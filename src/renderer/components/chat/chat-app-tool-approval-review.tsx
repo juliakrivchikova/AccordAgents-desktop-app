@@ -17,6 +17,7 @@ import type {
 } from "../../../shared/types";
 import { chatParticipantReference } from "../conversation/conversation-display";
 import { chatToolPermissionAllowsChatScope } from "./chat-app-tool-data";
+import { chatToolPermissionScopeOptionLabel } from "../../../shared/toolPermissionScope";
 import { reviewResultPreview } from "./chat-app-tool-review-preview";
 import { ChatUsedApprovalLine } from "./chat-used-card-row";
 
@@ -320,7 +321,9 @@ export function approvalOptions(
   const chatOptionLabel = permissionRequest
     ? `Yes, allow ${chatParticipantReference(approval.requesterHandle)} in this chat`
     : toolPermissionRequest
-      ? `Yes, allow ${chatParticipantReference(approval.requesterHandle)} to use ${toolPermissionRequest.toolName} in this chat`
+      ? toolPermissionRequest.chatScope
+        ? chatToolPermissionScopeOptionLabel(toolPermissionRequest.chatScope)
+        : `Yes, allow ${chatParticipantReference(approval.requesterHandle)} to use ${toolPermissionRequest.toolName} in this chat`
     : participantRequest
       ? `Yes, allow ${chatParticipantReference(approval.requesterHandle)} to ask ${participantRequest.requests.length === 1 ? chatParticipantReference(participantRequest.requests[0].target) : "these members"}`
       : selfCompactionRequest

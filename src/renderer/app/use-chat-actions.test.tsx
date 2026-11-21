@@ -7,7 +7,7 @@ import { act, create } from "react-test-renderer";
 import type { AgentHealth, AppSettings, ChatParticipantInput } from "../../shared/types";
 import { defaultChatAgentPermissions } from "../../shared/agentPermissions";
 import type { AppState } from "./app-state";
-import { useChatActions, type ChatActions } from "./use-chat-actions";
+import { newChatProviderChangedRefusal, useChatActions, type ChatActions } from "./use-chat-actions";
 import type { ConversationActions } from "./use-conversation-actions";
 
 test("a saved CLI that is not ready gives way to a ready one; with none ready the chat is not created", async () => {
@@ -133,6 +133,8 @@ test("a new chat is made with its main session first (ordinary member rights, it
   };
   let error: string | undefined;
   const currentSettings = settings();
+  // The classic view's New chat: the members picker adds saved members.
+  currentSettings.defaultChatView = "classic";
   currentSettings.providers = [{ kind: "codex-cli", label: "Codex", enabled: true }];
   currentSettings.assistantProviderKind = "codex-cli";
   currentSettings.chatRoleConfigs = [
@@ -235,6 +237,124 @@ test("a new chat is made with its main session first (ordinary member rights, it
   assert.equal(member?.skipToolchainPreflight, true);
   assert.equal(member?.autoWatch, true);
   renderer.unmount();
+});
+
+for (const scenario of [
+  { name: "Claude Code's own sign-in", choice: { kind: "claude-code" as const }, hostId: undefined },
+  { name: "an added provider (Z.ai GLM on Claude Code)", choice: { kind: "claude-code" as const, hostId: "zai-host" }, hostId: "zai-host" }
+]) {
+  test(`in the sessions view a new chat is made with its main session alone, on the provider the chip chose: ${scenario.name}`, async () => {
+    let createRequest: { participants: ChatParticipantInput[] } | undefined;
+    (globalThis as any).window = {
+      consensus: {
+        createChatConversation: async (request: { participants: ChatParticipantInput[] }) => {
+          createRequest = request;
+          throw new Error("stop after create request");
+        }
+      }
+    };
+    const currentSettings = settings();
+    currentSettings.providers = [
+      { kind: "claude-code", label: "Claude Code", enabled: true },
+      { kind: "codex-cli", label: "Codex", enabled: true }
+    ];
+    currentSettings.assistantProviderKind = "codex-cli";
+    currentSettings.cliProviderHosts = [{ id: "zai-host", label: "Z.ai GLM", cli: "claude-code", vendor: "zai", baseUrl: "https://api.z.ai/api/anthropic", hasApiKey: true, updatedAt: "2026-11-21T00:00:00.000Z" }];
+    currentSettings.chatParticipantConfigs = [{
+      id: "member-codex", handle: "codex", roleConfigId: "engineer", behaviorRuleIds: [], kind: "codex-cli",
+      agentMode: "default", permissions: defaultChatAgentPermissions(), remoteExecution: "local", skipToolchainPreflight: false,
+      autoWatchEnabled: false, updatedAt: "2026-07-13T00:00:00.000Z"
+    }];
+    let error: string | undefined;
+    let providerReset = false;
+    const state = {
+      question: "@codex please look at the login",
+      agents: [readyAgent("claude-code"), readyAgent("codex-cli")],
+      settings: currentSettings,
+      selectedChatParticipantConfigIds: new Set<string>(["member-codex"]),
+      selectedChatParticipantRuntimeOverrides: { "__new-chat-main-session__": { model: "haiku", reasoningEffort: "low" } },
+      newChatMainSessionProvider: scenario.choice,
+      setNewChatMainSessionProvider: () => { providerReset = true; },
+      startingChatRef: { current: false },
+      chatCreationRef: { current: undefined },
+      chatBeforeActivityRef: { current: undefined }, openConversationRequestRef: { current: 0 }, railViewRef: { current: "chats" },
+      repoPath: "",
+      setError: (value: string | undefined) => { error = value; },
+      setWarnings: () => undefined,
+      setCurrentRunId: () => undefined,
+      setBusy: () => undefined
+    } as unknown as AppState;
+    let actions: ChatActions | undefined;
+    function Harness(): null {
+      actions = useChatActions(state, {} as ConversationActions);
+      return null;
+    }
+    const renderer = create(<Harness />);
+    await act(async () => { await actions?.startChat(); });
+    assert.equal(error, "stop after create request");
+    assert.equal(createRequest?.participants.length, 1, "only the main session: no saved member chosen or named with @");
+    const [main] = createRequest?.participants ?? [];
+    assert.equal(main?.roleConfigId, "main-session");
+    assert.equal(main?.kind, "claude-code", "the chip's provider, not Settings → General's Codex");
+    assert.equal(main?.hostId, scenario.hostId);
+    assert.equal(main?.model, "haiku");
+    assert.equal(main?.reasoningEffort, "low");
+    assert.equal(main?.agentMode, "default");
+    assert.equal(main?.permissions?.cliApprovals, true, "Claude Code's own Default mode: it asks before edits, commands and web");
+    assert.equal(main?.permissions?.workspaceWrite, false);
+    assert.equal(currentSettings.assistantProviderKind, "codex-cli", "the setting is not changed");
+    assert.equal(providerReset, false, "kept while the chat was not made");
+    renderer.unmount();
+  });
+}
+
+test("a sessions-view New chat whose chip provider stopped being ready refuses the send and says so, instead of starting on another CLI", async () => {
+  let createCalls = 0;
+  (globalThis as any).window = { consensus: { createChatConversation: async () => { createCalls += 1; throw new Error("must not be called"); } } };
+  const currentSettings = settings();
+  currentSettings.providers = [{ kind: "claude-code", label: "Claude Code", enabled: true }, { kind: "codex-cli", label: "Codex", enabled: true }];
+  currentSettings.assistantProviderKind = "codex-cli";
+  let error: string | undefined;
+  let chosen: unknown = { kind: "claude-code" };
+  const state = {
+    question: "Look at the login",
+    agents: [{ ...readyAgent("claude-code"), authentication: "required" }, readyAgent("codex-cli")],
+    settings: currentSettings,
+    selectedChatParticipantConfigIds: new Set<string>(),
+    selectedChatParticipantRuntimeOverrides: { "__new-chat-main-session__": { model: "haiku" } },
+    newChatMainSessionProvider: chosen,
+    setNewChatMainSessionProvider: (value: unknown) => { chosen = value; },
+    startingChatRef: { current: false },
+    chatCreationRef: { current: undefined },
+    chatBeforeActivityRef: { current: undefined }, openConversationRequestRef: { current: 0 }, railViewRef: { current: "chats" },
+    repoPath: "",
+    setError: (value: string | undefined) => { error = value; },
+    setWarnings: () => undefined,
+    setCurrentRunId: () => undefined,
+    setBusy: () => undefined
+  } as unknown as AppState;
+  let actions: ChatActions | undefined;
+  function Harness(): null {
+    actions = useChatActions(state, {} as ConversationActions);
+    return null;
+  }
+  const renderer = create(<Harness />);
+  let started: boolean | undefined;
+  await act(async () => { started = await actions?.startChat(); });
+  assert.equal(started, false);
+  assert.equal(createCalls, 0, "no chat is made on Codex behind the User's back");
+  assert.match(error ?? "", /Claude Code is not ready any more\. The chat would start on Codex: check the model chip and send again\./);
+  assert.equal(chosen, undefined, "the chip now shows the provider it would take");
+  renderer.unmount();
+});
+
+test("the refusal rule: only a chosen provider that is gone, or a shown one that gave way", () => {
+  const codex = { kind: "codex-cli" as const, label: "Codex" };
+  const claude = { kind: "claude-code" as const, label: "Claude Code" };
+  assert.equal(newChatProviderChangedRefusal(undefined, codex, codex, [codex]), undefined);
+  assert.equal(newChatProviderChangedRefusal({ kind: "claude-code" }, claude, claude, [claude, codex]), undefined);
+  assert.match(newChatProviderChangedRefusal(undefined, claude, codex, [codex]) ?? "", /^Claude Code is not ready any more/);
+  assert.match(newChatProviderChangedRefusal({ kind: "claude-code", hostId: "zai" }, undefined, codex, [codex]) ?? "", /The chat would start on Codex/);
 });
 
 test("stale New Chat readiness refresh failure fails closed and preserves the complete draft", async () => {

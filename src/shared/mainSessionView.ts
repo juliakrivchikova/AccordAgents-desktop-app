@@ -165,7 +165,7 @@ export function sessionsMemberTitle(
   member: { handle?: string } | undefined,
   task?: Pick<ChatParticipantRequestItem, "prompt" | "targetHandle"> & { title?: unknown }
 ): string {
-  return (task ? sessionsTaskTitle(task) : "") || (member?.handle ?? task?.targetHandle ?? "").trim().replace(/^@/, "") || "Member";
+  return (task ? sessionsTaskTitle(task) : "") || (member?.handle ?? task?.targetHandle ?? "").trim().replace(/^@/, "") || "Session";
 }
 
 /** The line under a member's title: its provider, model and role (the role
@@ -175,9 +175,11 @@ export function sessionsMemberDetail(parts: { provider?: string; model?: string;
   return [parts.provider, parts.model, role].map((part) => part?.trim()).filter(Boolean).join(" · ");
 }
 
-/** The line at the end of the main timeline while the main session waits. */
+/** The line at the end of the main timeline while the main session waits.
+ *  The sessions view never says "members" (the User, 2026-11-21): it waits
+ *  on tasks. */
 export function sessionsWaitingText(titles: readonly string[]): string {
-  return `Waiting on ${titles.length} ${titles.length === 1 ? "member" : "members"}: ${titles.join(", ")}`;
+  return `Waiting on ${titles.length} ${titles.length === 1 ? "task" : "tasks"}: ${titles.join(", ")}`;
 }
 
 /** The summary heading the delegations inside a reply's "Worked for …". */
@@ -331,11 +333,11 @@ export function sessionsMemberRows(
   return { current: rows.filter((row) => !finished(row)), previous: rows.filter(finished) };
 }
 
-/** "N members · K running" for a task card with several members. */
+/** "N tasks · K running" for a task card that gave several tasks. */
 export function sessionsTaskGroupLabel(statuses: readonly SessionsWorkStatus[]): string {
   const running = statuses.filter((status) => status === "running").length;
-  const members = `${statuses.length} ${statuses.length === 1 ? "member" : "members"}`;
-  return running > 0 ? `${members} · ${running} running` : members;
+  const tasks = `${statuses.length} ${statuses.length === 1 ? "task" : "tasks"}`;
+  return running > 0 ? `${tasks} · ${running} running` : tasks;
 }
 
 /** A former member's row (shared/mainSession.ts sessionsFormerMembers): how

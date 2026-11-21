@@ -15,6 +15,8 @@ export function ParticipantRunLocation(props: {
   /** It already ran: a new place moves it there with its session. */
   moves?: boolean;
   handle?: string;
+  /** The sessions view names nobody: "Moving to …". */
+  anonymous?: boolean;
   hideLabel?: boolean;
   onChange: (patch: { homeMachineId?: string; cloudRun?: CloudRunSelection; remoteExecution: "local" }) => unknown;
 }): JSX.Element {
@@ -75,7 +77,7 @@ export function ParticipantRunLocation(props: {
     const destination = value === "local" ? "this computer" : selectedMachine?.name ?? "Cloud run";
     const track = (pending: unknown): Promise<unknown> => {
       if (!props.moves) return Promise.resolve(pending);
-      setMoving(`Moving ${props.handle ? `@${props.handle}` : "this member"} to ${destination} with its session…`);
+      setMoving(props.anonymous ? `Moving to ${destination} with its session…` : `Moving ${props.handle ? `@${props.handle}` : "this member"} to ${destination} with its session…`);
       return Promise.resolve(pending).finally(() => setMoving(undefined));
     };
     if (value !== "cloud" && !selectedMachine?.awsInstanceId) {

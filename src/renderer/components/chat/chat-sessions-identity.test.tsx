@@ -1,5 +1,5 @@
 // The sessions view has no avatar pictures: a member's only mark there is its
-// provider's logo tile (the User, 2026-11-20). The classic view keeps every
+// provider's bare logo glyph (the User, 2026-11-20/21). The classic view keeps every
 // avatar.
 import assert from "node:assert/strict";
 import test from "node:test";
@@ -43,7 +43,7 @@ function renderIn(sessions: boolean, element: ReactElement): { root: ReactTestIn
   return { root: renderer!.root, unmount: () => act(() => renderer!.unmount()) };
 }
 
-test("a member's mark: its avatar in the classic view; its provider's logo tile in the sessions view, nothing for a member no longer known", () => {
+test("a member's mark: its avatar in the classic view; its provider's bare glyph in the sessions view, nothing for a member no longer known", () => {
   const avatar = avatarForParticipant("@drew", DREW.id);
   const classic = renderIn(false, <ChatMemberMark className="mini-avatar" avatar={avatar} member={DREW} />);
   assert.equal(classic.root.findAll(hasClass("mini-avatar")).length, 1);
@@ -56,6 +56,8 @@ test("a member's mark: its avatar in the classic view; its provider's logo tile 
   assert.equal(mark.props["data-provider-kind"], "codex-cli");
   assert.equal(mark.props["aria-label"], "Codex CLI");
   assert.ok(mark.props.className.split(" ").includes("is-mini"));
+  assert.ok(mark.props.className.split(" ").includes("is-bare"), "the glyph alone, no tile behind it");
+  assert.equal(mark.props["data-variant"], "bare");
   sessions.unmount();
 
   const gone = renderIn(true, <ChatMemberMark className="mini-avatar" avatar={avatar} />);
@@ -139,7 +141,7 @@ test("the sessions view's composer writes to the main session: no members to men
   tuned.unmount();
 });
 
-test("the sessions view's main composer has no active-runs pill, and its button stops the main session while it runs and nothing is typed", () => {
+test("the sessions view's main composer has no active-runs pill; its button stops the main session while it runs and nothing is typed, and with text typed Stop stands beside Send", () => {
   const stopped: string[] = [];
   const idle = sessionsComposerProps(MAIN.id, undefined, { runIds: [], onStopRun: (runId) => stopped.push(runId) });
   assert.equal(idle.activeRunCount, 0, "no 'N active runs' pill: the Waiting line and the side panel name the members");
@@ -159,16 +161,20 @@ test("the sessions view's main composer has no active-runs pill, and its button 
   assert.equal(stop.props.disabled, undefined, "enabled with nothing typed");
   empty.unmount();
   const typed = button(true);
-  const send = typed.root.find((node) => node.type === "button");
-  assert.equal(send.props["aria-label"], "Send message", "typing turns it back into Send");
-  act(() => send.props.onClick());
+  const buttons = typed.root.findAll((node) => node.type === "button");
+  assert.deepEqual(buttons.map((node) => node.props["aria-label"]), ["Stop the main session", "Send message"],
+    "typing keeps a way to stop, as a CLI interrupts whatever is in its prompt; Send stays the main button");
+  assert.ok(buttons[0]!.props.className.includes("is-beside-send"), "the secondary Stop");
+  act(() => buttons[1]!.props.onClick());
   assert.equal(stopped.at(-1), "sent");
+  act(() => buttons[0]!.props.onClick());
+  assert.deepEqual(stopped.slice(-2), ["run-main", "run-main-queued"], "Stop with text typed stops the main session's runs");
   typed.unmount();
-  // A picture still loading (nothing sendable yet) is not an empty draft: a disabled Send, not Stop.
+  // A picture still loading (nothing sendable yet) is not an empty draft: a disabled Send, Stop beside it.
   const loading = button(false, false);
-  const waiting = loading.root.find((node) => node.type === "button");
-  assert.equal(waiting.props["aria-label"], "Send message", "a picture still loading keeps Send");
-  assert.equal(waiting.props.disabled, true);
+  const waiting = loading.root.find((node) => node.type === "button" && node.props["aria-label"] === "Send message");
+  assert.equal(waiting.props.disabled, true, "a picture still loading keeps a disabled Send");
+  assert.equal(loading.root.findAll((node) => node.type === "button" && node.props["data-testid"] === "chat-composer-stop").length, 1);
   loading.unmount();
   const classic = renderIn(false, <ChatComposerSendButton canSend={false} draftEmpty isRunning={false} onSend={() => undefined} />);
   assert.equal(classic.root.find((node) => node.type === "button").props.disabled, true, "without a Stop, an empty draft is a disabled Send, as before");

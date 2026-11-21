@@ -621,3 +621,48 @@ test("geminiTranscriptPathForConversation: points into the Antigravity brain", (
     path.join("/home/user", ".gemini", "antigravity-cli", "brain", "abc-123", ".system_generated", "logs", "transcript.jsonl")
   );
 });
+
+// The sessions view's access in agy's own terms (src/shared/chatAccessModes.ts):
+// agy runs in its own mode and nothing skips its confirmations; what the mode
+// would ask about, print mode refuses (agy 1.5.14, checked 2026-11-21: Default
+// refused write_file, accept-edits wrote in its workspace and refused the
+// command, plan refused Bash, and `--mode default` is not a value agy takes).
+for (const scenario of [
+  { name: "Default", agentMode: "default" as const, workspaceWrite: false, mode: undefined, agentModeSetting: "" },
+  { name: "Accept edits", agentMode: "default" as const, workspaceWrite: true, mode: "accept-edits", agentModeSetting: undefined },
+  { name: "Auto mode", agentMode: "auto" as const, workspaceWrite: false, mode: "auto", agentModeSetting: undefined },
+  { name: "Plan mode", agentMode: "plan" as const, workspaceWrite: false, mode: "plan", agentModeSetting: undefined }
+]) {
+  test(`buildGeminiExecInvocation: agy ${scenario.name} runs in agy's own mode, never skipping its confirmations`, () => {
+    const invocation = buildGeminiExecInvocation({
+      participant,
+      prompt: "Do work",
+      repoPath: "/repo/project",
+      kind: "chat",
+      options: {
+        agentMode: scenario.agentMode,
+        permissions: { ...defaultChatAgentPermissions(), workspaceWrite: scenario.workspaceWrite, cliApprovals: true },
+        appMcp: { url: "http://127.0.0.1:1/mcp", token: "t", toolNames: ["app_chat_set_title"] },
+        userSettings: { readable: true }
+      }
+    });
+    assert.equal(flagValue(invocation.args, "--mode"), scenario.mode);
+    assert.equal(invocation.args.includes("--dangerously-skip-permissions"), false, "agy's own confirmations decide");
+    assert.equal(invocation.args.includes("--sandbox"), false, "the CLI's own default, not the classic read-only stand-in");
+    const settings = JSON.parse(flagValue(invocation.args, "--settings") ?? "{}") as { agentMode?: string; permissions?: { allow?: string[] } };
+    assert.equal(settings.agentMode, scenario.agentModeSetting, "agy's Default is its agentMode \"\" (its --mode has no default)");
+    assert.ok(settings.permissions?.allow?.some((rule) => rule.includes("app_chat_set_title")), "the app's own tools stay allowed, as print mode cannot ask");
+    const prompt = flagValue(invocation.args, "--print") ?? "";
+    assert.match(prompt, /cannot ask User for approval/);
+    assert.doesNotMatch(prompt, /This run is read-only/, "not told it is read-only when its mode is what decides");
+  });
+}
+
+test("buildGeminiExecInvocation: the classic controls keep the app's own agy mapping", () => {
+  const classic = buildGeminiExecInvocation({
+    participant, prompt: "Do work", repoPath: "/repo/project", kind: "chat",
+    options: { agentMode: "default", permissions: { ...defaultChatAgentPermissions(), workspaceWrite: true } }
+  });
+  assert.equal(classic.args.includes("--dangerously-skip-permissions"), true);
+  assert.equal(classic.args.includes("--mode"), false);
+});

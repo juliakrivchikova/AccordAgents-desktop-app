@@ -1,9 +1,9 @@
-import { memo, useState } from "react";
+import { memo, useState, type ReactNode } from "react";
 import { ChevronDown, ChevronRight, Hammer } from "lucide-react";
 
 import { SESSIONS_WORK_STATUS_LABELS, sessionsDelegationSummary, type SessionsTaskEntry } from "../../../shared/mainSessionView";
 import type { ChatParticipant } from "../../../shared/types";
-import { ChatProviderMark } from "./chat-member-mark";
+import { ChatProviderMark, ChatProviderMarkSlot } from "./chat-member-mark";
 import { ChatElapsed } from "./chat-task-card";
 import { formatWorkedDuration } from "./chat-worked-row";
 
@@ -22,14 +22,19 @@ export const ChatWorkedFold = memo(function ChatWorkedFold(props: {
   entries: readonly SessionsTaskEntry[];
   participants?: readonly ChatParticipant[];
   onOpenTask?: (entry: SessionsTaskEntry) => void;
-  /** The reply's full stream, shown in place of its text while open. */
+  /** The reply's full stream, shown in place of its text while open; with
+   *  `activity`, whether the fold is open. */
   stream?: { open: boolean; toggle: () => void };
+  /** The rows its turn showed while it ran (ChatSessionsFinishedActivity),
+   *  shown inside the fold, above its tasks, while it is open. */
+  activity?: ReactNode;
 }): JSX.Element {
   const [tasksOpen, setTasksOpen] = useState(false);
   const label = props.workedMs !== undefined ? `Worked for ${formatWorkedDuration(props.workedMs)}` : "Worked";
   const hasTasks = props.entries.length > 0;
-  const open = hasTasks ? tasksOpen : Boolean(props.stream?.open);
-  const toggle = hasTasks ? () => setTasksOpen((current) => !current) : props.stream?.toggle;
+  const stream = props.activity ? props.stream : undefined;
+  const open = stream ? stream.open : hasTasks ? tasksOpen : Boolean(props.stream?.open);
+  const toggle = stream ? stream.toggle : hasTasks ? () => setTasksOpen((current) => !current) : props.stream?.toggle;
   return (
     <div className={`chat-worked-fold ${open ? "is-open" : ""}`} data-testid="chat-worked-fold">
       {toggle ? (
@@ -40,6 +45,7 @@ export const ChatWorkedFold = memo(function ChatWorkedFold(props: {
       ) : (
         <span className="chat-worked-fold-toggle is-static">{label}</span>
       )}
+      {open && stream && props.activity}
       {hasTasks && open && <ChatDelegationRows entries={props.entries} participants={props.participants} onOpenTask={props.onOpenTask} />}
     </div>
   );
@@ -92,7 +98,7 @@ function ChatDelegationRow(props: {
       <span className="chat-delegation-mark">
         {participant
           ? <ChatProviderMark member={participant} />
-          : entry.item.targetKind ? <ChatProviderMark member={{ kind: entry.item.targetKind }} /> : <span className="chat-provider-icon" aria-hidden="true" />}
+          : entry.item.targetKind ? <ChatProviderMark member={{ kind: entry.item.targetKind }} /> : <ChatProviderMarkSlot />}
         <span className={`chat-delegation-dot is-${entry.status}`} aria-hidden="true" />
       </span>
       <span className="chat-delegation-text">

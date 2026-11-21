@@ -7,7 +7,7 @@ import type { ChatParticipant } from "../../../shared/types";
 import { Button } from "@/components/ui/button";
 import { IconButton } from "../primitives";
 import { ChatAccordRow } from "./chat-accord-dock";
-import { ChatProviderMark } from "./chat-member-mark";
+import { ChatProviderMark, ChatProviderMarkSlot } from "./chat-member-mark";
 import { ChatElapsed, ChatWorkStatusLabel } from "./chat-task-card";
 import type { SessionsFormerRow } from "./use-chat-sessions-view";
 
@@ -15,8 +15,6 @@ export interface ChatMembersPanelProps {
   /** The chat's latest Accord, listed first: a row that opens it. */
   accord?: DockedAccord;
   onOpenAccord?: (launchId: string) => void;
-  /** The main session, first: its provider and its settings. */
-  main?: { participant: ChatParticipant; detail: string; settings?: ReactNode };
   rows: { current: readonly SessionsMemberRow[]; previous: readonly SessionsMemberRow[] };
   /** Members no longer in the chat, whose sessions stay readable. */
   formerRows?: readonly SessionsFormerRow[];
@@ -30,11 +28,13 @@ export interface ChatMembersPanelProps {
   onClose: () => void;
 }
 
-/** The sessions view's right panel (T3 Code's agents list): the chat's latest
- *  Accord, then every member but the main session, each its provider's logo
- *  and its task, what it does and Stop; while some member works, those that
- *  worked and ended under "Previous"; members no longer in the chat under
- *  "Removed", read-only. */
+/** The sessions view's right panel (T3 Code's agents list): no title, only
+ *  its close button (the User, 2026-11-21); the chat's latest Accord, then
+ *  the sessions the main session delegated (never the main session itself,
+ *  whose settings are its composer chip), each its provider's glyph and its
+ *  task, what it does and Stop; while one works, those that ended under
+ *  "Previous"; those no longer in the chat under "Removed", read-only.
+ *  Nothing is said when there are none. */
 export function ChatMembersPanel(props: ChatMembersPanelProps): JSX.Element {
   const allRows = [...props.rows.current, ...props.rows.previous];
   const allRunIds = allRows.flatMap((row) => props.runIdsByParticipantId.get(row.participant.id) ?? []);
@@ -60,40 +60,21 @@ export function ChatMembersPanel(props: ChatMembersPanelProps): JSX.Element {
     );
   };
   return (
-    <section className="chat-thread-panel chat-members-panel" aria-label="Members" data-testid="chat-members-panel">
-      <header className="thread-panel-head chat-thread-head" data-titlebar>
-        <div>
-          <h2>Members</h2>
-        </div>
+    <section className="chat-thread-panel chat-members-panel" aria-label="Sessions" data-testid="chat-members-panel">
+      <header className="thread-panel-head chat-thread-head chat-members-head" data-titlebar>
+        <div />
         <div className="thread-panel-actions">
           {props.onStopRuns && allRunIds.length > 0 && (
             <Button variant="ghost" size="sm" data-testid="chat-members-stop-all" onClick={() => props.onStopRuns?.(allRunIds)}>
               Stop all
             </Button>
           )}
-          <IconButton icon={X} label="Close members" tooltip="Close members" onClick={props.onClose} />
+          <IconButton icon={X} label="Close" tooltip="Close" onClick={props.onClose} />
         </div>
       </header>
       <div className="chat-thread-body chat-members-body" data-testid="chat-members-body">
         {props.accord && props.onOpenAccord && (
           <ChatAccordRow launch={props.accord} testId="chat-members-accord" onOpen={() => props.onOpenAccord?.(props.accord!.launchId)} />
-        )}
-        {props.main && (
-          <div className="chat-members-list">
-            <div className="chat-members-row is-main" data-testid="chat-members-main" data-participant-id={props.main.participant.id}>
-              <span className="chat-members-row-main">
-                <ChatProviderMark member={props.main.participant} />
-                <span className="chat-members-row-text">
-                  <strong className="chat-members-row-name">Main session</strong>
-                  {props.main.detail && <span className="chat-members-row-task">{props.main.detail}</span>}
-                </span>
-              </span>
-              {props.main.settings}
-            </div>
-          </div>
-        )}
-        {allRows.length === 0 && former.length === 0 && (
-          <p className="chat-members-empty">No other members yet. The main session adds members when it gives them a task.</p>
         )}
         {props.rows.current.length > 0 && <div className="chat-members-list">{props.rows.current.map(renderRow)}</div>}
         <ChatMembersGroup label="Previous" testId="chat-members-previous" count={props.rows.previous.length}>
@@ -105,7 +86,7 @@ export function ChatMembersPanel(props: ChatMembersPanelProps): JSX.Element {
               key={row.member.id}
               id={row.member.id}
               status={row.status}
-              mark={row.member.kind ? <ChatProviderMark member={{ kind: row.member.kind }} /> : <span className="chat-provider-icon" aria-hidden="true" />}
+              mark={row.member.kind ? <ChatProviderMark member={{ kind: row.member.kind }} /> : <ChatProviderMarkSlot />}
               title={row.title}
               detail={SESSIONS_REMOVED_MEMBER_DETAIL}
               onOpen={() => props.onOpenMember(row.member.id)}

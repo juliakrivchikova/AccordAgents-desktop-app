@@ -3,6 +3,7 @@ import type { ChatScriptChangeRequest } from "./scripts";
 import type { ChatParticipantRosterStatus } from "./chatParticipantStatus";
 import type { DeviceEventBlobReference } from "./deviceEventBlobs";
 import type { UrgentAlertView } from "./urgentAlerts";
+import type { ChatToolPermissionScope } from "./toolPermissionScope";
 import type {
   CreateMachineRequest,
   CreateMachineResult,
@@ -941,6 +942,15 @@ export interface ChatAgentPermissions {
       allowedTools: string[];
     };
   };
+  /**
+   * The member's CLI runs in its own permission mode (the sessions view's
+   * access picker, src/shared/chatAccessModes.ts): what the rights above do
+   * not already allow, the CLI asks about as it does in its own terminal —
+   * Claude Code and Codex through the app's approval cards; Antigravity's
+   * print mode cannot ask, so agy refuses it. Without it (the classic
+   * controls), the app refuses what is not granted.
+   */
+  cliApprovals?: true;
 }
 
 export interface ChatParticipant {
@@ -1257,6 +1267,10 @@ export interface ChatToolPermissionRequest {
   reason?: string;
   toolName: string;
   toolInput?: unknown;
+  /** What "for this chat" covers, as Claude Code scopes its "don't ask
+   *  again" (src/shared/toolPermissionScope.ts): set when the card is
+   *  raised. A scoped tool's card without one offers no "for this chat". */
+  chatScope?: ChatToolPermissionScope;
 }
 
 /** A member asks the User to sign in to (or reconnect) an MCP server its task
@@ -1583,6 +1597,10 @@ export interface ChatAppToolApprovalPolicy {
   capability: ChatAppToolCapability;
   targetParticipantId?: string;
   targetToolName?: string;
+  /** For a tool permission rule: what of the tool it covers (a command
+   *  prefix, a domain, a folder; ChatToolPermissionRequest.chatScope). A rule
+   *  without one covers the whole tool. */
+  targetToolScope?: ChatToolPermissionScope;
   scope: "chat";
   createdAt: string;
   updatedAt: string;
@@ -1745,6 +1763,14 @@ export interface ChatMessageMetadata {
   memberMoveCancelled?: { participantId: string; runId: string };
   workedMs?: number;
   queuedBehind?: { handle: string };
+  /** The reply waits behind its member's turn before it: the shared word
+   *  of `queuedBehind` (which stays on the device), so the phone shows it
+   *  queued, with no clock. */
+  turnQueued?: true;
+  /** When a reply that waited behind its member's turn before it began its
+   *  own turn: its "Working for …" counts from here, not from when it was
+   *  queued (desktop and phone). */
+  turnStartedAt?: string;
   appMessageSource?: string;
   /** Set on messages a scheduled script posted. */
   scriptId?: string;

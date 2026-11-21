@@ -58,6 +58,7 @@ import {
   resolveChatManageRolesParticipantsPermission
 } from "../shared/agentPermissions";
 import { MAIN_SESSION_ROLE_ID } from "../shared/mainSession";
+import { chatToolPermissionIsScoped, chatToolPermissionScopesEqual, normalizeChatToolPermissionScope } from "../shared/toolPermissionScope";
 import {
   APP_CHAT_REQUEST_PARTICIPANTS_TOOL,
   APP_PARTICIPANTS_REQUEST_CHANGE_TOOL,
@@ -341,6 +342,9 @@ function withGrant(permissions: ChatAgentPermissions, request: Record<string, un
 function rightsBeyond(wanted: ChatAgentPermissions, had: ChatAgentPermissions): boolean {
   if ((wanted.repoRead && !had.repoRead) || (wanted.workspaceWrite && !had.workspaceWrite) || (wanted.webAccess && !had.webAccess)) return true;
   if (wanted.shell.enabled && !had.shell.enabled) return true;
+  // Running in its CLI's own mode, asking the User for what it is not
+  // granted, is a right of its own (the app's chatAgentPermissionsWithin).
+  if (wanted.cliApprovals && !had.cliApprovals) return true;
   const hadRules = new Set(had.shell.rules.map(shellRuleKey));
   if (wanted.shell.rules.some((rule) => rule.action !== "deny" && !hadRules.has(shellRuleKey(rule)))) return true;
   const wantedRules = new Set(wanted.shell.rules.map(shellRuleKey));
@@ -367,7 +371,8 @@ function rightsWithin(wanted: ChatAgentPermissions, ceiling: ChatAgentPermission
     webAccess: wanted.webAccess && ceiling.webAccess,
     requestCompaction: lowerRight(compaction, compactionCeiling),
     shell: { enabled: wanted.shell.enabled && ceiling.shell.enabled, rules },
-    providerNative: tools.length ? { "claude-code": { allowedTools: tools } } : undefined
+    providerNative: tools.length ? { "claude-code": { allowedTools: tools } } : undefined,
+    cliApprovals: wanted.cliApprovals && ceiling.cliApprovals ? true : undefined
   };
 }
 
@@ -378,6 +383,22 @@ function rightsWithin(wanted: ChatAgentPermissions, ceiling: ChatAgentPermission
  *  add members as broad (docs/main-session.md). Less is always fine. A grant
  *  this write uses is noted, so it gives its change once. */
 function keepRights(next: ChatParticipant, current: ChatParticipant, approved: Approved[], noted: Set<string>): ChatParticipant {
+  return keepAntigravityMode(keepGrantedRights(next, current, approved, noted), current);
+}
+
+/** Antigravity's own mode (`cliApprovals`) is what holds it back: without
+ *  it, granted edits or Auto skip every agy confirmation (geminiExec.ts). A
+ *  write that drops it while edits or Auto stay is broader, not less: the
+ *  mode stays as the server has it (the app's clampChatAgentAccess). */
+function keepAntigravityMode(next: ChatParticipant, current: ChatParticipant): ChatParticipant {
+  if (current.kind !== "gemini-cli" || next.kind !== "gemini-cli") return next;
+  const had = normalizeChatAgentPermissions(current.permissions);
+  const wanted = normalizeChatAgentPermissions(next.permissions);
+  if (!had.cliApprovals || wanted.cliApprovals || (!wanted.workspaceWrite && normalizeChatAgentMode(next.agentMode) !== "auto")) return next;
+  return { ...next, permissions: { ...permissionsOf(next), cliApprovals: true } as unknown as ChatParticipant["permissions"] };
+}
+
+function keepGrantedRights(next: ChatParticipant, current: ChatParticipant, approved: Approved[], noted: Set<string>): ChatParticipant {
   let kept = next;
   if (MODE_RANK[normalizeChatAgentMode(next.agentMode)] > MODE_RANK[normalizeChatAgentMode(current.agentMode)]) {
     const { agentMode: _mode, ...rest } = kept;
@@ -399,6 +420,7 @@ function keepRights(next: ChatParticipant, current: ChatParticipant, approved: A
   const within = rightsWithin(wanted, ceiling);
   const permissions: Record<string, unknown> = { ...permissionsOf(next), ...within };
   if (!within.providerNative) delete permissions.providerNative;
+  if (!within.cliApprovals) delete permissions.cliApprovals;
   return { ...kept, permissions: permissions as unknown as ChatParticipant["permissions"] };
 }
 
@@ -677,8 +699,15 @@ function isPolicyFor(policy: ChatAppToolApprovalPolicy, item: Approved): boolean
   // The other tools that get such a rule are tool permissions, named by the
   // tool they allow; member and member-request tools never do.
   if (approval.toolName === APP_PARTICIPANTS_REQUEST_CHANGE_TOOL || approval.toolName === APP_CHAT_REQUEST_PARTICIPANTS_TOOL) return false;
-  const tool = (approval.request as { toolName?: unknown } | undefined)?.toolName;
-  return typeof tool === "string" && policy.targetToolName === tool;
+  const request = approval.request as { toolName?: unknown; chatScope?: unknown } | undefined;
+  const tool = request?.toolName;
+  if (typeof tool !== "string" || policy.targetToolName !== tool) return false;
+  // Scoped as the card the User answered was (a command prefix, a domain, a
+  // folder; src/shared/toolPermissionScope.ts): never broader, and never the
+  // whole of a tool whose answer is scoped.
+  const scope = normalizeChatToolPermissionScope(request?.chatScope);
+  if (chatToolPermissionIsScoped(tool)) return Boolean(scope) && chatToolPermissionScopesEqual(policy.targetToolScope, scope);
+  return policy.targetToolScope === undefined;
 }
 
 // --- the chat's name ----------------------------------------------------------

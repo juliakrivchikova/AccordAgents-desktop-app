@@ -200,7 +200,7 @@ export function ChatAccordLauncherDialog(props: {
             />
           </FormRow>
 
-          <FormRow className="chat-accord-field" label="Members">
+          <FormRow className="chat-accord-field" label={props.sessions === true ? "Sessions" : "Members"}>
             <div className="chat-accord-target-list" data-testid="chat-accord-targets">
               {targetOptions.map((participant) => {
                 const checked = targetIds.includes(participant.id);

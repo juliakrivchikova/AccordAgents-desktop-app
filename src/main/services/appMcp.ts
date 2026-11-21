@@ -115,7 +115,7 @@ type AppRoleOptionsHandler = (actor: AppMcpActor) => Promise<unknown>;
 type AppParticipantChangeHandler = (actor: AppMcpActor, request: unknown) => Promise<unknown>;
 type AppParticipantOptionsHandler = (actor: AppMcpActor) => Promise<unknown>;
 type AppPermissionChangeHandler = (actor: AppMcpActor, request: unknown) => Promise<unknown>;
-type AppToolPermissionHandler = (actor: AppMcpActor, request: unknown) => Promise<unknown>;
+type AppToolPermissionHandler = (actor: AppMcpActor, request: unknown, signal?: AbortSignal) => Promise<unknown>;
 /** A tool call that waits for the User: given a signal that aborts when the
  *  member's CLI gives up on the call. */
 type AppWaitingToolHandler = (actor: AppMcpActor, request: unknown, signal?: AbortSignal) => Promise<unknown>;
@@ -189,6 +189,9 @@ export class AppMcpService {
   private connectorSignInHandler?: AppWaitingToolHandler;
   /** How often a waiting tool call reports progress (tests shorten it). */
   waitingProgressMs = APP_MCP_WAITING_PROGRESS_MS;
+  /** Calls that wait for the User, by their member's grant and request id:
+   *  a `notifications/cancelled` for one ends its wait. */
+  private readonly waitingCalls = new WeakMap<AppMcpActor, Map<string, AbortController>>();
   private chatContextHandler?: AppChatContextHandler;
   private chatParticipantsHandler?: AppChatParticipantsHandler;
   private chatParticipantActivityHandler?: AppChatParticipantActivityHandler;
@@ -497,6 +500,15 @@ export class AppMcpService {
       if (method === "notifications/initialized") {
         return undefined;
       }
+      if (method === "notifications/cancelled") {
+        // The CLI gave up on a call that waits for the User without closing
+        // its stream: the wait ends as if it had (its card is expired).
+        const params = request.params && typeof request.params === "object" ? request.params as { requestId?: unknown } : {};
+        if (typeof params.requestId === "string" || typeof params.requestId === "number") {
+          this.waitingCalls.get(actor)?.get(String(params.requestId))?.abort();
+        }
+        return undefined;
+      }
       if (method === "tools/list") {
         const tools = this.toolsForActor(actor);
         this.markClientToolsListed(actor, tools);
@@ -709,7 +721,7 @@ export class AppMcpService {
       if (!this.toolPermissionHandler) {
         throw new Error("Tool permission handling is not available.");
       }
-      return this.toolTextResult(await this.toolPermissionHandler(actor, record.arguments));
+      return this.toolTextResult(await this.toolPermissionHandler(actor, record.arguments, signal));
     }
     if (record.name === APP_CONNECTOR_SIGN_IN_TOOL) {
       if (!hasChatAppToolCapability(actor.capabilities, "permissions.request")) {
@@ -1091,12 +1103,14 @@ export class AppMcpService {
     };
   }
 
-  /** A call of a tool that waits for the User (a sign-in card). */
+  /** A call of a tool that waits for the User (a sign-in card, Claude
+   *  Code's permission prompt). */
   private isWaitingToolCall(payload: unknown): boolean {
     if (!payload || typeof payload !== "object" || Array.isArray(payload)) return false;
     const request = payload as JsonRpcRequest;
     const params = request.params && typeof request.params === "object" ? request.params as { name?: unknown } : undefined;
-    return request.method === "tools/call" && request.id !== undefined && params?.name === APP_CONNECTOR_SIGN_IN_TOOL;
+    return request.method === "tools/call" && request.id !== undefined &&
+      (params?.name === APP_CONNECTOR_SIGN_IN_TOOL || params?.name === APP_TOOL_PERMISSION_TOOL);
   }
 
   /** Answers a waiting tool call as an event stream (MCP Streamable HTTP):
@@ -1109,6 +1123,10 @@ export class AppMcpService {
     response.on("close", () => {
       if (!finished) abandoned.abort();
     });
+    const callKey = String(request.id);
+    const calls = this.waitingCalls.get(actor) ?? new Map<string, AbortController>();
+    calls.set(callKey, abandoned);
+    this.waitingCalls.set(actor, calls);
     response.writeHead(200, { "content-type": "text/event-stream", "cache-control": "no-store" });
     response.flushHeaders();
     const send = (message: unknown): void => {
@@ -1133,6 +1151,7 @@ export class AppMcpService {
       answer = this.rpcError(request.id, -32603, error instanceof Error ? error.message : String(error));
     } finally {
       clearInterval(ticker);
+      if (calls.get(callKey) === abandoned) calls.delete(callKey);
     }
     finished = true;
     send(answer);

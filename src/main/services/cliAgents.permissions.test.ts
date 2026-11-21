@@ -9,6 +9,7 @@ import { PassThrough } from "node:stream";
 import test from "node:test";
 import { NativeProcessRegistry } from "./nativeProcessRegistry";
 import {
+  CLAUDE_APP_MCP_TOOL_TIMEOUT_MS,
   ClaudeFolderNotTrustedError,
   claudeModelProbeEnv,
   ClaudeModelListTimeoutError,
@@ -28,6 +29,7 @@ import type { CodexServerRequestDelivery } from "./codexApprovals";
 import { buildCodexExecInvocation, CODEX_APP_SERVER_MCP_TOKEN_ENV } from "./codexExec";
 import type { ParticipantRunResult } from "./providers";
 import { defaultChatAgentPermissions } from "../../shared/agentPermissions";
+import { APP_TOOL_PERMISSION_WAIT_MS } from "../../shared/appMcpToolContracts";
 
 // Claude Code's own config on this computer (Claude in Chrome, for one) must
 // not decide these tests: an empty config folder is a fresh Claude Code.
@@ -2638,6 +2640,12 @@ test("claude chat MCP config is additive and does not pass strict or closed tool
   const parsed = JSON.parse(mcpArgs[1]);
   assert.equal(parsed.mcpServers.accord_agents.type, "http");
   assert.equal(parsed.mcpServers.accord_agents.url, "http://127.0.0.1:1/mcp");
+  // Claude Code waits for the User's answer on a permission card as long as
+  // the card waits (its default gave up after 60 s), for the app's server
+  // only: the User's own MCP servers keep Claude Code's defaults.
+  assert.equal(parsed.mcpServers.accord_agents.timeout, APP_TOOL_PERMISSION_WAIT_MS + 5 * 60_000);
+  assert.equal(CLAUDE_APP_MCP_TOOL_TIMEOUT_MS > APP_TOOL_PERMISSION_WAIT_MS, true, "the app answers first");
+  assert.equal(Object.keys(runner.agentRunEnv(options) ?? {}).includes("MCP_TOOL_TIMEOUT"), false);
 });
 
 test("claude default chat delegates unmatched tool approvals to app_tool_permission", () => {
@@ -7020,4 +7028,65 @@ test("a host admission completing after shutdown cannot start its earlier comman
     assert.equal(result.ok, false); assert.match(result.error, /shut down while/);
     assert.equal(executions, 0); assert.equal(runner.hasActiveNativeWork(), false);
   }
+});
+
+// The sessions view's access in each CLI's own terms (src/shared/chatAccessModes.ts):
+// the CLI runs in that mode and asks about what it is not granted, as in its
+// own terminal, each ask an approval card.
+function ownModeOptions(agentMode: "default" | "plan" | "auto", workspaceWrite: boolean, shell?: ReturnType<typeof defaultChatAgentPermissions>["shell"]) {
+  const options = chatOptions({ agentMode, workspaceWrite, shell, canRequestPermissions: true, appToolNames: ["app_permissions_request_change", "app_tool_permission"] });
+  return { ...options, permissions: { ...options.permissions, cliApprovals: true as const } };
+}
+
+test("Claude Code Default (sessions view): edits, commands and web stay available and each is asked through the app's approval card, as the CLI asks", () => {
+  const runner = makeRunner() as any;
+  const options = ownModeOptions("default", false, { enabled: false, rules: [{ action: "deny", match: "prefix", pattern: "rm -rf" }] });
+  const config = runner.claudeToolConfig("chat", "/repo", [], options);
+  assert.equal(config.permissionMode, "default");
+  for (const tool of ["Edit", "Write", "NotebookEdit", "Bash", "WebSearch", "WebFetch"]) {
+    assert.equal(config.disallowedTools.includes(tool), false, `${tool} is not taken away`);
+    assert.equal(config.allowedTools.includes(tool), false, `${tool} is not pre-approved: the CLI asks`);
+  }
+  assert.ok(config.disallowedTools.includes("Bash(rm -rf:*)"), "a deny rule stays a hard stop");
+  assert.deepEqual(runner.claudePermissionPromptArgs("chat", options), ["--permission-prompt-tool", "mcp__accord_agents__app_tool_permission"],
+    "every ask goes to the app's approval card");
+});
+
+test("Claude Code Accept edits (sessions view): edits without asking, commands and web asked", () => {
+  const runner = makeRunner() as any;
+  const config = runner.claudeToolConfig("chat", "/repo", [], ownModeOptions("default", true));
+  assert.equal(config.permissionMode, "acceptEdits");
+  assert.equal(config.disallowedTools.includes("Bash"), false);
+  assert.equal(config.disallowedTools.includes("WebFetch"), false);
+  assert.equal(config.allowedTools.includes("WebFetch"), false, "web asked, not pre-approved");
+});
+
+test("Claude Code Plan mode and Auto mode are the CLI's own; the classic controls still take away what is not granted", () => {
+  const runner = makeRunner() as any;
+  const plan = runner.claudeToolConfig("chat", "/repo", [], ownModeOptions("plan", false));
+  assert.equal(plan.permissionMode, "plan");
+  assert.ok(plan.disallowedTools.includes("Edit") && plan.disallowedTools.includes("Bash"), "Plan mode changes nothing");
+  assert.equal(runner.claudeToolConfig("chat", "/repo", [], ownModeOptions("auto", false)).permissionMode, "auto");
+  const classic = runner.claudeToolConfig("chat", "/repo", [], chatOptions({ agentMode: "default", workspaceWrite: false }));
+  assert.ok(["Edit", "Bash", "WebFetch"].every((tool) => classic.disallowedTools.includes(tool)), "classic: unchanged");
+});
+
+test("Codex Read only and Default (sessions view) ask through approval cards (on-request); Plan mode and the classic controls never ask", () => {
+  const runner = makeRunner() as any;
+  const participant = { kind: "codex-cli", label: "@codex", model: undefined };
+  const readOnly = runner.codexAppServerThreadStartParams(participant, "/repo", "chat", ownModeOptions("default", false));
+  assert.equal(readOnly.sandbox, "read-only");
+  assert.equal(readOnly.approvalPolicy, "on-request", "Codex's Read Only preset: approval to edit or go online");
+  assert.equal(readOnly.approvalsReviewer, null, "the User answers, not Codex");
+  const workspace = runner.codexAppServerThreadResumeParams("thread-1", participant, "/repo", "chat", ownModeOptions("default", true));
+  assert.equal(workspace.sandbox, "workspace-write");
+  assert.equal(workspace.approvalPolicy, "on-request", "Codex's Default preset, on resume too");
+  const auto = runner.codexAppServerThreadStartParams(participant, "/repo", "chat", ownModeOptions("auto", false));
+  assert.equal(auto.approvalPolicy, "on-request");
+  assert.equal(auto.approvalsReviewer, "auto_review");
+  const plan = runner.codexAppServerThreadStartParams(participant, "/repo", "chat", ownModeOptions("plan", true));
+  assert.equal(plan.sandbox, "read-only");
+  assert.equal(plan.approvalPolicy, "never");
+  const classic = runner.codexAppServerThreadStartParams(participant, "/repo", "chat", chatOptions({ agentMode: "default", workspaceWrite: true }));
+  assert.equal(classic.approvalPolicy, "never", "classic: unchanged");
 });

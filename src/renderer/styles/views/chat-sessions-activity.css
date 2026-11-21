@@ -1,0 +1,125 @@
+/* A reply's work in the sessions view (chat-sessions-activity.tsx), T3
+   Code's way: "Working for 4s" over a hairline, then one quiet line per step,
+   an outline icon and muted text, the newest shimmering while it runs. */
+
+.chat-sessions-working {
+  padding: 2px 0 7px;
+  margin-bottom: 6px;
+  border-bottom: 1px solid var(--app-hairline);
+  color: var(--app-muted);
+  font-size: 13px;
+  line-height: 18px;
+  font-variant-numeric: tabular-nums;
+}
+
+.chat-sessions-activity {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.chat-sessions-activity.is-finished {
+  margin: 4px 0 8px;
+}
+
+.chat-sessions-activity-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  min-height: 24px;
+  color: var(--app-muted);
+  font-size: 13px;
+  line-height: 18px;
+}
+
+.chat-sessions-activity-icon {
+  flex: 0 0 auto;
+  color: var(--app-muted);
+}
+
+.chat-sessions-activity-text {
+  overflow: hidden;
+  min-width: 0;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* The step in progress: a subtle light moving across its words. */
+.chat-sessions-activity-row.is-current .chat-sessions-activity-text {
+  background:
+    linear-gradient(
+      90deg,
+      var(--app-muted) 0%,
+      var(--app-muted) 35%,
+      var(--app-text-strong) 50%,
+      var(--app-muted) 65%,
+      var(--app-muted) 100%
+    );
+  background-size: 230% 100%;
+  background-position: 120% 0;
+  -webkit-background-clip: text;
+  background-clip: text;
+  -webkit-text-fill-color: transparent;
+  animation: chat-sessions-activity-shimmer 2.2s ease-in-out infinite;
+}
+
+@keyframes chat-sessions-activity-shimmer {
+  0% {
+    background-position: 120% 0;
+  }
+
+  100% {
+    background-position: -120% 0;
+  }
+}
+
+.app-inactive .chat-sessions-activity-row.is-current .chat-sessions-activity-text {
+  animation-play-state: paused;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .chat-sessions-activity-row.is-current .chat-sessions-activity-text {
+    background: none;
+    color: var(--app-muted);
+    -webkit-text-fill-color: currentColor;
+    animation: none;
+  }
+}
+
+/* What the member writes between its steps: its own words, at text size. */
+.chat-sessions-activity-words {
+  margin: 4px 0;
+  color: var(--app-text);
+}
+
+.chat-sessions-activity-notice {
+  color: var(--app-muted);
+  font-size: 12px;
+}
+
+.chat-sessions-running .chat-interim-post {
+  margin: 4px 0;
+}
+
+.chat-sessions-running .chat-delegations {
+  margin-top: 4px;
+}
+
+/* The steps not drawn: one muted line, which opens them in a finished fold. */
+.chat-sessions-activity-earlier {
+  padding: 0 0 0 22px;
+  border: 0;
+  background: none;
+  font-style: italic;
+  text-align: left;
+}
+
+button.chat-sessions-activity-earlier {
+  cursor: pointer;
+}
+
+button.chat-sessions-activity-earlier:hover .chat-sessions-activity-text {
+  color: var(--app-text-strong);
+}

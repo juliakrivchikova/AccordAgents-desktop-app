@@ -156,7 +156,7 @@ test("the sessions view (T3 Code's way): tasks inside the turn's Worked fold, ch
     label: document.getElementById("chat-members-button").getAttribute("aria-label"), count: document.getElementById("chat-members-count").textContent,
     dot: ${visible("#chat-members-dot")}
   }))()`);
-  assert.deepEqual(header, { switch: false, chevron: true, label: "Members (2 running)", count: "2", dot: true });
+  assert.deepEqual(header, { switch: false, chevron: true, label: "Side panel (2 running)", count: "2", dot: true });
   // The User's message to the main session reads without its @main.
   assert.equal(await app.evaluate(`document.querySelector('#message-list .message-row[data-thread-root="u1"] .message-content').textContent.trim()`), "Fix the login page");
   // Only a current or former member's exact @handle is its chip (its
@@ -201,7 +201,7 @@ test("the sessions view (T3 Code's way): tasks inside the turn's Worked fold, ch
   assert.match(fold.rows[0].time, /^\d+m \d+s$/, "a running task counts up");
   assert.equal(fold.rows[1].time, "23m 0s", "an ended task says how long it took");
   // The Waiting line names the tasks, and stops them.
-  assert.equal(await app.evaluate(`document.querySelector(".sessions-waiting-text").textContent`), "Waiting on 2 members: Restyle the login button, Check the server logs for every failed…");
+  assert.equal(await app.evaluate(`document.querySelector(".sessions-waiting-text").textContent`), "Waiting on 2 tasks: Restyle the login button, Check the server logs for every failed…");
   assert.equal(await app.evaluate(`document.querySelector(".sessions-waiting .sessions-stop").disabled`), false, "the Waiting line has Stop, though one of them has written nothing yet");
 
   // --- a delegation row opens the member's session at its message ----------
@@ -231,22 +231,28 @@ test("the sessions view (T3 Code's way): tasks inside the turn's Worked fold, ch
   await app.evaluate(`document.getElementById("back-to-timeline").click()`);
   await app.waitFor(mainShown, "back");
 
-  // --- the one panel: main session, Accord, members, Removed ---------------
+  // --- the one panel: no title, no main session; Accord, tasks, Removed -----
   await app.evaluate(`document.getElementById("chat-members-button").click()`);
-  await app.waitFor(`${visible("#members-sheet")} && document.querySelectorAll("#members-sheet-list .sessions-member-row").length >= 3`, "the panel");
+  await app.waitFor(`${visible("#members-sheet")} && document.querySelectorAll("#members-sheet-list .sessions-member-row").length >= 2`, "the panel");
   const sheet = await app.evaluate(`(() => ({
     title: document.getElementById("members-sheet-title").textContent,
+    titleHidden: document.getElementById("members-sheet-title").hidden,
     stopAll: !document.getElementById("members-sheet-stop-all").hidden,
-    main: [document.querySelector(".sessions-main-row strong").textContent, document.querySelector(".sessions-main-row .provider-logo").dataset.providerKind],
+    main: document.querySelector(".sessions-main-row") !== null,
     accord: document.querySelector(".sessions-accord-row")?.textContent || "",
-    rows: [...document.querySelectorAll("#members-sheet-list .sessions-member-row:not(.sessions-main-row)")].map((row) => [row.dataset.memberSession, row.dataset.memberStatus,
+    rows: [...document.querySelectorAll("#members-sheet-list .sessions-member-row")].map((row) => [row.dataset.memberSession, row.dataset.memberStatus,
       row.querySelector(".members-sheet-task").textContent, row.querySelector(".provider-logo").dataset.providerKind, Boolean(row.querySelector(".sessions-stop"))]),
     groups: [...document.querySelectorAll("#members-sheet-list .members-previous-toggle")].map((node) => node.textContent),
-    handles: /@[A-Za-z]/.test(document.getElementById("members-sheet-list").innerText)
+    handles: /@[A-Za-z]/.test(document.getElementById("members-sheet-list").innerText),
+    members: /members?/i.test(document.getElementById("members-sheet").innerText),
+    bare: [...document.querySelectorAll("#members-sheet-list .provider-logo")].every((logo) => logo.classList.contains("is-bare"))
   }))()`);
-  assert.equal(sheet.title, "Chat");
+  assert.equal(sheet.title, "", "the panel has no title");
+  assert.equal(sheet.titleHidden, true);
   assert.equal(sheet.stopAll, true);
-  assert.deepEqual(sheet.main, ["Main session", "claude-code"], "the main session first");
+  assert.equal(sheet.main, false, "the main session is not listed: its settings are its composer chip");
+  assert.equal(sheet.members, false, "the sessions view never says members");
+  assert.equal(sheet.bare, true, "provider marks are bare glyphs");
   assert.match(sheet.accord, /^AccordButton colour · Drafts/, "the chat's Accord, by its document");
   assert.deepEqual(sheet.rows, [["p-drew", "running", "Restyle the login button", "claude-code", true], ["p-sam", "running", "Check the server logs for every failed…", "gemini-cli", true]],
     "the members at work, by task, with Stop; the one that ended under Previous");
@@ -310,10 +316,16 @@ test("the sessions view (T3 Code's way): tasks inside the turn's Worked fold, ch
     input.dispatchEvent(new Event("input", { bubbles: true })); })()`);
   await app.waitFor(`${sendMode} === "stop"`, "the composer's Stop");
   assert.equal(await app.evaluate(`document.getElementById("send-button").getAttribute("aria-label")`), "Stop the main session");
+  const sideStop = `(() => { const node = document.getElementById("composer-stop-button");
+    return { shown: !node.hidden && getComputedStyle(node).display !== "none", label: node.getAttribute("aria-label"), disabled: node.disabled }; })()`;
+  assert.equal((await app.evaluate(sideStop)).shown, false, "nothing typed: the send button itself is Stop, nothing beside it");
   await typeIn("one more thing");
   assert.equal(await app.evaluate(sendMode), "send", "typing turns it back into Send");
+  assert.deepEqual(await app.evaluate(sideStop), { shown: true, label: "Stop the main session", disabled: false },
+    "with something typed Stop stands beside Send: the CLI interrupts whatever is in the prompt");
   await typeIn("");
   assert.equal(await app.evaluate(sendMode), "stop");
+  assert.equal((await app.evaluate(sideStop)).shown, false);
   // A picture is something to send too: picking one with nothing typed
   // turns Stop into Send, and taking it off brings Stop back.
   await app.evaluate(`(() => {
@@ -329,9 +341,14 @@ test("the sessions view (T3 Code's way): tasks inside the turn's Worked fold, ch
   await app.evaluate(`document.querySelector("#composer-attachments .composer-attachment-remove").click()`);
   await app.waitFor(`document.querySelectorAll("#composer-attachments .composer-attachment-chip").length === 0`, "the picture is taken off");
   assert.equal(await app.evaluate(sendMode), "stop", "with nothing left to send, Stop again");
-  await app.evaluate(`document.getElementById("send-button").dispatchEvent(new PointerEvent("pointerup", { bubbles: true, cancelable: true }))`);
+  // Stop beside Send stops the run and leaves what is typed to be sent.
+  await typeIn("keep this for later");
+  await app.evaluate(`document.getElementById("composer-stop-button").click()`);
   const stopMain = await waitForOp(hub, (op) => op.kind === "turn.stop" && op.participantId === MAIN.id);
   assert.equal(stopMain.messageId, "drew-q", "the main session's run, named by the message it answers");
+  assert.equal(await app.evaluate(`document.getElementById("composer-input").value`), "keep this for later", "what is typed stays");
+  assert.equal(await app.evaluate(sendMode), "send", "still Send: the words are for sending");
+  await typeIn("");
   // Back before a member's session is drawn is back: the reply its chip
   // leads to does not open that session again once the rows are read.
   await app.evaluate(`(() => { document.querySelector('#message-list .sessions-member-chip[data-open-member="p-drew"]').click(); document.getElementById("back-to-timeline").click(); })()`);
@@ -444,17 +461,20 @@ test("New chat on the phone leads with the main session, and the chat it makes h
   await pairPage(app, { hub, siteOrigin: site.origin, query: "qa=1" });
   await app.waitFor(`!document.getElementById("new-chat-button").hidden`, "New chat");
   await app.evaluate(`document.getElementById("new-chat-button").click()`);
-  await app.waitFor(`document.querySelectorAll("#new-chat-members .new-chat-member").length === 2`, "the members");
-  const lead = await app.evaluate(`(() => { const row = document.querySelector("#new-chat-members .new-chat-member");
-    return { name: row.querySelector("strong").textContent, line: row.querySelector(".members-sheet-role").textContent, locked: row.getAttribute("aria-disabled"),
-      pressed: row.getAttribute("aria-pressed"), text: document.getElementById("new-chat-members").textContent,
-      label: document.getElementById("new-chat-members-button").getAttribute("aria-label") }; })()`);
-  assert.deepEqual([lead.name, lead.line, lead.locked, lead.pressed], ["Main session", "@main · Claude Code", "true", "true"], "the locked first row");
-  assert.deepEqual(await app.evaluate(`(() => { const row = document.querySelector("#new-chat-members .new-chat-member");
-    return [row.querySelector(".provider-logo")?.dataset.providerKind ?? null, row.querySelector(".mobile-mention-avatar") === null]; })()`),
-  ["claude-code", true], "the main session shows its provider's logo, not an avatar picture");
-  assert.equal(/Assistant/.test(lead.text), false, "nothing says Assistant");
-  assert.equal(lead.label, "Members: Main session");
+  // A new chat that opens in the sessions view has no members on New chat:
+  // the chip names the main session's provider (a computer from before
+  // offers no model list: its CLI's name).
+  await app.waitFor(`!document.getElementById("new-chat-model-button").hidden && !document.getElementById("new-chat-model-button").disabled`, "the model chip");
+  const lead = await app.evaluate(`(() => ({
+    members: !document.getElementById("new-chat-members-button").hidden,
+    listed: document.querySelectorAll("#new-chat-members .new-chat-member").length,
+    chip: document.getElementById("new-chat-model-label").textContent,
+    glyph: document.querySelector("#new-chat-model-label .provider-logo")?.dataset.providerKind ?? null,
+    avatar: document.querySelector(".new-chat-card .mobile-mention-avatar") !== null,
+    text: document.querySelector(".new-chat-card").innerText
+  }))()`);
+  assert.deepEqual([lead.members, lead.listed, lead.chip, lead.glyph, lead.avatar], [false, 0, "Claude Code", "claude-code", false], "no members, the chip instead");
+  assert.equal(/Assistant|members?/i.test(lead.text), false, "nothing says Assistant or members");
 
   await app.evaluate(`(() => { const input = document.getElementById("new-chat-input"); input.value = "Plan the release"; input.dispatchEvent(new Event("input", { bubbles: true }));
     document.getElementById("new-chat-start").click(); })()`);
@@ -463,6 +483,7 @@ test("New chat on the phone leads with the main session, and the chat it makes h
   const made = participants.find((participant) => participant.roleConfigId === "main-session");
   assert.ok(made && made.id !== "t-main", "the main session, with an id of its own");
   assert.equal(participants[0].id, made.id, "first");
+  assert.equal(participants.length, 1, "alone: it makes members itself");
   assert.equal(create.conversation.metadata.mainSessionParticipantId, made.id, "the chat says which member is its main session");
   assert.equal(create.conversation.metadata.chatView, "sessions", "and opens in the sessions view");
   // Its first message names nobody: it goes to the main session (a member

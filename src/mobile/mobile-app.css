@@ -1522,6 +1522,22 @@ button.mobile-chat-group-title:active {
   color: var(--mut);
 }
 
+/* A queued reply of the sessions view is taken back from its own row: a
+   small ×, a finger's target around it. */
+.message-stop.is-queued-cancel {
+  width: 32px;
+  height: 32px;
+  padding: 0;
+  border-color: transparent;
+  background: transparent;
+  color: var(--mut);
+  font: 400 18px/1 var(--sans);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  touch-action: manipulation;
+}
+
 .message-content {
   white-space: pre-wrap;
   overflow-wrap: anywhere;
@@ -1790,6 +1806,24 @@ button.mobile-chat-group-title:active {
 .composer .composer-tool:focus-visible {
   outline: 2px solid var(--fg1);
   outline-offset: 1px;
+}
+
+/* Stop beside Send while the session runs and something is written (the
+   CLI interrupts whatever is in the prompt): an outlined circle, neutral, so
+   Send stays the one filled button. */
+.composer .composer-stop {
+  margin-left: auto;
+  color: var(--fg1);
+  box-shadow: inset 0 0 0 1px var(--bd);
+}
+
+.composer .composer-stop:disabled {
+  background: transparent;
+  color: var(--mut);
+}
+
+.composer .composer-stop:not([hidden]) + .composer-send {
+  margin-left: 4px;
 }
 
 /* Send sits at the far end of the same row, the way Slack puts it. */
@@ -2120,15 +2154,25 @@ button.mobile-chat-group-title:active {
   display: flex;
   align-items: baseline;
   gap: 8px;
+  min-width: 0;
   margin-bottom: 4px;
 }
 
 .control-card-title {
+  min-width: 0;
   font-weight: 600;
   font-size: 14px;
+  overflow-wrap: anywhere;
 }
 
+/* Who raised it: cut with an ellipsis, never pushed off the screen. */
 .control-card-who {
+  flex: 0 1 auto;
+  min-width: 0;
+  max-width: 60%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
   font-size: 12px;
   opacity: 0.7;
 }
@@ -2965,6 +3009,13 @@ button.mobile-chat-group-title:active {
   cursor: pointer;
 }
 
+/* A chip the screen does not offer (the members in the sessions view, the
+   model chip in the classic one) is gone: its own display must not win
+   over [hidden]. */
+.new-chat-chip[hidden] {
+  display: none;
+}
+
 .new-chat-chip:disabled {
   color: var(--mut);
   cursor: default;
@@ -2984,6 +3035,38 @@ button.mobile-chat-group-title:active {
 
 .new-chat-members-chip {
   flex: 0 0 auto;
+}
+
+/* The sessions view's model chip, T3 Code's way: no border, the provider's
+   bare glyph, the model and a muted effort. */
+.new-chat-model-chip {
+  flex: 0 1 auto;
+  border-color: transparent;
+  background: none;
+  color: var(--fg);
+}
+
+.new-chat-model-label {
+  min-width: 0;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  overflow: hidden;
+  white-space: nowrap;
+}
+
+.new-chat-model-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.new-chat-model-effort {
+  color: var(--mut);
+}
+
+.new-chat-model-option .provider-logo {
+  margin-right: 2px;
 }
 
 .new-chat-chip-label {
@@ -4805,6 +4888,46 @@ button.card-row:focus-visible {
   height: 18px;
 }
 
+/* The bare glyph (the sessions view, T3 Code's way): no tile, no rounded
+   square, sized to the text line. Claude's asterisk is its own orange; the
+   tile's white asterisk is its shape. */
+.provider-logo.is-bare,
+.provider-logo.is-bare[data-provider-kind="claude-code"] {
+  width: 16px;
+  height: 16px;
+  border-radius: 0;
+  background: none;
+  box-shadow: none;
+}
+
+.provider-logo.is-bare svg,
+.provider-logo.is-bare .provider-logo-mark {
+  width: 100%;
+  height: 100%;
+}
+
+.provider-logo.is-bare.is-chip {
+  width: 13px;
+  height: 13px;
+}
+
+.provider-logo.is-bare.is-small {
+  width: 14px;
+  height: 14px;
+}
+
+.provider-logo.is-bare.is-mini,
+.provider-logo.is-bare.is-note {
+  width: 18px;
+  height: 18px;
+}
+
+.provider-logo.is-bare .provider-logo-mark.is-claude {
+  background: var(--brand-anthropic);
+  -webkit-mask: url("./assets/providers/claude.png") center / contain no-repeat;
+  mask: url("./assets/providers/claude.png") center / contain no-repeat;
+}
+
 /* The header in the sessions view: the title's menu holds the view; the
    members icon carries a count and a dot instead of words. */
 .mobile-chat-header {
@@ -5065,10 +5188,10 @@ button.card-row:focus-visible {
 
 .sessions-logo-dot {
   position: absolute;
-  right: -2px;
-  bottom: -2px;
-  width: 8px;
-  height: 8px;
+  right: -3px;
+  bottom: -3px;
+  width: 7px;
+  height: 7px;
   border-radius: 50%;
   border: 1.5px solid var(--surface);
   background: var(--mut);
@@ -5152,4 +5275,81 @@ button.card-row:focus-visible {
 
 .sessions-member-row.is-former {
   opacity: 0.75;
+}
+
+/* A running reply of the sessions view (T3 Code's turn in progress): a quiet
+   "Working for 4s" over a hairline, then one muted row per step with its
+   outline icon, the newest shimmering. Its "Worked for …" opens to the same
+   rows once it is done. */
+.message-row.is-sessions .message-status:empty {
+  display: none;
+}
+
+.message-row.is-sessions[data-status="Running"] .message-meta:not(:has(> :not(:empty))) {
+  display: none;
+}
+
+.sessions-working {
+  margin: 2px 0 6px;
+}
+
+.sessions-working-head {
+  padding: 2px 0 7px;
+  margin-bottom: 6px;
+  border-bottom: 1px solid var(--bd);
+  color: var(--mut);
+  font: 400 13px var(--sans);
+  font-variant-numeric: tabular-nums;
+}
+
+.sessions-activity {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.sessions-activity-row,
+.sessions-activity-more {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  min-height: 24px;
+  color: var(--mut);
+  font: 400 13px var(--sans);
+}
+
+.sessions-activity-icon {
+  flex: 0 0 auto;
+}
+
+.sessions-activity-text {
+  overflow: hidden;
+  min-width: 0;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.sessions-activity-row.is-current .sessions-activity-text {
+  background: linear-gradient(90deg, var(--mut) 0%, var(--mut) 35%, var(--fg1) 50%, var(--mut) 65%, var(--mut) 100%);
+  background-size: 230% 100%;
+  background-position: 120% 0;
+  -webkit-background-clip: text;
+  background-clip: text;
+  -webkit-text-fill-color: transparent;
+  animation: thinking-transfusion 2.2s ease-in-out infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .sessions-activity-row.is-current .sessions-activity-text {
+    background: none;
+    color: var(--mut);
+    -webkit-text-fill-color: currentColor;
+    animation: none;
+  }
+}
+
+.sessions-worked-body > .sessions-activity {
+  margin-bottom: 4px;
 }

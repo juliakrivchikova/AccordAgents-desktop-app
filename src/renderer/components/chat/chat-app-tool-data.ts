@@ -17,6 +17,7 @@ import type {
 } from "../../../shared/types";
 import { isChatScriptChangeRequest, type ChatScriptChangeRequest } from "../../../shared/scripts";
 import { isConnectorSignInRequest } from "../../../shared/connectorSignIn";
+import { chatToolPermissionIsScoped, normalizeChatToolPermissionScope } from "../../../shared/toolPermissionScope";
 import { chatParticipantReference } from "../conversation/conversation-display";
 import { CODEX_APPROVAL_TOOL_NAME, chatCodexApprovalRequest } from "./chat-codex-approval-presentation";
 
@@ -305,12 +306,16 @@ export function chatToolPermissionRequest(
       : fallbackAgentMode,
     reason: typeof request.reason === "string" ? request.reason : undefined,
     toolName,
-    toolInput: request.toolInput
+    toolInput: request.toolInput,
+    ...(normalizeChatToolPermissionScope(request.chatScope) ? { chatScope: normalizeChatToolPermissionScope(request.chatScope) } : {})
   };
 }
 
+/** Whether the card offers "for this chat": not in Claude's Auto mode, and
+ *  for Bash, WebFetch and file edits only with the scope Claude Code's
+ *  "don't ask again" would have (src/shared/toolPermissionScope.ts). */
 export function chatToolPermissionAllowsChatScope(request: ChatToolPermissionRequest): boolean {
-  return request.agentMode !== "auto";
+  return request.agentMode !== "auto" && (!chatToolPermissionIsScoped(request.toolName) || Boolean(request.chatScope));
 }
 
 export function chatPermissionGrantLabel(permission: ChatPermissionGrant): string {

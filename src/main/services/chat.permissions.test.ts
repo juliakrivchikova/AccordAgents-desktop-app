@@ -70,6 +70,7 @@ import type {
   ChatRoleConfig,
   ChatRoleConfigUpdate,
   ChatSkillMention,
+  ChatToolPermissionRequest,
   CliProviderHost,
   Conversation,
   ParticipantConfig,
@@ -900,6 +901,36 @@ test("permission request has stable requestId and idempotent replay after approv
   );
 });
 
+test("in the run an approval resumed it in, a member asking again gets the answer it has, not a second card", async () => {
+  const participant = chatParticipant("claude-code", { webAccess: false });
+  const approval = permissionApproval(participant, { kind: "portable", permissions: ["webAccess"] }, {
+    status: "approved",
+    approvalScope: "once",
+    resumeContext: { runId: "asking-run", triggerMessageId: "user-message" }
+  });
+  const conversation = chatConversation([participant], { pendingAppToolApprovals: [approval] });
+  const { service, storage } = testService({ conversation });
+  const actor = (runId: string) => ({
+    conversationId: conversation.id,
+    participantId: participant.id,
+    roleConfigId: participant.roleConfigId,
+    roleConfigVersion: 0,
+    capabilities: ["permissions.request" as const],
+    runId,
+    triggerMessageId: "user-message",
+    runPermissions: defaultChatAgentPermissions()
+  });
+
+  const resumed = actor("turn-permission-resume-approval-1");
+  assert.equal((await service.requestPermissionChangeFromTool(resumed, { requestId: approval.id })).status, "approved");
+  const again = await service.requestPermissionChangeFromTool(resumed, { kind: "portable", permissions: ["webAccess"] });
+  assert.equal(again.status, "approved");
+  assert.equal(again.requestId, approval.id);
+  assert.equal((storage.current.metadata.pendingAppToolApprovals as ChatAppToolApproval[]).length, 1, "no second card");
+  // Any other run still asks for itself.
+  assert.equal((await service.requestPermissionChangeFromTool(actor("another-run"), { requestId: approval.id })).status, "not_found");
+});
+
 test("permission request status lookup returns denied decisions idempotently", async () => {
   const participant = chatParticipant("claude-code", { webAccess: false });
   const conversation = chatConversation([participant]);
@@ -1128,6 +1159,186 @@ test("tool permission chat approval reuses policy for the same participant and t
   );
   assert.equal(toolApprovals.length, 1);
   assert.equal(((storage.current.metadata.appToolApprovalPolicies ?? []) as ChatAppToolApprovalPolicy[])[0].targetToolName, "mcp__atlassian__search");
+});
+
+function toolPermissionActor(participant: ChatParticipant, conversation: Conversation, runId = "run-42") {
+  return {
+    conversationId: conversation.id,
+    participantId: participant.id,
+    roleConfigId: participant.roleConfigId,
+    roleConfigVersion: 0,
+    capabilities: ["permissions.request" as const],
+    agentMode: "default" as const,
+    runId,
+    triggerMessageId: "user-message"
+  };
+}
+
+async function pendingToolPermission(storage: { current: Conversation }, toolName: string): Promise<ChatAppToolApproval> {
+  await waitFor(() => ((storage.current.metadata.pendingAppToolApprovals ?? []) as ChatAppToolApproval[])
+    .some((approval) => approval.toolName === APP_TOOL_PERMISSION_TOOL && approval.status === "pending" &&
+      (approval.request as { toolName?: string }).toolName === toolName));
+  return ((storage.current.metadata.pendingAppToolApprovals ?? []) as ChatAppToolApproval[])
+    .filter((approval) => (approval.request as { toolName?: string }).toolName === toolName)
+    .find((approval) => approval.status === "pending")!;
+}
+
+test("a permission card whose Claude Code call ended (it stopped waiting) is expired, and an answer to it does nothing", async () => {
+  const participant = chatParticipant("claude-code");
+  const conversation = chatConversation([participant]);
+  const { service, storage } = testService({ conversation });
+  const abandoned = new AbortController();
+  const pending = service.requestToolPermissionFromTool(toolPermissionActor(participant, conversation), {
+    tool_name: "Bash", input: { command: "date > /tmp/stamp.txt" }, tool_use_id: "toolu_1"
+  }, abandoned.signal);
+  const card = await pendingToolPermission(storage, "Bash");
+  abandoned.abort();
+  const result = await pending;
+  assert.equal(result.behavior, "deny");
+  const expired = ((storage.current.metadata.pendingAppToolApprovals ?? []) as ChatAppToolApproval[]).find((item) => item.id === card.id)!;
+  assert.equal(expired.status, "expired", "not shown as waiting, and not as the User's denial");
+  assert.match(expired.error ?? "", /stopped waiting/);
+  await assert.rejects(
+    service.respondToAppToolApproval({ conversationId: conversation.id, approvalId: card.id, approve: true, scope: "once" }),
+    /already been answered/
+  );
+});
+
+test("while the same tool call asked again still waits on its card, the first call ending leaves the card open for it", async () => {
+  const participant = chatParticipant("claude-code");
+  const conversation = chatConversation([participant]);
+  const { service, storage } = testService({ conversation });
+  const actor = toolPermissionActor(participant, conversation);
+  const request = { tool_name: "Bash", input: { command: "ls /tmp" }, tool_use_id: "toolu_same" };
+  const firstGone = new AbortController();
+  const first = service.requestToolPermissionFromTool(actor, request, firstGone.signal);
+  const card = await pendingToolPermission(storage, "Bash");
+  const second = service.requestToolPermissionFromTool(actor, request);
+  await waitFor(() => ((service as any).toolPermissionWaiters.get(card.id) ?? 0) === 2);
+  firstGone.abort();
+  assert.equal((await first).behavior, "deny");
+  const open = ((storage.current.metadata.pendingAppToolApprovals ?? []) as ChatAppToolApproval[]).find((item) => item.id === card.id)!;
+  assert.equal(open.status, "pending", "still waited on");
+  await service.respondToAppToolApproval({ conversationId: conversation.id, approvalId: card.id, approve: true, scope: "once" });
+  assert.equal((await second).behavior, "allow", "the call still waiting gets the answer");
+});
+
+test("an answer to a permission card no call waits on any more (the app restarted) expires it instead of doing nothing", async () => {
+  const participant = chatParticipant("claude-code");
+  const orphan: ChatAppToolApproval = {
+    id: "orphan-1", conversationId: "conversation-1", requesterParticipantId: participant.id, requesterHandle: participant.handle,
+    requesterRoleConfigId: participant.roleConfigId, toolName: APP_TOOL_PERMISSION_TOOL, capability: "permissions.request",
+    request: { kind: "toolPermission", agentMode: "default", toolName: "Bash", toolInput: { command: "ls" } },
+    summary: "Use Bash", status: "pending", createdAt: NOW, updatedAt: NOW,
+    resumeContext: { runId: "old-run", triggerMessageId: "user-message" }
+  } as ChatAppToolApproval;
+  const conversation = chatConversation([participant], { pendingAppToolApprovals: [orphan] });
+  const { service, storage } = testService({ conversation });
+  await assert.rejects(
+    service.respondToAppToolApproval({ conversationId: conversation.id, approvalId: orphan.id, approve: true, scope: "once" }),
+    /Nothing is waiting for this answer/,
+    "refused, never reported as applied"
+  );
+  const after = ((storage.current.metadata.pendingAppToolApprovals ?? []) as ChatAppToolApproval[]).find((item) => item.id === orphan.id)!;
+  assert.equal(after.status, "expired");
+  assert.match(after.error ?? "", /Nothing is waiting for this answer/);
+});
+
+test("Allow for this chat on a Bash card covers the command prefixes, as Claude Code's \"don't ask again\" does: another command still asks", async () => {
+  const participant = chatParticipant("claude-code");
+  const conversation = chatConversation([participant]);
+  const { service, storage } = testService({ conversation });
+  const actor = toolPermissionActor(participant, conversation);
+  const first = service.requestToolPermissionFromTool(actor, {
+    tool_name: "Bash", input: { command: "mkdir -p /tmp/aa && git status" }, tool_use_id: "toolu_a"
+  });
+  const card = await pendingToolPermission(storage, "Bash");
+  assert.deepEqual((card.request as ChatToolPermissionRequest).chatScope, { kind: "commands", prefixes: ["mkdir", "git status"] });
+  await service.respondToAppToolApproval({ conversationId: conversation.id, approvalId: card.id, approve: true, scope: "chat" });
+  assert.equal((await first).behavior, "allow");
+  const rules = (storage.current.metadata.appToolApprovalPolicies ?? []) as ChatAppToolApprovalPolicy[];
+  assert.deepEqual(rules.map((rule) => [rule.targetToolName, rule.targetToolScope]), [["Bash", { kind: "commands", prefixes: ["mkdir", "git status"] }]]);
+  assert.ok(storage.current.messages.some((message: ChatMessage) => message.content === `Allowed @${participant.handle} to run mkdir and git status commands for this chat.`));
+
+  // The same prefixes: unasked.
+  const again = await service.requestToolPermissionFromTool({ ...actor, runId: "run-43" }, {
+    tool_name: "Bash", input: { command: "mkdir /tmp/bb" }, tool_use_id: "toolu_b"
+  });
+  assert.equal(again.behavior, "allow");
+  // Another command: a card, not a free pass for every command.
+  const abandoned = new AbortController();
+  const other = service.requestToolPermissionFromTool({ ...actor, runId: "run-44" }, {
+    tool_name: "Bash", input: { command: "rm -rf /tmp/aa" }, tool_use_id: "toolu_c"
+  }, abandoned.signal);
+  const asked = await pendingToolPermission(storage, "Bash");
+  assert.notEqual(asked.id, card.id);
+  abandoned.abort();
+  await other;
+
+  // WebFetch: the domain.
+  const fetch = service.requestToolPermissionFromTool({ ...actor, runId: "run-45" }, {
+    tool_name: "WebFetch", input: { url: "https://docs.example.com/a" }, tool_use_id: "toolu_d"
+  });
+  const fetchCard = await pendingToolPermission(storage, "WebFetch");
+  await service.respondToAppToolApproval({ conversationId: conversation.id, approvalId: fetchCard.id, approve: true, scope: "chat" });
+  await fetch;
+  assert.equal((await service.requestToolPermissionFromTool({ ...actor, runId: "run-46" }, {
+    tool_name: "WebFetch", input: { url: "https://docs.example.com/b" }, tool_use_id: "toolu_e"
+  })).behavior, "allow");
+  const otherSite = new AbortController();
+  const elsewhere = service.requestToolPermissionFromTool({ ...actor, runId: "run-47" }, {
+    tool_name: "WebFetch", input: { url: "https://example.org/" }, tool_use_id: "toolu_f"
+  }, otherSite.signal);
+  assert.notEqual((await pendingToolPermission(storage, "WebFetch")).id, fetchCard.id, "another domain asks");
+  otherSite.abort();
+  await elsewhere;
+});
+
+test("a rule for edits in a folder does not cover a link in it that leads out of it", async (t) => {
+  const root = await mkdtemp(path.join(tmpdir(), "aa-edit-scope-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const inside = path.join(root, "work");
+  const outside = path.join(root, "elsewhere");
+  await mkdir(inside, { recursive: true });
+  await mkdir(outside, { recursive: true });
+  await symlink(outside, path.join(inside, "out"));
+  const participant = chatParticipant("claude-code");
+  const conversation = chatConversation([participant]);
+  const { service, storage } = testService({ conversation });
+  const actor = toolPermissionActor(participant, conversation);
+  const first = service.requestToolPermissionFromTool(actor, { tool_name: "Write", input: { file_path: path.join(inside, "a.txt"), content: "x" }, tool_use_id: "toolu_w1" });
+  const card = await pendingToolPermission(storage, "Write");
+  assert.deepEqual((card.request as ChatToolPermissionRequest).chatScope, { kind: "folder", path: inside });
+  await service.respondToAppToolApproval({ conversationId: conversation.id, approvalId: card.id, approve: true, scope: "chat" });
+  await first;
+  assert.equal((await service.requestToolPermissionFromTool({ ...actor, runId: "run-e2" }, {
+    tool_name: "Edit", input: { file_path: path.join(inside, "b.txt"), old_string: "a", new_string: "b" }, tool_use_id: "toolu_w2"
+  })).behavior, "allow", "another edit in the folder");
+  const abandoned = new AbortController();
+  const viaLink = service.requestToolPermissionFromTool({ ...actor, runId: "run-e3" }, {
+    tool_name: "Write", input: { file_path: path.join(inside, "out", "c.txt"), content: "x" }, tool_use_id: "toolu_w3"
+  }, abandoned.signal);
+  assert.notEqual((await pendingToolPermission(storage, "Write")).id, card.id, "asked: it lands outside the folder");
+  abandoned.abort();
+  await viaLink;
+});
+
+test("a Bash card the app cannot scope is allowed once even when answered for the chat; a rule kept from before still covers its tool", async () => {
+  const participant = chatParticipant("claude-code");
+  const legacy: ChatAppToolApprovalPolicy = {
+    id: "legacy", participantId: participant.id, roleConfigId: participant.roleConfigId, toolName: APP_TOOL_PERMISSION_TOOL,
+    capability: "permissions.request", targetToolName: "WebSearch", scope: "chat", createdAt: NOW, updatedAt: NOW
+  };
+  const conversation = chatConversation([participant], { appToolApprovalPolicies: [legacy] });
+  const { service, storage } = testService({ conversation });
+  const actor = toolPermissionActor(participant, conversation);
+  const opaque = service.requestToolPermissionFromTool(actor, { tool_name: "Bash", input: { command: "echo $(whoami)" }, tool_use_id: "toolu_x" });
+  const card = await pendingToolPermission(storage, "Bash");
+  assert.equal((card.request as ChatToolPermissionRequest).chatScope, undefined);
+  await service.respondToAppToolApproval({ conversationId: conversation.id, approvalId: card.id, approve: true, scope: "chat" });
+  assert.equal((await opaque).behavior, "allow");
+  assert.equal(((storage.current.metadata.appToolApprovalPolicies ?? []) as ChatAppToolApprovalPolicy[]).length, 1, "no rule for the whole of Bash");
+  assert.equal((await service.requestToolPermissionFromTool({ ...actor, runId: "run-9" }, { tool_name: "WebSearch", input: { query: "x" } })).behavior, "allow");
 });
 
 test("Claude Auto tool permission approvals are per occurrence and never reuse chat policy", async () => {
@@ -2115,7 +2326,8 @@ test("permission resume attaches resumed participant-request reply to the origin
   assert.equal(batch?.items[0].status, "answered");
   assert.equal(batch?.items[0].replyMessageId, reply?.id);
   assert.equal(saved.metadata.pendingAppToolApprovals[0].consumedAt.length > 0, true);
-  assert.equal(progressEvents[0]?.runId, "blocked-run");
+  // A run of its own, never the blocked one: that turn is over on the User's server.
+  assert.equal(progressEvents[0]?.runId, "turn-permission-resume-approval-1");
   assert.equal(progressEvents[0]?.phase, "initial");
   assert.equal(progressEvents.some((event) => event.agentProgress?.state === "running"), true);
   assert.equal(progressEvents.at(-1)?.phase, "done");
@@ -2320,7 +2532,7 @@ test("permission resume registers a cancellable chat run controller", async () =
   });
   const pendingMessageId = storage.current.metadata.lastMessageByParticipant?.[participant.id]?.messageId;
 
-  assert.equal(service.cancelRun("blocked-run"), true);
+  assert.equal(service.cancelRun("turn-permission-resume-approval-1"), true);
   await resume;
   await waitFor(() => storage.current.metadata.running === false);
 
@@ -4567,6 +4779,11 @@ test("same participant sends show queued bubble and serialize provider runs", as
       promoted?.status === "pending" &&
       promoted.metadata?.queuedBehind === undefined;
   });
+  const promoted = storage.current.messages.find((message: Conversation["messages"][number]) => message.id === queuedMessage?.id);
+  assert.equal(queuedMessage?.metadata?.turnQueued, true, "queued, in words the User's server keeps (queuedBehind stays on the device)");
+  assert.equal(promoted?.metadata?.turnQueued, undefined, "no longer queued once its turn began");
+  assert.ok(promoted?.metadata?.turnStartedAt, "its own turn's start is stamped, so Working for does not count the wait");
+  assert.ok(Date.parse(promoted!.metadata!.turnStartedAt!) >= Date.parse(promoted!.createdAt));
 
   releaseSecond();
   await waitFor(() =>
@@ -15788,4 +16005,103 @@ test("a moved member's note goes with its turns until one is answered, and only 
   assert.equal(moved(), undefined, "told once");
   await turn("later");
   assert.equal(prompts[2].includes("Note from AccordAgents"), false);
+});
+
+test("the effort's Default really resets: an effort sent as none is the CLI's own again; one not sent stays", async () => {
+  const codex = { ...chatParticipant("codex-cli"), reasoningEffort: "high" as const };
+  const conversation = chatConversation([codex]);
+  const { service, storage } = testService({ conversation });
+  const effort = (): unknown => (storage.current.metadata.participants as ChatParticipant[])[0]?.reasoningEffort;
+  await service.updateParticipantRuntime({ conversationId: conversation.id, participantId: codex.id, model: "gpt-5.5-mini" });
+  assert.equal(effort(), "high", "a change that does not name the effort keeps it");
+  await service.updateParticipantRuntime({ conversationId: conversation.id, participantId: codex.id, reasoningEffort: "" as never });
+  assert.equal(effort(), undefined, "the sessions picker's Default (\"\")");
+  await service.updateParticipantRuntime({ conversationId: conversation.id, participantId: codex.id, reasoningEffort: "low" });
+  await service.updateParticipantRuntime({ conversationId: conversation.id, participantId: codex.id, reasoningEffort: undefined, model: undefined });
+  assert.equal(effort(), undefined, "the classic picker's Default (sent as undefined) resets too");
+  await service.updateParticipantRuntime({ conversationId: conversation.id, participantId: codex.id, model: "" });
+  assert.equal((storage.current.metadata.participants as ChatParticipant[])[0]?.model, undefined, "the model's Default (\"\") resets the model");
+});
+
+test("a member's first turn that fails on a CLI that is not ready on this computer says why in the reply (a chat the phone made); the run still decides", async () => {
+  const runs: unknown[] = [];
+  const claude = chatParticipant("claude-code");
+  const conversation = chatConversation([claude]);
+  const { service, storage, tempRoot } = testService({
+    conversation,
+    agents: [
+      { kind: "codex-cli", label: "Codex CLI", installed: true, detection: "detected", runnable: "ready", authentication: "ready" },
+      { kind: "claude-code", label: "Claude Code", installed: true, detection: "detected", runnable: "ready", authentication: "required" }
+    ],
+    run: async (participant: ParticipantConfig) => { runs.push(participant); return { participant, ok: false, content: "", error: "Not logged in", durationMs: 1 }; }
+  });
+  (service as any).ensureHistoryFiles = async () => tempRoot;
+  await service.sendMessage({ conversationId: conversation.id, runId: "run-first", content: "@drew hello" });
+  await waitFor(() => storage.current.messages.some((message: ChatMessage) => message.participantId === claude.id && message.status === "error"));
+  const reply = storage.current.messages.find((message: ChatMessage) => message.participantId === claude.id)!;
+  assert.equal(reply.content, "@drew cannot start on this computer: Claude Code requires sign-in. Fix it in Settings → Local CLI setup, or start the chat on another provider.");
+  assert.equal(runs.length, 1, "the CLI was tried: readiness can be stale, the run decides");
+});
+
+test("the phone's New chat offer never waits for a model list: a hanging one is read in the background and the offer is published again once it has it", { timeout: 10_000 }, async () => {
+  const { service } = testService({
+    agents: [{ kind: "codex-cli", label: "Codex CLI", installed: true, detection: "detected", runnable: "ready", authentication: "ready" }],
+    settings: { chatRoleConfigs: [ADMIN_ROLE, ROLE], providers: [{ kind: "codex-cli", label: "Codex CLI", enabled: true }] }
+  });
+  let answer: ((catalog: unknown) => void) | undefined;
+  let reads = 0;
+  ((service as any).cliRunner).listModelCatalog = () => { reads += 1; return new Promise((resolve) => { answer = resolve; }); };
+  let republished = 0;
+  service.onNewChatOffersChanged = () => { republished += 1; };
+  const started = Date.now();
+  const first = await service.newChatOptions([]);
+  assert.ok(Date.now() - started < 2_000, "the offer did not wait for the hanging list");
+  const codex = first?.mainSessionProviders?.find((provider) => provider.kind === "codex-cli");
+  assert.deepEqual(codex?.models, [], "its default model only, for now");
+  const again = await service.newChatOptions([]);
+  assert.equal(reads, 1, "one read at a time, not one per offer");
+  assert.equal(JSON.stringify(again), JSON.stringify(first), "an unchanged offer: nothing new to publish");
+  answer?.({ kind: "codex-cli", authoritative: true, fetchedAt: NOW, models: [
+    { id: "gpt-5.5", label: "GPT-5.5", recommended: true, source: "cli" }, { id: "gpt-5.5-mini", label: "GPT-5.5 mini", source: "cli" }] });
+  await service.settleNewChatModelCatalogsForTests();
+  assert.equal(republished, 1, "published again once the list arrived");
+  const later = await service.newChatOptions([]);
+  assert.deepEqual(later?.mainSessionProviders?.find((provider) => provider.kind === "codex-cli")?.models.map((model) => model.id), ["gpt-5.5-mini"]);
+  assert.equal(reads, 1, "a fresh list is not read again at once");
+});
+
+test("a model list that fails is tried again after a minute, never replacing the last good one, and a failure alone publishes nothing", { timeout: 10_000 }, async () => {
+  const { service } = testService({
+    agents: [{ kind: "codex-cli", label: "Codex CLI", installed: true, detection: "detected", runnable: "ready", authentication: "ready" }],
+    settings: { chatRoleConfigs: [ADMIN_ROLE, ROLE], providers: [{ kind: "codex-cli", label: "Codex CLI", enabled: true }] }
+  });
+  let fail = true;
+  let reads = 0;
+  ((service as any).cliRunner).listModelCatalog = async () => {
+    reads += 1;
+    if (fail) throw new Error("Codex is signed out");
+    return { kind: "codex-cli", authoritative: true, fetchedAt: NOW, models: [{ id: "gpt-5.5", label: "GPT-5.5", recommended: true, source: "cli" }, { id: "gpt-5.5-mini", label: "GPT-5.5 mini", source: "cli" }] };
+  };
+  let republished = 0;
+  service.onNewChatOffersChanged = () => { republished += 1; };
+  await service.newChatOptions([]);
+  await service.settleNewChatModelCatalogsForTests();
+  await service.newChatOptions([]);
+  await service.settleNewChatModelCatalogsForTests();
+  assert.equal(reads, 1, "a failed read is not tried again at once (a signed-out CLI is not asked on every publish)");
+  assert.equal(republished, 0, "nothing changed");
+  const entry = Array.from(((service as any).mainSessionCatalogs as Map<string, { failedAt?: number; readAt: number }>).values())[0]!;
+  entry.failedAt = Date.now() - 61_000;
+  fail = false;
+  await service.newChatOptions([]);
+  await service.settleNewChatModelCatalogsForTests();
+  assert.equal(reads, 2);
+  assert.equal(republished, 1);
+  fail = true;
+  entry.readAt = Date.now() - 11 * 60_000;
+  await service.newChatOptions([]);
+  await service.settleNewChatModelCatalogsForTests();
+  const offer = await service.newChatOptions([]);
+  assert.deepEqual(offer?.mainSessionProviders?.[0]?.models.map((model) => model.id), ["gpt-5.5-mini"], "the last good list stays through a failed refresh");
+  assert.equal(republished, 1, "and a flapping read publishes nothing");
 });

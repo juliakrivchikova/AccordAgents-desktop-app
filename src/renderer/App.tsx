@@ -8,7 +8,7 @@ import type {
   PluginCatalogItem,
   StartReviewResult
 } from "../shared/types";
-import { ArrowLeft, ArrowRight, FileBox, RefreshCw, SquareTerminal, XCircle } from "lucide-react";
+import { ArrowLeft, ArrowRight, FileBox, RefreshCw, Settings2, SquareTerminal, XCircle } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { Toaster } from "@/components/ui/sonner";
@@ -30,8 +30,10 @@ import { ChatSearchModal } from "./components/search/chat-search-modal";
 import { ChatTopBarTitle } from "./components/chat/chat-top-bar-title";
 import { ChatClassicOnly, ChatViewHeaderControls } from "./components/chat/chat-view-switch";
 import { memberModelChip } from "./components/chat/chat-sessions-composer";
+import { ChatMemberModelAccess } from "./components/chat/chat-member-model-access";
+import { memberSessionMoves } from "../shared/memberSessionMove";
 import { renderNewChatMemberMark } from "./components/chat/chat-member-mark";
-import { chatViewFor } from "../shared/mainSession";
+import { chatViewFor, mainSessionParticipantId } from "../shared/mainSession";
 import { chatRoleLabel } from "./components/chat/chat-conversation-data";
 import { defaultChatParticipantDraft } from "./components/chat/chat-participant-drafts";
 import type { DraftPluginMention } from "./components/chat/chat-composer-draft-utils";
@@ -325,6 +327,32 @@ function App(): JSX.Element {
       trigger={trigger}
     />
   ) : null;
+  // The sessions view's settings of one member (the main session's from its
+  // composer chip, a member's from its chip or its session's gear): the
+  // compact picker, not the classic roster (the User, 2026-11-21).
+  const sessionsMemberSettings = (memberId: string, trigger?: React.ReactNode): JSX.Element | null => {
+    const participant = view.activeChatParticipants.find((candidate) => candidate.id === memberId);
+    if (!view.activeChatConversation || !participant) return null;
+    const status = view.participantStatusById.get(memberId);
+    const hasRun = view.participantHasRunById.get(memberId) === true;
+    const isMain = mainSessionParticipantId(view.activeChatConversation.metadata) === memberId;
+    return (
+      <ChatMemberModelAccess
+        participant={participant}
+        trigger={trigger ?? <IconButton label="Settings" icon={Settings2} tooltip="Settings" data-testid="chat-member-settings-trigger" />}
+        working={status === "running" || status === "compacting"}
+        status={status}
+        runLocationLocked={hasRun && !memberSessionMoves(participant)}
+        runLocationMoves={hasRun && memberSessionMoves(participant)}
+        onUpdate={(participantId, patch) => chatActions.updateChatParticipantRuntime(participantId, patch)}
+        onRestart={(participantId, stopBackgroundTasks) => chatActions.restartChatParticipant(participantId, stopBackgroundTasks)}
+        onStopRestart={(runId) => void window.consensus.cancelReview(runId)}
+        restartStatus={restartingMembers(state.progressLog).get(memberId)}
+        onRemove={isMain ? undefined : () => void chatActions.removeChatParticipant(memberId)}
+        removeDisabledReason={view.busyParticipantIds.has(memberId) ? "busy" : undefined}
+      />
+    );
+  };
   const topBarActions = isNewChatScreen ? terminalToggle : (
     <>
       {/* The open chat's view switch and members button (its chat view provides them). */}
@@ -389,8 +417,8 @@ function App(): JSX.Element {
       openingConversationDescription={openingConversationDescription}
       accordDisabledReason={accordDisabledReason}
       onOpenAccord={() => setAccordDialogOpen(true)}
-      renderMemberSettings={(participantId) => rosterMenu(participantId)}
-      renderMemberChip={(participantId) => rosterMenu(participantId, memberModelChip(view.activeChatParticipants, participantId))}
+      renderMemberSettings={(participantId) => sessionsMemberSettings(participantId)}
+      renderMemberChip={(participantId) => sessionsMemberSettings(participantId, memberModelChip(view.activeChatParticipants, participantId))}
       topBar={chatUsesInlineTopBar ? chatTopBar : activityTopBar}
       artifacts={artifacts}
     />
@@ -601,6 +629,10 @@ function App(): JSX.Element {
                 repoInfo={state.repoInfo}
                 selectedParticipantIds={state.selectedChatParticipantConfigIds}
                 selectedParticipantRuntimeOverrides={state.selectedChatParticipantRuntimeOverrides}
+                mainSessionProvider={state.newChatMainSessionProvider}
+                onMainSessionProviderChange={state.setNewChatMainSessionProvider}
+                mainSessionOverrideFor={state.newChatMainSessionOverrideFor}
+                onMainSessionOverrideForChange={state.setNewChatMainSessionOverrideFor}
                 settings={state.settings}
                 summaries={state.summaries}
                 agents={state.agents}

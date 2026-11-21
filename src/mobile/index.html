@@ -12,7 +12,7 @@
          draws a grey letter (the User, 2026-11-01). The Mac app's icon
          (assets/icon.icns), full bleed at 180px: iOS rounds the corners. -->
     <link rel="apple-touch-icon" href="apple-touch-icon.png" />
-    <link rel="stylesheet" href="mobile-app.css?v=2026-11-20-main-session-views" />
+    <link rel="stylesheet" href="mobile-app.css?v=2026-11-21-new-chat-access-stop-2" />
   </head>
   <body>
     <div class="mobile-stage">
@@ -231,6 +231,9 @@
                   </svg>
                 </button>
                 <button id="mention-button" class="composer-tool composer-tool-glyph" type="button" aria-label="Mention a member" aria-controls="mention-menu">@</button>
+                <button id="composer-stop-button" class="composer-tool composer-stop" type="button" aria-label="Stop" hidden>
+                  <svg width="12" height="12" viewBox="0 0 14 14" aria-hidden="true"><rect x="1.5" y="1.5" width="11" height="11" rx="2" fill="currentColor"></rect></svg>
+                </button>
                 <button id="send-button" class="composer-send" type="submit" aria-label="Send message">
                   <svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round">
                     <path d="M12 19V5M5 12l7-7 7 7"></path>
@@ -339,6 +342,12 @@
                 <svg class="new-chat-chevron" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m6 9 6 6 6-6"></path></svg>
               </button>
               <span class="new-chat-spacer"></span>
+              <!-- In the sessions view, the main session's provider, model and
+                   effort instead of members, as the computer's chip (T3 Code). -->
+              <button id="new-chat-model-button" class="new-chat-chip new-chat-model-chip" type="button" aria-haspopup="dialog" aria-controls="new-chat-model-sheet" aria-label="Model" hidden disabled>
+                <span id="new-chat-model-label" class="new-chat-model-label"></span>
+                <svg class="new-chat-chevron" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m6 9 6 6 6-6"></path></svg>
+              </button>
               <button id="new-chat-start" class="new-chat-send" type="button" aria-label="Start chat" disabled>
                 <svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
                   <path d="M12 19V5M5 12l7-7 7 7"></path>
@@ -359,6 +368,18 @@
               <div id="new-chat-projects" class="members-sheet-list new-chat-options" role="group" aria-label="Project"></div>
             </div>
           </div>
+          <!-- The main session's provider, model and effort (sessions view). -->
+          <div id="new-chat-model-sheet" class="members-sheet new-chat-picker" role="dialog" aria-modal="true" aria-label="Model" hidden>
+            <div class="members-sheet-backdrop" data-new-chat-picker-close="1"></div>
+            <div class="members-sheet-panel">
+              <div class="members-sheet-grip" aria-hidden="true"></div>
+              <div class="members-sheet-head">
+                <strong>Model</strong>
+                <button class="members-sheet-close" type="button" data-new-chat-picker-close="1">Done</button>
+              </div>
+              <div id="new-chat-model-options" class="members-sheet-list new-chat-options" role="group" aria-label="Model"></div>
+            </div>
+          </div>
           <div id="new-chat-members-sheet" class="members-sheet new-chat-picker" role="dialog" aria-modal="true" aria-label="Members" hidden>
             <div class="members-sheet-backdrop" data-new-chat-picker-close="1"></div>
             <div class="members-sheet-panel">
@@ -375,15 +396,15 @@
       </main>
     </div>
     <!-- The database description both the page and the service worker load. -->
-    <script src="mobile-db.js?v=2026-11-20-main-session-views" defer></script>
-    <script src="jsqr.js?v=2026-11-20-main-session-views" defer></script>
+    <script src="mobile-db.js?v=2026-11-21-new-chat-access-stop-2" defer></script>
+    <script src="jsqr.js?v=2026-11-21-new-chat-access-stop-2" defer></script>
     <!-- How the phone talks to the User's server (signed requests carrying
          its operations), and the rules shared with the desktop verbatim
          (avatars, timeline visibility), bundled from src/shared by the mobile
          build. -->
-    <script src="mobile-hub-client.js?v=2026-11-20-main-session-views" defer></script>
-    <script src="mobile-shared.js?v=2026-11-20-main-session-views" defer></script>
-    <script src="mobile-activity.js?v=2026-11-20-main-session-views" defer></script>
-    <script src="mobile-app.js?v=2026-11-20-main-session-views" defer></script>
+    <script src="mobile-hub-client.js?v=2026-11-21-new-chat-access-stop-2" defer></script>
+    <script src="mobile-shared.js?v=2026-11-21-new-chat-access-stop-2" defer></script>
+    <script src="mobile-activity.js?v=2026-11-21-new-chat-access-stop-2" defer></script>
+    <script src="mobile-app.js?v=2026-11-21-new-chat-access-stop-2" defer></script>
   </body>
 </html>

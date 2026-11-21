@@ -90,6 +90,13 @@ export function canSwitchChatView(metadata: ChatMetadataLike | undefined): boole
   return isMainSessionChat(metadata);
 }
 
+/** The view a new chat opens in: Settings → General's choice, else the
+ *  sessions view. The New chat screen follows it (members picker or model
+ *  chip). */
+export function newChatViewFor(defaultChatView: unknown): ChatViewMode {
+  return isChatViewMode(defaultChatView) ? defaultChatView : DEFAULT_CHAT_VIEW;
+}
+
 /** The view the chat is shown in. */
 export function chatViewFor(metadata: ChatMetadataLike | undefined, fallback?: ChatViewMode): ChatViewMode {
   if (!isMainSessionChat(metadata)) return "classic";

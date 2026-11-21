@@ -17,6 +17,10 @@ verbatim there). Modelled on T3 Code (`~/reference/t3code`,
   `--resume <id> --fork-session`, Codex app-server `thread/fork`). Antigravity
   has no fork, and a fork cannot cross providers or devices: the tool refuses
   it and the main session starts a clean member with a full brief instead.
+- **The main session is woken only by its own tasks** (the User,
+  2026-11-21): when the tasks it gave end. A member's turn that is not its
+  task (the User's message in that member's session, a scheduled task's
+  wake-up) does not wake it; it reads those messages on its next turn.
 - **The tasks of one turn come back as one turn.** The main session is
   resumed once for all the tasks it gave in one turn: when that turn is over
   and every one of them has ended (answered, failed or stopped), with every
@@ -71,7 +75,10 @@ chat without a main session is always `classic`; its switch is disabled.
 - `classic`: today's timeline: avatars, every member's reply on it.
 - `sessions` (like T3 Code / Claude desktop):
   - no avatars, author names or handles anywhere: a member is its
-    provider's logo tile and its current or latest task's short title, as
+    provider's bare glyph (Claude's orange asterisk, Codex's glyph,
+    Antigravity's "A", sized to the text line, no tile; `ProviderIcon`
+    `bare`, the phone's `providerLogoElement`; Settings → Local CLI setup and
+    the classic New chat keep the tile) and its current or latest task's short title, as
     T3 Code titles a thread: the 2–6 word `title` the main session gives
     the task in `app_chat_delegate_task`, else the task's first sentence cut
     at a word to 40 characters (`sessionsTaskTitle`, `sessionsMemberTitle`;
@@ -92,7 +99,48 @@ chat without a main session is always `classic`; its switch is disabled.
     (`targetParticipantIds=[main]`, `deliveryTargets=[main]` on the phone),
     offers no members to mention (`/` and `#` stay), and carries the main
     session's model chip, which opens its settings; a member's composer
-    the same for that member. The chip names the member's own model, else
+    the same for that member. The settings are a compact picker, T3 Code's
+    (`ChatModelAccessPanel`): the model (the CLI's default first), the
+    effort, the access in the CLI's own terms and, once a machine exists,
+    where it runs (the effort a model lacks reads as Default; nothing is
+    saved until a choice is made; Default sends the explicit reset; only
+    the chosen setting is sent). The access is the CLI's own mode, run as
+    the CLI runs it (`src/shared/chatAccessModes.ts`, the permissions'
+    `cliApprovals`: what is not granted the CLI asks about instead of the
+    app taking it away; the classic controls keep refusing it):
+    - Claude Code (`--permission-mode`): Default reads freely and asks
+      before each edit, command and web use, every ask an approval card
+      (`--permission-prompt-tool`; deny rules stay hard stops); Accept
+      edits edits without asking and asks before commands and web; Plan
+      mode reads and plans; Auto mode is Claude's classifier.
+    - Codex (its 0.155 presets): Read only (read-only sandbox) and Default
+      (workspace-write), both asking (approval policy `on-request`, every
+      ask an approval card) to go further; Auto-review, where Codex reviews
+      its own asks; Plan mode, the read-only sandbox that never asks.
+    - Antigravity (`agy --mode`; its Default is `agentMode: ""`, which
+      `--mode` does not take): print mode cannot ask, so what a mode would
+      ask about is refused (agy 1.5.14, 2026-11-21): Default reads and
+      refuses edits and commands, Accept edits edits in the workspace and
+      refuses commands, Auto mode edits and runs safe commands where the
+      account has it (elsewhere agy says so and stays in Default), Plan
+      mode reads and plans. No agy mode is called Read only.
+    A main session starts in its CLI's own default: Claude Code's Default,
+    Codex's Default, agy's Default. Settings from the classic controls are
+    no mode: the picker marks none and says so, and a classic toggle (Read
+    Files, Edit Files, Run Shell, Access Web) ends a mode chosen in the
+    picker (`withClassicChatPermissions`), so what it turns off is refused,
+    not asked about. A member held to a main session without the CLI's own
+    mode loses its own mode too; an Antigravity member then runs Default with
+    no edits (`--sandbox`), never with its confirmations skipped
+    (`clampChatAgentAccess`). Its … menu has Restart
+    (picks up changed connectors, idle only, naming background work it
+    stops; not Antigravity) and, for a member, Remove from chat. Its
+    provider stays the one it was made with. No name, status,
+    member rights or auto-watch: the main session's chat behaviour is fixed
+    (it creates and asks members, request and manage are allowed as its role
+    gives them, and it is told when its tasks end). A member other than the
+    main session is removed from the picker's … menu; the gear in its
+    session's header opens the same picker. The chip names the member's own model, else
     the one its CLI runs on by default (the CLI's model list: Claude Code's
     initialize answer, Codex's model/list, `agy models`; an added
     provider's vendor default), else the CLI ("Claude Code"), with the
@@ -100,8 +148,9 @@ chat without a main session is always `classic`; its switch is disabled.
     no chip). The main composer has no "N active runs" pill (the Waiting
     line and the side panel name and stop the members); while the main
     session itself runs and nothing is typed, its send button is Stop for
-    the main session's run, as in T3 Code and Claude (typing turns it
-    back into Send);
+    the main session's run, as in T3 Code and Claude; with something typed
+    a secondary Stop stands next to Send (a CLI interrupts whatever is in
+    its prompt), and Send still sends the message to it;
   - the main timeline holds the User's messages to the main session, the
     main session's messages, system lines and the cards the User must
     answer; the member-added cards of its delegations are not shown
@@ -114,26 +163,55 @@ chat without a main session is always `classic`; its switch is disabled.
     the task), marked for a moment. A task whose reply is not loaded is one
     such row of its own. While the main session waits there is a line
     "Waiting on N members: <tasks> · Stop";
+  - a reply still being written reads as T3 Code's turn in progress (the
+    User, 2026-11-21), on the desktop and the phone, on the main timeline
+    and in a member's session: a quiet "Working for 4s" (live) over a
+    hairline, then one muted line per step with an outline icon by its kind
+    and what it is about (`sessionsActivityRow`, from the activity events
+    the run already reports): thinking (brain), web search (globe, the
+    query), shell (terminal, the command), file read (file, the path), edit
+    (pencil, the path), any other tool (wrench, its label); the newest one
+    shimmers (still for reduced motion). The member's words and its posts
+    stay its words, in order between the rows; its turn's tasks follow as
+    their rows. No status label, no "Thinking" word, no grouped boxes, no
+    Stop or copy on a running reply (the composer stops it, also with
+    text typed; a member's session head stops the member); a queued one is
+    taken back from a small × on hover (always on a touch screen, the
+    phone's at least 32px) and shows "Queued", no clock. A long turn
+    draws its newest 50 steps under a muted "N earlier steps" (a finished
+    fold opens them); a reply that waited in the queue counts its
+    "Working for" from its own turn's start (`turnStartedAt`). A run on a
+    machine shows where it stands ("Preparing the workspace") as its
+    current step until its first own step. The phone gets a reply's newest 12 steps, each one
+    line of at most 120 characters, with how many earlier ones there were
+    (`phoneSessionsActivity`; the live copy marks text that is only where
+    the run stands, `liveStatus`);
   - every finished reply says how long it worked T3 Code's quiet way,
     on the main timeline and in a member's session: muted "Worked for 44s"
-    and a chevron, no pill; the chevron of a reply that gave tasks opens
-    them, of any other reply its full stream (the phone has none: there
-    the muted text alone); the classic view keeps its pill;
+    and a chevron, no pill; the chevron opens, in place, the same rows its
+    turn showed while it ran (and the words it wrote between them, which
+    its final text does not repeat), then its tasks; a reply with neither
+    is the muted text alone; the classic view keeps its pill;
   - one icon at the top right opens the side panel (a running count on it,
     a dot while an Accord is open); the view switch is in the chat title's
-    menu and the roster's popover is not shown. The side panel lists the
-    chat's latest Accord, the main session (its settings), the members
-    (provider, task, status, elapsed time, Stop) with Stop all; while some
-    member runs or waits for the User the ended ones are under "Previous";
-    members no longer in the chat are under "Removed"
-    (`sessionsFormerMembers`). A member opens its **whole session** in the
+    menu and the roster's popover is not shown. The side panel has no title,
+    only its close button, as Claude desktop's right panel (the User,
+    2026-11-21); it lists the chat's latest Accord and the sessions the main
+    session delegated (provider, task, status, elapsed time, Stop) with Stop
+    all, never the main session itself (its settings are its composer chip);
+    while one runs or waits for the User the ended ones are under
+    "Previous"; those no longer in the chat are under "Removed"
+    (`sessionsFormerMembers`). With nothing delegated it says nothing. A member opens its **whole session** in the
     same panel (Back to the list) with its settings (gear) and a composer
     that writes to it only; a removed member's session is read-only;
+  - the word "members" is never shown (desktop and phone): "Waiting on N
+    tasks", "Side panel", "Back", "Close";
   - no threads UI: every message has one place (`sessionsViewLane`); the
     main session's answer to a member's question is in that member's
     session from its first token (placed by the request it answers);
   - a finished message shows no member state; its time is with its controls
-    on hover. A message still being written keeps "Running 12s" or "Queued";
+    on hover. A reply still being written has its "Working for …" (above),
+    one still queued keeps "Queued";
   - a task's state is not taken from the member's earlier stopped or failed
     turn while the task waits (queued, a machine preparing);
   - no turn-finished note ("<X> finished answering"), the main session's
@@ -146,6 +224,42 @@ chat without a main session is always `classic`; its switch is disabled.
     pages that added nothing to it ("Load older messages" goes on); "Load
     older" in a member's session goes on until a message of that member
     arrives or the chat's start, six pages at most.
+
+## New chat
+
+A new chat opens in the view Settings → General names (`newChatViewFor`).
+
+- **Sessions view** (the User, 2026-11-21: "как в T3, выбираешь просто
+  провайдера и модель"): no members picker, no avatars, handles or
+  "members" on the screen. The composer's chip at its bottom right shows
+  the main session's provider glyph, model and effort ("✳ Opus 5.5 High")
+  and opens the compact picker with the provider choosable: every ready CLI
+  and every added provider whose CLI is ready and which has its key
+  (`mainSessionProviderOptions`). The default provider is Settings →
+  General's "Main session provider" (`resolveMainSessionProvider`); the
+  chip's choice is for that one chat and never changes the setting, and
+  is forgotten when the User leaves New chat without sending. What was set
+  for one provider (model, effort, access, where it runs) is dropped when
+  another is in effect, also between visits. A chosen or shown provider
+  that stops being ready is said on the screen and the send is refused,
+  never made on another one silently. The
+  chat is made with that main session alone; an @handle in the first
+  message picks nobody. Folder and attach stay.
+- **Classic view**: today's New chat, with its members picker.
+- **The phone** gets the same from the New chat offer
+  (`HubNewChatOptions.mainSessionProviders`: each provider with its
+  default model's name, its models, at most 24, and efforts;
+  `newChatProviderOffer`), shows the same chip and sheet (with the same
+  Access, and Runs on where a machine exists), and makes the chat with the
+  offered main session on the chosen provider, model, effort and access
+  (`newChatMainSessionFor`). An offer from a computer from before has no
+  list: the chip shows the offered main session's CLI. The offer never
+  waits for a model list: each provider goes with the list it last had,
+  read again in the background (a good one after 10 minutes, a failed one
+  after a minute, a failure never replacing a good one), and a list that
+  changed publishes the offer again. A provider the phone chose that is
+  not ready on the computer when the chat's first turn runs says so in the
+  reply ("@main cannot start on this computer: …").
 
 The placement rules are in `src/shared/mainSession.ts` and are the same on
 the desktop and on the phone (bundled through `mobileSharedRules.ts`).

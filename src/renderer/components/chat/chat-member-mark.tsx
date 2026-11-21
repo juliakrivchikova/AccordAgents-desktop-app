@@ -26,15 +26,25 @@ export interface ChatMemberProvider {
   hostLabel?: string;
 }
 
-/** A member's provider logo tile, at row size. */
-export function ChatProviderMark(props: { member: ChatMemberProvider; className?: string }): JSX.Element {
+/** A member's provider mark, at row size: the bare glyph (Claude's orange
+ *  asterisk, Codex's glyph, Antigravity's "A"), sized to the text beside it,
+ *  as T3 Code shows it (the User, 2026-11-21); `tile` puts it on its logo
+ *  tile, as Settings → Local CLI setup shows it. */
+export function ChatProviderMark(props: { member: ChatMemberProvider; className?: string; tile?: boolean }): JSX.Element {
   return (
     <ProviderIcon
       className={props.className ? `chat-provider-icon ${props.className}` : "chat-provider-icon"}
       kind={props.member.kind}
       label={participantProviderLabel(props.member.kind, props.member.hostLabel)}
+      bare={props.tile !== true}
     />
   );
+}
+
+/** Where a member has no known provider (removed since): an empty slot of
+ *  the bare mark's size. */
+export function ChatProviderMarkSlot(): JSX.Element {
+  return <span className="chat-provider-icon is-bare" aria-hidden="true" />;
 }
 
 /**
@@ -63,10 +73,10 @@ export function renderComposerMemberMark(participant: ChatParticipant): JSX.Elem
   return <ChatMemberMark className="mini-avatar" markClassName="is-mini" avatar={avatarForChatParticipant(participant)} member={participant} />;
 }
 
-/** A member's mark on the New chat screen: the main session has no avatar
- *  picture, its provider's logo is its mark (as in the sessions view). */
+/** A member's mark on the classic New chat screen: the main session has no
+ *  avatar picture, its provider's logo tile is its mark. */
 export function renderNewChatMemberMark(participant: ChatParticipant): JSX.Element {
   return participant.roleConfigId === MAIN_SESSION_ROLE_ID
-    ? <ChatProviderMark member={participant} className="is-mini" />
+    ? <ChatProviderMark member={participant} className="is-mini" tile />
     : <Avatar className="mini-avatar" spec={avatarForChatParticipant(participant)} />;
 }

@@ -57,7 +57,8 @@ export function cloneChatAgentPermissions(permissions: ChatAgentPermissions): Ch
       enabled: permissions.shell.enabled,
       rules: normalizeChatShellPermissionRules(permissions.shell.rules)
     },
-    ...(providerNative ? { providerNative } : {})
+    ...(providerNative ? { providerNative } : {}),
+    ...(permissions.cliApprovals === true ? { cliApprovals: true as const } : {})
   };
 }
 
@@ -85,7 +86,8 @@ export function normalizeChatAgentPermissions(value: unknown): ChatAgentPermissi
       enabled: typeof shell.enabled === "boolean" ? shell.enabled : DEFAULT_CHAT_AGENT_PERMISSIONS.shell.enabled,
       rules: normalizeChatShellPermissionRules(shell.rules)
     },
-    ...(providerNative ? { providerNative } : {})
+    ...(providerNative ? { providerNative } : {}),
+    ...(record.cliApprovals === true ? { cliApprovals: true as const } : {})
   };
 }
 
@@ -252,7 +254,49 @@ export function clampChatAgentPermissions(
       enabled: wanted.shell.enabled && limit.shell.enabled,
       rules
     },
-    ...(allowedTools.length > 0 ? { providerNative: { "claude-code": { allowedTools } } } : {})
+    ...(allowedTools.length > 0 ? { providerNative: { "claude-code": { allowedTools } } } : {}),
+    // Asking the User before what is not granted is a right of its own: only
+    // when the ceiling may ask too.
+    ...(wanted.cliApprovals && limit.cliApprovals ? { cliApprovals: true as const } : {})
+  };
+}
+
+/**
+ * A member's mode and rights held to a ceiling's (clampChatAgentMode and
+ * clampChatAgentPermissions), for the CLI it runs on. The ceiling never
+ * turns a restricting mode into a broader one: Antigravity in its own mode
+ * (`cliApprovals`, agy's `--mode`) is held back by that mode, while without
+ * it the app's mapping skips every agy confirmation once edits are granted
+ * or in Auto (geminiExec.ts geminiPermissionArgs). So when the ceiling takes
+ * its own mode away, or it would skip every confirmation (edits, commands,
+ * web) under a ceiling without all three, it runs the most restrictive way
+ * instead: Default with no edits (agy's `--sandbox`, read-only).
+ * Claude Code and Codex without their own mode refuse what is not granted
+ * instead of asking, which is already narrower.
+ */
+export function clampChatAgentAccess(
+  kind: ChatProviderKind | undefined,
+  requested: { agentMode?: ChatAgentMode; permissions: ChatAgentPermissions },
+  ceiling: { agentMode?: ChatAgentMode; permissions: ChatAgentPermissions }
+): { agentMode: ChatAgentMode; permissions: ChatAgentPermissions } {
+  const agentMode = clampChatAgentMode(requested.agentMode, ceiling.agentMode);
+  const permissions = clampChatAgentPermissions(requested.permissions, ceiling.permissions);
+  if (kind !== "gemini-cli") {
+    return { agentMode, permissions };
+  }
+  const ownModeTaken = normalizeChatAgentPermissions(requested.permissions).cliApprovals === true && !permissions.cliApprovals;
+  // Without its own mode, agy with edits or in Auto skips every
+  // confirmation: edits, commands and web alike. That is within a ceiling
+  // only when the ceiling has all three.
+  const limit = normalizeChatAgentPermissions(ceiling.permissions);
+  const skipsAll = !permissions.cliApprovals && (agentMode === "auto" || permissions.workspaceWrite);
+  const ceilingSkipsAll = limit.workspaceWrite && limit.shell.enabled && limit.webAccess;
+  if (!ownModeTaken && !(skipsAll && !ceilingSkipsAll)) {
+    return { agentMode, permissions };
+  }
+  return {
+    agentMode: agentMode === "plan" ? "plan" : "default",
+    permissions: { ...permissions, workspaceWrite: false }
   };
 }
 
@@ -269,6 +313,9 @@ export function chatAgentPermissionsWithin(actual: ChatAgentPermissions, ceiling
     return false;
   }
   if (member.shell.enabled && !limit.shell.enabled) {
+    return false;
+  }
+  if (member.cliApprovals && !limit.cliApprovals) {
     return false;
   }
   const limitRules = new Set(limit.shell.rules.map(shellRuleKey));

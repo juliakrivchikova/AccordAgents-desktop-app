@@ -201,3 +201,21 @@ test("a card still asking, or answered and waiting for its machine, is not folde
   assert.match(removal.title ?? "", /Waiting for running turns to finish/);
   removal.unmount();
 });
+
+test("a Bash card offers \"for this chat\" in Claude Code's words, scoped to the command prefixes; one it cannot scope offers once only", () => {
+  const bash = (request: Record<string, unknown>) => approval({ toolName: "app_tool_permission", capability: "permissions.request", status: "pending",
+    summary: "Use Bash", request: { kind: "toolPermission", agentMode: "default", toolName: "Bash", ...request } as never });
+  const scoped = line(bash({ toolInput: { command: "mkdir -p /tmp/a && date" }, chatScope: { kind: "commands", prefixes: ["mkdir", "date"] } }));
+  assert.match(scoped.text, /Yes, allow once/);
+  assert.match(scoped.text, /Yes, and don't ask again for mkdir and date commands in this chat/);
+  assert.doesNotMatch(scoped.text, /to use Bash in this chat/, "never the whole of Bash");
+  scoped.unmount();
+  const opaque = line(bash({ toolInput: { command: "echo $(whoami)" } }));
+  assert.match(opaque.text, /Yes, allow once/);
+  assert.doesNotMatch(opaque.text, /in this chat/);
+  opaque.unmount();
+  const web = line(approval({ toolName: "app_tool_permission", capability: "permissions.request", status: "pending", summary: "Use WebFetch",
+    request: { kind: "toolPermission", agentMode: "default", toolName: "WebFetch", toolInput: { url: "https://docs.example.com/" }, chatScope: { kind: "domain", domain: "docs.example.com" } } as never }));
+  assert.match(web.text, /Yes, and don't ask again for docs\.example\.com in this chat/);
+  web.unmount();
+});

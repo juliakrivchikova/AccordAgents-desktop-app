@@ -2,14 +2,23 @@ import { cloudRunSelection, type CloudRunPreparationProgress, type CloudRunSelec
 import { DEFAULT_CHAT_VIEW, MAIN_SESSION_HANDLE, MAIN_SESSION_ROLE_ID, canSwitchChatView, isChatViewMode, isMainSessionChat, isMainSessionParticipant, isRoleOfferedForNewMembers, mainSessionMemberOf, mainSessionParticipantId } from "../../shared/mainSession";
 import { SESSIONS_TASK_GIVEN_TITLE_MAX_CHARS, firstTextLine, sessionsTaskTitle, shortenAtWord } from "../../shared/mainSessionView";
 import { createHash, randomUUID } from "node:crypto";
-import { constants as fsConstants } from "node:fs";
+import { constants as fsConstants, realpathSync } from "node:fs";
 import { copyFile, lstat, mkdir, open, readFile, readdir, realpath, rename, rm, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { tmpdir } from "node:os";
 import { hasConfiguredHostPlatform, userDataPath } from "../platform";
 import { buildConversationSnapshot, cloneConversationBody, snapshotRowsBytes, type SnapshotMessageRow } from "./chatSnapshotDelta";
 import { chatChangeBaseline, diffChatChanges, type ChatChangeBaseline, isSafeChatId } from "./chatChanges";
-import { newChatIntro, newChatProjects, participantConfigUsage, participantConfigUsageCount, type NewChatMemberOption } from "../../shared/newChat";
+import {
+  newChatIntro,
+  newChatProjects,
+  newChatProviderOffer,
+  participantConfigUsage,
+  participantConfigUsageCount,
+  type NewChatMemberOption,
+  type NewChatProviderOffer
+} from "../../shared/newChat";
+import { mainSessionProviderKey, mainSessionProviderOptions, type MainSessionProviderOption } from "../../shared/mainSessionProviders";
 import { normalizedChatAvatarId } from "../../shared/chatAvatarCatalog";
 import type { HubNewChatOptions } from "../../shared/hubProtocol";
 import { chatChangesToOps, furthestTurnMarks, newOpId, serverSeqOf, sortByServerOrder, turnMark, turnsOfEffect, type ChatServerLink } from "./chatServerOps";
@@ -211,7 +220,9 @@ import {
 import { normalizeChatReasoningEffort, reasoningEffortOptionsForProvider } from "../../shared/reasoningEffort";
 import {
   cliProviderHostDefaultModel,
+  cliProviderHostDefaultModelLabel,
   cliProviderHostForParticipant,
+  cliProviderHostModelCatalog,
   cliProviderHostRunConfig,
   cliProviderHostRunVersion
 } from "../../shared/cliProviderHosts";
@@ -228,8 +239,7 @@ import {
   chatAgentPermissionsEqual,
   chatAgentPermissionsWithin,
   chatParticipantRequestPermissionRank,
-  clampChatAgentMode,
-  clampChatAgentPermissions,
+  clampChatAgentAccess,
   effectiveChatAgentPermissionsForProvider,
   isChatShellPermissionPatternSafe,
   newChatMemberPermissions,
@@ -248,7 +258,7 @@ import {
   hasChatAppToolCapability,
   normalizeChatAppToolCapabilities
 } from "../../shared/appTools";
-import { chatPermissionPromptLines } from "../../shared/permissionPrompt";
+import { chatPermissionPromptLines, chatPermissionSummaryLine } from "../../shared/permissionPrompt";
 import { buildChatParticipantActivitySnapshot } from "../../shared/chatParticipantActivity";
 import { chatParticipantHome, chatParticipantHomeUnassignedMessage, preservedRemoteExecution } from "../../shared/chatParticipantHome";
 import {
@@ -294,6 +304,16 @@ import {
   autoPreauthorizedAppMcpToolNames as classifiedAutoPreauthorizedAppMcpToolNames
 } from "./appMcp";
 import type { AppMcpClientStatus } from "./appMcp";
+import { APP_TOOL_PERMISSION_WAIT_MS } from "../../shared/appMcpToolContracts";
+import {
+  CHAT_TOOL_PERMISSION_EDIT_TOOLS,
+  chatToolPermissionCoveredByScopes,
+  chatToolPermissionIsScoped,
+  chatToolPermissionScope,
+  chatToolPermissionScopeSummary,
+  chatToolPermissionScopesEqual,
+  normalizeChatToolPermissionScope
+} from "../../shared/toolPermissionScope";
 import { isChatScriptChangeRequest, type ChatScriptChangeRequest, type ScriptRunRow } from "../../shared/scripts";
 import type { ProposeScriptChangeInput, ProposeScriptChangeResult, ScriptChatInfo } from "./scripts";
 import {
@@ -356,6 +376,11 @@ type ProgressCallback = (progress: ReviewProgress) => void;
 /** When a machine member's addition is looked at again while its User answer
  *  cannot be read here yet. */
 const MEMBER_ADDITION_RETRY_DELAYS_MS = [5_000, 30_000, 120_000];
+/** How long the phone's New chat offer keeps a provider's model list before
+ *  reading it again (in the background), and how soon a failed read is tried
+ *  again. */
+const MAIN_SESSION_CATALOG_FRESH_MS = 10 * 60_000;
+const MAIN_SESSION_CATALOG_RETRY_MS = 60_000;
 
 /** Whether this desktop can confirm the User's answer behind a machine
  *  member's approved roster change (see ChatService.machineRosterDecision). */
@@ -376,6 +401,20 @@ function deliveryTargetsOf(message: ChatMessage): string[] {
 function askedParticipantIdsOf(message: ChatMessage): string[] {
   const later = message.metadata?.askedParticipantIds;
   return [...deliveryTargetsOf(message), ...(Array.isArray(later) ? later.filter((id): id is string => typeof id === "string" && id.length > 0) : [])];
+}
+
+/** The run a permission approval resumes its member in. It is a turn of its
+ *  own on the User's server: the turn that asked for the permission has ended
+ *  there, and a claim of it again is answered "finished", so nothing would
+ *  run. Named after the approval, the resume is one turn however often the
+ *  approval is read again. Its run here has the same name as its turn on the
+ *  server, so every device (the computer stopping a cloud member's turn, the
+ *  phone, the member's own device) names it the same way. */
+function permissionApprovalResumeRunId(approvalId: string): string {
+  const named = `turn-permission-resume-${approvalId}`;
+  return isHubTurnRunId(named)
+    ? named
+    : `turn-permission-resume-${createHash("sha256").update(approvalId).digest("hex").slice(0, 32)}`;
 }
 
 /** How a member's turn was opened on the User's server (Д4, Д5, Д13). */
@@ -580,8 +619,10 @@ const CHAT_PARTICIPANT_REQUEST_RATE_WINDOW_MS = 60_000;
 const CHAT_PARTICIPANT_REQUEST_RATE_LIMIT = 8;
 const CHAT_PARTICIPANT_REQUEST_WAIT_DEFAULT_MS = 120_000;
 const CHAT_PARTICIPANT_REQUEST_WAIT_MAX_MS = 300_000;
-const CHAT_TOOL_PERMISSION_WAIT_MS = 30 * 60_000;
 const CONNECTOR_SIGN_IN_ORPHANED = "No member is waiting for this sign-in any more; it ended before you answered.";
+/** A permission card whose call ended before the User answered it. */
+const TOOL_PERMISSION_ABANDONED = "Claude Code stopped waiting for this answer before it was given.";
+const TOOL_PERMISSION_ORPHANED = "Nothing is waiting for this answer any more; the request ended before it was answered.";
 // Mirrors the dedicated CLI's bounded human approval wait. The provider turn
 // timer is paused separately while a direct callback is outstanding.
 const CHAT_CODEX_APPROVAL_WAIT_MS = 30 * 60_000;
@@ -1221,6 +1262,8 @@ export class ChatService {
   private readonly permissionApprovalAutoResumes = new Set<string>();
   private readonly codexApprovalContinuations = new Set<string>();
   private readonly toolPermissionResolvers = new Map<string, Set<(decision: ToolPermissionDecision) => void>>();
+  /** Permission cards a member's call waits on now, with how many calls. */
+  private readonly toolPermissionWaiters = new Map<string, number>();
   /** Sign-in cards members' calls wait on in this process, by how many calls
    *  wait. Any other pending one was left by a call that ended (the app
    *  restarted), and is closed rather than answered into nothing. */
@@ -1647,7 +1690,8 @@ export class ChatService {
     await this.withChatMutation(conversation, async () => {
       const participantsSynced = await this.syncConversationParticipantsFromSettings(conversation);
       const orphanedCodexApprovalsExpired = this.expireOrphanedCodexApprovals(conversation);
-      const orphanedSignInsExpired = this.expireOrphanedConnectorSignIns(conversation);
+      const signInsExpired = this.expireOrphanedConnectorSignIns(conversation);
+      const orphanedSignInsExpired = this.expireOrphanedToolPermissions(conversation) || signInsExpired;
       const recoveredRunState = this.recoverStaleChatRun(conversation);
       const orphanedRequestsInterrupted = this.markOrphanedParticipantRequestsInterrupted(conversation);
       const delegationGroupsRecovered = this.recoverDelegationGroupsOfEndedTurns(conversation);
@@ -1925,16 +1969,105 @@ export class ChatService {
     // published again. A phone from before reads `assistant`: it gets the
     // main session there too, and so makes a main-session chat.
     const offeredMainSession = { ...mainSession, id: MAIN_SESSION_ROLE_ID };
+    const mainSessionProviders = unavailable ? [] : await this.newChatProviderOffers(agents, settings);
     return {
       projects,
       ...(defaultProject ? { defaultProject } : {}),
       mainSession: offeredMainSession,
       assistant: offeredMainSession,
       ...(isChatViewMode(settings.defaultChatView) ? { defaultChatView: settings.defaultChatView } : {}),
+      ...(mainSessionProviders.length > 0 ? { mainSessionProviders } : {}),
       members,
       ...(unavailable ? { unavailable } : {}),
       ...(assistantNote ? { assistantNote } : {})
     };
+  }
+
+  /**
+   * What the phone's New chat chip offers for the main session in the
+   * sessions view, as this computer's chip lists it (the User, 2026-11-21):
+   * every provider it can run on now, with its CLI's models and efforts. A
+   * model list that cannot be read in time leaves that provider with its
+   * default model only.
+   */
+  private async newChatProviderOffers(agents: AgentHealth[], settings: AppSettings): Promise<NewChatProviderOffer[]> {
+    const options = mainSessionProviderOptions(agents, settings.providers, settings.cliProviderHosts ?? []);
+    // Never waits for a model list: each provider is offered with the list
+    // it last had (none yet: its default model only), and a list that is
+    // due is read in the background; one that changed publishes the offer
+    // again (onNewChatOffersChanged).
+    return options.map((option) => newChatProviderOffer({
+      ...option,
+      vendorDefaultModelLabel: option.hostVendor ? cliProviderHostDefaultModelLabel({ vendor: option.hostVendor }) : undefined,
+      catalog: this.cachedMainSessionModelCatalog(option, settings),
+      providerEfforts: reasoningEffortOptionsForProvider(option.kind)
+    }));
+  }
+
+  /** Told when a provider's model list read in the background changed what
+   *  the phone's New chat offers (main.ts publishes the catalog again). */
+  onNewChatOffersChanged?: () => void;
+  private readonly mainSessionCatalogs = new Map<string, { catalog?: ProviderModelCatalog; readAt: number; failedAt?: number; reading?: Promise<void> }>();
+
+  /** A provider's last model list, read again in the background when due:
+   *  a good list after 10 minutes, a failed or empty read (a CLI signed out,
+   *  a list that hung) after a minute, a failure never replacing a good list. */
+  private cachedMainSessionModelCatalog(option: MainSessionProviderOption, settings: AppSettings, now = Date.now()): ProviderModelCatalog | undefined {
+    const key = mainSessionProviderKey(option);
+    const entry = this.mainSessionCatalogs.get(key) ?? { readAt: 0 };
+    this.mainSessionCatalogs.set(key, entry);
+    const due = entry.failedAt !== undefined && entry.failedAt >= entry.readAt
+      ? now - entry.failedAt >= MAIN_SESSION_CATALOG_RETRY_MS
+      : now - entry.readAt >= MAIN_SESSION_CATALOG_FRESH_MS;
+    if (due && !entry.reading) {
+      const before = JSON.stringify(entry.catalog?.models ?? null);
+      entry.reading = this.mainSessionModelCatalog(option, settings)
+        .catch(() => undefined)
+        .then((catalog) => {
+          if (catalog && catalog.models.length > 0) {
+            entry.catalog = catalog;
+            entry.readAt = Date.now();
+            entry.failedAt = undefined;
+          } else {
+            entry.failedAt = Date.now();
+          }
+          if (JSON.stringify(entry.catalog?.models ?? null) !== before) this.onNewChatOffersChanged?.();
+        })
+        .finally(() => { entry.reading = undefined; });
+    }
+    return entry.catalog;
+  }
+
+  /** Waits for the model lists being read in the background (tests). */
+  async settleNewChatModelCatalogsForTests(): Promise<void> {
+    await Promise.all(Array.from(this.mainSessionCatalogs.values()).map((entry) => entry.reading));
+  }
+
+  /** A provider's model list, as the computer's model pickers read it
+   *  (settings:list-provider-models): an added provider's fixed list, an
+   *  Antigravity key's own list, else the CLI's. At most 15 seconds (only
+   *  ever read in the background, cachedMainSessionModelCatalog). */
+  private async mainSessionModelCatalog(option: MainSessionProviderOption, settings: AppSettings): Promise<ProviderModelCatalog | undefined> {
+    const read = async (): Promise<ProviderModelCatalog | undefined> => {
+      if (option.hostVendor) {
+        const fixed = cliProviderHostModelCatalog({ vendor: option.hostVendor, cli: option.kind });
+        if (fixed) return fixed;
+        if (option.kind === "gemini-cli" && option.hostId) {
+          const secret = await this.settings.getCliProviderHostSecret(option.hostId);
+          return this.cliRunner.listHostModelCatalog(secret && secret.host.cli === option.kind ? secret : undefined);
+        }
+      }
+      if (typeof this.cliRunner.listModelCatalog !== "function") return undefined;
+      const configuredModel = settings.providers.find((provider) => provider.kind === option.kind)?.model;
+      return this.cliRunner.listModelCatalog(option.kind, configuredModel, settings.lastRepoPath);
+    };
+    let timer: NodeJS.Timeout | undefined;
+    const late = new Promise<undefined>((resolve) => { timer = setTimeout(() => resolve(undefined), 15_000); });
+    try {
+      return await Promise.race([read(), late]);
+    } finally {
+      if (timer) clearTimeout(timer);
+    }
   }
 
   /** Why this computer starts no chat now, in the words its New chat uses;
@@ -2391,7 +2524,9 @@ export class ChatService {
       const updated: ChatParticipant = {
         ...target,
         model: typeof request.model === "string" ? request.model.trim() || undefined : target.model,
-        reasoningEffort: request.reasoningEffort !== undefined
+        // Sent at all, it is the effort from now on: none ("" or undefined)
+        // is the CLI's own effort again.
+        reasoningEffort: Object.prototype.hasOwnProperty.call(request, "reasoningEffort")
           ? normalizeChatReasoningEffort(request.reasoningEffort, target.kind)
           : target.reasoningEffort,
         agentMode: normalizeChatAgentMode(request.agentMode ?? target.agentMode),
@@ -4355,7 +4490,12 @@ export class ChatService {
     }
   }
 
-  async requestToolPermissionFromTool(actor: ChatAppMcpActor, rawRequest: unknown): Promise<Record<string, unknown>> {
+  /** Claude Code's permission prompt (`--permission-prompt-tool`): a card
+   *  the call waits on, up to APP_TOOL_PERMISSION_WAIT_MS (the CLI is told
+   *  to wait that long, cliAgents claudeMcpConfigJson). `abandoned` aborts
+   *  when the CLI gives up on the call (its connection closes): the card is
+   *  then expired, so the User is never offered an answer nobody reads. */
+  async requestToolPermissionFromTool(actor: ChatAppMcpActor, rawRequest: unknown, abandoned?: AbortSignal): Promise<Record<string, unknown>> {
     const conversation = await this.requireChat(actor.conversationId);
     if (!hasChatAppToolCapability(actor.capabilities, "permissions.request")) {
       return { behavior: "deny", message: "This chat member is not allowed to request tool permissions." };
@@ -4375,7 +4515,7 @@ export class ChatService {
         const agentMode = actor.agentMode
           ? normalizeChatAgentMode(actor.agentMode)
           : normalizeChatAgentMode(requester.agentMode);
-        const prepared = this.prepareToolPermissionRequest(rawRequest, agentMode);
+        const prepared = this.prepareToolPermissionRequest(rawRequest, agentMode, this.chatWorkingDirectory(conversation));
         const existing = this.toolPermissionApprovalForOccurrence(
           conversation,
           requester.id,
@@ -4394,14 +4534,7 @@ export class ChatService {
 
         const policy = prepared.request.agentMode === "auto"
           ? undefined
-          : this.matchingAppToolApprovalPolicy(
-              conversation,
-              requester,
-              APP_TOOL_PERMISSION_TOOL,
-              "permissions.request",
-              undefined,
-              prepared.request.toolName
-            );
+          : this.toolPermissionPolicyFor(conversation, requester, prepared.request.toolName, prepared.toolInput);
         if (policy) {
           return {
             prepared,
@@ -4434,7 +4567,15 @@ export class ChatService {
           { threadId: "system" }
         ));
         conversation.updatedAt = new Date().toISOString();
-        await this.saveConversation(conversation);
+        // Waited on from before the card is shown: an answer is never taken
+        // for one to a card nobody waits on.
+        this.noteToolPermissionWaiter(approval.id, 1);
+        try {
+          await this.saveConversation(conversation);
+        } catch (error) {
+          this.noteToolPermissionWaiter(approval.id, -1);
+          throw error;
+        }
         return { prepared, route: "created", approval };
       });
     } catch (error) {
@@ -4470,7 +4611,28 @@ export class ChatService {
     if (!approval) {
       return { behavior: "deny", message: "Tool permission request could not be created." };
     }
-    const decision = await this.waitForToolPermissionDecision(actor.conversationId, approval.id, actor.runId);
+    if (outcome.route !== "created") {
+      this.noteToolPermissionWaiter(approval.id, 1);
+    }
+    let decision: ToolPermissionDecision;
+    try {
+      decision = await this.waitForToolPermissionDecision(actor.conversationId, approval.id, actor.runId, abandoned);
+    } finally {
+      this.noteToolPermissionWaiter(approval.id, -1);
+    }
+    if (!decision.approve && decision.source !== "user" && this.toolPermissionWaiters.has(approval.id)) {
+      // Another call (the same tool call asked again) still waits on this
+      // card: it stays open for that one.
+      this.logToolPermissionResolution(actor, outcome, decision);
+      return { behavior: "deny", message: decision.reason ?? "Tool permission request did not receive approval." };
+    }
+    if (!decision.approve && decision.source === "abort" && abandoned?.aborted) {
+      // Claude Code stopped waiting for this answer: the card can no longer
+      // be answered, so it says so instead of taking a click that does nothing.
+      await this.expirePendingToolPermissionApproval(actor.conversationId, approval.id, TOOL_PERMISSION_ABANDONED);
+      this.logToolPermissionResolution(actor, outcome, { ...decision, reason: TOOL_PERMISSION_ABANDONED });
+      return { behavior: "deny", message: TOOL_PERMISSION_ABANDONED };
+    }
     if (!decision.approve) {
       if (decision.source !== "user") {
         await this.denyPendingToolPermissionApproval(
@@ -5001,8 +5163,11 @@ export class ChatService {
     };
     const kind = input.kind ?? caller.kind;
     const sameProvider = kind === caller.kind;
-    const agentMode = clampChatAgentMode(input.agentMode ?? callerMode, callerMode);
-    const permissions = clampChatAgentPermissions(this.delegationRequestedPermissions(input.permissions, ceiling), ceiling);
+    const access = clampChatAgentAccess(kind,
+      { agentMode: input.agentMode ?? callerMode, permissions: this.delegationRequestedPermissions(input.permissions, ceiling) },
+      { agentMode: callerMode, permissions: ceiling });
+    const agentMode = access.agentMode;
+    const permissions = access.permissions;
     if (this.participantManagementChangeEscalates(role, permissions)) {
       return this.delegationRefusal("not_allowed", `Managing members beyond what the ${role.label} role gives needs User's approval. Ask User, or add the member with app_participants_request_change.`);
     }
@@ -5453,9 +5618,10 @@ export class ChatService {
       return participant;
     }
     const own = normalizeChatAgentPermissions(participant.permissions);
-    const { manageRolesParticipants: _manage, ...clamped } = clampChatAgentPermissions(own, ceiling.permissions);
+    const access = clampChatAgentAccess(participant.kind, { agentMode: participant.agentMode, permissions: own }, { agentMode: ceiling.mode, permissions: ceiling.permissions });
+    const { manageRolesParticipants: _manage, ...clamped } = access.permissions;
     const permissions: ChatAgentPermissions = own.manageRolesParticipants ? { ...clamped, manageRolesParticipants: own.manageRolesParticipants } : clamped;
-    const agentMode = clampChatAgentMode(participant.agentMode, ceiling.mode);
+    const agentMode = access.agentMode;
     if (agentMode === normalizeChatAgentMode(participant.agentMode) && chatAgentPermissionsEqual(permissions, own)) {
       return participant;
     }
@@ -7904,6 +8070,7 @@ export class ChatService {
     }
     let decidedApproval: ChatAppToolApproval | undefined;
     let decision: ToolPermissionDecision | undefined;
+    let expired = false;
     await this.withChatMutation(conversation, async () => {
       const approval = this.chatAppToolApprovals(conversation)
         .find((item) => item.id === request.approvalId);
@@ -7915,6 +8082,16 @@ export class ChatService {
       }
 
       const now = new Date().toISOString();
+      if (!this.toolPermissionWaiters.has(approval.id)) {
+        // No call waits on it any more (its CLI stopped waiting, or the app
+        // restarted): the card says so instead of taking an answer that
+        // would do nothing, and the answer is refused (never "applied").
+        this.upsertAppToolApproval(conversation, { ...approval, status: "expired", error: TOOL_PERMISSION_ORPHANED, updatedAt: now });
+        conversation.updatedAt = now;
+        await this.saveConversation(conversation);
+        expired = true;
+        return;
+      }
       if (!request.approve) {
         await execution?.beforeApply(approval);
         decidedApproval = {
@@ -7936,7 +8113,12 @@ export class ChatService {
         // Legacy pending records did not persist the run mode. Their safe fallback is
         // the member's current mode, never the provider session's previous-turn mode.
         const agentMode = approval.request.agentMode ?? normalizeChatAgentMode(requester.agentMode);
-        const scope = agentMode === "auto" ? "once" : request.scope === "chat" ? "chat" : "once";
+        // "For this chat" covers what Claude Code's "don't ask again" covers
+        // (a command prefix, a domain, a folder); a scoped tool's request
+        // that could not be scoped is allowed once.
+        const chatScope = normalizeChatToolPermissionScope(approval.request.chatScope);
+        const scopedTool = chatToolPermissionIsScoped(approval.request.toolName);
+        const scope = agentMode === "auto" || (scopedTool && !chatScope) ? "once" : request.scope === "chat" ? "chat" : "once";
         await execution?.beforeApply(approval);
         decidedApproval = {
           ...approval,
@@ -7953,6 +8135,7 @@ export class ChatService {
             toolName: approval.toolName,
             capability: approval.capability,
             targetToolName: approval.request.toolName,
+            ...(scopedTool && chatScope ? { targetToolScope: chatScope } : {}),
             scope: "chat",
             createdAt: now,
             updatedAt: now
@@ -7961,7 +8144,7 @@ export class ChatService {
         conversation.messages.push(this.message(
           "system",
           scope === "chat"
-            ? `Allowed @${approval.requesterHandle} to use ${approval.request.toolName} for this chat.`
+            ? `Allowed @${approval.requesterHandle} to ${scopedTool && chatScope ? chatToolPermissionScopeSummary(chatScope) : `use ${approval.request.toolName}`} for this chat.`
             : `Allowed @${approval.requesterHandle} to use ${approval.request.toolName} once.`,
           undefined,
           { threadId: "system" }
@@ -7972,6 +8155,9 @@ export class ChatService {
       await this.saveConversation(conversation);
     });
 
+    if (expired) {
+      throw new Error(TOOL_PERMISSION_ORPHANED);
+    }
     if (!decidedApproval || !decision) {
       throw new Error("App tool approval request could not be resolved.");
     }
@@ -8361,7 +8547,8 @@ export class ChatService {
     }
     if (isPermissionApproval && updatedApproval.resumeContext && updatedApproval.resumeContext.remoteRun !== true) {
       void this.autoResumePermissionApproval(conversation.id, updatedApproval.id, progress).catch((error) => {
-        this.emitProgress(updatedApproval.resumeContext?.runId ?? updatedApproval.id, progress, "error", error instanceof Error ? error.message : String(error));
+        // Said on the resume's own run: the asking run has ended.
+        this.emitProgress(permissionApprovalResumeRunId(updatedApproval.id), progress, "error", error instanceof Error ? error.message : String(error));
         void this.debugLogs.write("chat.permission-approval.auto-resume.error", {
           conversationId: conversation.id,
           approvalId: updatedApproval.id,
@@ -8723,7 +8910,8 @@ export class ChatService {
             sourceMessageId: controlMessage.id,
             approvedContinuation: true,
             runId: resumeRunId,
-            queuedBehind: turnReservation.queued ? { handle: participant.handle } : undefined
+            queuedBehind: turnReservation.queued ? { handle: participant.handle } : undefined,
+            turnQueued: turnReservation.queued ? true : undefined
           },
           "pending"
         );
@@ -9969,7 +10157,8 @@ export class ChatService {
             chatThreadRootId: triggerMessage.metadata?.chatThreadRootId,
             sourceMessageId: triggerMessage.id,
             runId: targetRunId,
-            queuedBehind: turnReservation.queued ? { handle: participant.handle } : undefined
+            queuedBehind: turnReservation.queued ? { handle: participant.handle } : undefined,
+            turnQueued: turnReservation.queued ? true : undefined
           },
           "pending"
         );
@@ -10198,8 +10387,8 @@ export class ChatService {
             // jump aimed at a message that no longer exists (a silent no-op). Repair from the
             // remaining full history (refreshStoredChatState already merged it here).
             this.repairLastMessagePointerAfterRemoval(conversation, pendingMessageId);
-          } else if (pending.metadata?.queuedBehind) {
-            const { queuedBehind: _queuedBehind, ...metadata } = pending.metadata;
+          } else if (pending.metadata?.queuedBehind || pending.metadata?.turnQueued) {
+            const { queuedBehind: _queuedBehind, turnQueued: _turnQueued, ...metadata } = pending.metadata;
             conversation.messages[idx] = {
               ...pending,
               metadata
@@ -10418,7 +10607,8 @@ export class ChatService {
           participantRequestDepth: options.participantRequestDepth ?? 0,
           participantRequestBatchId: options.participantRequestBatchId,
           participantRequestChainRootId: options.chainRootId,
-          queuedBehind: options.queuedBehindHandle ? { handle: options.queuedBehindHandle } : undefined
+          queuedBehind: options.queuedBehindHandle ? { handle: options.queuedBehindHandle } : undefined,
+          turnQueued: options.queuedBehindHandle ? true : undefined
         },
         "pending"
       );
@@ -10563,6 +10753,11 @@ export class ChatService {
         this.markPendingAppToolApprovalsForRunTerminal(conversation, runId, message);
         return [pendingMessage];
       }
+      // A member's first turn here, on a provider perhaps chosen elsewhere (a
+      // chat the phone made from an offer this computer published earlier):
+      // the run still decides (readiness can be stale), and a first turn that
+      // fails on a CLI that is not ready here says so (firstTurnProviderProblem).
+      const firstTurnHere = !session.sessionId && !forkSource;
       executionLease = this.acquireParticipantExecutorLease(conversation, participant, session, "desktop");
       pendingMessage.metadata = {
         ...pendingMessage.metadata,
@@ -10706,6 +10901,11 @@ export class ChatService {
       } else {
         pendingMessage.status = result.ok ? "done" : "error";
       }
+      const notReady = !signal?.aborted && !result.ok && firstTurnHere ? await this.firstTurnProviderProblem(participant) : undefined;
+      if (notReady) {
+        pendingMessage.content = pendingMessage.content.trim() ? `${notReady}\n\n${pendingMessage.content}` : notReady;
+        options.warnings.push(notReady);
+      }
       if (!signal?.aborted && !result.ok) {
         this.markPendingAppToolApprovalsForRunTerminal(
           conversation,
@@ -10716,7 +10916,9 @@ export class ChatService {
       if (!signal?.aborted && !result.ok && result.error) {
         options.warnings.push(`@${participant.handle}: ${result.error}`);
       }
-      const workedMs = Date.parse(now) - Date.parse(pendingMessage.createdAt);
+      // Worked from its own turn's start: a reply that waited in the queue
+      // does not count the wait (turnStartedAt).
+      const workedMs = Date.parse(now) - Date.parse(pendingMessage.metadata?.turnStartedAt ?? pendingMessage.createdAt);
       if (Number.isFinite(workedMs) && workedMs >= 0) {
         pendingMessage.metadata = { ...pendingMessage.metadata, workedMs };
       }
@@ -11159,7 +11361,12 @@ export class ChatService {
           ? { participantRequestChainRootId: inferenceContext.chainRootId }
           : {})
       };
+      if (metadata.queuedBehind || metadata.turnQueued) {
+        // It waited behind the member's turn before it: its own turn starts now.
+        metadata.turnStartedAt = new Date().toISOString();
+      }
       delete metadata.queuedBehind;
+      delete metadata.turnQueued;
       pendingMessage.metadata = Object.keys(metadata).length > 0 ? metadata : undefined;
       if (existingIndex >= 0) {
         conversation.messages[existingIndex] = pendingMessage;
@@ -11191,6 +11398,7 @@ export class ChatService {
       }
       const metadata: ChatMessageMetadata = { ...pendingMessage.metadata };
       delete metadata.queuedBehind;
+      delete metadata.turnQueued;
       pendingMessage.metadata = Object.keys(metadata).length > 0 ? metadata : undefined;
       pendingMessage.status = "error";
       if (!pendingMessage.content.trim()) {
@@ -12366,7 +12574,7 @@ export class ChatService {
     const permissions = effectiveChatAgentPermissionsForProvider(providerKind, agentMode, runPermissions);
     const permissionLines = chatPermissionPromptLines({ agentMode, providerKind, permissions, canRequestPermissions });
     return [
-      `Permissions: shell commands ${permissions.shell.enabled ? "allowed" : "blocked"}, workspace edits ${permissions.workspaceWrite ? "allowed" : "blocked"}, web access ${permissions.webAccess ? "allowed" : "blocked"}.`,
+      chatPermissionSummaryLine({ agentMode, providerKind, permissions, canRequestPermissions }),
       this.repoReadEscalationLine(permissions.repoRead, canRequestPermissions),
       permissionLines.shell,
       permissionLines.workspace,
@@ -12970,6 +13178,8 @@ export class ChatService {
       !storedMetadata?.pendingChoice &&
       !storedMetadata?.participantRequest &&
       !storedMetadata?.queuedBehind &&
+      !storedMetadata?.turnQueued &&
+      !storedMetadata?.turnStartedAt &&
       !storedMetadata?.activityEvents &&
       !storedMetadata?.processingTranscript &&
       !storedMetadata?.remoteRunStatus &&
@@ -13026,6 +13236,10 @@ export class ChatService {
     } else {
       delete merged.queuedBehind;
     }
+    // Its shared word and its own turn's start follow the same stored truth.
+    if (storedMetadata?.turnQueued) merged.turnQueued = true;
+    else delete merged.turnQueued;
+    if (storedMetadata?.turnStartedAt) merged.turnStartedAt = storedMetadata.turnStartedAt;
     if (storedMetadata?.activityEvents?.length && !currentMetadata?.activityEvents?.length) {
       merged.activityEvents = cloneJsonValue(storedMetadata.activityEvents);
     }
@@ -14463,6 +14677,28 @@ export class ChatService {
       }
     }
     return false;
+  }
+
+  /** Why a member's failed first turn on this computer failed, when its CLI
+   *  (or added provider) is not ready here (checked afresh), in the words New
+   *  chat uses. Undefined when it is ready, or when readiness cannot be told
+   *  (the run's own error then says what went wrong). */
+  private async firstTurnProviderProblem(participant: ChatParticipant): Promise<string | undefined> {
+    let agents: AgentHealth[];
+    try {
+      agents = await this.cliRunner.detectAgents({ trigger: "submit" });
+    } catch {
+      return undefined;
+    }
+    if (agents.length === 0) return undefined;
+    const settings = await this.settings.getPublicSettings();
+    const host = cliProviderHostForParticipant(participant.kind, participant.hostId?.trim() || undefined, settings.cliProviderHosts ?? []);
+    if (participant.hostId?.trim() && !host) return undefined; // participantHostBinding says it.
+    const state = readinessForParticipant({ kind: participant.kind, host }, agents, settings.providers ?? []);
+    if (state === "ready" || state === "checking" || state === "could-not-verify") return undefined;
+    const label = host?.label ?? cliProviderMetadata(participant.kind).label;
+    const reason = agentReadinessReason(state, label) ?? `${label} is not ready.`;
+    return `@${participant.handle} cannot start on this computer: ${reason} Fix it in Settings → Local CLI setup, or start the chat on another provider.`;
   }
 
   private async detectAgentsForReadiness(
@@ -15941,7 +16177,7 @@ export class ChatService {
       item.requesterParticipantId === requester.id &&
       item.toolName === APP_PERMISSIONS_REQUEST_CHANGE_TOOL &&
       this.isPermissionChangeRequest(item.request) &&
-      (!actor.runId || item.resumeContext?.runId === actor.runId)
+      (!actor.runId || this.isPermissionRequestOfRun(item, actor.runId))
     );
     if (!approval) {
       return {
@@ -15976,6 +16212,13 @@ export class ChatService {
     };
   }
 
+  /** A member's permission request belongs to the run that asked for it and
+   *  to the run its approval resumed the member in: there the member may ask
+   *  for it again, or for its status, and gets the answer it already has. */
+  private isPermissionRequestOfRun(approval: ChatAppToolApproval, runId: string): boolean {
+    return approval.resumeContext?.runId === runId || permissionApprovalResumeRunId(approval.id) === runId;
+  }
+
   private findReplayablePermissionApproval(
     conversation: Conversation,
     requester: ChatParticipant,
@@ -15991,7 +16234,7 @@ export class ChatService {
         return false;
       }
       if (actor.runId) {
-        if (approval.resumeContext?.runId !== actor.runId) {
+        if (!this.isPermissionRequestOfRun(approval, actor.runId)) {
           return false;
         }
       } else if (approval.status !== "pending") {
@@ -16184,7 +16427,116 @@ export class ChatService {
     return typeof reason === "string" ? reason.trim().slice(0, 500) || undefined : undefined;
   }
 
-  private prepareToolPermissionRequest(raw: unknown, agentMode: ChatAgentMode): PreparedToolPermission {
+  /** Where a member's CLI runs in this chat on this device: the project, or
+   *  the chat's own folder. */
+  private chatWorkingDirectory(conversation: Conversation): string {
+    return conversation.repoPath || path.join(this.chatUserDataPath(), "chats", conversation.id);
+  }
+
+  /** The member's "for this chat" rule that answers this request, if one
+   *  does: one for the whole tool (a tool whose answer is not scoped, or a
+   *  rule kept from before answers were scoped, as its card said), else the
+   *  scoped rules that together cover it (every command of it by a prefix,
+   *  its domain, its folder; src/shared/toolPermissionScope.ts). */
+  private toolPermissionPolicyFor(
+    conversation: Conversation,
+    participant: ChatParticipant,
+    toolName: string,
+    toolInput: unknown
+  ): ChatAppToolApprovalPolicy | undefined {
+    const policies = this.chatAppToolApprovalPolicies(conversation).filter((policy) =>
+      policy.participantId === participant.id &&
+      policy.roleConfigId === participant.roleConfigId &&
+      policy.toolName === APP_TOOL_PERMISSION_TOOL &&
+      policy.capability === "permissions.request" &&
+      !policy.targetParticipantId &&
+      policy.scope === "chat"
+    );
+    const whole = policies.find((policy) => policy.targetToolName === toolName && !policy.targetToolScope);
+    if (whole || !chatToolPermissionIsScoped(toolName)) {
+      return whole;
+    }
+    const editTool = CHAT_TOOL_PERMISSION_EDIT_TOOLS.includes(toolName);
+    const family = editTool ? CHAT_TOOL_PERMISSION_EDIT_TOOLS : [toolName];
+    const scoped = policies.filter((policy) => policy.targetToolScope && family.includes(policy.targetToolName ?? ""));
+    const scopes = scoped.map((policy) => policy.targetToolScope!);
+    if (!chatToolPermissionCoveredByScopes(toolName, toolInput, scopes)) {
+      return undefined;
+    }
+    // A file edit is covered where it really lands too: a link inside the
+    // folder that leads out of it is not the folder.
+    if (editTool && !chatToolPermissionCoveredByScopes(toolName, this.withRealEditTarget(toolInput), scopes.map((scope) =>
+      scope.kind === "folder" ? { kind: "folder" as const, path: this.realPathOf(scope.path) } : scope))) {
+      return undefined;
+    }
+    return scoped[0];
+  }
+
+  /** An absolute path with links resolved as far as it exists (the rest, a
+   *  file still to be made, kept as written). */
+  private realPathOf(target: string): string {
+    const missing: string[] = [];
+    let current = path.resolve(target);
+    for (;;) {
+      try {
+        return path.join(realpathSync.native(current), ...missing.reverse());
+      } catch {
+        const parent = path.dirname(current);
+        if (parent === current) return path.resolve(target);
+        missing.push(path.basename(current));
+        current = parent;
+      }
+    }
+  }
+
+  private withRealEditTarget(toolInput: unknown): unknown {
+    if (!toolInput || typeof toolInput !== "object" || Array.isArray(toolInput)) return toolInput;
+    const input = toolInput as Record<string, unknown>;
+    const key = ["file_path", "notebook_path", "path"].find((name) => typeof input[name] === "string");
+    if (!key || !(input[key] as string).startsWith("/")) return toolInput;
+    return { ...input, [key]: this.realPathOf(input[key] as string) };
+  }
+
+  private noteToolPermissionWaiter(approvalId: string, change: 1 | -1): void {
+    const count = (this.toolPermissionWaiters.get(approvalId) ?? 0) + change;
+    if (count > 0) this.toolPermissionWaiters.set(approvalId, count);
+    else this.toolPermissionWaiters.delete(approvalId);
+  }
+
+  /** A permission card whose call ended unanswered: closed as expired. */
+  private async expirePendingToolPermissionApproval(conversationId: string, approvalId: string, reason: string): Promise<void> {
+    const conversation = await this.storage.getConversation(conversationId);
+    if (!conversation || conversation.kind !== "chat") return;
+    await this.saveChatChange(conversation, () => {
+      const approval = this.chatAppToolApprovals(conversation).find((item) => item.id === approvalId);
+      // A call that joined meanwhile (the same tool call asked again) keeps it open.
+      if (!approval || approval.status !== "pending" || approval.toolName !== APP_TOOL_PERMISSION_TOOL || this.toolPermissionWaiters.has(approvalId)) return;
+      this.upsertAppToolApproval(conversation, { ...approval, status: "expired", error: reason, updatedAt: new Date().toISOString() });
+    }).catch(() => undefined);
+  }
+
+  /** Permission cards of this device's members that no call waits on any
+   *  more (the app restarted while they were open): closed as expired, so
+   *  none offers an answer that would do nothing. */
+  private expireOrphanedToolPermissions(conversation: Conversation): boolean {
+    const owned = new Set(this.chatParticipants(conversation).filter((participant) => this.ownsParticipant(participant)).map((participant) => participant.id));
+    const now = new Date().toISOString();
+    let changed = false;
+    const nextApprovals = this.chatAppToolApprovals(conversation).map((approval) => {
+      if (approval.toolName !== APP_TOOL_PERMISSION_TOOL || approval.status !== "pending" || !owned.has(approval.requesterParticipantId) ||
+        (approval.homeMachineId && approval.homeMachineId !== this.hostMachineId) || this.toolPermissionWaiters.has(approval.id)) {
+        return approval;
+      }
+      changed = true;
+      return { ...approval, status: "expired" as const, error: TOOL_PERMISSION_ORPHANED, updatedAt: now };
+    });
+    if (changed) {
+      conversation.metadata = { ...conversation.metadata, pendingAppToolApprovals: nextApprovals };
+    }
+    return changed;
+  }
+
+  private prepareToolPermissionRequest(raw: unknown, agentMode: ChatAgentMode, workingDirectory?: string): PreparedToolPermission {
     if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
       throw new Error("Tool permission request must be an object.");
     }
@@ -16200,13 +16552,15 @@ export class ChatService {
     const nativeOccurrenceId = typeof rawNativeOccurrenceId === "string"
       ? rawNativeOccurrenceId.trim().slice(0, 500) || undefined
       : undefined;
+    const chatScope = agentMode === "auto" ? undefined : chatToolPermissionScope(toolName, toolInput, workingDirectory);
     const request: ChatToolPermissionRequest = {
       kind: "toolPermission",
       agentMode,
       nativeOccurrenceId,
       reason,
       toolName: toolName.slice(0, CHAT_PROVIDER_NATIVE_ALLOWED_TOOL_MAX_LENGTH),
-      toolInput: this.toolPermissionInputPreview(toolInput)
+      toolInput: this.toolPermissionInputPreview(toolInput),
+      ...(chatScope ? { chatScope } : {})
     };
     return {
       request,
@@ -16340,7 +16694,7 @@ export class ChatService {
           source: "timeout",
           reason: "Timed out waiting for User approval."
         });
-      }, CHAT_TOOL_PERMISSION_WAIT_MS);
+      }, APP_TOOL_PERMISSION_WAIT_MS);
       const resolvers = this.toolPermissionResolvers.get(approvalId) ?? new Set();
       resolvers.add(finish);
       this.toolPermissionResolvers.set(approvalId, resolvers);
@@ -16381,7 +16735,7 @@ export class ChatService {
     }
     await this.withChatMutation(conversation, async () => {
       const approval = this.chatAppToolApprovals(conversation).find((item) => item.id === approvalId);
-      if (!approval || approval.status !== "pending" || approval.toolName !== APP_TOOL_PERMISSION_TOOL) {
+      if (!approval || approval.status !== "pending" || approval.toolName !== APP_TOOL_PERMISSION_TOOL || this.toolPermissionWaiters.has(approvalId)) {
         return;
       }
       const now = new Date().toISOString();
@@ -17244,7 +17598,8 @@ export class ChatService {
         }
         this.permissionApprovalAutoResumes.add(triggerResumeKey);
         resumeKeys.push(triggerResumeKey);
-        const resumeRunId = approval.resumeContext.runId || randomUUID();
+        // Never the run that asked: its turn on the server is over.
+        const resumeRunId = permissionApprovalResumeRunId(approval.id);
         const participantLabel = `@${requester.handle}`;
         this.emitProgress(resumeRunId, progress, "initial", `Resuming ${participantLabel} after permission approval.`, {
           participantLabel
@@ -17321,6 +17676,7 @@ export class ChatService {
     try {
       const messages = await this.runParticipantTurnSerialized(conversation, requester, trigger, resumeRunId, undefined, progress, {
         warnings: [],
+        ownServerTurn: true,
         participantRequestDepth: participantRequestBatch
           ? this.participantRequestResumeDepth(participantRequestBatch, requester.id)
           : undefined,
@@ -17750,6 +18106,10 @@ export class ChatService {
       existingPendingMessage?: ChatMessage;
       turnReservation?: ParticipantTurnReservation;
       writeGate?: ClaudeWriteGate;
+      /** A turn of its own on the server, named after this run, even when its
+       *  trigger is a User's message to this member, whose own turn is over
+       *  (a permission approval's resume). */
+      ownServerTurn?: boolean;
     }
   ): Promise<ChatMessage[]> {
     const turnSegmentId = randomUUID();
@@ -17782,7 +18142,7 @@ export class ChatService {
       // request runners, resumes) goes through here: the User's server first
       // (Д4, Д13), then here or on the member's own device.
       const opened: ServerTurnOpen = this.serverLink
-        ? await this.openServerTurn(conversation, participant, triggerMessage, runId, turnController.signal)
+        ? await this.openServerTurn(conversation, participant, triggerMessage, runId, turnController.signal, options.ownServerTurn === true)
         : { kind: "none" };
       // Where it runs was decided there (after any move of it): as the chat
       // has it now.
@@ -19863,6 +20223,7 @@ export class ChatService {
         policy.targetParticipantId,
         policy.targetToolName
       ) &&
+      chatToolPermissionScopesEqual(item.targetToolScope, policy.targetToolScope) &&
       item.scope === policy.scope
     );
     conversation.metadata = {
@@ -22921,7 +23282,9 @@ export class ChatService {
         policy.toolName === APP_TOOL_PERMISSION_TOOL &&
         policy.capability === "permissions.request" &&
         typeof policy.targetParticipantId !== "string" &&
-        typeof policy.targetToolName === "string"
+        typeof policy.targetToolName === "string" &&
+        (policy.targetToolScope === undefined || (normalizeChatToolPermissionScope(policy.targetToolScope) !== undefined &&
+          chatToolPermissionScopesEqual(normalizeChatToolPermissionScope(policy.targetToolScope), policy.targetToolScope)))
       )) &&
       policy.scope === "chat" &&
       typeof policy.createdAt === "string" &&
@@ -25011,21 +25374,22 @@ export class ChatService {
   /** Opens a member's turn on the server before anything of it is shown or
    *  run (Д4, Д5, Д13): the message it answers must be on the server first,
    *  then the turn is taken here (a member that runs here) or asked of the
-   *  device it runs on. Memoized per local run. */
-  private openServerTurn(conversation: Conversation, participant: ChatParticipant, triggerMessage: ChatMessage, localRunId: string, signal?: AbortSignal): Promise<ServerTurnOpen> {
+   *  device it runs on. Memoized per local run. `ownTurn`: never the turn
+   *  the User's message asked of the member (see runParticipantTurnSerialized). */
+  private openServerTurn(conversation: Conversation, participant: ChatParticipant, triggerMessage: ChatMessage, localRunId: string, signal?: AbortSignal, ownTurn = false): Promise<ServerTurnOpen> {
     const known = this.serverTurnOpens.get(localRunId);
     if (known) return known;
-    const opening = this.openServerTurnNow(conversation, participant, triggerMessage, localRunId, signal);
+    const opening = this.openServerTurnNow(conversation, participant, triggerMessage, localRunId, signal, ownTurn);
     this.serverTurnOpens.set(localRunId, opening);
     void opening.catch(() => this.serverTurnOpens.delete(localRunId));
     return opening;
   }
 
-  private async openServerTurnNow(conversation: Conversation, participant: ChatParticipant, triggerMessage: ChatMessage, localRunId: string, signal?: AbortSignal): Promise<ServerTurnOpen> {
+  private async openServerTurnNow(conversation: Conversation, participant: ChatParticipant, triggerMessage: ChatMessage, localRunId: string, signal?: AbortSignal, ownTurn = false): Promise<ServerTurnOpen> {
     const link = this.serverLink;
     if (!link) return { kind: "none" };
     const targets = deliveryTargetsOf(triggerMessage);
-    const canonical = triggerMessage.role === "user" && targets.includes(participant.id);
+    const canonical = !ownTurn && triggerMessage.role === "user" && targets.includes(participant.id);
     const serverRunId = canonical ? hubTurnRunId(triggerMessage.id, participant.id) : localRunId.startsWith("turn-") ? localRunId : `turn-${localRunId}`;
     this.inProcessServerTurns.add(serverRunId);
     this.serverRunOfLocal.set(localRunId, { runId: serverRunId, conversationId: conversation.id, participantId: participant.id });
@@ -25752,7 +26116,8 @@ export class ChatService {
       await this.withChatMutation(conversation, async () => {
         // Cards left by calls that ended (this device restarted) are closed
         // before the server is told which are open.
-        if (this.expireOrphanedConnectorSignIns(conversation)) {
+        const signInsExpired = this.expireOrphanedConnectorSignIns(conversation);
+        if (this.expireOrphanedToolPermissions(conversation) || signInsExpired) {
           conversation.updatedAt = new Date().toISOString();
           await this.saveConversation(conversation);
         }

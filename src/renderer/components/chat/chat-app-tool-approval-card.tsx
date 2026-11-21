@@ -30,8 +30,9 @@ import { ChatAppToolRoleChangeOperation } from "./chat-app-tool-role-operation";
 import { ChatAppToolParticipantChangeOperation } from "./chat-app-tool-participant-operation";
 import { ChatCodexApprovalOperation } from "./chat-codex-approval-operation";
 import { ChatScriptApprovalCard } from "./chat-script-approval-card";
-import { chatConnectorSignInRequest, chatParticipantRemovalRequest, chatScriptChangeRequest } from "./chat-app-tool-data";
+import { chatConnectorSignInRequest, chatParticipantRemovalRequest, chatScriptChangeRequest, chatToolPermissionAllowsChatScope } from "./chat-app-tool-data";
 import { ChatConnectorSignInCard } from "./chat-connector-sign-in-card";
+import { chatToolPermissionScopeSummary } from "../../../shared/toolPermissionScope";
 import { ChatAppToolMemberRemovalOperation, ChatAppToolMemberRemovalResult, memberRemovalOptions, memberRemovalQuestion } from "./chat-app-tool-member-removal";
 
 /** Scheduled-script proposals and connector sign-ins have their own cards;
@@ -328,7 +329,11 @@ function GenericChatAppToolApprovalCard(props: {
             <p className="chat-app-tool-scope-note">
               {toolPermissionRequest.agentMode === "auto"
                 ? `Applies only to ${requesterLabel}. Claude Auto approvals are per occurrence and do not grant future calls.`
-                : `Applies only to ${requesterLabel}. Allow once approves this blocked call; chat grants apply to future ${toolPermissionRequest.toolName} calls from this member in this chat.`}
+                : toolPermissionRequest.chatScope
+                  ? `Applies only to ${requesterLabel}. Allow once approves this blocked call; the chat grant lets it ${chatToolPermissionScopeSummary(toolPermissionRequest.chatScope)} in this chat without asking.`
+                  : !chatToolPermissionAllowsChatScope(toolPermissionRequest)
+                    ? `Applies only to ${requesterLabel}. Allow once approves this blocked call; the next one asks again.`
+                    : `Applies only to ${requesterLabel}. Allow once approves this blocked call; chat grants apply to future ${toolPermissionRequest.toolName} calls from this member in this chat.`}
             </p>
           )}
           {participantRequest && (

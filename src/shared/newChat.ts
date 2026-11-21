@@ -1,6 +1,18 @@
 import { normalizeAutoChatTitle, normalizeManualChatTitle } from "./chatTitles";
+import { applyChatAccessOptionById } from "./chatAccessModes";
 import { DEFAULT_CHAT_VIEW, MAIN_SESSION_ROLE_ID, isChatViewMode, mainSessionMemberOf } from "./mainSession";
-import type { ChatParticipant, ChatParticipantConfig, ChatViewMode, ConversationMetadata, ConversationSummary } from "./types";
+import type {
+  ChatParticipant,
+  ChatParticipantConfig,
+  ChatProviderKind,
+  ChatReasoningEffort,
+  ChatViewMode,
+  CliProviderHostVendor,
+  ConversationMetadata,
+  ConversationSummary,
+  ProviderModelCatalog,
+  ProviderReasoningEffortOption
+} from "./types";
 
 /**
  * How a new chat is made, the same on the computer and on the phone (the
@@ -209,4 +221,130 @@ export function newChatMetadata(
   const mainSession = mainSessionMemberOf(participants);
   if (!mainSession) return {};
   return { mainSessionParticipantId: mainSession.id, chatView: isChatViewMode(defaultChatView) ? defaultChatView : DEFAULT_CHAT_VIEW };
+}
+
+/** At most this many models of one provider go into the New chat offer: a
+ *  CLI lists a handful; the cap keeps a long list (a custom provider's) from
+ *  growing what the server holds and every phone reads. */
+export const NEW_CHAT_PROVIDER_MODELS_MAX = 24;
+const NEW_CHAT_LABEL_MAX = 60;
+
+export interface NewChatEffortOption {
+  id: ChatReasoningEffort;
+  label: string;
+}
+
+/**
+ * A provider the phone's New chat chip offers for the main session, as the
+ * computer's chip lists it (the User, 2026-11-21): its name, the model its
+ * CLI runs on by default, its other models (each with its efforts when they
+ * differ from the provider's) and its efforts. Only what the phone shows.
+ */
+export interface NewChatProviderOffer {
+  kind: ChatProviderKind;
+  hostId?: string;
+  hostLabel?: string;
+  hostVendor?: CliProviderHostVendor;
+  label: string;
+  defaultModelLabel: string;
+  models: Array<{ id: string; label: string; efforts?: NewChatEffortOption[] }>;
+  efforts: NewChatEffortOption[];
+}
+
+function shortLabel(text: string): string {
+  const clean = text.replace(/\s+/g, " ").trim();
+  return clean.length > NEW_CHAT_LABEL_MAX ? `${clean.slice(0, NEW_CHAT_LABEL_MAX - 1)}…` : clean;
+}
+
+function effortList(options: readonly ProviderReasoningEffortOption[] | undefined): NewChatEffortOption[] {
+  return (options ?? []).map((option) => ({ id: option.id, label: shortLabel(option.label) }));
+}
+
+/** The offer of one provider from its CLI's model list: the default model
+ *  (its row says "Default") left out of the list, as on the computer. */
+export function newChatProviderOffer(input: {
+  kind: ChatProviderKind;
+  hostId?: string;
+  hostLabel?: string;
+  hostVendor?: CliProviderHostVendor;
+  label: string;
+  /** An added provider's vendor default model, by name. */
+  vendorDefaultModelLabel?: string;
+  catalog?: ProviderModelCatalog;
+  providerEfforts: readonly ProviderReasoningEffortOption[];
+}): NewChatProviderOffer {
+  const efforts = effortList(input.providerEfforts);
+  const same = (list: NewChatEffortOption[]): boolean => list.length === efforts.length && list.every((item, index) => item.id === efforts[index]?.id);
+  const listed = input.catalog?.models ?? [];
+  const usual = listed.find((model) => model.recommended && model.source !== "configured" && !model.hidden);
+  const usualEfforts = effortList(usual?.supportedReasoningEfforts);
+  // A model's name as a chip says it: without the id Codex repeats in brackets.
+  const nameOf = (model: { id: string; label: string }): string => {
+    const label = model.label.trim();
+    const repeated = ` (${model.id})`;
+    return label.endsWith(repeated) && label.length > repeated.length ? label.slice(0, -repeated.length) : label || model.id;
+  };
+  const models = listed
+    .filter((model) => !model.hidden && model !== usual)
+    .slice(0, NEW_CHAT_PROVIDER_MODELS_MAX)
+    .map((model) => {
+      const own = effortList(model.supportedReasoningEfforts);
+      return { id: model.id, label: shortLabel(nameOf(model)), ...(own.length > 0 && !same(own) ? { efforts: own } : {}) };
+    });
+  return {
+    kind: input.kind,
+    ...(input.hostId ? { hostId: input.hostId, hostLabel: input.hostLabel, hostVendor: input.hostVendor } : {}),
+    label: shortLabel(input.label),
+    // The model its CLI runs on by default (the computer's chip says the same).
+    defaultModelLabel: shortLabel(input.vendorDefaultModelLabel ?? (usual ? nameOf(usual) : input.label)),
+    models,
+    efforts: usualEfforts.length > 0 ? usualEfforts : efforts
+  };
+}
+
+/** What the phone's chip chose for the main session. */
+export interface NewChatMainSessionChoice {
+  kind: ChatProviderKind;
+  hostId?: string;
+  model?: string;
+  reasoningEffort?: ChatReasoningEffort;
+  /** Its CLI's mode by the CLI's own name (chatAccessOptions); none: the
+   *  mode its CLI starts in. */
+  access?: string;
+  /** The machine it runs on; none: the computer. */
+  homeMachineId?: string;
+}
+
+/**
+ * The main session a phone's new chat is made with in the sessions view:
+ * the one the computer offers (its role, rights and handle), on the provider,
+ * model and effort the chip chose. A provider the offer no longer has, or a
+ * model or effort it does not list, is left out: the offer's main session as
+ * it is, or its CLI's own model and effort.
+ */
+export function newChatMainSessionFor(
+  offered: ChatParticipant,
+  providers: readonly NewChatProviderOffer[] | undefined,
+  choice: NewChatMainSessionChoice | undefined
+): ChatParticipant {
+  if (!choice) return offered;
+  const provider = (providers ?? []).find((item) => item.kind === choice.kind && (item.hostId ?? "") === (choice.hostId ?? ""));
+  if (!provider) {
+    // Its CLI's mode, on the provider the offer has.
+    return { ...offered, ...applyChatAccessOptionById(offered.kind, choice.kind === offered.kind ? choice.access : undefined, offered.permissions) };
+  }
+  const model = choice.model && provider.models.some((item) => item.id === choice.model) ? choice.model : undefined;
+  const efforts = (model ? provider.models.find((item) => item.id === model)?.efforts : undefined) ?? provider.efforts;
+  const reasoningEffort = choice.reasoningEffort && efforts.some((item) => item.id === choice.reasoningEffort) ? choice.reasoningEffort : undefined;
+  const { hostId: _hostId, hostLabel: _hostLabel, hostVendor: _hostVendor, model: _model, reasoningEffort: _effort, avatarId: _avatar, ...rest } = offered;
+  const { homeMachineId: _home, ...placed } = rest;
+  return {
+    ...placed,
+    kind: provider.kind,
+    ...(provider.hostId ? { hostId: provider.hostId, hostLabel: provider.hostLabel, hostVendor: provider.hostVendor } : {}),
+    ...(model ? { model } : {}),
+    ...(reasoningEffort ? { reasoningEffort } : {}),
+    ...applyChatAccessOptionById(provider.kind, choice.access, offered.permissions),
+    ...(choice.homeMachineId ? { homeMachineId: choice.homeMachineId } : {})
+  };
 }

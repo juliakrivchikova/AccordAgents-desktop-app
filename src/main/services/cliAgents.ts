@@ -103,6 +103,7 @@ import {
   parseGeminiTranscriptActivity
 } from "./geminiExec";
 import type { ParticipantRunResult } from "./providers";
+import { APP_TOOL_PERMISSION_WAIT_MS } from "../../shared/appMcpToolContracts";
 
 const MAX_CLI_ERROR_CHARS = 500;
 const MAX_CLI_ERROR_LINES = 8;
@@ -207,6 +208,18 @@ const GEMINI_MCP_PROXY_ARG = "--accordagents-gemini-mcp-proxy";
 const APP_PERMISSIONS_REQUEST_CHANGE_TOOL = "app_permissions_request_change";
 const APP_TOOL_PERMISSION_TOOL = "app_tool_permission";
 const APP_TOOL_PERMISSION_MCP_TOOL = `mcp__accord_agents__${APP_TOOL_PERMISSION_TOOL}`;
+/**
+ * How long Claude Code waits on a call of the app's tools (the app MCP
+ * server's own `timeout`, ms). Its default gives up on Claude Code's
+ * permission prompt after 60 s (an HTTP server's answer) while the User's
+ * card waits APP_TOOL_PERMISSION_WAIT_MS: then her answer reached nobody
+ * (Claude Code 2.1.329). It is a hard limit per call (progress does not
+ * extend it), so it is the app's wait and five minutes more: the app answers
+ * first (it denies at the end of its wait), and a sign-in card's reconnect
+ * after a late answer still fits. Set for this server only, never
+ * MCP_TOOL_TIMEOUT, which would change the User's own MCP servers too.
+ */
+export const CLAUDE_APP_MCP_TOOL_TIMEOUT_MS = APP_TOOL_PERMISSION_WAIT_MS + 5 * 60_000;
 const ANTIGRAVITY_GOAL_ENV = "ACCORD_AGENTS_NATIVE_GOAL_PROMPT";
 const ANTIGRAVITY_GOAL_ARG_COUNT_ENV = "ACCORD_AGENTS_NATIVE_GOAL_ARG_COUNT";
 const ANTIGRAVITY_GOAL_ARG_ENV_PREFIX = "ACCORD_AGENTS_NATIVE_GOAL_ARG_";
@@ -4526,7 +4539,7 @@ export class CliAgentRunner {
     return {
       model: participant.model ?? null,
       cwd: repoPath ?? null,
-      approvalPolicy: this.codexAppServerApprovalPolicy(mode),
+      approvalPolicy: this.codexAppServerApprovalPolicy(mode, permissions),
       approvalsReviewer: mode === "auto" ? CODEX_AUTO_APPROVALS_REVIEWER : null,
       sandbox: permissions.workspaceWrite ? "workspace-write" : "read-only",
       config: this.codexAppServerConfig(participant, permissions, options),
@@ -4550,7 +4563,7 @@ export class CliAgentRunner {
       threadId: sessionId,
       model: participant.model ?? null,
       cwd: repoPath ?? null,
-      approvalPolicy: this.codexAppServerApprovalPolicy(mode),
+      approvalPolicy: this.codexAppServerApprovalPolicy(mode, permissions),
       approvalsReviewer: mode === "auto" ? CODEX_AUTO_APPROVALS_REVIEWER : null,
       sandbox: permissions.workspaceWrite ? "workspace-write" : "read-only",
       config: this.codexAppServerConfig(participant, permissions, options),
@@ -4574,8 +4587,13 @@ export class CliAgentRunner {
     };
   }
 
-  private codexAppServerApprovalPolicy(mode: ChatAgentMode): string {
-    return mode === "auto" ? "on-request" : "never";
+  /** Codex asks (approval policy on-request, each ask an approval card) in
+   *  Auto-review, where Codex reviews the asks itself, and in its own Read
+   *  only and Default presets (the sessions view's access, `cliApprovals`);
+   *  Plan mode and the classic controls never ask: what the sandbox does not
+   *  allow fails. */
+  private codexAppServerApprovalPolicy(mode: ChatAgentMode, permissions?: ChatAgentPermissions): string {
+    return mode === "auto" || (mode === "default" && permissions?.cliApprovals === true) ? "on-request" : "never";
   }
 
   private codexReasoningEffort(value: ChatReasoningEffort | undefined): ChatReasoningEffort | undefined {
@@ -8539,7 +8557,8 @@ export class CliAgentRunner {
           url: appMcp.url,
           headers: {
             Authorization: `Bearer ${appMcp.token}`
-          }
+          },
+          timeout: CLAUDE_APP_MCP_TOOL_TIMEOUT_MS
         }
       }
     });
@@ -8832,6 +8851,11 @@ export class CliAgentRunner {
     const disallowedTools: string[] = [];
     const askTools: string[] = [];
     const providerNativeAllowedTools = permissions.providerNative?.["claude-code"]?.allowedTools ?? [];
+    // Claude Code's own default modes (the sessions view's Default and Accept
+    // edits): what is not granted is not taken away but asked about, each
+    // ask an approval card through --permission-prompt-tool, as the CLI asks
+    // in its terminal. Deny rules stay hard stops.
+    const asksForUngranted = permissions.cliApprovals === true && agentMode === "default";
     const readContextAvailable = Boolean(repoPath) || extraReadableDirs.length > 0;
     const readTools = ["Read", "Grep", "Glob", "LS"];
     // Claude Code 2.1 validates --disallowedTools strictly and rejects MultiEdit as
@@ -8850,10 +8874,14 @@ export class CliAgentRunner {
         tools.add(tool);
         allowedTools.push(tool);
       }
+    } else if (asksForUngranted) {
+      for (const tool of webTools) {
+        tools.add(tool);
+      }
     } else {
       disallowedTools.push(...webTools);
     }
-    if (permissions.workspaceWrite) {
+    if (permissions.workspaceWrite || asksForUngranted) {
       for (const tool of editTools) {
         tools.add(tool);
       }
@@ -8874,6 +8902,13 @@ export class CliAgentRunner {
           } else {
             askTools.push(toolRule);
           }
+        }
+      }
+    } else if (asksForUngranted) {
+      tools.add("Bash");
+      for (const rule of permissions.shell.rules) {
+        if (rule.action === "deny") {
+          disallowedTools.push(this.claudeBashPermissionRule(rule));
         }
       }
     } else {

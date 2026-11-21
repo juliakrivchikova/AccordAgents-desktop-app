@@ -4,6 +4,7 @@ import type {
   ChatImageInput,
   ChatParticipant,
   ChatParticipantConfig,
+  ChatProviderKind,
   ChatSkillMention,
   Conversation,
   RepoFileMention
@@ -26,6 +27,14 @@ import {
   validateChatStartupDrafts
 } from "../components/chat/chat-participant-drafts";
 import { NEW_CHAT_MAIN_SESSION_PARTICIPANT_ID, newChatMainSessionParticipantDraft } from "../components/chat/chat-main-session-draft";
+import { newChatViewFor } from "../../shared/mainSession";
+import {
+  type MainSessionProviderChoice,
+  type MainSessionProviderOption,
+  mainSessionProviderKey,
+  mainSessionProviderOptions,
+  resolveMainSessionProvider
+} from "../../shared/mainSessionProviders";
 import {
   errorText,
   mergeProgressIntoConversation
@@ -39,6 +48,7 @@ import { cleanIpcError } from "../lib/ipc-error";
 import { serializeComposerDraft } from "../components/chat/chat-composer-draft-utils";
 import { revokePendingImageUrls } from "../components/chat/use-chat-composer-images";
 import {
+  cliProviderMetadata,
   isAgentSnapshotStale,
   NO_READY_CLI_MESSAGE,
   resolveAssistantProviderKind
@@ -57,7 +67,7 @@ export interface ChatActions {
   respondToChatChoice: (sourceMessageId: string, choiceId: string, response: ChatChoiceResponse) => Promise<void>;
   addChatParticipant: () => Promise<void>;
   addSavedChatParticipant: (config: ChatParticipantConfig) => Promise<void>;
-  updateChatParticipantRuntime: (participantId: string, patch: Pick<ChatParticipant, "model" | "reasoningEffort" | "agentMode" | "permissions" | "remoteExecution" | "cloudRun" | "homeMachineId" | "skipToolchainPreflight" | "autoWatch">) => Promise<boolean>;
+  updateChatParticipantRuntime: (participantId: string, patch: ChatParticipantRuntimePatch) => Promise<boolean>;
   removeChatParticipant: (participantId: string) => Promise<void>;
   compactChatParticipant: (participantId: string, options?: ChatRunScopeOptions) => Promise<boolean>;
   restartChatParticipant: (participantId: string, stopBackgroundTasks?: boolean) => Promise<boolean>;
@@ -103,6 +113,48 @@ export interface StartChatAccordOptions {
 
 type ChatChoiceResponse = { cancel?: boolean; selectedOptionId?: string; customAnswer?: string; note?: string };
 
+/** A member's settings to save: the keys present are saved, the others
+ *  stay as they are. */
+export type ChatParticipantRuntimePatch = Partial<Pick<ChatParticipant,
+  "model" | "reasoningEffort" | "agentMode" | "permissions" | "remoteExecution" | "cloudRun" | "homeMachineId" | "skipToolchainPreflight" | "autoWatch">>;
+
+const RUNTIME_PATCH_KEYS = ["model", "reasoningEffort", "agentMode", "permissions", "remoteExecution", "cloudRun", "homeMachineId", "skipToolchainPreflight", "autoWatch"] as const;
+
+/** The patch's own keys, values as given (undefined included). */
+export function runtimePatchFields(patch: ChatParticipantRuntimePatch): ChatParticipantRuntimePatch {
+  const fields: Record<string, unknown> = {};
+  for (const key of RUNTIME_PATCH_KEYS) {
+    if (Object.prototype.hasOwnProperty.call(patch, key)) fields[key] = patch[key];
+  }
+  return fields as ChatParticipantRuntimePatch;
+}
+
+/**
+ * Why a sessions-view New chat refuses a send whose main session would not
+ * run where the screen said: the provider chosen on the chip is no longer
+ * ready, or the one shown (Settings → General's) gave way to another while
+ * the readiness was checked again. Undefined when it runs where shown.
+ */
+export function newChatProviderChangedRefusal(
+  chosen: MainSessionProviderChoice | undefined,
+  shown: MainSessionProviderOption | undefined,
+  resolved: MainSessionProviderOption,
+  options: readonly MainSessionProviderOption[]
+): string | undefined {
+  if (chosen && !options.some((option) => mainSessionProviderKey(option) === mainSessionProviderKey(chosen))) {
+    const name = (shown && mainSessionProviderKey(shown) === mainSessionProviderKey(chosen) ? shown.label : "") || chatProviderName(chosen.kind);
+    return `${name} is not ready any more. The chat would start on ${resolved.label || chatProviderName(resolved.kind)}: check the model chip and send again.`;
+  }
+  if (shown && mainSessionProviderKey(shown) !== mainSessionProviderKey(resolved)) {
+    return `${shown.label || chatProviderName(shown.kind)} is not ready any more. The chat would start on ${resolved.label || chatProviderName(resolved.kind)}: check the model chip and send again.`;
+  }
+  return undefined;
+}
+
+function chatProviderName(kind: ChatProviderKind): string {
+  return cliProviderMetadata(kind).label;
+}
+
 export function useChatActions(state: AppState, conversationActions: ConversationActions): ChatActions {
   async function startChat(options: StartChatOptions = {}): Promise<boolean> {
     state.setError(undefined);
@@ -116,14 +168,23 @@ export function useChatActions(state: AppState, conversationActions: Conversatio
       state.setError("Enter a message or attach an image to start a chat.");
       return false;
     }
-    const resolveProvider = (agents: typeof state.agents) => resolveAssistantProviderKind({
-      agents,
-      providers: state.settings.providers,
-      explicitKind: state.settings.assistantProviderKind
-    });
-    // The main session's CLI the screen showed: settings made for it in the
-    // member list do not carry over to another one.
-    const shownAssistantKind = resolveProvider(state.agents);
+    // In the sessions view the main session runs on what the New chat chip
+    // chose for this chat (else Settings → General's CLI), and the chat is
+    // made with it alone; the classic view's New chat is as before.
+    const sessionsView = newChatViewFor(state.settings.defaultChatView) === "sessions";
+    const resolveProvider = (agents: typeof state.agents): MainSessionProviderOption | undefined => {
+      const kind = resolveAssistantProviderKind({
+        agents,
+        providers: state.settings.providers,
+        explicitKind: state.settings.assistantProviderKind
+      });
+      if (!sessionsView) return kind ? { kind, label: "" } : undefined;
+      const options = mainSessionProviderOptions(agents, state.settings.providers, state.settings.cliProviderHosts);
+      return resolveMainSessionProvider(state.newChatMainSessionProvider, options, kind);
+    };
+    // The main session's provider the screen showed: settings made for it
+    // there do not carry over to another one.
+    const shownProvider = resolveProvider(state.agents);
     let agents = state.agents;
     if (isAgentSnapshotStale(agents)) {
       try {
@@ -133,25 +194,40 @@ export function useChatActions(state: AppState, conversationActions: Conversatio
         return false;
       }
     }
-    const assistantProviderKind = resolveProvider(agents);
-    if (!assistantProviderKind) {
+    const mainProvider = resolveProvider(agents);
+    if (!mainProvider) {
       // The saved CLI gives way to any ready one: none is ready.
       state.setError(NO_READY_CLI_MESSAGE);
       return false;
     }
-    const mainSessionRuntimeOverride = assistantProviderKind === shownAssistantKind
+    // The provider the chip showed (or chose) stopped being ready before the
+    // send: the chat is not silently made on another one; the screen now
+    // shows the one it would take, and the next send takes it.
+    const refusal = sessionsView
+      ? newChatProviderChangedRefusal(state.newChatMainSessionProvider, shownProvider, mainProvider, mainSessionProviderOptions(agents, state.settings.providers, state.settings.cliProviderHosts))
+      : undefined;
+    if (refusal) {
+      state.setError(refusal);
+      if (state.newChatMainSessionProvider) state.setNewChatMainSessionProvider?.(undefined);
+      return false;
+    }
+    const overrideMadeFor = state.newChatMainSessionOverrideFor;
+    const mainSessionRuntimeOverride = shownProvider && mainSessionProviderKey(mainProvider) === mainSessionProviderKey(shownProvider) &&
+      !(overrideMadeFor && overrideMadeFor !== mainSessionProviderKey(mainProvider))
       ? state.selectedChatParticipantRuntimeOverrides[NEW_CHAT_MAIN_SESSION_PARTICIPANT_ID]
       : undefined;
     // Every new chat has its main session first, instead of the Chat
-    // Assistant (docs/main-session.md).
+    // Assistant (docs/main-session.md). In the sessions view nobody else:
+    // the main session makes members itself, and an @handle in the first
+    // message picks none.
     const participants = [
-      newChatMainSessionParticipantDraft(assistantProviderKind, mainSessionRuntimeOverride, Boolean(state.repoPath.trim())),
-      ...selectedOrMentionedChatParticipantDrafts(
+      newChatMainSessionParticipantDraft(mainProvider.kind, mainSessionRuntimeOverride, Boolean(state.repoPath.trim()), mainProvider.hostId, sessionsView),
+      ...(sessionsView ? [] : selectedOrMentionedChatParticipantDrafts(
         state.settings.chatParticipantConfigs,
         state.selectedChatParticipantConfigIds,
         initialMessage,
         state.selectedChatParticipantRuntimeOverrides
-      )
+      ))
     ];
     const validation = validateChatStartupDrafts(
       participants,
@@ -231,6 +307,8 @@ export function useChatActions(state: AppState, conversationActions: Conversatio
       state.setNewChatSkillMentions([]);
       state.setNewChatPluginMentions([]);
       state.setSelectedChatParticipantRuntimeOverrides({});
+      // The chip's provider was for that chat only.
+      state.setNewChatMainSessionProvider?.(undefined);
       await conversationActions.refreshConversations().catch(() => undefined);
       return true;
     } catch (caught) {
@@ -517,22 +595,17 @@ export function useChatActions(state: AppState, conversationActions: Conversatio
     await commitChatParticipant(participant);
   }
 
-  async function updateChatParticipantRuntime(participantId: string, patch: Pick<ChatParticipant, "model" | "reasoningEffort" | "agentMode" | "permissions" | "remoteExecution" | "cloudRun" | "homeMachineId" | "skipToolchainPreflight" | "autoWatch">): Promise<boolean> {
+  async function updateChatParticipantRuntime(participantId: string, patch: ChatParticipantRuntimePatch): Promise<boolean> {
     if (!state.conversation || state.conversation.kind !== "chat") return false;
     state.setError(undefined);
     try {
+      // Only what the patch names is sent (a key with no value is a reset):
+      // a setting changed meanwhile by another click is never sent back as
+      // it stood when this one was made.
       const saved = await window.consensus.updateChatParticipantRuntime({
         conversationId: state.conversation.id,
         participantId,
-        model: patch.model,
-        reasoningEffort: patch.reasoningEffort,
-        agentMode: patch.agentMode,
-        permissions: patch.permissions,
-        remoteExecution: patch.remoteExecution,
-        homeMachineId: patch.homeMachineId,
-        cloudRun: patch.cloudRun,
-        skipToolchainPreflight: patch.skipToolchainPreflight,
-        autoWatch: patch.autoWatch
+        ...runtimePatchFields(patch)
       });
       if (saved) updateIfStillOpen(saved);
       await conversationActions.refreshConversations();

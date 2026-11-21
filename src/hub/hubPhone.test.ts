@@ -441,6 +441,81 @@ test("a desktop member's live progress reaches the phone by a post the server ke
   assert.equal(await h.storage.hubOps().head(), before, "nothing of it went into the order");
 });
 
+test("a running reply's steps reach the phone as the sessions view's short rows, newest kept, its status-only text marked", async (t) => {
+  const h = await hub(t);
+  const machine = createDeviceIdentity(new Date().toISOString());
+  const { opId, write } = await seedChat(h, machine);
+  const { client } = await pairPhone(h);
+  // The step rows are the sessions view's: a chat with its main session, in that view.
+  const main: ChatParticipant = { id: "p-main", handle: "main", roleConfigId: "main-session", kind: "claude-code" };
+  await write(h.owner, { opId: opId(), kind: "conversation.create", conversationId: "chat-s",
+    conversation: { title: "Sessions", kind: "chat", createdAt: new Date().toISOString(),
+      metadata: { participants: [main, localMember], mainSessionParticipantId: main.id, chatView: "sessions" } } });
+  const runId = "turn-run-steps-1";
+  const pending: ChatMessage = { id: "bubble-steps", role: "participant", participantId: localMember.id, participantLabel: "@mac", content: "", createdAt: new Date().toISOString(), status: "pending", metadata: { runId } as ChatMessage["metadata"] };
+  await write(h.owner, { opId: opId(), kind: "message.create", conversationId: "chat-s", message: pending });
+  const at = new Date().toISOString();
+  const steps = [
+    { id: "s1", sequence: 1, kind: "web" as const, label: "Using web search", detail: "EUR to USD", createdAt: at },
+    ...Array.from({ length: 14 }, (_, index) => ({ id: `c${index}`, sequence: index + 2, kind: "command" as const, label: "Running command", detail: `npm test ${index}\nmore`, createdAt: at })),
+    { id: "long", sequence: 20, kind: "tool" as const, label: "Reading file", detail: `src/${"a".repeat(300)}.ts`, createdAt: at }
+  ];
+  const progress: ReviewProgress = { runId, phase: "debate", message: "working", createdAt: at,
+    agentProgress: { participantId: localMember.id, participantLabel: "@mac", state: "running", messageId: "bubble-steps", activity: "Reading file", activityEvents: steps } } as ReviewProgress;
+  const frame = encodeMachineProgress(undefined, progress, { conversationId: "chat-s", streamId: "stream-steps", sequence: 1 });
+  assert.equal((await h.call(h.owner, "POST", "/v1/progress", { frames: [frame] })).status, 200);
+  const live = await client.getJson<{ events: Array<{ id: string; content: string; liveStatus?: boolean; activity?: Array<{ kind: string; text: string }>; activityMore?: number }> }>(
+    "/v1/phone/progress", { conversationId: "chat-s" });
+  const [event] = live.events;
+  assert.equal(event?.content, "Reading file");
+  assert.equal(event?.liveStatus, true, "its text is where the run stands, not words of the reply");
+  assert.equal(event?.activity?.length, 12, "the newest steps only");
+  assert.equal(event?.activityMore, 4);
+  assert.deepEqual(event?.activity?.[0], { kind: "shell", text: "npm test 3" }, "the command's first line");
+  const last = event!.activity![11]!;
+  assert.equal(last.kind, "read");
+  assert.equal(last.text.length, 120, "a row stays one short line");
+  assert.ok(last.text.endsWith("…"));
+  assert.ok(JSON.stringify(event).length < 4_000, "a reply that ran many tools stays small on the wire");
+
+  // A classic chat's running reply carries no step rows: its phone, as its
+  // desktop, shows none.
+  const classicRun = "turn-run-classic-1";
+  const classicPending: ChatMessage = { ...pending, id: "bubble-classic", metadata: { runId: classicRun } as ChatMessage["metadata"] };
+  await write(h.owner, { opId: opId(), kind: "message.create", conversationId: "chat-1", message: classicPending });
+  const classicProgress = { ...progress, runId: classicRun, agentProgress: { ...progress.agentProgress!, messageId: "bubble-classic" } } as ReviewProgress;
+  const classicFrame = encodeMachineProgress(undefined, classicProgress, { conversationId: "chat-1", streamId: "stream-classic", sequence: 1 });
+  assert.equal((await h.call(h.owner, "POST", "/v1/progress", { frames: [classicFrame] })).status, 200);
+  const classicLive = await client.getJson<{ events: Array<{ id: string; activity?: unknown; activityMore?: number }> }>("/v1/phone/progress", { conversationId: "chat-1" });
+  const classicEvent = classicLive.events.find((item) => item.id === "bubble-classic");
+  assert.ok(classicEvent, "the classic chat's running reply is there");
+  assert.equal(classicEvent.activity, undefined, "no step rows in a classic chat");
+  assert.equal(classicEvent.activityMore, undefined);
+});
+
+test("a queued running reply reaches the phone as queued, and a machine's run with the time its own run began", async (t) => {
+  const h = await hub(t);
+  const machine = createDeviceIdentity(new Date().toISOString());
+  const { opId, write } = await seedChat(h, machine);
+  const { client } = await pairPhone(h);
+  const queued: ChatMessage = { id: "bubble-queued", role: "participant", participantId: localMember.id, participantLabel: "@mac", content: "",
+    // What a device sends of its queue: the shared word (queuedBehind stays on the device).
+    createdAt: new Date(Date.now() - 60_000).toISOString(), status: "pending", metadata: { runId: "run-queued", queuedBehind: { handle: "mac" }, turnQueued: true } as ChatMessage["metadata"] };
+  const startedAt = new Date(Date.now() - 5_000).toISOString();
+  const remote: ChatMessage = { id: "bubble-remote", role: "participant", participantId: machineMember.id, participantLabel: "@box", content: "",
+    createdAt: new Date(Date.now() - 90_000).toISOString(), status: "pending",
+    metadata: { runId: "run-remote", remoteRunStatus: { phase: "waiting-for-response", label: "Working", startedAt, updatedAt: startedAt } } as ChatMessage["metadata"] };
+  await write(h.owner, { opId: opId(), kind: "message.create", conversationId: "chat-1", message: queued });
+  // A machine member's reply is written by its machine.
+  await write(machine, { opId: opId(), kind: "message.create", conversationId: "chat-1", message: remote });
+  const live = await client.getJson<{ events: Array<{ id: string; queued?: boolean; startedAt?: string }> }>("/v1/phone/progress", { conversationId: "chat-1" });
+  const byId = new Map(live.events.map((event) => [event.id, event]));
+  assert.equal(byId.get("bubble-queued")?.queued, true, "waiting behind the member's turn before it");
+  assert.equal(byId.get("bubble-queued")?.startedAt, undefined);
+  assert.equal(byId.get("bubble-remote")?.startedAt, startedAt, "its Working for counts from when its run began");
+  assert.equal(byId.get("bubble-remote")?.queued, undefined);
+});
+
 test("a certificate is refused when anything in it was changed, or its owner is not the issuer", async (t) => {
   const h = await hub(t);
   const { answer } = await pairPhone(h);

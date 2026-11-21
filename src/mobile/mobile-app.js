@@ -559,7 +559,10 @@
       // An Accord the main session started is its card; a turn's worked time
       // heads its delegations.
       Boolean(left.accordLaunchByMainSession) === Boolean(right.accordLaunchByMainSession) &&
-      (left.workedMs || 0) === (right.workedMs || 0);
+      (left.workedMs || 0) === (right.workedMs || 0) &&
+      // A running reply's steps, and what its Worked for opens to.
+      activitySignature(left) === activitySignature(right) &&
+      Boolean(left.liveStatus) === Boolean(right.liveStatus);
   }
 
   function sameMobileEvent(left, right) {
@@ -723,7 +726,11 @@
             ...(Array.isArray(stored.addressees) && !Array.isArray(entry.addressees) ? { addressees: stored.addressees } : {}),
             ...(stored.participantRequest && !entry.participantRequest ? { participantRequest: stored.participantRequest } : {}),
             ...(stored.accordLaunchByMainSession && !entry.accordLaunchByMainSession ? { accordLaunchByMainSession: true } : {}),
-            ...(typeof stored.workedMs === "number" && typeof entry.workedMs !== "number" ? { workedMs: stored.workedMs } : {})
+            ...(typeof stored.workedMs === "number" && typeof entry.workedMs !== "number" ? { workedMs: stored.workedMs } : {}),
+            // Nor one without the reply's steps (a live copy from a server
+            // before it carried them).
+            ...(Array.isArray(stored.activity) && !Array.isArray(entry.activity)
+              ? { activity: stored.activity, ...(stored.activityMore ? { activityMore: stored.activityMore } : {}) } : {})
           };
           // Nor one that holds fewer of the reply's posts (a live copy from a
           // server before it carried them, a page read before the newest
@@ -3339,6 +3346,9 @@
   let newChatSaid;
   let newChatReading = false;
   let newChatChosen = new Set();
+  // The main session's provider, model and effort the chip chose (sessions
+  // view): { kind, hostId, model, reasoningEffort }; none: as offered.
+  let newChatMainChoice;
   // The project the chat works in: a path the computer offered, or "" for none.
   let newChatProject = "";
   // Pictures for the first message, prepared as the chat's composer prepares them.
@@ -3381,6 +3391,7 @@
     const token = ++newChatToken;
     newChatOffer = undefined;
     newChatChosen = new Set();
+    newChatMainChoice = undefined;
     newChatProject = "";
     newChatReading = true;
     newChatReadingAgain = again;
@@ -3437,7 +3448,7 @@
   function newChatUntouched() {
     if (!newChatOffer) return false;
     const input = document.getElementById("new-chat-input");
-    return newChatChosen.size === 0 && newChatProject === (newChatOffer.options.defaultProject || "") &&
+    return newChatChosen.size === 0 && !newChatMainChoice && newChatProject === (newChatOffer.options.defaultProject || "") &&
       newChatAttachments.length === 0 && newChatPreparing === 0 && !(input && input.value.trim()) &&
       !document.querySelector(".new-chat-picker:not([hidden])");
   }
@@ -3499,6 +3510,9 @@
 
   function closeNewChat() {
     newChatToken += 1;
+    // What the chip chose was for that chat: closed without sending, it is
+    // gone, as on the computer.
+    newChatMainChoice = undefined;
     // Left, New chat reads nothing more until it is opened again, and then
     // from the first pause.
     clearTimeout(newChatRetryTimer);
@@ -3525,7 +3539,7 @@
   }
 
   function closeNewChatPickers() {
-    for (const id of ["new-chat-projects-sheet", "new-chat-members-sheet"]) {
+    for (const id of ["new-chat-projects-sheet", "new-chat-members-sheet", "new-chat-model-sheet"]) {
       const sheet = document.getElementById(id);
       if (sheet) sheet.hidden = true;
     }
@@ -3587,7 +3601,7 @@
   function newChatAvatar(participant) {
     // The main session has no avatar picture: its mark is its provider's
     // logo, as in the sessions view a new chat opens in (and on the desktop).
-    if (isMainSessionMember(participant)) return providerLogoElement(participant.kind, "is-mini");
+    if (isMainSessionMember(participant)) return providerLogoElement(participant.kind, "is-mini", { tile: true });
     const avatar = document.createElement("span");
     avatar.className = "mobile-mention-avatar";
     const assistant = participant.roleConfigId === "administrator";
@@ -3607,6 +3621,175 @@
 
   function isMainSessionMember(participant) {
     return Boolean(participant) && participant.roleConfigId === MAIN_SESSION_ROLE;
+  }
+
+  /** A new chat that opens in the sessions view (the computer's Settings →
+   *  General; unset: sessions) has no members on New chat: its chip chooses
+   *  the main session's provider, model and effort, as on the computer (the
+   *  User, 2026-11-21: "как в T3, выбираешь просто провайдера и модель"). */
+  function newChatSessionsView(offer) {
+    return Boolean(offer) && offer.defaultChatView !== "classic" && isMainSessionMember(newChatLead(offer));
+  }
+
+  /** The providers the chip offers: the computer's list, else (a computer
+   *  from before) the offered main session's own. */
+  function newChatProviders(offer) {
+    if (offer && Array.isArray(offer.mainSessionProviders) && offer.mainSessionProviders.length > 0) return offer.mainSessionProviders;
+    const lead = newChatLead(offer);
+    return lead ? [{ kind: lead.kind, label: memberKindLabel(lead.kind), defaultModelLabel: memberKindLabel(lead.kind), models: [], efforts: [] }] : [];
+  }
+
+  /** What the chip shows chosen: the choice while the offer still has its
+   *  provider, else the offered main session's provider with its CLI's own
+   *  model and effort. */
+  function newChatMainSelection(offer) {
+    const providers = newChatProviders(offer);
+    const lead = newChatLead(offer);
+    const same = function (item, choice) { return item.kind === choice.kind && (item.hostId || "") === (choice.hostId || ""); };
+    const chosen = newChatMainChoice && providers.find(function (item) { return same(item, newChatMainChoice); });
+    const provider = chosen || (lead && providers.find(function (item) { return same(item, { kind: lead.kind, hostId: lead.hostId }); })) || providers[0];
+    if (!provider) return undefined;
+    const model = chosen && newChatMainChoice.model && provider.models.some(function (item) { return item.id === newChatMainChoice.model; }) ? newChatMainChoice.model : undefined;
+    const modelEntry = model ? provider.models.find(function (item) { return item.id === model; }) : undefined;
+    const efforts = (modelEntry && modelEntry.efforts) || provider.efforts || [];
+    const effort = chosen && newChatMainChoice.reasoningEffort && efforts.some(function (item) { return item.id === newChatMainChoice.reasoningEffort; }) ? newChatMainChoice.reasoningEffort : undefined;
+    // Its CLI's mode in the CLI's own terms, the computer's picker's modes and
+    // words (chatAccessModes): the one its CLI starts in until one is chosen.
+    const accessOptions = newChatAccessOptions(provider.kind);
+    const defaultAccess = accessOptions.length > 0 ? newChatDefaultAccess(provider.kind) : undefined;
+    const access = chosen && newChatMainChoice.access && accessOptions.some(function (item) { return item.id === newChatMainChoice.access; })
+      ? newChatMainChoice.access : defaultAccess;
+    // Where it runs: one of the machines, once there is one; else this computer.
+    const homeMachineId = chosen && newChatMainChoice.homeMachineId && newChatMachineList().some(function (item) { return item.id === newChatMainChoice.homeMachineId; })
+      ? newChatMainChoice.homeMachineId : undefined;
+    return { provider: provider, model: model, modelLabel: modelEntry ? modelEntry.label : provider.defaultModelLabel, efforts: efforts,
+      effort: effort, effortLabel: effort ? (efforts.find(function (item) { return item.id === effort; }) || {}).label : undefined,
+      accessOptions: accessOptions, access: access, homeMachineId: homeMachineId };
+  }
+
+  /** The modes the computer's picker lists for this CLI (one shared list). */
+  function newChatAccessOptions(kind) {
+    const shared = mobileSharedRules();
+    return shared && typeof shared.chatAccessOptions === "function" ? shared.chatAccessOptions(kind) : [];
+  }
+
+  function newChatDefaultAccess(kind) {
+    const shared = mobileSharedRules();
+    const option = shared && typeof shared.defaultChatAccessOption === "function" ? shared.defaultChatAccessOption(kind) : undefined;
+    return option ? option.id : undefined;
+  }
+
+  /** The machines the server knows, by name: where a main session can run
+   *  besides this computer. None: New chat does not ask where it runs. */
+  function newChatMachineList() {
+    const machines = newChatOffer && newChatOffer.machines ? newChatOffer.machines : {};
+    return Object.keys(machines).map(function (id) { return { id: id, name: machines[id] || "Machine" }; });
+  }
+
+  /** The projects a machine has, as the computer said for the members that
+   *  run there (none known: it is not held to a project). */
+  function newChatMachineProjects(machineId) {
+    const offer = newChatOffer && newChatOffer.options;
+    const member = offer && (offer.members || []).find(function (item) {
+      return Array.isArray(item.projects) && (item.machineId || (item.participant && item.participant.homeMachineId)) === machineId;
+    });
+    return member ? member.projects : undefined;
+  }
+
+  /** Whether a machine has the chat's project (or the chat has none), by the
+   *  rule members on machines are held to. */
+  function newChatMachineFitsProject(machineId) {
+    const shared = mobileSharedRules();
+    if (!machineId || !shared || typeof shared.newChatMemberFitsProject !== "function") return true;
+    return shared.newChatMemberFitsProject({ projects: newChatMachineProjects(machineId) }, newChatProject);
+  }
+
+  function newChatOptionRow(options) {
+    const row = document.createElement("button");
+    row.type = "button";
+    row.className = "members-sheet-row new-chat-option new-chat-model-option";
+    row.setAttribute("aria-pressed", options.chosen ? "true" : "false");
+    if (options.data) for (const key of Object.keys(options.data)) row.dataset[key] = options.data[key];
+    const copy = document.createElement("span");
+    copy.className = "members-sheet-copy";
+    const name = document.createElement("strong");
+    name.textContent = options.label;
+    copy.append(name);
+    if (options.detail) {
+      const detail = document.createElement("span");
+      detail.className = "members-sheet-location";
+      detail.textContent = options.detail;
+      copy.append(detail);
+    }
+    if (options.mark) row.append(options.mark);
+    row.append(copy, newChatCheck(options.chosen));
+    row.addEventListener("click", options.onClick);
+    return row;
+  }
+
+  /** The chip's sheet: the providers, the chosen one's models (its default
+   *  first) and its efforts. */
+  function renderNewChatModelOptions(offer) {
+    const list = document.getElementById("new-chat-model-options");
+    if (!list) return;
+    list.replaceChildren();
+    const selection = offer && newChatSessionsView(offer) ? newChatMainSelection(offer) : undefined;
+    if (!selection) return;
+    const section = function (text) {
+      const head = document.createElement("div");
+      head.className = "members-sheet-section";
+      head.textContent = text;
+      list.append(head);
+    };
+    const choose = function (patch) {
+      const current = { kind: selection.provider.kind, hostId: selection.provider.hostId, model: selection.model, reasoningEffort: selection.effort,
+        access: selection.access, homeMachineId: selection.homeMachineId };
+      newChatMainChoice = Object.assign(current, patch);
+      renderNewChat("");
+    };
+    section("Provider");
+    for (const provider of newChatProviders(offer)) {
+      const chosen = provider.kind === selection.provider.kind && (provider.hostId || "") === (selection.provider.hostId || "");
+      list.append(newChatOptionRow({ label: provider.label, chosen: chosen, mark: providerLogoElement(provider.kind, "is-small"),
+        data: { providerKind: provider.kind, hostId: provider.hostId || "" },
+        // Another provider: its own default model, effort and mode, as the
+        // computer drops what was chosen for the one before.
+        onClick: function () {
+          if (chosen) return;
+          choose({ kind: provider.kind, hostId: provider.hostId, model: undefined, reasoningEffort: undefined, access: undefined, homeMachineId: undefined });
+        } }));
+    }
+    section("Model");
+    list.append(newChatOptionRow({ label: selection.provider.defaultModelLabel, detail: "Default", chosen: !selection.model, data: { model: "" },
+      onClick: function () { choose({ model: undefined }); } }));
+    for (const model of selection.provider.models) {
+      list.append(newChatOptionRow({ label: model.label, chosen: selection.model === model.id, data: { model: model.id },
+        onClick: function () { choose({ model: model.id }); } }));
+    }
+    section("Effort");
+    list.append(newChatOptionRow({ label: "Default", chosen: !selection.effort, data: { effort: "" }, onClick: function () { choose({ reasoningEffort: undefined }); } }));
+    for (const effort of selection.efforts) {
+      list.append(newChatOptionRow({ label: effort.label, chosen: selection.effort === effort.id, data: { effort: effort.id },
+        onClick: function () { choose({ reasoningEffort: effort.id }); } }));
+    }
+    if (selection.accessOptions.length > 0) {
+      section("Access");
+      for (const option of selection.accessOptions) {
+        list.append(newChatOptionRow({ label: option.label, detail: option.detail, chosen: selection.access === option.id, data: { access: option.id },
+          onClick: function () { choose({ access: option.id }); } }));
+      }
+    }
+    const machines = newChatMachineList();
+    if (machines.length > 0) {
+      section("Runs on");
+      list.append(newChatOptionRow({ label: "This computer", chosen: !selection.homeMachineId, data: { runsOn: "" },
+        onClick: function () { choose({ homeMachineId: undefined }); } }));
+      for (const machine of machines) {
+        list.append(newChatOptionRow({ label: machine.name, chosen: selection.homeMachineId === machine.id, data: { runsOn: machine.id },
+          detail: newChatMachineFitsProject(machine.id) ? undefined : "Does not have this project",
+          onClick: function () { choose({ homeMachineId: machine.id }); } }));
+      }
+    }
   }
 
   function newChatMemberName(participant) {
@@ -3696,10 +3879,11 @@
         projects.append(divider, newChatProjectRow(undefined, !newChatProject));
       }
     }
+    renderNewChatModelOptions(offer);
     const list = document.getElementById("new-chat-members");
     if (list) {
       list.replaceChildren();
-      if (offer) {
+      if (offer && !newChatSessionsView(offer)) {
         list.append(newChatMemberRow(newChatLead(offer), { chosen: true, locked: true }));
         for (const member of newChatVisibleMembers(offer)) {
           const unavailable = member.unavailable || member.machineUnavailable;
@@ -3735,6 +3919,34 @@
       if (projectButton) projectButton.setAttribute("aria-label", "Project: " + projectLabel.textContent);
     }
     const chosen = newChatChosenParticipants(offer);
+    // The sessions view: the model chip instead of the members.
+    const sessionsView = newChatSessionsView(offer);
+    const modelButton = document.getElementById("new-chat-model-button");
+    if (membersButton) membersButton.hidden = sessionsView;
+    if (modelButton) {
+      modelButton.hidden = !sessionsView;
+      modelButton.disabled = !offer;
+      const selection = sessionsView ? newChatMainSelection(offer) : undefined;
+      const label = document.getElementById("new-chat-model-label");
+      const key = selection ? [selection.provider.kind, selection.provider.hostId || "", selection.modelLabel, selection.effortLabel || ""].join("\u0000") : "";
+      if (label && label.dataset.key !== key) {
+        label.dataset.key = key;
+        label.replaceChildren();
+        if (selection) {
+          const model = document.createElement("span");
+          model.className = "new-chat-model-name";
+          model.textContent = selection.modelLabel;
+          label.append(providerLogoElement(selection.provider.kind, "is-chip"), model);
+          if (selection.effortLabel) {
+            const effort = document.createElement("span");
+            effort.className = "new-chat-model-effort";
+            effort.textContent = selection.effortLabel;
+            label.append(effort);
+          }
+        }
+      }
+      modelButton.setAttribute("aria-label", selection ? "Model: " + [selection.provider.label, selection.modelLabel, selection.effortLabel].filter(Boolean).join(", ") : "Model");
+    }
     if (membersButton) {
       membersButton.disabled = !offer;
       membersButton.setAttribute("aria-label", chosen.length ? "Members: " + chosen.map(newChatMemberName).join(", ") : "Members");
@@ -3768,9 +3980,9 @@
     if (start) start.disabled = newChatStarting || newChatPreparing > 0 || !offer || Boolean(offer.unavailable) || !hasMessage;
     // What is being started is what was on the card when Start was tapped.
     if (input) input.readOnly = newChatStarting;
-    for (const id of ["new-chat-project", "new-chat-members-button"]) {
+    for (const id of ["new-chat-project", "new-chat-members-button", "new-chat-model-button"]) {
       const button = document.getElementById(id);
-      const sheet = document.getElementById(id === "new-chat-project" ? "new-chat-projects-sheet" : "new-chat-members-sheet");
+      const sheet = document.getElementById(id === "new-chat-project" ? "new-chat-projects-sheet" : id === "new-chat-model-button" ? "new-chat-model-sheet" : "new-chat-members-sheet");
       if (button) button.setAttribute("aria-expanded", sheet && !sheet.hidden ? "true" : "false");
     }
     if (input) {
@@ -3820,12 +4032,23 @@
     });
     // As on the computer, a picture on its own starts a chat.
     if (!offer || offer.unavailable || (!text && attachments.length === 0) || !shared || newChatStarting) return;
+    // In the sessions view the chat is made with its main session alone, on
+    // what the chip chose: no member is picked, an @ in the text included.
+    const sessionsView = newChatSessionsView(offer);
     // Each member it gets, chosen or named with @, must be one the computer
     // could add now, as the computer's New chat checks them all.
-    const picked = shared.newChatPickedMembers({ members: offer.members, chosenConfigIds: Array.from(newChatChosen), firstMessage: text });
+    const picked = sessionsView ? [] : shared.newChatPickedMembers({ members: offer.members, chosenConfigIds: Array.from(newChatChosen), firstMessage: text });
     const blocked = picked.find(function (member) { return member.unavailable || member.machineUnavailable; });
     if (blocked) {
       renderNewChat(blocked.unavailable || blocked.machineUnavailable);
+      return;
+    }
+    // The main session on a machine that does not have this project would
+    // wait for the computer to copy it there, as a member would.
+    const mainChoice = sessionsView ? newChatMainSelection(offer) : undefined;
+    if (mainChoice && mainChoice.homeMachineId && !newChatMachineFitsProject(mainChoice.homeMachineId)) {
+      const machineName = (newChatMachineList().find(function (item) { return item.id === mainChoice.homeMachineId; }) || {}).name || "That machine";
+      renderNewChat(machineName + " does not have this project. Choose a project it has, No project, or This computer.");
       return;
     }
     // Named with @, a member whose machine does not have this project would
@@ -3846,9 +4069,15 @@
       const createdAt = nowIso();
       // The main session leads, as on the computer (passed under both names
       // the shared rule has known it by).
-      const lead = newChatLead(offer);
+      const offeredLead = newChatLead(offer);
+      const selection = sessionsView ? newChatMainSelection(offer) : undefined;
+      const lead = selection && typeof shared.newChatMainSessionFor === "function"
+        ? shared.newChatMainSessionFor(offeredLead, offer.mainSessionProviders, { kind: selection.provider.kind, hostId: selection.provider.hostId,
+          model: selection.model, reasoningEffort: selection.effort, access: selection.access, homeMachineId: selection.homeMachineId })
+        : offeredLead;
       const participants = shared.newChatParticipants({
-        assistant: lead, mainSession: lead, members: offer.members, chosenConfigIds: Array.from(newChatChosen), firstMessage: text, newId: createEventId,
+        assistant: lead, mainSession: lead, members: sessionsView ? [] : offer.members, chosenConfigIds: sessionsView ? [] : Array.from(newChatChosen),
+        firstMessage: sessionsView ? "" : text, newId: createEventId,
         // Its rights follow the project as on the computer: it reads the
         // project only when the chat has one.
         project: newChatProject || ""
@@ -3904,6 +4133,7 @@
     }
     newChatStarting = false;
     if (input) input.value = "";
+    newChatMainChoice = undefined;
     newChatAttachments = [];
     renderNewChatAttachments();
     closeNewChat();
@@ -3916,7 +4146,8 @@
    *  member this chat can have, as the computer's New chat lists them. */
   function newChatMentionMembers() {
     const offer = newChatOffer && newChatOffer.options;
-    if (!offer) return [];
+    // The sessions view offers no members to name (the computer's neither).
+    if (!offer || newChatSessionsView(offer)) return [];
     const option = function (participant, configId) {
       return { handle: participant.handle, mentionHandle: participant.handle, displayName: newChatMemberName(participant),
         roleLabel: newChatMemberRoleLine(participant),
@@ -4019,6 +4250,7 @@
     });
     document.getElementById("new-chat-project")?.addEventListener("click", function () { openNewChatPicker("new-chat-projects-sheet"); });
     document.getElementById("new-chat-members-button")?.addEventListener("click", function () { openNewChatPicker("new-chat-members-sheet"); });
+    document.getElementById("new-chat-model-button")?.addEventListener("click", function () { openNewChatPicker("new-chat-model-sheet"); });
     input?.addEventListener("input", function () {
       renderNewChatState();
       renderNewChatMentions();
@@ -4921,6 +5153,26 @@
       .map(function (item) { return item.post; });
   }
 
+  // A reply's steps as the sessions view shows them (shared/sessionsActivity.ts),
+  // made short by the server: one row each, the newest last, and how many
+  // earlier ones were left out.
+  const SESSIONS_ACTIVITY_KINDS = new Set(["thinking", "web", "shell", "read", "edit", "tool", "status"]);
+  function activityOfEvent(event) {
+    if (!event || !Array.isArray(event.activity)) return {};
+    const activity = event.activity.filter(function (row) {
+      return row && SESSIONS_ACTIVITY_KINDS.has(row.kind) && typeof row.text === "string" && row.text.trim();
+    }).slice(-24).map(function (row) { return { kind: row.kind, text: row.text.slice(0, 200) }; });
+    if (activity.length === 0) return {};
+    const more = Number.isFinite(event.activityMore) && event.activityMore > 0 ? Math.floor(event.activityMore) : 0;
+    return more > 0 ? { activity: activity, activityMore: more } : { activity: activity };
+  }
+
+  function activitySignature(entry) {
+    return entry && Array.isArray(entry.activity) && entry.activity.length
+      ? JSON.stringify([entry.activity, entry.activityMore || 0])
+      : "";
+  }
+
   function interimPostsSignature(entry) {
     return entry && Array.isArray(entry.interimPosts)
       ? entry.interimPosts.map(function (post) { return post.id; }).join(",")
@@ -5340,6 +5592,7 @@
       const content = typeof event.content === "string" ? event.content.trim() : "";
       const attachments = timelineAttachmentsFromEvent(event);
       const interimPosts = event.role === "participant" ? interimPostsOfEvent(event) : {};
+      const activity = event.role === "participant" ? activityOfEvent(event) : {};
       // A picture with no caption is still a message. Requiring text dropped it.
       if (!content && attachments.length === 0) {
         // A turn that ended with nothing to say travels hidden and empty: it
@@ -5457,6 +5710,15 @@
         // A member's request: its task card and the members list read it.
         ...(role === "participant" ? taskBatchOfEvent(event) : {}),
         ...interimPosts,
+        // Its steps, as the sessions view's rows show them, and whether its
+        // live text is where the run stands rather than words of the reply.
+        ...activity,
+        ...(role === "participant" && status === "pending" && event.liveStatus === true ? { liveStatus: true } : {}),
+        // Waiting behind its member's turn before it, or when its own run
+        // began: its "Queued", and where its "Working for …" counts from.
+        ...(role === "participant" && status === "pending" && event.queued === true ? { queued: true } : {}),
+        ...(role === "participant" && status === "pending" && typeof event.startedAt === "string" && !Number.isNaN(Date.parse(event.startedAt))
+          ? { startedAt: event.startedAt } : {}),
         // An Accord the main session started: its card, like the User's own.
         ...(role === "participant" && event.accordLaunchByMainSession === true ? { accordLaunchByMainSession: true } : {}),
         // How long the turn worked: the sessions view's "Worked for …".
@@ -7445,7 +7707,7 @@
 
   /** What a card is drawn from, so an unchanged card is not drawn again. */
   function controlCardSignature(card) {
-    return JSON.stringify([card.id, card.kind, card.status, card.waiting === true, card.outcome || "", card.title, card.summary, card.requesterLabel,
+    return JSON.stringify([card.id, card.kind, card.status, card.waiting === true, card.outcome || "", card.title, card.summary, cardRequesterLabel(card),
       card.machineName, card.options, card.recommendedOptionId, card.allowsCustomAnswer, card.allowsCancel,
       isCardLocked(card.id) || controlCardAnswering.has(card.id), controlCardErrors.get(card.id) || "",
       cardSentText(card.id), cardOutcome(card.id) || "", card.signInUrl || ""]);
@@ -7497,7 +7759,7 @@
    *  scrolling cannot answer for her. */
   function choiceCardBody(wrap, card, sent) {
     const draft = choiceDraft(card);
-    const who = card.requesterLabel || "the member";
+    const who = cardRequesterLabel(card) || "the member";
     const list = document.createElement("div");
     list.className = "control-card-choices";
     list.setAttribute("role", "radiogroup");
@@ -7708,6 +7970,36 @@
     if (active && node.contains(active) && typeof active.blur === "function") active.blur();
   }
 
+  /** Who raised a card, beside its title: the member's handle, except in a
+   *  sessions-view chat, where no handle is shown (docs/main-session.md): the
+   *  main session reads "Main session", a member its task's title. The label
+   *  is cut with an ellipsis rather than pushed off the screen. */
+  function appendCardWho(head, card) {
+    const requester = cardRequesterLabel(card);
+    if (!requester && !card.machineName) return;
+    const who = document.createElement("span");
+    who.className = "control-card-who";
+    who.textContent = [requester, card.machineName].filter(Boolean).join(" · ");
+    who.title = who.textContent;
+    head.append(who);
+  }
+
+  function cardRequesterLabel(card) {
+    const label = card.requesterLabel;
+    if (!label) return label;
+    const chat = loadChats().find(function (item) { return item.id === card.conversationId; });
+    if (!chat || chatViewOf(chat) !== "sessions") return label;
+    const handle = String(label).replace(/^@/, "").toLowerCase();
+    const member = chatMembers(chat).find(function (item) {
+      return String(item.mentionHandle || item.handle || "").replace(/^@/, "").toLowerCase() === handle;
+    });
+    if (member && (member.id === chat.mainSessionParticipantId || member.roleConfigId === MAIN_SESSION_ROLE)) return "Main session";
+    const state = lastSessionsState && lastSessionsState.conversationId === card.conversationId ? lastSessionsState : undefined;
+    if (member && state) return sessionsMemberTitleOf(state, member.id);
+    // A member this phone has no task for yet: its handle as a plain word.
+    return handle || label;
+  }
+
   function controlCardElement(card) {
     if (card.waiting === true) {
       // Answered and not done yet: what was approved and what it waits for.
@@ -7733,12 +8025,7 @@
     title.className = "control-card-title";
     title.textContent = card.title || (card.kind === "permission" ? "Permission request" : "Choice");
     head.append(title);
-    if (card.requesterLabel || card.machineName) {
-      const who = document.createElement("span");
-      who.className = "control-card-who";
-      who.textContent = [card.requesterLabel, card.machineName].filter(Boolean).join(" · ");
-      head.append(who);
-    }
+    appendCardWho(head, card);
     wrap.append(head);
 
     if (card.summary) {
@@ -8069,29 +8356,47 @@
     keepingReaderAtLatest(applyDock);
   }
 
-  // The sessions view's main timeline the composer last drew its button for.
+  // The sessions view the composer last drew its button for, and whose run
+  // it stops: the main session's on the main timeline, a member's in its
+  // session.
   let composerStopState;
+  let composerStopIds = [];
 
-  /** The sessions view's main composer, as the desktop's: while the main
-   *  session itself runs and nothing is written, its send button stops that
-   *  run (T3 Code's and Claude's Stop); writing turns it back into Send.
-   *  Members are stopped from the Waiting line and the panel. */
-  function syncComposerStop(state) {
+  /** The sessions view's composer, as the desktop's: while the session it
+   *  writes to runs (the main session on the main timeline, the member in
+   *  its session) and nothing is written, its send button stops that run
+   *  (T3 Code's and Claude's Stop); with something written it is Send again
+   *  and Stop stands beside it, since the CLI interrupts whatever is typed.
+   *  Members are stopped from the Waiting line and the panel too. */
+  function syncComposerStop(state, memberId) {
     composerStopState = state;
+    // Drawn again for the same screen (typing, a run starting or ending):
+    // it keeps stopping whom it stopped, a member in its session included.
+    if (arguments.length < 2 && state) {
+      // composerStopIds stay as the screen last set them.
+    } else if (memberId !== undefined || !state) composerStopIds = state && memberId ? [memberId] : [];
+    else composerStopIds = state.mainId ? [state.mainId] : [];
     const button = document.getElementById("send-button");
     const input = document.getElementById("composer-input");
     if (!button || !input) return;
     const empty = !input.value.trim() && pendingAttachments.length === 0 && attachmentsPreparing === 0;
-    const ids = state && state.mainId ? [state.mainId] : [];
+    const ids = composerStopIds;
     const canStop = ids.length > 0 && sessionsCanStop(state, ids);
     const stopping = ids.length > 0 && !canStop && sessionsStopping(state, ids);
+    const side = document.getElementById("composer-stop-button");
+    if (side) {
+      side.hidden = empty || (!canStop && !stopping);
+      side.disabled = !canStop;
+      side.setAttribute("aria-label", stopping ? "Stopping" : ids[0] && state && ids[0] === state.mainId ? "Stop the main session" : "Stop this member");
+    }
     const mode = empty && canStop ? "stop" : empty && stopping ? "stopping" : "send";
+    const whose = ids[0] && state && ids[0] === state.mainId ? "the main session" : "this member";
+    button.setAttribute("aria-label", mode === "send" ? "Send message" : mode === "stop" ? "Stop " + whose : "Stopping " + whose);
     if ((button.dataset.mode || "send") === mode) return;
     button.dataset.mode = mode;
     button.classList.toggle("is-stop", mode !== "send");
     button.type = mode === "send" ? "submit" : "button";
     button.disabled = mode === "stopping";
-    button.setAttribute("aria-label", mode === "send" ? "Send message" : mode === "stop" ? "Stop the main session" : "Stopping the main session");
     if (mode === "send") {
       const icon = lineIcon(["M12 19V5M5 12l7-7 7 7"], 19);
       icon.setAttribute("stroke-width", "2.1");
@@ -9372,6 +9677,14 @@
         ...(Array.isArray(entry.interimPosts) && entry.interimPosts.length ? { interimPosts: entry.interimPosts } : {}),
         ...(entry.accordLaunchByMainSession ? { accordLaunchByMainSession: true } : {}),
         ...(typeof entry.workedMs === "number" ? { workedMs: entry.workedMs } : {}),
+        ...(Array.isArray(entry.activity) && entry.activity.length ? { activity: entry.activity } : {}),
+        ...(entry.activityMore ? { activityMore: entry.activityMore } : {}),
+        ...(entry.liveStatus && entry.status === "pending" ? { liveStatus: true } : {}),
+        // Waiting behind the member's turn before it: "Queued", and its
+        // "Working for …" starts once its own turn does (startedAt), as on
+        // the desktop.
+        ...(entry.queued && entry.status === "pending" ? { queued: true } : {}),
+        ...(typeof entry.startedAt === "string" && entry.startedAt ? { startedAt: entry.startedAt } : {}),
         // A member's "@x is running…" row is still its turn: the sessions
         // view stops it by its run like any running reply.
         ...(isScaffoldingEntry(entry) && entry.participantLabel && entry.participantId && entry.runId ? { memberTurn: true } : {}),
@@ -9465,7 +9778,7 @@
     const finalHeading = sessionMember ? sessionsMemberName(sessionMember) : accordScreen ? "Accord" : openThread ? "Thread" : activeChat?.title || "AccordAgents";
     if (title && title.textContent !== finalHeading) title.textContent = finalHeading;
     renderThreadHeader(openThread, sessionMember, Boolean(accordScreen));
-    syncComposerStop(sessions && !sessionMember && !accordScreen ? sessions : undefined);
+    syncComposerStop(sessions && !accordScreen && !readOnlyScreen ? sessions : undefined, sessionMember ? sessionMember.id : undefined);
     renderChatViewSwitch(activeId, activeChat, Boolean(openThread || sessionMember || accordScreen));
     renderMembersButton(activeId, activeChat);
     renderMembersSheetIfOpen(activeChat);
@@ -9816,6 +10129,13 @@
       presentation: entry.presentation,
       authorLabel: entry.authorLabel,
       worked: sessionsView ? entry.workedMs : undefined,
+      // Its steps (a running reply's rows; what its Worked for opens to, and
+      // whether it is open).
+      activity: sessionsView && activitySignature(entry)
+        ? activitySignature(entry) + (openWorkedFolds.has(entry.rowKey || entry.id) ? ":open" : "") : undefined,
+      liveStatus: sessionsView && entry.liveStatus ? true : undefined,
+      queued: sessionsView && entry.queued ? true : undefined,
+      startedAt: sessionsView ? entry.startedAt : undefined,
       sessions: sessionsView ? sessionsSpecialSignature(entry) : undefined,
       avatar: entry.author === "agent" && entry.identified !== false && !sessionsView ? avatarSignature(rowAvatar(entry)) : undefined,
       identified: entry.identified,
@@ -9942,6 +10262,9 @@
   }
 
   function messageStatusLabel(entry) {
+    // A running reply of the sessions view says "Working for …" instead;
+    // one still waiting behind the member's turn before it, "Queued".
+    if (isSessionsRunningEntry(entry)) return entry.queued ? "Queued" : "";
     // A refused message of the User's says why; one not sent yet is faded
     // and shows its time like any other.
     if (entry.author === "you" && entry.mark) return entry.mark;
@@ -10095,10 +10418,22 @@
 
   function syncMessageStopButton(meta, entry) {
     let button = meta.querySelector(".message-stop");
-    const visible = isCancellableMobileRow(entry);
+    // The sessions view's composer (and a member session's head) stops a
+    // running reply: the reply itself has no Stop, as in T3 Code. A reply
+    // still queued is taken back from its own row (a small ×), as on the
+    // desktop.
+    // A queued member's turn is still "@x is running…" text: its run is what
+    // is taken back, as the sessions view stops any member's turn.
+    const queuedInSessions = isSessionsRunningEntry(entry) && entry.queued === true && Boolean(entry.runId) &&
+      (entry.cancellable !== false || entry.memberTurn === true);
+    const visible = queuedInSessions || (isCancellableMobileRow(entry) && !isSessionsRunningEntry(entry));
     if (!visible) {
       button?.remove();
       return;
+    }
+    if (button && button.classList.contains("is-queued-cancel") !== queuedInSessions) {
+      button.remove();
+      button = null;
     }
     if (!button) {
       button = document.createElement("button");
@@ -10112,15 +10447,22 @@
           return;
         }
         button.disabled = true;
-        button.textContent = "Stopping…";
+        if (!button.classList.contains("is-queued-cancel")) button.textContent = "Stopping…";
         void stopRunFromPhone(targetRunId, undefined, { messageId: button.dataset.turnMessageId, participantId: button.dataset.participantId });
       });
+      if (queuedInSessions) button.classList.add("is-queued-cancel");
       meta.append(button);
     }
     button.dataset.runId = entry.runId;
     button.dataset.turnMessageId = entry.sourceMessageId || "";
     button.dataset.participantId = entry.participantId || "";
     button.disabled = entry.stopRequested === true;
+    if (queuedInSessions) {
+      button.textContent = "\u00d7";
+      button.setAttribute("aria-label", "Cancel this queued reply");
+      button.title = "Cancel";
+      return;
+    }
     button.textContent = entry.stopRequested ? "Stopping…" : "Stop";
     button.setAttribute("aria-label", "Stop response from " + rowHandleText(entry));
   }
@@ -11008,7 +11350,10 @@
       status.textContent = messageStatusLabel(entry);
       const content = document.createElement("div");
       content.className = "message-content";
-      if (isThinkingEntry(entry)) {
+      if (isSessionsRunningEntry(entry)) {
+        // No "Thinking" word: its "Working for …" and its steps say it.
+        renderMessageContentIfChanged(content, sessionsRunningText(entry), entry.author);
+      } else if (isThinkingEntry(entry)) {
         renderThinkingInto(content, entry);
       } else {
         renderMessageContentIfChanged(content, entry.content, entry.author);
@@ -11028,6 +11373,7 @@
       // What the member posted during its turn sits inside the reply, above
       // its final text (shared/interimPosts.ts).
       syncInterimPosts(copy, content, entry);
+      syncSessionsWorking(copy, meta, entry);
       renderAttachmentsInto(attachmentsNodeFor(copy), entry);
       syncAnsweredCards(copy, entry);
       syncPendingCards(copy, entry);
@@ -11325,7 +11671,7 @@
     const outcome = card.outcome || "Answered";
     const when = card.decidedAt ? formatClockTime(card.decidedAt) : "";
     const row = cardRowElement("article", lineIcon(CHOICE_ROW_PATHS, 14), card.title || "Choice",
-      [card.requesterLabel, outcome + (when ? " " + when : "")].filter(Boolean).join(" · "), false);
+      [cardRequesterLabel(card), outcome + (when ? " " + when : "")].filter(Boolean).join(" · "), false);
     row.classList.add("control-card-answered");
     row.querySelector(".card-row-outcome").title = outcome;
     row.dataset.cardId = card.id;
@@ -11348,12 +11694,7 @@
     // Headed as the live card is, now that a permission folds as well.
     title.textContent = card.title || (card.kind === "permission" ? "Permission request" : "Choice");
     head.append(title);
-    if (card.requesterLabel || card.machineName) {
-      const who = document.createElement("span");
-      who.className = "control-card-who";
-      who.textContent = [card.requesterLabel, card.machineName].filter(Boolean).join(" · ");
-      head.append(who);
-    }
+    appendCardWho(head, card);
     wrap.append(head);
     if (card.summary) {
       const summary = document.createElement("p");
@@ -11500,15 +11841,16 @@
       syncMessageStopButton(meta, entry);
       // A running row drawn again in place (its posts came) keeps "Thinking"
       // as a new row draws it, not the placeholder sentence.
-      if (isThinkingEntry(entry)) {
+      if (isThinkingEntry(entry) && !isSessionsRunningEntry(entry)) {
         delete content.dataset.markdownRaw;
         delete content.dataset.markdownSource;
         renderThinkingInto(content, entry);
       } else {
         delete content.dataset.thinking;
-        renderMessageContentIfChanged(content, entry.content, entry.author);
+        renderMessageContentIfChanged(content, isSessionsRunningEntry(entry) ? sessionsRunningText(entry) : entry.content, entry.author);
       }
       if (content.parentElement) syncInterimPosts(content.parentElement, content, entry);
+      if (content.parentElement) syncSessionsWorking(content.parentElement, meta, entry);
       // Its "Worked for …" (and the tasks its turn gave): a reply that
       // finished on screen gets it as a new row has it.
       if (content.parentElement) syncSessionsWorked(content.parentElement, meta, content, entry);
@@ -12052,6 +12394,9 @@
         base.delegations = {
           key: key, live: live, open: live || openWorkedFolds.has(key),
           workedMs: typeof row.workedMs === "number" ? row.workedMs : undefined,
+          // A finished turn's steps, which its fold opens to with its tasks
+          // (while it runs they are under its "Working for …").
+          ...(!live && Array.isArray(row.activity) && row.activity.length ? { activity: row.activity, activityMore: row.activityMore || 0 } : {}),
           summary: shared.sessionsDelegationSummary(tasks.reduce(function (count, task) {
             return count + (task.metadata.participantRequest ? task.metadata.participantRequest.items.length : 0);
           }, 0)),
@@ -12209,9 +12554,13 @@
   /** A member's provider logo tile (no avatar picture anywhere in the
    *  sessions view); an empty tile for a member whose provider is not known
    *  (one that left the chat). */
-  function providerLogoElement(kind, className) {
+  /** A member's provider mark. In the sessions view the bare glyph (Claude's
+   *  orange asterisk, Codex's glyph, Antigravity's "A") sized to the text
+   *  beside it, as T3 Code shows it (the User, 2026-11-21); `options.tile`
+   *  puts it on its logo tile (the classic New chat's main session row). */
+  function providerLogoElement(kind, className, options) {
     const tile = document.createElement("span");
-    tile.className = "provider-logo" + (className ? " " + className : "");
+    tile.className = "provider-logo" + (className ? " " + className : "") + (options && options.tile ? "" : " is-bare");
     tile.dataset.providerKind = kind || "unknown";
     const label = memberKindLabel(kind);
     if (label) {
@@ -12305,7 +12654,120 @@
   function sessionsWorkedSignature(entry) {
     if (entry.presentation !== "sessions") return "";
     if (entry.delegations && !entry.delegations.standalone) return "delegations:" + JSON.stringify(entry.delegations);
-    return !entry.delegations && entry.status === "Done" && typeof entry.workedMs === "number" ? "worked:" + entry.workedMs : "";
+    if (entry.delegations || entry.status !== "Done") return "";
+    const steps = activitySignature(entry);
+    if (typeof entry.workedMs !== "number" && !steps) return "";
+    return "worked:" + (typeof entry.workedMs === "number" ? entry.workedMs : "") +
+      (steps ? ":" + steps + (openWorkedFolds.has(entry.rowKey || entry.id) ? ":open" : "") : "");
+  }
+
+  // --- a running reply's work (T3 Code's turn in progress) --------------------
+  // The sessions view's running reply (the User, 2026-11-21), as on the
+  // desktop: a quiet "Working for 4s" over a hairline, then one row per step,
+  // an outline icon by its kind and what it is about in muted text, the
+  // newest shimmering. No status label, no "Thinking" word, no Stop on the
+  // reply (the composer's button stops it). Once done, its "Worked for …"
+  // opens to the same rows.
+
+  /** A reply of the sessions view still being written. */
+  function isSessionsRunningEntry(entry) {
+    return Boolean(entry) && entry.presentation === "sessions" && entry.author === "agent" && entry.status === "Running" && !entry.scaffolding;
+  }
+
+  // Outline icons by step (lucide's brain, globe, terminal, file-text, pencil,
+  // wrench and activity), the desktop's own.
+  const SESSIONS_ACTIVITY_ICONS = {
+    thinking: ["M12 5a3 3 0 1 0-5.997.125 4 4 0 0 0-2.526 5.77 4 4 0 0 0 .556 6.588A4 4 0 1 0 12 18Z", "M12 5a3 3 0 1 1 5.997.125 4 4 0 0 1 2.526 5.77 4 4 0 0 1-.556 6.588A4 4 0 1 1 12 18Z",
+      "M15 13a4.5 4.5 0 0 1-3-4 4.5 4.5 0 0 1-3 4", "M17.599 6.5a3 3 0 0 0 .399-1.375", "M6.003 5.125A3 3 0 0 0 6.401 6.5", "M3.477 10.896a4 4 0 0 1 .585-.396",
+      "M19.938 10.5a4 4 0 0 1 .585.396", "M6 18a4 4 0 0 1-1.967-.516", "M19.967 17.484A4 4 0 0 1 18 18"],
+    web: ["M12 2a10 10 0 1 0 0 20a10 10 0 1 0 0-20", "M12 2a14.5 14.5 0 0 0 0 20 14.5 14.5 0 0 0 0-20", "M2 12h20"],
+    shell: ["m4 17 6-6-6-6", "M12 19h8"],
+    read: ["M15 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7Z", "M14 2v4a2 2 0 0 0 2 2h4", "M10 9H8", "M16 13H8", "M16 17H8"],
+    edit: ["M21.174 6.812a1 1 0 0 0-3.986-3.987L3.842 16.174a2 2 0 0 0-.5.83l-1.321 4.352a.5.5 0 0 0 .623.622l4.353-1.32a2 2 0 0 0 .83-.497z", "m15 5 4 4"],
+    tool: ["M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z"],
+    status: ["M22 12h-2.48a2 2 0 0 0-1.93 1.46l-2.35 8.36a.25.25 0 0 1-.48 0L9.24 2.18a.25.25 0 0 0-.48 0l-2.35 8.36A2 2 0 0 1 4.49 12H2"]
+  };
+
+  /** A running reply's own words so far: none while its text is only the
+   *  placeholder or where the run stands (shown as a step instead). */
+  function sessionsRunningText(entry) {
+    return isThinkingEntry(entry) || entry.liveStatus ? "" : entry.content;
+  }
+
+  /** Where a run stands, as its current step, until it has steps of its own
+   *  ("Preparing the workspace" on a machine). */
+  function sessionsRunningStatus(entry) {
+    if (!entry.liveStatus || (Array.isArray(entry.activity) && entry.activity.length) || isThinkingEntry(entry)) return "";
+    const text = String(entry.content || "").replace(/\s+/g, " ").trim();
+    return /^(thinking|running)\b/i.test(text) ? "" : text;
+  }
+
+  /** A reply's steps, one row each; while `live`, the newest is the current one. */
+  function sessionsActivityElement(entry, live) {
+    const list = document.createElement("div");
+    list.className = "sessions-activity";
+    const rows = Array.isArray(entry.activity) ? entry.activity : [];
+    if (entry.activityMore > 0) {
+      const more = document.createElement("div");
+      more.className = "sessions-activity-more";
+      more.textContent = entry.activityMore === 1 ? "1 earlier step" : entry.activityMore + " earlier steps";
+      list.append(more);
+    }
+    rows.forEach(function (row, index) {
+      const line = document.createElement("div");
+      line.className = "sessions-activity-row is-" + row.kind + (live && index === rows.length - 1 ? " is-current" : "");
+      line.dataset.activityKind = row.kind;
+      const icon = lineIcon(SESSIONS_ACTIVITY_ICONS[row.kind] || SESSIONS_ACTIVITY_ICONS.tool, 14);
+      icon.setAttribute("stroke-width", "1.75");
+      icon.classList.add("sessions-activity-icon");
+      const text = document.createElement("span");
+      text.className = "sessions-activity-text";
+      text.textContent = row.text;
+      line.append(icon, text);
+      list.append(line);
+    });
+    return list;
+  }
+
+  /** "Working for 4s" (ticking, startThinkingClock) over a hairline, then
+   *  the reply's steps so far. */
+  function sessionsWorkingElement(entry) {
+    const wrap = document.createElement("div");
+    wrap.className = "sessions-working";
+    const head = document.createElement("div");
+    head.className = "sessions-working-head";
+    head.setAttribute("role", "status");
+    // From the turn's own start (a machine's run, once it started), not from
+    // when the reply was queued, as on the desktop.
+    head.append(document.createTextNode("Working for "), sessionsElapsedElement(entry.startedAt || entry.createdAt || nowIso()));
+    wrap.append(head);
+    const status = sessionsRunningStatus(entry);
+    if (Array.isArray(entry.activity) && entry.activity.length) wrap.append(sessionsActivityElement(entry, true));
+    else if (status) wrap.append(sessionsActivityElement({ activity: [{ kind: "status", text: status }] }, true));
+    return wrap;
+  }
+
+  /** A row updated in place keeps its "Working for …" in step: right under
+   *  its meta while it runs, redrawn when its steps change, gone once done. */
+  function syncSessionsWorking(copy, meta, entry) {
+    const existing = Array.from(copy.children).find(function (child) { return child.classList.contains("sessions-working"); });
+    // Queued: its meta says so; it works for nothing yet.
+    if (!isSessionsRunningEntry(entry) || entry.queued) {
+      existing?.remove();
+      return;
+    }
+    const signature = (entry.startedAt || entry.createdAt || "") + "|" + activitySignature(entry) + "|" + sessionsRunningStatus(entry);
+    let node = existing;
+    if (!node || node.dataset.workingSignature !== signature) {
+      node = sessionsWorkingElement(entry);
+      node.dataset.workingSignature = signature;
+      if (existing) existing.replaceWith(node);
+    }
+    if (meta.parentElement === copy) {
+      if (meta.nextSibling !== node) meta.after(node);
+    } else if (copy.firstChild !== node) {
+      copy.prepend(node);
+    }
   }
 
   /** A row updated in place keeps its "Worked for …" and its turn's tasks
@@ -12343,13 +12805,37 @@
   /** "Worked for 44s" above a finished reply of the sessions view that gave
    *  no tasks: muted text, as the fold of one that did. */
   function sessionsWorkedElement(entry) {
-    if (entry.presentation !== "sessions" || entry.delegations || entry.status !== "Done" || typeof entry.workedMs !== "number") return undefined;
+    const steps = Array.isArray(entry.activity) && entry.activity.length > 0;
+    if (entry.presentation !== "sessions" || entry.delegations || entry.status !== "Done" || (typeof entry.workedMs !== "number" && !steps)) return undefined;
+    const label = typeof entry.workedMs === "number" ? "Worked for " + formatWorkedMs(entry.workedMs) : "Worked";
     const wrap = document.createElement("div");
-    wrap.className = "sessions-worked is-plain";
-    const label = document.createElement("span");
-    label.className = "sessions-worked-label";
-    label.textContent = "Worked for " + formatWorkedMs(entry.workedMs);
-    wrap.append(label);
+    if (!steps) {
+      wrap.className = "sessions-worked is-plain";
+      const text = document.createElement("span");
+      text.className = "sessions-worked-label";
+      text.textContent = label;
+      wrap.append(text);
+      return wrap;
+    }
+    // Its steps: the fold opens to the rows its turn showed while it ran.
+    const key = entry.rowKey || entry.id;
+    const open = openWorkedFolds.has(key);
+    wrap.className = "sessions-worked" + (open ? " is-open" : "");
+    const toggle = document.createElement("button");
+    toggle.type = "button";
+    toggle.className = "sessions-worked-toggle";
+    toggle.dataset.workedFold = key;
+    toggle.setAttribute("aria-expanded", open ? "true" : "false");
+    const text = document.createElement("span");
+    text.textContent = label;
+    toggle.append(text, lineIcon([open ? "m6 9 6 6 6-6" : "m9 18 6-6-6-6"], 14));
+    wrap.append(toggle);
+    if (open) {
+      const body = document.createElement("div");
+      body.className = "sessions-worked-body";
+      body.append(sessionsActivityElement(entry, false));
+      wrap.append(body);
+    }
     return wrap;
   }
 
@@ -12388,6 +12874,8 @@
       summary.append(lineIcon(HAMMER_ICON_PATHS, 14), text);
       const body = document.createElement("div");
       body.className = "sessions-worked-body";
+      // A finished turn's steps first, as they came, then its tasks.
+      if (!delegations.live && Array.isArray(delegations.activity) && delegations.activity.length) body.append(sessionsActivityElement(delegations, false));
       body.append(summary, ...rows);
       wrap.append(body);
     }
@@ -12423,7 +12911,7 @@
     text.className = "sessions-waiting-text";
     text.textContent = waiting.text;
     wrap.append(spinner, text);
-    if (waiting.canStop || waiting.stopping) wrap.append(sessionsStopButton(waiting.memberIds, waiting.canStop, waiting.stopping, "Stop the members the main session waits on"));
+    if (waiting.canStop || waiting.stopping) wrap.append(sessionsStopButton(waiting.memberIds, waiting.canStop, waiting.stopping, "Stop the tasks the main session waits on"));
     return wrap;
   }
 
@@ -12438,7 +12926,7 @@
     if (head.status !== "idle") state.append(sessionsStatusElement(head.status));
     if (head.since) state.append(sessionsElapsedElement(head.since));
     wrap.append(providerLogoElement(head.kind), text, state);
-    if (head.canStop || head.stopping) wrap.append(sessionsStopButton([head.participantId], head.canStop, head.stopping, "Stop this member"));
+    if (head.canStop || head.stopping) wrap.append(sessionsStopButton([head.participantId], head.canStop, head.stopping, "Stop this session"));
     return wrap;
   }
 
@@ -12803,17 +13291,20 @@
     const accordOpen = Boolean(state && (state.openAccord || openAccordLaunchId));
     if (dot && dot.hidden === accordOpen) dot.hidden = !accordOpen;
     button.classList.toggle("has-accord", accordOpen);
-    const label = sessionsView ? (running > 0 ? "Members (" + running + " running)" : "Members")
+    // The sessions view never says "members" (the User, 2026-11-21).
+    const label = sessionsView ? (running > 0 ? "Side panel (" + running + " running)" : "Side panel")
       : count === 1 ? "Members: 1 member" : count > 0 ? "Members: " + count + " members" : "Members";
     if (button.getAttribute("aria-label") !== label) button.setAttribute("aria-label", label);
     syncHeaderSpacer();
   }
 
   /** The sessions view's one panel (the header's icon; the desktop's right
-   *  panel): the main session first (back to its timeline), the chat's
-   *  Accord, then every other member — logo, task, what it does, how long,
-   *  Stop — with Stop all; those that worked and ended under Previous, and
-   *  those no longer in the chat under Removed (their sessions read only). */
+   *  panel), with no title (the User, 2026-11-21): the chat's Accord, then
+   *  the sessions the main session delegated (never the main session, whose
+   *  settings are on the computer's composer chip) — logo, task, what it
+   *  does, how long, Stop — with Stop all; those that worked and ended under
+   *  Previous, and those no longer in the chat under Removed (their sessions
+   *  read only). Nothing is said when there are none. */
   function renderSessionsMembersSheet(state, list, title) {
     const shared = sessionsRules();
     const stopAll = document.getElementById("members-sheet-stop-all");
@@ -12848,38 +13339,17 @@
       return { id: former.id, kind: formerMemberKind(former), name: sessionsMemberTitleOf(state, former.id), detail: sessionsRemovedMemberDetail(),
         status: shared.sessionsFormerMemberStatus(task ? task.item : undefined), former: true };
     });
-    const main = state.mainMember;
-    const mainRow = main ? { kind: main.kind || "", detail: sessionsMemberDetailOf(main) } : undefined;
     const docked = state.openAccord || undefined;
     const accord = docked ? { launchId: docked.launchId, text: docked.progress.title + " · " + shared.accordProgressStatus(docked.progress) } : undefined;
-    const signature = JSON.stringify(["sessions", state.conversationId, mainRow, accord, current, previous, removed, membersPreviousOpen, membersRemovedOpen]);
+    const signature = JSON.stringify(["sessions", state.conversationId, accord, current, previous, removed, membersPreviousOpen, membersRemovedOpen]);
     if (signature === lastMembersSheetSignature && list.childElementCount > 0) return;
     lastMembersSheetSignature = signature;
-    if (title) title.textContent = "Chat";
-    list.replaceChildren();
-    const section = function (text) {
-      const head = document.createElement("div");
-      head.className = "members-sheet-section";
-      head.textContent = text;
-      list.append(head);
-    };
-    if (mainRow) {
-      const item = document.createElement("div");
-      item.className = "members-sheet-row sessions-member-row sessions-main-row is-openable";
-      item.dataset.sheetMain = "1";
-      item.setAttribute("role", "button");
-      item.tabIndex = 0;
-      const copy = document.createElement("span");
-      copy.className = "members-sheet-copy";
-      const name = document.createElement("strong");
-      name.textContent = "Main session";
-      const where = document.createElement("span");
-      where.className = "members-sheet-location";
-      where.textContent = mainRow.detail;
-      copy.append(name, where);
-      item.append(providerLogoElement(mainRow.kind), copy);
-      list.append(item);
+    if (title) {
+      title.textContent = "";
+      title.hidden = true;
     }
+    document.getElementById("members-sheet")?.setAttribute("aria-label", "Side panel");
+    list.replaceChildren();
     if (accord) {
       const item = document.createElement("div");
       item.className = "members-sheet-row sessions-accord-row is-openable";
@@ -12942,14 +13412,6 @@
       list.append(toggle);
       if (open) for (const row of entries) list.append(rowElement(row));
     };
-    if (all.length === 0 && removed.length === 0) {
-      const empty = document.createElement("div");
-      empty.className = "members-sheet-empty";
-      empty.textContent = "No other members yet. The main session adds members when it gives them a task.";
-      list.append(empty);
-      return;
-    }
-    section("Members");
     for (const row of current) list.append(rowElement(row));
     if (previous.length > 0) group("Previous", "membersPrevious", membersPreviousOpen, previous);
     if (removed.length > 0) group("Removed", "membersRemoved", membersRemovedOpen, removed);
@@ -12991,7 +13453,9 @@
       return;
     }
     lastMembersSheetSignature = signature;
+    document.getElementById("members-sheet")?.setAttribute("aria-label", "Members");
     if (title) {
+      title.hidden = false;
       title.textContent = members.length === 1 ? "1 member" : members.length + " members";
     }
     list.replaceChildren();
@@ -14080,13 +14544,24 @@
       if (sendButton) {
         sendButton.addEventListener("pointerup", function (event) {
           event.preventDefault();
-          // Nothing written while the main session runs: Stop, not Send.
+          // Nothing written while the session runs: Stop, not Send.
           if (sendButton.dataset.mode === "stop" && composerStopState) {
-            void stopMembersFromPhone([composerStopState.mainId]);
+            void stopMembersFromPhone(composerStopIds.slice());
             return;
           }
           if (sendButton.dataset.mode === "stopping") return;
           void sendComposer();
+        });
+      }
+      // Stop beside Send: the run stops, what is written stays to be sent.
+      const sideStop = document.getElementById("composer-stop-button");
+      if (sideStop) {
+        keepFieldFocusedOnTap(sideStop);
+        sideStop.addEventListener("click", function (event) {
+          event.preventDefault();
+          if (sideStop.disabled || !composerStopState || composerStopIds.length === 0) return;
+          sideStop.disabled = true;
+          void stopMembersFromPhone(composerStopIds.slice());
         });
       }
       form.addEventListener("submit", function (event) {

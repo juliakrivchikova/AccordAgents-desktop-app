@@ -10,6 +10,7 @@ import {
   normalizeOptionalChatParticipantRequestPermission
 } from "../../../shared/agentPermissions";
 import { reasoningEffortOptionsForProvider } from "../../../shared/reasoningEffort";
+import { withClassicChatPermissions } from "../../../shared/chatAccessModes";
 import { modelDetectionFailureText, useProviderModelCatalog, type ProviderModelCatalogHost } from "./use-provider-model-catalog";
 import { savedModelId } from "../../../shared/geminiModels";
 import type {
@@ -364,8 +365,9 @@ function PermissionsToggleRow(props: {
   onChange: (permissions: ChatAgentPermissions) => void;
 }): JSX.Element {
   const permissions = normalizeChatAgentPermissions(props.participant.permissions);
+  // Classic toggles mean what they say: a CLI mode chosen in the picker ends.
   function set(patch: Partial<ChatAgentPermissions>): void {
-    props.onChange({ ...permissions, ...patch });
+    props.onChange(withClassicChatPermissions(permissions, patch, props.participant.kind));
   }
   const toggles: Array<{ label: string; icon: LucideIcon; checked: boolean; onChange: (value: boolean) => void }> = [
     { label: "Read Files", icon: FileText, checked: permissions.repoRead, onChange: (value) => set({ repoRead: value }) },

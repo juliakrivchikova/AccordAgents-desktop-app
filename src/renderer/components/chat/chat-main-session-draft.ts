@@ -1,6 +1,7 @@
 import { MAIN_SESSION_HANDLE, MAIN_SESSION_ROLE_ID } from "../../../shared/mainSession";
 import type { ChatParticipantConfig, ChatProviderKind } from "../../../shared/types";
 import { newChatMemberPermissions } from "../../../shared/agentPermissions";
+import { applyChatAccessOption, defaultChatAccessOption } from "../../../shared/chatAccessModes";
 import { isChatAssistantParticipant } from "../conversation/conversation-display";
 import {
   type ChatParticipantDraft,
@@ -17,36 +18,53 @@ export const NEW_CHAT_MAIN_SESSION_PARTICIPANT_ID = "__new-chat-main-session__";
  *  the rights its role gives a new member (not the Assistant's narrow ones). */
 export function newChatMainSessionParticipantConfig(
   kind: ChatProviderKind,
-  hasProject = true
+  hasProject = true,
+  hostId?: string,
+  /** A chat that opens in the sessions view: its main session starts in its
+   *  CLI's own default mode (chatAccessModes.ts), as the CLI starts. */
+  sessionsView = false
 ): ChatParticipantConfig {
+  const permissions = { ...newChatMemberPermissions(hasProject), requestParticipants: "allow" as const, manageRolesParticipants: "allow" as const };
+  const access = sessionsView ? applyChatAccessOption(defaultChatAccessOption(kind), permissions) : { agentMode: "default" as const, permissions };
   return {
     id: NEW_CHAT_MAIN_SESSION_PARTICIPANT_ID,
     handle: MAIN_SESSION_HANDLE,
     roleConfigId: MAIN_SESSION_ROLE_ID,
     behaviorRuleIds: [],
     kind,
-    agentMode: "default",
+    // An added provider the New chat chip chose for it (sessions view).
+    ...(hostId ? { hostId } : {}),
     // The rights an ordinary member starts with in this chat (reading its
     // project when it has one), asking members without a card as its role
     // does; the app makes the same one (ChatService.ensureMainSessionParticipant).
-    permissions: { ...newChatMemberPermissions(hasProject), requestParticipants: "allow", manageRolesParticipants: "allow" },
+    // In the sessions view its CLI's default mode on top: what it is not
+    // granted, the CLI asks about.
+    agentMode: access.agentMode,
+    permissions: access.permissions,
     remoteExecution: "local",
     updatedAt: ""
   };
 }
 
 /** What a new chat is made with for its main session, with the settings the
- *  User changed for it on the New chat screen. No saved member is behind it. */
+ *  User changed for it on the New chat screen (and the added provider its
+ *  chip chose). No saved member is behind it. */
 export function newChatMainSessionParticipantDraft(
   kind: ChatProviderKind,
   runtimeOverride: ChatParticipantRuntimeOverride | undefined,
-  hasProject = true
+  hasProject = true,
+  hostId?: string,
+  sessionsView = false
 ): ChatParticipantDraft {
   const draft = chatParticipantConfigToDraftWithRuntimeOverrides(
-    newChatMainSessionParticipantConfig(kind, hasProject),
+    newChatMainSessionParticipantConfig(kind, hasProject, hostId, sessionsView),
     runtimeOverride ? { [NEW_CHAT_MAIN_SESSION_PARTICIPANT_ID]: runtimeOverride } : {}
   );
-  return { ...draft, participantConfigId: undefined };
+  // The sessions view's picker has no repository switch: the main session
+  // reads the chat's project when it has one, whatever folder was chosen
+  // when its access was.
+  const permissions = sessionsView && draft.permissions ? { ...draft.permissions, repoRead: hasProject } : draft.permissions;
+  return { ...draft, permissions, participantConfigId: undefined };
 }
 
 /** A member the New chat screen never offers to add: the main session (the

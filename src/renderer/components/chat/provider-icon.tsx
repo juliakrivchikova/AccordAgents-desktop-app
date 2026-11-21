@@ -2,14 +2,24 @@ import type { ChatProviderKind } from "../../../shared/types";
 
 /** A provider's mark: Claude Code, Codex or Antigravity. `className` names
  *  the frame (the CLI setup card's by default); the marks inside carry both
- *  that card's classes and their own, so any frame can size them. */
+ *  that card's classes and their own, so any frame can size them. `bare`:
+ *  the glyph alone, no tile behind it, as T3 Code shows a provider beside
+ *  text (the sessions view; Settings → Local CLI setup keeps its tile). */
 export function ProviderIcon(props: {
   kind: ChatProviderKind;
   label: string;
   className?: string;
+  bare?: boolean;
 }): JSX.Element {
+  const frame = props.className ?? "cli-readiness-provider-icon";
   return (
-    <span className={props.className ?? "cli-readiness-provider-icon"} role="img" aria-label={props.label} data-provider-kind={props.kind}>
+    <span
+      className={props.bare ? `${frame} is-bare` : frame}
+      role="img"
+      aria-label={props.label}
+      data-provider-kind={props.kind}
+      data-variant={props.bare ? "bare" : undefined}
+    >
       {props.kind === "gemini-cli"
         ? <span className="cli-readiness-antigravity-mark provider-mark-antigravity" aria-hidden="true" />
         : props.kind === "codex-cli"

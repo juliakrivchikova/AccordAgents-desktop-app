@@ -276,6 +276,49 @@
   background: url("../../assets/antigravity-logo.png") center / contain no-repeat;
 }
 
+/* The bare glyph (the sessions view, T3 Code's way): no tile, no rounded
+   square, sized to the text line. Claude's asterisk is its own orange; the
+   white asterisk of the tile is used as its shape. */
+.chat-provider-icon.is-bare {
+  width: 15px;
+  height: 15px;
+  border-radius: 0;
+  background: none;
+  box-shadow: none;
+}
+
+.chat-provider-icon.is-bare[data-provider-kind="claude-code"] {
+  background: none;
+}
+
+.chat-provider-icon.is-bare svg,
+.chat-provider-icon.is-bare .provider-mark-claude,
+.chat-provider-icon.is-bare .provider-mark-antigravity {
+  width: 100%;
+  height: 100%;
+}
+
+.chat-provider-icon.is-bare.is-chip {
+  width: 13px;
+  height: 13px;
+}
+
+.chat-provider-icon.is-bare.is-mini {
+  width: 14px;
+  height: 14px;
+}
+
+.chat-provider-icon.is-bare.is-large {
+  width: 18px;
+  height: 18px;
+}
+
+.chat-provider-icon.is-bare .provider-mark-claude {
+  background: var(--brand-anthropic);
+  -webkit-mask: url("../../assets/claude-avatar.png") center / contain no-repeat;
+  mask: url("../../assets/claude-avatar.png") center / contain no-repeat;
+}
+
 /* Task status (task cards, members panel) */
 
 .chat-work-status {
@@ -837,10 +880,10 @@
 
 .chat-delegation-dot {
   position: absolute;
-  right: -2px;
-  bottom: -2px;
-  width: 8px;
-  height: 8px;
+  right: -3px;
+  bottom: -3px;
+  width: 7px;
+  height: 7px;
   border: 1.5px solid var(--app-surface);
   border-radius: 50%;
   background: var(--app-muted);
@@ -999,4 +1042,43 @@
 /* Mid-chat lines without boxes. */
 .chat-view.is-sessions-view .chat-sessions-waiting {
   font-size: 12.5px;
+}
+
+/* A queued reply's own × in the sessions view: on hover only (always on a
+   touch screen), not a standing control. */
+.chat-message.is-sessions.is-running .message-actions.is-sessions-stop {
+  opacity: 0;
+  pointer-events: none;
+  transform: translateY(-2px);
+}
+
+.chat-message.is-sessions.is-running .message-body:hover .message-actions.is-sessions-stop,
+.chat-message.is-sessions.is-running .message-actions.is-sessions-stop:focus-within {
+  opacity: 1;
+  pointer-events: auto;
+  transform: translateY(0);
+}
+
+@media (hover: none) {
+  .chat-message.is-sessions.is-running .message-actions.is-sessions-stop {
+    opacity: 1;
+    pointer-events: auto;
+    transform: none;
+  }
+}
+
+/* Stop next to Send while something is typed: secondary, the accent stays
+   with Send. */
+.composer-send-button.is-stop.is-beside-send {
+  width: 30px;
+  height: 30px;
+  margin-right: 6px;
+  background: var(--app-surface-hover);
+  color: var(--app-text-strong);
+  box-shadow: none;
+}
+
+.composer-send-button.is-stop.is-beside-send:hover:not(:disabled) {
+  background: var(--app-surface-subtle);
+  box-shadow: none;
 }
