@@ -1204,6 +1204,25 @@ test("a permission card whose Claude Code call ended (it stopped waiting) is exp
   );
 });
 
+test("while the same tool call asked again still waits on its card, the first call ending leaves the card open for it", async () => {
+  const participant = chatParticipant("claude-code");
+  const conversation = chatConversation([participant]);
+  const { service, storage } = testService({ conversation });
+  const actor = toolPermissionActor(participant, conversation);
+  const request = { tool_name: "Bash", input: { command: "ls /tmp" }, tool_use_id: "toolu_same" };
+  const firstGone = new AbortController();
+  const first = service.requestToolPermissionFromTool(actor, request, firstGone.signal);
+  const card = await pendingToolPermission(storage, "Bash");
+  const second = service.requestToolPermissionFromTool(actor, request);
+  await waitFor(() => ((service as any).toolPermissionWaiters.get(card.id) ?? 0) === 2);
+  firstGone.abort();
+  assert.equal((await first).behavior, "deny");
+  const open = ((storage.current.metadata.pendingAppToolApprovals ?? []) as ChatAppToolApproval[]).find((item) => item.id === card.id)!;
+  assert.equal(open.status, "pending", "still waited on");
+  await service.respondToAppToolApproval({ conversationId: conversation.id, approvalId: card.id, approve: true, scope: "once" });
+  assert.equal((await second).behavior, "allow", "the call still waiting gets the answer");
+});
+
 test("an answer to a permission card no call waits on any more (the app restarted) expires it instead of doing nothing", async () => {
   const participant = chatParticipant("claude-code");
   const orphan: ChatAppToolApproval = {
@@ -1215,7 +1234,11 @@ test("an answer to a permission card no call waits on any more (the app restarte
   } as ChatAppToolApproval;
   const conversation = chatConversation([participant], { pendingAppToolApprovals: [orphan] });
   const { service, storage } = testService({ conversation });
-  await service.respondToAppToolApproval({ conversationId: conversation.id, approvalId: orphan.id, approve: true, scope: "once" });
+  await assert.rejects(
+    service.respondToAppToolApproval({ conversationId: conversation.id, approvalId: orphan.id, approve: true, scope: "once" }),
+    /Nothing is waiting for this answer/,
+    "refused, never reported as applied"
+  );
   const after = ((storage.current.metadata.pendingAppToolApprovals ?? []) as ChatAppToolApproval[]).find((item) => item.id === orphan.id)!;
   assert.equal(after.status, "expired");
   assert.match(after.error ?? "", /Nothing is waiting for this answer/);

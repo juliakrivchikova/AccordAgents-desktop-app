@@ -112,3 +112,25 @@ test("Claude Code's permission prompt waits as a stream too, and its CLI giving 
     await service.stop();
   }
 });
+
+test("a notifications/cancelled for a waiting call ends its wait, as the stream closing does", async () => {
+  const service = new AppMcpService();
+  service.waitingProgressMs = 20;
+  const aborted = new Promise<void>((resolve) => {
+    service.setToolPermissionHandler((_actor, _request, signal) => new Promise((settle) => {
+      signal?.addEventListener("abort", () => { resolve(); settle({ behavior: "deny", message: "gone" }); });
+    }));
+  });
+  await service.start();
+  try {
+    const connection = service.issueToken(GRANT)!;
+    const body = { jsonrpc: "2.0", id: 21, method: "tools/call", params: { name: APP_TOOL_PERMISSION_TOOL, arguments: { tool_name: "Bash", input: { command: "ls" } } } };
+    const { response } = await post(connection.url, connection.token, body, "application/json, text/event-stream");
+    response.resume();
+    const cancel = await post(connection.url, connection.token, { jsonrpc: "2.0", method: "notifications/cancelled", params: { requestId: 21, reason: "timeout" } }, "application/json, text/event-stream");
+    cancel.response.resume();
+    await aborted;
+  } finally {
+    await service.stop();
+  }
+});

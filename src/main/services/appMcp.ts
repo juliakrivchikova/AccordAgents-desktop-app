@@ -189,6 +189,9 @@ export class AppMcpService {
   private connectorSignInHandler?: AppWaitingToolHandler;
   /** How often a waiting tool call reports progress (tests shorten it). */
   waitingProgressMs = APP_MCP_WAITING_PROGRESS_MS;
+  /** Calls that wait for the User, by their member's grant and request id:
+   *  a `notifications/cancelled` for one ends its wait. */
+  private readonly waitingCalls = new WeakMap<AppMcpActor, Map<string, AbortController>>();
   private chatContextHandler?: AppChatContextHandler;
   private chatParticipantsHandler?: AppChatParticipantsHandler;
   private chatParticipantActivityHandler?: AppChatParticipantActivityHandler;
@@ -495,6 +498,15 @@ export class AppMcpService {
         return isNotification ? undefined : this.rpcResult(id, this.initializeResult());
       }
       if (method === "notifications/initialized") {
+        return undefined;
+      }
+      if (method === "notifications/cancelled") {
+        // The CLI gave up on a call that waits for the User without closing
+        // its stream: the wait ends as if it had (its card is expired).
+        const params = request.params && typeof request.params === "object" ? request.params as { requestId?: unknown } : {};
+        if (typeof params.requestId === "string" || typeof params.requestId === "number") {
+          this.waitingCalls.get(actor)?.get(String(params.requestId))?.abort();
+        }
         return undefined;
       }
       if (method === "tools/list") {
@@ -1111,6 +1123,10 @@ export class AppMcpService {
     response.on("close", () => {
       if (!finished) abandoned.abort();
     });
+    const callKey = String(request.id);
+    const calls = this.waitingCalls.get(actor) ?? new Map<string, AbortController>();
+    calls.set(callKey, abandoned);
+    this.waitingCalls.set(actor, calls);
     response.writeHead(200, { "content-type": "text/event-stream", "cache-control": "no-store" });
     response.flushHeaders();
     const send = (message: unknown): void => {
@@ -1135,6 +1151,7 @@ export class AppMcpService {
       answer = this.rpcError(request.id, -32603, error instanceof Error ? error.message : String(error));
     } finally {
       clearInterval(ticker);
+      if (calls.get(callKey) === abandoned) calls.delete(callKey);
     }
     finished = true;
     send(answer);

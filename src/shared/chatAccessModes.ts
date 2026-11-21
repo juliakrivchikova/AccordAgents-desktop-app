@@ -95,12 +95,20 @@ export function selectedChatAccessOption(
 /** Rights set from the classic controls (Read Files, Edit Files, Run Shell,
  *  Access Web): the classic meaning wins, so the member leaves its CLI's own
  *  mode (`cliApprovals`) and what is off is refused, never asked about; the
- *  picker then shows "Custom access". */
+ *  picker then shows "Custom access". Antigravity's own mode is what holds
+ *  it back (geminiExec.ts: without it, granted edits skip every agy
+ *  confirmation), so leaving it never keeps its edits unless this very toggle
+ *  turns them on: it runs read-only (`--sandbox`) instead. */
 export function withClassicChatPermissions(
   permissions: ChatAgentPermissions | undefined,
-  patch: Partial<ChatAgentPermissions>
+  patch: Partial<ChatAgentPermissions>,
+  kind?: ChatProviderKind
 ): ChatAgentPermissions {
-  const { cliApprovals: _ownMode, ...classic } = { ...normalizeChatAgentPermissions(permissions), ...patch };
+  const current = normalizeChatAgentPermissions(permissions);
+  const { cliApprovals: _ownMode, ...classic } = { ...current, ...patch };
+  if (kind === "gemini-cli" && current.cliApprovals && patch.workspaceWrite !== true) {
+    return { ...classic, workspaceWrite: false };
+  }
   return classic;
 }
 

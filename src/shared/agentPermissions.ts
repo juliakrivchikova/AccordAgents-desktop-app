@@ -268,8 +268,9 @@ export function clampChatAgentPermissions(
  * (`cliApprovals`, agy's `--mode`) is held back by that mode, while without
  * it the app's mapping skips every agy confirmation once edits are granted
  * or in Auto (geminiExec.ts geminiPermissionArgs). So when the ceiling takes
- * its own mode away, it runs the most restrictive way instead: Default with
- * no edits (agy's `--sandbox`, read-only), never with confirmations skipped.
+ * its own mode away, or it would skip every confirmation (edits, commands,
+ * web) under a ceiling without all three, it runs the most restrictive way
+ * instead: Default with no edits (agy's `--sandbox`, read-only).
  * Claude Code and Codex without their own mode refuse what is not granted
  * instead of asking, which is already narrower.
  */
@@ -280,8 +281,17 @@ export function clampChatAgentAccess(
 ): { agentMode: ChatAgentMode; permissions: ChatAgentPermissions } {
   const agentMode = clampChatAgentMode(requested.agentMode, ceiling.agentMode);
   const permissions = clampChatAgentPermissions(requested.permissions, ceiling.permissions);
+  if (kind !== "gemini-cli") {
+    return { agentMode, permissions };
+  }
   const ownModeTaken = normalizeChatAgentPermissions(requested.permissions).cliApprovals === true && !permissions.cliApprovals;
-  if (kind !== "gemini-cli" || !ownModeTaken) {
+  // Without its own mode, agy with edits or in Auto skips every
+  // confirmation: edits, commands and web alike. That is within a ceiling
+  // only when the ceiling has all three.
+  const limit = normalizeChatAgentPermissions(ceiling.permissions);
+  const skipsAll = !permissions.cliApprovals && (agentMode === "auto" || permissions.workspaceWrite);
+  const ceilingSkipsAll = limit.workspaceWrite && limit.shell.enabled && limit.webAccess;
+  if (!ownModeTaken && !(skipsAll && !ceilingSkipsAll)) {
     return { agentMode, permissions };
   }
   return {

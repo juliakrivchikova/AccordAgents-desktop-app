@@ -4620,7 +4620,13 @@ export class ChatService {
     } finally {
       this.noteToolPermissionWaiter(approval.id, -1);
     }
-    if (!decision.approve && decision.source === "abort" && abandoned?.aborted && !this.toolPermissionWaiters.has(approval.id)) {
+    if (!decision.approve && decision.source !== "user" && this.toolPermissionWaiters.has(approval.id)) {
+      // Another call (the same tool call asked again) still waits on this
+      // card: it stays open for that one.
+      this.logToolPermissionResolution(actor, outcome, decision);
+      return { behavior: "deny", message: decision.reason ?? "Tool permission request did not receive approval." };
+    }
+    if (!decision.approve && decision.source === "abort" && abandoned?.aborted) {
       // Claude Code stopped waiting for this answer: the card can no longer
       // be answered, so it says so instead of taking a click that does nothing.
       await this.expirePendingToolPermissionApproval(actor.conversationId, approval.id, TOOL_PERMISSION_ABANDONED);
@@ -8079,8 +8085,7 @@ export class ChatService {
       if (!this.toolPermissionWaiters.has(approval.id)) {
         // No call waits on it any more (its CLI stopped waiting, or the app
         // restarted): the card says so instead of taking an answer that
-        // would do nothing.
-        await execution?.beforeApply(approval);
+        // would do nothing, and the answer is refused (never "applied").
         this.upsertAppToolApproval(conversation, { ...approval, status: "expired", error: TOOL_PERMISSION_ORPHANED, updatedAt: now });
         conversation.updatedAt = now;
         await this.saveConversation(conversation);
@@ -8151,7 +8156,7 @@ export class ChatService {
     });
 
     if (expired) {
-      return conversation;
+      throw new Error(TOOL_PERMISSION_ORPHANED);
     }
     if (!decidedApproval || !decision) {
       throw new Error("App tool approval request could not be resolved.");
@@ -16504,7 +16509,8 @@ export class ChatService {
     if (!conversation || conversation.kind !== "chat") return;
     await this.saveChatChange(conversation, () => {
       const approval = this.chatAppToolApprovals(conversation).find((item) => item.id === approvalId);
-      if (!approval || approval.status !== "pending" || approval.toolName !== APP_TOOL_PERMISSION_TOOL) return;
+      // A call that joined meanwhile (the same tool call asked again) keeps it open.
+      if (!approval || approval.status !== "pending" || approval.toolName !== APP_TOOL_PERMISSION_TOOL || this.toolPermissionWaiters.has(approvalId)) return;
       this.upsertAppToolApproval(conversation, { ...approval, status: "expired", error: reason, updatedAt: new Date().toISOString() });
     }).catch(() => undefined);
   }
@@ -16729,7 +16735,7 @@ export class ChatService {
     }
     await this.withChatMutation(conversation, async () => {
       const approval = this.chatAppToolApprovals(conversation).find((item) => item.id === approvalId);
-      if (!approval || approval.status !== "pending" || approval.toolName !== APP_TOOL_PERMISSION_TOOL) {
+      if (!approval || approval.status !== "pending" || approval.toolName !== APP_TOOL_PERMISSION_TOOL || this.toolPermissionWaiters.has(approvalId)) {
         return;
       }
       const now = new Date().toISOString();
@@ -23277,7 +23283,8 @@ export class ChatService {
         policy.capability === "permissions.request" &&
         typeof policy.targetParticipantId !== "string" &&
         typeof policy.targetToolName === "string" &&
-        (policy.targetToolScope === undefined || chatToolPermissionScopesEqual(normalizeChatToolPermissionScope(policy.targetToolScope), policy.targetToolScope))
+        (policy.targetToolScope === undefined || (normalizeChatToolPermissionScope(policy.targetToolScope) !== undefined &&
+          chatToolPermissionScopesEqual(normalizeChatToolPermissionScope(policy.targetToolScope), policy.targetToolScope)))
       )) &&
       policy.scope === "chat" &&
       typeof policy.createdAt === "string" &&

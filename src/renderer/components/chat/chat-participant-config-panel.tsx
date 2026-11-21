@@ -352,10 +352,10 @@ export function ChatParticipantInlinePermissionsRow(props: {
     next: (value: boolean) => ChatAgentPermissions;
   }> = [
     // Classic toggles mean what they say: a CLI mode chosen in the picker ends.
-    { key: "repoRead", label: "repo read", checked: permissions.repoRead, next: (value) => withClassicChatPermissions(permissions, { repoRead: value }) },
-    { key: "workspaceWrite", label: "file editing", checked: permissions.workspaceWrite, next: (value) => withClassicChatPermissions(permissions, { workspaceWrite: value }) },
-    { key: "webAccess", label: "web access", checked: permissions.webAccess, next: (value) => withClassicChatPermissions(permissions, { webAccess: value }) },
-    { key: "shell", label: "shell access", checked: permissions.shell.enabled, next: (value) => withClassicChatPermissions(permissions, { shell: { ...permissions.shell, enabled: value } }) }
+    { key: "repoRead", label: "repo read", checked: permissions.repoRead, next: (value) => withClassicChatPermissions(permissions, { repoRead: value }, props.participant.kind) },
+    { key: "workspaceWrite", label: "file editing", checked: permissions.workspaceWrite, next: (value) => withClassicChatPermissions(permissions, { workspaceWrite: value }, props.participant.kind) },
+    { key: "webAccess", label: "web access", checked: permissions.webAccess, next: (value) => withClassicChatPermissions(permissions, { webAccess: value }, props.participant.kind) },
+    { key: "shell", label: "shell access", checked: permissions.shell.enabled, next: (value) => withClassicChatPermissions(permissions, { shell: { ...permissions.shell, enabled: value } }, props.participant.kind) }
   ];
   return (
     <ChatParticipantSpecRow label="Permissions">

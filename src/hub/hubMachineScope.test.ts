@@ -214,6 +214,15 @@ test("running in its CLI's own mode (asking the User for what it is not granted)
   assert.equal((members(scoped).get("p-box")?.permissions as Record<string, unknown>).cliApprovals, true);
   scoped = scopeMachineConversationUpdate(chatWith([deskR, own]), { metadata: { participants: [deskR, boxR] } }, "machine-1", { rules });
   assert.deepEqual(scoped.refused, []);
+  // For Antigravity its own mode is what holds it back: dropping it while
+  // edits stay would skip every agy confirmation, so it stays.
+  const agy = { ...boxR, kind: "gemini-cli", permissions: { ...boxR.permissions, workspaceWrite: true, cliApprovals: true } };
+  const { cliApprovals: _mode, ...withoutMode } = agy.permissions;
+  scoped = scopeMachineConversationUpdate(chatWith([deskR, agy]), { metadata: { participants: [deskR, { ...agy, permissions: withoutMode }] } }, "machine-1", { rules });
+  assert.equal((members(scoped).get("p-box")?.permissions as Record<string, unknown>).cliApprovals, true);
+  assert.ok(scoped.refused.includes("participants.p-box.rights"));
+  scoped = scopeMachineConversationUpdate(chatWith([deskR, agy]), { metadata: { participants: [deskR, { ...agy, permissions: { ...withoutMode, workspaceWrite: false } }] } }, "machine-1", { rules });
+  assert.deepEqual(scoped.refused, [], "without edits it is less");
 });
 
 test("a machine names a new chat once, as the app does from the member that answers first", () => {

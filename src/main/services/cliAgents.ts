@@ -213,12 +213,13 @@ const APP_TOOL_PERMISSION_MCP_TOOL = `mcp__accord_agents__${APP_TOOL_PERMISSION_
  * server's own `timeout`, ms). Its default gives up on Claude Code's
  * permission prompt after 60 s (an HTTP server's answer) while the User's
  * card waits APP_TOOL_PERMISSION_WAIT_MS: then her answer reached nobody
- * (Claude Code 2.1.329). It is a hard limit per call, so it is the app's
- * wait and a minute more: the app answers first (it denies at the end of its
- * wait). Set for this server only, never MCP_TOOL_TIMEOUT, which would
- * change the User's own MCP servers too.
+ * (Claude Code 2.1.329). It is a hard limit per call (progress does not
+ * extend it), so it is the app's wait and five minutes more: the app answers
+ * first (it denies at the end of its wait), and a sign-in card's reconnect
+ * after a late answer still fits. Set for this server only, never
+ * MCP_TOOL_TIMEOUT, which would change the User's own MCP servers too.
  */
-export const CLAUDE_APP_MCP_TOOL_TIMEOUT_MS = APP_TOOL_PERMISSION_WAIT_MS + 60_000;
+export const CLAUDE_APP_MCP_TOOL_TIMEOUT_MS = APP_TOOL_PERMISSION_WAIT_MS + 5 * 60_000;
 const ANTIGRAVITY_GOAL_ENV = "ACCORD_AGENTS_NATIVE_GOAL_PROMPT";
 const ANTIGRAVITY_GOAL_ARG_COUNT_ENV = "ACCORD_AGENTS_NATIVE_GOAL_ARG_COUNT";
 const ANTIGRAVITY_GOAL_ARG_ENV_PREFIX = "ACCORD_AGENTS_NATIVE_GOAL_ARG_";

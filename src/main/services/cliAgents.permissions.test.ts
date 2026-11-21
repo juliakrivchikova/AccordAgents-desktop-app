@@ -2643,7 +2643,7 @@ test("claude chat MCP config is additive and does not pass strict or closed tool
   // Claude Code waits for the User's answer on a permission card as long as
   // the card waits (its default gave up after 60 s), for the app's server
   // only: the User's own MCP servers keep Claude Code's defaults.
-  assert.equal(parsed.mcpServers.accord_agents.timeout, APP_TOOL_PERMISSION_WAIT_MS + 60_000);
+  assert.equal(parsed.mcpServers.accord_agents.timeout, APP_TOOL_PERMISSION_WAIT_MS + 5 * 60_000);
   assert.equal(CLAUDE_APP_MCP_TOOL_TIMEOUT_MS > APP_TOOL_PERMISSION_WAIT_MS, true, "the app answers first");
   assert.equal(Object.keys(runner.agentRunEnv(options) ?? {}).includes("MCP_TOOL_TIMEOUT"), false);
 });

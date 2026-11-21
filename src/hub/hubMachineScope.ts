@@ -383,6 +383,22 @@ function rightsWithin(wanted: ChatAgentPermissions, ceiling: ChatAgentPermission
  *  add members as broad (docs/main-session.md). Less is always fine. A grant
  *  this write uses is noted, so it gives its change once. */
 function keepRights(next: ChatParticipant, current: ChatParticipant, approved: Approved[], noted: Set<string>): ChatParticipant {
+  return keepAntigravityMode(keepGrantedRights(next, current, approved, noted), current);
+}
+
+/** Antigravity's own mode (`cliApprovals`) is what holds it back: without
+ *  it, granted edits or Auto skip every agy confirmation (geminiExec.ts). A
+ *  write that drops it while edits or Auto stay is broader, not less: the
+ *  mode stays as the server has it (the app's clampChatAgentAccess). */
+function keepAntigravityMode(next: ChatParticipant, current: ChatParticipant): ChatParticipant {
+  if (current.kind !== "gemini-cli" || next.kind !== "gemini-cli") return next;
+  const had = normalizeChatAgentPermissions(current.permissions);
+  const wanted = normalizeChatAgentPermissions(next.permissions);
+  if (!had.cliApprovals || wanted.cliApprovals || (!wanted.workspaceWrite && normalizeChatAgentMode(next.agentMode) !== "auto")) return next;
+  return { ...next, permissions: { ...permissionsOf(next), cliApprovals: true } as unknown as ChatParticipant["permissions"] };
+}
+
+function keepGrantedRights(next: ChatParticipant, current: ChatParticipant, approved: Approved[], noted: Set<string>): ChatParticipant {
   let kept = next;
   if (MODE_RANK[normalizeChatAgentMode(next.agentMode)] > MODE_RANK[normalizeChatAgentMode(current.agentMode)]) {
     const { agentMode: _mode, ...rest } = kept;

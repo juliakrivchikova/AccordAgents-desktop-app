@@ -29,21 +29,38 @@ const MAX_COMMAND_PREFIXES = 5;
 const MAX_COMMAND_PREFIX_LENGTH = 160;
 /** Constructs whose command is decided only when they run, and characters
  *  the shell reads otherwise than this parser would (a whitespace other than
- *  a space or a tab is part of a word to the shell; control characters). */
-const OPAQUE_COMMAND = /`|\$\(|<\(|>\(|[^\S \t]|[\u0000-\u0008\u000e-\u001f\u007f]/u;
-/** Commands that run another command or a script: their prefix is the whole
- *  command, never the bare program (`Bash(sudo:*)` would allow anything). */
+ *  a space or a tab is part of a word to the shell; control characters) or
+ *  that make a label read otherwise than it runs (bidi and zero-width marks). */
+const OPAQUE_COMMAND = /`|\$\(|<\(|>\(|[^\S \t]|[\u0000-\u0008\u000e-\u001f\u007f\u200b-\u200f\u202a-\u202e\u2060-\u2069\ufeff]/u;
+/** Commands that run another command, a script or code they are given: their
+ *  prefix is the whole command and covers only that same command, never the
+ *  bare program (`Bash(sudo:*)` would allow anything); one with nothing after
+ *  it is not scoped. */
 const COMMAND_RUNNERS = new Set([
   "sudo", "doas", "su", "env", "exec", "eval", "command", "builtin", "nohup", "time", "timeout", "nice", "xargs", "watch",
-  "bash", "sh", "zsh", "fish", "dash", "ksh", "python", "python3", "node", "deno", "bun", "ruby", "perl", "php", "osascript",
-  "ssh", "find", "awk", "sed"
+  "caffeinate", "script", "source", ".", "open", "npx", "bunx", "pnpx",
+  "bash", "sh", "zsh", "fish", "dash", "ksh", "csh", "tcsh", "python", "python3", "node", "deno", "bun", "ruby", "perl",
+  "php", "lua", "osascript", "ssh", "find", "awk", "gawk", "sed", "tar", "curl", "wget", "git-shell", "parallel"
+]);
+/** Shell words that start or end a compound command: what they run is the
+ *  command inside, which a prefix of them would never name. */
+const SHELL_RESERVED_WORDS = new Set([
+  "if", "then", "else", "elif", "fi", "for", "while", "until", "do", "done", "case", "esac", "select", "function",
+  "coproc", "time", "{", "}", "!", "[[", "]]", "in"
 ]);
 /** Programs whose first argument names what they do (`git commit`). */
 const SUBCOMMAND_PROGRAMS = new Set([
-  "git", "npm", "pnpm", "yarn", "npx", "cargo", "go", "docker", "kubectl", "gh", "brew", "pip", "pip3", "uv", "poetry",
+  "git", "npm", "pnpm", "yarn", "cargo", "go", "docker", "kubectl", "gh", "brew", "pip", "pip3", "uv", "poetry",
   "make", "dotnet", "terraform", "aws", "gcloud", "swift", "xcodebuild", "rustup", "gradle", "mvn", "helm", "launchctl"
 ]);
 const SCRIPT_RUNNERS = new Set(["npm", "pnpm", "yarn"]);
+/** Files whose edit runs code later (a git hook, a shell's start-up file,
+ *  the CLI's own settings): asked each time, never covered by a folder. */
+const PROTECTED_PATH_SEGMENTS = new Set([".git", ".claude", ".ssh", ".aws", ".gnupg", "LaunchAgents", "LaunchDaemons"]);
+const PROTECTED_FILE_NAMES = new Set([
+  ".bashrc", ".bash_profile", ".bash_login", ".bash_logout", ".profile", ".zshrc", ".zshenv", ".zprofile", ".zlogin", ".zlogout",
+  ".gitconfig", ".gitmodules", ".npmrc", ".mcp.json", ".envrc"
+]);
 
 /** Whether this tool's "for this chat" answer is scoped (Bash, WebFetch,
  *  file edits); another tool's covers the tool. */
@@ -70,10 +87,15 @@ export function chatToolPermissionScope(
   }
   if (CHAT_TOOL_PERMISSION_EDIT_TOOLS.includes(toolName)) {
     const file = editedFile(input);
-    if (!file) return undefined;
+    if (!file || protectedFile(file)) return undefined;
     const home = workingDirectory ? normalizedAbsolute(workingDirectory) : undefined;
-    const folder = home && within(file, home) ? home : parentFolder(file);
-    return folder ? { kind: "folder", path: folder } : undefined;
+    const inHome = Boolean(home && within(file, home));
+    const folder = inHome ? home : parentFolder(file);
+    // A folder high up would cover far more than the file asked about: the
+    // root or a top-level folder (/etc, /Users), and outside the working
+    // folder also a user's home (/Users/name).
+    const depth = folder ? folder.split("/").filter(Boolean).length : 0;
+    return folder && depth >= (inHome ? 2 : 3) ? { kind: "folder", path: folder } : undefined;
   }
   return undefined;
 }
@@ -94,9 +116,8 @@ export function chatToolPermissionCoveredByScopes(
     const segments = typeof input.command === "string" ? commandSegments(input.command) : undefined;
     if (!segments || segments.length === 0 || prefixes.length === 0) return false;
     return segments.every((segment) => {
-      if (segment.writes) return false;
-      const text = withoutAssignments(segment.words).join(" ");
-      return text.length > 0 && prefixes.some((prefix) => text === prefix || text.startsWith(`${prefix} `));
+      if (segment.writes || segment.words.length === 0 || hasAssignment(segment.words)) return false;
+      return prefixes.some((prefix) => prefixCovers(prefix, segment.words));
     });
   }
   if (toolName === "WebFetch") {
@@ -105,9 +126,18 @@ export function chatToolPermissionCoveredByScopes(
   }
   if (CHAT_TOOL_PERMISSION_EDIT_TOOLS.includes(toolName)) {
     const file = editedFile(input);
-    return Boolean(file) && scopes.some((scope) => scope.kind === "folder" && within(file!, scope.path));
+    return Boolean(file) && !protectedFile(file!) && scopes.some((scope) => scope.kind === "folder" && within(file!, scope.path));
   }
   return false;
+}
+
+/** Whether a saved prefix covers a command (its words, quotes removed): the
+ *  same first words, one by one; a runner's (`bash -c …`, `find …`) only the
+ *  very same command. */
+function prefixCovers(prefix: string, words: string[]): boolean {
+  const wanted = prefix.split(" ");
+  if (wanted.length > words.length || wanted.some((word, index) => words[index] !== word)) return false;
+  return wanted.length === words.length || !COMMAND_RUNNERS.has(programName(wanted[0]!));
 }
 
 /** The card's "for this chat" option, in Claude Code's words. */
@@ -178,27 +208,41 @@ export function commandPrefixes(command: string): string[] | undefined {
 }
 
 function segmentPrefix(words: string[]): string | undefined {
-  const rest = withoutAssignments(words);
-  const [program, ...args] = rest;
-  if (!program || program.includes("$") || program === "{" || program === "}" || program === "!") return undefined;
-  const name = program.slice(program.lastIndexOf("/") + 1);
+  // A command run with variables set for it (`PATH=… git status`,
+  // `GIT_CONFIG_…`, `NODE_OPTIONS=…`) can run anything: not scoped.
+  if (words.length === 0 || hasAssignment(words)) return undefined;
+  const [program, ...args] = words;
+  if (!program || /[$*?[\]{}~]/.test(program) || SHELL_RESERVED_WORDS.has(program)) return undefined;
+  const name = programName(program);
   let prefix: string[];
   if (COMMAND_RUNNERS.has(name)) {
-    prefix = rest;
-  } else if (SUBCOMMAND_PROGRAMS.has(name) && args[0] && !args[0].startsWith("-")) {
+    if (args.length === 0) return undefined;
+    prefix = words;
+  } else if (SUBCOMMAND_PROGRAMS.has(name)) {
+    // `git -C dir push`: the subcommand is not where it is looked for; the
+    // bare program would cover every git command.
+    if (!args[0] || args[0].startsWith("-")) return undefined;
     prefix = [program, args[0]];
-    if (SCRIPT_RUNNERS.has(name) && args[0] === "run" && args[1] && !args[1].startsWith("-")) prefix.push(args[1]);
+    if (SCRIPT_RUNNERS.has(name) && args[0] === "run") {
+      if (!args[1] || args[1].startsWith("-")) return undefined;
+      prefix.push(args[1]);
+    }
   } else {
     prefix = [program];
   }
+  // A word of the prefix with a space in it (or none at all) would read
+  // otherwise in the saved prefix.
+  if (prefix.some((word) => word.length === 0 || /[ \t]/.test(word))) return undefined;
   const text = prefix.join(" ");
   return text.length <= MAX_COMMAND_PREFIX_LENGTH ? text : undefined;
 }
 
-function withoutAssignments(words: string[]): string[] {
-  let start = 0;
-  while (start < words.length && /^[A-Za-z_][A-Za-z0-9_]*=/.test(words[start]!)) start++;
-  return words.slice(start);
+function programName(program: string): string {
+  return program.slice(program.lastIndexOf("/") + 1);
+}
+
+function hasAssignment(words: string[]): boolean {
+  return /^[A-Za-z_][A-Za-z0-9_]*\+?=/.test(words[0] ?? "");
 }
 
 /** A shell command split into its commands (at `&&`, `||`, `;`, `|`, `&`),
@@ -281,9 +325,18 @@ function commandSegments(command: string): CommandSegment[] | undefined {
       if (char === "<" && next === "<") return undefined;
       if (char === ">" && (next === ">" || next === "|")) index++;
       if (command[index + 1] === "&") {
-        // `>&2`, `2>&1`: one stream into another, no file.
+        // `>&2`, `2>&1`, `>&-`: one stream into another (or closed), no
+        // file. Anything else after `>&` (`>&file`, `>& ~/.zshrc`, `>&2x`)
+        // is a file the shell writes.
+        const rest = command.slice(index + 2);
+        const stream = /^(\d+|-)(?=$|[ \t;&|<>()])/.exec(rest);
+        if (stream) {
+          index += 1 + stream[0].length;
+          continue;
+        }
         index++;
-        while (/[\d-]/.test(command[index + 1] ?? "")) index++;
+        if (char === ">") writes = true;
+        redirect = char === ">" ? "out" : "in";
         continue;
       }
       redirect = char === ">" ? "out" : "in";
@@ -338,6 +391,11 @@ function normalizedAbsolute(path: string): string | undefined {
 function parentFolder(file: string): string | undefined {
   const index = file.lastIndexOf("/");
   return index > 0 ? file.slice(0, index) : undefined;
+}
+
+function protectedFile(file: string): boolean {
+  const parts = file.split("/").filter(Boolean);
+  return parts.some((part) => PROTECTED_PATH_SEGMENTS.has(part)) || PROTECTED_FILE_NAMES.has(parts[parts.length - 1] ?? "");
 }
 
 function within(file: string, folder: string): boolean {

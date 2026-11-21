@@ -124,6 +124,21 @@ test("a ceiling without the CLI's own mode never turns Antigravity's restricting
   assert.deepEqual([kept.agentMode, kept.permissions.workspaceWrite, kept.permissions.cliApprovals], ["default", true, true], "agy's Accept edits under Claude's");
   const claude = clampChatAgentAccess("claude-code", applyChatAccessOptionById("claude-code", "acceptEdits", defaultChatAgentPermissions()), classicMain);
   assert.deepEqual([claude.permissions.workspaceWrite, claude.permissions.cliApprovals], [true, undefined]);
+  // Classic agy edits skip every confirmation (commands and web too): only
+  // under a ceiling that has all of them.
+  const classicAgy = { agentMode: "default" as const, permissions: { ...defaultChatAgentPermissions(), workspaceWrite: true } };
+  assert.equal(clampChatAgentAccess("gemini-cli", classicAgy, classicMain).permissions.workspaceWrite, false, "the ceiling runs no commands");
+  const allMain = { agentMode: "default" as const, permissions: { ...defaultChatAgentPermissions(), workspaceWrite: true, webAccess: true, shell: { enabled: true, rules: [] } } };
+  assert.equal(clampChatAgentAccess("gemini-cli", classicAgy, allMain).permissions.workspaceWrite, true);
+});
+
+test("a classic toggle never turns Antigravity's own mode into skipped confirmations", () => {
+  const accept = applyChatAccessOptionById("gemini-cli", "accept-edits", defaultChatAgentPermissions());
+  const web = withClassicChatPermissions(accept.permissions, { webAccess: true }, "gemini-cli");
+  assert.deepEqual([web.cliApprovals, web.workspaceWrite], [undefined, false], "an unrelated toggle: read-only, not --dangerously-skip-permissions");
+  const edits = withClassicChatPermissions(accept.permissions, { workspaceWrite: true }, "gemini-cli");
+  assert.equal(edits.workspaceWrite, true, "turning Edit Files on is the classic choice itself");
+  assert.equal(withClassicChatPermissions(applyChatAccessOptionById("claude-code", "acceptEdits", defaultChatAgentPermissions()).permissions, { webAccess: true }, "claude-code").workspaceWrite, true);
 });
 
 test("the classic toggles end a CLI mode chosen in the picker: what is off is refused, and the picker says Custom access", () => {

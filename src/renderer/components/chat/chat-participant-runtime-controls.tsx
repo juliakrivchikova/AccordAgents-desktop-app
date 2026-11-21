@@ -367,7 +367,7 @@ function PermissionsToggleRow(props: {
   const permissions = normalizeChatAgentPermissions(props.participant.permissions);
   // Classic toggles mean what they say: a CLI mode chosen in the picker ends.
   function set(patch: Partial<ChatAgentPermissions>): void {
-    props.onChange(withClassicChatPermissions(permissions, patch));
+    props.onChange(withClassicChatPermissions(permissions, patch, props.participant.kind));
   }
   const toggles: Array<{ label: string; icon: LucideIcon; checked: boolean; onChange: (value: boolean) => void }> = [
     { label: "Read Files", icon: FileText, checked: permissions.repoRead, onChange: (value) => set({ repoRead: value }) },
