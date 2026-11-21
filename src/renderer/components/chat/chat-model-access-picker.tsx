@@ -7,7 +7,7 @@ import { mainSessionProviderKey, type MainSessionProviderOption } from "../../..
 import type { CloudRunSelection } from "../../../shared/cloudRunPreparation";
 import type { ChatParticipant, ProviderModel, ProviderModelCatalog, ProviderReasoningEffortOption } from "../../../shared/types";
 import { IconButton } from "../primitives";
-import { applyChatAccessOption, chatAccessOptions, selectedChatAccessOption } from "./chat-access-modes";
+import { applyChatAccessOption, chatAccessOptions, selectedChatAccessOption } from "../../../shared/chatAccessModes";
 import { ChatProviderMark } from "./chat-member-mark";
 import { chipModelLabel, memberDefaultModelName } from "./chat-member-model-name";
 import { ParticipantRunLocation } from "./participant-run-location";
@@ -23,6 +23,8 @@ export type ChatModelAccessPatch = Partial<Pick<ChatParticipant,
 
 export interface ChatModelAccessAction {
   label: string;
+  /** One muted line under it. */
+  detail?: string;
   onSelect: () => void;
   tone?: "danger";
   disabled?: boolean;
@@ -40,7 +42,9 @@ export function ChatModelAccessPanel(props: {
   value: ChatModelAccessValue;
   providers?: readonly MainSessionProviderOption[];
   onProviderChange?: (option: MainSessionProviderOption) => void;
-  onChange: (patch: ChatModelAccessPatch) => void;
+  /** Saves one choice; what it returns (a save's promise, false when it
+   *  failed) is what "Runs on" waits for before it prepares a machine. */
+  onChange: (patch: ChatModelAccessPatch) => unknown;
   disabled?: boolean;
   /** Where it runs: offered once a machine exists (or it runs on one). */
   runsOn?: { locked?: boolean; moves?: boolean };
@@ -54,19 +58,25 @@ export function ChatModelAccessPanel(props: {
   const models = useMemo(() => explicitModels(catalog), [catalog]);
   const defaultLabel = memberDefaultModelName(value, catalog);
   const efforts = useMemo(() => effortOptions(value.kind, catalog, model), [catalog, model, value.kind]);
-  const effort = normalizeChatReasoningEffort(value.reasoningEffort, value.kind);
+  // An effort the chosen model does not have reads as the CLI's own here;
+  // nothing is saved until the User picks one (opening the picker, even
+  // while the member runs, changes nothing).
+  const effort = shownEffort(normalizeChatReasoningEffort(value.reasoningEffort, value.kind), efforts);
   const access = selectedChatAccessOption(value.kind, value.agentMode, value.permissions);
   const machinesExist = useMachinesExist();
   const showRunsOn = Boolean(props.runsOn) && (machinesExist || Boolean(value.homeMachineId || value.cloudRun));
   const [menuOpen, setMenuOpen] = useState(false);
   const { onChange } = props;
-
-  // A model without the chosen effort: back to the CLI's own effort.
-  useEffect(() => {
-    if (effort && !efforts.some((option) => option.id === effort)) {
-      onChange({ reasoningEffort: undefined });
-    }
-  }, [effort, efforts, onChange]);
+  // A model chosen without the saved effort: that choice clears it too, so
+  // its CLI is never given an effort the model does not have.
+  const savedEffort = normalizeChatReasoningEffort(value.reasoningEffort, value.kind);
+  // "" is the explicit reset to the CLI's own model or effort.
+  const withEffortFor = (modelId: string | undefined): ChatModelAccessPatch => {
+    const next = effortOptions(value.kind, catalog, modelId);
+    return savedEffort && !next.some((option) => option.id === savedEffort)
+      ? { model: modelId ?? "", reasoningEffort: "" as ChatModelAccessPatch["reasoningEffort"] }
+      : { model: modelId ?? "" };
+  };
 
   return (
     <div className="chat-model-access" data-testid={props.testId ?? "chat-model-access"} aria-disabled={props.disabled || undefined}>
@@ -78,8 +88,9 @@ export function ChatModelAccessPanel(props: {
               {props.actions.map((action) => (
                 <button key={action.label} type="button" role="menuitem" disabled={action.disabled}
                   className={action.tone === "danger" ? "chat-model-access-row is-danger" : "chat-model-access-row"}
-                  data-testid="chat-model-access-action" onClick={() => { setMenuOpen(false); action.onSelect(); }}>
+                  data-testid="chat-model-access-action" title={action.detail} onClick={() => { setMenuOpen(false); action.onSelect(); }}>
                   <span className="chat-model-access-row-label">{action.label}</span>
+                  {action.detail && <span className="chat-model-access-row-detail">{action.detail}</span>}
                 </button>
               ))}
             </div>
@@ -100,10 +111,10 @@ export function ChatModelAccessPanel(props: {
       )}
       <PickerSection label="Model">
         <PickerRow selected={!model} disabled={props.disabled} testId="chat-model-access-model" label={defaultLabel} detail="Default"
-          onSelect={() => onChange({ model: undefined })} />
+          onSelect={() => { if (model) onChange(withEffortFor(undefined)); }} />
         {models.map((item) => (
           <PickerRow key={item.id} selected={model === item.id} disabled={props.disabled} testId="chat-model-access-model"
-            label={chipModelLabel(item)} onSelect={() => onChange({ model: item.id })} />
+            label={chipModelLabel(item)} onSelect={() => { if (model !== item.id) onChange(withEffortFor(item.id)); }} />
         ))}
         {model && !models.some((item) => item.id === model) && (
           <PickerRow selected disabled={props.disabled} testId="chat-model-access-model" label={model} onSelect={() => undefined} />
@@ -116,7 +127,7 @@ export function ChatModelAccessPanel(props: {
             <button key={option.id ?? "default"} type="button" role="radio" aria-checked={effort === option.id}
               className={effort === option.id ? "chat-model-access-effort is-selected" : "chat-model-access-effort"}
               data-testid="chat-model-access-effort" disabled={props.disabled}
-              onClick={() => onChange({ reasoningEffort: option.id })}>
+              onClick={() => { if (savedEffort !== option.id) onChange({ reasoningEffort: option.id ?? "" as ChatModelAccessPatch["reasoningEffort"] }); }}>
               {option.label}
             </button>
           ))}
@@ -124,14 +135,20 @@ export function ChatModelAccessPanel(props: {
       </PickerSection>
       <PickerSection label="Access">
         {chatAccessOptions(value.kind).map((option) => (
-          <PickerRow key={option.id} selected={option.id === access.id} disabled={props.disabled} testId="chat-model-access-mode"
-            label={option.label} detail={option.detail} onSelect={() => onChange(applyChatAccessOption(option, value.permissions))} />
+          <PickerRow key={option.id} selected={option.id === access?.id} disabled={props.disabled} testId="chat-model-access-mode"
+            label={option.label} detail={option.detail}
+            onSelect={() => { if (option.id !== access?.id) onChange(applyChatAccessOption(option, value.permissions)); }} />
         ))}
+        {!access && (
+          <p className="chat-model-access-note" data-testid="chat-model-access-custom">
+            Custom access, set in the classic view. Choose a mode to run in the CLI's own.
+          </p>
+        )}
       </PickerSection>
       {showRunsOn && (
         <PickerSection label="Runs on">
           <ParticipantRunLocation kind={value.kind} homeMachineId={value.homeMachineId} cloudRun={value.cloudRun} hideLabel
-            disabled={props.disabled} locked={props.runsOn?.locked} moves={props.runsOn?.moves} handle={value.handle}
+            disabled={props.disabled} locked={props.runsOn?.locked} moves={props.runsOn?.moves} anonymous
             onChange={(patch: { homeMachineId?: string; cloudRun?: CloudRunSelection; remoteExecution: "local" }) => onChange(patch)} />
         </PickerSection>
       )}
@@ -167,6 +184,12 @@ function PickerRow(props: {
       <span className="chat-model-access-check" aria-hidden="true">{props.selected && <Check size={14} />}</span>
     </button>
   );
+}
+
+/** The effort the picker marks: the saved one when the model has it, else
+ *  none (the CLI's own). */
+export function shownEffort<T extends string>(effort: T | undefined, efforts: ReadonlyArray<{ id: string }>): T | undefined {
+  return effort && efforts.some((option) => option.id === effort) ? effort : undefined;
 }
 
 /** The models offered besides the default row: the CLI's list without the

@@ -14,6 +14,8 @@ import { ChatMessageItem } from "./chat-message-item";
 import { ChatSessionsPresentationContext } from "./chat-member-mark";
 import type { ChatParticipantRosterStatus } from "./chat-roster-status";
 import { ChatSessionsTimelineRow } from "./chat-sessions-timeline-row";
+import { newestActivityBlocks, sameActivityRow } from "./chat-sessions-activity";
+import { chatInlineTranscriptParts } from "../../../shared/processingTranscript";
 import { useChatSessionsView, type ChatSessionsView } from "./use-chat-sessions-view";
 import { DREW, GERA, MAIN, PARTICIPANTS, TAYLOR, chatMessage, disclosure, sessionsConversation, sessionsMessages } from "./chat-sessions-fixtures.test";
 
@@ -100,7 +102,7 @@ const WORK_ROWS = [
   ["tool", "Using mcp__accord_agents__app_chat_get_context"]
 ];
 
-test("a running reply of the sessions view: Working for over a hairline, one quiet row per step by kind, the newest shimmering; no Running label, no Thinking word, no boxed groups, no controls of its own", () => {
+test("a running reply of the sessions view: Working for over a hairline, one quiet row per step by kind, the newest shimmering; no Running label, no Thinking word, no boxed groups, only a hover × to stop it", () => {
   const sessions = sessionsOf(sessionsConversation());
   const running = chatMessage("main-run", "participant", 12, { participantId: MAIN.id, status: "pending", content: "", metadata: { runId: "run-main" } });
   const root = renderSessionsRow(running, sessions, { liveProgress: { participantLabel: "main", state: "running" as const, partialContent: "", activityEvents: workEvents() }, onStopRun: noop } as Partial<Parameters<typeof ChatMessageItem>[0]>);
@@ -109,8 +111,11 @@ test("a running reply of the sessions view: Working for over a hairline, one qui
   const text = textOf(root);
   assert.doesNotMatch(text, /Running|Thinking\b|commands?\b/, "no status label, no placeholder word, no group summary");
   assert.equal(root.findAll(hasClass("chat-inline-activity-group")).length, 0, "no boxed groups");
-  assert.equal(root.findAll(hasClass("message-actions")).length, 0, "no stop or copy on the message: the composer's button is Stop");
-  assert.equal(root.findAll((node) => node.props?.label === "Stop response" || node.props?.label === "Copy message").length, 0);
+  const actions = root.findAll(hasClass("message-actions"));
+  assert.equal(actions.length, 1, "one small control, shown on hover (is-sessions-stop)");
+  assert.ok(actions[0]!.props.className.includes("is-sessions-stop"));
+  assert.equal(root.findAll((node) => typeof node.type === "string" && node.props?.["data-testid"] === "chat-sessions-reply-stop").length, 1, "the reply can be stopped from its own row, as the CLI interrupts");
+  assert.equal(root.findAll((node) => node.props?.label === "Copy message").length, 0, "no copy while it runs");
 
   // Before its first step it is the header alone: no "Thinking".
   const fresh = renderSessionsRow({ ...running, id: "main-fresh" }, sessions);
@@ -177,4 +182,67 @@ test("the classic view's running reply is as it was: its status line and its sto
   assert.equal(rowsOf(root).length, 0);
   assert.equal(root.findAll((node) => node.props?.["data-testid"] === "chat-sessions-working").length, 0);
   act(() => renderer!.unmount());
+});
+
+test("a queued reply of the sessions view can be cancelled from its own row", () => {
+  const sessions = sessionsOf(sessionsConversation());
+  const stopped: string[] = [];
+  const queued = chatMessage("main-queued", "participant", 13, { participantId: MAIN.id, status: "pending", content: "", metadata: { runId: "run-queued", queuedBehind: { handle: "drew" } } } as Partial<ChatMessage>);
+  const root = renderSessionsRow(queued, sessions, { onStopRun: (runId: string) => { stopped.push(runId); } } as Partial<Parameters<typeof ChatMessageItem>[0]>);
+  const cancel = root.find((node) => typeof node.type === "string" && node.props?.["data-testid"] === "chat-sessions-reply-stop");
+  assert.equal(cancel.props["aria-label"], "Cancel queued reply");
+  act(() => cancel.props.onClick({ defaultPrevented: false, preventDefault: noop, stopPropagation: noop }));
+  assert.deepEqual(stopped, ["run-queued"]);
+});
+
+/** A long turn: `count` steps, each a command. */
+function manySteps(count: number): ChatAgentActivityEvent[] {
+  return Array.from({ length: count }, (_, index) => activity(`s${index + 1}`, "command", "Running command", 0, `step ${index + 1}`));
+}
+
+test("a long running turn draws only its newest 50 steps under a muted 'N earlier steps', and each step is drawn again only when it changed", () => {
+  const sessions = sessionsOf(sessionsConversation());
+  const running = chatMessage("main-long", "participant", 12, { participantId: MAIN.id, status: "pending", content: "", metadata: { runId: "run-long" } });
+  const events = manySteps(180);
+  const root = renderSessionsRow(running, sessions, { liveProgress: { participantLabel: "main", state: "running" as const, partialContent: "", activityEvents: events } } as Partial<Parameters<typeof ChatMessageItem>[0]>);
+  const rows = rowsOf(root);
+  assert.equal(rows.length, 50, "the newest 50");
+  assert.equal(rows[0]![1], "step 131");
+  assert.deepEqual(rows.at(-1), ["shell", "step 180", "current"]);
+  const earlier = root.find((node) => typeof node.type === "string" && node.props?.["data-testid"] === "chat-sessions-activity-earlier");
+  assert.equal(textOf(earlier), "130 earlier steps");
+  assert.notEqual(earlier.type, "button", "not opened while it runs");
+
+  // The same step handed again as a new object (a streamed update) is not a change.
+  assert.equal(sameActivityRow(events[3]!, { ...events[3]! }), true);
+  assert.equal(sameActivityRow(events[3]!, { ...events[3]!, detail: "other" }), false);
+  const parts = chatInlineTranscriptParts("", events);
+  assert.equal(parts.filter((part) => part.kind === "activity").every((part, index) => part.kind === "activity" && part.event === events[index]), true,
+    "an event whose place does not move keeps its own object, so its row is not drawn again");
+});
+
+test("a finished long turn's fold opens to its newest 50 steps, and 'N earlier steps' opens the rest", () => {
+  const sessions = sessionsOf(sessionsConversation());
+  const done = chatMessage("main-long-done", "participant", 14, { participantId: MAIN.id, content: "Done.", metadata: { workedMs: 60_000, activityEvents: manySteps(70) } } as Partial<ChatMessage>);
+  const toggles = { ...disclosure(), expandedProcessingTranscriptMessageIds: new Set(["main-long-done"]), toggleProcessingTranscript: noop };
+  const root = renderSessionsRow(done, sessions, { activityDisclosure: toggles });
+  assert.equal(rowsOf(root).length, 50);
+  const earlier = root.find((node) => typeof node.type === "string" && node.props?.["data-testid"] === "chat-sessions-activity-earlier");
+  assert.equal(earlier.type, "button");
+  assert.equal(textOf(earlier), "20 earlier steps");
+  act(() => earlier.props.onClick());
+  assert.equal(rowsOf(root).length, 70, "all of them once opened");
+  assert.equal(root.findAll((node) => typeof node.type === "string" && node.props?.["data-testid"] === "chat-sessions-activity-earlier").length, 0);
+});
+
+test("the newest-steps cut keeps a group's newest steps and drops the words before them", () => {
+  const events = manySteps(5);
+  const blocks = [
+    { kind: "activity-group", events: events.slice(0, 3) },
+    { kind: "text", text: "between" },
+    { kind: "activity-group", events: events.slice(3) }
+  ];
+  const cut = newestActivityBlocks(blocks, 3);
+  assert.equal(cut.hidden, 2);
+  assert.deepEqual(cut.blocks.map((block) => block.kind === "text" ? "text" : block.events!.map((event) => event.id).join(",")), ["s3", "text", "s4,s5"]);
 });

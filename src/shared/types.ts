@@ -941,6 +941,15 @@ export interface ChatAgentPermissions {
       allowedTools: string[];
     };
   };
+  /**
+   * The member's CLI runs in its own permission mode (the sessions view's
+   * access picker, src/shared/chatAccessModes.ts): what the rights above do
+   * not already allow, the CLI asks about as it does in its own terminal —
+   * Claude Code and Codex through the app's approval cards; Antigravity's
+   * print mode cannot ask, so agy refuses it. Without it (the classic
+   * controls), the app refuses what is not granted.
+   */
+  cliApprovals?: true;
 }
 
 export interface ChatParticipant {
@@ -1745,6 +1754,10 @@ export interface ChatMessageMetadata {
   memberMoveCancelled?: { participantId: string; runId: string };
   workedMs?: number;
   queuedBehind?: { handle: string };
+  /** When a reply that waited behind its member's turn before it began its
+   *  own turn: its "Working for …" counts from here, not from when it was
+   *  queued (desktop and phone). */
+  turnStartedAt?: string;
   appMessageSource?: string;
   /** Set on messages a scheduled script posted. */
   scriptId?: string;

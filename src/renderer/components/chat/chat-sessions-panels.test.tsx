@@ -8,6 +8,8 @@ import { latestTaskByMember, sessionsMemberActivity, sessionsMemberRows, session
 import type { AppSettings, ChatMessage } from "../../../shared/types";
 import { ChatMembersPanel } from "./chat-members-panel";
 import { ChatModelAccessPanel, type ChatModelAccessPatch } from "./chat-model-access-picker";
+import { memberSettingsActions } from "./chat-member-model-access";
+import { runtimePatchFields } from "../../app/use-chat-actions";
 import { defaultChatAgentPermissions } from "../../../shared/agentPermissions";
 import { ChatMemberSessionPanel, type ChatMemberSendRequest } from "./chat-member-session-panel";
 import type { ChatParticipantRosterStatus } from "./chat-roster-status";
@@ -328,7 +330,7 @@ test("a member's settings in the sessions view: its model, effort, access in its
     await act(async () => {
       renderer = create(
         <TooltipProvider>
-          <ChatModelAccessPanel value={{ ...DREW, agentMode: "default", permissions: { ...defaultChatAgentPermissions(), workspaceWrite: false } }}
+          <ChatModelAccessPanel value={{ ...DREW, agentMode: "default", permissions: { ...defaultChatAgentPermissions(), workspaceWrite: false, cliApprovals: true } }}
             onChange={(patch) => patches.push(patch)} runsOn={{}} actions={[{ label: "Remove from chat", tone: "danger", onSelect: () => { removed += 1; } }]} />
         </TooltipProvider>
       );
@@ -341,11 +343,15 @@ test("a member's settings in the sessions view: its model, effort, access in its
     assert.deepEqual(root.findAll(byTestId("chat-model-access-model")).map(textOf), ["GPT-5.5Default", "GPT-5.5 mini"]);
     const modes = root.findAll(byTestId("chat-model-access-mode"));
     assert.deepEqual(modes.map((row) => textOf(row.findAll((node) => node.props.className === "chat-model-access-row-label")[0]!)),
-      ["Read only", "Workspace write", "Auto-review", "Plan mode"], "Codex's own sandbox and approval terms");
+      ["Read only", "Default", "Auto-review", "Plan mode"], "Codex's own presets (Read Only, Default) and its Auto-review and Plan mode");
+    assert.match(textOf(modes[1]!), /asks to go outside it or online/, "each says what Codex does in it");
     assert.equal(modes[0]!.props["aria-checked"], true, "read-only now");
+    assert.deepEqual(patches, [], "opening it saves nothing");
     await act(async () => { modes[1]!.props.onClick(); });
     assert.equal(patches.at(-1)?.agentMode, "default");
     assert.equal(patches.at(-1)?.permissions?.workspaceWrite, true);
+    assert.equal(patches.at(-1)?.permissions?.cliApprovals, true, "the CLI runs in its own mode, asking for the rest");
+    assert.deepEqual(Object.keys(patches.at(-1)!).sort(), ["agentMode", "permissions"], "only what the choice changes");
     assert.equal(root.findAll(byTestId("chat-model-access-action")).length, 0, "Remove from chat sits behind …");
     await act(async () => { root.find((node) => node.type === "button" && node.props["aria-label"] === "More").props.onClick(); });
     const remove = root.find(byTestId("chat-model-access-action"));
@@ -356,4 +362,126 @@ test("a member's settings in the sessions view: its model, effort, access in its
     if (renderer) act(() => renderer!.unmount());
     host.consensus = previous;
   }
+});
+
+const CODEX_CATALOG = {
+  kind: "codex-cli", authoritative: true, fetchedAt: "2026-11-21T00:00:00.000Z",
+  models: [
+    { id: "gpt-5.5", label: "GPT-5.5", recommended: true, source: "cli", supportedReasoningEfforts: [{ id: "low", label: "Low" }, { id: "medium", label: "Medium" }, { id: "xhigh", label: "Extra high" }] },
+    { id: "gpt-5.5-mini", label: "GPT-5.5 mini", source: "cli", supportedReasoningEfforts: [{ id: "low", label: "Low" }, { id: "medium", label: "Medium" }] }
+  ]
+};
+
+async function renderPicker(value: Parameters<typeof ChatModelAccessPanel>[0]["value"], onChange: (patch: ChatModelAccessPatch) => unknown, extra: Record<string, unknown> = {}, bridge: Record<string, unknown> = {}) {
+  const host = window as unknown as { consensus?: unknown };
+  const previous = host.consensus;
+  host.consensus = { listProviderModels: async () => CODEX_CATALOG, listMachines: async () => ({ machines: [] }), ...bridge };
+  let renderer: ReturnType<typeof create> | undefined;
+  await act(async () => {
+    renderer = create(<TooltipProvider><ChatModelAccessPanel value={value} onChange={onChange} runsOn={{}} {...extra} /></TooltipProvider>);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  });
+  return { root: renderer!.root, done: () => { act(() => renderer!.unmount()); host.consensus = previous; } };
+}
+
+test("the picker saves only an explicit choice: an effort the model lacks reads as Default without a save, and Default really resets", async () => {
+  const patches: ChatModelAccessPatch[] = [];
+  const view = await renderPicker({ ...DREW, model: "gpt-5.5-mini", reasoningEffort: "xhigh", agentMode: "default", permissions: { ...defaultChatAgentPermissions(), cliApprovals: true } },
+    (patch) => { patches.push(patch); });
+  try {
+    const efforts = view.root.findAll(byTestId("chat-model-access-effort"));
+    assert.deepEqual(efforts.map(textOf), ["Default", "Low", "Medium"], "the chosen model's efforts");
+    assert.equal(efforts[0]!.props["aria-checked"], true, "xhigh, which mini lacks, reads as the CLI's own");
+    assert.deepEqual(patches, [], "nothing is saved by opening the picker (it used to save in a loop)");
+    await act(async () => { efforts[0]!.props.onClick(); });
+    assert.deepEqual(patches.at(-1), { reasoningEffort: "" }, "Default sends the explicit reset, not undefined (which kept the old effort)");
+    const models = view.root.findAll(byTestId("chat-model-access-model"));
+    await act(async () => { models[0]!.props.onClick(); });
+    assert.deepEqual(patches.at(-1), { model: "" }, "the default model: the explicit reset; its own efforts have xhigh, so the effort stays");
+    await act(async () => { models[1]!.props.onClick(); });
+    assert.equal(patches.length, 2, "choosing the model it already has saves nothing");
+  } finally {
+    view.done();
+  }
+  const fromDefault: ChatModelAccessPatch[] = [];
+  const second = await renderPicker({ ...DREW, reasoningEffort: "xhigh", permissions: { ...defaultChatAgentPermissions(), cliApprovals: true } }, (patch) => { fromDefault.push(patch); });
+  try {
+    await act(async () => { second.root.findAll(byTestId("chat-model-access-model"))[1]!.props.onClick(); });
+    assert.deepEqual(fromDefault, [{ model: "gpt-5.5-mini", reasoningEffort: "" }], "a model without the saved effort clears it in the same save");
+  } finally {
+    second.done();
+  }
+});
+
+test("access set in the classic controls is not passed off as one of the CLI's modes", async () => {
+  const view = await renderPicker({ ...DREW, agentMode: "default", permissions: { ...defaultChatAgentPermissions(), workspaceWrite: true } }, () => undefined);
+  try {
+    assert.equal(view.root.findAll(byTestId("chat-model-access-mode")).filter((row) => row.props["aria-checked"]).length, 0, "no mode marked");
+    assert.match(textOf(view.root.find(byTestId("chat-model-access-custom"))), /Custom access/);
+  } finally {
+    view.done();
+  }
+});
+
+test("Runs on waits for the save: Cloud run prepares its machine only after the save worked, and a move shows its progress until it ends", async () => {
+  const prepared: unknown[] = [];
+  const bridge = {
+    listMachines: async () => ({ machines: [{ id: "m-cloud", name: "Cloud box", awsInstanceId: "i-1" }, { id: "m-mac", name: "Studio" }] }),
+    onMachinesUpdated: () => noop,
+    onCloudRunPreparationProgress: () => noop,
+    getCloudRunPreparation: async () => undefined,
+    prepareCloudRun: async (request: unknown) => { prepared.push(request); }
+  };
+  const answers: Array<(saved: boolean) => void> = [];
+  const view = await renderPicker({ ...DREW, kind: "claude-code", permissions: { ...defaultChatAgentPermissions(), cliApprovals: true } },
+    () => new Promise<boolean>((resolve) => { answers.push(resolve); }), { runsOn: { moves: true } }, bridge);
+  try {
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 0)); });
+    const select = () => view.root.find((node) => node.type === "select" && node.props["aria-label"] === "Run on");
+    await act(async () => { select().props.onChange({ currentTarget: { value: "machine:m-cloud" } }); });
+    assert.match(textOf(view.root), /Moving to Cloud box with its session/, "the move is shown while it is saved, naming nobody");
+    assert.equal(select().props.disabled, true, "no second move meanwhile");
+    await act(async () => { answers[0]!(false); await new Promise((resolve) => setTimeout(resolve, 0)); });
+    assert.deepEqual(prepared, [], "a failed save prepares nothing");
+    assert.doesNotMatch(textOf(view.root), /Moving/);
+    await act(async () => { select().props.onChange({ currentTarget: { value: "machine:m-cloud" } }); });
+    await act(async () => { answers[1]!(true); await new Promise((resolve) => setTimeout(resolve, 0)); });
+    assert.equal(prepared.length, 1, "prepared once the save worked");
+  } finally {
+    view.done();
+  }
+});
+
+test("a member's … menu restarts it as the classic roster does: idle only, never Antigravity, naming the background work it stops", () => {
+  const restarts: Array<[string, boolean]> = [];
+  const stops: string[] = [];
+  let closed = 0;
+  const base = { participant: { id: "p-1", kind: "claude-code" as const }, backgroundTaskCount: 0, onRestart: (id: string, stop: boolean) => { restarts.push([id, stop]); },
+    onStopRestart: (runId: string) => { stops.push(runId); }, close: () => { closed += 1; } };
+  const idle = memberSettingsActions({ ...base, status: "idle", onRemove: noop });
+  assert.deepEqual(idle.map((action) => action.label), ["Restart", "Remove from chat"], "Restart next to Remove from chat");
+  assert.match(idle[0]!.detail ?? "", /connectors/);
+  idle[0]!.onSelect();
+  assert.deepEqual(restarts, [["p-1", false]]);
+  assert.equal(closed, 1);
+  const busy = memberSettingsActions({ ...base, status: "running" });
+  assert.equal(busy[0]!.disabled, true, "not while it works");
+  const tasks = memberSettingsActions({ ...base, status: "background", backgroundTaskCount: 2 });
+  assert.equal(tasks[0]!.label, "Restart (stops 2 background tasks)", "said before it is chosen");
+  tasks[0]!.onSelect();
+  assert.deepEqual(restarts.at(-1), ["p-1", true]);
+  assert.deepEqual(memberSettingsActions({ ...base, participant: { id: "p-2", kind: "gemini-cli" }, status: "idle" }), [], "Antigravity starts a process per message: nothing to restart");
+  const waiting = memberSettingsActions({ ...base, status: "idle", restartStatus: { runId: "r-9", message: "Waiting for machine Box", waiting: true } });
+  assert.equal(waiting[0]!.label, "Stop restarting");
+  waiting[0]!.onSelect();
+  assert.deepEqual(stops, ["r-9"]);
+  assert.equal(memberSettingsActions({ ...base, status: "idle", restartStatus: { runId: "r-9", message: "Restarting", waiting: false } })[0]!.disabled, true);
+});
+
+test("a member's settings send only what was chosen, so a second quick choice never sends the first one back as it was", () => {
+  assert.deepEqual(runtimePatchFields({ reasoningEffort: "low" }), { reasoningEffort: "low" });
+  assert.deepEqual(runtimePatchFields({ model: "" }), { model: "" }, "the reset goes as it is");
+  const reset = runtimePatchFields({ reasoningEffort: undefined, homeMachineId: undefined });
+  assert.deepEqual(Object.keys(reset).sort(), ["homeMachineId", "reasoningEffort"], "a key given without a value is a reset, and is sent");
+  assert.equal(Object.prototype.hasOwnProperty.call(runtimePatchFields({ model: "x" }), "permissions"), false);
 });

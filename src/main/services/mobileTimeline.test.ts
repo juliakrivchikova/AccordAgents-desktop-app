@@ -633,3 +633,13 @@ test("a running reply waiting behind its member's turn travels as queued; a mach
   assert.deepEqual([byId.get("remote")?.queued, byId.get("remote")?.startedAt], [undefined, startedAt]);
   assert.deepEqual([byId.get("local")?.queued, byId.get("local")?.startedAt], [undefined, undefined], "a local turn counts from its reply");
 });
+
+test("a reply that waited in the queue works, on the phone too, from when its own turn began", () => {
+  const conversation = requestConversation("Task", 1);
+  const turnStartedAt = "2026-11-20T10:07:45Z";
+  conversation.messages.push({ id: "was-queued", role: "participant", participantId: "main", participantLabel: "@main", content: "", createdAt: "2026-11-20T10:07:00Z", status: "pending",
+    metadata: { runId: "run-w", turnStartedAt } });
+  const event = timelineEventsFromSnapshot(conversation).find((item) => item.id === "was-queued");
+  assert.equal(event?.queued, undefined);
+  assert.equal(event?.startedAt, turnStartedAt, "not the time it was queued");
+});

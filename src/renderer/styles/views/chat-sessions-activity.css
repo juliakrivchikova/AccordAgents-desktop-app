@@ -106,3 +106,20 @@
 .chat-sessions-running .chat-delegations {
   margin-top: 4px;
 }
+
+/* The steps not drawn: one muted line, which opens them in a finished fold. */
+.chat-sessions-activity-earlier {
+  padding: 0 0 0 22px;
+  border: 0;
+  background: none;
+  font-style: italic;
+  text-align: left;
+}
+
+button.chat-sessions-activity-earlier {
+  cursor: pointer;
+}
+
+button.chat-sessions-activity-earlier:hover .chat-sessions-activity-text {
+  color: var(--app-text-strong);
+}

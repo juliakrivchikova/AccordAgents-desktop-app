@@ -166,10 +166,12 @@ export function chatInlineTranscriptParts(
   segment?: ChatTranscriptSegment
 ): ChatInlineTranscriptPart[] {
   const normalized = content.replace(/\r\n/g, "\n");
-  const events = (segment ? chatActivityEventsForSegment(activityEvents, segment) : [...activityEvents]).map((event) => ({
-    ...event,
-    afterContentLength: snapActivityOffset(normalized, activityEventOffset(event, normalized.length))
-  })).sort((left, right) => {
+  // An event keeps its own object when its place does not move, so a row
+  // drawn from it is not drawn again on every streamed update.
+  const events = (segment ? chatActivityEventsForSegment(activityEvents, segment) : activityEvents).map((event) => {
+    const afterContentLength = snapActivityOffset(normalized, activityEventOffset(event, normalized.length));
+    return event.afterContentLength === afterContentLength ? event : { ...event, afterContentLength };
+  }).sort((left, right) => {
     const offsetDelta = activityEventOffset(left, normalized.length) - activityEventOffset(right, normalized.length);
     return offsetDelta || left.sequence - right.sequence;
   });

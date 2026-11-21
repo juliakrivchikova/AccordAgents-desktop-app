@@ -446,7 +446,8 @@ export function phoneTurnTiming(
   remoteRunStatus = message.metadata?.remoteRunStatus
 ): { queued?: true; startedAt?: string } {
   if (message.metadata?.queuedBehind) return { queued: true };
-  const startedAt = remoteRunStreamingStartedAt(message.createdAt, remoteRunStatus);
+  // A reply that waited in the queue counts from its own turn's start.
+  const startedAt = remoteRunStreamingStartedAt(message.metadata?.turnStartedAt ?? message.createdAt, remoteRunStatus);
   return startedAt && startedAt !== message.createdAt ? { startedAt } : {};
 }
 

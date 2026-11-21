@@ -341,9 +341,13 @@ function App(): JSX.Element {
         participant={participant}
         trigger={trigger ?? <IconButton label="Settings" icon={Settings2} tooltip="Settings" data-testid="chat-member-settings-trigger" />}
         working={status === "running" || status === "compacting"}
+        status={status}
         runLocationLocked={hasRun && !memberSessionMoves(participant)}
         runLocationMoves={hasRun && memberSessionMoves(participant)}
         onUpdate={(participantId, patch) => chatActions.updateChatParticipantRuntime(participantId, patch)}
+        onRestart={(participantId, stopBackgroundTasks) => chatActions.restartChatParticipant(participantId, stopBackgroundTasks)}
+        onStopRestart={(runId) => void window.consensus.cancelReview(runId)}
+        restartStatus={restartingMembers(state.progressLog).get(memberId)}
         onRemove={isMain ? undefined : () => void chatActions.removeChatParticipant(memberId)}
         removeDisabledReason={view.busyParticipantIds.has(memberId) ? "busy" : undefined}
       />
@@ -627,6 +631,8 @@ function App(): JSX.Element {
                 selectedParticipantRuntimeOverrides={state.selectedChatParticipantRuntimeOverrides}
                 mainSessionProvider={state.newChatMainSessionProvider}
                 onMainSessionProviderChange={state.setNewChatMainSessionProvider}
+                mainSessionOverrideFor={state.newChatMainSessionOverrideFor}
+                onMainSessionOverrideForChange={state.setNewChatMainSessionOverrideFor}
                 settings={state.settings}
                 summaries={state.summaries}
                 agents={state.agents}

@@ -428,6 +428,116 @@ test("a new chat that opens in the classic view keeps its members picker, and ha
   renderer.unmount();
 });
 
+/** The New chat screen as App keeps it: its chip's provider, the main
+ *  session's settings and which provider they were made for live outside it. */
+function trackedHarness(settingsFor: () => AppSettings, agentsFor: () => AgentHealth[] = readyAgents) {
+  const state: {
+    provider?: { kind: AgentHealth["kind"]; hostId?: string };
+    overrides: Record<string, ChatParticipantRuntimeOverride>;
+    madeFor?: string;
+  } = { overrides: {} };
+  // The state outlives the screen (App keeps it), so a write made as the
+  // screen goes away still lands.
+  function setter<K extends keyof typeof state>(key: K, force: () => void) {
+    return (value: unknown) => {
+      state[key] = (typeof value === "function" ? (value as (current: unknown) => unknown)(state[key]) : value) as (typeof state)[K];
+      force();
+    };
+  }
+  function Harness(): JSX.Element {
+    const [, setTick] = useState(0);
+    const force = (): void => setTick((tick) => tick + 1);
+    return <NewChatScreen {...baseProps(agentsFor(), {
+      settings: settingsFor(),
+      mainSessionProvider: state.provider,
+      onMainSessionProviderChange: setter("provider", force),
+      selectedParticipantRuntimeOverrides: state.overrides,
+      onSelectedParticipantRuntimeOverridesChange: setter("overrides", force),
+      mainSessionOverrideFor: state.madeFor,
+      onMainSessionOverrideForChange: setter("madeFor", force)
+    })} />;
+  }
+  return { state, Harness };
+}
+
+const modeRows = (root: ReactTestInstance): ReactTestInstance[] => root.findByProps({ "data-testid": "new-chat-model-picker" }).findAllByProps({ "data-testid": "chat-model-access-mode" });
+const checkedMode = (root: ReactTestInstance): string | undefined => {
+  const row = modeRows(root).find((candidate) => candidate.props["aria-checked"] === true);
+  return row ? textOf(row.findByProps({ className: "chat-model-access-row-label" })) : undefined;
+};
+
+test("a new chat's main session in the sessions view starts in its CLI's own default mode, and another provider's settings never carry over", async () => {
+  installModelBridge();
+  let settings: AppSettings = { ...SETTINGS, assistantProviderKind: "claude-code" };
+  const { state, Harness } = trackedHarness(() => settings);
+  let renderer = create(<Harness />);
+  await settle();
+  await click(renderer.root.findByProps({ "data-testid": "new-chat-model-chip" }));
+  await settle();
+  assert.equal(checkedMode(renderer.root), "Default", "Claude Code's Default: it reads, and asks before edits, commands and web");
+  assert.match(textOf(modeRows(renderer.root)[0]!), /asks before edits, commands and web/);
+
+  await click(modeRows(renderer.root).find((row) => textOf(row).startsWith("Accept edits"))!);
+  await click(renderer.root.findByProps({ "data-testid": "new-chat-model-picker" }).findAllByProps({ "data-testid": "chat-model-access-model" }).find((row) => textOf(row) === "Haiku 5.5")!);
+  await settle();
+  assert.equal(state.overrides["__new-chat-main-session__"]?.model, "haiku");
+  assert.equal(state.madeFor, "claude-code\u0000", "made for Claude Code");
+
+  // Codex chosen on the chip: what was set for Claude Code is dropped,
+  // its access included, and Codex starts in its own default mode.
+  await click(renderer.root.findByProps({ "data-testid": "new-chat-model-picker" }).findAllByProps({ "data-testid": "chat-model-access-provider" }).find((row) => textOf(row) === "Codex")!);
+  await settle();
+  assert.equal(state.overrides["__new-chat-main-session__"], undefined, "no Claude model (or mode) reaches Codex");
+  assert.equal(checkedMode(renderer.root), "Default", "Codex's Default preset (workspace write, asking to go further)");
+  assert.equal(textOf(renderer.root.findByProps({ "data-testid": "new-chat-model-chip" })), "GPT-5.5", "Codex's own default model");
+  await click(modeRows(renderer.root).find((row) => textOf(row).startsWith("Read only"))!);
+  await settle();
+  act(() => renderer.unmount());
+  assert.equal(state.provider, undefined, "leaving New chat without sending forgets the chip's provider");
+  assert.equal(state.overrides["__new-chat-main-session__"], undefined, "and what was chosen for that chat");
+
+  // A visit made while Settings named another CLI: settings made for the old
+  // one (kept from before this rule, say) are not used.
+  state.overrides = { "__new-chat-main-session__": { model: "haiku" } };
+  state.madeFor = "claude-code\u0000";
+  settings = { ...SETTINGS, assistantProviderKind: "codex-cli" };
+  renderer = create(<Harness />);
+  await settle();
+  assert.equal(textOf(renderer.root.findByProps({ "data-testid": "new-chat-model-chip" })), "GPT-5.5", "the Claude model is never shown or sent for Codex");
+  assert.equal(state.overrides["__new-chat-main-session__"], undefined);
+  act(() => renderer.unmount());
+});
+
+test("the classic New chat clears the main session's settings, access included, when its CLI changes, and keeps them when you leave", async () => {
+  installModelBridge();
+  let agents = readyAgents();
+  const { state, Harness } = trackedHarness(() => ({ ...CLASSIC, assistantProviderKind: "claude-code" }), () => agents);
+  state.overrides = { "__new-chat-main-session__": { agentMode: "plan", permissions: { ...defaultChatAgentPermissions(), workspaceWrite: true } } };
+  const renderer = create(<Harness />);
+  await settle();
+  assert.ok(state.overrides["__new-chat-main-session__"], "kept while its CLI is the same");
+  // Claude Code signs out: the main session moves to a ready CLI.
+  agents = [readyAgent("gemini-cli"), { ...readyAgent("claude-code"), authentication: "required" }, readyAgent("codex-cli")];
+  act(() => renderer.update(<Harness />));
+  await settle();
+  assert.equal(state.overrides["__new-chat-main-session__"], undefined, "as before the sessions view: its settings were for the other CLI");
+  state.overrides = { "__new-chat-main-session__": { agentMode: "plan" } };
+  act(() => renderer.update(<Harness />));
+  act(() => renderer.unmount());
+  assert.ok(state.overrides["__new-chat-main-session__"], "the classic New chat keeps its settings when you leave");
+});
+
+test("a provider chosen on the chip that stops being ready is said on the screen, never taken over silently", async () => {
+  installModelBridge();
+  const renderer = create(<NewChatScreen {...baseProps([readyAgent("codex-cli"), { ...readyAgent("claude-code"), authentication: "required" }], {
+    settings: { ...SETTINGS, assistantProviderKind: "codex-cli" },
+    mainSessionProvider: { kind: "claude-code" }
+  })} />);
+  await settle();
+  assert.match(textOf(renderer.root.findByProps({ "data-testid": "new-chat-assistant-note" })), /chosen on the model chip is not ready now: this chat would start on Codex/);
+  renderer.unmount();
+});
+
 function savedMember(): ChatParticipantConfig {
   return {
     id: "saved-drew", handle: "drew", roleConfigId: "main-session-reviewer", behaviorRuleIds: [], kind: "claude-code",

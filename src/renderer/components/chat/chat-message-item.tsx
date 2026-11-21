@@ -181,7 +181,8 @@ export const ChatMessageItem = memo(function ChatMessageItem(props: {
     livePartialContent: props.liveProgress?.partialContent,
     displayContent
   });
-  const streamingStartedAt = remoteRunStreamingStartedAt(message.createdAt, streamedRemoteRunStatus);
+  // A reply that waited in the queue works from when its own turn began.
+  const streamingStartedAt = remoteRunStreamingStartedAt(message.metadata?.turnStartedAt ?? message.createdAt, streamedRemoteRunStatus);
   const streamedActivity = props.liveProgress?.activity;
   const streamedActivityEvents = remoteRunStreamingActivityEvents({
     isStreaming,
@@ -359,7 +360,22 @@ export const ChatMessageItem = memo(function ChatMessageItem(props: {
           <Avatar className="message-avatar" spec={avatar} />
         )}
         <div className="message-body">
-          {/* A running reply of the sessions view has no controls of its own: the composer's button is Stop. */}
+          {/* A running or queued reply of the sessions view keeps the clean
+              look: only a small × on hover stops it (a queued one is
+              cancelled), as the composer's Stop does for the running turn. */}
+          {sessions && isStreaming && message.metadata?.runId && props.onStopRun && (
+            <div className="message-actions is-sessions-stop">
+              <IconButton
+                className="message-action-stop"
+                size="xs"
+                icon={X}
+                label={queuedBehind ? "Cancel queued reply" : "Stop response"}
+                tooltip={queuedBehind ? "Cancel queued reply" : "Stop response"}
+                data-testid="chat-sessions-reply-stop"
+                onClick={() => props.onStopRun?.(message.metadata!.runId!)}
+              />
+            </div>
+          )}
           {!(sessions && isStreaming) && <div className="message-actions">
             {sessions && !isStreaming && <ChatMessageHoverWhen createdAt={message.createdAt} />}
             {isStreaming && message.metadata?.runId && props.onStopRun && (

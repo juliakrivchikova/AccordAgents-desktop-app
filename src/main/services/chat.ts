@@ -18,7 +18,7 @@ import {
   type NewChatMemberOption,
   type NewChatProviderOffer
 } from "../../shared/newChat";
-import { mainSessionProviderOptions, type MainSessionProviderOption } from "../../shared/mainSessionProviders";
+import { mainSessionProviderKey, mainSessionProviderOptions, type MainSessionProviderOption } from "../../shared/mainSessionProviders";
 import { normalizedChatAvatarId } from "../../shared/chatAvatarCatalog";
 import type { HubNewChatOptions } from "../../shared/hubProtocol";
 import { chatChangesToOps, furthestTurnMarks, newOpId, serverSeqOf, sortByServerOrder, turnMark, turnsOfEffect, type ChatServerLink } from "./chatServerOps";
@@ -259,7 +259,7 @@ import {
   hasChatAppToolCapability,
   normalizeChatAppToolCapabilities
 } from "../../shared/appTools";
-import { chatPermissionPromptLines } from "../../shared/permissionPrompt";
+import { chatPermissionPromptLines, chatPermissionSummaryLine } from "../../shared/permissionPrompt";
 import { buildChatParticipantActivitySnapshot } from "../../shared/chatParticipantActivity";
 import { chatParticipantHome, chatParticipantHomeUnassignedMessage, preservedRemoteExecution } from "../../shared/chatParticipantHome";
 import {
@@ -367,6 +367,11 @@ type ProgressCallback = (progress: ReviewProgress) => void;
 /** When a machine member's addition is looked at again while its User answer
  *  cannot be read here yet. */
 const MEMBER_ADDITION_RETRY_DELAYS_MS = [5_000, 30_000, 120_000];
+/** How long the phone's New chat offer keeps a provider's model list before
+ *  reading it again (in the background), and how soon a failed read is tried
+ *  again. */
+const MAIN_SESSION_CATALOG_FRESH_MS = 10 * 60_000;
+const MAIN_SESSION_CATALOG_RETRY_MS = 60_000;
 
 /** Whether this desktop can confirm the User's answer behind a machine
  *  member's approved roster change (see ChatService.machineRosterDecision). */
@@ -1959,20 +1964,61 @@ export class ChatService {
    */
   private async newChatProviderOffers(agents: AgentHealth[], settings: AppSettings): Promise<NewChatProviderOffer[]> {
     const options = mainSessionProviderOptions(agents, settings.providers, settings.cliProviderHosts ?? []);
-    return Promise.all(options.map(async (option) => {
-      const catalog = await this.mainSessionModelCatalog(option, settings).catch(() => undefined);
-      return newChatProviderOffer({
-        ...option,
-        vendorDefaultModelLabel: option.hostVendor ? cliProviderHostDefaultModelLabel({ vendor: option.hostVendor }) : undefined,
-        catalog,
-        providerEfforts: reasoningEffortOptionsForProvider(option.kind)
-      });
+    // Never waits for a model list: each provider is offered with the list
+    // it last had (none yet: its default model only), and a list that is
+    // due is read in the background; one that changed publishes the offer
+    // again (onNewChatOffersChanged).
+    return options.map((option) => newChatProviderOffer({
+      ...option,
+      vendorDefaultModelLabel: option.hostVendor ? cliProviderHostDefaultModelLabel({ vendor: option.hostVendor }) : undefined,
+      catalog: this.cachedMainSessionModelCatalog(option, settings),
+      providerEfforts: reasoningEffortOptionsForProvider(option.kind)
     }));
+  }
+
+  /** Told when a provider's model list read in the background changed what
+   *  the phone's New chat offers (main.ts publishes the catalog again). */
+  onNewChatOffersChanged?: () => void;
+  private readonly mainSessionCatalogs = new Map<string, { catalog?: ProviderModelCatalog; readAt: number; failedAt?: number; reading?: Promise<void> }>();
+
+  /** A provider's last model list, read again in the background when due:
+   *  a good list after 10 minutes, a failed or empty read (a CLI signed out,
+   *  a list that hung) after a minute, a failure never replacing a good list. */
+  private cachedMainSessionModelCatalog(option: MainSessionProviderOption, settings: AppSettings, now = Date.now()): ProviderModelCatalog | undefined {
+    const key = mainSessionProviderKey(option);
+    const entry = this.mainSessionCatalogs.get(key) ?? { readAt: 0 };
+    this.mainSessionCatalogs.set(key, entry);
+    const due = entry.failedAt !== undefined && entry.failedAt >= entry.readAt
+      ? now - entry.failedAt >= MAIN_SESSION_CATALOG_RETRY_MS
+      : now - entry.readAt >= MAIN_SESSION_CATALOG_FRESH_MS;
+    if (due && !entry.reading) {
+      const before = JSON.stringify(entry.catalog?.models ?? null);
+      entry.reading = this.mainSessionModelCatalog(option, settings)
+        .catch(() => undefined)
+        .then((catalog) => {
+          if (catalog && catalog.models.length > 0) {
+            entry.catalog = catalog;
+            entry.readAt = Date.now();
+            entry.failedAt = undefined;
+          } else {
+            entry.failedAt = Date.now();
+          }
+          if (JSON.stringify(entry.catalog?.models ?? null) !== before) this.onNewChatOffersChanged?.();
+        })
+        .finally(() => { entry.reading = undefined; });
+    }
+    return entry.catalog;
+  }
+
+  /** Waits for the model lists being read in the background (tests). */
+  async settleNewChatModelCatalogsForTests(): Promise<void> {
+    await Promise.all(Array.from(this.mainSessionCatalogs.values()).map((entry) => entry.reading));
   }
 
   /** A provider's model list, as the computer's model pickers read it
    *  (settings:list-provider-models): an added provider's fixed list, an
-   *  Antigravity key's own list, else the CLI's. At most 15 seconds. */
+   *  Antigravity key's own list, else the CLI's. At most 15 seconds (only
+   *  ever read in the background, cachedMainSessionModelCatalog). */
   private async mainSessionModelCatalog(option: MainSessionProviderOption, settings: AppSettings): Promise<ProviderModelCatalog | undefined> {
     const read = async (): Promise<ProviderModelCatalog | undefined> => {
       if (option.hostVendor) {
@@ -2450,7 +2496,9 @@ export class ChatService {
       const updated: ChatParticipant = {
         ...target,
         model: typeof request.model === "string" ? request.model.trim() || undefined : target.model,
-        reasoningEffort: request.reasoningEffort !== undefined
+        // Sent at all, it is the effort from now on: none ("" or undefined)
+        // is the CLI's own effort again.
+        reasoningEffort: Object.prototype.hasOwnProperty.call(request, "reasoningEffort")
           ? normalizeChatReasoningEffort(request.reasoningEffort, target.kind)
           : target.reasoningEffort,
         agentMode: normalizeChatAgentMode(request.agentMode ?? target.agentMode),
@@ -10622,6 +10670,18 @@ export class ChatService {
         this.markPendingAppToolApprovalsForRunTerminal(conversation, runId, message);
         return [pendingMessage];
       }
+      // A member's first turn here, on a provider chosen elsewhere (a chat the
+      // phone made from an offer this computer published earlier): its CLI is
+      // checked first, and one that is not ready says so instead of failing
+      // as the CLI would.
+      const notReady = !session.sessionId && !forkSource ? await this.firstTurnProviderProblem(participant) : undefined;
+      if (notReady) {
+        pendingMessage.status = "error";
+        pendingMessage.content = notReady;
+        options.warnings.push(notReady);
+        this.markPendingAppToolApprovalsForRunTerminal(conversation, runId, notReady);
+        return [pendingMessage];
+      }
       executionLease = this.acquireParticipantExecutorLease(conversation, participant, session, "desktop");
       pendingMessage.metadata = {
         ...pendingMessage.metadata,
@@ -11218,6 +11278,10 @@ export class ChatService {
           ? { participantRequestChainRootId: inferenceContext.chainRootId }
           : {})
       };
+      if (metadata.queuedBehind) {
+        // It waited behind the member's turn before it: its own turn starts now.
+        metadata.turnStartedAt = new Date().toISOString();
+      }
       delete metadata.queuedBehind;
       pendingMessage.metadata = Object.keys(metadata).length > 0 ? metadata : undefined;
       if (existingIndex >= 0) {
@@ -12425,7 +12489,7 @@ export class ChatService {
     const permissions = effectiveChatAgentPermissionsForProvider(providerKind, agentMode, runPermissions);
     const permissionLines = chatPermissionPromptLines({ agentMode, providerKind, permissions, canRequestPermissions });
     return [
-      `Permissions: shell commands ${permissions.shell.enabled ? "allowed" : "blocked"}, workspace edits ${permissions.workspaceWrite ? "allowed" : "blocked"}, web access ${permissions.webAccess ? "allowed" : "blocked"}.`,
+      chatPermissionSummaryLine({ agentMode, providerKind, permissions, canRequestPermissions }),
       this.repoReadEscalationLine(permissions.repoRead, canRequestPermissions),
       permissionLines.shell,
       permissionLines.workspace,
@@ -14522,6 +14586,28 @@ export class ChatService {
       }
     }
     return false;
+  }
+
+  /** Why a member cannot take its first turn on this computer now: its CLI
+   *  (or added provider) is not ready, in the words New chat uses. Undefined
+   *  when it is ready, or when readiness cannot be told (the run then says
+   *  what went wrong itself). */
+  private async firstTurnProviderProblem(participant: ChatParticipant): Promise<string | undefined> {
+    let agents: AgentHealth[];
+    try {
+      agents = await this.cliRunner.detectAgents();
+    } catch {
+      return undefined;
+    }
+    if (agents.length === 0) return undefined;
+    const settings = await this.settings.getPublicSettings();
+    const host = cliProviderHostForParticipant(participant.kind, participant.hostId?.trim() || undefined, settings.cliProviderHosts ?? []);
+    if (participant.hostId?.trim() && !host) return undefined; // participantHostBinding says it.
+    const state = readinessForParticipant({ kind: participant.kind, host }, agents, settings.providers ?? []);
+    if (state === "ready" || state === "checking" || state === "could-not-verify") return undefined;
+    const label = host?.label ?? cliProviderMetadata(participant.kind).label;
+    const reason = agentReadinessReason(state, label) ?? `${label} is not ready.`;
+    return `@${participant.handle} cannot start on this computer: ${reason} Fix it in Settings → Local CLI setup, or start the chat on another provider.`;
   }
 
   private async detectAgentsForReadiness(

@@ -115,25 +115,13 @@ export function buildGeminiExecInvocation(request: BuildGeminiExecInvocationRequ
   for (const dir of normalizedExtraReadableDirs(options.extraReadableDirs)) {
     args.push("--add-dir", dir);
   }
-  if (mode === "auto" || permissions.workspaceWrite) {
-    // Print mode cannot answer interactive tool confirmations, so granted-write
-    // and Auto-review runs must skip the confirmation prompts entirely.
-    args.push("--dangerously-skip-permissions");
-  } else {
-    // Best effort: agy has no OS-enforced read-only sandbox. `--sandbox` only
-    // restricts terminal commands; the prompt preamble carries the read-only
-    // contract for file tools.
-    args.push("--sandbox");
-  }
-  const settings = geminiSessionSettings(request.participant, mode === "auto" || permissions.workspaceWrite ? undefined : geminiAppToolSettings(options));
-  if (settings) {
-    args.push("--settings", options.settingsPath ?? JSON.stringify(settings));
-  }
+  const permissionArgs = geminiPermissionArgs(request.kind, mode, permissions, request.participant, options);
+  args.push(...permissionArgs.args);
 
   return {
     args,
     env: geminiInvocationEnv(options),
-    ...(settings ? { settings } : {})
+    ...(permissionArgs.settings ? { settings: permissionArgs.settings } : {})
   };
 }
 
@@ -160,21 +148,68 @@ export function buildGeminiInteractiveGoalInvocation(
   for (const dir of normalizedExtraReadableDirs(options.extraReadableDirs)) {
     args.push("--add-dir", dir);
   }
-  if (mode === "auto" || permissions.workspaceWrite) {
-    args.push("--dangerously-skip-permissions");
-  } else {
-    args.push("--sandbox");
-  }
-  const settings = geminiSessionSettings(request.participant, mode === "auto" || permissions.workspaceWrite ? undefined : geminiAppToolSettings(options));
-  if (settings) {
-    args.push("--settings", options.settingsPath ?? JSON.stringify(settings));
-  }
+  const permissionArgs = geminiPermissionArgs(request.kind, mode, permissions, request.participant, options);
+  args.push(...permissionArgs.args);
   return {
     args,
     env: geminiInvocationEnv(options),
-    ...(settings ? { settings } : {}),
+    ...(permissionArgs.settings ? { settings: permissionArgs.settings } : {}),
     goalPrompt: `/goal ${geminiPrompt(request.prompt, request.repoPath, request.kind, mode, permissions)}`
   };
+}
+
+/**
+ * How agy is allowed to act. In the sessions view's access (`cliApprovals`)
+ * agy runs in its own mode (`--mode`, its Default being `agentMode: ""`,
+ * which `--mode` does not take), without skipping its confirmations: what
+ * the mode would ask about, print mode refuses, as `agy -p` does in a
+ * terminal (agy 1.5.14, 2026-11-21). The classic controls keep the app's
+ * own mapping: granted writes and Auto-review skip every confirmation, else
+ * terminal restrictions and a read-only instruction.
+ */
+function geminiPermissionArgs(
+  kind: ConversationKind,
+  mode: ChatAgentMode,
+  permissions: ChatAgentPermissions,
+  participant: Pick<ParticipantConfig, "geminiSettings">,
+  options: GeminiExecOptions
+): { args: string[]; settings?: Record<string, unknown> } {
+  const args: string[] = [];
+  let modeSettings: Record<string, unknown> | undefined;
+  const ownMode = kind === "chat" && permissions.cliApprovals === true;
+  if (ownMode) {
+    const agyMode = geminiAgentMode(mode, permissions);
+    if (agyMode) {
+      args.push("--mode", agyMode);
+    } else {
+      modeSettings = { agentMode: "" };
+    }
+  } else if (mode === "auto" || permissions.workspaceWrite) {
+    // Print mode cannot answer interactive tool confirmations, so granted-write
+    // and Auto-review runs must skip the confirmation prompts entirely.
+    args.push("--dangerously-skip-permissions");
+  } else {
+    // Best effort: agy has no OS-enforced read-only sandbox. `--sandbox` only
+    // restricts terminal commands; the prompt preamble carries the read-only
+    // contract for file tools.
+    args.push("--sandbox");
+  }
+  const skipsConfirmations = !ownMode && (mode === "auto" || permissions.workspaceWrite);
+  const appTools = skipsConfirmations ? undefined : geminiAppToolSettings(options);
+  const sessionSettings = geminiSessionSettings(participant, appTools);
+  const settings = sessionSettings || modeSettings ? { ...(sessionSettings ?? {}), ...(modeSettings ?? {}) } : undefined;
+  if (settings) {
+    args.push("--settings", options.settingsPath ?? JSON.stringify(settings));
+  }
+  return { args, ...(settings ? { settings } : {}) };
+}
+
+/** agy's `--mode` for a member's mode and file-edit right; none for its
+ *  Default. */
+export function geminiAgentMode(mode: ChatAgentMode, permissions: Pick<ChatAgentPermissions, "workspaceWrite">): "accept-edits" | "auto" | "plan" | undefined {
+  if (mode === "auto") return "auto";
+  if (mode === "plan") return "plan";
+  return permissions.workspaceWrite ? "accept-edits" : undefined;
 }
 
 /** agy takes one --settings: the member's own (its Gemini API key route)
@@ -431,7 +466,10 @@ function geminiPrompt(
       `File modifications are limited to the selected repository workspace (${repoPath}). Do not create, modify, move, or delete files outside that workspace.`
     );
   }
-  if (mode !== "auto" && !permissions.workspaceWrite) {
+  if (permissions.cliApprovals === true) {
+    // agy's own mode decides; what it would ask about, print mode refuses.
+    lines.push("Antigravity runs in its own permission mode for this turn and cannot ask User for approval: an edit or command the mode would ask about is refused, so say what you need instead of retrying it.");
+  } else if (mode !== "auto" && !permissions.workspaceWrite) {
     lines.push(
       "This run is read-only: do not create, modify, or delete files, and do not run mutating terminal commands. Use file and terminal access only to gather context."
     );

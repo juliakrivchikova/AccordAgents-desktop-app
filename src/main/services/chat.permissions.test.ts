@@ -4567,6 +4567,9 @@ test("same participant sends show queued bubble and serialize provider runs", as
       promoted?.status === "pending" &&
       promoted.metadata?.queuedBehind === undefined;
   });
+  const promoted = storage.current.messages.find((message: Conversation["messages"][number]) => message.id === queuedMessage?.id);
+  assert.ok(promoted?.metadata?.turnStartedAt, "its own turn's start is stamped, so Working for does not count the wait");
+  assert.ok(Date.parse(promoted!.metadata!.turnStartedAt!) >= Date.parse(promoted!.createdAt));
 
   releaseSecond();
   await waitFor(() =>
@@ -15788,4 +15791,103 @@ test("a moved member's note goes with its turns until one is answered, and only 
   assert.equal(moved(), undefined, "told once");
   await turn("later");
   assert.equal(prompts[2].includes("Note from AccordAgents"), false);
+});
+
+test("the effort's Default really resets: an effort sent as none is the CLI's own again; one not sent stays", async () => {
+  const codex = { ...chatParticipant("codex-cli"), reasoningEffort: "high" as const };
+  const conversation = chatConversation([codex]);
+  const { service, storage } = testService({ conversation });
+  const effort = (): unknown => (storage.current.metadata.participants as ChatParticipant[])[0]?.reasoningEffort;
+  await service.updateParticipantRuntime({ conversationId: conversation.id, participantId: codex.id, model: "gpt-5.5-mini" });
+  assert.equal(effort(), "high", "a change that does not name the effort keeps it");
+  await service.updateParticipantRuntime({ conversationId: conversation.id, participantId: codex.id, reasoningEffort: "" as never });
+  assert.equal(effort(), undefined, "the sessions picker's Default (\"\")");
+  await service.updateParticipantRuntime({ conversationId: conversation.id, participantId: codex.id, reasoningEffort: "low" });
+  await service.updateParticipantRuntime({ conversationId: conversation.id, participantId: codex.id, reasoningEffort: undefined, model: undefined });
+  assert.equal(effort(), undefined, "the classic picker's Default (sent as undefined) resets too");
+  await service.updateParticipantRuntime({ conversationId: conversation.id, participantId: codex.id, model: "" });
+  assert.equal((storage.current.metadata.participants as ChatParticipant[])[0]?.model, undefined, "the model's Default (\"\") resets the model");
+});
+
+test("a member's first turn on a CLI that is not ready on this computer says so in the reply instead of failing as the CLI would (a chat the phone made)", async () => {
+  const runs: unknown[] = [];
+  const claude = chatParticipant("claude-code");
+  const conversation = chatConversation([claude]);
+  const { service, storage, tempRoot } = testService({
+    conversation,
+    agents: [
+      { kind: "codex-cli", label: "Codex CLI", installed: true, detection: "detected", runnable: "ready", authentication: "ready" },
+      { kind: "claude-code", label: "Claude Code", installed: true, detection: "detected", runnable: "ready", authentication: "required" }
+    ],
+    run: async (participant: ParticipantConfig) => { runs.push(participant); return { participant, ok: true, content: "ok", durationMs: 1 }; }
+  });
+  (service as any).ensureHistoryFiles = async () => tempRoot;
+  await service.sendMessage({ conversationId: conversation.id, runId: "run-first", content: "@drew hello" });
+  await waitFor(() => storage.current.messages.some((message: ChatMessage) => message.participantId === claude.id && message.status === "error"));
+  const reply = storage.current.messages.find((message: ChatMessage) => message.participantId === claude.id)!;
+  assert.equal(reply.content, "@drew cannot start on this computer: Claude Code requires sign-in. Fix it in Settings → Local CLI setup, or start the chat on another provider.");
+  assert.deepEqual(runs, [], "the CLI is not started");
+});
+
+test("the phone's New chat offer never waits for a model list: a hanging one is read in the background and the offer is published again once it has it", { timeout: 10_000 }, async () => {
+  const { service } = testService({
+    agents: [{ kind: "codex-cli", label: "Codex CLI", installed: true, detection: "detected", runnable: "ready", authentication: "ready" }],
+    settings: { chatRoleConfigs: [ADMIN_ROLE, ROLE], providers: [{ kind: "codex-cli", label: "Codex CLI", enabled: true }] }
+  });
+  let answer: ((catalog: unknown) => void) | undefined;
+  let reads = 0;
+  ((service as any).cliRunner).listModelCatalog = () => { reads += 1; return new Promise((resolve) => { answer = resolve; }); };
+  let republished = 0;
+  service.onNewChatOffersChanged = () => { republished += 1; };
+  const started = Date.now();
+  const first = await service.newChatOptions([]);
+  assert.ok(Date.now() - started < 2_000, "the offer did not wait for the hanging list");
+  const codex = first?.mainSessionProviders?.find((provider) => provider.kind === "codex-cli");
+  assert.deepEqual(codex?.models, [], "its default model only, for now");
+  const again = await service.newChatOptions([]);
+  assert.equal(reads, 1, "one read at a time, not one per offer");
+  assert.equal(JSON.stringify(again), JSON.stringify(first), "an unchanged offer: nothing new to publish");
+  answer?.({ kind: "codex-cli", authoritative: true, fetchedAt: NOW, models: [
+    { id: "gpt-5.5", label: "GPT-5.5", recommended: true, source: "cli" }, { id: "gpt-5.5-mini", label: "GPT-5.5 mini", source: "cli" }] });
+  await service.settleNewChatModelCatalogsForTests();
+  assert.equal(republished, 1, "published again once the list arrived");
+  const later = await service.newChatOptions([]);
+  assert.deepEqual(later?.mainSessionProviders?.find((provider) => provider.kind === "codex-cli")?.models.map((model) => model.id), ["gpt-5.5-mini"]);
+  assert.equal(reads, 1, "a fresh list is not read again at once");
+});
+
+test("a model list that fails is tried again after a minute, never replacing the last good one, and a failure alone publishes nothing", { timeout: 10_000 }, async () => {
+  const { service } = testService({
+    agents: [{ kind: "codex-cli", label: "Codex CLI", installed: true, detection: "detected", runnable: "ready", authentication: "ready" }],
+    settings: { chatRoleConfigs: [ADMIN_ROLE, ROLE], providers: [{ kind: "codex-cli", label: "Codex CLI", enabled: true }] }
+  });
+  let fail = true;
+  let reads = 0;
+  ((service as any).cliRunner).listModelCatalog = async () => {
+    reads += 1;
+    if (fail) throw new Error("Codex is signed out");
+    return { kind: "codex-cli", authoritative: true, fetchedAt: NOW, models: [{ id: "gpt-5.5", label: "GPT-5.5", recommended: true, source: "cli" }, { id: "gpt-5.5-mini", label: "GPT-5.5 mini", source: "cli" }] };
+  };
+  let republished = 0;
+  service.onNewChatOffersChanged = () => { republished += 1; };
+  await service.newChatOptions([]);
+  await service.settleNewChatModelCatalogsForTests();
+  await service.newChatOptions([]);
+  await service.settleNewChatModelCatalogsForTests();
+  assert.equal(reads, 1, "a failed read is not tried again at once (a signed-out CLI is not asked on every publish)");
+  assert.equal(republished, 0, "nothing changed");
+  const entry = Array.from(((service as any).mainSessionCatalogs as Map<string, { failedAt?: number; readAt: number }>).values())[0]!;
+  entry.failedAt = Date.now() - 61_000;
+  fail = false;
+  await service.newChatOptions([]);
+  await service.settleNewChatModelCatalogsForTests();
+  assert.equal(reads, 2);
+  assert.equal(republished, 1);
+  fail = true;
+  entry.readAt = Date.now() - 11 * 60_000;
+  await service.newChatOptions([]);
+  await service.settleNewChatModelCatalogsForTests();
+  const offer = await service.newChatOptions([]);
+  assert.deepEqual(offer?.mainSessionProviders?.[0]?.models.map((model) => model.id), ["gpt-5.5-mini"], "the last good list stays through a failed refresh");
+  assert.equal(republished, 1, "and a flapping read publishes nothing");
 });

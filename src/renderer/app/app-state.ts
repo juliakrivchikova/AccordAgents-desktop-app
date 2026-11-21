@@ -122,6 +122,10 @@ export interface AppState {
    *  session (sessions view); none: Settings → General's. */
   newChatMainSessionProvider: MainSessionProviderChoice | undefined;
   setNewChatMainSessionProvider: StateSetter<MainSessionProviderChoice | undefined>;
+  /** The provider (mainSessionProviderKey) the main session's settings on
+   *  the New chat screen were made for. */
+  newChatMainSessionOverrideFor: string | undefined;
+  setNewChatMainSessionOverrideFor: StateSetter<string | undefined>;
   /** Unsent composer text of the open chat; each chat keeps its own. */
   chatMessageDraft: string;
   /** Changes the open chat's unsent text; does nothing when no chat is open. */
@@ -228,6 +232,7 @@ export function useAppState(): AppState {
   const [selectedChatParticipantConfigIds, setSelectedChatParticipantConfigIds] = useState<Set<string>>(new Set());
   const [selectedChatParticipantRuntimeOverrides, setSelectedChatParticipantRuntimeOverrides] = useState<Record<string, ChatParticipantRuntimeOverride>>({});
   const [newChatMainSessionProvider, setNewChatMainSessionProvider] = useState<MainSessionProviderChoice | undefined>();
+  const [newChatMainSessionOverrideFor, setNewChatMainSessionOverrideFor] = useState<string | undefined>();
   const openConversationId = conversation?.id;
   const messageDrafts = usePerChatState<string>(openConversationId, NO_DRAFT_TEXT, isEmptyDraftText);
   const skillMentionDrafts = usePerChatState<ChatSkillMention[]>(openConversationId, NO_SKILL_MENTIONS, isEmptyList);
@@ -306,6 +311,7 @@ export function useAppState(): AppState {
     setPlanCorrectionDraft, selectedChatParticipantConfigIds, setSelectedChatParticipantConfigIds,
     selectedChatParticipantRuntimeOverrides, setSelectedChatParticipantRuntimeOverrides,
     newChatMainSessionProvider, setNewChatMainSessionProvider,
+    newChatMainSessionOverrideFor, setNewChatMainSessionOverrideFor,
     chatMessageDraft, setChatMessageDraft, setChatMessageDraftForConversation, chatComposerSkillMentions,
     setChatComposerSkillMentions, chatComposerPluginMentions, setChatComposerPluginMentions, chatComposerFileMentions,
     setChatComposerFileMentions, clearChatMessageDraft, chatAddParticipantDraft, setChatAddParticipantDraft,

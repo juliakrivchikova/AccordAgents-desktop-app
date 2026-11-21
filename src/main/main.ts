@@ -770,6 +770,9 @@ const hubPhonePublisher: HubPhonePublisher = new HubPhonePublisher({
   },
   log: (event, payload) => { void debugLogService.write(event, payload); }
 });
+// A provider's model list read in the background changed the phone's New
+// chat offer: published again (an unchanged catalog is not sent).
+chatService.onNewChatOffersChanged = () => hubPhonePublisher.scheduleCatalog();
 
 /**
  * A phone that pairs with one of this desktop's invites is on the server's

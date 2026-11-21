@@ -57,7 +57,8 @@ export function cloneChatAgentPermissions(permissions: ChatAgentPermissions): Ch
       enabled: permissions.shell.enabled,
       rules: normalizeChatShellPermissionRules(permissions.shell.rules)
     },
-    ...(providerNative ? { providerNative } : {})
+    ...(providerNative ? { providerNative } : {}),
+    ...(permissions.cliApprovals === true ? { cliApprovals: true as const } : {})
   };
 }
 
@@ -85,7 +86,8 @@ export function normalizeChatAgentPermissions(value: unknown): ChatAgentPermissi
       enabled: typeof shell.enabled === "boolean" ? shell.enabled : DEFAULT_CHAT_AGENT_PERMISSIONS.shell.enabled,
       rules: normalizeChatShellPermissionRules(shell.rules)
     },
-    ...(providerNative ? { providerNative } : {})
+    ...(providerNative ? { providerNative } : {}),
+    ...(record.cliApprovals === true ? { cliApprovals: true as const } : {})
   };
 }
 
@@ -252,7 +254,10 @@ export function clampChatAgentPermissions(
       enabled: wanted.shell.enabled && limit.shell.enabled,
       rules
     },
-    ...(allowedTools.length > 0 ? { providerNative: { "claude-code": { allowedTools } } } : {})
+    ...(allowedTools.length > 0 ? { providerNative: { "claude-code": { allowedTools } } } : {}),
+    // Asking the User before what is not granted is a right of its own: only
+    // when the ceiling may ask too.
+    ...(wanted.cliApprovals && limit.cliApprovals ? { cliApprovals: true as const } : {})
   };
 }
 
@@ -269,6 +274,9 @@ export function chatAgentPermissionsWithin(actual: ChatAgentPermissions, ceiling
     return false;
   }
   if (member.shell.enabled && !limit.shell.enabled) {
+    return false;
+  }
+  if (member.cliApprovals && !limit.cliApprovals) {
     return false;
   }
   const limitRules = new Set(limit.shell.rules.map(shellRuleKey));

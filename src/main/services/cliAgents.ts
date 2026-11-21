@@ -4526,7 +4526,7 @@ export class CliAgentRunner {
     return {
       model: participant.model ?? null,
       cwd: repoPath ?? null,
-      approvalPolicy: this.codexAppServerApprovalPolicy(mode),
+      approvalPolicy: this.codexAppServerApprovalPolicy(mode, permissions),
       approvalsReviewer: mode === "auto" ? CODEX_AUTO_APPROVALS_REVIEWER : null,
       sandbox: permissions.workspaceWrite ? "workspace-write" : "read-only",
       config: this.codexAppServerConfig(participant, permissions, options),
@@ -4550,7 +4550,7 @@ export class CliAgentRunner {
       threadId: sessionId,
       model: participant.model ?? null,
       cwd: repoPath ?? null,
-      approvalPolicy: this.codexAppServerApprovalPolicy(mode),
+      approvalPolicy: this.codexAppServerApprovalPolicy(mode, permissions),
       approvalsReviewer: mode === "auto" ? CODEX_AUTO_APPROVALS_REVIEWER : null,
       sandbox: permissions.workspaceWrite ? "workspace-write" : "read-only",
       config: this.codexAppServerConfig(participant, permissions, options),
@@ -4574,8 +4574,13 @@ export class CliAgentRunner {
     };
   }
 
-  private codexAppServerApprovalPolicy(mode: ChatAgentMode): string {
-    return mode === "auto" ? "on-request" : "never";
+  /** Codex asks (approval policy on-request, each ask an approval card) in
+   *  Auto-review, where Codex reviews the asks itself, and in its own Read
+   *  only and Default presets (the sessions view's access, `cliApprovals`);
+   *  Plan mode and the classic controls never ask: what the sandbox does not
+   *  allow fails. */
+  private codexAppServerApprovalPolicy(mode: ChatAgentMode, permissions?: ChatAgentPermissions): string {
+    return mode === "auto" || (mode === "default" && permissions?.cliApprovals === true) ? "on-request" : "never";
   }
 
   private codexReasoningEffort(value: ChatReasoningEffort | undefined): ChatReasoningEffort | undefined {
@@ -8832,6 +8837,11 @@ export class CliAgentRunner {
     const disallowedTools: string[] = [];
     const askTools: string[] = [];
     const providerNativeAllowedTools = permissions.providerNative?.["claude-code"]?.allowedTools ?? [];
+    // Claude Code's own default modes (the sessions view's Default and Accept
+    // edits): what is not granted is not taken away but asked about, each
+    // ask an approval card through --permission-prompt-tool, as the CLI asks
+    // in its terminal. Deny rules stay hard stops.
+    const asksForUngranted = permissions.cliApprovals === true && agentMode === "default";
     const readContextAvailable = Boolean(repoPath) || extraReadableDirs.length > 0;
     const readTools = ["Read", "Grep", "Glob", "LS"];
     // Claude Code 2.1 validates --disallowedTools strictly and rejects MultiEdit as
@@ -8850,10 +8860,14 @@ export class CliAgentRunner {
         tools.add(tool);
         allowedTools.push(tool);
       }
+    } else if (asksForUngranted) {
+      for (const tool of webTools) {
+        tools.add(tool);
+      }
     } else {
       disallowedTools.push(...webTools);
     }
-    if (permissions.workspaceWrite) {
+    if (permissions.workspaceWrite || asksForUngranted) {
       for (const tool of editTools) {
         tools.add(tool);
       }
@@ -8874,6 +8888,13 @@ export class CliAgentRunner {
           } else {
             askTools.push(toolRule);
           }
+        }
+      }
+    } else if (asksForUngranted) {
+      tools.add("Bash");
+      for (const rule of permissions.shell.rules) {
+        if (rule.action === "deny") {
+          disallowedTools.push(this.claudeBashPermissionRule(rule));
         }
       }
     } else {

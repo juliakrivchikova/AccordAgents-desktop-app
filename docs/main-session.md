@@ -101,11 +101,35 @@ chat without a main session is always `classic`; its switch is disabled.
     session's model chip, which opens its settings; a member's composer
     the same for that member. The settings are a compact picker, T3 Code's
     (`ChatModelAccessPanel`): the model (the CLI's default first), the
-    effort, the access in the CLI's own terms (`chat-access-modes.ts`:
-    Claude Code's Default / Accept edits / Plan mode / Auto mode, Codex's
-    Read only / Workspace write / Auto-review / Plan mode, the app's mode
-    and file-edit right underneath) and, once a machine exists, where it
-    runs. Its provider stays the one it was made with. No name, status,
+    effort, the access in the CLI's own terms and, once a machine exists,
+    where it runs (the effort a model lacks reads as Default; nothing is
+    saved until a choice is made; Default sends the explicit reset; only
+    the chosen setting is sent). The access is the CLI's own mode, run as
+    the CLI runs it (`src/shared/chatAccessModes.ts`, the permissions'
+    `cliApprovals`: what is not granted the CLI asks about instead of the
+    app taking it away; the classic controls keep refusing it):
+    - Claude Code (`--permission-mode`): Default reads freely and asks
+      before each edit, command and web use, every ask an approval card
+      (`--permission-prompt-tool`; deny rules stay hard stops); Accept
+      edits edits without asking and asks before commands and web; Plan
+      mode reads and plans; Auto mode is Claude's classifier.
+    - Codex (its 0.155 presets): Read only (read-only sandbox) and Default
+      (workspace-write), both asking (approval policy `on-request`, every
+      ask an approval card) to go further; Auto-review, where Codex reviews
+      its own asks; Plan mode, the read-only sandbox that never asks.
+    - Antigravity (`agy --mode`; its Default is `agentMode: ""`, which
+      `--mode` does not take): print mode cannot ask, so what a mode would
+      ask about is refused (agy 1.5.14, 2026-11-21): Default reads and
+      refuses edits and commands, Accept edits edits in the workspace and
+      refuses commands, Auto mode edits and runs safe commands where the
+      account has it (elsewhere agy says so and stays in Default), Plan
+      mode reads and plans. No agy mode is called Read only.
+    A main session starts in its CLI's own default: Claude Code's Default,
+    Codex's Default, agy's Default. Settings from the classic controls are
+    no mode: the picker marks none and says so. Its … menu has Restart
+    (picks up changed connectors, idle only, naming background work it
+    stops; not Antigravity) and, for a member, Remove from chat. Its
+    provider stays the one it was made with. No name, status,
     member rights or auto-watch: the main session's chat behaviour is fixed
     (it creates and asks members, request and manage are allowed as its role
     gives them, and it is told when its tasks end). A member other than the
@@ -118,8 +142,9 @@ chat without a main session is always `classic`; its switch is disabled.
     no chip). The main composer has no "N active runs" pill (the Waiting
     line and the side panel name and stop the members); while the main
     session itself runs and nothing is typed, its send button is Stop for
-    the main session's run, as in T3 Code and Claude (typing turns it
-    back into Send);
+    the main session's run, as in T3 Code and Claude; with something typed
+    a secondary Stop stands next to Send (a CLI interrupts whatever is in
+    its prompt), and Send still sends the message to it;
   - the main timeline holds the User's messages to the main session, the
     main session's messages, system lines and the cards the User must
     answer; the member-added cards of its delegations are not shown
@@ -143,10 +168,14 @@ chat without a main session is always `classic`; its switch is disabled.
     shimmers (still for reduced motion). The member's words and its posts
     stay its words, in order between the rows; its turn's tasks follow as
     their rows. No status label, no "Thinking" word, no grouped boxes, no
-    Stop or copy on the reply itself (the composer's button is Stop; a
-    member's session head stops the member). A run on a machine shows
-    where it stands ("Preparing the workspace") as its current step until
-    its first own step. The phone gets a reply's newest 12 steps, each one
+    copy on the reply itself; only a small × on hover (always on a touch
+    screen) stops it, and cancels a queued one (the composer's button is
+    Stop too; a member's session head stops the member). A long turn
+    draws its newest 50 steps under a muted "N earlier steps" (a finished
+    fold opens them); a reply that waited in the queue counts its
+    "Working for" from its own turn's start (`turnStartedAt`). A run on a
+    machine shows where it stands ("Preparing the workspace") as its
+    current step until its first own step. The phone gets a reply's newest 12 steps, each one
     line of at most 120 characters, with how many earlier ones there were
     (`phoneSessionsActivity`; the live copy marks text that is only where
     the run stands, `liveStatus`);
@@ -201,17 +230,29 @@ A new chat opens in the view Settings → General names (`newChatViewFor`).
   and every added provider whose CLI is ready and which has its key
   (`mainSessionProviderOptions`). The default provider is Settings →
   General's "Main session provider" (`resolveMainSessionProvider`); the
-  chip's choice is for that one chat and never changes the setting. The
+  chip's choice is for that one chat and never changes the setting, and
+  is forgotten when the User leaves New chat without sending. What was set
+  for one provider (model, effort, access, where it runs) is dropped when
+  another is in effect, also between visits. A chosen or shown provider
+  that stops being ready is said on the screen and the send is refused,
+  never made on another one silently. The
   chat is made with that main session alone; an @handle in the first
   message picks nobody. Folder and attach stay.
 - **Classic view**: today's New chat, with its members picker.
 - **The phone** gets the same from the New chat offer
   (`HubNewChatOptions.mainSessionProviders`: each provider with its
   default model's name, its models, at most 24, and efforts;
-  `newChatProviderOffer`), shows the same chip and sheet, and makes the chat
-  with the offered main session on the chosen provider, model and effort
+  `newChatProviderOffer`), shows the same chip and sheet (with the same
+  Access, and Runs on where a machine exists), and makes the chat with the
+  offered main session on the chosen provider, model, effort and access
   (`newChatMainSessionFor`). An offer from a computer from before has no
-  list: the chip shows the offered main session's CLI.
+  list: the chip shows the offered main session's CLI. The offer never
+  waits for a model list: each provider goes with the list it last had,
+  read again in the background (a good one after 10 minutes, a failed one
+  after a minute, a failure never replacing a good one), and a list that
+  changed publishes the offer again. A provider the phone chose that is
+  not ready on the computer when the chat's first turn runs says so in the
+  reply ("@main cannot start on this computer: …").
 
 The placement rules are in `src/shared/mainSession.ts` and are the same on
 the desktop and on the phone (bundled through `mobileSharedRules.ts`).

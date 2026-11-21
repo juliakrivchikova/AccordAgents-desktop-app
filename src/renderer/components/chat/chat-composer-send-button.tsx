@@ -11,9 +11,10 @@ export interface ChatComposerStop {
 /**
  * The composer's round button. It sends the draft; while `stop` is given and
  * the draft is empty (no text, no picture, none still loading), it stops that
- * run instead, as T3 Code's and Claude's composers do. Typing or adding a
- * picture turns it back into Send (disabled while a picture loads), so a
- * message can still go to a member at work (its CLI takes it as it would).
+ * run instead, as T3 Code's and Claude's composers do. With something typed
+ * the run can still be stopped, as a CLI interrupts whatever is in its
+ * prompt: Stop stands next to Send, and Send (or Enter) still sends the
+ * message to the member at work (its CLI takes it as it would).
  */
 export function ChatComposerSendButton(props: {
   canSend: boolean;
@@ -23,21 +24,22 @@ export function ChatComposerSendButton(props: {
   onSend: () => void;
   stop?: ChatComposerStop;
 }): JSX.Element {
-  if (props.stop && props.draftEmpty) {
-    return (
-      <button
-        type="button"
-        className="composer-send-button is-stop"
-        title={props.stop.label}
-        aria-label={props.stop.label}
-        data-testid="chat-composer-stop"
-        onClick={props.stop.onStop}
-      >
-        <Square size={12} fill="currentColor" strokeWidth={0} />
-      </button>
-    );
+  const stopButton = props.stop ? (
+    <button
+      type="button"
+      className={props.draftEmpty ? "composer-send-button is-stop" : "composer-send-button is-stop is-beside-send"}
+      title={props.stop.label}
+      aria-label={props.stop.label}
+      data-testid="chat-composer-stop"
+      onClick={props.stop.onStop}
+    >
+      <Square size={12} fill="currentColor" strokeWidth={0} />
+    </button>
+  ) : null;
+  if (stopButton && props.draftEmpty) {
+    return stopButton;
   }
-  return (
+  const sendButton = (
     <button
       type="button"
       className="composer-send-button"
@@ -49,4 +51,5 @@ export function ChatComposerSendButton(props: {
       {props.isRunning ? <RefreshCw size={17} className="spin" /> : <ArrowUp size={18} strokeWidth={2.4} />}
     </button>
   );
+  return stopButton ? <>{stopButton}{sendButton}</> : sendButton;
 }

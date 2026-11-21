@@ -79,6 +79,13 @@ import {
   resolveMainSessionProvider
 } from "../../../shared/mainSessionProviders";
 
+/** Whether the main session's settings on the New chat screen were made for
+ *  another provider than the one it is on now (none recorded: made before
+ *  any provider was, they are its own). */
+export function mainSessionOverrideForOtherProvider(madeFor: string | undefined, providerKey: string | undefined): boolean {
+  return Boolean(madeFor) && Boolean(providerKey) && madeFor !== providerKey;
+}
+
 const ACCORDAGENTS_MARK_URL = new URL("../../assets/accordagents-mark.png", import.meta.url).href;
 const NO_MENTIONS: ChatParticipant[] = [];
 
@@ -100,6 +107,10 @@ export function NewChatScreen(props: {
    *  session; none: the one Settings → General names. */
   mainSessionProvider?: MainSessionProviderChoice;
   onMainSessionProviderChange?: (choice: MainSessionProviderChoice | undefined) => void;
+  /** The provider (mainSessionProviderKey) the main session's settings on
+   *  this screen were made for; settings made for another one are dropped. */
+  mainSessionOverrideFor?: string;
+  onMainSessionOverrideForChange?: (key: string | undefined) => void;
   settings: AppSettings;
   summaries: ConversationSummary[];
   agents: AgentHealth[];
@@ -160,6 +171,8 @@ export function NewChatScreen(props: {
   const mainHostId = mainProvider?.hostId;
   const chosenProviderInEffect = sessionsView && Boolean(props.mainSessionProvider) && Boolean(mainProvider) &&
     mainSessionProviderKey(mainProvider!) === mainSessionProviderKey(props.mainSessionProvider!);
+  // The provider chosen on the chip stopped being ready: said, never taken silently.
+  const chosenProviderGone = sessionsView && Boolean(props.mainSessionProvider) && !chosenProviderInEffect;
   // The main session's saved CLI is not ready: this chat takes a ready one, and says so.
   const assistantNote = useMemo(
     () => assistantSubstituteNote({
@@ -171,29 +184,43 @@ export function NewChatScreen(props: {
     [props.agents, props.settings.assistantProviderKind, props.settings.providers]
   );
   // The main session moved to another provider (its saved CLI signed in or
-  // out, or another one chosen on the chip): model, effort and where it runs
-  // were chosen for the one before; its access stays.
+  // out, another one chosen on the chip, or Settings changed while this
+  // screen was closed): what was set for it here (model, effort, access,
+  // where it runs) was for the one before and is dropped, as the classic
+  // New chat always did; another provider's model never reaches a CLI.
   const mainProviderKey = mainProvider ? mainSessionProviderKey(mainProvider) : undefined;
-  const mainProviderShown = useRef(mainProviderKey);
-  const { onSelectedParticipantRuntimeOverridesChange } = props;
+  const { onSelectedParticipantRuntimeOverridesChange, onMainSessionOverrideForChange, mainSessionOverrideFor } = props;
+  const overrideForOtherProvider = mainSessionOverrideForOtherProvider(mainSessionOverrideFor, mainProviderKey);
   useEffect(() => {
-    const before = mainProviderShown.current;
-    mainProviderShown.current = mainProviderKey;
-    if (!before || !mainProviderKey || before === mainProviderKey) return;
-    onSelectedParticipantRuntimeOverridesChange((current) => {
-      const previous = current[NEW_CHAT_MAIN_SESSION_PARTICIPANT_ID];
-      if (!previous) return current;
-      const { [NEW_CHAT_MAIN_SESSION_PARTICIPANT_ID]: _forTheOtherProvider, ...rest } = current;
-      const kept = {
-        ...(previous.agentMode ? { agentMode: previous.agentMode } : {}),
-        ...(previous.permissions ? { permissions: previous.permissions } : {})
-      };
-      return Object.keys(kept).length > 0 ? { ...rest, [NEW_CHAT_MAIN_SESSION_PARTICIPANT_ID]: kept } : rest;
+    if (!mainProviderKey || mainSessionOverrideFor === mainProviderKey) return;
+    if (mainSessionOverrideFor !== undefined) {
+      onSelectedParticipantRuntimeOverridesChange((current) => {
+        if (!(NEW_CHAT_MAIN_SESSION_PARTICIPANT_ID in current)) return current;
+        const { [NEW_CHAT_MAIN_SESSION_PARTICIPANT_ID]: _forTheOtherProvider, ...rest } = current;
+        return rest;
+      });
+    }
+    onMainSessionOverrideForChange?.(mainProviderKey);
+  }, [mainProviderKey, mainSessionOverrideFor, onMainSessionOverrideForChange, onSelectedParticipantRuntimeOverridesChange]);
+  // Leaving New chat without sending: the sessions view's chip choice was
+  // for the chat about to be made, so the next New chat starts from
+  // Settings again (the classic New chat keeps its members and settings).
+  const leaveRef = useRef({ sessionsView, onSelectedParticipantRuntimeOverridesChange, onMainSessionProviderChange: props.onMainSessionProviderChange });
+  leaveRef.current = { sessionsView, onSelectedParticipantRuntimeOverridesChange, onMainSessionProviderChange: props.onMainSessionProviderChange };
+  useEffect(() => () => {
+    const leaving = leaveRef.current;
+    if (!leaving.sessionsView) return;
+    leaving.onMainSessionProviderChange?.(undefined);
+    leaving.onSelectedParticipantRuntimeOverridesChange((current) => {
+      if (!(NEW_CHAT_MAIN_SESSION_PARTICIPANT_ID in current)) return current;
+      const { [NEW_CHAT_MAIN_SESSION_PARTICIPANT_ID]: _chosenForThatChat, ...rest } = current;
+      return rest;
     });
-  }, [mainProviderKey, onSelectedParticipantRuntimeOverridesChange]);
+  }, []);
+  const mainSessionOverride = overrideForOtherProvider ? undefined : props.selectedParticipantRuntimeOverrides[NEW_CHAT_MAIN_SESSION_PARTICIPANT_ID];
   const mainSessionParticipant = useMemo(
-    () => mainKind ? newChatMainSessionParticipantConfig(mainKind, Boolean(props.repoPath.trim()), mainHostId) : undefined,
-    [mainHostId, mainKind, props.repoPath]
+    () => mainKind ? newChatMainSessionParticipantConfig(mainKind, Boolean(props.repoPath.trim()), mainHostId, sessionsView) : undefined,
+    [mainHostId, mainKind, props.repoPath, sessionsView]
   );
   const savedParticipantOptions = useMemo(
     () => sortSavedParticipantOptionsByUsage(
@@ -214,9 +241,9 @@ export function NewChatScreen(props: {
   );
   const mainSessionDraft = useMemo(
     () => mainKind
-      ? newChatMainSessionParticipantDraft(mainKind, props.selectedParticipantRuntimeOverrides[NEW_CHAT_MAIN_SESSION_PARTICIPANT_ID], Boolean(props.repoPath.trim()), mainHostId)
+      ? newChatMainSessionParticipantDraft(mainKind, mainSessionOverride, Boolean(props.repoPath.trim()), mainHostId, sessionsView)
       : undefined,
-    [mainHostId, mainKind, props.repoPath, props.selectedParticipantRuntimeOverrides]
+    [mainHostId, mainKind, mainSessionOverride, props.repoPath, sessionsView]
   );
   const prospectiveParticipantDrafts = useMemo(() => {
     // In the sessions view the chat is made with its main session alone: it
@@ -238,11 +265,14 @@ export function NewChatScreen(props: {
     props.settings.chatParticipantConfigs
   ]);
   const changeMainSession = useCallback((patch: ChatModelAccessPatch) => {
+    // "" is the picker's reset to the CLI's own model or effort: none here.
+    const settled = Object.fromEntries(Object.entries(patch).map(([key, value]) => [key, value === "" ? undefined : value])) as ChatModelAccessPatch;
     onSelectedParticipantRuntimeOverridesChange((current) => ({
       ...current,
-      [NEW_CHAT_MAIN_SESSION_PARTICIPANT_ID]: { ...current[NEW_CHAT_MAIN_SESSION_PARTICIPANT_ID], ...patch }
+      [NEW_CHAT_MAIN_SESSION_PARTICIPANT_ID]: { ...current[NEW_CHAT_MAIN_SESSION_PARTICIPANT_ID], ...settled }
     }));
-  }, [onSelectedParticipantRuntimeOverridesChange]);
+    if (mainProviderKey) onMainSessionOverrideForChange?.(mainProviderKey);
+  }, [mainProviderKey, onMainSessionOverrideForChange, onSelectedParticipantRuntimeOverridesChange]);
   const { onMainSessionProviderChange } = props;
   const chooseMainProvider = useCallback((option: MainSessionProviderOption) => {
     onMainSessionProviderChange?.({ kind: option.kind, ...(option.hostId ? { hostId: option.hostId } : {}) });
@@ -603,7 +633,12 @@ export function NewChatScreen(props: {
       )}
 
       {readyKinds.length > 0 && validation && <div className="inline-error new-chat-error">{validation}</div>}
-      {!needsProviderSetup && assistantNote && !chosenProviderInEffect && (
+      {!needsProviderSetup && chosenProviderGone && mainProvider && (
+        <p className="new-chat-assistant-note" data-testid="new-chat-assistant-note">
+          {`The provider chosen on the model chip is not ready now: this chat would start on ${mainProvider.label || mainProvider.kind}.`}
+        </p>
+      )}
+      {!needsProviderSetup && !chosenProviderGone && assistantNote && !chosenProviderInEffect && (
         <p className="new-chat-assistant-note" data-testid="new-chat-assistant-note">{assistantNote}</p>
       )}
     </div>

@@ -1,4 +1,5 @@
 import { normalizeAutoChatTitle, normalizeManualChatTitle } from "./chatTitles";
+import { applyChatAccessOptionById } from "./chatAccessModes";
 import { DEFAULT_CHAT_VIEW, MAIN_SESSION_ROLE_ID, isChatViewMode, mainSessionMemberOf } from "./mainSession";
 import type {
   ChatParticipant,
@@ -307,6 +308,11 @@ export interface NewChatMainSessionChoice {
   hostId?: string;
   model?: string;
   reasoningEffort?: ChatReasoningEffort;
+  /** Its CLI's mode by the CLI's own name (chatAccessOptions); none: the
+   *  mode its CLI starts in. */
+  access?: string;
+  /** The machine it runs on; none: the computer. */
+  homeMachineId?: string;
 }
 
 /**
@@ -323,16 +329,22 @@ export function newChatMainSessionFor(
 ): ChatParticipant {
   if (!choice) return offered;
   const provider = (providers ?? []).find((item) => item.kind === choice.kind && (item.hostId ?? "") === (choice.hostId ?? ""));
-  if (!provider) return offered;
+  if (!provider) {
+    // Its CLI's mode, on the provider the offer has.
+    return { ...offered, ...applyChatAccessOptionById(offered.kind, choice.kind === offered.kind ? choice.access : undefined, offered.permissions) };
+  }
   const model = choice.model && provider.models.some((item) => item.id === choice.model) ? choice.model : undefined;
   const efforts = (model ? provider.models.find((item) => item.id === model)?.efforts : undefined) ?? provider.efforts;
   const reasoningEffort = choice.reasoningEffort && efforts.some((item) => item.id === choice.reasoningEffort) ? choice.reasoningEffort : undefined;
   const { hostId: _hostId, hostLabel: _hostLabel, hostVendor: _hostVendor, model: _model, reasoningEffort: _effort, avatarId: _avatar, ...rest } = offered;
+  const { homeMachineId: _home, ...placed } = rest;
   return {
-    ...rest,
+    ...placed,
     kind: provider.kind,
     ...(provider.hostId ? { hostId: provider.hostId, hostLabel: provider.hostLabel, hostVendor: provider.hostVendor } : {}),
     ...(model ? { model } : {}),
-    ...(reasoningEffort ? { reasoningEffort } : {})
+    ...(reasoningEffort ? { reasoningEffort } : {}),
+    ...applyChatAccessOptionById(provider.kind, choice.access, offered.permissions),
+    ...(choice.homeMachineId ? { homeMachineId: choice.homeMachineId } : {})
   };
 }
