@@ -286,6 +286,8 @@ test("the sessions view (T3 Code's way): tasks inside the turn's Worked fold, ch
     assert.deepEqual(sent.message.metadata.deliveryTargets, [MAIN.id], `"${text}" goes to the main session`);
   }
   assert.equal(await app.evaluate(`document.getElementById("composer-input").placeholder`), "Ask anything");
+  // The @ button is gone in the sessions view (its display rule must not beat [hidden]).
+  assert.equal(await app.evaluate(`getComputedStyle(document.getElementById("mention-button")).display`), "none", "no @ button in the sessions view");
 
   // --- the main session's answer to a member is in that member's session ---
   await hub.addMessages("conv-main", [
