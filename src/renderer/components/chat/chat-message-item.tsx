@@ -61,6 +61,7 @@ import { IconButton, StatusBadge } from "../primitives";
 import type { ChatParticipantRosterStatus } from "./chat-participant-menu";
 import { WorkedRow } from "./chat-worked-row";
 import { ChatDelegationRows, ChatWorkedFold } from "./chat-delegation-fold";
+import { ChatSessionsFinishedActivity, ChatSessionsRunningReply, sessionsReplyHasActivity } from "./chat-sessions-activity";
 import { mainSessionMemberOf, withoutLeadingMention } from "../../../shared/mainSession";
 import type { SessionsTaskEntry } from "../../../shared/mainSessionView";
 import { ChatAppToolApprovalList } from "./chat-app-tool-approvals";
@@ -262,6 +263,13 @@ export const ChatMessageItem = memo(function ChatMessageItem(props: {
     }))
     .filter((entry) => entry.reactors.length > 0);
   const hasProcessingTranscript = Boolean(processingTranscriptView && chatProcessingTranscriptViewHasHidden(processingTranscriptView, activityEvents));
+  // The sessions view: a finished reply's "Worked for …" opens to the rows
+  // its turn showed while it ran, in place, not to the full stream instead
+  // of its text.
+  const sessionsFoldView = hasProcessingTranscript ? processingTranscriptView : undefined;
+  const sessionsFoldActivity = props.presentation === "sessions" && !isStreaming && sessionsReplyHasActivity(activityEvents, sessionsFoldView)
+    ? <ChatSessionsFinishedActivity view={sessionsFoldView} activityEvents={activityEvents} />
+    : undefined;
 
   async function copyMessage(): Promise<void> {
     if (!canCopy) {
@@ -351,7 +359,8 @@ export const ChatMessageItem = memo(function ChatMessageItem(props: {
           <Avatar className="message-avatar" spec={avatar} />
         )}
         <div className="message-body">
-          <div className="message-actions">
+          {/* A running reply of the sessions view has no controls of its own: the composer's button is Stop. */}
+          {!(sessions && isStreaming) && <div className="message-actions">
             {sessions && !isStreaming && <ChatMessageHoverWhen createdAt={message.createdAt} />}
             {isStreaming && message.metadata?.runId && props.onStopRun && (
               <IconButton
@@ -364,7 +373,7 @@ export const ChatMessageItem = memo(function ChatMessageItem(props: {
                 onClick={() => props.onStopRun?.(message.metadata!.runId!)}
               />
             )}
-            {hasProcessingTranscript && (
+            {hasProcessingTranscript && !sessionsFoldActivity && (
               <IconButton
                 size="xs"
                 icon={processingTranscriptOpen ? ChevronUp : ChevronDown}
@@ -386,7 +395,7 @@ export const ChatMessageItem = memo(function ChatMessageItem(props: {
               />
             )}
             {reactAndReplyActions}
-          </div>
+          </div>}
           <ChatMessageMeta
             message={message}
             author={author}
@@ -400,14 +409,26 @@ export const ChatMessageItem = memo(function ChatMessageItem(props: {
             inThread={props.inThread}
           />
           {/* One quiet "Worked for …" for every reply of the sessions view. */}
-          {(props.sessionsWork?.length || (sessions && showWorkedRow)) && !isStreaming
+          {(props.sessionsWork?.length || (sessions && (showWorkedRow || sessionsFoldActivity))) && !isStreaming
             ? <ChatWorkedFold workedMs={workedMs ?? undefined} entries={props.sessionsWork ?? NO_SESSIONS_WORK} participants={props.participants} onOpenTask={props.onOpenTask}
-                stream={hasProcessingTranscript ? { open: processingTranscriptOpen, toggle: () => props.activityDisclosure.toggleProcessingTranscript(message.id) } : undefined} />
+                activity={sessionsFoldActivity}
+                stream={hasProcessingTranscript || sessionsFoldActivity ? { open: processingTranscriptOpen, toggle: () => props.activityDisclosure.toggleProcessingTranscript(message.id) } : undefined} />
             : showWorkedRow && <WorkedRow workedMs={workedMs} />}
           {/* Every rendering of the content (streaming, transcript, final) knows its author. */}
           <FileLinkAuthorContext.Provider value={participant?.cloudRun || participant?.homeMachineId ? CLOUD_AUTHOR : LOCAL_AUTHOR}>
           <div className="message-content">
-            {isStreaming ? (
+            {isStreaming && sessions ? (
+              <ChatSessionsRunningReply
+                since={queuedBehind ? undefined : streamingStartedAt}
+                content={streamedContent}
+                activityEvents={props.liveProgress?.activityEvents ?? (streamedActivityEvents.length > 0 ? streamedActivityEvents : activityEvents)}
+                statusLabel={streamedRemoteRunStatus?.label}
+                posts={interimPosts}
+                attachments={allImageAttachments}
+                conversationId={props.conversationId}
+                tasks={props.sessionsWork?.length ? <ChatDelegationRows bare entries={props.sessionsWork} participants={props.participants} onOpenTask={props.onOpenTask} /> : undefined}
+              />
+            ) : isStreaming ? (
               <StreamingContentWithInterimPosts
                 activityDisclosure={props.activityDisclosure}
                 content={streamedContent}
@@ -421,7 +442,7 @@ export const ChatMessageItem = memo(function ChatMessageItem(props: {
             ) : (
               <>
                 <ChatInterimPostList conversationId={props.conversationId} posts={interimPosts} attachments={allImageAttachments} />
-                {hasProcessingTranscript && processingTranscriptOpen && processingTranscriptView ? (
+                {hasProcessingTranscript && processingTranscriptOpen && processingTranscriptView && !sessionsFoldActivity ? (
                   <ChatExpandedProcessingTranscript
                     activityDisclosure={props.activityDisclosure}
                     view={processingTranscriptView}
@@ -438,7 +459,7 @@ export const ChatMessageItem = memo(function ChatMessageItem(props: {
               </>
             )}
           </div>
-          {isStreaming && props.sessionsWork?.length ? <ChatDelegationRows entries={props.sessionsWork} participants={props.participants} onOpenTask={props.onOpenTask} /> : null}
+          {isStreaming && !sessions && props.sessionsWork?.length ? <ChatDelegationRows entries={props.sessionsWork} participants={props.participants} onOpenTask={props.onOpenTask} /> : null}
           </FileLinkAuthorContext.Provider>
           {props.appToolApprovals && props.appToolApprovals.length > 0 && props.onRespondToAppToolApproval && (
             <div className="chat-message-embedded-approvals">

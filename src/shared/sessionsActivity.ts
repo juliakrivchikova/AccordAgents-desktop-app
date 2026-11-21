@@ -1,0 +1,75 @@
+// A running reply's work in the sessions view (docs/main-session.md), as T3
+// Code shows a turn in progress: one quiet line per step, an outline icon by
+// its kind and what it is about (the thinking text, the search query, the
+// command, the file). The desktop and the phone read the same rows; the phone
+// gets them already made (mobileTimeline.ts, hubPhoneState.ts), short.
+
+import type { ChatAgentActivityEvent } from "./types";
+
+/** What a row is about: its icon. */
+export type SessionsActivityKind = "thinking" | "web" | "shell" | "read" | "edit" | "tool" | "status";
+
+export interface SessionsActivityRow {
+  kind: SessionsActivityKind;
+  /** One line: what the step is about. */
+  text: string;
+}
+
+/** The rows a phone gets of one reply at most (the newest), and each row's
+ *  length: a reply that ran hundreds of tools stays a few lines on the wire. */
+export const PHONE_ACTIVITY_ROWS_MAX = 12;
+export const PHONE_ACTIVITY_ROW_CHARS = 120;
+
+const THINKING_LABEL = /^(thinking|reasoning)\b/i;
+const READ_LABEL = /^(reading|viewing)\b/i;
+
+function oneLine(value: string | undefined): string {
+  return (value ?? "").replace(/\s+/g, " ").trim();
+}
+
+/** The first line of an activity's detail: the command, the query, the path. */
+function detailLine(detail: string | undefined): string {
+  const first = (detail ?? "").split(/\r?\n/).find((line) => line.trim());
+  return oneLine(first);
+}
+
+/** One step of a reply as its row shows it. The detail (the command, the
+ *  query, the path) is what the row says when the CLI gave one; else the
+ *  step's own label ("Reading file", "Using Bash"). */
+export function sessionsActivityRow(event: Pick<ChatAgentActivityEvent, "kind" | "label" | "detail">): SessionsActivityRow {
+  const label = oneLine(event.label);
+  const detail = detailLine(event.detail);
+  const text = (fallback: string) => detail || fallback;
+  if (THINKING_LABEL.test(label)) {
+    return { kind: "thinking", text: detail || (label.replace(THINKING_LABEL, "").replace(/^[\s:.…-]+/, "") || label) };
+  }
+  switch (event.kind) {
+    case "command":
+      return { kind: "shell", text: text(label) };
+    case "web":
+      return { kind: "web", text: text(label) };
+    case "file-edit":
+      return { kind: "edit", text: text(label) };
+    case "status":
+    case "approval":
+      return { kind: "status", text: label || detail };
+    default:
+      return READ_LABEL.test(label) ? { kind: "read", text: text(label) } : { kind: "tool", text: label || detail };
+  }
+}
+
+/** A reply's newest rows as the phone gets them, and how many earlier ones
+ *  were left out. */
+export function phoneSessionsActivity(
+  events: ReadonlyArray<Pick<ChatAgentActivityEvent, "kind" | "label" | "detail">> | undefined
+): { activity: SessionsActivityRow[]; activityMore?: number } | undefined {
+  if (!Array.isArray(events) || events.length === 0) return undefined;
+  const rows = events.map(sessionsActivityRow).filter((row) => row.text);
+  if (rows.length === 0) return undefined;
+  const kept = rows.slice(-PHONE_ACTIVITY_ROWS_MAX).map((row) => ({
+    kind: row.kind,
+    text: row.text.length > PHONE_ACTIVITY_ROW_CHARS ? `${row.text.slice(0, PHONE_ACTIVITY_ROW_CHARS - 1).trimEnd()}…` : row.text
+  }));
+  const more = rows.length - kept.length;
+  return more > 0 ? { activity: kept, activityMore: more } : { activity: kept };
+}
