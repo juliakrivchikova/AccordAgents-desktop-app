@@ -41,14 +41,15 @@ export function isForkCutMissingError(text: string | undefined): boolean {
   return /no message found with message\.uuid|turn not found/i.test(text ?? "");
 }
 
-export const FORK_CUT_NOT_IN_SESSION = "that reply is not in its session here";
-export const FORK_CUT_NO_TURN_BY_THEN = "none of its session's turns here ended by that reply";
+// Said in a line every device shows: none says "here".
+export const FORK_CUT_NOT_IN_SESSION = "that reply is not in its session";
+export const FORK_CUT_NO_TURN_BY_THEN = "none of its session's turns ended by that reply";
 // Claude Code loads a compacted session only from its compaction on.
 export const FORK_CUT_COMPACTED = "its session was compacted after that reply";
-export const FORK_CUT_TRANSCRIPT_UNREADABLE = "its session file could not be read here";
+export const FORK_CUT_TRANSCRIPT_UNREADABLE = "its session file could not be read";
 export const FORK_CUT_TURNS_UNLISTED = "Codex could not list its session's turns";
 export const FORK_CUT_UNSUPPORTED = "this Claude Code cannot end a copy at a reply";
-export const FORK_CUT_SESSION_GONE = "its session changed after its last reply, and that session is not here";
+export const FORK_CUT_SESSION_GONE = "its session changed after its last reply, and that earlier session is gone";
 
 /** Claude Code does not know `--resume-session-at` (a hidden flag: a later
  *  version may drop it). */
@@ -62,11 +63,13 @@ export interface ClaudeTranscriptRow {
   kind: "assistant" | "user" | "compact";
   uuid?: string;
   at: number;
-  /** A user row a compaction writes, not the member's work: the summary,
-   *  and the `/compact` command's own lines (the local-command caveat, the
-   *  command, its output). */
+  /** A user row that is not the member's work: a compaction's summary, the
+   *  `/compact` command, and a local command's caveat and output (any
+   *  command's: onlyCompactions takes them only around a `/compact`). */
   compaction?: "summary" | "caveat" | "command" | "output";
-  /** A compaction's: the messages before it that it kept as they were. */
+  /** A compaction's: the messages before it that it kept as they were;
+   *  only for one the User asked for (`/compact`, not one the CLI made
+   *  itself during a turn, which may hold that turn's prompt). */
   kept?: string[];
 }
 
@@ -91,11 +94,16 @@ function compactionRowOf(entry: Record<string, unknown>): ClaudeTranscriptRow["c
   return undefined;
 }
 
-/** The messages a compaction kept as they were (Claude Code loads them
- *  after it). */
+/** The messages a `/compact` kept as they were (Claude Code loads them
+ *  after it). None for a compaction the CLI made during a turn (`trigger`
+ *  "auto", or one that names the turn it ran in): what it summed up may
+ *  hold that turn's prompt, which the User had not seen answered. */
 function compactionKept(entry: Record<string, unknown>): string[] | undefined {
   const metadata = entry.compactMetadata;
-  const preserved = metadata && typeof metadata === "object" ? (metadata as { preservedMessages?: unknown }).preservedMessages : undefined;
+  if (!metadata || typeof metadata !== "object") return undefined;
+  const fields = metadata as Record<string, unknown>;
+  if (fields.trigger !== "manual" || "runningTurnPrompt" in fields || "runningTurnSends" in fields) return undefined;
+  const preserved = fields.preservedMessages;
   if (!preserved || typeof preserved !== "object") return undefined;
   const ids = new Set<string>();
   for (const key of ["uuids", "allUuids"]) {

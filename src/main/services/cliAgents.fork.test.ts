@@ -117,15 +117,15 @@ test("claude: a point the CLI cannot keep copies the whole session and says why"
     assert.deepEqual(afterCompaction.said, ["0:its session was compacted after that reply"], "said before the turn runs");
     const noTranscript = await claudeForkTurns(empty, { at: "a1" });
     assert.equal(noTranscript.turns[0].forkResumeAt, undefined);
-    assert.equal(noTranscript.result.forkCutMissed, "its session file could not be read here");
+    assert.equal(noTranscript.result.forkCutMissed, "its session file could not be read");
     // The CLI refused the point after all: once more, whole, and said.
     const projects = await claudeProjectsWithTranscript("parent-session");
     try {
       const refused = await claudeForkTurns(projects, { at: "a1" }, [{ ok: false, content: "", error: "claude warm process exited with code 1: No message found with message.uuid of: a1" }]);
       assert.deepEqual(refused.turns.map((turn) => turn.forkResumeAt), ["a1", undefined]);
       assert.equal(refused.result.ok, true);
-      assert.equal(refused.result.forkCutMissed, "that reply is not in its session here");
-      assert.deepEqual(refused.said, ["1:that reply is not in its session here"], "said before the whole copy runs");
+      assert.equal(refused.result.forkCutMissed, "that reply is not in its session");
+      assert.deepEqual(refused.said, ["1:that reply is not in its session"], "said before the whole copy runs");
       // A Claude Code without the flag: the same, said so.
       const unsupported = await claudeForkTurns(projects, { at: "a1" }, [{ ok: false, content: "", error: "error: unknown option '--resume-session-at'" }]);
       assert.deepEqual(unsupported.turns.map((turn) => turn.forkResumeAt), ["a1", undefined]);
@@ -171,7 +171,7 @@ test("claude: when the member's session changed after the reply, the session tha
     assert.deepEqual(earlier.said, []);
     const gone = await claudeForkTurns(projects, { at: "a1", sessionId: "lost-session" });
     assert.deepEqual([gone.turns[0].forkFromSessionId, gone.turns[0].forkResumeAt], ["parent-session", undefined]);
-    assert.deepEqual(gone.said, ["0:its session changed after its last reply, and that session is not here"]);
+    assert.deepEqual(gone.said, ["0:its session changed after its last reply, and that earlier session is gone"]);
   } finally {
     await rm(projects, { recursive: true, force: true });
   }
@@ -368,14 +368,14 @@ test("codex: a turn Codex does not know copies the whole thread and says why; so
   assert.equal(refused.result.ok, true, JSON.stringify(refused.result));
   assert.deepEqual(refused.methods.filter((item) => item.method === "thread/fork").map((item) => item.params.lastTurnId ?? null),
     ["01a1feed-0000-7000-8000-00000000dead", null]);
-  assert.equal(refused.result.forkCutMissed, "that reply is not in its session here");
+  assert.equal(refused.result.forkCutMissed, "that reply is not in its session");
   // The copy is made even when the turn then fails: it says so too.
   const failed = await runForkedCodexTurn("child-thread", { forkCut: { at: "01a1feed-0000-7000-8000-00000000dead" }, sourceTurns: SOURCE_TURNS, failTurns: true });
   assert.equal(failed.result.ok, false);
-  assert.equal(failed.result.forkCutMissed, "that reply is not in its session here");
+  assert.equal(failed.result.forkCutMissed, "that reply is not in its session");
   const before = await runForkedCodexTurn("child-thread", { forkCut: { finishedBy: "2026-11-21T16:00:00.000Z" }, sourceTurns: SOURCE_TURNS });
   assert.equal(before.methods.find((item) => item.method === "thread/fork")!.params.lastTurnId, undefined);
-  assert.equal(before.result.forkCutMissed, "none of its session's turns here ended by that reply");
+  assert.equal(before.result.forkCutMissed, "none of its session's turns ended by that reply");
 });
 
 test("codex: when the member's thread changed after the reply, the thread that reply was in is forked through it; gone, the member's own, said", async () => {
@@ -389,7 +389,7 @@ test("codex: when the member's thread changed after the reply, the thread that r
   assert.equal(gone.result.ok, true, JSON.stringify(gone.result));
   assert.deepEqual(gone.methods.filter((item) => item.method === "thread/fork").map((item) => [item.params.threadId, item.params.lastTurnId ?? null]),
     [["lost-thread", turn], ["parent-thread", null]]);
-  assert.equal(gone.result.forkCutMissed, "its session changed after its last reply, and that session is not here");
+  assert.equal(gone.result.forkCutMissed, "its session changed after its last reply, and that earlier session is gone");
 });
 
 test("codex: a fork answered with the source's own id is refused, so the member never writes to it", async () => {

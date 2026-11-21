@@ -892,22 +892,22 @@ test("a cloud member's reply that failed here before its turn started stays wher
   assert.notEqual(buildChatParticipantStatusMap(answered!).get(cloudy.id), "error", "so it does not show Error");
 });
 
-test("a fork's line a machine writes during its member's turn reaches the server and the computer once, said again on a later turn or a redelivery", async (t) => {
+test("a fork's line a machine writes during its member's turn reaches the server and the computer once, and is not written again when said again on a later turn", async (t) => {
   // Fork to new chat and a delegated fork say what became of the copy as a
-  // line in the chat (ChatService.postChatNoticeLine), never a chat warning:
+  // line in the chat (ChatService.postForkNotice) as well as a chat warning:
   // a warning stays on the device that raised it, here the machine.
   const notice = "@drew could not start from a copy of @main's session, so it started a clean session from the saved chat context.";
   const h = await linked(t, localChat("chat-fork-line"));
   const machine = h.machineChat as unknown as {
-    runParticipantTurn: (conversation: Conversation, ...rest: unknown[]) => Promise<ChatMessage[]>;
-    postChatNoticeLine: (conversation: Conversation, text: string) => void;
+    runParticipantTurn: (conversation: Conversation, participant: ChatParticipant, ...rest: unknown[]) => Promise<ChatMessage[]>;
+    postForkNotice: (conversation: Conversation, participant: ChatParticipant, kind: string, text: string) => void;
   };
   const turn = machine.runParticipantTurn.bind(machine);
-  machine.runParticipantTurn = async (conversation, ...rest) => {
+  machine.runParticipantTurn = async (conversation, participant, ...rest) => {
     // Twice, as a turn handed over again after a restart would say it.
-    machine.postChatNoticeLine(conversation, notice);
-    machine.postChatNoticeLine(conversation, notice);
-    return turn(conversation, ...rest);
+    machine.postForkNotice(conversation, participant, "started-clean", notice);
+    machine.postForkNotice(conversation, participant, "started-clean", notice);
+    return turn(conversation, participant, ...rest);
   };
   const lines = (messages: ChatMessage[] | undefined) => (messages ?? []).filter((message) => message.role === "system" && message.content === notice);
   await h.desktopChat.sendMessage({ conversationId: "chat-fork-line", content: "@drew hello" } as never);
@@ -919,6 +919,10 @@ test("a fork's line a machine writes during its member's turn reaches the server
   const desktop = await until(() => h.desktopStorage.getConversation("chat-fork-line"), (chat) => lines(chat?.messages).length > 0);
   await new Promise((resolve) => setTimeout(resolve, 200));
   assert.equal(lines((await h.desktopStorage.getConversation("chat-fork-line"))?.messages).length, 1, "once on the computer");
-  assert.deepEqual(((desktop?.metadata.warnings ?? []) as string[]).filter((warning) => warning === notice), [], "not a warning there either");
+  assert.equal(lines((await h.desktopStorage.getConversation("chat-fork-line"))?.messages)[0]!.id, `fork-notice-started-clean-${remote.id}`);
+  // The warning stays on the machine that ran the turn, as every warning does.
+  assert.deepEqual(((desktop?.metadata.warnings ?? []) as string[]).filter((warning) => warning === notice), [], "no warning on the computer");
+  await h.machineChat.settleChatSaves();
+  assert.deepEqual(((await h.machineStorage.getConversation("chat-fork-line"))?.metadata.warnings as string[] ?? []).filter((warning) => warning === notice), [notice]);
   await until(async () => h.desktopChat.liveRunIds().length + h.machineChat.liveRunIds().length, (count) => count === 0);
 });

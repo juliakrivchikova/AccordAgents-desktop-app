@@ -304,7 +304,7 @@ chat as that chat's main session, with everything it knew
   server reads its copy of the chat by it. One narrow difference: the phone
   cannot see a member's session record, so it applies that rule to a member
   on the computer too; one whose session was dropped since is offered, and
-  its fork starts clean with the chat's line saying so.
+  its fork starts clean and says so (below).
 - The new chat is made through the same path as every new chat
   (`createConversation` with `forkOf`, saved and so put on the User's server):
   titled "<chat> (fork)" until its first reply names it, in the member's
@@ -324,21 +324,27 @@ chat as that chat's main session, with everything it knew
   main session that already answered never becomes a copy again. A member
   that moved to that device and whose session still waits on her server is
   taken first, as its own next turn would take it. When the member's session
-  is not on that device, it starts clean and a line in the chat says so
-  before its turn runs ("@main could not start from a copy of @x's session
-  in the chat "T": that session is not on your computer / the cloud machine
-  @main runs on, so it starts a clean session."); when the CLI cannot copy
-  it, the fork's two-strike fallback holds, said the same way. Every notice
-  of a fork (this one, a clean start, the two-strike fallback, the "may
-  include" line below; a delegated fork's too) is a line in the chat
-  (`postChatNoticeLine`, a system message on the "system" thread), never a
-  chat warning: a warning stays on the device that raised it, so a fork run
-  on a cloud machine, or asked from the phone, would say nothing to the
-  computer or the phone. The line goes to her server with the chat and is
-  shown on every device; the device that runs the turn writes it once (the
-  same words are not written twice, so a turn run again after a restart or
-  handed over again by her server says nothing more). The member's chat is
-  read without its messages (its metadata and newest messages).
+  is not on that device, it starts clean and says so before its turn runs
+  ("@main could not start from a copy of @x's session in the chat "T":
+  that session is not on your computer / the cloud machine @main runs on,
+  so it starts a clean session."; when its provider was changed since,
+  "@main now runs on Codex, not Claude Code"); when the CLI cannot copy it,
+  the fork's two-strike fallback holds, said the same way. Every notice of
+  a fork (this one, a clean start, the two-strike fallback, the "may
+  include" line below; a delegated fork's too) is said by `postForkNotice`
+  twice over: as a line in the chat (a system message on the "system"
+  thread, id `fork-notice-<kind>-<member id>`), which goes to her server
+  with the chat and so reaches every device, a fork run on a cloud machine
+  or asked from the phone too; and, as before, as a chat warning on the
+  device that ran it, which stays there. Open: the chat's timeline shows no
+  system line on any device (`isChatMessageHiddenFromTimeline`, and the
+  phone's timeline by the same rule), so today the User sees only that
+  warning, on the device that ran the fork; showing the line on the
+  computer and the phone needs a look of its own (and her server holding
+  its writer to the member's device). Each is written once per member and
+  kind (her server refuses a second line with that id), so a turn run again
+  after a restart or handed over again says nothing more. The member's chat
+  is read without its messages (its metadata and newest messages).
 - The copy is what she saw when she tapped Fork. The User, 2026-11-21, on
   her card "When should a fork copy the member?": "When you tap Fork — Like
   the CLI: the copy is exactly what you saw at that moment; beta.3 comes out
@@ -377,14 +383,15 @@ chat as that chat's main session, with everything it knew
     transcript a line at a time (`claudeForkCut`; her longest, 113 MB,
     reads in about 0.4 s with no pause of the app over 12 ms); a compaction
     after the point, no point (the CLI does not load a message before a
-    later compaction and refuses it), unless nothing but compactions came
-    after it (their boundaries, summaries and the `/compact` command's own
-    lines) and the last of them kept it as it was
-    (`compactMetadata.preservedMessages`, which holds the last message
-    before a `/compact`): the CLI loads that message after the compaction's
-    summary, so the point is given and the copy is what she saw, compacted,
-    with no line; refused after all, the whole session and the line, which
-    names the compaction. Codex forks with `thread/fork`
+    later compaction and refuses it), unless nothing but `/compact`s came
+    after it (their boundaries, summaries and the command's own lines) and
+    the last of them kept it as it was (`compactMetadata.preservedMessages`,
+    which holds the last message before a `/compact`): the CLI loads that
+    message after the compaction's summary, so the point is given and the
+    copy is what she saw, compacted, with no line; refused after all, the
+    whole session and the line, which names the compaction. A compaction the
+    CLI made itself (`trigger` "auto", or one naming the turn it ran in)
+    never counts: it ran during a later turn, whose prompt it may sum up. Codex forks with `thread/fork`
     `lastTurnId` (inclusive; a later compaction does not stop it), reading
     the thread's turns newest first (`thread/turns/list`, no items) for a
     reply from before. The point is given even when nothing follows it yet:
@@ -399,12 +406,11 @@ chat as that chat's main session, with everything it knew
     member's session is copied, as before this rule, and a line in the chat
     says so as soon as that is decided, before the turn runs (it may last
     hours, and the app may stop during it): "@main's copy of @x's session
-    may include what @x did after you tapped Fork: <why>." A line, not a
-    chat warning: a warning stays on the device that raised it, and the
-    copy may run on a cloud machine or have been asked from the phone; the
-    line reaches every device through her server. Never a clean start: the
-    copy keeps what she saw, the line says what may be more. A compaction
-    after her last reply that kept it (above) gives no line.
+    may include what @x did after you tapped Fork: <why>." (`postForkNotice`,
+    above: a line in the chat and a warning on the device that ran it).
+    Never a clean start: the copy keeps what she saw, the line says what may
+    be more. A `/compact` after her last reply that kept it (above) gives
+    no line; a compaction the CLI made itself during a later turn does.
   - Checked 2026-11-21 on throwaway sessions: Claude Code 2.1.329 forked at
     the first of two turns ("remember APPLE", "remember BANANA") answers
     APPLE only, in one-shot and in stream-json (warm) mode, the source
@@ -455,11 +461,11 @@ chat as that chat's main session, with everything it knew
   still carries the member's identity note and its role's instructions;
   otherwise the next turn tries the fork once more
   (`forkFrom.failedAttempts`), and when that fails too the member becomes a
-  clean member (fork and its chat-context pointer dropped). Either way a
-  line in the chat says so ("@x could not start from a copy of @main's
-  session, …"; `postChatNoticeLine`, never a chat warning), and the failed
-  reply the main session reads says it too (a forked main session's own
-  failed reply does not: the User asked it and reads the line).
+  clean member (fork and its chat-context pointer dropped). Either way the
+  chat says so ("@x could not start from a copy of @main's session, …";
+  `postForkNotice`, above), and the failed reply the main session reads
+  says it too (a forked main session's own failed reply does not: the User
+  asked it, and the notice is hers).
 - `ChatParticipantRequestItem.title?`: the main session's short title for
   its task (`app_chat_delegate_task`'s `title`, at most 80 characters).
 - `ChatParticipantRequestBatch.delegation.turnId?`: the main-session turn (its `turnSegmentId`) that gave the task while that

@@ -443,12 +443,20 @@ interface ParticipantMoveApplied {
   line: string;
 }
 
+/** What a fork says about its copy, once per member (postForkNotice). */
+type ForkNoticeKind = "origin-unavailable" | "cut-missed" | "started-clean" | "starts-clean-next";
+
+/** The id of a fork's line: one per member and kind. */
+function forkNoticeMessageId(participantId: string, kind: ForkNoticeKind): string {
+  return `fork-notice-${kind}-${participantId}`;
+}
+
 interface ChatParticipantSessionState {
   session: ChatParticipantSession;
   instructionsRefreshed: boolean;
   /** A main session made by Fork to new chat whose member's session is not
-   *  on this device: it starts clean, and a line in the chat says so when
-   *  its turn runs (postChatNoticeLine). */
+   *  on this device: it starts clean, and the chat says so when its turn
+   *  runs (postForkNotice). */
   forkOriginUnavailable?: string;
 }
 
@@ -10977,10 +10985,10 @@ export class ChatService {
         await this.waitForEarlierClaudeMessages(options.writeGate, signal);
       }
       // A main session made by Fork to new chat whose member's session is
-      // not here starts clean: a line in the chat says so before the turn
-      // runs, as the fork's other notices are said (postChatNoticeLine).
+      // not here starts clean: the chat says so before the turn runs, as the
+      // fork's other notices are said (postForkNotice).
       if (sessionState.forkOriginUnavailable) {
-        this.postChatNoticeLine(conversation, sessionState.forkOriginUnavailable);
+        this.postForkNotice(conversation, participant, "origin-unavailable", sessionState.forkOriginUnavailable);
       }
       let result = await this.cliRunner.run(cliParticipant, prompt, runPath, undefined, "chat", signal, {
         persistSession: true,
@@ -11058,9 +11066,9 @@ export class ChatService {
       // The CLI could not copy the source session and started the member
       // clean from the saved chat context instead (Claude Code's resume-miss
       // fallback): it is a member of its own from now on, and the chat says so.
-      // A fork's notices are lines in the chat, never chat warnings: a
+      // A fork's notices are lines in the chat as well as warnings here: a
       // warning stays on the device that raised it, and a fork may run on a
-      // cloud machine, or have been asked from the phone (postChatNoticeLine).
+      // cloud machine, or have been asked from the phone (postForkNotice).
       const forkStartedClean = forkSource && result.sessionRestarted
         ? this.forkStartedCleanNotice(conversation, participant, forkSource, "now")
         : undefined;
@@ -11069,13 +11077,14 @@ export class ChatService {
       // tapped Fork: a line in the chat says why, once.
       const forkCutNote = forkSource && !forkStartedClean ? this.forkCutMissedNote(participant, forkSource, session, result) : undefined;
       if (forkCutNote) {
-        this.postChatNoticeLine(conversation, forkCutNote);
+        this.postForkNotice(conversation, participant, "cut-missed", forkCutNote);
       }
       if (forkStartedClean) {
         delete session.forkFrom;
         delete session.forkedFromParticipantId;
-        // In the chat, whoever asked for the turn.
-        this.postChatNoticeLine(conversation, forkStartedClean);
+        // In the chat, whoever asked for the turn (a member's request keeps
+        // no run warnings of its own).
+        this.postForkNotice(conversation, participant, "started-clean", forkStartedClean);
         void this.debugLogs.write("chat.session.fork-started-clean", {
           conversationId: conversation.id,
           participantId: participant.id,
@@ -11096,10 +11105,10 @@ export class ChatService {
           // session has seen none of it.
           this.forgetPromptContextPointers(conversation, participant.id);
           const notice = this.forkStartedCleanNotice(conversation, participant, forkSource, "next");
-          this.postChatNoticeLine(conversation, notice);
+          this.postForkNotice(conversation, participant, "starts-clean-next", notice);
           // The member that gave the task reads it in this failed reply (a
           // main session made by Fork to new chat was asked by the User,
-          // who reads the line: its reply does not say it twice).
+          // whose notice it is: its reply does not say it twice).
           if (!this.otherChatForkOrigin(conversation, participant, forkSource.participantId)) {
             result = { ...result, content: [result.content.trim(), notice].filter(Boolean).join("\n\n") };
           }
@@ -12676,7 +12685,11 @@ export class ChatService {
       });
       // Read on every device (a line in the chat): the place is named, not "this".
       const place = this.machineRuntime ? `the cloud machine @${participant.handle} runs on` : "your computer";
-      return `@${participant.handle} could not start from a copy of ${this.forkOriginSessionName(origin)}: that session is not on ${place}, so it starts a clean session.`;
+      const label = (kind: ChatProviderKind): string => cliProviderMetadata(kind).label;
+      const why = origin.kind !== participant.kind
+        ? `@${participant.handle} now runs on ${label(participant.kind)}, not ${label(origin.kind)}`
+        : !forkable ? `${label(participant.kind)} has no session fork` : `that session is not on ${place}`;
+      return `@${participant.handle} could not start from a copy of ${this.forkOriginSessionName(origin)}: ${why}, so it starts a clean session.`;
     }
     // The copy ends with the turn of the reply the User saw last, at the
     // point that reply recorded in this session, or by its finish.
@@ -12772,7 +12785,7 @@ export class ChatService {
     if (!cut) return {};
     const note = (reason: string): void => {
       const text = this.forkCutNoteText(participant, reason);
-      if (text) this.postChatNoticeLine(conversation, text);
+      if (text) this.postForkNotice(conversation, participant, "cut-missed", text);
     };
     if (cut.unknown) {
       note(cut.unknown);
@@ -12819,16 +12832,33 @@ export class ChatService {
     return this.forkCutNoteText(participant, reason);
   }
 
-  /** A line in the chat that every device shows (it goes to her server
-   *  with the chat), written outside the turn's own save. */
-  private postChatNoticeLine(conversation: Conversation, text: string): void {
+  /**
+   * What a fork says about its copy (Fork to new chat, a delegated fork):
+   * a line in the chat, which goes to her server with the chat, so a fork
+   * run on a cloud machine or asked from the phone has it on every device;
+   * and, as before, a chat warning on the device that ran it. Both, because
+   * the chat's timeline does not show a system line on any device yet: the
+   * warning is what the User sees on the device that ran the fork until the
+   * line has a look of its own. Once per member and kind (the line's id says
+   * which; her server refuses a second line with it), so a turn run again
+   * after a restart or handed over again says nothing more. The warning is
+   * kept in this copy of the chat at once, as it was, and saved with the
+   * next save even when the line's own write fails.
+   */
+  private postForkNotice(conversation: Conversation, participant: ChatParticipant, kind: ForkNoticeKind, text: string): void {
+    this.addConversationWarning(conversation, text);
+    const id = forkNoticeMessageId(participant.id, kind);
     void this.withChatMutation(conversation, async () => {
-      if (conversation.messages.some((message) => message.role === "system" && message.content === text)) return;
-      conversation.messages.push(this.message("system", text, undefined, { threadId: "system" }));
+      this.addConversationWarning(conversation, text);
+      if (!conversation.messages.some((message) => message.id === id)) {
+        conversation.messages.push({ ...this.message("system", text, undefined, { threadId: "system" }), id });
+      }
       this.queueSnapshot(conversation);
     }).catch((error) => {
-      void this.debugLogs.write("chat.notice-line.persist-failed", {
+      void this.debugLogs.write("chat.fork-notice.persist-failed", {
         conversationId: conversation.id,
+        participantId: participant.id,
+        kind,
         error: error instanceof Error ? error.message : String(error)
       });
     });

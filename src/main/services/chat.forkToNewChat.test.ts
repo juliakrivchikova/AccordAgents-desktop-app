@@ -240,18 +240,22 @@ function linesOf(conversation: Conversation | undefined, text: string): ChatMess
   return (conversation?.messages ?? []).filter((message) => message.role === "system" && message.content === text);
 }
 
-/** A fork's notice is a line in the chat, once, never a chat warning (a
- *  warning stays on the device that raised it). */
-async function assertLineOnce(storage: { store: Map<string, Conversation> }, id: string, text: string, label = text): Promise<void> {
+/** A fork's notice (postForkNotice): a line in the chat, which her server
+ *  carries to every device, once per member and kind (its id says which);
+ *  and the warning the device that ran it shows, once. `service`: the
+ *  services that may still be writing, drained before counting. */
+async function assertLineOnce(storage: { store: Map<string, Conversation> }, id: string, text: string, label = text, services: ChatService[] = []): Promise<void> {
   await waitFor(() => linesOf(storage.store.get(id), text).length > 0);
-  // Saves still queued land first.
+  // Writes still queued land before counting.
+  for (const service of services) await service.settleChatSaves();
   await new Promise((resolve) => setTimeout(resolve, 20));
+  for (const service of services) await service.settleChatSaves();
   const lines = linesOf(storage.store.get(id), text);
   assert.equal(lines.length, 1, `${label}: once`);
   assert.equal(lines[0]!.metadata?.threadId, "system", label);
+  assert.match(lines[0]!.id, /^fork-notice-(origin-unavailable|cut-missed|started-clean|starts-clean-next)-/, `${label}: one id per member and kind`);
   const warnings = (storage.store.get(id)?.metadata.warnings ?? []) as string[];
-  assert.equal(warnings.some((warning) => warning.includes("could not start from a copy") || warning.includes("may include what")), false,
-    `${label}: not a chat warning (${JSON.stringify(warnings)})`);
+  assert.deepEqual(warnings.filter((warning) => warning === text), [text], `${label}: the warning on the device that ran it, once (${JSON.stringify(warnings)})`);
 }
 
 /** The chat as a cloud machine's runtime has it, its main session homed on
@@ -289,6 +293,17 @@ function forkedOnMachine(source: Conversation, sourceMember: ChatParticipant): C
       mainSessionParticipantId: "main-id"
     }
   } as Conversation;
+}
+
+/** The fork notices a service says (postForkNotice), as it says them. */
+function spyForkNotices(service: ChatService): string[] {
+  const said: string[] = [];
+  const post = (service as any).postForkNotice.bind(service);
+  (service as any).postForkNotice = (conversation: Conversation, participant: ChatParticipant, kind: string, text: string) => {
+    said.push(text);
+    return post(conversation, participant, kind, text);
+  };
+  return said;
 }
 
 function asMachine(service: ChatService): ChatService {
@@ -430,12 +445,12 @@ test("when the member's session is not on this computer any more, the main sessi
   await waitFor(() => (storage.store.get(id)?.messages ?? []).some((message) => message.participantId === mainId && message.status === "done"));
   assert.equal(runs[0]!.options.forkFromSessionId, undefined);
   assert.equal(linesWhileRunning, 1, "in the chat while the turn ran");
-  await assertLineOnce(storage, id, NOT_ON_COMPUTER);
-  assert.deepEqual(storage.store.get(id)!.metadata.warnings ?? [], []);
+  await assertLineOnce(storage, id, NOT_ON_COMPUTER, NOT_ON_COMPUTER, [service]);
+  assert.deepEqual(storage.store.get(id)!.metadata.warnings ?? [], [NOT_ON_COMPUTER], "nothing else");
   // Its later turns say nothing more.
   await service.sendMessage({ conversationId: id, runId: "run-next", content: "Next.", targetParticipantIds: [mainId] });
   await waitFor(() => runs.length === 2);
-  await assertLineOnce(storage, id, NOT_ON_COMPUTER, "after a later turn");
+  await assertLineOnce(storage, id, NOT_ON_COMPUTER, "after a later turn", [service]);
 });
 
 test("a first turn cut short by a quit, run again after the restart, says its line once", async () => {
@@ -461,34 +476,46 @@ test("a first turn cut short by a quit, run again after the restart, says its li
     runOptions.onSessionId?.("clean-session");
     return { participant, ok: true, content: "Hello.", durationMs: 1, sessionId: "clean-session" };
   });
+  const said = spyForkNotices(again);
   await again.sendMessage({ conversationId: id, runId: "run-again", content: "Hello again.", targetParticipantIds: [mainId] });
   await waitFor(() => runs.length === 2);
   await waitFor(() => (storage.store.get(id)?.messages ?? []).some((message) => message.participantId === mainId && message.status === "done"));
-  await assertLineOnce(storage, id, NOT_ON_COMPUTER, "after the restart");
+  assert.deepEqual(said, [NOT_ON_COMPUTER], "the turn run again says it again");
+  await assertLineOnce(storage, id, NOT_ON_COMPUTER, "after the restart", [again]);
   release();
 });
 
-test("on a cloud machine: the member's session not there, the line names the machine and goes in the chat, not the machine's warnings; once on redelivery", async () => {
+test("on a cloud machine: the member's session not there, the line names the machine and goes in the chat; once when the server hands the turn over again after the machine stopped mid-turn", async () => {
   const source = oldChat([ASSISTANT, { ...REVIEWER, homeMachineId: "m-1" }]);
   const forked = forkedOnMachine(source, REVIEWER);
+  let release!: () => void;
   const { service, storage, runs, restart } = testService({
     conversations: [forked],
-    run: async (participant) => ({ participant, ok: false, content: "", error: "Chat run cancelled.", durationMs: 1 })
+    // The machine stops during the first turn: it never ends, nor gets a session id.
+    run: () => new Promise((resolve) => { release = () => resolve({ ok: false, content: "", error: "Chat run cancelled.", durationMs: 1 }); })
   });
   asMachine(service);
   const text = "@main could not start from a copy of @reviewer's session in the chat \"Old chat\": that session is not on the cloud machine @main runs on, so it starts a clean session.";
-  const warnings = await runOnMachine(service, storage, forked.id, "main-id", "Hello.");
+  void runOnMachine(service, storage, forked.id, "main-id", "Hello.");
+  await waitFor(() => runs.length === 1 && linesOf(storage.store.get(forked.id), text).length === 1);
   assert.equal(runs[0]!.options.forkFromSessionId, undefined);
-  await assertLineOnce(storage, forked.id, text);
-  assert.equal(warnings.includes(text), false, "not in the turn's warnings either");
+  await service.settleChatSaves();
+  assert.equal(sessionsOf(storage.store.get(forked.id)).length, 0, "no session record was written before it stopped");
   // The server hands the turn over again after the machine restarted (its reply never written).
   const stored = storage.store.get(forked.id)!;
   stored.messages = stored.messages.filter((message) => message.participantId !== "main-id");
   storage.store.set(forked.id, stored);
-  const again = asMachine(restart());
-  await runOnMachine(again, storage, forked.id, "main-id", "Hello.", "run-Hello.-redelivered");
+  const again = asMachine(restart(async (participant, _prompt, runOptions) => {
+    runOptions.onSessionId?.("clean-session");
+    return { participant, ok: true, content: "Hello.", durationMs: 1, sessionId: "clean-session" };
+  }));
+  const said = spyForkNotices(again);
+  const warnings = await runOnMachine(again, storage, forked.id, "main-id", "Hello.", "run-Hello.-redelivered");
   assert.equal(runs.length, 2);
-  await assertLineOnce(storage, forked.id, text, "redelivered");
+  assert.deepEqual(said, [text], "the turn handed over again says it again");
+  assert.equal(warnings.includes(text), false, "not left for the turn's own warnings");
+  await assertLineOnce(storage, forked.id, text, "redelivered", [again]);
+  release();
 });
 
 test("a fork the CLI cannot make (its source session gone) uses the two-strike fallback: tried once more, then a clean session, and the chat says so", async () => {
@@ -534,8 +561,9 @@ test("Claude Code starting the copy clean (its source gone) still tells it it is
   assert.match(fallback, /^You were to start from a copy of @reviewer's session in the chat "Old chat", but it could not be copied/);
   assert.match(fallback, /You are @main, role: Main session: the main session of this chat\./);
   assert.match(fallback, /You are the main session\./, "its role's instructions");
-  await assertLineOnce(storage, id, "@main could not start from a copy of @reviewer's session in the chat \"Old chat\", so it started a clean session from the saved chat context.");
-  assert.deepEqual(storage.store.get(id)!.metadata.warnings ?? [], [], "nor the CLI's own restart warning");
+  const notice = "@main could not start from a copy of @reviewer's session in the chat \"Old chat\", so it started a clean session from the saved chat context.";
+  await assertLineOnce(storage, id, notice, notice, [service]);
+  assert.deepEqual(storage.store.get(id)!.metadata.warnings ?? [], [notice], "not the CLI's own restart warning");
 });
 
 test("on a cloud machine: a copy the CLI started clean, and the two-strike fallback, are lines in the chat", async () => {
@@ -551,8 +579,8 @@ test("on a cloud machine: a copy the CLI started clean, and the two-strike fallb
     });
     const warnings = await runOnMachine(asMachine(service), storage, startedClean.id, "main-id", "Go on.");
     const text = "@main could not start from a copy of @reviewer's session in the chat \"Old chat\", so it started a clean session from the saved chat context.";
-    await assertLineOnce(storage, startedClean.id, text);
-    assert.deepEqual(warnings, [], "nothing left for the machine's own warnings");
+    await assertLineOnce(storage, startedClean.id, text, text, [service]);
+    assert.deepEqual(warnings, [], "nothing left for the turn's own warnings");
   }
   {
     const codexReviewer: ChatParticipant = { ...REVIEWER, kind: "codex-cli", model: undefined, reasoningEffort: undefined, homeMachineId: "m-1" };
@@ -571,7 +599,8 @@ test("on a cloud machine: a copy the CLI started clean, and the two-strike fallb
     // A reply that failed counts as an answer: the retry is a later turn of the same session record.
     await runOnMachine(service, storage, forked.id, "main-id", "Try again.");
     assert.equal(runs.length, 2);
-    await assertLineOnce(storage, forked.id, "@main could not start from a copy of @reviewer's session in the chat \"Old chat\", so its next turn starts a clean session.");
+    const next = "@main could not start from a copy of @reviewer's session in the chat \"Old chat\", so its next turn starts a clean session.";
+    await assertLineOnce(storage, forked.id, next, next, [service]);
   }
 });
 
@@ -838,6 +867,7 @@ test("the copy ends with the reply the User saw when she tapped Fork: what the m
   const reply = storage.store.get(id)!.messages.find((message) => message.participantId === mainId && message.role === "participant")!;
   assert.deepEqual(reply.metadata?.sessionCut, { sessionId: "fork-own-session", at: "fork-assistant-1" }, "its own reply records where its copy stands");
   assert.deepEqual(storage.store.get(id)!.metadata.warnings ?? [], [], "nothing to say: the copy is what she saw");
+  assert.equal(storage.store.get(id)!.messages.some((message) => message.id.startsWith("fork-notice-")), false);
   assert.equal(storage.store.get(id)!.messages.some((message) => /may include what/.test(message.content)), false);
 });
 
@@ -873,11 +903,9 @@ test("when the point cannot be named the whole session is copied and a line in t
     assert.equal(runs[0]!.options.forkFromSessionId, "src-cli-session", `${label}: still a copy`);
     assert.equal(linesWhileRunning, 1, `${label}: in the chat while the turn ran`);
     // A line in the chat, which her server carries to the phone and from a
-    // cloud machine; not a warning, which stays on the device that ran it.
-    await new Promise((resolve) => setTimeout(resolve, 20));
-    assert.equal(lines().length, 1, `${label}: once`);
-    assert.equal(lines()[0]!.metadata?.threadId, "system", label);
-    assert.deepEqual(storage.store.get(id)!.metadata.warnings ?? [], [], label);
+    // cloud machine, and the warning the device that ran it shows.
+    await assertLineOnce(storage, id, note, label, [service]);
+    assert.deepEqual(storage.store.get(id)!.metadata.warnings ?? [], [note], label);
     if (!cliReason) assert.equal(runs[0]!.options.forkCut, undefined, `${label}: no point asked`);
   }
 });
@@ -895,7 +923,7 @@ test("a fork whose source is gone says only that, not that its copy may hold mor
   const { service, storage } = testService({
     conversations: [source],
     run: async (participant) => ({ participant, ok: false, content: "", error: "no rollout found for thread id src-cli-session", durationMs: 1,
-      forkCutMissed: "that reply is not in its session here" })
+      forkCutMissed: "that reply is not in its session" })
   });
   const { id, mainId } = await forkAndSend(service, storage);
   await waitFor(() => sessionsOf(storage.store.get(id)).find((item) => item.participantId === mainId)?.forkFrom?.failedAttempts === 1);
@@ -971,4 +999,35 @@ test("her server and the computer read the reply the User saw by the same rule",
   } finally {
     await rm(directory, { recursive: true, force: true });
   }
+});
+
+test("a forked main session whose provider was changed before its first turn says so, not that the session is missing", async () => {
+  const source = oldChat([ASSISTANT, REVIEWER]);
+  const { service, storage, runs } = testService({ conversations: [source] });
+  const created = await service.createConversation({ participants: [], forkOf: { conversationId: source.id, participantId: REVIEWER.id } });
+  const id = created.conversation.id;
+  const mainId = String(created.conversation.metadata.mainSessionParticipantId);
+  // Its provider changed in its settings before it ever ran.
+  const stored = storage.store.get(id)!;
+  stored.metadata.participants = participantsOf(stored).map((item) => item.id === mainId ? { ...item, kind: "codex-cli", model: undefined, reasoningEffort: undefined } : item);
+  storage.store.set(id, stored);
+  await service.sendMessage({ conversationId: id, runId: "run-other-cli", content: "Hello.", targetParticipantIds: [mainId] });
+  await waitFor(() => runs.length === 1);
+  assert.equal(runs[0]!.options.forkFromSessionId, undefined);
+  const text = "@main could not start from a copy of @reviewer's session in the chat \"Old chat\": @main now runs on Codex, not Claude Code, so it starts a clean session.";
+  await assertLineOnce(storage, id, text, text, [service]);
+});
+
+test("a member's CLI session started anew says so as a warning, unless a fork's line says it instead", () => {
+  const { service } = testService({ conversations: [] });
+  const session = { ...sessionRecord(REVIEWER, "old-session") };
+  const restarted = { participant: { id: REVIEWER.id, kind: "claude-code", label: "@reviewer" }, ok: true, content: "Done.", sessionId: "new-session", sessionRestarted: true };
+  const warnings: string[] = [];
+  (service as any).applyCliRunMetadata(session, restarted, REVIEWER, warnings);
+  (service as any).applyCliRunMetadata(session, restarted, REVIEWER, warnings);
+  assert.deepEqual(warnings, ["@reviewer: previous CLI session was unavailable, so a new session was started from saved chat context."], "once");
+  assert.equal(session.sessionId, "new-session");
+  const forked: string[] = [];
+  (service as any).applyCliRunMetadata({ ...sessionRecord(REVIEWER, "") }, restarted, REVIEWER, forked, true);
+  assert.deepEqual(forked, []);
 });

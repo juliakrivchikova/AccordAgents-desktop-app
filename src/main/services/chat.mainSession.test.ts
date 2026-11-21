@@ -456,7 +456,9 @@ test("a fork the CLI could not make is tried once more, then the member starts c
     const lines = () => storage.current.messages.filter((message: ChatMessage) => message.role === "system" && message.content === notice);
     await waitFor(() => lines().length > 0);
     assert.equal(lines()[0].metadata?.threadId, "system", kind);
-    assert.equal(((storage.current.metadata.warnings ?? []) as string[]).some((warning) => warning.includes("could not start from a copy")), false, `${kind}: not a chat warning`);
+    assert.equal(lines()[0].id, `fork-notice-starts-clean-next-${childId}`, kind);
+    // And the warning the device that ran it shows.
+    assert.ok(((storage.current.metadata.warnings ?? []) as string[]).includes(notice), kind);
     // The main session that gave the task reads it in the failed reply.
     const failedReplies = storage.current.messages.filter((message: ChatMessage) => message.participantId === childId && message.status === "error");
     assert.ok(failedReplies.some((message: ChatMessage) => message.content.includes(notice)), kind);
@@ -517,7 +519,7 @@ test("a fork the CLI starts clean (its source is gone) is still told who it is, 
   await waitFor(() => storage.current.messages.some((message: ChatMessage) => message.role === "system" && message.content === notice));
   await new Promise((resolve) => setTimeout(resolve, 20));
   assert.equal(storage.current.messages.filter((message: ChatMessage) => message.role === "system" && message.content === notice).length, 1, "once");
-  assert.deepEqual(storage.current.metadata.warnings ?? [], [], "a line, not a chat warning, nor the CLI's own restart warning");
+  assert.deepEqual(storage.current.metadata.warnings ?? [], [notice], "the warning the device that ran it shows, not the CLI's own restart warning");
 });
 
 test("a fork never takes the source's session id as its own", () => {

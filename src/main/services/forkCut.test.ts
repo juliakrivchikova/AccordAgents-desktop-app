@@ -106,6 +106,46 @@ test("claude: a compaction that did not keep the reply, or anything but compacti
   // A prompt between two compactions: the second did not keep the reply as she saw it.
   const between = [...twoTurns(), ...compactedAfter(["a2"]), user("u3", "2026-11-21T16:31:00.000Z", "Hello?"), ...compactedAfter(["a2"], "2026-11-21T16:40:00.000Z")];
   assert.deepEqual(claudeForkCut(between.join("\n"), { at: "a2" }), { kind: "missed", reason: FORK_CUT_COMPACTED });
+  // A command's output with no /compact before it.
+  const stray = [...twoTurns(), user("o0", "2026-11-21T16:25:00.000Z", "<local-command-stdout>Done</local-command-stdout>"), ...compactedAfter(["a2"])];
+  assert.deepEqual(claudeForkCut(stray.join("\n"), { at: "a2" }), { kind: "missed", reason: FORK_CUT_COMPACTED });
+});
+
+/** A compaction the CLI made itself during a turn, keeping `kept`: the
+ *  boundary (as 2.1.321 writes one, naming the turn it ran in) and its
+ *  summary, no command lines. */
+function autoCompacted(kept: string[], extra: Record<string, unknown> = {}, at = "2026-11-21T16:30:00.000Z"): string[] {
+  return [
+    line({ type: "system", subtype: "compact_boundary", uuid: `c-${at}`, timestamp: at,
+      compactMetadata: { trigger: "auto", preservedMessages: { uuids: kept, allUuids: kept }, ...extra } }),
+    user(`s-${at}`, at, "This session is being continued from a previous conversation…", { isCompactSummary: true })
+  ];
+}
+
+test("claude: a compaction the CLI made itself never counts as nothing but a compaction: it ran during a turn whose prompt it may sum up", () => {
+  assert.deepEqual(claudeForkCut([...twoTurns(), ...autoCompacted(["a2"])].join("\n"), { at: "a2" }), { kind: "missed", reason: FORK_CUT_COMPACTED });
+  // Nor a manual one that names the turn it ran in.
+  const running = [...twoTurns(), ...compactedAfter(["a2"])];
+  running[twoTurns().length] = line({ type: "system", subtype: "compact_boundary", uuid: "c-run", timestamp: "2026-11-21T16:30:00.000Z",
+    compactMetadata: { trigger: "manual", runningTurnPrompt: "Now refactor.", preservedMessages: { uuids: ["a2"], allUuids: ["a2"] } } });
+  assert.deepEqual(claudeForkCut(running.join("\n"), { at: "a2" }), { kind: "missed", reason: FORK_CUT_COMPACTED });
+});
+
+test("claude: what a /compact kept is read from either of its lists; only the last compaction's list counts", () => {
+  const withKept = (preservedMessages: Record<string, unknown>) => {
+    const rows = [...twoTurns(), ...compactedAfter(["a2"])];
+    rows[twoTurns().length] = line({ type: "system", subtype: "compact_boundary", uuid: "c-1", timestamp: "2026-11-21T16:30:00.000Z",
+      compactMetadata: { trigger: "manual", preservedMessages } });
+    return rows.join("\n");
+  };
+  assert.deepEqual(claudeForkCut(withKept({ uuids: ["a2"] }), { at: "a2" }), { kind: "cut", at: "a2", afterCompaction: true });
+  assert.deepEqual(claudeForkCut(withKept({ allUuids: ["x", "a2"] }), { at: "a2" }), { kind: "cut", at: "a2", afterCompaction: true });
+  assert.deepEqual(claudeForkCut(withKept({ anchorUuid: "a2" }), { at: "a2" }), { kind: "missed", reason: FORK_CUT_COMPACTED }, "no list");
+  // The CLI loads from the last compaction on: its list decides.
+  const twice = [...twoTurns(), ...compactedAfter([]), ...compactedAfter(["a2"], "2026-11-21T16:40:00.000Z")];
+  assert.deepEqual(claudeForkCut(twice.join("\n"), { at: "a2" }), { kind: "cut", at: "a2", afterCompaction: true });
+  const lastDropped = [...twoTurns(), ...compactedAfter(["a2"]), ...compactedAfter([], "2026-11-21T16:40:00.000Z")];
+  assert.deepEqual(claudeForkCut(lastDropped.join("\n"), { at: "a2" }), { kind: "missed", reason: FORK_CUT_COMPACTED });
 });
 
 test("claude: a point not in the session here, or nothing to go by, is said, never guessed", () => {
