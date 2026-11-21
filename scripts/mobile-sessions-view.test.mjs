@@ -330,6 +330,12 @@ test("the sessions view (T3 Code's way): tasks inside the turn's Worked fold, ch
   await app.evaluate(`document.getElementById("send-button").dispatchEvent(new PointerEvent("pointerup", { bubbles: true, cancelable: true }))`);
   const stopMain = await waitForOp(hub, (op) => op.kind === "turn.stop" && op.participantId === MAIN.id);
   assert.equal(stopMain.messageId, "drew-q", "the main session's run, named by the message it answers");
+  // Back before a member's session is drawn is back: the reply its chip
+  // leads to does not open that session again once the rows are read.
+  await app.evaluate(`(() => { document.querySelector('#message-list .sessions-member-chip[data-open-member="p-drew"]').click(); document.getElementById("back-to-timeline").click(); })()`);
+  await app.waitFor(mainShown, "back at once");
+  await sleep(1500);
+  assert.equal(await app.evaluate(mainShown), true, "still the main timeline once the rows are read");
   await app.evaluate(`document.querySelector('#message-list .sessions-member-chip[data-open-member="p-drew"]').click()`);
   await app.waitFor(`${title} === "Restyle the login button"`, "drew's session again");
   // A task's end its request message has not been read again for: its reply says it.

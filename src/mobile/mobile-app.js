@@ -10433,6 +10433,8 @@
     if (!launchId) return;
     closeMembersSheet();
     setOpenMemberSessionId(undefined);
+    // A member's message still to be landed on would open its session again.
+    pendingMessageFocus = undefined;
     openAccordLaunchId = launchId;
     void render();
   }
@@ -11750,7 +11752,10 @@
     setOpenThreadRootId(undefined);
     openAccordLaunchId = undefined;
     setOpenMemberSessionId(participantId);
-    if (focusMessageId) pendingMessageFocus = { conversationId: chat.id, messageId: focusMessageId };
+    // The message to land on here, or none: a landing asked for before (in
+    // a session the User left before it was drawn) is not carried over, or
+    // the next drawing would open that member's session instead.
+    pendingMessageFocus = focusMessageId ? { conversationId: chat.id, messageId: focusMessageId } : undefined;
     void render();
   }
 
@@ -13127,6 +13132,8 @@
       if (target && target.closest("[data-sheet-main]")) {
         closeMembersSheet();
         setOpenMemberSessionId(undefined);
+        // A member's message still to be landed on would open its session again.
+        pendingMessageFocus = undefined;
         openAccordLaunchId = undefined;
         void render();
         return;
@@ -13638,6 +13645,10 @@
         setOpenMemberSessionId(undefined);
         openAccordLaunchId = undefined;
         pendingSessionsTarget = undefined;
+        // Back is back, also before the screen left was drawn: the message it
+        // was to land on (a member's reply its chip leads to) no longer opens
+        // that member's session again once the rows are read.
+        pendingMessageFocus = undefined;
         void render();
       });
     }
