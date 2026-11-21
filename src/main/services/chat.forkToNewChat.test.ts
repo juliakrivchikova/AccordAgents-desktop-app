@@ -263,7 +263,7 @@ async function assertLineOnce(storage: { store: Map<string, Conversation> }, id:
   const lines = linesOf(storage.store.get(id), text);
   assert.equal(lines.length, 1, `${label}: once`);
   assert.equal(lines[0]!.metadata?.threadId, "system", label);
-  assert.match(lines[0]!.id, /^fork-notice-(origin-unavailable|cut-missed|started-clean|starts-clean-next)-/, `${label}: one id per member and kind`);
+  assert.match(lines[0]!.id, /^fork-notice-(origin-unavailable|cut-missed|started-clean)-/, `${label}: one id per member and kind`);
   const warnings = (storage.store.get(id)?.metadata.warnings ?? []) as string[];
   assert.deepEqual(warnings.filter((warning) => warning === text), [text], `${label}: the warning on the device that ran it, once (${JSON.stringify(warnings)})`);
 }
@@ -528,33 +528,114 @@ test("on a cloud machine: the member's session not there, the line names the mac
   release();
 });
 
-test("a fork the CLI cannot make (its source session gone) uses the two-strike fallback: tried once more, then a clean session, and the chat says so", async () => {
+test("a fork the CLI cannot make because its source session is gone starts clean in the same turn: her first message gets its reply, and the chat says so once", async () => {
+  for (const [kind, error] of [
+    ["codex-cli", "no rollout found for thread id src-cli-session"],
+    // Claude Code's live process exits before it takes the message.
+    ["claude-code", "claude warm process exited with code 1: No conversation found with session ID: src-cli-session"]
+  ] as const) {
+    const member: ChatParticipant = { ...REVIEWER, kind, ...(kind === "codex-cli" ? { model: undefined, reasoningEffort: undefined } : {}) };
+    const source = oldChat([ASSISTANT, member], { participantSessions: [sessionRecord(member, "src-cli-session")] });
+    const { service, storage, runs } = testService({
+      conversations: [source],
+      run: async (participant, _prompt, runOptions) => {
+        if (runOptions.forkFromSessionId) return { participant, ok: false, content: `${participant.label} stopped before it returned a response.`, error, durationMs: 1, forkCopyFailed: true };
+        if (runOptions.sessionId) return { participant, ok: true, content: "Resumed.", durationMs: 1, sessionId: runOptions.sessionId };
+        runOptions.onSessionId?.("clean-session");
+        return { participant, ok: true, content: "Clean.", durationMs: 1, sessionId: "clean-session" };
+      }
+    });
+    const { id, mainId } = await forkAndSend(service, storage);
+    await waitFor(() => runs.length === 2);
+    assert.equal(runs[0]!.options.forkFromSessionId, "src-cli-session", `${kind}: the copy was tried`);
+    // The CLI said the source is gone: no second try, a clean session at once.
+    assert.equal(runs[1]!.options.forkFromSessionId, undefined, kind);
+    assert.equal(runs[1]!.options.sessionId, undefined, kind);
+    assert.equal(runs[1]!.options.forkCut, undefined, kind);
+    assert.match(runs[1]!.prompt, /^You were to start from a copy of @reviewer's session in the chat "Old chat", but it could not be copied/, `${kind}: told who it is`);
+    assert.match(runs[1]!.prompt, /You are the main session\./, `${kind}: with its role's instructions`);
+    const replies = () => storage.store.get(id)!.messages.filter((message) => message.participantId === mainId && message.role === "participant");
+    await waitFor(() => replies().every((message) => message.status !== "pending"));
+    assert.deepEqual(replies().map((message) => [message.status, message.content]), [["done", "Clean."]], `${kind}: her first message got its reply`);
+    const session = () => sessionsOf(storage.store.get(id)).find((item) => item.participantId === mainId);
+    await waitFor(() => session()?.sessionId === "clean-session");
+    assert.equal(session()!.forkFrom, undefined, kind);
+    assert.equal(session()!.forkedFromParticipantId, undefined, kind);
+    const notice = "@main could not start from a copy of @reviewer's session in the chat \"Old chat\", so this turn started a clean session.";
+    await assertLineOnce(storage, id, notice, kind, [service]);
+    assert.deepEqual(storage.store.get(id)!.metadata.warnings ?? [], [notice], `${kind}: nothing else said, not the failed copy's own error`);
+    // The User asked it, and reads the line: its reply does not say it twice.
+    assert.equal(replies().some((message) => message.content.includes("could not start from a copy")), false, kind);
+    await service.sendMessage({ conversationId: id, runId: `run-next-${kind}`, content: "And now?", targetParticipantIds: [mainId] });
+    await waitFor(() => runs.length === 3);
+    assert.equal(runs[2]!.options.sessionId, "clean-session", `${kind}: its own session from now on`);
+    assert.equal(runs[2]!.options.forkFromSessionId, undefined, kind);
+    await assertLineOnce(storage, id, notice, `${kind}: after its next turn`, [service]);
+  }
+});
+
+test("a copy that failed for another reason is tried once more in the same turn, then the turn starts clean; a retry that makes it is the copy", async () => {
+  const cases = [
+    ["the retry fails too", (attempt: number) => attempt <= 2 ? "fail" : "clean"],
+    ["the retry makes the copy", (attempt: number) => attempt === 1 ? "fail" : "copy"]
+  ] as const;
+  for (const [label, outcome] of cases) {
+    const codexReviewer: ChatParticipant = { ...REVIEWER, kind: "codex-cli", model: undefined, reasoningEffort: undefined };
+    const source = oldChat([ASSISTANT, codexReviewer], { participantSessions: [sessionRecord(codexReviewer, "src-cli-session")] });
+    const { service, storage, runs } = testService({
+      conversations: [source],
+      run: async (participant, _prompt, runOptions) => {
+        const what = outcome(runs.length);
+        if (what === "fail") {
+          assert.ok(runOptions.forkFromSessionId, `${label}: only a copy fails`);
+          return { participant, ok: false, content: "", error: "codex app-server did not return a thread id for the fork", durationMs: 1, forkCopyFailed: true };
+        }
+        const sessionId = what === "copy" ? "copy-session" : "clean-session";
+        runOptions.onSessionId?.(sessionId);
+        return { participant, ok: true, content: what === "copy" ? "Copied." : "Clean.", durationMs: 1, sessionId };
+      }
+    });
+    const { id, mainId } = await forkAndSend(service, storage);
+    const replies = () => storage.store.get(id)!.messages.filter((message) => message.participantId === mainId && message.role === "participant");
+    await waitFor(() => replies().every((message) => message.status !== "pending"));
+    await service.settleChatSaves();
+    const notice = "@main could not start from a copy of @reviewer's session in the chat \"Old chat\", so this turn started a clean session.";
+    if (outcome(2) === "fail") {
+      assert.deepEqual(runs.map((run) => run.options.forkFromSessionId ?? null), ["src-cli-session", "src-cli-session", null], `${label}: once more, then clean`);
+      assert.deepEqual(runs[1]!.options.forkCut, runs[0]!.options.forkCut, `${label}: the retry ends where the first try was to`);
+      assert.deepEqual(replies().map((message) => [message.status, message.content]), [["done", "Clean."]], label);
+      await assertLineOnce(storage, id, notice, label, [service]);
+    } else {
+      assert.deepEqual(runs.map((run) => run.options.forkFromSessionId ?? null), ["src-cli-session", "src-cli-session"], label);
+      assert.deepEqual(replies().map((message) => [message.status, message.content]), [["done", "Copied."]], label);
+      const session = sessionsOf(storage.store.get(id)).find((item) => item.participantId === mainId)!;
+      assert.equal(session.sessionId, "copy-session", label);
+      assert.equal(session.forkedFromParticipantId, REVIEWER.id, `${label}: still the copy`);
+      assert.equal(storage.store.get(id)!.messages.some((message) => message.id.startsWith("fork-notice-")), false, `${label}: nothing to say`);
+    }
+  }
+});
+
+test("a failure that is not the copy's (a turn that failed, a Stop) never starts the fork clean", async () => {
   const codexReviewer: ChatParticipant = { ...REVIEWER, kind: "codex-cli", model: undefined, reasoningEffort: undefined };
   const source = oldChat([ASSISTANT, codexReviewer], { participantSessions: [sessionRecord(codexReviewer, "src-cli-session")] });
   const { service, storage, runs } = testService({
     conversations: [source],
-    run: async (participant, _prompt, runOptions) => runOptions.forkFromSessionId
-      ? { participant, ok: false, content: "", error: "no rollout found for thread id src-cli-session", durationMs: 1 }
-      : { participant, ok: true, content: "Clean.", durationMs: 1, sessionId: "clean-session" }
+    run: async (participant) => ({ participant, ok: false, content: "", error: "The model is overloaded.", durationMs: 1 })
   });
   const { id, mainId } = await forkAndSend(service, storage);
-  const sessionOf = () => sessionsOf(storage.store.get(id)).find((item) => item.participantId === mainId);
-  await waitFor(() => sessionOf()?.forkFrom?.failedAttempts === 1);
-  assert.deepEqual(sessionOf()!.forkFrom, { participantId: codexReviewer.id, sessionId: "src-cli-session", kind: "codex-cli", conversationId: source.id,
-    cut: { finishedBy: REPLY_FINISHED }, failedAttempts: 1 }, "the retry ends where the first try was to");
-  await service.sendMessage({ conversationId: id, runId: "run-retry", content: "Try again.", targetParticipantIds: [mainId] });
-  await waitFor(() => runs.length === 2 && sessionOf()?.forkFrom === undefined);
-  assert.equal(runs[1]!.options.forkFromSessionId, "src-cli-session", "the retry forks again");
-  assert.deepEqual(runs[1]!.options.forkCut, { finishedBy: REPLY_FINISHED });
-  const notice = "@main could not start from a copy of @reviewer's session in the chat \"Old chat\", so its next turn starts a clean session.";
-  await assertLineOnce(storage, id, notice);
-  // The User asked it, and reads the line: its failed reply does not say it twice.
-  const replies = storage.store.get(id)!.messages.filter((message) => message.participantId === mainId);
-  assert.equal(replies.some((message) => message.content.includes("could not start from a copy")), false);
-  await service.sendMessage({ conversationId: id, runId: "run-clean", content: "Clean now.", targetParticipantIds: [mainId] });
-  await waitFor(() => runs.length === 3);
-  assert.equal(runs[2]!.options.forkFromSessionId, undefined);
-  await assertLineOnce(storage, id, notice, "after its clean turn");
+  await service.settleChatSaves();
+  assert.equal(runs.length, 1, "no second try, no clean start");
+  const session = sessionsOf(storage.store.get(id)).find((item) => item.participantId === mainId)!;
+  assert.equal(session.forkFrom?.sessionId, "src-cli-session", "its next turn makes the copy");
+  assert.equal(storage.store.get(id)!.messages.some((message) => message.id.startsWith("fork-notice-")), false);
+  // A Stop while the copy was made is the User's, not the copy's.
+  const stopped = new AbortController();
+  stopped.abort();
+  const failedCopy = { participant: runs[0]!.participant, ok: false, content: "", error: "no rollout found for thread id src-cli-session", forkCopyFailed: true };
+  assert.equal((service as any).forkCopyFailed(failedCopy, stopped.signal), false);
+  assert.equal((service as any).forkCopyFailed(failedCopy, undefined), true);
+  assert.equal((service as any).forkCopyFailed({ ...failedCopy, error: "some other failure", forkCopyFailed: undefined }, undefined), false);
 });
 
 test("Claude Code starting the copy clean (its source gone) still tells it it is the new chat's main session, with its role", async () => {
@@ -576,7 +657,7 @@ test("Claude Code starting the copy clean (its source gone) still tells it it is
   assert.deepEqual(storage.store.get(id)!.metadata.warnings ?? [], [notice], "not the CLI's own restart warning");
 });
 
-test("on a cloud machine: a copy the CLI started clean, and the two-strike fallback, are lines in the chat", async () => {
+test("on a cloud machine: a copy the CLI started clean, and the clean start of a fork whose source is gone, are lines in the chat", async () => {
   const source = oldChat([ASSISTANT, { ...REVIEWER, homeMachineId: "m-1" }]);
   const startedClean = forkedOnMachine(source, REVIEWER);
   {
@@ -603,14 +684,13 @@ test("on a cloud machine: a copy the CLI started clean, and the two-strike fallb
         : { participant, ok: true, content: "Clean.", durationMs: 1, sessionId: "clean-session" }
     });
     asMachine(service);
-    // The first failure keeps the reply as it is; the second is the line.
+    // The source is gone: the same turn starts clean, and the line says so.
     await runOnMachine(service, storage, forked.id, "main-id", "Go on.");
-    await waitFor(() => sessionsOf(storage.store.get(forked.id)).find((item) => item.participantId === "main-id")?.forkFrom?.failedAttempts === 1);
-    // A reply that failed counts as an answer: the retry is a later turn of the same session record.
-    await runOnMachine(service, storage, forked.id, "main-id", "Try again.");
-    assert.equal(runs.length, 2);
-    const next = "@main could not start from a copy of @reviewer's session in the chat \"Old chat\", so its next turn starts a clean session.";
-    await assertLineOnce(storage, forked.id, next, next, [service]);
+    assert.deepEqual(runs.map((run) => run.options.forkFromSessionId ?? null), ["src-cli-session", null]);
+    const turn = "@main could not start from a copy of @reviewer's session in the chat \"Old chat\", so this turn started a clean session.";
+    await assertLineOnce(storage, forked.id, turn, turn, [service]);
+    const reply = storage.store.get(forked.id)!.messages.find((message) => message.participantId === "main-id" && message.role === "participant");
+    assert.deepEqual([reply?.status, reply?.content], ["done", "Clean."]);
   }
 });
 
@@ -955,15 +1035,25 @@ test("when the member's session changed after the reply she saw, the session tha
 
 test("a fork whose source is gone says only that, not that its copy may hold more", async () => {
   const codexReviewer: ChatParticipant = { ...REVIEWER, kind: "codex-cli", model: undefined, reasoningEffort: undefined };
-  const source = oldChat([ASSISTANT, codexReviewer], { participantSessions: [sessionRecord(codexReviewer, "src-cli-session")] });
-  const { service, storage } = testService({
-    conversations: [source],
-    run: async (participant) => ({ participant, ok: false, content: "", error: "no rollout found for thread id src-cli-session", durationMs: 1,
-      forkCutMissed: "that reply is not in its session" })
-  });
-  const { id, mainId } = await forkAndSend(service, storage);
-  await waitFor(() => sessionsOf(storage.store.get(id)).find((item) => item.participantId === mainId)?.forkFrom?.failedAttempts === 1);
-  assert.equal((storage.store.get(id)?.messages ?? []).some((message) => /may include what/.test(message.content)), false);
+  const unplaced = oldChat([ASSISTANT, codexReviewer], { participantSessions: [sessionRecord(codexReviewer, "src-cli-session")] });
+  // No reply that ended a turn: no point can be named either.
+  unplaced.messages = [unplaced.messages[0]!, { ...unplaced.messages[1]!, metadata: undefined }];
+  const recorded = oldChat([ASSISTANT, codexReviewer], { participantSessions: [sessionRecord(codexReviewer, "src-cli-session")] });
+  for (const [label, source] of [["a point that could not be named", unplaced], ["a point the CLI reported missed", recorded]] as const) {
+    const { service, storage, runs } = testService({
+      conversations: [source],
+      run: async (participant, _prompt, runOptions) => runOptions.forkFromSessionId
+        ? { participant, ok: false, content: "", error: "no rollout found for thread id src-cli-session", durationMs: 1, forkCopyFailed: true,
+          forkCutMissed: "that reply is not in its session" }
+        : { participant, ok: true, content: "Clean.", durationMs: 1, sessionId: "clean-session" }
+    });
+    const { id } = await forkAndSend(service, storage);
+    await waitFor(() => runs.length === 2);
+    await service.settleChatSaves();
+    const said = (storage.store.get(id)?.messages ?? []).filter((message) => message.id.startsWith("fork-notice-")).map((message) => message.content);
+    assert.deepEqual(said, ["@main could not start from a copy of @reviewer's session in the chat \"Old chat\", so this turn started a clean session."], label);
+    assert.equal(((storage.store.get(id)!.metadata.warnings ?? []) as string[]).some((warning) => /may include what/.test(warning)), false, label);
+  }
 });
 
 test("a reply that ends a turn records where its CLI session stood; one whose CLI did not say records nothing", async () => {

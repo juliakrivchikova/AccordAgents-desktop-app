@@ -1062,9 +1062,6 @@ export interface ChatSessionForkSource {
   /** The chat the source member is in, when it is not this one (Fork to new
    *  chat): the copy becomes this chat's main session. */
   conversationId?: string;
-  /** Turns whose fork failed because the source session could not be read.
-   *  After the retry fails too, the member starts a clean session instead. */
-  failedAttempts?: number;
   /** Fork to new chat: where the copy ends (what the User saw when she
    *  tapped Fork). A delegated fork has none: it copies the session as it
    *  is. */

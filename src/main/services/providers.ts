@@ -18,6 +18,11 @@ export interface ParticipantRunResult {
   /** A fork asked to end at a point (CliAgentRunOptions.forkCut) copied the
    *  whole session instead: why. */
   forkCutMissed?: string;
+  /** A fork's first turn (CliAgentRunOptions.forkFromSessionId) failed while
+   *  the CLI made the copy, before it took the message: no session of the
+   *  member's own exists. Whether the CLI said why in its own words (the
+   *  source is gone) is isForkSourceMissingError(error). */
+  forkCopyFailed?: boolean;
 }
 
 export class ProviderRunner {
