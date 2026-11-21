@@ -243,6 +243,7 @@ test("the phone forks a member to a new chat from the title's menu as the comput
     };
     document.getElementById("chat-title-fork").click(); })()`);
   await app.waitFor(`document.getElementById("chat-title-fork-detail").textContent === "Could not start the chat: QA: the phone's storage is full"`, "the failure, in the menu");
+  assert.equal(await app.evaluate(visible("#send-log-button")), false, "said where she tapped: not in the send log");
   assert.equal(await app.evaluate(`localStorage.getItem("accordagents.mobile.startedChats.v1")`), null, "nothing left in the list");
   assert.equal(hub.opsRequests.flatMap((request) => request.ops || []).some((op) => op.kind === "conversation.create"), false);
   await closeMenu(app);
@@ -417,6 +418,7 @@ test("in the classic view the phone forks a member from a small action on its ro
     };
     document.getElementById("members-sheet-fork").click(); })()`);
   await app.waitFor(`document.getElementById("members-sheet-fork-detail").textContent === "Could not start the chat: QA: the phone's storage is full"`, "the failure, in the item");
+  assert.equal(await app.evaluate(visible("#send-log-button")), false, "said where she tapped: not in the send log");
   assert.equal(await app.evaluate(visible("#members-sheet")), true);
   assert.equal(await app.evaluate(`localStorage.getItem("accordagents.mobile.startedChats.v1")`), null, "nothing left in the list");
   assert.equal(hub.opsRequests.flatMap((request) => request.ops || []).some((op) => op.kind === "conversation.create"), false);
@@ -495,6 +497,22 @@ test("a fork made after she opened another chat or went back to her chats leaves
     chats: document.getElementById("chats-screen").classList.contains("is-active"), title: document.getElementById("chat-title").textContent,
     keyboard: document.activeElement ? document.activeElement.id : "", menu: !document.getElementById("chat-title-menu").hidden })`;
   const listed = (conversationId) => `Boolean(document.querySelector('.mobile-chat-row[data-conversation-id=${JSON.stringify(conversationId)}]'))`;
+  // A chat she made herself is not news to her: no unread dot on its row,
+  // in the list nor in what the phone keeps as unread.
+  const unread = (conversationId) => `(() => { const row = document.querySelector('.mobile-chat-row[data-conversation-id=${JSON.stringify(conversationId)}]');
+    const kept = JSON.parse(localStorage.getItem("accordagents.mobile.unreadConversationIds.v1") || "[]");
+    return Boolean(row && row.querySelector(".mobile-unread-dot")) || kept.includes(${JSON.stringify(conversationId)}); })()`;
+  /** Her server lists the new chat, and the list is read again (as a pull
+   *  or the next sync does), long enough for a late dot to have come. */
+  async function settleList(conversationId) {
+    const end = Date.now() + 10_000;
+    while (Date.now() < end && !(await app.evaluate(`(JSON.parse(localStorage.getItem("accordagents.mobile.chatList.v1") || "[]") || []).some((chat) => chat && chat.id === ${JSON.stringify(conversationId)})`))) {
+      await new Promise((resolve) => setTimeout(resolve, 300));
+    }
+    assert.ok(await app.evaluate(`(JSON.parse(localStorage.getItem("accordagents.mobile.chatList.v1") || "[]") || []).some((chat) => chat && chat.id === ${JSON.stringify(conversationId)})`),
+      "her server lists the new chat");
+    await new Promise((resolve) => setTimeout(resolve, 1_500));
+  }
 
   /** Taps Fork for the main session of "Login page" with her server holding
    *  the read at the tap until she has done `leave`. */
@@ -540,6 +558,11 @@ test("a fork made after she opened another chat or went back to her chats leaves
   });
   assert.deepEqual(await app.evaluate(onScreen), { open: "conv-other", chats: false, title: "Other work", keyboard: "composer-input", menu: true },
     "the chat she opened stays, with its keyboard and the menu she opened");
+  {
+    const made = creates()[creates().length - 1];
+    await settleList(made.conversationId);
+    assert.equal(await app.evaluate(unread(made.conversationId)), false, "the fork she made is not unread");
+  }
   // Its Fork item is hers again, not left "Starting the new chat…".
   await app.waitFor(`document.getElementById("chat-title-fork-detail").textContent !== "Checking…"`, "its fork's answer");
   assert.deepEqual(await app.evaluate(forkItem), { shown: true, disabled: "false", label: "Fork to new chat", detail: "A new chat whose main session starts from a copy of this session", views: 2 });
@@ -552,6 +575,55 @@ test("a fork made after she opened another chat or went back to her chats leaves
   const shown = await app.evaluate(onScreen);
   assert.deepEqual({ open: shown.open, chats: shown.chats, menu: shown.menu }, { open: undefined, chats: true, menu: false }, "her chats stay");
   assert.notEqual(shown.keyboard, "composer-input");
+  await settleList(second.conversationId);
+  assert.equal(await app.evaluate(unread(second.conversationId)), false, "made while she was in her chats: not unread either");
+  // A member's reply in it afterwards is news, as in any chat.
+  const mainId = second.conversation.metadata.mainSessionParticipantId;
+  await hub.addMessages(second.conversationId, [{ id: "fork-reply", role: "participant", participantId: mainId, participantLabel: "@main", content: "Picked it up.",
+    status: "done", createdAt: new Date().toISOString(), metadata: { workedMs: 1_000 } }]);
+  await app.waitFor(unread(second.conversationId), "a reply in it after she made it is news", 20_000);
+
+  // A fork that fails once she has left: said in the send log as a New chat
+  // the phone could not start, the header pointing at it; she stays where she is.
+  await openChat(app, "conv-main");
+  await app.waitFor(mainShown, "the main timeline");
+  assert.equal((await openForkMenu(app)).disabled, "false");
+  const createsBefore = creates().length;
+  const forkRows = `[...document.querySelectorAll(".mobile-chat-row")].filter((row) => /Login page \\(fork\\)/.test(row.textContent)).length`;
+  const rowsBefore = await app.evaluate(forkRows);
+  await app.evaluate(`(() => { const real = window.__realFetch || window.fetch; window.__realFetch = real;
+    window.__forkReadHeld = new Promise((resolve) => { window.__releaseForkRead = resolve; });
+    window.fetch = async function (input, init) {
+      const url = String(input && input.url || input);
+      if (url.indexOf("/v1/phone/new-chat") >= 0 && url.indexOf("forkOf=conv-main") >= 0) await window.__forkReadHeld;
+      return real.call(window, input, init);
+    }; })()`);
+  await app.evaluate(`document.getElementById("chat-title-fork").click()`);
+  await app.waitFor(`document.getElementById("chat-title-fork-detail").textContent === "Starting the new chat…"`, "the fork on its way");
+  await openChat(app, "conv-other");
+  assert.equal(await app.evaluate(visible("#send-log-button")), false, "nothing to look at yet");
+  // The phone cannot keep what it would send.
+  await app.evaluate(`(() => { const real = IDBDatabase.prototype.transaction; window.__realTransaction = real;
+    IDBDatabase.prototype.transaction = function (names, mode) {
+      if (mode === "readwrite" && [].concat(names).includes("outbox")) throw new DOMException("The phone's storage is full.", "QuotaExceededError");
+      return real.apply(this, arguments);
+    }; })()`);
+  await app.evaluate(`window.__releaseForkRead()`);
+  await app.waitFor(visible("#send-log-button"), "the header points at the send log");
+  await app.evaluate(`IDBDatabase.prototype.transaction = window.__realTransaction; window.fetch = window.__realFetch`);
+  assert.equal(await app.evaluate(`document.getElementById("send-log-button").getAttribute("aria-label")`), "Send log: a chat you started did not start");
+  assert.equal(creates().length, createsBefore, "nothing was sent");
+  const stayed = await app.evaluate(onScreen);
+  assert.deepEqual({ open: stayed.open, title: stayed.title }, { open: "conv-other", title: "Other work" }, "she stays where she is");
+  await openChat(app, "conv-other");
+  await app.evaluate(`document.getElementById("back-to-chats").click()`);
+  await app.waitFor(`document.getElementById("chats-screen").classList.contains("is-active")`, "her chats");
+  assert.equal(await app.evaluate(forkRows), rowsBefore, "no chat was made");
+  await openChat(app, "conv-other");
+  await app.evaluate(`document.getElementById("send-log-button").click()`);
+  await app.waitFor(visible("#send-log-sheet"), "the send log");
+  const logged = await app.evaluate(`[...document.querySelectorAll("#send-log-list .send-log-row")].map((row) => [row.querySelector(".send-log-what").textContent, row.querySelector(".send-log-why").textContent])`);
+  assert.deepEqual(logged[0], ["New chat: Login page (fork)", "Could not start the chat: The phone's storage is full."], JSON.stringify(logged));
   // It opens from the list as any chat does.
   await openChat(app, second.conversationId);
   assert.equal(await app.evaluate(title), "Login page (fork)");

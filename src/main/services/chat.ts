@@ -279,7 +279,7 @@ import {
 } from "../../shared/chatDeliveryPolicy";
 import { isDeviceEventBlobReference, type DeviceEventBlobReference } from "../../shared/deviceEventBlobs";
 import { CHAT_PROMPT_SUGGESTION_LOCAL_SOURCE, ChatPromptSuggestionStore, type ChatMemberPromptSuggestion } from "./chatPromptSuggestions";
-import { CliAgentRunner, COMPACTION_CANCELLED_BEFORE_START, isForkSourceMissingError, type CliAgentBackgroundTask, type CliAgentCodexServerRequest, type CliAgentCompactResult, type CliAgentOutputEvent, type CliAgentReplyOrigin, type CliAgentRoleOptions, type CliAgentRunOptions, type CliAgentSelfResumedTurn } from "./cliAgents";
+import { CliAgentRunner, COMPACTION_CANCELLED_BEFORE_START, forkCopyNotMade, isForkSourceMissingError, type CliAgentBackgroundTask, type CliAgentCodexServerRequest, type CliAgentCompactResult, type CliAgentOutputEvent, type CliAgentReplyOrigin, type CliAgentRoleOptions, type CliAgentRunOptions, type CliAgentSelfResumedTurn } from "./cliAgents";
 import { cloudRunWorkerTargetFromSettings, normalizeCloudRunWorkerSettings } from "./cloudRunWorkers";
 import { emitCodexLiveOutput } from "./codexExec";
 import {
@@ -446,7 +446,7 @@ interface ParticipantMoveApplied {
 }
 
 /** What a fork says about its copy, once per member (postForkNotice). */
-type ForkNoticeKind = "origin-unavailable" | "cut-missed" | "started-clean" | "starts-clean-next";
+type ForkNoticeKind = "origin-unavailable" | "cut-missed" | "started-clean";
 
 /** The id of a fork's line: one per member and kind. */
 function forkNoticeMessageId(participantId: string, kind: ForkNoticeKind): string {
@@ -10962,7 +10962,11 @@ export class ChatService {
     });
     const agentEnvironment = await this.agentEnvironmentForParticipant(participant, cliParticipant.model);
     cliParticipant = this.cliParticipantWithHost(cliParticipant, agentEnvironment);
+    // The last session id this turn's CLI reported (a fork's copy, or one
+    // Claude Code was given before it made it).
+    let reportedHere: string | undefined;
     const persistSessionId = (sessionId: string): void => {
+      reportedHere = sessionId.trim() || reportedHere;
       this.persistParticipantSessionId(conversation, session, sessionId);
     };
     let executionLease: ChatExecutionLeaseMetadata | undefined;
@@ -11020,10 +11024,14 @@ export class ChatService {
       if (sessionState.forkOriginUnavailable) {
         this.postForkNotice(conversation, participant, "origin-unavailable", sessionState.forkOriginUnavailable);
       }
-      let result = await this.cliRunner.run(cliParticipant, prompt, runPath, undefined, "chat", signal, {
+      // `clean`: a fork whose copy could not be made starts a session of its
+      // own from the saved chat context, in this same turn (below).
+      const runCli = (clean = false): Promise<ParticipantRunResult> => this.cliRunner.run(cliParticipant, clean ? resumeFallbackPrompt ?? prompt : prompt, runPath, undefined, "chat", signal, {
         persistSession: true,
-        sessionId: session.sessionId,
-        ...(forkSource ? { forkFromSessionId: forkSource.sessionId, ...this.forkCutRunOption(conversation, participant, forkSource) } : {}),
+        ...(clean ? {} : {
+          sessionId: session.sessionId,
+          ...(forkSource ? { forkFromSessionId: forkSource.sessionId, ...this.forkCutRunOption(conversation, participant, forkSource) } : {})
+        }),
         extraReadableDirs: [workspacePath],
         resumeFallbackPrompt,
         role,
@@ -11075,6 +11083,7 @@ export class ChatService {
           })
         }
       });
+      let result = await runCli();
       if (!this.machineRuntime) {
         this.promptSuggestions.replyEnded(conversation.id, participant.id, runId);
       }
@@ -11082,9 +11091,11 @@ export class ChatService {
       // instead of the process error that reads as a missing CLI. Only the
       // project folder can go away under the member: the chat's own workspace
       // is created for every run.
+      let missingRunFolderSaid = false;
       if (!result.ok && !signal?.aborted && runPath !== workspacePath && startFailedOnMissingPath(result)) {
         const missing = await this.missingRunFolder(conversation, runPath);
         if (missing) {
+          missingRunFolderSaid = true;
           result = { ...result, content: missingRunFolderText(participant.handle, missing), error: missing.reason };
           // The computer that made the copy forgets it when it reads this,
           // so the next message copies the project again.
@@ -11093,15 +11104,89 @@ export class ChatService {
           }
         }
       }
+      // The CLI could not make the copy: her message still gets its reply in
+      // this turn. When the CLI says the source session is gone, the member
+      // starts clean at once; any other failure of the copy is tried once
+      // more first. Never a failure that is not the copy's (a project folder
+      // gone, a Stop, a turn that failed after the copy was made).
+      let forkStartedCleanThisTurn = false;
+      if (forkSource && !missingRunFolderSaid && this.forkCopyFailed(result, signal)) {
+        const sourceGone = isForkSourceMissingError(result.error);
+        void this.debugLogs.write("chat.session.fork-failed", {
+          conversationId: conversation.id,
+          participantId: participant.id,
+          sourceParticipantId: forkSource.participantId,
+          sourceGone,
+          error: result.error
+        });
+        // The id this turn's CLI was given (or reported) is no session; one
+        // another turn of the member made meanwhile stays.
+        const forgetOwnId = (): void => {
+          if (session.sessionId === reportedHere) session.sessionId = "";
+        };
+        // Two messages sent at once share the member's first turn: the other
+        // one may have made its session (the copy, or a clean one) meanwhile.
+        const madeMeanwhile = (): boolean => Boolean(session.sessionId?.trim()) && !session.forkFrom && session.sessionId !== forkSource.sessionId;
+        forgetOwnId();
+        if (!sourceGone && !madeMeanwhile()) {
+          progressSink.beginAttempt();
+          result = await runCli();
+          if (this.forkCopyFailed(result, signal)) forgetOwnId();
+        }
+        if (this.forkCopyFailed(result, signal) && madeMeanwhile()) {
+          // This message goes into the session the other one made.
+          progressSink.beginAttempt();
+          result = await runCli();
+        } else if (this.forkCopyFailed(result, signal)) {
+          // The retry may be the one that says the source is gone.
+          const gone = sourceGone || isForkSourceMissingError(result.error);
+          const copyFailure = result;
+          const forkedFromParticipantId = session.forkedFromParticipantId;
+          delete session.forkFrom;
+          delete session.forkedFromParticipantId;
+          forkStartedCleanThisTurn = true;
+          void this.debugLogs.write("chat.session.fork-starts-clean", {
+            conversationId: conversation.id,
+            participantId: participant.id,
+            sourceParticipantId: forkSource.participantId,
+            sourceGone: gone
+          });
+          // Said before the clean turn runs (it may last hours, and the app
+          // may stop during it) when the CLI said the copy cannot be made.
+          if (gone) this.postForkNotice(conversation, participant, "started-clean", this.forkStartedCleanNotice(conversation, participant, forkSource, "turn"));
+          const reportedBeforeClean = reportedHere;
+          progressSink.beginAttempt();
+          result = await runCli(true);
+          // No session started: the CLI exited before it took the message,
+          // or nothing reported a session at all (a thread that could not
+          // be started, a process that could not be had).
+          if (!result.ok && !signal?.aborted && (result.sessionNotStarted === true || reportedHere === reportedBeforeClean)) {
+            // The id the clean session was given is no session, and its next
+            // turn must not resume it.
+            forgetOwnId();
+            if (!gone) {
+              // Nor was the copy what failed: the member stays a fork, its
+              // next turn makes the copy, and the reply says what went wrong.
+              session.forkFrom = forkSource;
+              if (forkedFromParticipantId) session.forkedFromParticipantId = forkedFromParticipantId;
+              forkStartedCleanThisTurn = false;
+              result = copyFailure;
+            }
+          }
+        }
+      }
       // The CLI could not copy the source session and started the member
       // clean from the saved chat context instead (Claude Code's resume-miss
-      // fallback): it is a member of its own from now on, and the chat says so.
-      // A fork's notices are lines in the chat as well as warnings here: a
-      // warning stays on the device that raised it, and a fork may run on a
-      // cloud machine, or have been asked from the phone (postForkNotice).
-      const forkStartedClean = forkSource && result.sessionRestarted
-        ? this.forkStartedCleanNotice(conversation, participant, forkSource, "now")
-        : undefined;
+      // fallback, or the clean start above): it is a member of its own from
+      // now on, and the chat says so, once. A fork's notices are lines in
+      // the chat as well as warnings here: a warning stays on the device that
+      // raised it, and a fork may run on a cloud machine, or have been asked
+      // from the phone (postForkNotice).
+      const forkStartedClean = forkSource && forkStartedCleanThisTurn
+        ? this.forkStartedCleanNotice(conversation, participant, forkSource, "turn")
+        : forkSource && result.sessionRestarted
+          ? this.forkStartedCleanNotice(conversation, participant, forkSource, "now")
+          : undefined;
       this.applyCliRunMetadata(session, result, participant, options.warnings, Boolean(forkStartedClean));
       // Its copy was made whole although it was to end where the User
       // tapped Fork: a line in the chat says why, once.
@@ -11118,38 +11203,21 @@ export class ChatService {
         void this.debugLogs.write("chat.session.fork-started-clean", {
           conversationId: conversation.id,
           participantId: participant.id,
-          sourceParticipantId: forkSource!.participantId
+          sourceParticipantId: forkSource!.participantId,
+          ok: result.ok
         });
-      } else if (forkSource && !result.ok && !signal?.aborted && isForkSourceMissingError(result.error)) {
-        // The copy was never made (the source session could not be read):
-        // the id the CLI was given is no session. The next turn tries the
-        // fork once more; when that fails too, the member starts clean.
-        session.sessionId = "";
-        const failedAttempts = (forkSource.failedAttempts ?? 0) + 1;
-        if (failedAttempts < 2) {
-          session.forkFrom = { ...forkSource, failedAttempts };
-        } else {
-          delete session.forkFrom;
-          delete session.forkedFromParticipantId;
-          // Its chat context started where the source's did; a clean
-          // session has seen none of it.
+        if (forkStartedCleanThisTurn && !result.ok) {
+          // Its clean start failed too, or was stopped: its next turn starts
+          // as a new session's first, with the chat context from where the
+          // source's started (a clean session has seen none of it).
           this.forgetPromptContextPointers(conversation, participant.id);
-          const notice = this.forkStartedCleanNotice(conversation, participant, forkSource, "next");
-          this.postForkNotice(conversation, participant, "starts-clean-next", notice);
           // The member that gave the task reads it in this failed reply (a
           // main session made by Fork to new chat was asked by the User,
           // whose notice it is: its reply does not say it twice).
-          if (!this.otherChatForkOrigin(conversation, participant, forkSource.participantId)) {
-            result = { ...result, content: [result.content.trim(), notice].filter(Boolean).join("\n\n") };
+          if (!signal?.aborted && !this.otherChatForkOrigin(conversation, participant, forkSource!.participantId)) {
+            result = { ...result, content: [result.content.trim(), forkStartedClean].filter(Boolean).join("\n\n") };
           }
         }
-        void this.debugLogs.write("chat.session.fork-failed", {
-          conversationId: conversation.id,
-          participantId: participant.id,
-          sourceParticipantId: forkSource.participantId,
-          failedAttempts,
-          startsClean: failedAttempts >= 2
-        });
       }
       if (!signal?.aborted) {
         this.consumeOneTimePermissionApprovals(conversation, participant, appliedOneTimePermissionApprovalIds);
@@ -12208,15 +12276,24 @@ export class ChatService {
   }
 
   /** The chat's line that a fork could not copy its source's session and
-   *  started (or starts at its next turn) a clean session. */
-  private forkStartedCleanNotice(conversation: Conversation, participant: ChatParticipant, forkSource: ChatSessionForkSource, when: "now" | "next"): string {
+   *  started a clean session in that turn ("now": the CLI started it clean
+   *  itself, Claude Code's one-shot start). */
+  private forkStartedCleanNotice(conversation: Conversation, participant: ChatParticipant, forkSource: ChatSessionForkSource, when: "now" | "turn"): string {
     const origin = this.otherChatForkOrigin(conversation, participant, forkSource.participantId);
     const source = origin ? undefined : this.chatParticipants(conversation).find((item) => item.id === forkSource.participantId);
     const sessionName = origin ? this.forkOriginSessionName(origin) : `${source ? `@${source.handle}'s` : "the main session's"} session`;
     return when === "now"
       ? `@${participant.handle} could not start from a copy of ${sessionName}, so it started a clean session from the saved chat context.`
-      : `@${participant.handle} could not start from a copy of ${sessionName}, so its next turn starts a clean session.`;
+      : `@${participant.handle} could not start from a copy of ${sessionName}, so this turn started a clean session.`;
   }
+
+  /** A fork's run that failed while its CLI made the copy (no session of its
+   *  own exists): the CLI said the source is gone, or failed before it took
+   *  the message. Not a Stop, nor a start the CLI already made clean. */
+  private forkCopyFailed(result: ParticipantRunResult, signal: AbortSignal | undefined): boolean {
+    return !signal?.aborted && !result.ok && !result.sessionRestarted && forkCopyNotMade(result);
+  }
+
 
   /** The member's chat context starts over: its next turn is given the chat
    *  as a new session's first turn is. */
@@ -12804,23 +12881,24 @@ export class ChatService {
   /** Where a fork's copy ends, for the CLI (Fork to new chat): the point its
    *  reply recorded (and the session it is in), or the reply's finish; none
    *  for a delegated fork. When no point can be named, or the CLI cannot
-   *  stop there, a line in the chat says so at once, before the turn runs
-   *  (it may last hours, and the app may stop during it). */
+   *  stop there, a line in the chat says so before the turn's reply (it may
+   *  last hours, and the app may stop during it): Codex once its copy is
+   *  made, Claude Code once it has read the member's transcript. A source
+   *  that is gone gets no copy and no such line. */
   private forkCutRunOption(
     conversation: Conversation,
     participant: ChatParticipant,
     forkSource: ChatSessionForkSource
-  ): { forkCut?: { at?: string; sessionId?: string; finishedBy?: string }; onForkCutMissed?: (reason: string) => void } {
+  ): { forkCut?: { at?: string; sessionId?: string; finishedBy?: string; unknown?: string }; onForkCutMissed?: (reason: string) => void } {
     const cut = forkSource.cut;
     if (!cut) return {};
     const note = (reason: string): void => {
       const text = this.forkCutNoteText(participant, reason);
       if (text) this.postForkNotice(conversation, participant, "cut-missed", text);
     };
-    if (cut.unknown) {
-      note(cut.unknown);
-      return {};
-    }
+    // No point to give the CLI: it copies the whole session and says why
+    // once it knows there is a copy to make.
+    if (cut.unknown) return { forkCut: { unknown: cut.unknown }, onForkCutMissed: note };
     const forkCut = cut.at
       ? { at: cut.at, ...(cut.sessionId ? { sessionId: cut.sessionId } : {}) }
       : cut.finishedBy ? { finishedBy: cut.finishedBy } : undefined;

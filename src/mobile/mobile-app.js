@@ -41,6 +41,9 @@
   // and the number on the app icon both read from here; the service worker
   // adds to its IndexedDB mirror when a push lands while the app is closed.
   const UNREAD_KEY = "accordagents.mobile.unreadConversationIds.v1";
+  // Chats she started on this phone (New chat, a fork) while her server lists
+  // nothing in them she did not make: their moving in the list is no news.
+  const OWN_CHATS_KEY = "accordagents.mobile.ownChats.v1";
   const UNREAD_META_KEY = "unreadConversations";
   const CHAT_TITLES_META_KEY = "chatTitles";
   // Where the history of each chat stops on this phone: whether the desktop
@@ -1320,6 +1323,8 @@
    *  nothing was queued): out of the list, as the computer lists no chat its
    *  New chat failed to make. Why stays in the send log and in the chat. */
   function forgetStartedChat(conversationId) {
+    const own = loadStoredStringArray(OWN_CHATS_KEY);
+    if (own.indexOf(conversationId) >= 0) saveStoredStringArray(OWN_CHATS_KEY, own.filter(function (id) { return id !== conversationId; }));
     const started = loadStartedChats();
     const kept = started.filter(function (chat) { return chat.id !== conversationId; });
     if (kept.length === started.length) return;
@@ -1394,14 +1399,28 @@
       return !normalized.some(function (known) { return known.id === chat.id; });
     });
     if (stillStarted.length !== started.length) saveStartedChats(stillStarted);
+    // A chat she started here stays hers until it holds something she did
+    // not make: a member at work, a question for her, a line not hers. One
+    // her server no longer lists (and that is not still on its way) goes.
+    const ownIds = loadStoredStringArray(OWN_CHATS_KEY);
+    const stillOwn = ownIds.filter(function (id) {
+      const listed = normalized.find(function (chat) { return chat.id === id; });
+      if (!listed) return started.some(function (chat) { return chat.id === id; });
+      return listed.running !== true && listed.waitingChoice !== true && (!listed.who || listed.who === "you:");
+    });
+    if (stillOwn.length !== ownIds.length) saveStoredStringArray(OWN_CHATS_KEY, stillOwn);
     // Same rule as the desktop sidebar: a chat that moved while it was not the
     // one on screen is unread. The list this phone held before is the "seen"
-    // baseline, so the first list after an update marks nothing.
+    // baseline, so the first list after an update marks nothing. A chat she
+    // made herself (New chat, a fork) is no news to her, wherever she is by
+    // the time her server lists it: it moves as her server takes what she
+    // made, until something else is in it.
     const activeId = selectedConversationId();
     const viewingActive = Boolean(activeId) && !document.hidden;
     const newlyActive = normalized.filter(function (chat) {
       const previous = previousById.get(chat.id);
       return Boolean(previous) &&
+        stillOwn.indexOf(chat.id) < 0 &&
         chat.updatedAt > previous.updatedAt &&
         !(viewingActive && chat.id === activeId);
     }).map(function (chat) {
@@ -1412,6 +1431,13 @@
     }
     void mirrorChatTitlesForWorker(normalized);
     return normalized;
+  }
+
+  /** A chat she starts here is hers (OWN_CHATS_KEY) until it holds
+   *  something she did not make. */
+  function noteOwnChat(conversationId) {
+    const own = loadStoredStringArray(OWN_CHATS_KEY);
+    if (own.indexOf(conversationId) < 0) saveStoredStringArray(OWN_CHATS_KEY, own.concat(conversationId));
   }
 
   function loadUnreadConversationIds() {
@@ -2458,7 +2484,7 @@
         tx.remove(META_STORE, UNREAD_META_KEY), tx.remove(META_STORE, CHAT_TITLES_META_KEY)
       ]);
     });
-    const keys = [CHAT_LIST_KEY, CHAT_LIST_AT_KEY, CONTROL_CARDS_KEY, CONTROL_CARD_SENT_KEY, UNREAD_KEY, TIMELINE_PAGES_KEY,
+    const keys = [CHAT_LIST_KEY, CHAT_LIST_AT_KEY, CONTROL_CARDS_KEY, CONTROL_CARD_SENT_KEY, UNREAD_KEY, OWN_CHATS_KEY, TIMELINE_PAGES_KEY,
       ACTIVE_CONVERSATION_KEY, OPEN_THREAD_KEY, OPEN_STREAM_KEY, STARTED_CHATS_KEY, VIEWED_AT_KEY, LIST_ACTIVITY_SEEN_KEY,
       ACTIVITY_CLEARED_KEY, TERMINAL_RUNS_KEY, SYNC_WAIT_KEY, SEND_LOG_SEEN_KEY, SETTLE_TURNS_KEY, ACCORD_DOCK_STORAGE_KEY];
     for (const key of keys) {
@@ -3090,10 +3116,14 @@
   const SEND_FAILURES_KEPT = 200;
   const SEND_FAILURE_TEXT_CHARS = 80;
   // When the User last opened the log: the header points at it while a send
-  // is failing, or after a refusal she has not seen.
+  // is failing, or after a refusal (or a chat this phone could not start)
+  // she has not seen.
   const SEND_LOG_SEEN_KEY = "accordagents.mobile.sendLogSeenAt.v1";
   let sendLogNewestAt = "";
   let sendLogNewestRefusalAt = "";
+  // Whether that newest one is a chat this phone could not start (a fork
+  // that failed after she left its screen), not a refusal by her server.
+  let sendLogNewestNotStarted = false;
   let sendLogCount = 0;
 
   /** What an entry is, for the log: its kind, its chat and a little of it. */
@@ -3132,6 +3162,12 @@
     };
   }
 
+  /** What the header points at until she has looked: her server's refusal,
+   *  or a chat this phone could not start once she had left its screen. */
+  function sendLogNeedsLook(record) {
+    return Boolean(record) && (record.cause === "refused" || record.notStarted === true);
+  }
+
   /** Writes one failed attempt, and lets go of the oldest past the bound. A
    *  log that cannot be written never stops the sending it describes. */
   function recordSendFailure(record) {
@@ -3139,7 +3175,10 @@
     const chat = loadChats().find(function (item) { return item.id === record.conversationId; });
     const stored = { ...record, at: at, ...(chat && chat.title ? { chatTitle: chat.title } : {}) };
     sendLogNewestAt = at;
-    if (record.cause === "refused") sendLogNewestRefusalAt = at;
+    if (sendLogNeedsLook(record)) {
+      sendLogNewestRefusalAt = at;
+      sendLogNewestNotStarted = record.notStarted === true;
+    }
     recordRelayDebug({ event: "send-failure", kind: record.kind, cause: record.cause, reason: record.reason });
     return withNamedStore(SEND_FAILURES_STORE, "readwrite", function (store) {
       store.add(stored);
@@ -3171,8 +3210,11 @@
       const list = Array.isArray(rows) ? rows.slice().reverse() : [];
       sendLogCount = list.length;
       if (list[0] && list[0].at > sendLogNewestAt) sendLogNewestAt = list[0].at;
-      const refusal = list.find(function (row) { return row.cause === "refused"; });
-      if (refusal && refusal.at > sendLogNewestRefusalAt) sendLogNewestRefusalAt = refusal.at;
+      const refusal = list.find(sendLogNeedsLook);
+      if (refusal && refusal.at > sendLogNewestRefusalAt) {
+        sendLogNewestRefusalAt = refusal.at;
+        sendLogNewestNotStarted = refusal.notStarted === true;
+      }
       return list;
     }).catch(function () { return []; });
   }
@@ -3200,8 +3242,8 @@
 
   /** The way to the log from the chat's header, beside where it says whether
    *  the phone is connected: there while a send is failing, and after a
-   *  refusal the User has not looked at. It sits before the members button
-   *  at the header's end. */
+   *  refusal (or a chat this phone could not start) the User has not looked
+   *  at. It sits before the members button at the header's end. */
   function renderSendLogButton() {
     const button = document.getElementById("send-log-button");
     if (!button) return;
@@ -3212,7 +3254,9 @@
     syncHeaderSpacer();
     button.setAttribute("aria-label", summary.failing > 0
       ? "Send log: " + (summary.failing === 1 ? "something you sent has" : summary.failing + " things you sent have") + " not reached your server yet"
-      : "Send log: your server did not take something you sent");
+      : sendLogNewestNotStarted
+        ? "Send log: a chat you started did not start"
+        : "Send log: your server did not take something you sent");
   }
 
   function sendLogKindLabel(record) {
@@ -4120,6 +4164,7 @@
       // In the list at once, as the computer's sidebar shows a chat it made
       // (the first message finds its members there).
       listed = true;
+      noteOwnChat(conversationId);
       saveStartedChats([{
         id: conversationId, title: title, group: shared.mobileChatGroupLabel(repoPath), snippet: shared.mobileSnippet(text), who: "you:", updatedAt: createdAt,
         running: false, startedHere: true, deviceId: (loadPairing() || {}).deviceId,
@@ -13317,6 +13362,7 @@
     const startedFor = forkMenu && forkMenu.plan === plan ? forkMenu.key : undefined;
     renderForkItems();
     const conversationId = createEventId();
+    const title = shared.forkedChatTitle(plan.source.title);
     let listed = false;
     try {
       // The copy ends with the member's last reply that ended a turn as her
@@ -13330,11 +13376,11 @@
         mainSession: offer.mainSession || offer.assistant, basePermissions: offer.fork.basePermissions, member: plan.running,
         source: { id: plan.source.conversationId, title: plan.source.title }, seen: seen, id: createEventId()
       });
-      const title = shared.forkedChatTitle(plan.source.title);
       const repoPath = plan.source.repoPath || undefined;
       const chatView = offer.defaultChatView === "classic" || offer.defaultChatView === "sessions" ? offer.defaultChatView : "sessions";
       const sessionsFields = { mainSessionParticipantId: mainSession.id, chatView: chatView };
       listed = true;
+      noteOwnChat(conversationId);
       saveStartedChats([{
         id: conversationId, title: title, group: shared.mobileChatGroupLabel(repoPath), snippet: shared.mobileSnippet(""), who: "", updatedAt: createdAt,
         running: false, startedHere: true, deviceId: (loadPairing() || {}).deviceId, ...sessionsFields, canSwitchView: true,
@@ -13360,7 +13406,18 @@
     } catch (error) {
       if (listed) forgetStartedChat(conversationId);
       forkStarting = false;
-      if (forkMenu && forkMenu.key === startedFor) forkMenu = { ...forkMenu, reason: "Could not start the chat: " + (error && error.message ? error.message : String(error)), plan: undefined };
+      const reason = "Could not start the chat: " + (error && error.message ? error.message : String(error));
+      const menuShowsThisFork = Boolean(forkMenu) && forkMenu.key === startedFor;
+      if (menuShowsThisFork) forkMenu = { ...forkMenu, reason: reason, plan: undefined };
+      // Gone from where she tapped it (another chat or screen, or its menu
+      // closed): said where the phone says a New chat that did not go
+      // through, in the send log ("New chat: <title>"), the header pointing
+      // at it until she has looked.
+      if (!(menuShowsThisFork && stillInForkedChat(plan.source.conversationId) && (chatTitleMenuOpen || membersSheetOpen))) {
+        void recordSendFailure({ ...sendFailureRecord({ eventId: conversationId, kind: "conversation.create", conversationId: conversationId,
+          payload: { conversation: { title: title } } }, { cause: "phone", reason: reason }), notStarted: true });
+        renderSendLogButton();
+      }
       renderForkItems();
       return;
     }

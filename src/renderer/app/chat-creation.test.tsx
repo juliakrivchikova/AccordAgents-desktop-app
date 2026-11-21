@@ -36,9 +36,10 @@ async function harness() {
   let appNavigation!: AppNavigation;
   let progress!: (event: ReviewProgress) => void;
   let createRunId: string | undefined;
+  let announce: ((update: Conversation) => void) | undefined;
   window.consensus = {
     onConversationDeleted: () => () => {},
-    onConversationUpdated: () => () => {},
+    onConversationUpdated: (callback: (update: Conversation) => void) => { announce = callback; return () => {}; },
     onReviewProgress: callback => { progress = callback; return () => {}; },
     createChatConversation: request => { calls.push("create"); createRunId = request.runId; return creation.promise; },
     sendChatMessage: request => { calls.push(`send:${request.runId}`); return sent.promise; },
@@ -87,6 +88,8 @@ async function harness() {
   });
   return { renderer, creation, sent, opened, calls, state: () => state, actions: () => actions, navigation: () => navigation, appNavigation: () => appNavigation,
     progress: (event: ReviewProgress) => progress(event), runId: () => createRunId,
+    /** The app's snapshot of a chat, as conversations:updated announces it. */
+    announce: (update: Conversation) => announce?.(update),
     saved: (value: Conversation) => { saved = value; } };
 }
 
@@ -409,6 +412,48 @@ test("a fork she stayed for opens with its keyboard, also after Settings and bac
     assert.equal(f.h.state().railView, "chats", meanwhile);
     assert.equal(takeComposerFocusRequest("fork"), true, meanwhile);
     assert.deepEqual(f.notices(), [], `${meanwhile}: no notice, the chat itself is on screen`);
+    await act(async () => { f.h.renderer.unmount(); });
+  }
+});
+
+test("a chat she made herself is not unread: New chat, a fork she stayed for, and one made after she left; what comes after still is", async () => {
+  // New chat: the app announces the chat while it is made, before it is on screen.
+  const h = await harness();
+  const made = conversation();
+  let pending!: Promise<boolean>;
+  await act(async () => { pending = h.actions().startChat(); });
+  await act(async () => { h.announce(made); });
+  await act(async () => { h.creation.resolve({ conversation: made, warnings: [] }); });
+  const sent = { ...made, updatedAt: "2026-09-13T00:00:01.000Z" };
+  await act(async () => { h.announce(sent); h.sent.resolve({ conversation: sent, warnings: [] }); assert.equal(await pending, true); });
+  assert.equal(h.state().conversation?.id, "created");
+  // She goes elsewhere: her own chat has no dot.
+  await act(async () => { h.state().setConversation({ ...conversation(), id: "elsewhere" }); });
+  assert.equal(h.state().unreadConversationIds.has("created"), false, "New chat: nothing in it she has not seen");
+  // A member's reply after she left is news.
+  await act(async () => { h.announce({ ...made, updatedAt: "2026-09-13T00:00:09.000Z" }); });
+  assert.equal(h.state().unreadConversationIds.has("created"), true, "a reply after she left");
+  await act(async () => { h.renderer.unmount(); });
+
+  for (const stayed of [true, false]) {
+    const f = await forkHarness();
+    await f.startFork();
+    if (!stayed) {
+      await act(async () => { f.h.appNavigation().openChat("other"); });
+      await f.settle();
+    }
+    // Announced while it is made, before she could have opened it.
+    await act(async () => { f.h.announce(f.fork); });
+    assert.equal(await f.finishFork(), true);
+    // Announced again once made (the server's copy of it, the same moment).
+    await act(async () => { f.h.announce(f.fork); });
+    await act(async () => { f.h.appNavigation().openChat("third"); });
+    await f.settle();
+    assert.equal(f.h.state().conversation?.id, "third");
+    assert.equal(f.h.state().unreadConversationIds.has("fork"), false, stayed ? "a fork she stayed for" : "a fork made after she left");
+    await act(async () => { f.h.announce({ ...f.fork, updatedAt: "2026-09-13T00:00:09.000Z" }); });
+    assert.equal(f.h.state().unreadConversationIds.has("fork"), true, `${stayed ? "stayed" : "left"}: what comes after is news`);
+    clearNotices();
     await act(async () => { f.h.renderer.unmount(); });
   }
 });

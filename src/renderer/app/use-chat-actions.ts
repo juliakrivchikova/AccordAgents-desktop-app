@@ -41,7 +41,7 @@ import {
 } from "../components/review/review-conversation-data";
 import type { AppState } from "./app-state";
 import type { ConversationActions } from "./use-conversation-actions";
-import { upsertConversationSummary, withPinnedState } from "./conversation-summaries";
+import { conversationTimeValue, upsertConversationSummary, withPinnedState } from "./conversation-summaries";
 import { newChatTitle } from "../../shared/newChat";
 import { persistLastViewedAt } from "./storage";
 import { requestComposerFocus, takeComposerFocusRequest } from "./composer-focus-request";
@@ -285,6 +285,7 @@ export function useChatActions(state: AppState, conversationActions: Conversatio
         participants
       });
       createdConversationId = result.conversation.id;
+      markOwnChatSeen(result.conversation);
       creation.signal.throwIfAborted();
       state.chatCreationRef.current = undefined;
       if (!previewingElsewhere()) {
@@ -304,6 +305,7 @@ export function useChatActions(state: AppState, conversationActions: Conversatio
         skillMentions,
         imageAttachments
       });
+      markOwnChatSeen(sendResult.conversation);
       if (!previewingElsewhere()) {
         showCreated(mergeProgressIntoConversation(sendResult.conversation, state.progressLogRef.current.filter((item) => item.runId === runId)));
         state.setWarnings([...result.warnings, ...sendResult.warnings]);
@@ -732,6 +734,7 @@ export function useChatActions(state: AppState, conversationActions: Conversatio
       state.startingChatRef.current = false;
     }
     state.setSummaries((current) => upsertConversationSummary(current, created));
+    markOwnChatSeen(created);
     if (stillHere()) {
       requestComposerFocus(created.id);
       state.setRailView("chats");
@@ -762,6 +765,25 @@ export function useChatActions(state: AppState, conversationActions: Conversatio
     }
     await conversationActions.refreshConversations().catch(() => undefined);
     return true;
+  }
+
+  /** A chat she made herself (New chat, a fork) is no news to her, wherever
+   *  she is by the time it is made: what it holds then counts as seen, so
+   *  the list shows no unread dot for it (the app announces the chat while
+   *  it is made, before it is on screen). What comes after (a member's
+   *  reply) still is news. */
+  function markOwnChatSeen(conversation: Conversation): void {
+    const seen = state.lastViewedAtRef.current[conversation.id];
+    if (!seen || conversationTimeValue(conversation.updatedAt) > conversationTimeValue(seen)) {
+      state.lastViewedAtRef.current = { ...state.lastViewedAtRef.current, [conversation.id]: conversation.updatedAt };
+      persistLastViewedAt(state.lastViewedAtRef.current);
+    }
+    state.setUnreadConversationIds((current) => {
+      if (!current.has(conversation.id)) return current;
+      const next = new Set(current);
+      next.delete(conversation.id);
+      return next;
+    });
   }
 
   async function startChatAccord(options: StartChatAccordOptions): Promise<boolean> {

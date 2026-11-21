@@ -354,6 +354,12 @@ export function isForkSourceMissingError(text: string | undefined): boolean {
   return /no conversation found|no rollout found for thread id/i.test(text ?? "");
 }
 
+/** Whether a fork's run failed with no copy made: the CLI said the source is
+ *  gone, or failed while it made the copy (ParticipantRunResult.forkCopyFailed). */
+export function forkCopyNotMade(result: Pick<ParticipantRunResult, "error" | "forkCopyFailed">): boolean {
+  return isForkSourceMissingError(result.error) || result.forkCopyFailed === true;
+}
+
 export interface CliAgentRunOptions {
   persistSession?: boolean;
   sessionId?: string;
@@ -567,6 +573,9 @@ interface WarmAgentEntry {
   /** Claude only: no reply is waiting, running or about to start on its own;
    *  background tasks may still be running. */
   isReplyIdle?: () => boolean;
+  /** Claude only: whether the CLI ever started a step in this process (it
+   *  loaded its session, or made a fork's copy). */
+  everStartedStep?: () => boolean;
   /** Claude only: settles once no reply is waiting, running or about to
    *  start on its own (or the process is gone); background tasks may still
    *  be running. */
@@ -679,6 +688,8 @@ interface ClaudeWarmReply {
 interface ClaudeWarmProcessState {
   /** Unsettled replies in the order they were submitted or started. */
   replies: ClaudeWarmReply[];
+  /** Set at the first step this process starts. */
+  everStartedStep?: boolean;
   /** The reply receiving the running model step's output. */
   active?: ClaudeWarmReply;
   /** True from a step's start (`system/init`, a command `started`, or any of
@@ -3522,9 +3533,13 @@ export class CliAgentRunner {
         // A fork this turn made whole although it was to end earlier says
         // so even when the turn itself failed.
         const forkCutMissed = (error as { forkCutMissed?: unknown } | undefined)?.forkCutMissed;
-        const failed = (): ParticipantRunResult => typeof forkCutMissed === "string"
-          ? { ...this.failed(participant, error), forkCutMissed }
-          : this.failed(participant, error);
+        // A fork whose copy Codex did not make (thread/fork failed).
+        const forkCopyFailed = (error as { forkCopyFailed?: unknown } | undefined)?.forkCopyFailed === true && !signal?.aborted;
+        const failed = (): ParticipantRunResult => ({
+          ...this.failed(participant, error),
+          ...(typeof forkCutMissed === "string" ? { forkCutMissed } : {}),
+          ...(forkCopyFailed ? { forkCopyFailed: true } : {})
+        });
         if (signal?.aborted) {
           return failed();
         }
@@ -3727,18 +3742,25 @@ export class CliAgentRunner {
       initialized = true;
     };
 
+    // Said once the copy is made (thread/fork answered, still before the
+    // turn runs): a source that is gone gets no copy, and its fork says only
+    // that it starts clean.
+    let forkCutMissedPending: string | undefined;
+    const missedCut = (reason: string): void => {
+      forkCutMissedPending = reason;
+    };
     /** Where a Fork to new chat's copy ends (options.forkCut): the turn its
      *  reply recorded, or, for a reply from before that, the last turn that
      *  ended by the reply's finish, read from the thread's turns newest
      *  first; undefined for all of it (nothing came after, or no point can
      *  be named: forkCutMissed says why). */
-    const missedCut = (reason: string): void => {
-      forkCutMissed = reason;
-      options.onForkCutMissed?.(reason);
-    };
     const codexForkLastTurnId = async (sourceThreadId: string, timeoutMs?: number): Promise<string | undefined> => {
       const cut = options.forkCut;
       if (!cut) return undefined;
+      if (cut.unknown) {
+        missedCut(cut.unknown);
+        return undefined;
+      }
       if (cut.at) return cut.at;
       if (!cut.finishedBy) return undefined;
       let decision: ForkCutDecision | undefined;
@@ -3793,28 +3815,42 @@ export class CliAgentRunner {
         // not write to the session it was copied from.
         const sourceThreadId = options.forkFromSessionId;
         forkCutMissed = undefined;
+        forkCutMissedPending = undefined;
         const forkParams = this.codexAppServerThreadForkParams(sourceThreadId, participant, repoPath, kind, options);
-        // Fork to new chat: only through the turn of the reply the User saw
-        // last (Codex 0.155.1 `lastTurnId`, inclusive), in the thread that
-        // reply was in (the member's own now, unless it changed after it).
-        const lastTurnId = await codexForkLastTurnId(sourceThreadId, timeoutMs);
-        const replyThreadId = lastTurnId && options.forkCut?.sessionId?.trim() ? options.forkCut.sessionId.trim() : sourceThreadId;
+        let forkedThreadId: string | undefined;
         let result: CodexAppServerThreadStartResult;
         try {
-          result = await sendRequest("thread/fork", lastTurnId ? { ...forkParams, threadId: replyThreadId, lastTurnId } : forkParams, timeoutMs) as CodexAppServerThreadStartResult;
+          // Fork to new chat: only through the turn of the reply the User saw
+          // last (Codex 0.155.1 `lastTurnId`, inclusive), in the thread that
+          // reply was in (the member's own now, unless it changed after it).
+          const lastTurnId = await codexForkLastTurnId(sourceThreadId, timeoutMs);
+          const replyThreadId = lastTurnId && options.forkCut?.sessionId?.trim() ? options.forkCut.sessionId.trim() : sourceThreadId;
+          try {
+            result = await sendRequest("thread/fork", lastTurnId ? { ...forkParams, threadId: replyThreadId, lastTurnId } : forkParams, timeoutMs) as CodexAppServerThreadStartResult;
+          } catch (error) {
+            const text = this.errorText(error);
+            const earlierGone = replyThreadId !== sourceThreadId && (isForkSourceMissingError(text) || /thread not (?:found|loaded)/i.test(text));
+            if (!lastTurnId || (!earlierGone && !isForkCutMissingError(text))) throw error;
+            // Codex does not know that turn, or the thread it was in is gone:
+            // the whole of the member's thread, and the chat says so.
+            void this.writeDebugLog("cli-agent-codex-fork-cut-refused", { participantId: participant.id, earlierGone });
+            missedCut(earlierGone ? FORK_CUT_SESSION_GONE : FORK_CUT_NOT_IN_SESSION);
+            result = await sendRequest("thread/fork", forkParams, timeoutMs) as CodexAppServerThreadStartResult;
+          }
+          forkedThreadId = result.thread?.id ?? result.thread?.sessionId;
+          if (!forkedThreadId || forkedThreadId === options.forkFromSessionId) {
+            throw new Error("codex app-server did not return a thread id for the fork");
+          }
         } catch (error) {
-          const text = this.errorText(error);
-          const earlierGone = replyThreadId !== sourceThreadId && (isForkSourceMissingError(text) || /thread not (?:found|loaded)/i.test(text));
-          if (!lastTurnId || (!earlierGone && !isForkCutMissingError(text))) throw error;
-          // Codex does not know that turn, or the thread it was in is gone:
-          // the whole of the member's thread, and the chat says so.
-          void this.writeDebugLog("cli-agent-codex-fork-cut-refused", { participantId: participant.id, earlierGone });
-          missedCut(earlierGone ? FORK_CUT_SESSION_GONE : FORK_CUT_NOT_IN_SESSION);
-          result = await sendRequest("thread/fork", forkParams, timeoutMs) as CodexAppServerThreadStartResult;
+          // No copy was made: the caller may try again or start clean
+          // (ParticipantRunResult.forkCopyFailed).
+          forkCutMissedPending = undefined;
+          throw Object.assign(error instanceof Error ? error : new Error(String(error)), { forkCopyFailed: true });
         }
-        const forkedThreadId = result.thread?.id ?? result.thread?.sessionId;
-        if (!forkedThreadId || forkedThreadId === options.forkFromSessionId) {
-          throw new Error("codex app-server did not return a thread id for the fork");
+        if (forkCutMissedPending) {
+          forkCutMissed = forkCutMissedPending;
+          forkCutMissedPending = undefined;
+          options.onForkCutMissed?.(forkCutMissed);
         }
         threadId = forkedThreadId;
         threadLoaded = true;
@@ -5873,12 +5909,14 @@ export class CliAgentRunner {
     // session changed after it).
     const member = options.forkFromSessionId;
     const replySession = forkCut.sessionId?.trim() || member;
-    const cut = await this.claudeForkCutFor(replySession, forkCut, replySession !== member);
+    const cut = forkCut.unknown
+      ? await this.claudeForkSourceHere(member) ? { kind: "missed" as const, reason: forkCut.unknown } : { kind: "gone" as const, reason: forkCut.unknown }
+      : await this.claudeForkCutFor(replySession, forkCut, member);
     void this.writeDebugLog("cli-agent-claude-fork-cut", {
       participantId: participant.id,
       decision: cut.kind,
       otherSession: replySession !== member,
-      ...(cut.kind === "missed" ? { reason: cut.reason } : cut.afterCompaction ? { afterCompaction: true } : {})
+      ...(cut.kind !== "cut" ? { reason: cut.reason } : cut.afterCompaction ? { afterCompaction: true } : {})
     });
     // The whole of the member's session, said in the chat at once (before a
     // turn that may last hours, and an app that may stop during it).
@@ -5887,6 +5925,14 @@ export class CliAgentRunner {
       const result = await this.runClaudeTurn(participant, prompt, repoPath, kind, signal, rest);
       return { ...result, forkCutMissed: reason };
     };
+    if (cut.kind === "gone") {
+      // Its transcript is nowhere on this device, so the CLI cannot copy it
+      // either ("No conversation found") and the member starts clean: no
+      // word that the copy may hold more. Made after all, it says so with
+      // the turn.
+      const result = await this.runClaudeTurn(participant, prompt, repoPath, kind, signal, rest);
+      return result.ok || !forkCopyNotMade(result) ? { ...result, forkCutMissed: cut.reason } : result;
+    }
     if (cut.kind === "missed") return whole(cut.reason);
     const result = await this.runClaudeTurn(participant, prompt, repoPath, kind, signal, { ...rest, forkFromSessionId: replySession, forkResumeAt: cut.at });
     const unsupported = isForkCutUnsupportedError(result.error);
@@ -5900,13 +5946,29 @@ export class CliAgentRunner {
     return whole(unsupported ? FORK_CUT_UNSUPPORTED : cut.afterCompaction ? FORK_CUT_COMPACTED : FORK_CUT_NOT_IN_SESSION);
   }
 
-  /** Where a Claude Code fork of `sessionId` ends, read from its transcript
-   *  on this device (forkCut.ts); `earlier`: the session the member's reply
-   *  was in, not its own now. */
-  private async claudeForkCutFor(sessionId: string, request: ForkCutRequest, earlier: boolean): Promise<ForkCutDecision> {
+  /** Whether the member's session is on this device for Claude Code to copy. */
+  private async claudeForkSourceHere(sessionId: string): Promise<boolean> {
     try {
-      const file = await findClaudeTranscript(await this.claudeProjectsDirectory(), sessionId);
-      if (!file) return { kind: "missed", reason: earlier ? FORK_CUT_SESSION_GONE : FORK_CUT_TRANSCRIPT_UNREADABLE };
+      return Boolean(await findClaudeTranscript(await this.claudeProjectsDirectory(), sessionId));
+    } catch {
+      return true;
+    }
+  }
+
+  /** Where a Claude Code fork of `sessionId` ends, read from its transcript
+   *  on this device (forkCut.ts); `sessionId` other than `memberSessionId`:
+   *  the session the member's reply was in, not its own now. "gone": the
+   *  member's own session is not on this device either, so there is nothing
+   *  to copy. */
+  private async claudeForkCutFor(sessionId: string, request: ForkCutRequest, memberSessionId: string): Promise<ForkCutDecision | { kind: "gone"; reason: string }> {
+    const earlier = sessionId !== memberSessionId;
+    try {
+      const projects = await this.claudeProjectsDirectory();
+      const file = await findClaudeTranscript(projects, sessionId);
+      if (!file) {
+        if (earlier && await findClaudeTranscript(projects, memberSessionId)) return { kind: "missed", reason: FORK_CUT_SESSION_GONE };
+        return { kind: "gone", reason: earlier ? FORK_CUT_SESSION_GONE : FORK_CUT_TRANSCRIPT_UNREADABLE };
+      }
       return claudeForkCut(await readClaudeTranscriptRows(file), request);
     } catch {
       return { kind: "missed", reason: FORK_CUT_TRANSCRIPT_UNREADABLE };
@@ -6289,6 +6351,9 @@ export class CliAgentRunner {
 
     const claudeEntry = entry;
     claudeEntry.idleTimeoutMs = warm.idleTimeoutMs;
+    // Whether the CLI took this message into a step: a fork's process that
+    // ended before it did never made the copy (forkCopyFailed below).
+    let replyStarted = false;
     // Messages are not serialized here: the CLI queues them itself and hands a
     // message sent mid-step to the running step, as the dedicated CLI does.
     return this.trackWarmRun(claudeEntry, async () => {
@@ -6299,7 +6364,10 @@ export class CliAgentRunner {
             origin: warm.origin,
             onSelfResumedTurn: warm.onSelfResumedTurn,
             onBackgroundTasksChanged: warm.onBackgroundTasksChanged,
-            onReplyStarted: freshProcess ? undefined : warm.onReplyStarted,
+            onReplyStarted: () => {
+              replyStarted = true;
+              if (!freshProcess) warm.onReplyStarted?.();
+            },
             onMessageWritten: warm.onMessageWritten,
             onPromptSuggestion: warm.onPromptSuggestion,
             allowEmptyContent: options.allowEmptyContent,
@@ -6346,7 +6414,17 @@ export class CliAgentRunner {
           conversationId: warm.conversationId,
           error: this.errorText(error)
         });
-        return this.failed(participant, error);
+        // A new session (a fork's copy, or a clean one) whose CLI exited
+        // before it started any step: no session was made (Claude Code exits
+        // at once when it cannot load the session it forks), although the
+        // id it was given has been reported. A process that never started is
+        // not that; nor is one that took another message first (two sent at
+        // once share the process: that one made the session).
+        const notStarted = !options.sessionId && !replyStarted && claudeEntry.everStartedStep?.() !== true &&
+          typeof claudeEntry.process.exitCode === "number";
+        return notStarted
+          ? { ...this.failed(participant, error), sessionNotStarted: true, ...(options.forkFromSessionId ? { forkCopyFailed: true } : {}) }
+          : this.failed(participant, error);
       }
     });
   }
@@ -6785,6 +6863,7 @@ export class CliAgentRunner {
       whenIdle: (signal?: AbortSignal) => waitUntil(isIdle, signal),
       whenReplyIdle: (signal?: AbortSignal) => waitUntil(isReplyIdle, signal),
       isReplyIdle,
+      everStartedStep: () => state.everStartedStep === true,
       capturedBackgroundProcesses: () => Array.from(capturedBackgroundProcesses.values()),
       refreshCapturedBackgroundProcesses: captureBackgroundProcesses,
       contextUsage: async (signal?: AbortSignal) => {
@@ -7175,6 +7254,7 @@ export class CliAgentRunner {
    *  with none the CLI started this step on its own. */
   private startClaudeWarmStep(state: ClaudeWarmProcessState, participant: ParticipantConfig, hooks: ClaudeWarmProcessHooks): void {
     state.stepActive = true;
+    state.everStartedStep = true;
     state.promptSuggestionTarget = undefined;
     if (state.active && !state.active.settled) {
       return;
