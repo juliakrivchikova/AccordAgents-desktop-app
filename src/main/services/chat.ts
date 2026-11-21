@@ -394,6 +394,20 @@ function askedParticipantIdsOf(message: ChatMessage): string[] {
   return [...deliveryTargetsOf(message), ...(Array.isArray(later) ? later.filter((id): id is string => typeof id === "string" && id.length > 0) : [])];
 }
 
+/** The run a permission approval resumes its member in. It is a turn of its
+ *  own on the User's server: the turn that asked for the permission has ended
+ *  there, and a claim of it again is answered "finished", so nothing would
+ *  run. Named after the approval, the resume is one turn however often the
+ *  approval is read again. Its run here has the same name as its turn on the
+ *  server, so every device (the computer stopping a cloud member's turn, the
+ *  phone, the member's own device) names it the same way. */
+function permissionApprovalResumeRunId(approvalId: string): string {
+  const named = `turn-permission-resume-${approvalId}`;
+  return isHubTurnRunId(named)
+    ? named
+    : `turn-permission-resume-${createHash("sha256").update(approvalId).digest("hex").slice(0, 32)}`;
+}
+
 /** How a member's turn was opened on the User's server (Д4, Д5, Д13). */
 type ServerTurnOpen =
   | { kind: "none" }
@@ -8468,7 +8482,8 @@ export class ChatService {
     }
     if (isPermissionApproval && updatedApproval.resumeContext && updatedApproval.resumeContext.remoteRun !== true) {
       void this.autoResumePermissionApproval(conversation.id, updatedApproval.id, progress).catch((error) => {
-        this.emitProgress(updatedApproval.resumeContext?.runId ?? updatedApproval.id, progress, "error", error instanceof Error ? error.message : String(error));
+        // Said on the resume's own run: the asking run has ended.
+        this.emitProgress(permissionApprovalResumeRunId(updatedApproval.id), progress, "error", error instanceof Error ? error.message : String(error));
         void this.debugLogs.write("chat.permission-approval.auto-resume.error", {
           conversationId: conversation.id,
           approvalId: updatedApproval.id,
@@ -16097,7 +16112,7 @@ export class ChatService {
       item.requesterParticipantId === requester.id &&
       item.toolName === APP_PERMISSIONS_REQUEST_CHANGE_TOOL &&
       this.isPermissionChangeRequest(item.request) &&
-      (!actor.runId || item.resumeContext?.runId === actor.runId)
+      (!actor.runId || this.isPermissionRequestOfRun(item, actor.runId))
     );
     if (!approval) {
       return {
@@ -16132,6 +16147,13 @@ export class ChatService {
     };
   }
 
+  /** A member's permission request belongs to the run that asked for it and
+   *  to the run its approval resumed the member in: there the member may ask
+   *  for it again, or for its status, and gets the answer it already has. */
+  private isPermissionRequestOfRun(approval: ChatAppToolApproval, runId: string): boolean {
+    return approval.resumeContext?.runId === runId || permissionApprovalResumeRunId(approval.id) === runId;
+  }
+
   private findReplayablePermissionApproval(
     conversation: Conversation,
     requester: ChatParticipant,
@@ -16147,7 +16169,7 @@ export class ChatService {
         return false;
       }
       if (actor.runId) {
-        if (approval.resumeContext?.runId !== actor.runId) {
+        if (!this.isPermissionRequestOfRun(approval, actor.runId)) {
           return false;
         }
       } else if (approval.status !== "pending") {
@@ -17400,7 +17422,8 @@ export class ChatService {
         }
         this.permissionApprovalAutoResumes.add(triggerResumeKey);
         resumeKeys.push(triggerResumeKey);
-        const resumeRunId = approval.resumeContext.runId || randomUUID();
+        // Never the run that asked: its turn on the server is over.
+        const resumeRunId = permissionApprovalResumeRunId(approval.id);
         const participantLabel = `@${requester.handle}`;
         this.emitProgress(resumeRunId, progress, "initial", `Resuming ${participantLabel} after permission approval.`, {
           participantLabel
@@ -17477,6 +17500,7 @@ export class ChatService {
     try {
       const messages = await this.runParticipantTurnSerialized(conversation, requester, trigger, resumeRunId, undefined, progress, {
         warnings: [],
+        ownServerTurn: true,
         participantRequestDepth: participantRequestBatch
           ? this.participantRequestResumeDepth(participantRequestBatch, requester.id)
           : undefined,
@@ -17906,6 +17930,10 @@ export class ChatService {
       existingPendingMessage?: ChatMessage;
       turnReservation?: ParticipantTurnReservation;
       writeGate?: ClaudeWriteGate;
+      /** A turn of its own on the server, named after this run, even when its
+       *  trigger is a User's message to this member, whose own turn is over
+       *  (a permission approval's resume). */
+      ownServerTurn?: boolean;
     }
   ): Promise<ChatMessage[]> {
     const turnSegmentId = randomUUID();
@@ -17938,7 +17966,7 @@ export class ChatService {
       // request runners, resumes) goes through here: the User's server first
       // (Д4, Д13), then here or on the member's own device.
       const opened: ServerTurnOpen = this.serverLink
-        ? await this.openServerTurn(conversation, participant, triggerMessage, runId, turnController.signal)
+        ? await this.openServerTurn(conversation, participant, triggerMessage, runId, turnController.signal, options.ownServerTurn === true)
         : { kind: "none" };
       // Where it runs was decided there (after any move of it): as the chat
       // has it now.
@@ -25167,21 +25195,22 @@ export class ChatService {
   /** Opens a member's turn on the server before anything of it is shown or
    *  run (Д4, Д5, Д13): the message it answers must be on the server first,
    *  then the turn is taken here (a member that runs here) or asked of the
-   *  device it runs on. Memoized per local run. */
-  private openServerTurn(conversation: Conversation, participant: ChatParticipant, triggerMessage: ChatMessage, localRunId: string, signal?: AbortSignal): Promise<ServerTurnOpen> {
+   *  device it runs on. Memoized per local run. `ownTurn`: never the turn
+   *  the User's message asked of the member (see runParticipantTurnSerialized). */
+  private openServerTurn(conversation: Conversation, participant: ChatParticipant, triggerMessage: ChatMessage, localRunId: string, signal?: AbortSignal, ownTurn = false): Promise<ServerTurnOpen> {
     const known = this.serverTurnOpens.get(localRunId);
     if (known) return known;
-    const opening = this.openServerTurnNow(conversation, participant, triggerMessage, localRunId, signal);
+    const opening = this.openServerTurnNow(conversation, participant, triggerMessage, localRunId, signal, ownTurn);
     this.serverTurnOpens.set(localRunId, opening);
     void opening.catch(() => this.serverTurnOpens.delete(localRunId));
     return opening;
   }
 
-  private async openServerTurnNow(conversation: Conversation, participant: ChatParticipant, triggerMessage: ChatMessage, localRunId: string, signal?: AbortSignal): Promise<ServerTurnOpen> {
+  private async openServerTurnNow(conversation: Conversation, participant: ChatParticipant, triggerMessage: ChatMessage, localRunId: string, signal?: AbortSignal, ownTurn = false): Promise<ServerTurnOpen> {
     const link = this.serverLink;
     if (!link) return { kind: "none" };
     const targets = deliveryTargetsOf(triggerMessage);
-    const canonical = triggerMessage.role === "user" && targets.includes(participant.id);
+    const canonical = !ownTurn && triggerMessage.role === "user" && targets.includes(participant.id);
     const serverRunId = canonical ? hubTurnRunId(triggerMessage.id, participant.id) : localRunId.startsWith("turn-") ? localRunId : `turn-${localRunId}`;
     this.inProcessServerTurns.add(serverRunId);
     this.serverRunOfLocal.set(localRunId, { runId: serverRunId, conversationId: conversation.id, participantId: participant.id });

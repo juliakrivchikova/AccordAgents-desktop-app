@@ -900,6 +900,36 @@ test("permission request has stable requestId and idempotent replay after approv
   );
 });
 
+test("in the run an approval resumed it in, a member asking again gets the answer it has, not a second card", async () => {
+  const participant = chatParticipant("claude-code", { webAccess: false });
+  const approval = permissionApproval(participant, { kind: "portable", permissions: ["webAccess"] }, {
+    status: "approved",
+    approvalScope: "once",
+    resumeContext: { runId: "asking-run", triggerMessageId: "user-message" }
+  });
+  const conversation = chatConversation([participant], { pendingAppToolApprovals: [approval] });
+  const { service, storage } = testService({ conversation });
+  const actor = (runId: string) => ({
+    conversationId: conversation.id,
+    participantId: participant.id,
+    roleConfigId: participant.roleConfigId,
+    roleConfigVersion: 0,
+    capabilities: ["permissions.request" as const],
+    runId,
+    triggerMessageId: "user-message",
+    runPermissions: defaultChatAgentPermissions()
+  });
+
+  const resumed = actor("turn-permission-resume-approval-1");
+  assert.equal((await service.requestPermissionChangeFromTool(resumed, { requestId: approval.id })).status, "approved");
+  const again = await service.requestPermissionChangeFromTool(resumed, { kind: "portable", permissions: ["webAccess"] });
+  assert.equal(again.status, "approved");
+  assert.equal(again.requestId, approval.id);
+  assert.equal((storage.current.metadata.pendingAppToolApprovals as ChatAppToolApproval[]).length, 1, "no second card");
+  // Any other run still asks for itself.
+  assert.equal((await service.requestPermissionChangeFromTool(actor("another-run"), { requestId: approval.id })).status, "not_found");
+});
+
 test("permission request status lookup returns denied decisions idempotently", async () => {
   const participant = chatParticipant("claude-code", { webAccess: false });
   const conversation = chatConversation([participant]);
@@ -2115,7 +2145,8 @@ test("permission resume attaches resumed participant-request reply to the origin
   assert.equal(batch?.items[0].status, "answered");
   assert.equal(batch?.items[0].replyMessageId, reply?.id);
   assert.equal(saved.metadata.pendingAppToolApprovals[0].consumedAt.length > 0, true);
-  assert.equal(progressEvents[0]?.runId, "blocked-run");
+  // A run of its own, never the blocked one: that turn is over on the User's server.
+  assert.equal(progressEvents[0]?.runId, "turn-permission-resume-approval-1");
   assert.equal(progressEvents[0]?.phase, "initial");
   assert.equal(progressEvents.some((event) => event.agentProgress?.state === "running"), true);
   assert.equal(progressEvents.at(-1)?.phase, "done");
@@ -2320,7 +2351,7 @@ test("permission resume registers a cancellable chat run controller", async () =
   });
   const pendingMessageId = storage.current.metadata.lastMessageByParticipant?.[participant.id]?.messageId;
 
-  assert.equal(service.cancelRun("blocked-run"), true);
+  assert.equal(service.cancelRun("turn-permission-resume-approval-1"), true);
   await resume;
   await waitFor(() => storage.current.metadata.running === false);
 
