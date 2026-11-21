@@ -3655,16 +3655,26 @@
     const effort = chosen && newChatMainChoice.reasoningEffort && efforts.some(function (item) { return item.id === newChatMainChoice.reasoningEffort; }) ? newChatMainChoice.reasoningEffort : undefined;
     // Its CLI's mode in the CLI's own terms, the computer's picker's modes and
     // words (chatAccessModes): the one its CLI starts in until one is chosen.
+    const accessSet = newChatAccessSet(provider.kind);
     const accessOptions = newChatAccessOptions(provider.kind);
     const defaultAccess = accessOptions.length > 0 ? newChatDefaultAccess(provider.kind) : undefined;
     const access = chosen && newChatMainChoice.access && accessOptions.some(function (item) { return item.id === newChatMainChoice.access; })
       ? newChatMainChoice.access : defaultAccess;
+    // Codex's Plan mode: its own toggle beside the permissions, as on the computer.
+    const plan = Boolean(chosen && newChatMainChoice.plan && accessSet && accessSet.plan);
     // Where it runs: one of the machines, once there is one; else this computer.
     const homeMachineId = chosen && newChatMainChoice.homeMachineId && newChatMachineList().some(function (item) { return item.id === newChatMainChoice.homeMachineId; })
       ? newChatMainChoice.homeMachineId : undefined;
     return { provider: provider, model: model, modelLabel: modelEntry ? modelEntry.label : provider.defaultModelLabel, efforts: efforts,
       effort: effort, effortLabel: effort ? (efforts.find(function (item) { return item.id === effort; }) || {}).label : undefined,
-      accessOptions: accessOptions, access: access, homeMachineId: homeMachineId };
+      accessOptions: accessOptions, access: access, accessSet: accessSet, plan: plan, homeMachineId: homeMachineId };
+  }
+
+  /** A CLI's modes as its own menu titles them (and Codex's Plan mode, and
+   *  what Antigravity cannot do here), one shared table with the computer. */
+  function newChatAccessSet(kind) {
+    const shared = mobileSharedRules();
+    return shared && typeof shared.chatAccessModeSet === "function" ? shared.chatAccessModeSet(kind) : undefined;
   }
 
   /** The modes the computer's picker lists for this CLI (one shared list). */
@@ -3743,7 +3753,7 @@
     };
     const choose = function (patch) {
       const current = { kind: selection.provider.kind, hostId: selection.provider.hostId, model: selection.model, reasoningEffort: selection.effort,
-        access: selection.access, homeMachineId: selection.homeMachineId };
+        access: selection.access, plan: selection.plan, homeMachineId: selection.homeMachineId };
       newChatMainChoice = Object.assign(current, patch);
       renderNewChat("");
     };
@@ -3756,7 +3766,7 @@
         // computer drops what was chosen for the one before.
         onClick: function () {
           if (chosen) return;
-          choose({ kind: provider.kind, hostId: provider.hostId, model: undefined, reasoningEffort: undefined, access: undefined, homeMachineId: undefined });
+          choose({ kind: provider.kind, hostId: provider.hostId, model: undefined, reasoningEffort: undefined, access: undefined, plan: undefined, homeMachineId: undefined });
         } }));
     }
     section("Model");
@@ -3773,10 +3783,21 @@
         onClick: function () { choose({ reasoningEffort: effort.id }); } }));
     }
     if (selection.accessOptions.length > 0) {
-      section("Access");
+      // Under the CLI's own title ("Permission mode", "Permissions", "Agent Mode").
+      section(selection.accessSet && selection.accessSet.title ? selection.accessSet.title : "Access");
       for (const option of selection.accessOptions) {
         list.append(newChatOptionRow({ label: option.label, detail: option.detail, chosen: selection.access === option.id, data: { access: option.id },
           onClick: function () { choose({ access: option.id }); } }));
+      }
+      if (selection.accessSet && selection.accessSet.plan) {
+        list.append(newChatOptionRow({ label: selection.accessSet.plan.label, chosen: selection.plan, data: { plan: selection.plan ? "on" : "off" },
+          onClick: function () { choose({ plan: !selection.plan }); } }));
+      }
+      if (selection.accessSet && selection.accessSet.note) {
+        const note = document.createElement("p");
+        note.className = "members-sheet-note new-chat-access-note";
+        note.textContent = selection.accessSet.note;
+        list.append(note);
       }
     }
     const machines = newChatMachineList();
@@ -4073,7 +4094,7 @@
       const selection = sessionsView ? newChatMainSelection(offer) : undefined;
       const lead = selection && typeof shared.newChatMainSessionFor === "function"
         ? shared.newChatMainSessionFor(offeredLead, offer.mainSessionProviders, { kind: selection.provider.kind, hostId: selection.provider.hostId,
-          model: selection.model, reasoningEffort: selection.effort, access: selection.access, homeMachineId: selection.homeMachineId })
+          model: selection.model, reasoningEffort: selection.effort, access: selection.access, plan: selection.plan, homeMachineId: selection.homeMachineId })
         : offeredLead;
       const participants = shared.newChatParticipants({
         assistant: lead, mainSession: lead, members: sessionsView ? [] : offer.members, chosenConfigIds: sessionsView ? [] : Array.from(newChatChosen),

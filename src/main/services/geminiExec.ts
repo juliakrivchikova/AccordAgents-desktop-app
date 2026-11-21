@@ -6,7 +6,7 @@ import type {
   ConversationKind,
   ParticipantConfig
 } from "../../shared/types";
-import { effectiveChatAgentPermissionsForProvider, normalizeChatAgentMode, normalizeChatAgentPermissions } from "../../shared/agentPermissions";
+import { chatAgentModeForKind, effectiveChatAgentPermissionsForProvider, normalizeChatAgentMode, normalizeChatAgentPermissions } from "../../shared/agentPermissions";
 import { geminiModelId } from "../../shared/geminiModels";
 
 // Antigravity CLI (`agy`) discovers MCP servers from the global
@@ -479,7 +479,8 @@ function geminiPrompt(
 }
 
 function agentModeForRun(kind: ConversationKind, options: GeminiExecOptions): ChatAgentMode {
-  return kind === "chat" ? normalizeChatAgentMode(options.agentMode) : "plan";
+  // Codex's Full Access is not an agy mode: Auto, the broadest agy offers.
+  return kind === "chat" ? chatAgentModeForKind("gemini-cli", options.agentMode) : "plan";
 }
 
 function permissionsForRun(

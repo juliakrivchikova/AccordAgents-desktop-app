@@ -83,7 +83,7 @@ export function buildCodexExecInvocation(request: BuildCodexExecInvocationReques
   const resuming = Boolean(options.sessionId);
   const mode = agentModeForRun(request.kind, options);
   const permissions = permissionsForRun("codex-cli", mode, options);
-  const sandboxMode = codexSandboxMode(permissions, options.remoteSandbox);
+  const sandboxMode = codexSandboxMode(mode, permissions, options.remoteSandbox);
   const args = resuming
     ? [
         "exec",
@@ -437,9 +437,14 @@ function permissionsForRun(
 }
 
 function codexSandboxMode(
+  mode: ChatAgentMode,
   permissions: ChatAgentPermissions,
   remoteSandbox: CodexExecRemoteSandboxOptions | undefined
 ): "read-only" | "workspace-write" | "danger-full-access" {
+  // Codex's Full Access preset (src/shared/chatAccessModes.ts).
+  if (mode === "full-access") {
+    return "danger-full-access";
+  }
   if (remoteSandbox?.dangerFullAccess && permissions.workspaceWrite) {
     return "danger-full-access";
   }

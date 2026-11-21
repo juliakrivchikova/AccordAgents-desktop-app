@@ -450,7 +450,15 @@ test("in the sessions view the phone's New chat has no members: its chip chooses
   await app.waitFor(`!document.getElementById("new-chat-model-sheet").hidden`, "the chip's sheet");
   const codexAccess = await accessRows();
   assert.deepEqual(codexAccess.map(({ id, label, detail }) => ({ id, label, detail })), await sharedAccess("codex-cli"), "Codex's modes, worded as on the computer");
-  assert.deepEqual(codexAccess.filter((row) => row.chosen).map((row) => row.id), ["workspace-write"], "Codex starts in its Default (workspace write)");
+  assert.deepEqual(codexAccess.filter((row) => row.chosen).map((row) => row.id), ["workspace-write"], "Codex starts in its Ask for approval (workspace write)");
+  assert.deepEqual(codexAccess.map((row) => row.label), ["Ask for approval", "Approve for me", "Full Access"], "Codex's /permissions picker");
+  const sections = () => app.evaluate(`[...document.querySelectorAll('#new-chat-model-options .members-sheet-section')].map((head) => head.textContent)`);
+  assert.ok((await sections()).includes("Permissions"), "under Codex's own title");
+  assert.deepEqual(await app.evaluate(`[...document.querySelectorAll('#new-chat-model-options [data-plan]')].map((row) => [row.querySelector("strong").textContent, row.getAttribute("aria-pressed")])`),
+    [["Plan mode", "false"]], "Codex's Plan mode, a toggle of its own beside the permissions");
+  await app.evaluate(`document.querySelector('#new-chat-model-options [data-plan]').click()`);
+  await app.waitFor(`document.querySelector('#new-chat-model-options [data-plan]').getAttribute("aria-pressed") === "true"`, "Plan mode on");
+  assert.deepEqual((await accessRows()).filter((row) => row.chosen).map((row) => row.id), ["workspace-write"], "the preset stays under Plan mode");
   assert.equal(await app.evaluate(`document.querySelectorAll('#new-chat-model-options [data-runs-on]').length`), 0, "no Runs on without a machine");
 
   // Closed without sending, the chip's choice is gone, as on the computer.
@@ -477,7 +485,10 @@ test("in the sessions view the phone's New chat has no members: its chip chooses
   // Another provider: its own modes, its CLI's default chosen again.
   const claudeAccess = await accessRows();
   assert.deepEqual(claudeAccess.map(({ id, label, detail }) => ({ id, label, detail })), await sharedAccess("claude-code"), "Claude Code's modes, worded as on the computer");
-  assert.deepEqual(claudeAccess.filter((row) => row.chosen).map((row) => row.id), ["default"], "Claude Code starts in its Default");
+  assert.deepEqual(claudeAccess.filter((row) => row.chosen).map((row) => row.id), ["manual"], "Claude Code starts in its Manual (its Default before 2.1.330)");
+  assert.deepEqual(claudeAccess.map((row) => row.label), ["Manual", "Accept edits", "Plan", "Auto"], "Claude Code's own names");
+  assert.ok((await sections()).includes("Permission mode"), "under Claude's own title");
+  assert.equal(await app.evaluate(`document.querySelectorAll('#new-chat-model-options [data-plan]').length`), 0, "Claude Code's Plan is one of its modes");
   await app.evaluate(`document.querySelector('#new-chat-model-options [data-access="acceptEdits"]').click()`);
   await app.waitFor(`document.querySelector('#new-chat-model-options [data-access="acceptEdits"]').getAttribute("aria-pressed") === "true"`, "Accept edits chosen");
   assert.equal(await app.evaluate(`document.getElementById("new-chat-model-label").textContent`), "Haiku 5.5Low", "the model and effort stay");

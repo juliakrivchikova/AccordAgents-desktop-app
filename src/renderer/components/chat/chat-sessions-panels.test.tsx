@@ -10,7 +10,9 @@ import { FORK_TO_NEW_CHAT_DETAIL, FORK_TO_NEW_CHAT_LABEL } from "../../../shared
 import { ChatParticipantRosterRow } from "./chat-participant-roster-row";
 import { forkToNewChatReasonFor, machineForkSupportFrom } from "./use-fork-to-new-chat";
 import { ChatMembersPanel } from "./chat-members-panel";
-import { ChatModelAccessPanel, type ChatModelAccessPatch } from "./chat-model-access-picker";
+import { ChatMemberComposerControls, ChatModelMenu, type ChatModelAccessPatch } from "./chat-model-access-picker";
+import { latestAndOlderModels, modelFamily } from "./chat-model-groups";
+import { resetMemberModelCatalogs } from "./chat-member-model-name";
 import { memberSettingsActions } from "./chat-member-model-access";
 import { runtimePatchFields } from "../../app/use-chat-actions";
 import { defaultChatAgentPermissions } from "../../../shared/agentPermissions";
@@ -315,59 +317,137 @@ test("the side panel has no title and no main session row, says nothing when emp
   act(() => empty!.unmount());
 
   const session = renderSession({ member: DREW, readOnly: false, settings: <span data-testid="drew-settings" />, chip: <span data-testid="drew-chip" /> });
-  assert.equal(session.root.findAll(byTestId("drew-settings")).length, 1, "a gear in its session's header");
+  assert.equal(session.root.findAll(byTestId("drew-settings")).length, 1, "its … menu in its session's header");
   const composer = session.root.find((node) => node.props?.testId === "chat-member-composer");
-  assert.equal(composer.props.footerChip.props["data-testid"], "drew-chip", "its model chip in its composer");
+  assert.equal(composer.props.footerChip.props["data-testid"], "drew-chip", "its controls under its composer");
   act(() => session.unmount());
 });
 
-test("a member's settings in the sessions view: its model, effort, access in its CLI's terms and Remove from chat behind …; never member rights, auto-watch or a name", async () => {
+test("a member's settings in the sessions view: separate quiet controls (model, effort, its CLI's permission modes, Codex's Plan mode), each with its own menu; never member rights, auto-watch or a name", async () => {
   const host = window as unknown as { consensus?: unknown };
   const previous = host.consensus;
+  resetMemberModelCatalogs();
   host.consensus = {
     listProviderModels: async () => ({ kind: "codex-cli", authoritative: true, fetchedAt: "2026-11-21T00:00:00.000Z",
-      models: [{ id: "gpt-5.5", label: "GPT-5.5", recommended: true, source: "cli" }, { id: "gpt-5.5-mini", label: "GPT-5.5 mini", source: "cli" }] }),
+      models: [{ id: "gpt-5.5", label: "GPT-5.5", recommended: true, source: "cli", description: "Fast and affordable." }, { id: "gpt-5.5-mini", label: "GPT-5.5 mini", source: "cli" }] }),
     listMachines: async () => ({ machines: [] })
   };
   const patches: ChatModelAccessPatch[] = [];
-  let removed = 0;
   let renderer: ReturnType<typeof create> | undefined;
   try {
     await act(async () => {
       renderer = create(
         <TooltipProvider>
-          <ChatModelAccessPanel value={{ ...DREW, agentMode: "default", permissions: { ...defaultChatAgentPermissions(), workspaceWrite: false, cliApprovals: true } }}
-            onChange={(patch) => patches.push(patch)} runsOn={{}} actions={[{ label: "Remove from chat", tone: "danger", onSelect: () => { removed += 1; } }]} />
+          <ChatMemberComposerControls value={{ ...DREW, agentMode: "default", permissions: { ...defaultChatAgentPermissions(), workspaceWrite: false, cliApprovals: true } }}
+            onChange={(patch) => patches.push(patch)} runsOn={{}} />
         </TooltipProvider>
       );
       await new Promise((resolve) => setTimeout(resolve, 0));
     });
     const root = renderer!.root;
+    assert.deepEqual(root.findAll((node) => node.type === "button" && node.props["aria-haspopup"] === "menu").map((node) => node.props["data-testid"]),
+      ["chat-model-model", "chat-model-effort", "chat-model-mode"], "three separate controls, each opening its own menu");
+    assert.equal(root.findAll(byTestId("chat-model-runs-on")).length, 0, "where it runs only once a machine exists");
+    assert.equal(textOf(root.find(byTestId("chat-model-mode"))), "Read Only", "the preset it is in, by Codex's name");
+    assert.equal(root.findAll(byTestId("chat-model-model-menu")).length, 0, "menus are closed");
+    await openMenu(root, "chat-model-model");
     const text = textOf(root);
     assert.doesNotMatch(text, /Request other members|Manage members|Auto-watch|Main session|Provider/, "no rights, no auto-watch, no name; its provider is fixed");
-    assert.doesNotMatch(text, /Runs on/, "where it runs only once a machine exists");
-    assert.deepEqual(root.findAll(byTestId("chat-model-access-model")).map(textOf), ["GPT-5.5Default", "GPT-5.5 mini"]);
-    const modes = root.findAll(byTestId("chat-model-access-mode"));
-    assert.deepEqual(modes.map((row) => textOf(row.findAll((node) => node.props.className === "chat-model-access-row-label")[0]!)),
-      ["Read only", "Default", "Auto-review", "Plan mode"], "Codex's own presets (Read Only, Default) and its Auto-review and Plan mode");
-    assert.match(textOf(modes[1]!), /asks to go outside it or online/, "each says what Codex does in it");
-    assert.equal(modes[0]!.props["aria-checked"], true, "read-only now");
-    assert.deepEqual(patches, [], "opening it saves nothing");
-    await act(async () => { modes[1]!.props.onClick(); });
+    assert.deepEqual(root.findAll(byTestId("chat-model-option")).map(textOf), ["GPT-5.5Default · Fast and affordable.", "GPT-5.5 mini"], "the CLI's default first, with the vendor's words");
+    await act(async () => { root.find(byTestId("chat-model-model")).props.onClick(); });
+    await openMenu(root, "chat-model-mode");
+    assert.equal(textOf(root.find(byTestId("chat-access-menu")).find((node) => node.props.className === "composer-menu-label")), "Permissions", "Codex's own title");
+    const modes = root.findAll(byTestId("chat-access-option"));
+    assert.deepEqual(modes.map((row) => textOf(row.find((node) => node.props.className === "composer-menu-item-label"))),
+      ["Ask for approval", "Approve for me", "Full Access", "Read Only"], "Codex's /permissions picker, and Read Only while it is its preset");
+    assert.match(textOf(modes[2]!), /Exercise caution when using\./, "each with Codex's own description");
+    assert.doesNotMatch(textOf(root.find(byTestId("chat-access-menu"))), /Plan/, "Plan mode is not a permission");
+    assert.equal(modes[3]!.props["aria-checked"], true, "Read Only now");
+    assert.deepEqual(patches, [], "opening a menu saves nothing");
+    await act(async () => { modes[0]!.props.onClick(); });
     assert.equal(patches.at(-1)?.agentMode, "default");
     assert.equal(patches.at(-1)?.permissions?.workspaceWrite, true);
     assert.equal(patches.at(-1)?.permissions?.cliApprovals, true, "the CLI runs in its own mode, asking for the rest");
     assert.deepEqual(Object.keys(patches.at(-1)!).sort(), ["agentMode", "permissions"], "only what the choice changes");
-    assert.equal(root.findAll(byTestId("chat-model-access-action")).length, 0, "Remove from chat sits behind …");
-    await act(async () => { root.find((node) => node.type === "button" && node.props["aria-label"] === "More").props.onClick(); });
-    const remove = root.find(byTestId("chat-model-access-action"));
-    assert.equal(textOf(remove), "Remove from chat");
-    await act(async () => { remove.props.onClick(); });
-    assert.equal(removed, 1);
+    assert.equal(root.findAll(byTestId("chat-model-mode-menu")).length, 0, "a choice closes its menu");
+    const plan = root.find(byTestId("chat-model-plan"));
+    assert.equal(textOf(plan), "Plan mode");
+    assert.equal(plan.props["aria-pressed"], false);
+    await act(async () => { plan.props.onClick(); });
+    assert.equal(patches.at(-1)?.permissions?.codexPlanMode, true, "Plan mode on top of its preset");
+    assert.equal(patches.at(-1)?.permissions?.workspaceWrite, false, "the preset stays (Read Only)");
   } finally {
     if (renderer) act(() => renderer!.unmount());
     host.consensus = previous;
   }
+});
+
+test("Claude Code's permission modes by their names, Antigravity's with what it cannot do here; a member the main session made is held to its mode, the higher ones disabled with the reason", async () => {
+  const claude = { ...GERA, kind: "claude-code" as const, agentMode: "default" as const, permissions: { ...defaultChatAgentPermissions(), cliApprovals: true as const } };
+  const view = await renderPicker(claude, () => undefined);
+  try {
+    assert.equal(textOf(view.root.find(byTestId("chat-model-mode"))), "Manual", "Claude Code 2.1.330 calls its Default Manual");
+    await openMenu(view.root, "chat-model-mode");
+    const menu = view.root.find(byTestId("chat-access-menu"));
+    assert.equal(textOf(menu.find((node) => node.props.className === "composer-menu-label")), "Permission mode");
+    assert.deepEqual(menu.findAll(byTestId("chat-access-option")).map((row) => textOf(row.find((node) => node.props.className === "composer-menu-item-label"))),
+      ["Manual", "Accept edits", "Plan", "Auto"]);
+    assert.match(textOf(menu), /Always ask before making changes/);
+    assert.equal(view.root.findAll(byTestId("chat-model-plan")).length, 0, "Claude Code's Plan is one of its modes");
+  } finally {
+    view.done();
+  }
+  const main = { ...MAIN, kind: "claude-code" as const, ...applyChatAccessOptionById("claude-code", "manual", defaultChatAgentPermissions()) } as ChatParticipant;
+  const delegated = { ...claude, id: "p-made", delegatedByParticipantId: MAIN.id };
+  const held = await renderPicker(delegated, () => undefined, { mainSession: main });
+  try {
+    await openMenu(held.root, "chat-model-mode");
+    const rows = held.root.findAll(byTestId("chat-access-option"));
+    const state = rows.map((row) => [row.props["data-value"], row.props.disabled]);
+    assert.deepEqual(state, [["manual", false], ["acceptEdits", true], ["plan", false], ["auto", true]], "never above the main session's Manual");
+    assert.match(textOf(rows[3]!), /Not above the main session's mode \(Manual\)/, "the reason in its place");
+  } finally {
+    held.done();
+  }
+  const agy = await renderPicker({ ...TAYLOR, kind: "gemini-cli" as const, agentMode: "default" as const, permissions: { ...defaultChatAgentPermissions(), cliApprovals: true as const } }, () => undefined, {},
+    { listProviderModels: async () => ({ kind: "gemini-cli", authoritative: true, fetchedAt: "2026-11-21T00:00:00.000Z", models: [{ id: "gemini-4-neon-high", label: "Gemini 4 Neon (High)", recommended: true, source: "cli" }] }) });
+  try {
+    await openMenu(agy.root, "chat-model-mode");
+    assert.equal(textOf(agy.root.find(byTestId("chat-access-menu")).find((node) => node.props.className === "composer-menu-label")), "Agent Mode");
+    assert.match(textOf(agy.root.find(byTestId("chat-access-note"))), /Antigravity cannot ask for approval here/);
+    assert.equal(agy.root.findAll(byTestId("chat-model-effort")).length, 0, "agy folds effort into its models");
+  } finally {
+    agy.done();
+  }
+});
+
+test("a long model list: the newest of each family first, the rest under More models (open when the chosen one is there)", () => {
+  // Claude Code 2.1.330's initialize answer, in its order.
+  const claude = ["Opus 5.5", "Fable 5.2", "Sonnet 5.5", "Haiku 5.5", "Fable 5.1", "Haiku 4.5", "Sonnet 5", "Opus 5", "Fable 5", "Opus 4.8", "Opus 4.7", "Opus 4.6", "Sonnet 4.6"]
+    .map((label) => ({ id: label.toLowerCase().replace(/ /g, "-"), label, source: "cli" as const }));
+  const [recommended, ...rest] = claude;
+  const groups = latestAndOlderModels(rest, [recommended!]);
+  assert.deepEqual(groups.latest.map((model) => model.label), ["Fable 5.2", "Sonnet 5.5", "Haiku 5.5"], "Opus is the default row");
+  assert.deepEqual(groups.older.map((model) => model.label), ["Fable 5.1", "Haiku 4.5", "Sonnet 5", "Opus 5", "Fable 5", "Opus 4.8", "Opus 4.7", "Opus 4.6", "Sonnet 4.6"]);
+  assert.equal(modelFamily({ id: "gpt-5.6-luna", label: "GPT-5.6-Luna (gpt-5.6-luna)" }), modelFamily({ id: "gpt-6-luna", label: "GPT-6-Luna" }));
+  const codex = [{ id: "a", label: "GPT-5.6-Terra" }, { id: "b", label: "GPT-5.6-Luna" }];
+  assert.deepEqual(latestAndOlderModels(codex, [{ id: "c", label: "GPT-6-Luna" }]).older, [], "a short list is not split");
+  let renderer: ReturnType<typeof create> | undefined;
+  act(() => {
+    renderer = create(<ChatModelMenu value={{ ...DREW, kind: "claude-code" }} model="opus-4.8" defaultModel={recommended} defaultLabel="Opus 5.5" models={rest} onSelect={noop} />);
+  });
+  const rows = renderer!.root.findAll(byTestId("chat-model-option"));
+  assert.equal(rows.length, 1 + 3 + 9, "the chosen model is under More models, so it is open");
+  assert.equal(rows.find((row) => row.props["data-value"] === "opus-4.8")?.props["aria-checked"], true);
+  act(() => renderer!.update(<ChatModelMenu value={{ ...DREW, kind: "claude-code" }} model={undefined} defaultModel={recommended} defaultLabel="Opus 5.5" models={rest} onSelect={noop} />));
+  act(() => renderer!.unmount());
+  act(() => {
+    renderer = create(<ChatModelMenu value={{ ...DREW, kind: "claude-code" }} model={undefined} defaultModel={recommended} defaultLabel="Opus 5.5" models={rest} onSelect={noop} />);
+  });
+  assert.equal(renderer!.root.findAll(byTestId("chat-model-option")).length, 4, "closed: the default and the newest of each family");
+  act(() => renderer!.root.find(byTestId("chat-model-more")).props.onClick());
+  assert.equal(renderer!.root.findAll(byTestId("chat-model-option")).length, 13, "More models opens in place");
+  act(() => renderer!.unmount());
 });
 
 const CODEX_CATALOG = {
@@ -378,33 +458,41 @@ const CODEX_CATALOG = {
   ]
 };
 
-async function renderPicker(value: Parameters<typeof ChatModelAccessPanel>[0]["value"], onChange: (patch: ChatModelAccessPatch) => unknown, extra: Record<string, unknown> = {}, bridge: Record<string, unknown> = {}) {
+async function openMenu(root: ReactTestInstance, testId: string): Promise<void> {
+  await act(async () => { root.find(byTestId(testId)).props.onClick(); });
+}
+
+async function renderPicker(value: Parameters<typeof ChatMemberComposerControls>[0]["value"], onChange: (patch: ChatModelAccessPatch) => unknown, extra: Record<string, unknown> = {}, bridge: Record<string, unknown> = {}) {
   const host = window as unknown as { consensus?: unknown };
   const previous = host.consensus;
+  resetMemberModelCatalogs();
   host.consensus = { listProviderModels: async () => CODEX_CATALOG, listMachines: async () => ({ machines: [] }), ...bridge };
   let renderer: ReturnType<typeof create> | undefined;
   await act(async () => {
-    renderer = create(<TooltipProvider><ChatModelAccessPanel value={value} onChange={onChange} runsOn={{}} {...extra} /></TooltipProvider>);
+    renderer = create(<TooltipProvider><ChatMemberComposerControls value={value} onChange={onChange} runsOn={{}} {...extra} /></TooltipProvider>);
     await new Promise((resolve) => setTimeout(resolve, 0));
   });
   return { root: renderer!.root, done: () => { act(() => renderer!.unmount()); host.consensus = previous; } };
 }
 
-test("the picker saves only an explicit choice: an effort the model lacks reads as Default without a save, and Default really resets", async () => {
+test("the controls save only an explicit choice: an effort the model lacks reads as Default without a save, and Default really resets", async () => {
   const patches: ChatModelAccessPatch[] = [];
   const view = await renderPicker({ ...DREW, model: "gpt-5.5-mini", reasoningEffort: "xhigh", agentMode: "default", permissions: { ...defaultChatAgentPermissions(), cliApprovals: true } },
     (patch) => { patches.push(patch); });
   try {
-    const efforts = view.root.findAll(byTestId("chat-model-access-effort"));
+    assert.equal(textOf(view.root.find(byTestId("chat-model-effort"))), "Default", "xhigh, which mini lacks, reads as the CLI's own");
+    await openMenu(view.root, "chat-model-effort");
+    const efforts = view.root.findAll(byTestId("chat-effort-option"));
     assert.deepEqual(efforts.map(textOf), ["Default", "Low", "Medium"], "the chosen model's efforts");
-    assert.equal(efforts[0]!.props["aria-checked"], true, "xhigh, which mini lacks, reads as the CLI's own");
-    assert.deepEqual(patches, [], "nothing is saved by opening the picker (it used to save in a loop)");
+    assert.equal(efforts[0]!.props["aria-checked"], true);
+    assert.deepEqual(patches, [], "nothing is saved by opening a menu");
     await act(async () => { efforts[0]!.props.onClick(); });
     assert.deepEqual(patches.at(-1), { reasoningEffort: "" }, "Default sends the explicit reset, not undefined (which kept the old effort)");
-    const models = view.root.findAll(byTestId("chat-model-access-model"));
-    await act(async () => { models[0]!.props.onClick(); });
+    await openMenu(view.root, "chat-model-model");
+    await act(async () => { view.root.findAll(byTestId("chat-model-option"))[0]!.props.onClick(); });
     assert.deepEqual(patches.at(-1), { model: "" }, "the default model: the explicit reset; its own efforts have xhigh, so the effort stays");
-    await act(async () => { models[1]!.props.onClick(); });
+    await openMenu(view.root, "chat-model-model");
+    await act(async () => { view.root.findAll(byTestId("chat-model-option"))[1]!.props.onClick(); });
     assert.equal(patches.length, 2, "choosing the model it already has saves nothing");
   } finally {
     view.done();
@@ -412,7 +500,8 @@ test("the picker saves only an explicit choice: an effort the model lacks reads 
   const fromDefault: ChatModelAccessPatch[] = [];
   const second = await renderPicker({ ...DREW, reasoningEffort: "xhigh", permissions: { ...defaultChatAgentPermissions(), cliApprovals: true } }, (patch) => { fromDefault.push(patch); });
   try {
-    await act(async () => { second.root.findAll(byTestId("chat-model-access-model"))[1]!.props.onClick(); });
+    await openMenu(second.root, "chat-model-model");
+    await act(async () => { second.root.findAll(byTestId("chat-model-option"))[1]!.props.onClick(); });
     assert.deepEqual(fromDefault, [{ model: "gpt-5.5-mini", reasoningEffort: "" }], "a model without the saved effort clears it in the same save");
   } finally {
     second.done();
@@ -422,8 +511,11 @@ test("the picker saves only an explicit choice: an effort the model lacks reads 
 test("access set in the classic controls is not passed off as one of the CLI's modes", async () => {
   const view = await renderPicker({ ...DREW, agentMode: "default", permissions: { ...defaultChatAgentPermissions(), workspaceWrite: true } }, () => undefined);
   try {
-    assert.equal(view.root.findAll(byTestId("chat-model-access-mode")).filter((row) => row.props["aria-checked"]).length, 0, "no mode marked");
-    assert.match(textOf(view.root.find(byTestId("chat-model-access-custom"))), /Custom access/);
+    assert.equal(textOf(view.root.find(byTestId("chat-model-mode"))), "Custom");
+    assert.equal(view.root.findAll(byTestId("chat-model-plan")).length, 0, "no Plan mode outside the CLI's own mode");
+    await openMenu(view.root, "chat-model-mode");
+    assert.equal(view.root.findAll(byTestId("chat-access-option")).filter((row) => row.props["aria-checked"]).length, 0, "no mode marked");
+    assert.match(textOf(view.root.find(byTestId("chat-access-custom"))), /Custom access/);
   } finally {
     view.done();
   }
@@ -452,8 +544,9 @@ test("after a CLI mode was chosen in the picker, a classic toggle ends it: what 
   }
   const view = await renderPicker({ ...member, permissions: patches.at(-1)!.permissions! }, () => undefined);
   try {
-    assert.equal(view.root.findAll(byTestId("chat-model-access-mode")).filter((row) => row.props["aria-checked"]).length, 0, "no mode marked");
-    assert.match(textOf(view.root.find(byTestId("chat-model-access-custom"))), /Custom access/);
+    await openMenu(view.root, "chat-model-mode");
+    assert.equal(view.root.findAll(byTestId("chat-access-option")).filter((row) => row.props["aria-checked"]).length, 0, "no mode marked");
+    assert.match(textOf(view.root.find(byTestId("chat-access-custom"))), /Custom access/);
   } finally {
     view.done();
   }
@@ -473,6 +566,8 @@ test("Runs on waits for the save: Cloud run prepares its machine only after the 
     () => new Promise<boolean>((resolve) => { answers.push(resolve); }), { runsOn: { moves: true } }, bridge);
   try {
     await act(async () => { await new Promise((resolve) => setTimeout(resolve, 0)); });
+    assert.equal(textOf(view.root.find(byTestId("chat-model-runs-on"))), "Local", "once a machine exists, where it runs is a control of its own");
+    await openMenu(view.root, "chat-model-runs-on");
     const select = () => view.root.find((node) => node.type === "select" && node.props["aria-label"] === "Run on");
     await act(async () => { select().props.onChange({ currentTarget: { value: "machine:m-cloud" } }); });
     assert.match(textOf(view.root), /Moving to Cloud box with its session/, "the move is shown while it is saved, naming nobody");

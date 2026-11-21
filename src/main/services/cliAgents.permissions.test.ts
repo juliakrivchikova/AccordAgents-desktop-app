@@ -2345,7 +2345,7 @@ test("claude warm permits empty result only when explicitly allowed", () => {
 });
 
 function chatOptions(overrides: {
-  agentMode: "default" | "plan" | "auto";
+  agentMode: "default" | "plan" | "auto" | "full-access";
   workspaceWrite: boolean;
   webAccess?: boolean;
   shell?: ReturnType<typeof defaultChatAgentPermissions>["shell"];
@@ -7033,7 +7033,7 @@ test("a host admission completing after shutdown cannot start its earlier comman
 // The sessions view's access in each CLI's own terms (src/shared/chatAccessModes.ts):
 // the CLI runs in that mode and asks about what it is not granted, as in its
 // own terminal, each ask an approval card.
-function ownModeOptions(agentMode: "default" | "plan" | "auto", workspaceWrite: boolean, shell?: ReturnType<typeof defaultChatAgentPermissions>["shell"]) {
+function ownModeOptions(agentMode: "default" | "plan" | "auto" | "full-access", workspaceWrite: boolean, shell?: ReturnType<typeof defaultChatAgentPermissions>["shell"]) {
   const options = chatOptions({ agentMode, workspaceWrite, shell, canRequestPermissions: true, appToolNames: ["app_permissions_request_change", "app_tool_permission"] });
   return { ...options, permissions: { ...options.permissions, cliApprovals: true as const } };
 }
@@ -7071,22 +7071,54 @@ test("Claude Code Plan mode and Auto mode are the CLI's own; the classic control
   assert.ok(["Edit", "Bash", "WebFetch"].every((tool) => classic.disallowedTools.includes(tool)), "classic: unchanged");
 });
 
-test("Codex Read only and Default (sessions view) ask through approval cards (on-request); Plan mode and the classic controls never ask", () => {
+test("Codex Ask for approval and Read Only (sessions view) ask the User through approval cards (on-request, reviewer the User); Approve for me lets Codex review; Full Access never asks; the classic controls never ask", () => {
   const runner = makeRunner() as any;
   const participant = { kind: "codex-cli", label: "@codex", model: undefined };
   const readOnly = runner.codexAppServerThreadStartParams(participant, "/repo", "chat", ownModeOptions("default", false));
   assert.equal(readOnly.sandbox, "read-only");
   assert.equal(readOnly.approvalPolicy, "on-request", "Codex's Read Only preset: approval to edit or go online");
-  assert.equal(readOnly.approvalsReviewer, null, "the User answers, not Codex");
+  assert.equal(readOnly.approvalsReviewer, "user", "the User answers, even when her Codex config routes asks to auto-review");
   const workspace = runner.codexAppServerThreadResumeParams("thread-1", participant, "/repo", "chat", ownModeOptions("default", true));
   assert.equal(workspace.sandbox, "workspace-write");
-  assert.equal(workspace.approvalPolicy, "on-request", "Codex's Default preset, on resume too");
+  assert.equal(workspace.approvalPolicy, "on-request", "Codex's Ask for approval preset, on resume too");
+  assert.equal(workspace.approvalsReviewer, "user");
   const auto = runner.codexAppServerThreadStartParams(participant, "/repo", "chat", ownModeOptions("auto", false));
   assert.equal(auto.approvalPolicy, "on-request");
-  assert.equal(auto.approvalsReviewer, "auto_review");
-  const plan = runner.codexAppServerThreadStartParams(participant, "/repo", "chat", ownModeOptions("plan", true));
-  assert.equal(plan.sandbox, "read-only");
-  assert.equal(plan.approvalPolicy, "never");
+  assert.equal(auto.approvalsReviewer, "auto_review", "Approve for me");
+  assert.equal(auto.sandbox, "workspace-write");
+  const full = runner.codexAppServerThreadStartParams(participant, "/repo", "chat", ownModeOptions("full-access", false));
+  assert.equal(full.sandbox, "danger-full-access", "Codex's Full Access preset");
+  assert.equal(full.approvalPolicy, "never");
+  assert.equal(full.approvalsReviewer, null);
+  assert.equal(runner.codexAppServerThreadResumeParams("thread-1", participant, "/repo", "chat", ownModeOptions("full-access", false)).sandbox, "danger-full-access", "on resume too");
+  // A member saved in Plan before Plan was its own toggle: Read Only, asking.
+  const legacyPlan = runner.codexAppServerThreadStartParams(participant, "/repo", "chat", ownModeOptions("plan", true));
+  assert.equal(legacyPlan.sandbox, "read-only");
+  assert.equal(legacyPlan.approvalPolicy, "on-request");
   const classic = runner.codexAppServerThreadStartParams(participant, "/repo", "chat", chatOptions({ agentMode: "default", workspaceWrite: true }));
   assert.equal(classic.approvalPolicy, "never", "classic: unchanged");
+  assert.equal(classic.approvalsReviewer, null, "classic: unchanged");
+  const classicPlan = runner.codexAppServerThreadStartParams(participant, "/repo", "chat", chatOptions({ agentMode: "plan", workspaceWrite: true }));
+  assert.deepEqual([classicPlan.sandbox, classicPlan.approvalPolicy], ["read-only", "never"], "the classic Plan: unchanged");
+});
+
+test("Codex's Plan mode is its collaboration mode, said on every turn (a thread keeps the last one), with the thread's model; off, its Default mode with the member's effort", () => {
+  const runner = makeRunner() as any;
+  const participant = { kind: "codex-cli", label: "@codex", model: undefined, reasoningEffort: "high" };
+  const planned = { ...ownModeOptions("default", true), permissions: { ...ownModeOptions("default", true).permissions, codexPlanMode: true as const } };
+  assert.deepEqual(runner.codexCollaborationMode(participant, "chat", planned, "gpt-6-luna"),
+    { mode: "plan", settings: { model: "gpt-6-luna", reasoning_effort: null, developer_instructions: null } }, "Codex's own effort for Plan mode");
+  assert.equal(runner.codexAppServerThreadStartParams(participant, "/repo", "chat", planned).sandbox, "workspace-write", "the preset stays under Plan mode");
+  assert.deepEqual(runner.codexCollaborationMode(participant, "chat", ownModeOptions("default", true), "gpt-6-luna"),
+    { mode: "default", settings: { model: "gpt-6-luna", reasoning_effort: "high", developer_instructions: null } }, "off: Default, turning a thread's Plan off");
+  assert.equal(runner.codexCollaborationMode({ ...participant, model: "gpt-5.6-terra" }, "chat", planned, "gpt-6-luna").settings.model, "gpt-5.6-terra", "the member's own model");
+  assert.equal(runner.codexCollaborationMode(participant, "chat", planned, undefined), undefined, "no model known: nothing said");
+  assert.equal(runner.codexCollaborationMode(participant, "chat", ownModeOptions("plan", true), "m").mode, "plan", "a member saved in Plan from before");
+  assert.equal(runner.codexCollaborationMode(participant, "chat", chatOptions({ agentMode: "default", workspaceWrite: true }), "m").mode, "default", "classic: Default");
+  assert.equal(runner.codexCollaborationMode(participant, "code-review", planned, "m"), undefined, "chat turns only");
+});
+
+test("Codex's Full Access is not a Claude Code or Antigravity mode: they run Auto", () => {
+  const runner = makeRunner() as any;
+  assert.equal(runner.claudeToolConfig("chat", "/repo", [], ownModeOptions("full-access", false)).permissionMode, "auto");
 });

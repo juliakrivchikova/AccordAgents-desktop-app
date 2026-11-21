@@ -311,6 +311,8 @@ export interface NewChatMainSessionChoice {
   /** Its CLI's mode by the CLI's own name (chatAccessOptions); none: the
    *  mode its CLI starts in. */
   access?: string;
+  /** Codex's Plan mode on (its own toggle beside the permissions). */
+  plan?: boolean;
   /** The machine it runs on; none: the computer. */
   homeMachineId?: string;
 }
@@ -331,7 +333,8 @@ export function newChatMainSessionFor(
   const provider = (providers ?? []).find((item) => item.kind === choice.kind && (item.hostId ?? "") === (choice.hostId ?? ""));
   if (!provider) {
     // Its CLI's mode, on the provider the offer has.
-    return { ...offered, ...applyChatAccessOptionById(offered.kind, choice.kind === offered.kind ? choice.access : undefined, offered.permissions) };
+    const same = choice.kind === offered.kind;
+    return { ...offered, ...applyChatAccessOptionById(offered.kind, same ? choice.access : undefined, offered.permissions, same && choice.plan) };
   }
   const model = choice.model && provider.models.some((item) => item.id === choice.model) ? choice.model : undefined;
   const efforts = (model ? provider.models.find((item) => item.id === model)?.efforts : undefined) ?? provider.efforts;
@@ -344,7 +347,7 @@ export function newChatMainSessionFor(
     ...(provider.hostId ? { hostId: provider.hostId, hostLabel: provider.hostLabel, hostVendor: provider.hostVendor } : {}),
     ...(model ? { model } : {}),
     ...(reasoningEffort ? { reasoningEffort } : {}),
-    ...applyChatAccessOptionById(provider.kind, choice.access, offered.permissions),
+    ...applyChatAccessOptionById(provider.kind, choice.access, offered.permissions, choice.plan),
     ...(choice.homeMachineId ? { homeMachineId: choice.homeMachineId } : {})
   };
 }

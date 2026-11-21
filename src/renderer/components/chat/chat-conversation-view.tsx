@@ -232,6 +232,11 @@ export function ChatConversationView(props: ChatConversationViewProps): JSX.Elem
   const sessionsChrome = useChatSessionsChrome({
     sessions, viewMode, rightPanel, participantsById, closeArtifacts: artifacts.closePanel, accordOpen: Boolean(dockedAccord)
   });
+  // The main session's … actions go into the chat title's menu.
+  const mainSessionActions = props.mainSessionActions;
+  const headerState = useMemo(() => sessions && mainSessionActions
+    ? { ...sessionsChrome.header, mainSession: { id: sessions.mainSessionId, actions: mainSessionActions } }
+    : sessionsChrome.header, [mainSessionActions, sessions, sessionsChrome.header]);
   const viewport = useChatConversationViewport({
     conversationId: props.conversation.id,
     messages: props.conversation.messages,
@@ -403,7 +408,7 @@ export function ChatConversationView(props: ChatConversationViewProps): JSX.Elem
             }
           }}
         >
-          <ChatViewHeaderContext.Provider value={sessionsChrome.header}>{props.topBar}</ChatViewHeaderContext.Provider>
+          <ChatViewHeaderContext.Provider value={headerState}>{props.topBar}</ChatViewHeaderContext.Provider>
           <div className="chat-main">
             <ChatConversationTimeline
               activityDisclosure={activityDisclosure}

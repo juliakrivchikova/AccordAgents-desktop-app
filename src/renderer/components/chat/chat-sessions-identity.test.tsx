@@ -15,7 +15,8 @@ import { ChatMemberMark, ChatSessionsPresentationContext, renderComposerMemberMa
 import { ChatComposerSendButton } from "./chat-composer-send-button";
 import { memberDefaultModelName, resetMemberModelCatalogs } from "./chat-member-model-name";
 import { ChatParticipantRosterRow } from "./chat-participant-roster-row";
-import { SESSIONS_COMPOSER_PLACEHOLDER, mainComposerTargetIds, memberModelChip, sessionsComposerProps } from "./chat-sessions-composer";
+import { SESSIONS_COMPOSER_PLACEHOLDER, mainComposerTargetIds, sessionsComposerProps } from "./chat-sessions-composer";
+import { ChatMemberComposerControls } from "./chat-model-access-picker";
 import { ChatSessionsLinksContext, type ChatSessionsLinks } from "./chat-sessions-links";
 import { ChatTurnFinishedNote } from "./chat-turn-finished-note";
 import { DREW, MAIN, PARTICIPANTS, TAYLOR } from "./chat-sessions-fixtures.test";
@@ -126,18 +127,22 @@ test("the New chat screen shows the main session by its provider's logo, not an 
   member.unmount();
 });
 
-test("the sessions view's composer writes to the main session: no members to mention, its own placeholder, the main session's model chip", () => {
+/** A member's controls under a composer (model, effort, mode). */
+const controls = (participant: typeof MAIN): ReactElement => <ChatMemberComposerControls value={participant} onChange={() => undefined} />;
+const controlText = (root: ReactTestInstance, part: string): string => textOf(root.find((node) => node.type === "button" && node.props["data-testid"] === `chat-model-${part}`));
+
+test("the sessions view's composer writes to the main session: no members to mention, its own placeholder, the main session's controls", () => {
   assert.deepEqual(sessionsComposerProps(undefined), {}, "the classic composer is as before");
   const props = sessionsComposerProps(MAIN.id, (id) => <span data-testid="chip">{id}</span>);
   assert.deepEqual(props.participants, []);
   assert.equal(props.placeholder, SESSIONS_COMPOSER_PLACEHOLDER);
-  const chip = renderIn(true, <>{memberModelChip(PARTICIPANTS, MAIN.id)}</>);
-  assert.deepEqual(providerKinds(chip.root), [MAIN.kind]);
-  assert.equal(textOf(chip.root), "Claude Code", "no model of its own and no list of its CLI's: the CLI's name, never 'Default model'");
+  const chip = renderIn(true, controls(MAIN));
+  assert.deepEqual(providerKinds(chip.root.find((node) => node.type === "button" && node.props["data-testid"] === "chat-model-model")), [MAIN.kind]);
+  assert.equal(controlText(chip.root, "model"), "Claude Code", "no model of its own and no list of its CLI's: the CLI's name, never 'Default model'");
   chip.unmount();
-  const tuned = renderIn(true, <>{memberModelChip([{ ...MAIN, model: "Haiku 5.5", reasoningEffort: "low" }], MAIN.id)}</>);
-  assert.match(textOf(tuned.root), /Haiku 5\.5/);
-  assert.match(textOf(tuned.root), /Low/);
+  const tuned = renderIn(true, controls({ ...MAIN, model: "Haiku 5.5", reasoningEffort: "low" }));
+  assert.equal(controlText(tuned.root, "model"), "Haiku 5.5");
+  assert.equal(controlText(tuned.root, "effort"), "Low", "the effort, a control of its own");
   tuned.unmount();
 });
 
@@ -223,7 +228,7 @@ test("a member without a model of its own: its chip names the model its CLI runs
   // A member on an added provider: the vendor's default model.
   assert.equal(memberDefaultModelName({ ...MAIN, hostVendor: "zai", hostLabel: "Z.ai" }, undefined), "GLM-5.3");
 
-  // The chip asks the CLI's list once and shows its default, with the effort after it.
+  // The controls ask the CLI's list once and show its default, and the effort beside it.
   resetMemberModelCatalogs();
   const asked: string[] = [];
   // The window the renderer tests run in, or one of its own.
@@ -236,12 +241,12 @@ test("a member without a model of its own: its chip names the model its CLI runs
     return catalog([{ id: "opus", label: "Opus", recommended: true, source: "cli" }]);
   } };
   try {
-    const chip = renderIn(true, <>{memberModelChip([{ ...MAIN, reasoningEffort: "high" }], MAIN.id)}</>);
+    const chip = renderIn(true, controls({ ...MAIN, reasoningEffort: "high" }));
     await act(async () => { await new Promise((resolve) => setTimeout(resolve, 0)); });
-    assert.equal(textOf(chip.root), "OpusHigh");
+    assert.deepEqual([controlText(chip.root, "model"), controlText(chip.root, "effort")], ["Opus", "High"]);
     chip.unmount();
-    const again = renderIn(true, <>{memberModelChip(PARTICIPANTS, MAIN.id)}</>);
-    assert.equal(textOf(again.root), "Opus", "known at once the next time");
+    const again = renderIn(true, controls(MAIN));
+    assert.equal(controlText(again.root, "model"), "Opus", "known at once the next time");
     again.unmount();
     assert.deepEqual(asked, ["claude-code"], "asked once");
   } finally {

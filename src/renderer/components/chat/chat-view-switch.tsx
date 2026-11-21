@@ -5,6 +5,9 @@ import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { IconButton } from "../primitives";
 import type { ChatViewMode } from "../../../shared/types";
+import type { ChatModelAccessAction } from "./chat-model-access-picker";
+import { ChatMemberActionItems } from "./chat-member-model-access";
+import { ChatBackgroundTasksContext } from "./chat-roster-status";
 
 export const CHAT_VIEW_SWITCH_DISABLED_REASON = "This chat was made before main sessions, so it has the classic view only.";
 
@@ -66,10 +69,18 @@ export function chatMembersButtonLabel(runningCount: number): string {
 
 /** What the open chat puts into the header: its view switch and, in the
  *  sessions view, the toggle of its side panel. */
+/** The main session's … actions (Restart, Fork to new chat), made for the
+ *  title's menu: `close` closes it, `backgroundTaskCount` is the main
+ *  session's background work (a restart stops it). */
+export type MainSessionActions = (participantId: string, close: () => void, backgroundTaskCount: number) => ChatModelAccessAction[];
+
 export interface ChatViewHeaderState {
   view: ChatViewMode;
   canSwitch: boolean;
   onChangeView: (view: ChatViewMode) => void;
+  /** The sessions view: the main session and its … actions, which the
+   *  title's menu lists under the view switch. */
+  mainSession?: { id: string; actions: MainSessionActions };
   members?: {
     runningCount: number;
     /** An Accord is open: a dot on the toggle. */
@@ -127,13 +138,17 @@ export function ChatViewHeaderControls(): JSX.Element | null {
 }
 
 /** The chevron beside the chat's title in the sessions view: its menu holds
- *  the view switch ("View: Sessions / Classic"). Nothing elsewhere. */
+ *  the view switch ("View: Sessions / Classic") and the main session's …
+ *  actions (Restart, Fork to new chat). */
 export function ChatViewTitleMenu(): JSX.Element | null {
   const state = useContext(ChatViewHeaderContext);
   const [open, setOpen] = useState(false);
+  const backgroundTasks = useContext(ChatBackgroundTasksContext);
   if (!state || state.view !== "sessions") {
     return null;
   }
+  const main = state.mainSession;
+  const mainActions = main ? main.actions(main.id, () => setOpen(false), (backgroundTasks.get(main.id) ?? []).length) : [];
   return (
     <Popover open={open} onOpenChange={setOpen}>
       <PopoverTrigger asChild>
@@ -141,6 +156,11 @@ export function ChatViewTitleMenu(): JSX.Element | null {
       </PopoverTrigger>
       <PopoverContent align="start" sideOffset={6} className="chat-title-menu" data-testid="chat-title-menu-content">
         <ChatViewMenuItems state={state} onPicked={() => setOpen(false)} />
+        {mainActions.length > 0 && (
+          <div className="chat-title-menu-group" data-testid="chat-title-menu-main-session">
+            <ChatMemberActionItems label="Main session" actions={mainActions} />
+          </div>
+        )}
       </PopoverContent>
     </Popover>
   );

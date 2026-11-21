@@ -1,43 +1,137 @@
-/* The sessions view's compact model picker (T3 Code's): the composer chip's
-   and a member's settings, and the New chat chip's menu. Tiny muted section
-   labels, one-line rows, a check on the chosen one. */
+/* The sessions view's composer controls (Claude's desktop app, Codex and T3
+   Code's way): quiet chips under the composer (model, effort, permission
+   mode, Codex's Plan mode, where it runs), each opening its own small menu
+   laid over the window. Tiny muted section titles, each choice's name with
+   the vendor's description wrapped under it, a check on the chosen one. */
 
-.chat-model-access {
-  position: relative;
-  display: grid;
+.chat-composer-controls {
+  display: inline-flex;
+  align-items: center;
+  flex-wrap: wrap;
+  justify-content: flex-end;
   gap: 2px;
   min-width: 0;
 }
 
-.chat-model-access[aria-disabled="true"] {
+.chat-composer-controls[aria-disabled="true"] .chat-model-chip {
   opacity: 0.6;
 }
 
-.chat-model-access-section {
+.chat-composer-control-text {
+  min-width: 0;
+  max-width: 160px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.chat-composer-control-text.is-muted {
+  color: var(--app-muted);
+}
+
+.composer-menu-trigger {
+  gap: 4px;
+  min-width: 0;
+  max-width: 100%;
+}
+
+.composer-menu-trigger[aria-expanded="true"] {
+  background: var(--app-surface-hover);
+  color: var(--app-text-strong);
+}
+
+.composer-menu-trigger:disabled,
+.chat-composer-toggle:disabled {
+  cursor: default;
+}
+
+.composer-menu-chevron {
+  flex: 0 0 auto;
+  color: var(--app-muted);
+}
+
+/* Codex's Plan mode: pressed, it reads as the chosen one, not as a colour. */
+.chat-composer-toggle.is-on {
+  background: var(--app-surface-active);
+  color: var(--app-text-strong);
+}
+
+.chat-member-actions-trigger {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  border: 0;
+  border-radius: var(--radius-control);
+  background: transparent;
+  color: var(--app-text-secondary);
+  cursor: pointer;
+}
+
+.chat-member-actions-trigger:hover,
+.chat-member-actions-trigger[aria-expanded="true"] {
+  background: var(--app-surface-hover);
+  color: var(--app-text-strong);
+}
+
+.chat-member-actions-trigger:focus-visible,
+.chat-composer-toggle:focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring);
+}
+
+.composer-menu-item:focus-visible {
+  outline: none;
+}
+
+/* The menu itself: over the window, never wider than it nor taller than the
+   room on its side of its control (composer-menu.tsx sets both). */
+.composer-menu {
+  position: fixed;
+  z-index: 60;
+  display: grid;
+  gap: 2px;
+  min-width: 200px;
+  overflow-x: hidden;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding: 4px;
+  border: 1px solid var(--app-border);
+  border-radius: var(--radius-card);
+  background: var(--popover);
+  color: var(--app-text);
+  box-shadow: var(--shadow-lg);
+  font-size: 13px;
+}
+
+.composer-menu-section {
   display: grid;
   gap: 1px;
+  min-width: 0;
   padding: 2px 0 4px;
 }
 
-.chat-model-access-section + .chat-model-access-section {
+.composer-menu-section + .composer-menu-section {
   border-top: 1px solid var(--app-hairline);
   padding-top: 6px;
 }
 
-.chat-model-access-label {
+.composer-menu-label {
   padding: 2px 8px 3px;
   color: var(--app-muted);
   font-size: 11px;
   font-weight: 500;
 }
 
-.chat-model-access-row {
+.composer-menu-item {
   display: flex;
-  align-items: center;
+  align-items: flex-start;
   gap: 8px;
   width: 100%;
+  min-width: 0;
   min-height: 28px;
-  padding: 4px 8px;
+  padding: 5px 8px;
   border: 0;
   border-radius: var(--radius-control);
   background: transparent;
@@ -48,140 +142,83 @@
   cursor: pointer;
 }
 
-.chat-model-access-row:hover:not(:disabled) {
+.composer-menu-item:hover:not(:disabled),
+.composer-menu-item:focus-visible {
   background: var(--app-surface-hover);
 }
 
-.chat-model-access-row:disabled {
+.composer-menu-item:disabled {
   cursor: default;
-  opacity: 0.6;
 }
 
-.chat-model-access-row.is-danger {
+.composer-menu-item:disabled .composer-menu-item-label {
+  color: var(--app-muted);
+}
+
+.composer-menu-item.is-danger .composer-menu-item-label {
   color: var(--app-danger);
 }
 
-.chat-model-access-row-label {
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.chat-model-access-row-detail {
-  min-width: 0;
-  overflow: hidden;
-  color: var(--app-muted);
-  font-size: 12px;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.chat-model-access-check {
+.composer-menu-item-mark {
   display: inline-flex;
-  width: 14px;
-  margin-left: auto;
   flex: 0 0 auto;
-  color: var(--app-text-strong);
+  padding-top: 2px;
 }
 
-.chat-model-access-efforts {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 4px;
-  padding: 0 8px 2px;
-}
-
-.chat-model-access-effort {
-  height: 24px;
-  padding: 0 9px;
-  border: 1px solid var(--app-hairline);
-  border-radius: 999px;
-  background: transparent;
-  color: var(--app-text-secondary);
-  font: inherit;
-  font-size: 12px;
-  cursor: pointer;
-}
-
-.chat-model-access-effort:hover:not(:disabled) {
-  background: var(--app-surface-hover);
-}
-
-.chat-model-access-effort.is-selected {
-  border-color: var(--app-border-strong);
-  background: var(--app-surface-active);
-  color: var(--app-text-strong);
-}
-
-.chat-model-access-note {
-  margin: 0;
-  padding: 2px 8px;
-  color: var(--app-muted);
-  font-size: 12px;
-}
-
-.chat-model-access-more {
-  position: absolute;
-  top: 0;
-  right: 0;
-  z-index: 1;
-}
-
-/* Opens leftward from the … at the settings' top right, so it stays inside
-   their 320px card: never wider than the card, each item's label on its own
-   line with its muted line (what it does, or why not) wrapping under it. */
-.chat-model-access-menu {
-  position: absolute;
-  top: calc(100% + 4px);
-  right: 0;
-  width: max-content;
-  min-width: 170px;
-  max-width: 280px;
-  padding: 4px;
-  border: 1px solid var(--app-border);
-  border-radius: var(--radius-card);
-  background: var(--popover);
-  box-shadow: var(--shadow-lg);
-}
-
-.chat-model-access-menu .chat-model-access-row {
-  flex-direction: column;
-  align-items: flex-start;
+.composer-menu-item-copy {
+  display: grid;
   gap: 1px;
+  min-width: 0;
+  flex: 1 1 auto;
 }
 
-.chat-model-access-menu .chat-model-access-row-label,
-.chat-model-access-menu .chat-model-access-row-detail {
-  max-width: 100%;
+.composer-menu-item-label,
+.composer-menu-item-detail {
+  min-width: 0;
   white-space: normal;
   overflow-wrap: anywhere;
 }
 
-/* A disabled item's muted line says why: it stays readable, only the label
-   dims. */
-.chat-model-access-menu .chat-model-access-row:disabled {
-  opacity: 1;
-}
-
-.chat-model-access-menu .chat-model-access-row:disabled .chat-model-access-row-label {
+.composer-menu-item-detail {
   color: var(--app-muted);
+  font-size: 12px;
+  line-height: 1.35;
 }
 
-.chat-model-access .chat-run-location,
-.chat-model-access-section > :not(.chat-model-access-label):not(.chat-model-access-row):not(.chat-model-access-efforts):not(.chat-model-access-note) {
-  padding: 0 8px;
+.composer-menu-check {
+  display: inline-flex;
+  width: 14px;
+  flex: 0 0 auto;
+  padding-top: 2px;
+  color: var(--app-text-strong);
 }
 
-/* The New chat chip and its menu. */
+.composer-menu-disclosure {
+  align-items: center;
+  color: var(--app-text-secondary);
+}
+
+.composer-menu-note {
+  margin: 0;
+  padding: 2px 8px 4px;
+  color: var(--app-muted);
+  font-size: 12px;
+  line-height: 1.35;
+}
+
+.composer-menu-field {
+  padding: 0 8px 2px;
+}
+
+/* The New chat composer's controls. */
 .new-chat-model-picker {
-  position: relative;
   min-width: 0;
 }
 
-.new-chat-model-menu {
-  right: 0;
-  width: min(320px, calc(100vw - 48px));
-  overflow-y: auto;
-  overscroll-behavior: contain;
+/* The chat title's menu: the main session's … actions under the view
+   switch. */
+.chat-title-menu-group {
+  margin-top: 4px;
+  padding-top: 4px;
+  border-top: 1px solid var(--app-hairline);
 }

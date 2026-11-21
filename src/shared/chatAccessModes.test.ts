@@ -5,41 +5,122 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  chatAgentModeForKind,
+  chatAgentModeWithin,
   chatAgentPermissionsWithin,
   clampChatAgentAccess,
+  clampChatAgentMode,
   clampChatAgentPermissions,
   cloneChatAgentPermissions,
   defaultChatAgentPermissions,
+  effectiveChatAgentPermissionsForProvider,
+  normalizeChatAgentMode,
   normalizeChatAgentPermissions
 } from "./agentPermissions";
 import {
   applyChatAccessOption,
   applyChatAccessOptionById,
+  chatAccessMenuOptions,
+  chatAccessModeSet,
   chatAccessOptions,
+  codexPlanModeOn,
+  currentChatAccessId,
   defaultChatAccessOption,
   selectedChatAccessOption,
-  withClassicChatPermissions
+  withClassicChatPermissions,
+  withCodexPlanMode
 } from "./chatAccessModes";
 import { newChatMainSessionFor } from "./newChat";
 import { chatPermissionPromptLines, chatPermissionSummaryLine } from "./permissionPrompt";
 import type { ChatParticipant } from "./types";
 
-test("each CLI's modes by its own names, and the one it starts in", () => {
-  assert.deepEqual(chatAccessOptions("claude-code").map((option) => option.label), ["Default", "Accept edits", "Plan mode", "Auto mode"]);
-  assert.deepEqual(chatAccessOptions("codex-cli").map((option) => option.label), ["Read only", "Default", "Auto-review", "Plan mode"]);
-  assert.deepEqual(chatAccessOptions("gemini-cli").map((option) => option.label), ["Default", "Accept edits", "Auto mode", "Plan mode"]);
-  assert.equal(defaultChatAccessOption("claude-code").id, "default");
-  assert.equal(defaultChatAccessOption("codex-cli").id, "workspace-write", "Codex's Default preset");
+test("each CLI's modes by its own names and in its own order, described in the vendor's words, and the one it starts in", () => {
+  // Claude Code 2.1.330's Shift+Tab cycle and the Claude desktop app's Code sessions.
+  assert.deepEqual(chatAccessOptions("claude-code").map((option) => option.label), ["Manual", "Accept edits", "Plan", "Auto"]);
+  assert.deepEqual(chatAccessOptions("claude-code").map((option) => option.detail), [
+    "Always ask before making changes",
+    "Automatically accept all file edits",
+    "Create a plan before making changes",
+    "Claude handles permission decisions"
+  ]);
+  assert.equal(chatAccessModeSet("claude-code").title, "Permission mode");
+  // Codex 0.155.1's /permissions picker; Read Only is a preset it no longer offers.
+  assert.deepEqual(chatAccessOptions("codex-cli").map((option) => option.label), ["Ask for approval", "Approve for me", "Full Access"]);
+  assert.equal(chatAccessOptions("codex-cli")[1]!.detail, "Only ask for actions detected as potentially unsafe.");
+  assert.match(chatAccessOptions("codex-cli")[2]!.detail ?? "", /^Codex can edit files outside this workspace and access the internet without asking for approval\. Exercise caution when using\.$/);
+  assert.ok(!chatAccessOptions("codex-cli").some((option) => /plan/i.test(option.label)), "Plan mode is not one of Codex's permissions");
+  assert.equal(chatAccessModeSet("codex-cli").plan?.label, "Plan mode");
+  assert.equal(chatAccessModeSet("codex-cli").title, "Permissions");
+  // agy 1.5.14's Shift+Tab cycle and its /config → Agent Mode words.
+  assert.deepEqual(chatAccessOptions("gemini-cli").map((option) => option.label), ["Default", "Accept-edits mode", "Auto mode", "Plan mode"]);
+  assert.equal(chatAccessOptions("gemini-cli")[0]!.detail, "Standard behavior.");
+  assert.equal(chatAccessModeSet("gemini-cli").title, "Agent Mode");
+  assert.match(chatAccessModeSet("gemini-cli").note ?? "", /cannot ask for approval here/, "the stated divergence is shown");
+  assert.equal(chatAccessModeSet("claude-code").note, undefined);
+  assert.equal(chatAccessModeSet("claude-code").plan, undefined, "Claude Code's Plan is one of its modes");
+  assert.equal(defaultChatAccessOption("claude-code").id, "manual");
+  assert.equal(defaultChatAccessOption("codex-cli").id, "workspace-write", "Codex's Ask for approval preset");
   assert.equal(defaultChatAccessOption("gemini-cli").id, "default");
-  for (const kind of ["claude-code", "codex-cli", "gemini-cli"] as const) {
-    for (const option of chatAccessOptions(kind)) {
-      assert.doesNotMatch(option.detail, /Asks before editing files/, `${kind} ${option.id}: the old claim the app did not keep`);
-    }
+});
+
+test("stored and sent mode ids keep working: a renamed mode is its new one, Codex's old Plan is Read Only with Plan mode on", () => {
+  assert.equal(currentChatAccessId("claude-code", "default"), "manual", "Claude Code's Default is called Manual now");
+  assert.equal(currentChatAccessId("codex-cli", "workspace-write"), "workspace-write");
+  const claude = applyChatAccessOptionById("claude-code", "default", defaultChatAgentPermissions());
+  assert.equal(selectedChatAccessOption("claude-code", claude.agentMode, claude.permissions)?.id, "manual");
+  // A member saved with the old Claude Default (default mode, no edits, its own mode) reads as Manual.
+  assert.equal(selectedChatAccessOption("claude-code", "default", { ...defaultChatAgentPermissions(), cliApprovals: true })?.label, "Manual");
+  // A Codex member saved in Plan before Plan was a toggle: Read Only, Plan mode on.
+  const legacy = { ...defaultChatAgentPermissions(), workspaceWrite: true, cliApprovals: true as const };
+  const shown = selectedChatAccessOption("codex-cli", "plan", legacy);
+  assert.equal(shown?.id, "read-only");
+  assert.equal(codexPlanModeOn("codex-cli", "plan", legacy), true);
+  assert.deepEqual(chatAccessMenuOptions("codex-cli", shown).map((option) => option.label), ["Ask for approval", "Approve for me", "Full Access", "Read Only"], "Read Only shows while it is its mode");
+  const viaPhone = applyChatAccessOptionById("codex-cli", "plan", defaultChatAgentPermissions());
+  assert.deepEqual([viaPhone.agentMode, viaPhone.permissions.workspaceWrite, viaPhone.permissions.codexPlanMode], ["default", false, true]);
+  const off = withCodexPlanMode("plan", legacy, false);
+  assert.deepEqual([off.agentMode, off.permissions.workspaceWrite, off.permissions.codexPlanMode], ["default", false, undefined], "turning Plan off keeps Read Only, never grants edits");
+});
+
+test("Codex's Plan mode is a toggle on top of any preset; only Codex has it", () => {
+  for (const id of ["workspace-write", "auto-review", "full-access"]) {
+    const on = applyChatAccessOptionById("codex-cli", id, defaultChatAgentPermissions(), true);
+    assert.equal(on.permissions.codexPlanMode, true, id);
+    assert.equal(selectedChatAccessOption("codex-cli", on.agentMode, on.permissions)?.id, id, `${id}: the preset stays`);
+    assert.equal(codexPlanModeOn("codex-cli", on.agentMode, on.permissions), true);
+    const off = withCodexPlanMode(on.agentMode, on.permissions, false);
+    assert.equal(selectedChatAccessOption("codex-cli", off.agentMode, off.permissions)?.id, id, `${id}: and stays when Plan goes off`);
+    assert.equal(codexPlanModeOn("codex-cli", off.agentMode, off.permissions), false);
   }
-  assert.ok(!chatAccessOptions("gemini-cli").some((option) => option.label === "Read only"), "agy has no read-only mode, only a prompt");
-  // agy's print mode cannot ask: no agy mode says it asks.
-  assert.ok(chatAccessOptions("gemini-cli").every((option) => !/\basks\b/i.test(option.detail)), "no agy mode claims it asks");
-  assert.match(chatAccessOptions("gemini-cli")[0]!.detail, /refuses edits and commands/);
+  const applied = applyChatAccessOption(chatAccessOptions("codex-cli")[2]!, { ...defaultChatAgentPermissions(), codexPlanMode: true });
+  assert.equal(applied.permissions.codexPlanMode, true, "choosing a preset keeps Plan mode as it was");
+  assert.equal(applyChatAccessOptionById("claude-code", "manual", defaultChatAgentPermissions(), true).permissions.codexPlanMode, undefined, "not on another CLI");
+  assert.equal(codexPlanModeOn("codex-cli", "default", { ...defaultChatAgentPermissions(), codexPlanMode: true }), false, "only in the CLI's own mode");
+  const classic = withClassicChatPermissions(applyChatAccessOptionById("codex-cli", "workspace-write", defaultChatAgentPermissions(), true).permissions, { webAccess: true }, "codex-cli");
+  assert.equal(classic.codexPlanMode, undefined, "a classic toggle ends Plan mode with the CLI's own mode");
+  assert.equal(normalizeChatAgentPermissions({ codexPlanMode: true }).codexPlanMode, true);
+  assert.equal(cloneChatAgentPermissions({ ...defaultChatAgentPermissions(), codexPlanMode: true }).codexPlanMode, true);
+});
+
+test("Codex's Full Access is the broadest mode, Codex's alone: a ceiling below it holds it back, another CLI runs Auto", () => {
+  const full = applyChatAccessOptionById("codex-cli", "full-access", defaultChatAgentPermissions());
+  assert.equal(full.agentMode, "full-access");
+  assert.equal(normalizeChatAgentMode("full-access"), "full-access");
+  assert.equal(clampChatAgentMode("full-access", "auto"), "auto");
+  assert.equal(clampChatAgentMode("full-access", "full-access"), "full-access");
+  assert.equal(chatAgentModeWithin("auto", "full-access"), true);
+  assert.equal(chatAgentModeWithin("full-access", "auto"), false);
+  assert.equal(chatAgentModeForKind("claude-code", "full-access"), "auto");
+  assert.equal(chatAgentModeForKind("gemini-cli", "full-access"), "auto");
+  assert.equal(chatAgentModeForKind("codex-cli", "full-access"), "full-access");
+  const effective = effectiveChatAgentPermissionsForProvider("codex-cli", "full-access", full.permissions);
+  assert.deepEqual([effective.workspaceWrite, effective.shell.enabled, effective.webAccess], [true, true, true]);
+  // A Claude member a Codex main session in Full Access makes: Auto, never more.
+  const member = clampChatAgentAccess("claude-code", { agentMode: "full-access", permissions: full.permissions }, { agentMode: "full-access", permissions: effective });
+  assert.equal(member.agentMode, "auto");
+  const held = clampChatAgentAccess("codex-cli", full, applyChatAccessOptionById("codex-cli", "workspace-write", defaultChatAgentPermissions()));
+  assert.equal(held.agentMode, "default", "under Ask for approval: not Full Access");
+  assert.equal(selectedChatAccessOption("claude-code", "full-access", full.permissions)?.id, "auto", "a Claude member stored so reads as Auto");
 });
 
 test("a mode is the CLI's own (cliApprovals) with its file-edit right; the other rights stay; settings from the classic controls are no mode", () => {
@@ -94,12 +175,16 @@ test("the phone's main session is made in the mode its chip chose, else its CLI'
   const claude = newChatMainSessionFor(offered, providers, { kind: "claude-code" });
   assert.equal(claude.kind, "claude-code");
   assert.equal(claude.permissions?.cliApprovals, true);
-  assert.equal(claude.permissions?.workspaceWrite, false, "Claude Code's Default asks before edits");
+  assert.equal(claude.permissions?.workspaceWrite, false, "Claude Code's Manual asks before edits");
   assert.equal(claude.permissions?.requestParticipants, "allow", "its role's rights stay");
-  const plan = newChatMainSessionFor(offered, providers, { kind: "codex-cli", access: "plan" });
-  assert.equal(plan.agentMode, "plan");
+  const plan = newChatMainSessionFor(offered, providers, { kind: "codex-cli", access: "full-access", plan: true });
+  assert.deepEqual([plan.agentMode, plan.permissions?.codexPlanMode], ["full-access", true], "Full Access with Plan mode on");
+  const oldPhone = newChatMainSessionFor(offered, providers, { kind: "codex-cli", access: "plan" });
+  assert.deepEqual([oldPhone.agentMode, oldPhone.permissions?.workspaceWrite, oldPhone.permissions?.codexPlanMode], ["default", false, true], "a phone from before: Read Only with Plan mode");
+  const oldClaude = newChatMainSessionFor(offered, providers, { kind: "claude-code", access: "default" });
+  assert.equal(selectedChatAccessOption("claude-code", oldClaude.agentMode, oldClaude.permissions)?.id, "manual", "a phone from before sends Claude's old Default: Manual");
   const codexDefault = newChatMainSessionFor(offered, providers, { kind: "codex-cli" });
-  assert.equal(codexDefault.permissions?.workspaceWrite, true, "Codex's Default preset");
+  assert.equal(codexDefault.permissions?.workspaceWrite, true, "Codex's Ask for approval preset");
   const elsewhere = newChatMainSessionFor(offered, providers, { kind: "codex-cli", homeMachineId: "m-box" });
   assert.equal(elsewhere.homeMachineId, "m-box");
   assert.equal(newChatMainSessionFor(offered, providers, undefined), offered, "no choice: the offer as it is");

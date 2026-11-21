@@ -86,27 +86,34 @@ export function memberModelName(member: ModelNamedMember & { model?: string }, c
   return listed ? chipModelLabel(listed) : explicit;
 }
 
-/** memberModelName for a chip: an added provider's fixed list, else the
- *  CLI's list once known (the model's id or the CLI's name meanwhile). */
-export function useMemberModelName(member: ModelNamedMember & { model?: string }): string {
+/** A member's model list for its composer's controls: an added provider's
+ *  fixed list, else the CLI's list, asked once in a while for every control
+ *  that shows it (catalogFor), so a composer's controls ask nothing more
+ *  than its chip did. */
+export function useMemberModelCatalog(member: ModelNamedMember): { catalog: ProviderModelCatalog | undefined; loading: boolean } {
   const fixed = member.hostVendor && member.kind !== "gemini-cli"
     ? cliProviderHostModelCatalog({ vendor: member.hostVendor, cli: member.kind })
     : undefined;
-  const needsList = !fixed && !(member.hostVendor && !member.model?.trim() && cliProviderHostDefaultModelLabel({ vendor: member.hostVendor }));
   const { key } = catalogKey(member);
-  const [catalog, setCatalog] = useState<ProviderModelCatalog | undefined>(() => catalogs.get(key)?.value);
+  const [state, setState] = useState<{ key: string; catalog: ProviderModelCatalog | undefined; loading: boolean }>(() => {
+    const known = catalogs.get(key)?.value;
+    return { key, catalog: known, loading: !fixed && !known };
+  });
   useEffect(() => {
-    if (!needsList) return;
+    if (fixed) return;
     let cancelled = false;
+    const known = catalogs.get(key)?.value;
+    setState({ key, catalog: known, loading: !known });
     void catalogFor(member).then((next) => {
-      if (!cancelled) setCatalog(next);
+      if (!cancelled) setState({ key, catalog: next, loading: false });
     });
     return () => {
       cancelled = true;
     };
     // The list depends on the CLI and the provider only (its key).
-  }, [needsList, key]);
-  return memberModelName(member, fixed ?? catalog);
+  }, [Boolean(fixed), key]);
+  if (fixed) return { catalog: fixed, loading: false };
+  return state.key === key ? { catalog: state.catalog, loading: state.loading } : { catalog: catalogs.get(key)?.value, loading: true };
 }
 
 /** Forgets the lists asked so far (tests). */

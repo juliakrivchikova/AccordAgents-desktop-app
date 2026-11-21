@@ -52,6 +52,9 @@ export function chatShellRulesText(rules: ChatShellPermissionRule[]): string {
 }
 
 function chatShellPermissionLine({ agentMode, providerKind, permissions, canRequestPermissions }: ChatPermissionPromptLinesOptions): string {
+  if (agentMode === "full-access" && providerKind === "codex-cli") {
+    return "Codex Full Access: commands and edits run without asking, outside the workspace and with network access too, as in Codex's own Full Access preset.";
+  }
   if (agentMode === "auto" && providerKind === "codex-cli") {
     return "Codex Auto-review mode enables native command execution inside the workspace-write sandbox; eligible provider approvals are handled by Codex Auto-review.";
   }
@@ -104,7 +107,7 @@ function chatWorkspacePermissionLine(options: ChatPermissionPromptLinesOptions):
     if (providerKind === "codex-cli") {
       return "The sandbox is read-only: an edit asks User for approval (escalation), as Codex does in its terminal.";
     }
-    return "Antigravity's default mode refuses file edits here (print mode cannot ask User); if the task needs edits, say so: User can switch you to Accept edits.";
+    return "Antigravity's default mode refuses file edits here (print mode cannot ask User); if the task needs edits, say so: User can switch you to Accept-edits mode.";
   }
   return chatWorkspaceBlockedLine(options);
 }

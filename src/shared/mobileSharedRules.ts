@@ -31,7 +31,7 @@ export { nativeGoalObjective, parseNativeGoalCommand } from "./nativeGoalCommand
 // title (the User, 2026-10-29).
 // The sessions view's access, in each CLI's own terms: the same modes and
 // words in the phone's New chat sheet as in the computer's picker.
-export { applyChatAccessOptionById, chatAccessOptions, defaultChatAccessOption, selectedChatAccessOption } from "./chatAccessModes";
+export { applyChatAccessOptionById, chatAccessModeSet, chatAccessOptions, currentChatAccessId, defaultChatAccessOption, selectedChatAccessOption } from "./chatAccessModes";
 export { newChatIntro, newChatMainSessionFor, newChatMemberFitsProject, newChatMetadata, newChatParticipants, newChatPickedMembers, newChatTitle } from "./newChat";
 // The list row of a chat the phone started, as the server will list it.
 export { mobileChatGroupLabel, mobileSnippet } from "./mobileChatRow";

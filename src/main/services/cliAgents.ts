@@ -34,7 +34,7 @@ import type {
   ProviderReasoningEffortOption,
   ProviderModelCatalog
 } from "../../shared/types";
-import { effectiveChatAgentPermissionsForProvider, normalizeChatAgentMode, normalizeChatAgentPermissions } from "../../shared/agentPermissions";
+import { chatAgentModeForKind, effectiveChatAgentPermissionsForProvider, normalizeChatAgentMode, normalizeChatAgentPermissions } from "../../shared/agentPermissions";
 import { buildAgentContextUsage, contextWindowForModel } from "../../shared/agentContext";
 import { agentEnvironmentKeyValidationError, filterAllowedAgentEnvironment } from "../../shared/agentEnvironment";
 import { GEMINI_API_KEY_SETTINGS, geminiApiKeyEnv } from "../../shared/cliProviderHosts";
@@ -4639,9 +4639,11 @@ export class CliAgentRunner {
               tokenBudget: null
             });
           }
+          const collaborationMode = this.codexCollaborationMode(participant, kind, options, activeModel);
           const turn = await sendRequest("turn/start", {
             threadId: currentThreadId,
             effort: this.codexReasoningEffort(participant.reasoningEffort) ?? null,
+            ...(collaborationMode ? { collaborationMode } : {}),
             input: [
               {
                 type: "text",
@@ -4670,14 +4672,13 @@ export class CliAgentRunner {
     kind: ConversationKind,
     options: CliAgentRunOptions
   ): Record<string, unknown> {
-    const mode = this.agentModeForRun(kind, options);
-    const permissions = this.permissionsForRun("codex-cli", mode, options);
+    const { mode, permissions } = this.codexRunAccess(kind, options);
     return {
       model: participant.model ?? null,
       cwd: repoPath ?? null,
       approvalPolicy: this.codexAppServerApprovalPolicy(mode, permissions),
-      approvalsReviewer: mode === "auto" ? CODEX_AUTO_APPROVALS_REVIEWER : null,
-      sandbox: permissions.workspaceWrite ? "workspace-write" : "read-only",
+      approvalsReviewer: this.codexAppServerApprovalsReviewer(mode, permissions),
+      sandbox: this.codexAppServerSandbox(mode, permissions),
       config: this.codexAppServerConfig(participant, permissions, options),
       developerInstructions: options.role?.instructions ?? null,
       ephemeral: !options.persistSession,
@@ -4693,15 +4694,14 @@ export class CliAgentRunner {
     kind: ConversationKind,
     options: CliAgentRunOptions
   ): Record<string, unknown> {
-    const mode = this.agentModeForRun(kind, options);
-    const permissions = this.permissionsForRun("codex-cli", mode, options);
+    const { mode, permissions } = this.codexRunAccess(kind, options);
     return {
       threadId: sessionId,
       model: participant.model ?? null,
       cwd: repoPath ?? null,
       approvalPolicy: this.codexAppServerApprovalPolicy(mode, permissions),
-      approvalsReviewer: mode === "auto" ? CODEX_AUTO_APPROVALS_REVIEWER : null,
-      sandbox: permissions.workspaceWrite ? "workspace-write" : "read-only",
+      approvalsReviewer: this.codexAppServerApprovalsReviewer(mode, permissions),
+      sandbox: this.codexAppServerSandbox(mode, permissions),
       config: this.codexAppServerConfig(participant, permissions, options),
       developerInstructions: options.role?.instructions ?? null,
       excludeTurns: true,
@@ -4723,13 +4723,71 @@ export class CliAgentRunner {
     };
   }
 
+  /**
+   * A Codex member's mode and rights as Codex runs them, and whether its
+   * Plan mode is on (src/shared/chatAccessModes.ts). A member stored in Plan
+   * from before Plan was a toggle of its own (its mode "plan" in its own
+   * mode) runs Codex's Read Only preset with Plan mode on, as its menu shows.
+   */
+  private codexRunAccess(kind: ConversationKind, options: CliAgentRunOptions): { mode: ChatAgentMode; permissions: ChatAgentPermissions; plan: boolean } {
+    const raw = this.agentModeForRun(kind, options);
+    const stored = normalizeChatAgentPermissions(options.permissions);
+    const ownMode = kind === "chat" && stored.cliApprovals === true;
+    const legacyPlan = ownMode && raw === "plan";
+    const mode: ChatAgentMode = legacyPlan ? "default" : raw;
+    const permissions = this.permissionsForRun("codex-cli", mode, legacyPlan ? { ...options, permissions: { ...stored, workspaceWrite: false } } : options);
+    return { mode, permissions, plan: ownMode && (legacyPlan || stored.codexPlanMode === true) };
+  }
+
   /** Codex asks (approval policy on-request, each ask an approval card) in
-   *  Auto-review, where Codex reviews the asks itself, and in its own Read
-   *  only and Default presets (the sessions view's access, `cliApprovals`);
-   *  Plan mode and the classic controls never ask: what the sandbox does not
-   *  allow fails. */
+   *  Approve for me, where Codex reviews the asks itself first, and in its
+   *  own Ask for approval and Read Only presets (the sessions view's access,
+   *  `cliApprovals`); Full Access never asks (Codex 0.155.1's preset), nor do
+   *  the classic controls and their Plan: what the sandbox does not allow
+   *  fails. */
   private codexAppServerApprovalPolicy(mode: ChatAgentMode, permissions?: ChatAgentPermissions): string {
     return mode === "auto" || (mode === "default" && permissions?.cliApprovals === true) ? "on-request" : "never";
+  }
+
+  /** Who reviews Codex's asks: Codex itself in Approve for me; the User in
+   *  Ask for approval and Read Only, said explicitly so a reviewer set in the
+   *  User's own Codex config (`approvals_reviewer`) does not turn the mode
+   *  her menu shows into another one. */
+  private codexAppServerApprovalsReviewer(mode: ChatAgentMode, permissions: ChatAgentPermissions): string | null {
+    if (mode === "auto") return CODEX_AUTO_APPROVALS_REVIEWER;
+    return mode === "default" && permissions.cliApprovals === true ? "user" : null;
+  }
+
+  /** Codex's sandbox for the mode: Full Access's danger-full-access, else
+   *  workspace-write with the file-edit right, read-only without it. */
+  private codexAppServerSandbox(mode: ChatAgentMode, permissions: ChatAgentPermissions): string {
+    if (mode === "full-access") return "danger-full-access";
+    return permissions.workspaceWrite ? "workspace-write" : "read-only";
+  }
+
+  /** Codex's collaboration mode for a chat turn: its Plan mode when the
+   *  member has it on, else its Default mode, said on every turn because a
+   *  thread stays in the last one it was given (Codex 0.155.1). Plan takes
+   *  Codex's own effort for it, as its terminal does ("Model changed to …
+   *  medium for Plan mode"); Default keeps the member's. Needs the model the
+   *  thread runs on; none known, nothing is said. */
+  private codexCollaborationMode(
+    participant: ParticipantConfig,
+    kind: ConversationKind,
+    options: CliAgentRunOptions,
+    threadModel: string | undefined
+  ): Record<string, unknown> | undefined {
+    const model = participant.model ?? threadModel;
+    if (kind !== "chat" || !model) return undefined;
+    const { plan } = this.codexRunAccess(kind, options);
+    return {
+      mode: plan ? "plan" : "default",
+      settings: {
+        model,
+        reasoning_effort: plan ? null : this.codexReasoningEffort(participant.reasoningEffort) ?? null,
+        developer_instructions: null
+      }
+    };
   }
 
   private codexReasoningEffort(value: ChatReasoningEffort | undefined): ChatReasoningEffort | undefined {
@@ -6113,7 +6171,7 @@ export class CliAgentRunner {
           await this.extractClaudeSessionLogContextUsageWithRetry(sessionId, participant)
       }, participant, options), streamState?.resultEvent ?? result.stdout, participant, options.nativeGoal ? "one-shot-stream" : "one-shot");
     } catch (error) {
-      if (this.agentModeForRun(kind, options) === "auto" && this.isClaudePermissionModeUnsupported(error)) {
+      if (chatAgentModeForKind("claude-code", this.agentModeForRun(kind, options)) === "auto" && this.isClaudePermissionModeUnsupported(error)) {
         // Fail loudly instead of silently downgrading: Auto-review must run as native
         // Claude auto, not a different mode under the same label.
         return this.failed(
@@ -8693,7 +8751,7 @@ export class CliAgentRunner {
   }
 
   private shouldPassClaudeAllowedTools(kind: ConversationKind, options: CliAgentRunOptions): boolean {
-    return !(kind === "chat" && this.agentModeForRun(kind, options) === "auto");
+    return !(kind === "chat" && chatAgentModeForKind("claude-code", this.agentModeForRun(kind, options)) === "auto");
   }
 
   private claudeAllowedToolsArgs(kind: ConversationKind, options: CliAgentRunOptions, toolConfig: ClaudeToolConfig): string[] {
@@ -9038,7 +9096,9 @@ export class CliAgentRunner {
   }
 
   private claudePermissionMode(kind: ConversationKind, options: CliAgentRunOptions): ClaudePermissionMode {
-    const agentMode = this.agentModeForRun(kind, options);
+    // Codex's Full Access is not a Claude Code mode: Auto, the broadest one
+    // Claude Code offers without extra flags.
+    const agentMode = chatAgentModeForKind("claude-code", this.agentModeForRun(kind, options));
     if (agentMode === "plan") {
       return "plan";
     }
@@ -9059,7 +9119,7 @@ export class CliAgentRunner {
     extraReadableDirs: string[],
     options: CliAgentRunOptions
   ): ClaudeToolConfig {
-    const agentMode = this.agentModeForRun(kind, options);
+    const agentMode = chatAgentModeForKind("claude-code", this.agentModeForRun(kind, options));
     const permissionMode = this.claudePermissionMode(kind, options);
     const permissions = this.permissionsForRun("claude-code", agentMode, options);
     const tools = new Set<string>();

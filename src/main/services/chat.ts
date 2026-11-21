@@ -5671,7 +5671,9 @@ export class ChatService {
    *  (it may always ask the main session, as far as the main session itself
    *  may ask), and managing members only when named. Clamped afterwards. */
   private delegationRequestedPermissions(given: Record<string, unknown> | undefined, ceiling: ChatAgentPermissions): ChatAgentPermissions {
-    const { manageRolesParticipants: _ownManage, ...inherited } = ceiling;
+    // Codex's Plan mode is the main session's own way of working, not a
+    // right: a member it makes starts without it.
+    const { manageRolesParticipants: _ownManage, codexPlanMode: _plan, ...inherited } = ceiling;
     const merged: Record<string, unknown> = { ...inherited, requestParticipants: "allow" };
     if (given) {
       for (const key of ["repoRead", "workspaceWrite", "webAccess"] as const) {

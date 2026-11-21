@@ -347,7 +347,7 @@ export function memberAsItRunsNow(participant: ChatParticipant, mainSession: Cha
  */
 export function forkedMainSessionPermissions(base: ChatAgentPermissions, memberPermissions: ChatAgentPermissions | undefined): ChatAgentPermissions {
   const own = normalizeChatAgentPermissions(memberPermissions);
-  const { providerNative: _baseNative, cliApprovals: _baseApprovals, ...rest } = normalizeChatAgentPermissions(base);
+  const { providerNative: _baseNative, cliApprovals: _baseApprovals, codexPlanMode: _basePlan, ...rest } = normalizeChatAgentPermissions(base);
   return {
     ...rest,
     repoRead: own.repoRead,
@@ -355,7 +355,8 @@ export function forkedMainSessionPermissions(base: ChatAgentPermissions, memberP
     webAccess: own.webAccess,
     shell: { enabled: own.shell.enabled, rules: own.shell.rules.map((rule) => ({ ...rule })) },
     ...(own.providerNative ? { providerNative: own.providerNative } : {}),
-    ...(own.cliApprovals ? { cliApprovals: true as const } : {})
+    ...(own.cliApprovals ? { cliApprovals: true as const } : {}),
+    ...(own.cliApprovals && own.codexPlanMode ? { codexPlanMode: true as const } : {})
   };
 }
 

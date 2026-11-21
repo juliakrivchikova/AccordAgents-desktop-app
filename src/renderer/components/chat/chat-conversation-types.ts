@@ -69,6 +69,9 @@ export interface ChatConversationViewProps {
    *  composer opening the same. */
   renderMemberSettings?: (participantId: string) => ReactNode;
   renderMemberChip?: (participantId: string) => ReactNode;
+  /** The main session's … actions (Restart, Fork to new chat), shown in the
+   *  chat title's menu in the sessions view. */
+  mainSessionActions?: import("./chat-view-switch").MainSessionActions;
   /** The chat's view as her server saved it, and a switch that failed. */
   onChatViewSaved?: (saved: ChatViewState) => void;
   onChatViewError?: (message: string) => void;

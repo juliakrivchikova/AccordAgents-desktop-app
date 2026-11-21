@@ -1,60 +1,73 @@
-import { useCallback, useContext, useState, type ReactNode } from "react";
+import { useCallback, useContext } from "react";
+import { MoreHorizontal } from "lucide-react";
 
-import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { canRestartParticipant, memberProcessRestartable } from "../../../shared/chatParticipantStatus";
 import { FORK_TO_NEW_CHAT_DETAIL, FORK_TO_NEW_CHAT_LABEL } from "../../../shared/forkToNewChat";
 import type { MemberRestartInProgress } from "../../../shared/memberRestart";
 import type { ChatParticipant } from "../../../shared/types";
-import { ChatModelAccessPanel, type ChatModelAccessAction, type ChatModelAccessPatch } from "./chat-model-access-picker";
+import { ChatMemberComposerControls, type ChatModelAccessAction, type ChatModelAccessPatch } from "./chat-model-access-picker";
 import { backgroundTasksStatusLabel, ChatBackgroundTasksContext, type ChatParticipantRosterStatus } from "./chat-roster-status";
+import { ComposerMenu, ComposerMenuItem, ComposerMenuSection } from "./composer-menu";
 
 export type ChatMemberRuntimePatch = Partial<Pick<ChatParticipant,
   "model" | "reasoningEffort" | "agentMode" | "permissions" | "remoteExecution" | "cloudRun" | "homeMachineId" | "skipToolchainPreflight" | "autoWatch">>;
 
 /**
- * A member's settings in the sessions view (the User, 2026-11-21): the main
- * session's from its composer chip, a member's from its chip or the gear in
- * its session's header. The compact picker of its model, effort, access and
- * where it runs; its provider stays the one it was made with. Its … menu
- * restarts it (so its next reply picks up changed connectors, as the classic
- * roster's restart does) and, for a member other than the main session,
- * removes it. Its own turn running, its settings wait, as a CLI's settings
- * apply to its next turn.
+ * A member's settings in the sessions view (the User, 2026-11-21): quiet
+ * controls under its composer (the main session's under the main composer, a
+ * member's under its session's composer), each opening its own small menu:
+ * model, effort, permission mode (Codex's Plan mode beside it) and, once a
+ * machine exists, where it runs. Its provider stays the one it was made
+ * with. Its own turn running, its settings wait, as a CLI's settings apply
+ * to its next turn.
  */
-export function ChatMemberModelAccess(props: {
+export function ChatMemberComposerSettings(props: {
   participant: ChatParticipant;
-  trigger: ReactNode;
   /** Its own turn or compaction runs. */
   working: boolean;
-  /** Its roster state: a restart waits until it is idle. */
-  status?: ChatParticipantRosterStatus;
   runLocationLocked: boolean;
   runLocationMoves: boolean;
+  /** The chat's main session: a member it made is held to it. */
+  mainSession?: ChatParticipant;
   /** Saves what changed (only the keys given); resolves false when it failed. */
   onUpdate: (participantId: string, patch: ChatMemberRuntimePatch) => unknown;
-  /** Restarts its process; resolves once the restart ended. */
-  onRestart?: (participantId: string, stopBackgroundTasks: boolean) => unknown;
-  /** Stops waiting for a restart its machine has not taken (its run id). */
-  onStopRestart?: (runId: string) => void;
-  /** Its restart has not ended. */
-  restartStatus?: MemberRestartInProgress;
-  /** Removes it from the chat; none for the main session. */
-  onRemove?: () => void;
-  /** Why it cannot be removed now. */
-  removeDisabledReason?: string;
-  /** Makes a new chat whose main session is a copy of it (Fork to new chat). */
-  onForkToNewChat?: () => void;
-  /** Why it cannot be forked to a new chat now. */
-  forkToNewChatDisabledReason?: string;
 }): JSX.Element {
-  const [open, setOpen] = useState(false);
   const { participant, onUpdate } = props;
   // Only what was chosen is sent: a second quick choice never sends the
   // first one back as it stood before it was saved.
   const change = useCallback((patch: ChatModelAccessPatch) => onUpdate(participant.id, patch), [onUpdate, participant.id]);
-  const backgroundTasks = useContext(ChatBackgroundTasksContext).get(participant.id) ?? [];
-  const actions = memberSettingsActions({
-    participant,
+  return (
+    <ChatMemberComposerControls
+      value={participant}
+      onChange={change}
+      disabled={props.working}
+      runsOn={{ locked: props.runLocationLocked, moves: props.runLocationMoves }}
+      mainSession={props.mainSession}
+      testId="chat-member-controls"
+    />
+  );
+}
+
+/**
+ * A member's … menu (its session's header; the main session's are in the
+ * chat title's menu): Restart (picks up changed connectors, idle only,
+ * naming background work it stops; not Antigravity), Fork to new chat, and,
+ * for a member other than the main session, Remove from chat.
+ */
+export function ChatMemberActionsMenu(props: {
+  participant: ChatParticipant;
+  status?: ChatParticipantRosterStatus;
+  onRestart?: (participantId: string, stopBackgroundTasks: boolean) => unknown;
+  onStopRestart?: (runId: string) => void;
+  restartStatus?: MemberRestartInProgress;
+  onRemove?: () => void;
+  removeDisabledReason?: string;
+  onForkToNewChat?: () => void;
+  forkToNewChatDisabledReason?: string;
+}): JSX.Element | null {
+  const backgroundTasks = useContext(ChatBackgroundTasksContext).get(props.participant.id) ?? [];
+  const actions = (close: () => void): ChatModelAccessAction[] => memberSettingsActions({
+    participant: props.participant,
     status: props.status,
     backgroundTaskCount: backgroundTasks.length,
     restartStatus: props.restartStatus,
@@ -64,26 +77,34 @@ export function ChatMemberModelAccess(props: {
     removeDisabledReason: props.removeDisabledReason,
     onForkToNewChat: props.onForkToNewChat,
     forkToNewChatDisabledReason: props.forkToNewChatDisabledReason,
-    close: () => setOpen(false)
+    close
   });
+  if (actions(() => undefined).length === 0) return null;
   return (
-    <Popover open={open} onOpenChange={setOpen}>
-      <PopoverTrigger asChild>{props.trigger}</PopoverTrigger>
-      <PopoverContent
-        align="end"
-        sideOffset={8}
-        data-testid="chat-member-settings"
-        className="chat-model-access-popover w-[min(320px,calc(100vw-32px))] max-h-[min(560px,calc(100vh-96px))] overflow-auto p-1.5"
-      >
-        <ChatModelAccessPanel
-          value={participant}
-          onChange={change}
-          disabled={props.working}
-          runsOn={{ locked: props.runLocationLocked, moves: props.runLocationMoves }}
-          actions={actions.length > 0 ? actions : undefined}
-        />
-      </PopoverContent>
-    </Popover>
+    <ComposerMenu
+      testId="chat-member-actions"
+      title="More"
+      width={280}
+      align="end"
+      bare
+      triggerClassName="chat-member-actions-trigger"
+      label={<MoreHorizontal size={16} aria-hidden />}
+    >
+      {(close) => <ChatMemberActionItems actions={actions(close)} />}
+    </ComposerMenu>
+  );
+}
+
+/** The … actions as menu items, each with its muted line (what it does, or
+ *  why not). */
+export function ChatMemberActionItems(props: { actions: readonly ChatModelAccessAction[]; label?: string }): JSX.Element {
+  return (
+    <ComposerMenuSection label={props.label}>
+      {props.actions.map((action) => (
+        <ComposerMenuItem key={action.label} role="menuitem" testId="chat-member-action" label={action.label} detail={action.detail}
+          disabled={action.disabled} tone={action.tone} onSelect={action.onSelect} />
+      ))}
+    </ComposerMenuSection>
   );
 }
 

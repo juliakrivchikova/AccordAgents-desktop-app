@@ -311,7 +311,7 @@ function withDelegator(member: ChatParticipant, delegatorId: string | undefined)
   return delegatorId === undefined ? rest : { ...rest, delegatedByParticipantId: delegatorId };
 }
 
-const MODE_RANK: Record<ChatAgentMode, number> = { plan: 0, default: 1, auto: 2 };
+const MODE_RANK: Record<ChatAgentMode, number> = { plan: 0, default: 1, auto: 2, "full-access": 3 };
 
 function shellRuleKey(rule: { action: string; match: string; pattern: string }): string {
   return `${rule.action}\0${rule.match}\0${rule.pattern}`;
@@ -610,7 +610,9 @@ function isApprovedMember(member: ChatParticipant, approved: ApprovedMember, rul
   // same request makes (a role her published rules do not know yet).
   if (approved.newRole ? !rules || Boolean(rules.roles[member.roleConfigId]) : approved.roleConfigId === undefined || member.roleConfigId !== approved.roleConfigId) return false;
   if ((member.homeMachineId || undefined) !== approved.homeMachineId) return false;
-  if (normalizeChatAgentMode(member.agentMode) === "auto" && approved.agentMode !== "auto") return false;
+  // A mode that skips asking (Auto, Codex's Full Access) only as far as she approved.
+  const memberMode = normalizeChatAgentMode(member.agentMode);
+  if ((memberMode === "auto" || memberMode === "full-access") && MODE_RANK[memberMode] > MODE_RANK[normalizeChatAgentMode(approved.agentMode)]) return false;
   if (!permissionsWithin(normalizeChatAgentPermissions(member.permissions), approved.permissions)) return false;
   // Managing members as its role gives it now, never beyond what she saw.
   const actual = Math.max(rank(manageRight(rules?.roles[member.roleConfigId], member.permissions).effective),
