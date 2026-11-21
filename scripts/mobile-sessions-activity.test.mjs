@@ -184,7 +184,8 @@ test("a queued reply on the phone says Queued and is taken back from its own ×;
       running({ createdAt: at(2), metadata: { remoteRunStatus: { phase: "waiting-for-response", label: "Working", startedAt: runStarted, updatedAt: runStarted } } }),
       { id: "u2", role: "user", content: "And the signup page", status: "done", createdAt: at(1), metadata: { deliveryTargets: [MAIN.id] } },
       { id: "q1", role: "participant", participantId: MAIN.id, participantLabel: "@main", content: "", status: "pending", createdAt: at(0.9),
-        metadata: { runId: "run-queued", sourceMessageId: "u2", queuedBehind: { handle: "main" } } },
+        // What the User's server keeps of a queue: its shared word (queuedBehind stays on the device).
+        metadata: { runId: "run-queued", sourceMessageId: "u2", turnQueued: true } },
       { id: "u3", role: "user", content: "Check the tests", status: "done", createdAt: at(0.8), metadata: { deliveryTargets: [DREW.id] } },
       { id: "d1", role: "participant", participantId: DREW.id, participantLabel: "@drew", content: "", status: "pending", createdAt: at(0.7),
         metadata: { runId: "run-drew", sourceMessageId: "u3" } }

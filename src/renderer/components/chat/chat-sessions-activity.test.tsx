@@ -102,7 +102,7 @@ const WORK_ROWS = [
   ["tool", "Using mcp__accord_agents__app_chat_get_context"]
 ];
 
-test("a running reply of the sessions view: Working for over a hairline, one quiet row per step by kind, the newest shimmering; no Running label, no Thinking word, no boxed groups, only a hover × to stop it", () => {
+test("a running reply of the sessions view: Working for over a hairline, one quiet row per step by kind, the newest shimmering; no Running label, no Thinking word, no boxed groups, no controls of its own", () => {
   const sessions = sessionsOf(sessionsConversation());
   const running = chatMessage("main-run", "participant", 12, { participantId: MAIN.id, status: "pending", content: "", metadata: { runId: "run-main" } });
   const root = renderSessionsRow(running, sessions, { liveProgress: { participantLabel: "main", state: "running" as const, partialContent: "", activityEvents: workEvents() }, onStopRun: noop } as Partial<Parameters<typeof ChatMessageItem>[0]>);
@@ -111,11 +111,8 @@ test("a running reply of the sessions view: Working for over a hairline, one qui
   const text = textOf(root);
   assert.doesNotMatch(text, /Running|Thinking\b|commands?\b/, "no status label, no placeholder word, no group summary");
   assert.equal(root.findAll(hasClass("chat-inline-activity-group")).length, 0, "no boxed groups");
-  const actions = root.findAll(hasClass("message-actions"));
-  assert.equal(actions.length, 1, "one small control, shown on hover (is-sessions-stop)");
-  assert.ok(actions[0]!.props.className.includes("is-sessions-stop"));
-  assert.equal(root.findAll((node) => typeof node.type === "string" && node.props?.["data-testid"] === "chat-sessions-reply-stop").length, 1, "the reply can be stopped from its own row, as the CLI interrupts");
-  assert.equal(root.findAll((node) => node.props?.label === "Copy message").length, 0, "no copy while it runs");
+  assert.equal(root.findAll(hasClass("message-actions")).length, 0, "no stop or copy on the running reply: the composer stops it (also with text typed, Stop beside Send)");
+  assert.equal(root.findAll((node) => node.props?.label === "Stop response" || node.props?.label === "Copy message").length, 0);
 
   // Before its first step it is the header alone: no "Thinking".
   const fresh = renderSessionsRow({ ...running, id: "main-fresh" }, sessions);

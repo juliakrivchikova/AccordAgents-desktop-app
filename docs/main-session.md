@@ -168,9 +168,10 @@ chat without a main session is always `classic`; its switch is disabled.
     shimmers (still for reduced motion). The member's words and its posts
     stay its words, in order between the rows; its turn's tasks follow as
     their rows. No status label, no "Thinking" word, no grouped boxes, no
-    copy on the reply itself; only a small × on hover (always on a touch
-    screen) stops it, and cancels a queued one (the composer's button is
-    Stop too; a member's session head stops the member). A long turn
+    Stop or copy on a running reply (the composer stops it, also with
+    text typed; a member's session head stops the member); a queued one is
+    taken back from a small × on hover (always on a touch screen, the
+    phone's at least 32px) and shows "Queued", no clock. A long turn
     draws its newest 50 steps under a muted "N earlier steps" (a finished
     fold opens them); a reply that waited in the queue counts its
     "Working for" from its own turn's start (`turnStartedAt`). A run on a

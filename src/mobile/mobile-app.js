@@ -8370,7 +8370,11 @@
    *  Members are stopped from the Waiting line and the panel too. */
   function syncComposerStop(state, memberId) {
     composerStopState = state;
-    if (memberId !== undefined || !state) composerStopIds = state && memberId ? [memberId] : [];
+    // Drawn again for the same screen (typing, a run starting or ending):
+    // it keeps stopping whom it stopped, a member in its session included.
+    if (arguments.length < 2 && state) {
+      // composerStopIds stay as the screen last set them.
+    } else if (memberId !== undefined || !state) composerStopIds = state && memberId ? [memberId] : [];
     else composerStopIds = state.mainId ? [state.mainId] : [];
     const button = document.getElementById("send-button");
     const input = document.getElementById("composer-input");

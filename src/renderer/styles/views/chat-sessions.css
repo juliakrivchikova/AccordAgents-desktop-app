@@ -1044,8 +1044,8 @@
   font-size: 12.5px;
 }
 
-/* A running or queued reply's own × in the sessions view: on hover only
-   (always on a touch screen), not a standing control. */
+/* A queued reply's own × in the sessions view: on hover only (always on a
+   touch screen), not a standing control. */
 .chat-message.is-sessions.is-running .message-actions.is-sessions-stop {
   opacity: 0;
   pointer-events: none;

@@ -360,17 +360,18 @@ export const ChatMessageItem = memo(function ChatMessageItem(props: {
           <Avatar className="message-avatar" spec={avatar} />
         )}
         <div className="message-body">
-          {/* A running or queued reply of the sessions view keeps the clean
-              look: only a small × on hover stops it (a queued one is
-              cancelled), as the composer's Stop does for the running turn. */}
-          {sessions && isStreaming && message.metadata?.runId && props.onStopRun && (
+          {/* A reply of the sessions view keeps the clean look: the running
+              turn is stopped from the composer (its button, or Stop beside
+              Send), a queued one is taken back from a small × on hover, as on
+              the phone. */}
+          {sessions && isStreaming && queuedBehind && message.metadata?.runId && props.onStopRun && (
             <div className="message-actions is-sessions-stop">
               <IconButton
                 className="message-action-stop"
                 size="xs"
                 icon={X}
-                label={queuedBehind ? "Cancel queued reply" : "Stop response"}
-                tooltip={queuedBehind ? "Cancel queued reply" : "Stop response"}
+                label="Cancel queued reply"
+                tooltip="Cancel queued reply"
                 data-testid="chat-sessions-reply-stop"
                 onClick={() => props.onStopRun?.(message.metadata!.runId!)}
               />
