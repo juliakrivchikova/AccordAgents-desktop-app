@@ -306,7 +306,19 @@ async function forkHarness() {
   const clickOpen = async () => {
     const notice = toast.getToasts().find((item) => "title" in item && item.title === "Forked to a new chat: source (fork)") as { action?: { onClick: (event: unknown) => void } } | undefined;
     assert.ok(notice?.action, "the notice offers Open");
+    // A click on Open puts the keyboard on the notice's button; sonner would
+    // hand it back to what had it before once the notice goes, over the
+    // fork's composer. Open lets go of it first.
+    const toaster = document.createElement("ol");
+    toaster.dataset.sonnerToaster = "true";
+    const button = document.createElement("button");
+    toaster.append(button);
+    document.body.append(toaster);
+    button.focus();
+    assert.equal(document.activeElement, button);
     await act(async () => { notice.action!.onClick({}); await new Promise((resolve) => setTimeout(resolve, 20)); });
+    assert.notEqual(document.activeElement, button, "the notice's button lets go of the keyboard");
+    toaster.remove();
   };
   const settle = () => act(async () => { await new Promise((resolve) => setTimeout(resolve, 20)); });
   return { h, fork, startFork, finishFork, notices, clickOpen, settle };

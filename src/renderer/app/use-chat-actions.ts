@@ -746,6 +746,11 @@ export function useChatActions(state: AppState, conversationActions: Conversatio
         action: {
           label: "Open",
           onClick: () => {
+            // A notice hands the keyboard back to what had it before, when
+            // focus leaves it or the last notice goes (sonner): let it do so
+            // now, so it does not take the keyboard from the fork's composer.
+            const focused = document.activeElement;
+            if (focused instanceof HTMLElement && focused.closest("[data-sonner-toaster]")) focused.blur();
             openChat(created.id);
             // Asked once its open began (an open drops a request for any
             // other chat): taken when its composer appears, or at once when
