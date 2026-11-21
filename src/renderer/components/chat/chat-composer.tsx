@@ -31,7 +31,7 @@ import { useChatComposerSuggestions, type ChatComposerSuggestion } from "./use-c
 import { useComposerNoticeClearance } from "./use-composer-notice-clearance";
 import { SpeechToTextButton } from "./speech-to-text-button";
 import { DICTATION_SESSION_ATTRIBUTE } from "./dictation-target";
-import { takeComposerFocusRequest } from "../../app/composer-focus-request";
+import { onComposerFocusRequest, takeComposerFocusRequest } from "../../app/composer-focus-request";
 
 /**
  * Skills, plugins and files picked for the draft's tokens. When the owner
@@ -135,9 +135,13 @@ export function ChatComposer(props: ChatComposerProps): JSX.Element {
   const activeRunParticipantRows = props.activeRunParticipantRows ?? [];
 
   useEffect(() => {
-    if (props.takesFocusRequests && takeComposerFocusRequest(props.conversationId)) {
-      textareaRef.current?.focus();
-    }
+    if (!props.takesFocusRequests) return undefined;
+    const take = (): void => {
+      if (takeComposerFocusRequest(props.conversationId)) textareaRef.current?.focus();
+    };
+    take();
+    // Asked while this chat is already on screen (its fork's notice: Open).
+    return onComposerFocusRequest(take);
   }, [props.conversationId, props.takesFocusRequests]);
 
   useLayoutEffect(() => {

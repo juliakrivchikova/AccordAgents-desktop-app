@@ -9,7 +9,7 @@ import { createRoot } from "react-dom/client";
 
 import { Textarea } from "@/components/ui/textarea";
 import { TooltipProvider } from "@/components/ui/tooltip";
-import { requestComposerFocus } from "../../app/composer-focus-request";
+import { requestComposerFocus, takeComposerFocusRequest } from "../../app/composer-focus-request";
 import { ResizableTextarea } from "../primitives";
 import { ChatComposer, type ChatComposerProps } from "./chat-composer";
 
@@ -103,5 +103,29 @@ test("a composer that does not take a chat's request (a member's) leaves it for 
   } finally {
     await member.unmount();
     await main.unmount();
+  }
+});
+
+test("a request for the chat already on screen is taken at once, by its main composer only", async () => {
+  const elsewhere = document.createElement("input");
+  document.body.append(elsewhere);
+  const member = mount();
+  const main = mount();
+  try {
+    await member.render(composerProps({ conversationId: "chat-d" }));
+    await main.render(composerProps({ conversationId: "chat-d", takesFocusRequests: true }));
+    elsewhere.focus();
+    // Its fork's notice, Open, while the fork is already open.
+    await act(async () => { requestComposerFocus("chat-d"); });
+    assert.equal(document.activeElement, main.field(), "the main composer takes the keyboard at once");
+    // A request for another chat leaves this one alone.
+    elsewhere.focus();
+    await act(async () => { requestComposerFocus("chat-e"); });
+    assert.equal(document.activeElement, elsewhere);
+    assert.equal(takeComposerFocusRequest("chat-e"), true, "kept for chat-e's own composer");
+  } finally {
+    await member.unmount();
+    await main.unmount();
+    elsewhere.remove();
   }
 });

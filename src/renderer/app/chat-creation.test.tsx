@@ -8,6 +8,7 @@ import { useAppEffects } from "./use-app-effects";
 import { useAppViewModel } from "./use-app-view-model";
 import { useChatActions, type ChatActions } from "./use-chat-actions";
 import { useConversationActions, type ConversationActions } from "./use-conversation-actions";
+import { useAppNavigation, type AppNavigation } from "./use-app-navigation";
 import { ConversationPanel } from "../components/conversation/conversation-panel";
 import { toast } from "sonner";
 import { takeComposerFocusRequest } from "./composer-focus-request";
@@ -32,6 +33,7 @@ async function harness() {
   let state!: AppState;
   let actions!: ChatActions;
   let navigation!: ConversationActions;
+  let appNavigation!: AppNavigation;
   let progress!: (event: ReviewProgress) => void;
   let createRunId: string | undefined;
   window.consensus = {
@@ -58,6 +60,7 @@ async function harness() {
     state = useAppState();
     navigation = useConversationActions(state);
     actions = useChatActions(state, navigation);
+    appNavigation = useAppNavigation(state, navigation);
     useAppEffects(state, async () => {}, async () => [], async () => {});
     const view = useAppViewModel(state);
     // The coordinating creation path is real; ChatConversationView itself is
@@ -82,7 +85,7 @@ async function harness() {
     state.setRepoPath("/project");
     state.setNewChatRepoFileMentions([{ path: "src/main.ts" }]);
   });
-  return { renderer, creation, sent, opened, calls, state: () => state, actions: () => actions, navigation: () => navigation,
+  return { renderer, creation, sent, opened, calls, state: () => state, actions: () => actions, navigation: () => navigation, appNavigation: () => appNavigation,
     progress: (event: ReviewProgress) => progress(event), runId: () => createRunId,
     saved: (value: Conversation) => { saved = value; } };
 }
@@ -264,7 +267,9 @@ function clearNotices(): void {
 
 // Fork to new chat takes up to a second or so to make its chat. What she
 // opened meanwhile is her later choice: the fork does not replace it nor take
-// its keyboard; it is listed and a notice offers to open it.
+// its keyboard; it is listed and a notice offers to open it. Driven through
+// the app's own navigation (sidebar, Activity, Settings, Back), as App.tsx
+// wires it.
 async function forkHarness() {
   globalThis.requestAnimationFrame ??= (callback) => setTimeout(() => callback(0), 0) as unknown as number;
   const h = await harness();
@@ -277,11 +282,12 @@ async function forkHarness() {
   await act(async () => { await h.navigation().openConversation("source"); });
   assert.equal(h.state().conversation?.id, "source");
   clearNotices();
+  // Nothing left over from an earlier test.
+  takeComposerFocusRequest("fork");
   let pending!: Promise<boolean>;
-  const opened: string[] = [];
   const startFork = async () => {
     await act(async () => {
-      pending = h.actions().forkChatParticipantToNewChat("member", { openChat: (id) => { opened.push(id); void h.navigation().openConversation(id); } });
+      pending = h.actions().forkChatParticipantToNewChat("member", { openChat: (id) => h.appNavigation().openChat(id) });
     });
   };
   const finishFork = async (outcome: "made" | "refused" = "made") => {
@@ -297,63 +303,98 @@ async function forkHarness() {
     type: (item as { type?: string }).type, title: (item as { title?: unknown }).title,
     action: (item as { action?: { label?: unknown } }).action?.label
   }));
-  return { h, fork, opened, startFork, finishFork, notices };
+  const clickOpen = async () => {
+    const notice = toast.getToasts().find((item) => "title" in item && item.title === "Forked to a new chat: source (fork)") as { action?: { onClick: (event: unknown) => void } } | undefined;
+    assert.ok(notice?.action, "the notice offers Open");
+    await act(async () => { notice.action!.onClick({}); await new Promise((resolve) => setTimeout(resolve, 20)); });
+  };
+  const settle = () => act(async () => { await new Promise((resolve) => setTimeout(resolve, 20)); });
+  return { h, fork, startFork, finishFork, notices, clickOpen, settle };
 }
 
 test("a fork made after she opened another chat leaves that chat on screen with its keyboard, lists the fork and offers to open it", async () => {
   const f = await forkHarness();
   await f.startFork();
-  await act(async () => { await f.h.navigation().openConversation("other"); });
+  await act(async () => { f.h.appNavigation().openChat("other"); });
+  await f.settle();
   assert.equal(await f.finishFork(), true);
   assert.equal(f.h.state().conversation?.id, "other", "the chat she opened stays");
   assert.equal(f.h.state().railView, "chats");
+  assert.equal(f.h.state().startingChatRef.current, false, "a new chat may start");
   assert.equal(takeComposerFocusRequest("fork"), false, "the fork's composer is not asked to take the keyboard");
   assert.ok(f.h.state().summaries.some((summary) => summary.id === "fork"), "the fork is listed");
   assert.deepEqual(f.notices(), [{ type: "success", title: "Forked to a new chat: source (fork)", action: "Open" }]);
   // Open, from the notice: the fork opens with its keyboard, as the sidebar opens a chat.
-  const open = toast.getToasts().find((item) => "title" in item && item.title === "Forked to a new chat: source (fork)") as { action?: { onClick: (event: unknown) => void } };
-  await act(async () => { open.action?.onClick({}); await new Promise((resolve) => setTimeout(resolve, 20)); });
-  assert.deepEqual(f.opened, ["fork"]);
+  await f.clickOpen();
   assert.equal(f.h.state().conversation?.id, "fork");
   assert.equal(takeComposerFocusRequest("fork"), true);
   clearNotices();
   await act(async () => { f.h.renderer.unmount(); });
 });
 
-test("a fork made after she went to New chat, Activity or Settings leaves her there", async () => {
+test("a fork made after she went to New chat, Activity or Settings leaves her there; Open takes her to it", async () => {
   for (const leave of ["new chat", "activity", "settings"] as const) {
     const f = await forkHarness();
     await f.startFork();
     await act(async () => {
-      if (leave === "new chat") f.h.navigation().returnToNewChatDraft();
-      else f.h.state().setRailView(leave);
+      if (leave === "new chat") await f.h.navigation().newChatSession();
+      else if (leave === "activity") f.h.appNavigation().showView("activity");
+      else f.h.appNavigation().openSettingsSection("general");
     });
+    await f.settle();
     assert.equal(await f.finishFork(), true, leave);
     assert.equal(f.h.state().railView, leave === "new chat" ? "chats" : leave, leave);
     assert.equal(f.h.state().conversation?.id, leave === "new chat" ? undefined : "source", leave);
     assert.equal(takeComposerFocusRequest("fork"), false, leave);
-    assert.deepEqual(f.notices().map((notice) => notice.title), ["Forked to a new chat: source (fork)"], leave);
+    assert.deepEqual(f.notices(), [{ type: "success", title: "Forked to a new chat: source (fork)", action: "Open" }], leave);
+    await f.clickOpen();
+    assert.deepEqual({ railView: f.h.state().railView, open: f.h.state().conversation?.id, keyboard: takeComposerFocusRequest("fork") },
+      { railView: "chats", open: "fork", keyboard: true }, `${leave}: Open shows the fork in Chats with its keyboard`);
     clearNotices();
     await act(async () => { f.h.renderer.unmount(); });
   }
 });
 
-test("a fork she stayed for opens with its keyboard, also after a click on the chat she was in or Back from Activity to it", async () => {
-  for (const meanwhile of ["nothing", "the same chat clicked", "Back from Activity"] as const) {
+test("Open on a fork's notice never leaves its keyboard request behind for a later visit", async () => {
+  const f = await forkHarness();
+  await f.startFork();
+  await act(async () => { f.h.appNavigation().openChat("other"); });
+  await f.settle();
+  await f.finishFork();
+  // Open, then another chat before the fork has loaded: the fork's request goes.
+  const notice = toast.getToasts().find((item) => "title" in item && item.title === "Forked to a new chat: source (fork)") as { action: { onClick: (event: unknown) => void } };
+  await act(async () => {
+    notice.action.onClick({});
+    f.h.appNavigation().openChat("third");
+    await new Promise((resolve) => setTimeout(resolve, 20));
+  });
+  assert.equal(f.h.state().conversation?.id, "third");
+  assert.equal(takeComposerFocusRequest("fork"), false, "dropped when another chat opened");
+  clearNotices();
+  await act(async () => { f.h.renderer.unmount(); });
+});
+
+test("a fork she stayed for opens with its keyboard, also after Settings and back, a click on her chat, or Back from Activity to it", async () => {
+  for (const meanwhile of ["nothing", "Settings and back", "the same chat clicked", "Back from Activity", "Back from an Activity preview"] as const) {
     const f = await forkHarness();
     await f.startFork();
-    await act(async () => {
-      if (meanwhile === "the same chat clicked") await f.h.navigation().openConversation("source");
-      if (meanwhile === "Back from Activity") {
-        f.h.state().setRailView("activity");
-        await new Promise((resolve) => setTimeout(resolve, 0));
-        // leaveActivity: back to Chats, the chat from before Activity opened again.
-        f.h.state().setRailView("chats");
-        await f.h.navigation().openConversation("source");
-      }
-    });
+    const nav = () => f.h.appNavigation();
+    if (meanwhile === "Settings and back") {
+      await act(async () => { nav().openSettingsSection("general"); });
+      await act(async () => { nav().returnToChats(); });
+    }
+    if (meanwhile === "the same chat clicked") await act(async () => { nav().openChat("source"); });
+    if (meanwhile === "Back from Activity" || meanwhile === "Back from an Activity preview") {
+      await act(async () => { nav().showView("activity"); });
+      // A preview of another chat replaces hers while Activity is open.
+      if (meanwhile === "Back from an Activity preview") await act(async () => { await f.h.navigation().openConversation("other"); });
+      await act(async () => { nav().leaveActivity(); });
+    }
+    await f.settle();
+    assert.equal(f.h.state().conversation?.id, "source", `${meanwhile}: back on her chat`);
     assert.equal(await f.finishFork(), true, meanwhile);
     assert.equal(f.h.state().conversation?.id, "fork", meanwhile);
+    assert.equal(f.h.state().railView, "chats", meanwhile);
     assert.equal(takeComposerFocusRequest("fork"), true, meanwhile);
     assert.deepEqual(f.notices(), [], `${meanwhile}: no notice, the chat itself is on screen`);
     await act(async () => { f.h.renderer.unmount(); });
@@ -363,10 +404,12 @@ test("a fork she stayed for opens with its keyboard, also after a click on the c
 test("a fork refused after she went elsewhere says so by a notice, not in the chat she opened", async () => {
   const f = await forkHarness();
   await f.startFork();
-  await act(async () => { await f.h.navigation().openConversation("other"); });
+  await act(async () => { f.h.appNavigation().openChat("other"); });
+  await f.settle();
   assert.equal(await f.finishFork("refused"), false);
   assert.equal(f.h.state().conversation?.id, "other");
   assert.equal(f.h.state().error, undefined);
+  assert.equal(f.h.state().startingChatRef.current, false);
   assert.deepEqual(f.notices(), [{ type: "error", title: "@member cannot be forked to a new chat: Codex CLI requires sign-in.", action: undefined }]);
   clearNotices();
   await act(async () => { f.h.renderer.unmount(); });

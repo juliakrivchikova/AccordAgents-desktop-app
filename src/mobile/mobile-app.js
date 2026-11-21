@@ -13280,7 +13280,8 @@
    *  (fork)", the member's project, the computer's view for a new chat, one
    *  main session on the member's provider, model, effort, access and place,
    *  marked with where it comes from), lists it, and opens it with nothing
-   *  in it: the first message makes the copy. */
+   *  in it: the first message makes the copy. Gone from the chat it was
+   *  forked from by then, she stays where she is; it is only listed. */
   async function forkMemberToNewChat(plan) {
     const shared = mobileSharedRules();
     if (forkStarting || !shared) return;
@@ -13336,11 +13337,17 @@
       return;
     }
     forkStarting = false;
-    if (!forkMenu || forkMenu.key === startedFor) forkMenu = undefined;
+    const menuShowsThisFork = Boolean(forkMenu) && forkMenu.key === startedFor;
+    if (!forkMenu || menuShowsThisFork) forkMenu = undefined;
     // Making it waits on her server (up to FORK_SEEN_READ_TIMEOUT_MS): gone
     // to another chat or screen by then, she stays there, keyboard and all;
     // the new chat is in her list.
     if (!stillInForkedChat(plan.source.conversationId)) {
+      // The menu it was tapped in closes (she may have left by a
+      // notification, not a tap that closes it); a menu she opened since
+      // stays, its Fork item no longer "Starting the new chat…".
+      if (menuShowsThisFork) chatTitleMenuOpen = false;
+      renderForkItems();
       void sendNow();
       return;
     }

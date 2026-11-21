@@ -709,6 +709,7 @@ export function useChatActions(state: AppState, conversationActions: Conversatio
       (state.openConversationRequestRef.current === openRequestAtClick || state.openConversationTargetRef.current === conversationId);
     // Checking its CLI can take a moment: said at once, gone once it is made.
     const notice = laterLoadingNotice("Forking to a new chat…");
+    let created: Conversation;
     try {
       const result = await window.consensus.createChatConversation({
         runId: crypto.randomUUID(),
@@ -716,26 +717,7 @@ export function useChatActions(state: AppState, conversationActions: Conversatio
         skipDefaultParticipants: true,
         forkOf: { conversationId, participantId }
       });
-      notice.end();
-      const created = result.conversation;
-      state.setSummaries((current) => upsertConversationSummary(current, created));
-      if (!stillHere()) {
-        const openChat = options.openChat;
-        toast.success(`Forked to a new chat: ${created.title}`, openChat ? {
-          action: { label: "Open", onClick: () => { requestComposerFocus(created.id); openChat(created.id); } }
-        } : undefined);
-        await conversationActions.refreshConversations().catch(() => undefined);
-        return true;
-      }
-      requestComposerFocus(created.id);
-      state.setRailView("chats");
-      const openRequest = state.openConversationRequestRef.current + 1;
-      await conversationActions.openConversation(created.id);
-      // She opened another chat meanwhile: the request must not take the
-      // keyboard whenever she opens this one later.
-      if (state.openConversationRequestRef.current !== openRequest) takeComposerFocusRequest(created.id);
-      await conversationActions.refreshConversations().catch(() => undefined);
-      return true;
+      created = result.conversation;
     } catch (caught) {
       // Said where she is: in the chat she forked from, or by a notice once
       // she has gone elsewhere (an error banner there would be about a chat
@@ -745,8 +727,36 @@ export function useChatActions(state: AppState, conversationActions: Conversatio
       return false;
     } finally {
       notice.end();
+      // Made or refused: a new chat she starts meanwhile (she may have gone
+      // to New chat) is not held up while this one opens or is listed.
       state.startingChatRef.current = false;
     }
+    state.setSummaries((current) => upsertConversationSummary(current, created));
+    if (stillHere()) {
+      requestComposerFocus(created.id);
+      state.setRailView("chats");
+      const openRequest = state.openConversationRequestRef.current + 1;
+      await conversationActions.openConversation(created.id);
+      // She opened another chat meanwhile: the request must not take the
+      // keyboard whenever she opens this one later.
+      if (state.openConversationRequestRef.current !== openRequest) takeComposerFocusRequest(created.id);
+    } else {
+      const openChat = options.openChat;
+      toast.success(`Forked to a new chat: ${created.title}`, openChat ? {
+        action: {
+          label: "Open",
+          onClick: () => {
+            openChat(created.id);
+            // Asked once its open began (an open drops a request for any
+            // other chat): taken when its composer appears, or at once when
+            // the chat is already on screen.
+            requestComposerFocus(created.id);
+          }
+        }
+      } : undefined);
+    }
+    await conversationActions.refreshConversations().catch(() => undefined);
+    return true;
   }
 
   async function startChatAccord(options: StartChatAccordOptions): Promise<boolean> {

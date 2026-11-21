@@ -315,7 +315,8 @@ chat as that chat's main session, with everything it knew
   the same machine: a fork never crosses devices), with the main session's
   role and its say over members, marked `ChatParticipant.forkOrigin`
   (written only by the computer; her server keeps a machine from writing
-  it). The chat opens at once with its composer focused; the member and its
+  it). The chat opens at once with its composer focused (unless she has gone
+  elsewhere by then: below); the member and its
   chat are not touched. Making it checks only the CLI its main session runs
   on: a member on this computer has its own CLI checked (a check less than
   30 s old reused, otherwise that CLI alone, never every CLI); a member on a
@@ -329,7 +330,11 @@ chat as that chat's main session, with everything it knew
   (`stillHere` in `forkChatParticipantToNewChat`; told by what the latest
   open request was for, `openConversationTargetRef`, since Back from Activity
   and a click on the open chat count as requests too); a refusal is then a
-  notice too, not the error banner of the chat she opened. On the phone,
+  notice too, not the error banner of the chat she opened. Open takes the
+  keyboard to the fork's composer (at once when it is already on screen);
+  opening any other chat first drops that request, so it never fires on a
+  later visit (`composer-focus-request.ts`). The fork frees New chat as soon
+  as its chat is made or refused. On the phone,
   where the tap waits on her server for up to 4 s, the same: gone from the
   chat, she stays where she is and the new chat is in her list
   (`stillInForkedChat`; the phone has no notices).
