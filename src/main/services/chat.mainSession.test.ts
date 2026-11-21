@@ -463,19 +463,24 @@ test("a fork the CLI could not make starts clean in the same turn: the main sess
 
 test("a delegated fork whose clean start fails too: the main session reads why in the failed reply, and the member's next turn starts as a new session", async () => {
   const main = mainSession("codex-cli", { model: undefined });
-  const conversation = mainSessionChat([main], { participantSessions: [sessionRecord(main, "main-cli-session")] });
+  // The main session has read the chat through its first message: a fork's copy starts there.
+  const conversation = mainSessionChat([main], { participantSessions: [sessionRecord(main, "main-cli-session")],
+    promptContextPointers: { [main.id]: { timeline: { messageId: "user-message", sequence: 0, createdAt: NOW } } } });
+  let overloaded = true;
   const { service, storage, runs } = testService({
     conversation,
     run: async (participant, _prompt, runOptions) => {
       if (participant.id === main.id) return { participant, ok: true, content: "Noted.", durationMs: 1 };
-      return runOptions.forkFromSessionId
-        ? { participant, ok: false, content: "", error: "no rollout found for thread id main-cli-session", durationMs: 1, forkCopyFailed: true }
-        : { participant, ok: false, content: "Codex failed before it returned a response.", error: "The model is overloaded.", durationMs: 1 };
+      if (runOptions.forkFromSessionId) return { participant, ok: false, content: "", error: "no rollout found for thread id main-cli-session", durationMs: 1, forkCopyFailed: true };
+      return overloaded
+        ? { participant, ok: false, content: "Codex failed before it returned a response.", error: "The model is overloaded.", durationMs: 1 }
+        : { participant, ok: true, content: "Done.", durationMs: 1, sessionId: "clean-session" };
     }
   });
   const result = await service.delegateTaskFromTool(mainActor(), { task: "Continue.", start: "fork" });
   assert.equal(result.ok, true, JSON.stringify(result));
   const childId = String(result.participantId);
+  assert.ok(((storage.current.metadata.promptContextPointers ?? {}) as Record<string, unknown>)[childId], "the copy's chat context starts where the main session's did");
   await waitFor(() => delegationBatches(storage.current)[0]?.items[0]?.status === "failed");
   assert.equal(runs.filter((run) => run.participant.id === childId).length, 2, "the copy, then the clean start");
   const notice = `@${String(result.handle).slice(1)} could not start from a copy of @main's session, so this turn started a clean session.`;
@@ -483,6 +488,15 @@ test("a delegated fork whose clean start fails too: the main session reads why i
   assert.ok(failed?.content.includes(notice), failed?.content);
   const pointers = (storage.current.metadata.promptContextPointers ?? {}) as Record<string, unknown>;
   assert.equal(pointers[childId], undefined, "its chat context starts over");
+  // Its next turn: a new session's first, given the chat from its start.
+  overloaded = false;
+  const asked = await service.requestParticipantsFromTool(mainActor(undefined, { triggerMessageId: "trigger-next" }), { requests: [{ target: String(result.handle), prompt: "Try again." }] });
+  assert.equal(asked.ok, true, JSON.stringify(asked));
+  await waitFor(() => runs.filter((run) => run.participant.id === childId).length === 3);
+  const next = runs.filter((run) => run.participant.id === childId)[2]!;
+  assert.equal(next.options.forkFromSessionId, undefined);
+  assert.ok(!next.options.sessionId, "no session of its own yet");
+  assert.doesNotMatch(next.prompt, /You were forked from/);
 });
 test("a failure that is not a missing source does not count as a failed fork", async () => {
   const main = mainSession("codex-cli", { model: undefined });

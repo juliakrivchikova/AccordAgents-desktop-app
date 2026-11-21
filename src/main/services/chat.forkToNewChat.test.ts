@@ -616,6 +616,38 @@ test("a copy that failed for another reason is tried once more in the same turn,
   }
 });
 
+test("two messages sent at once: when the other one made the member's session meanwhile, this one goes into it, never a second clean session", async () => {
+  const codexReviewer: ChatParticipant = { ...REVIEWER, kind: "codex-cli", model: undefined, reasoningEffort: undefined };
+  const source = oldChat([ASSISTANT, codexReviewer], { participantSessions: [sessionRecord(codexReviewer, "src-cli-session")] });
+  let turnSession: ChatParticipantSession | undefined;
+  const { service, storage, runs } = testService({
+    conversations: [source],
+    run: async (participant, _prompt, runOptions) => {
+      if (runOptions.forkFromSessionId && !runOptions.sessionId) {
+        // The other message's turn made the member's session while this copy failed.
+        turnSession!.sessionId = "other-turn-session";
+        delete turnSession!.forkFrom;
+        return { participant, ok: false, content: "", error: "no rollout found for thread id src-cli-session", durationMs: 1, forkCopyFailed: true };
+      }
+      return { participant, ok: true, content: "Into the same session.", durationMs: 1, sessionId: runOptions.sessionId };
+    }
+  });
+  const sessionFor = (service as any).sessionForParticipant.bind(service);
+  (service as any).sessionForParticipant = async (...args: unknown[]) => {
+    const state = await sessionFor(...args);
+    turnSession = state.session;
+    return state;
+  };
+  const { id, mainId } = await forkAndSend(service, storage);
+  await service.settleChatSaves();
+  assert.equal(runs.length, 2);
+  assert.equal(runs[1]!.options.sessionId, "other-turn-session", "resumes the session the other turn made");
+  const reply = storage.store.get(id)!.messages.find((message) => message.participantId === mainId && message.role === "participant")!;
+  assert.deepEqual([reply.status, reply.content], ["done", "Into the same session."]);
+  assert.equal(sessionsOf(storage.store.get(id)).find((item) => item.participantId === mainId)!.sessionId, "other-turn-session");
+  assert.equal(storage.store.get(id)!.messages.some((message) => message.id.startsWith("fork-notice-")), false, "this turn started nothing clean");
+});
+
 test("a failure that is not the copy's (a turn that failed, a Stop) never starts the fork clean", async () => {
   const codexReviewer: ChatParticipant = { ...REVIEWER, kind: "codex-cli", model: undefined, reasoningEffort: undefined };
   const source = oldChat([ASSISTANT, codexReviewer], { participantSessions: [sessionRecord(codexReviewer, "src-cli-session")] });

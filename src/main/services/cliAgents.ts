@@ -347,6 +347,12 @@ export function isForkSourceMissingError(text: string | undefined): boolean {
   return /no conversation found|no rollout found for thread id/i.test(text ?? "");
 }
 
+/** Whether a fork's run failed with no copy made: the CLI said the source is
+ *  gone, or failed while it made the copy (ParticipantRunResult.forkCopyFailed). */
+export function forkCopyNotMade(result: Pick<ParticipantRunResult, "error" | "forkCopyFailed">): boolean {
+  return isForkSourceMissingError(result.error) || result.forkCopyFailed === true;
+}
+
 export interface CliAgentRunOptions {
   persistSession?: boolean;
   sessionId?: string;
@@ -3724,11 +3730,6 @@ export class CliAgentRunner {
       initialized = true;
     };
 
-    /** Where a Fork to new chat's copy ends (options.forkCut): the turn its
-     *  reply recorded, or, for a reply from before that, the last turn that
-     *  ended by the reply's finish, read from the thread's turns newest
-     *  first; undefined for all of it (nothing came after, or no point can
-     *  be named: forkCutMissed says why). */
     // Said once the copy is made (thread/fork answered, still before the
     // turn runs): a source that is gone gets no copy, and its fork says only
     // that it starts clean.
@@ -3736,6 +3737,11 @@ export class CliAgentRunner {
     const missedCut = (reason: string): void => {
       forkCutMissedPending = reason;
     };
+    /** Where a Fork to new chat's copy ends (options.forkCut): the turn its
+     *  reply recorded, or, for a reply from before that, the last turn that
+     *  ended by the reply's finish, read from the thread's turns newest
+     *  first; undefined for all of it (nothing came after, or no point can
+     *  be named: forkCutMissed says why). */
     const codexForkLastTurnId = async (sourceThreadId: string, timeoutMs?: number): Promise<string | undefined> => {
       const cut = options.forkCut;
       if (!cut) return undefined;
@@ -5833,7 +5839,7 @@ export class CliAgentRunner {
       // word that the copy may hold more. Made after all, it says so with
       // the turn.
       const result = await this.runClaudeTurn(participant, prompt, repoPath, kind, signal, rest);
-      return result.ok || !(isForkSourceMissingError(result.error) || result.forkCopyFailed) ? { ...result, forkCutMissed: cut.reason } : result;
+      return result.ok || !forkCopyNotMade(result) ? { ...result, forkCutMissed: cut.reason } : result;
     }
     if (cut.kind === "missed") return whole(cut.reason);
     const result = await this.runClaudeTurn(participant, prompt, repoPath, kind, signal, { ...rest, forkFromSessionId: replySession, forkResumeAt: cut.at });

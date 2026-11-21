@@ -427,8 +427,9 @@ chat as that chat's main session, with everything it knew
     Claude Code compacted the session after it, Codex could not list the
     turns, the CLI refused the point or does not know the flag), the whole of the
     member's session is copied, as before this rule, and a line in the chat
-    says so as soon as the copy is made, before the turn's reply (it may last
-    hours, and the app may stop during it): "@main's copy of @x's session
+    says so before the turn's reply (Codex once its copy is made, Claude Code
+    once it has read the transcript; the turn may last hours, and the app may
+    stop during it): "@main's copy of @x's session
     may include what @x did after you tapped Fork: <why>." (`postForkNotice`,
     above: a line in the chat and a warning on the device that ran it).
     Never a clean start: the copy keeps what she saw, the line says what may

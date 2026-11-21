@@ -277,7 +277,7 @@ import {
 } from "../../shared/chatDeliveryPolicy";
 import { isDeviceEventBlobReference, type DeviceEventBlobReference } from "../../shared/deviceEventBlobs";
 import { CHAT_PROMPT_SUGGESTION_LOCAL_SOURCE, ChatPromptSuggestionStore, type ChatMemberPromptSuggestion } from "./chatPromptSuggestions";
-import { CliAgentRunner, COMPACTION_CANCELLED_BEFORE_START, isForkSourceMissingError, type CliAgentBackgroundTask, type CliAgentCodexServerRequest, type CliAgentCompactResult, type CliAgentOutputEvent, type CliAgentReplyOrigin, type CliAgentRoleOptions, type CliAgentRunOptions, type CliAgentSelfResumedTurn } from "./cliAgents";
+import { CliAgentRunner, COMPACTION_CANCELLED_BEFORE_START, forkCopyNotMade, isForkSourceMissingError, type CliAgentBackgroundTask, type CliAgentCodexServerRequest, type CliAgentCompactResult, type CliAgentOutputEvent, type CliAgentReplyOrigin, type CliAgentRoleOptions, type CliAgentRunOptions, type CliAgentSelfResumedTurn } from "./cliAgents";
 import { cloudRunWorkerTargetFromSettings, normalizeCloudRunWorkerSettings } from "./cloudRunWorkers";
 import { emitCodexLiveOutput } from "./codexExec";
 import {
@@ -10952,10 +10952,15 @@ export class ChatService {
     // own id (a source that is gone gets no copy, and says only that it
     // starts clean).
     let forkCutUnknownNote = forkSource?.cut?.unknown ? this.forkCutNoteText(participant, forkSource.cut.unknown) : undefined;
-    let forkAttempt = Boolean(forkSource);
+    // The last session id this turn's CLI reported (a fork's copy, or one
+    // Claude Code was given before it made it).
+    let reportedHere: string | undefined;
     const persistSessionId = (sessionId: string): void => {
+      reportedHere = sessionId.trim() || reportedHere;
       this.persistParticipantSessionId(conversation, session, sessionId);
-      if (forkAttempt && forkCutUnknownNote && sessionId.trim() && sessionId !== forkSource?.sessionId) {
+      // Claude Code's one-shot start (a /goal) reports the id it gives the
+      // copy before it makes it: its line waits for the turn's end.
+      if (forkCutUnknownNote && !(nativeGoal && participant.kind === "claude-code") && sessionId.trim() && sessionId !== forkSource?.sessionId) {
         this.postForkNotice(conversation, participant, "cut-missed", forkCutUnknownNote);
         forkCutUnknownNote = undefined;
       }
@@ -11110,15 +11115,26 @@ export class ChatService {
           sourceGone,
           error: result.error
         });
-        // The id the CLI was given (or reported) is no session.
-        session.sessionId = "";
-        if (!sourceGone) {
+        // The id this turn's CLI was given (or reported) is no session; one
+        // another turn of the member made meanwhile stays.
+        const forgetOwnId = (): void => {
+          if (session.sessionId === reportedHere) session.sessionId = "";
+        };
+        // Two messages sent at once share the member's first turn: the other
+        // one may have made its session (the copy, or a clean one) meanwhile.
+        const madeMeanwhile = (): boolean => Boolean(session.sessionId?.trim()) && !session.forkFrom && session.sessionId !== forkSource.sessionId;
+        forgetOwnId();
+        if (!sourceGone && !madeMeanwhile()) {
           progressSink.beginAttempt();
           result = await runCli();
-          if (this.forkCopyFailed(result, signal)) session.sessionId = "";
+          if (this.forkCopyFailed(result, signal)) forgetOwnId();
         }
-        if (this.forkCopyFailed(result, signal)) {
-          forkAttempt = false;
+        if (this.forkCopyFailed(result, signal) && madeMeanwhile()) {
+          // This message goes into the session the other one made.
+          forkCutUnknownNote = undefined;
+          progressSink.beginAttempt();
+          result = await runCli();
+        } else if (this.forkCopyFailed(result, signal)) {
           forkCutUnknownNote = undefined;
           delete session.forkFrom;
           delete session.forkedFromParticipantId;
@@ -11166,15 +11182,15 @@ export class ChatService {
           sourceParticipantId: forkSource!.participantId,
           ok: result.ok
         });
-        if (forkStartedCleanThisTurn && !result.ok && !signal?.aborted) {
-          // Its clean start failed too: its next turn starts as a new
-          // session's first, with the chat context from where the source's
-          // started (a clean session has seen none of it).
+        if (forkStartedCleanThisTurn && !result.ok) {
+          // Its clean start failed too, or was stopped: its next turn starts
+          // as a new session's first, with the chat context from where the
+          // source's started (a clean session has seen none of it).
           this.forgetPromptContextPointers(conversation, participant.id);
           // The member that gave the task reads it in this failed reply (a
           // main session made by Fork to new chat was asked by the User,
           // whose notice it is: its reply does not say it twice).
-          if (!this.otherChatForkOrigin(conversation, participant, forkSource!.participantId)) {
+          if (!signal?.aborted && !this.otherChatForkOrigin(conversation, participant, forkSource!.participantId)) {
             result = { ...result, content: [result.content.trim(), forkStartedClean].filter(Boolean).join("\n\n") };
           }
         }
@@ -12236,7 +12252,8 @@ export class ChatService {
   }
 
   /** The chat's line that a fork could not copy its source's session and
-   *  started (or starts at its next turn) a clean session. */
+   *  started a clean session in that turn ("now": the CLI started it clean
+   *  itself, Claude Code's one-shot start). */
   private forkStartedCleanNotice(conversation: Conversation, participant: ChatParticipant, forkSource: ChatSessionForkSource, when: "now" | "turn"): string {
     const origin = this.otherChatForkOrigin(conversation, participant, forkSource.participantId);
     const source = origin ? undefined : this.chatParticipants(conversation).find((item) => item.id === forkSource.participantId);
@@ -12250,15 +12267,13 @@ export class ChatService {
    *  own exists): the CLI said the source is gone, or failed before it took
    *  the message. Not a Stop, nor a start the CLI already made clean. */
   private forkCopyFailed(result: ParticipantRunResult, signal: AbortSignal | undefined): boolean {
-    return !signal?.aborted && !result.ok && !result.sessionRestarted &&
-      (isForkSourceMissingError(result.error) || result.forkCopyFailed === true);
+    return !signal?.aborted && !result.ok && !result.sessionRestarted && forkCopyNotMade(result);
   }
 
   /** Whether a fork's turn made its copy: the member has an id of its own,
    *  not the source's, and the run did not fail at the copy. */
   private forkCopyMade(forkSource: ChatSessionForkSource, session: ChatParticipantSession, result: ParticipantRunResult): boolean {
-    return Boolean(session.sessionId?.trim()) && session.sessionId !== forkSource.sessionId && !session.forkFrom &&
-      !isForkSourceMissingError(result.error) && result.forkCopyFailed !== true;
+    return Boolean(session.sessionId?.trim()) && session.sessionId !== forkSource.sessionId && !session.forkFrom && !forkCopyNotMade(result);
   }
 
   /** The member's chat context starts over: its next turn is given the chat
@@ -12847,9 +12862,10 @@ export class ChatService {
   /** Where a fork's copy ends, for the CLI (Fork to new chat): the point its
    *  reply recorded (and the session it is in), or the reply's finish; none
    *  for a delegated fork. When no point can be named, or the CLI cannot
-   *  stop there, a line in the chat says so as soon as the copy is made,
-   *  before the turn's reply (it may last hours, and the app may stop
-   *  during it); a source that is gone gets no copy and no such line. */
+   *  stop there, a line in the chat says so before the turn's reply (it may
+   *  last hours, and the app may stop during it): Codex once its copy is
+   *  made, Claude Code once it has read the member's transcript. A source
+   *  that is gone gets no copy and no such line. */
   private forkCutRunOption(
     conversation: Conversation,
     participant: ChatParticipant,

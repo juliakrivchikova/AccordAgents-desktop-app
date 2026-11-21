@@ -3114,13 +3114,14 @@
   const SEND_FAILURES_KEPT = 200;
   const SEND_FAILURE_TEXT_CHARS = 80;
   // When the User last opened the log: the header points at it while a send
-  // is failing, or after a refusal she has not seen.
+  // is failing, or after a refusal (or a chat this phone could not start)
+  // she has not seen.
   const SEND_LOG_SEEN_KEY = "accordagents.mobile.sendLogSeenAt.v1";
   let sendLogNewestAt = "";
   let sendLogNewestRefusalAt = "";
   // Whether that newest one is a chat this phone could not start (a fork
   // that failed after she left its screen), not a refusal by her server.
-  let sendLogNewestRefusalNotStarted = false;
+  let sendLogNewestNotStarted = false;
   let sendLogCount = 0;
 
   /** What an entry is, for the log: its kind, its chat and a little of it. */
@@ -3174,7 +3175,7 @@
     sendLogNewestAt = at;
     if (sendLogNeedsLook(record)) {
       sendLogNewestRefusalAt = at;
-      sendLogNewestRefusalNotStarted = record.notStarted === true;
+      sendLogNewestNotStarted = record.notStarted === true;
     }
     recordRelayDebug({ event: "send-failure", kind: record.kind, cause: record.cause, reason: record.reason });
     return withNamedStore(SEND_FAILURES_STORE, "readwrite", function (store) {
@@ -3210,7 +3211,7 @@
       const refusal = list.find(sendLogNeedsLook);
       if (refusal && refusal.at > sendLogNewestRefusalAt) {
         sendLogNewestRefusalAt = refusal.at;
-        sendLogNewestRefusalNotStarted = refusal.notStarted === true;
+        sendLogNewestNotStarted = refusal.notStarted === true;
       }
       return list;
     }).catch(function () { return []; });
@@ -3239,8 +3240,8 @@
 
   /** The way to the log from the chat's header, beside where it says whether
    *  the phone is connected: there while a send is failing, and after a
-   *  refusal the User has not looked at. It sits before the members button
-   *  at the header's end. */
+   *  refusal (or a chat this phone could not start) the User has not looked
+   *  at. It sits before the members button at the header's end. */
   function renderSendLogButton() {
     const button = document.getElementById("send-log-button");
     if (!button) return;
@@ -3251,7 +3252,7 @@
     syncHeaderSpacer();
     button.setAttribute("aria-label", summary.failing > 0
       ? "Send log: " + (summary.failing === 1 ? "something you sent has" : summary.failing + " things you sent have") + " not reached your server yet"
-      : sendLogNewestRefusalNotStarted
+      : sendLogNewestNotStarted
         ? "Send log: a chat you started did not start"
         : "Send log: your server did not take something you sent");
   }

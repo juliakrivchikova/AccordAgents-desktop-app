@@ -243,6 +243,7 @@ test("the phone forks a member to a new chat from the title's menu as the comput
     };
     document.getElementById("chat-title-fork").click(); })()`);
   await app.waitFor(`document.getElementById("chat-title-fork-detail").textContent === "Could not start the chat: QA: the phone's storage is full"`, "the failure, in the menu");
+  assert.equal(await app.evaluate(visible("#send-log-button")), false, "said where she tapped: not in the send log");
   assert.equal(await app.evaluate(`localStorage.getItem("accordagents.mobile.startedChats.v1")`), null, "nothing left in the list");
   assert.equal(hub.opsRequests.flatMap((request) => request.ops || []).some((op) => op.kind === "conversation.create"), false);
   await closeMenu(app);
@@ -417,6 +418,7 @@ test("in the classic view the phone forks a member from a small action on its ro
     };
     document.getElementById("members-sheet-fork").click(); })()`);
   await app.waitFor(`document.getElementById("members-sheet-fork-detail").textContent === "Could not start the chat: QA: the phone's storage is full"`, "the failure, in the item");
+  assert.equal(await app.evaluate(visible("#send-log-button")), false, "said where she tapped: not in the send log");
   assert.equal(await app.evaluate(visible("#members-sheet")), true);
   assert.equal(await app.evaluate(`localStorage.getItem("accordagents.mobile.startedChats.v1")`), null, "nothing left in the list");
   assert.equal(hub.opsRequests.flatMap((request) => request.ops || []).some((op) => op.kind === "conversation.create"), false);

@@ -532,6 +532,7 @@ test("codex: a fork whose copy Codex did not make says so (forkCopyFailed), and 
 test("codex: a fork answered with the source's own id is refused, so the member never writes to it", async () => {
   const { result, sessionIds, methods } = await runForkedCodexTurn("parent-thread");
   assert.equal(result.ok, false);
+  assert.equal(result.forkCopyFailed, true, "no copy was made: the turn tries again, then starts clean");
   assert.equal(sessionIds.includes("parent-thread"), false);
   assert.equal(methods.some((item) => item.method === "turn/start"), false);
 });
