@@ -48,9 +48,14 @@ function trace(device: string, event: string, payload: Record<string, unknown>):
   if (process.env.ACCORD_TEST_TRACE) process.stderr.write(`${Date.now() - started}ms ${device} ${event} ${JSON.stringify(payload).slice(0, 300)}\n`);
 }
 
-interface Turn { device: "desktop" | "machine"; participantId: string; triggerId: string; runId: string }
+interface Turn { device: "desktop" | "machine"; participantId: string; triggerId: string; runId: string; signal?: AbortSignal }
 
-function chatService(storage: StorageService, turns: Turn[], device: Turn["device"]): ChatService {
+/** What a test does while a member's turn runs (what its CLI does then).
+ *  `showPending`: the turn's bubble is in the chat while it runs, as a real
+ *  turn's is, so other devices see it (and can stop it). */
+interface TurnControl { during?: (turn: Turn) => Promise<void>; showPending?: boolean }
+
+function chatService(storage: StorageService, turns: Turn[], device: Turn["device"], control: TurnControl = {}): ChatService {
   const settings = {
     async getPublicSettings() {
       return { chatRoleConfigs: [], chatParticipantConfigs: [], providers: [{ kind: "claude-code", enabled: true }, { kind: "codex-cli", enabled: true }] };
@@ -60,13 +65,35 @@ function chatService(storage: StorageService, turns: Turn[], device: Turn["devic
     async closeWarmAgents() { return undefined; } };
   const chat = new ChatService(storage as never, settings as never, cliRunner as never, { async write(event: string, payload: Record<string, unknown>) { trace(device, event, payload); } } as never);
   (chat as unknown as { ensureHistoryFiles: () => Promise<string> }).ensureHistoryFiles = async () => tmpdir();
-  (chat as unknown as { runParticipantTurn: (...args: unknown[]) => Promise<ChatMessage[]> }).runParticipantTurn = async (_conversation, participant, trigger, runId, _signal, _progress, options) => {
-    turns.push({ device, participantId: (participant as ChatParticipant).id, triggerId: (trigger as ChatMessage).id, runId: runId as string });
+  (chat as unknown as { runParticipantTurn: (...args: unknown[]) => Promise<ChatMessage[]> }).runParticipantTurn = async (conversation, participant, trigger, runId, signal, _progress, options) => {
+    const turn: Turn = { device, participantId: (participant as ChatParticipant).id, triggerId: (trigger as ChatMessage).id, runId: runId as string, signal: signal as AbortSignal | undefined };
+    turns.push(turn);
     const existing = (options as { existingPendingMessage?: ChatMessage }).existingPendingMessage;
     const reply: ChatMessage = existing ?? {
       id: randomUUID(), role: "participant", participantId: (participant as ChatParticipant).id, participantLabel: `@${(participant as ChatParticipant).handle}`,
-      content: "", createdAt: new Date().toISOString(), status: "pending", metadata: { runId: runId as string }
+      content: "", createdAt: new Date().toISOString(), status: "pending",
+      metadata: { runId: runId as string, ...(control.showPending ? { sourceMessageId: (trigger as ChatMessage).id, parentMessageId: (trigger as ChatMessage).id } : {}) }
     } as ChatMessage;
+    if (!existing && control.showPending) {
+      const chatInternals = chat as unknown as { withChatMutation(c: Conversation, mutate: () => Promise<void>): Promise<void>; queueSnapshot(c: Conversation): void };
+      await chatInternals.withChatMutation(conversation as Conversation, async () => {
+        (conversation as Conversation).messages.push({ ...reply, metadata: { ...reply.metadata } });
+        chatInternals.queueSnapshot(conversation as Conversation);
+      });
+    }
+    await control.during?.(turn);
+    if ((signal as AbortSignal | undefined)?.aborted) {
+      if (!existing && control.showPending) {
+        // As a stopped turn closes its bubble.
+        const chatInternals = chat as unknown as { withChatMutation(c: Conversation, mutate: () => Promise<void>): Promise<void>; queueSnapshot(c: Conversation): void };
+        await chatInternals.withChatMutation(conversation as Conversation, async () => {
+          const shown = (conversation as Conversation).messages.find((message) => message.id === reply.id);
+          if (shown) Object.assign(shown, { status: "error", content: `@${(participant as ChatParticipant).handle} stopped by user.` });
+          chatInternals.queueSnapshot(conversation as Conversation);
+        });
+      }
+      throw new Error("Chat run cancelled.");
+    }
     reply.content = `${device} reply to ${(trigger as ChatMessage).content}`;
     reply.status = "done";
     return [reply];
@@ -110,8 +137,10 @@ async function setup(t: test.TestContext) {
   const hubUrl = `http://127.0.0.1:${(http.address() as AddressInfo).port}`;
 
   const turns: Turn[] = [];
-  const desktopChat = chatService(desktopStorage, turns, "desktop");
-  const machineChat = chatService(machineStorage, turns, "machine");
+  const desktopControl: TurnControl = {};
+  const desktopChat = chatService(desktopStorage, turns, "desktop", desktopControl);
+  const machineControl: TurnControl = {};
+  const machineChat = chatService(machineStorage, turns, "machine", machineControl);
   const desktopAppliers = appliers(desktopStorage, desktopChat, desktopIdentity.originId, "desktop");
   const machineAppliers = appliers(machineStorage, machineChat, desktopIdentity.originId, "machine");
   desktopChat.setCardAppliers(async () => desktopAppliers);
@@ -155,7 +184,7 @@ async function setup(t: test.TestContext) {
     await machineLink.start();
   };
   return { hubStorage, hubUrl, desktopStorage, machineStorage, desktopChat, machineChat, desktopLink, machineLink, links, desktopIdentity, machineIdentity, desktopEvents, machineEvents,
-    phone, turns, scripts, call, card, phoneAnswers, startMachine, link };
+    phone, phoneHub, turns, desktopControl, machineControl, scripts, call, card, phoneAnswers, startMachine, link };
 }
 
 async function until<T>(read: () => Promise<T>, done: (value: T) => boolean, ms = 15_000): Promise<T> {
@@ -817,4 +846,131 @@ test("an answer from the phone that crosses the expiry is applied: the server re
   await until(async () => h.turns, (turns) => turns.length === 1);
   assert.deepEqual(h.turns.map((turn) => [turn.device, turn.participantId]), [["machine", remote.id]], "the member went on with her answer, once");
   await until(async () => h.machineChat.liveRunIds().length, (count) => count === 0);
+});
+
+/** The User asks a desktop member to run a shell command it may not run yet;
+ *  during that turn its CLI asks for the permission through the app's tool, as
+ *  a member does. Resolves with that turn and the card it raised. */
+async function memberAsksForShell(h: Awaited<ReturnType<typeof linkedDesktop>>, conversationId: string) {
+  let approvalId: string | undefined;
+  h.desktopControl.during = async (turn) => {
+    if (turn.participantId !== desk.id || approvalId) return;
+    const result = await h.desktopChat.requestPermissionChangeFromTool({
+      conversationId, participantId: desk.id, roleConfigId: desk.roleConfigId, roleConfigVersion: 1, capabilities: ["permissions.request"],
+      triggerMessageId: turn.triggerId, runId: turn.runId
+    } as never, { kind: "shellRules", rules: [{ action: "allow", match: "exact", pattern: "sleep 3 && echo done" }], reason: "The User asked me to run it." });
+    assert.equal(result.status, "pending_user_approval");
+    approvalId = result.approvalId;
+  };
+  await h.desktopChat.sendMessage({ conversationId, content: "@taylor run `sleep 3 && echo done` in the shell" } as never);
+  const [asked] = await until(async () => h.turns, (turns) => turns.length === 1);
+  await until(() => h.call<{ turns?: Array<{ runId: string; state: string }> }>(h.desktopIdentity, "GET", `/v3/chat?conversationId=${conversationId}`),
+    (page) => Boolean(page.turns?.some((item) => item.runId === asked.runId && item.state === "finished")));
+  assert.ok(approvalId, "the member asked for the permission during its turn");
+  await until(() => h.card(approvalId!), (item) => item?.state === "pending");
+  h.desktopControl.during = undefined;
+  return { asked, approvalId: approvalId! };
+}
+
+const serverTurn = (h: Awaited<ReturnType<typeof linkedDesktop>>, conversationId: string, runId: string) =>
+  h.call<{ turns?: Array<{ runId: string; state: string; outcome?: string; executorDeviceId?: string; messageId: string }> }>(h.desktopIdentity, "GET", `/v3/chat?conversationId=${conversationId}`)
+    .then((page) => page.turns?.find((item) => item.runId === runId));
+
+test("Allow on a desktop member's permission request continues the member in a new turn on the server, and it runs to its end", async (t) => {
+  const h = await linkedDesktop(t, chat("cards-perm-desk"));
+  const { asked, approvalId } = await memberAsksForShell(h, "cards-perm-desk");
+
+  await h.desktopChat.respondToAppToolApproval({ conversationId: "cards-perm-desk", approvalId, approve: true });
+  const [, resumed] = await until(async () => h.turns, (turns) => turns.length === 2);
+  assert.deepEqual([resumed.device, resumed.participantId, resumed.triggerId], ["desktop", desk.id, asked.triggerId], "the member continues from the message that asked it");
+  assert.notEqual(resumed.runId, asked.runId, "not the turn that asked for the permission, which is over");
+  // Named here as on the server, so every device names it the same way.
+  const finished = await until(() => serverTurn(h, "cards-perm-desk", resumed.runId), (item) => item?.state === "finished");
+  assert.deepEqual([finished!.outcome, finished!.executorDeviceId, finished!.messageId], ["done", h.desktopIdentity.originId, asked.triggerId]);
+  const replies = await until(() => h.desktopStorage.getConversation("cards-perm-desk"), (item) =>
+    (item?.messages.filter((message) => message.role === "participant" && message.status === "done").length ?? 0) === 2);
+  assert.equal(replies!.messages.filter((message) => message.content === "Auto-resumed @taylor after permission approval.").length, 1);
+  await until(async () => h.desktopChat.liveRunIds().length, (count) => count === 0);
+  assert.equal(h.turns.length, 2, "continued once");
+});
+
+test("Allow on the phone continues a desktop member once in its own turn, which a Stop from the phone stops", async (t) => {
+  const h = await linkedDesktop(t, chat("cards-perm-phone"));
+  const { asked, approvalId } = await memberAsksForShell(h, "cards-perm-phone");
+  // The continued turn runs until it is stopped.
+  h.desktopControl.during = (turn) => new Promise<void>((resolve) => {
+    if (turn.signal?.aborted) return resolve();
+    turn.signal?.addEventListener("abort", () => resolve(), { once: true });
+  });
+
+  assert.equal((await h.phoneAnswers("cards-perm-phone", approvalId, { approve: true })).result.status, "accepted");
+  const [, resumed] = await until(async () => h.turns, (turns) => turns.length === 2);
+  assert.deepEqual([resumed.device, resumed.participantId, resumed.triggerId], ["desktop", desk.id, asked.triggerId]);
+  const serverRunId = resumed.runId;
+  const claimed = await until(() => serverTurn(h, "cards-perm-phone", serverRunId), (item) => item?.state === "claimed");
+  assert.equal(claimed!.executorDeviceId, h.desktopIdentity.originId, "every device sees it running on the computer");
+
+  // The answer read again (a reconnect, a second answer) starts nothing more.
+  assert.equal((await h.phoneAnswers("cards-perm-phone", approvalId, { approve: true })).result.status, "rejected");
+  await h.desktopChat.resumeServerCards();
+  await new Promise((resolve) => setTimeout(resolve, 300));
+  assert.equal(h.turns.length, 2, "continued once");
+
+  // The phone names the run as its row does (turnOfRun), with the message it
+  // answers and its member.
+  const stop: HubOp = { opId: `op-${randomUUID()}`, kind: "turn.stop", conversationId: "cards-perm-phone", runId: serverRunId, messageId: asked.triggerId, participantId: desk.id };
+  assert.equal((await h.phoneHub.writeOps([stop])).results[0].status, "accepted");
+  await until(async () => resumed.signal?.aborted ?? false, (aborted) => aborted);
+  const stopped = await until(() => serverTurn(h, "cards-perm-phone", serverRunId), (item) => item?.state === "finished");
+  assert.equal(stopped!.outcome, "stopped");
+  await until(async () => h.desktopChat.liveRunIds().length, (count) => count === 0);
+  assert.equal(h.turns.length, 2);
+});
+
+test("a cloud member's permission request allowed on the phone continues it once on its machine, and Stop on the computer stops that turn", async (t) => {
+  const h = await linkedDesktop(t, chat("cards-perm-box"));
+  await h.startMachine();
+  await until(() => h.machineStorage.getConversation("cards-perm-box"), (item) => Boolean(item));
+  let approvalId: string | undefined;
+  h.machineControl.showPending = true;
+  h.machineControl.during = async (turn) => {
+    if (turn.participantId !== remote.id) return;
+    if (!approvalId) {
+      // During its turn the member asks for the permission through the app's tool, on its machine.
+      const result = await h.machineChat.requestPermissionChangeFromTool({
+        conversationId: "cards-perm-box", participantId: remote.id, roleConfigId: remote.roleConfigId, roleConfigVersion: 1, capabilities: ["permissions.request"],
+        triggerMessageId: turn.triggerId, runId: turn.runId
+      } as never, { kind: "shellRules", rules: [{ action: "allow", match: "exact", pattern: "sleep 3 && echo done" }], reason: "The User asked me to run it." });
+      assert.equal(result.status, "pending_user_approval");
+      approvalId = result.approvalId;
+      return;
+    }
+    // The continued turn runs until it is stopped.
+    await new Promise<void>((resolve) => {
+      if (turn.signal?.aborted) return resolve();
+      turn.signal?.addEventListener("abort", () => resolve(), { once: true });
+    });
+  };
+  await h.desktopChat.sendMessage({ conversationId: "cards-perm-box", content: "@drew run `sleep 3 && echo done` in the shell" } as never);
+  const [asked] = await until(async () => h.turns, (turns) => turns.length === 1);
+  assert.equal(asked.device, "machine");
+  await until(async () => approvalId, (id) => Boolean(id));
+  await until(() => h.card(approvalId!), (item) => item?.state === "pending" && item.raisedBy === h.machineIdentity.originId);
+
+  assert.equal((await h.phoneAnswers("cards-perm-box", approvalId!, { approve: true })).result.status, "accepted");
+  const [, resumed] = await until(async () => h.turns, (turns) => turns.length === 2);
+  assert.deepEqual([resumed.device, resumed.participantId, resumed.triggerId], ["machine", remote.id, asked.triggerId], "continued once, on its machine");
+  assert.notEqual(resumed.runId, asked.runId);
+  const claimed = await until(() => serverTurn(h, "cards-perm-box", resumed.runId), (item) => item?.state === "claimed");
+  assert.equal(claimed!.executorDeviceId, h.machineIdentity.originId, "named on the server as on its machine");
+
+  // Stop on the computer, on the member's bubble as the computer has it.
+  await until(() => h.desktopStorage.getConversation("cards-perm-box"), (item) =>
+    Boolean(item?.messages.some((message) => message.metadata?.runId === resumed.runId && message.status === "pending")));
+  h.desktopChat.cancelRun(resumed.runId);
+  await until(async () => resumed.signal?.aborted ?? false, (aborted) => aborted);
+  const stopped = await until(() => serverTurn(h, "cards-perm-box", resumed.runId), (item) => item?.state === "finished");
+  assert.equal(stopped!.outcome, "stopped");
+  await until(async () => h.machineChat.liveRunIds().length, (count) => count === 0);
+  assert.equal(h.turns.length, 2);
 });
