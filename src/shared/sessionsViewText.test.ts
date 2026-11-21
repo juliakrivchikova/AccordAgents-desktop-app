@@ -193,6 +193,8 @@ test("an approval's summary: who asks and whom it names lose their handles; a to
   assert.equal(sessionsViewSummaryText("Grant @drew file edits", NAMES), "Grant “Fix the logout” file edits");
   assert.equal(sessionsViewSummaryText("Remove @gone from this chat", NAMES), "Remove “Check the docs” from this chat");
   assert.equal(sessionsViewSummaryText("Use Bash: git log @main..HEAD && echo @drew", NAMES), "Use Bash: git log @main..HEAD && echo @drew");
+  assert.equal(sessionsViewSummaryText("Codex wants to run: git log @main..HEAD", NAMES), "Codex wants to run: git log @main..HEAD");
+  assert.equal(sessionsViewSummaryText("Codex Auto Review denied: npm publish --tag @drew", NAMES), "Codex Auto Review denied: npm publish --tag @drew");
   assert.equal(sessionsViewSummaryText("Grant @drew shell allow prefix \"npm publish --tag @main\"", NAMES), "Grant “Fix the logout” shell allow prefix \"npm publish --tag @main\"");
   assert.equal(sessionsViewText("Run `echo @drew` for @drew", NAMES), "Run `echo @drew` for “Fix the logout”", "code stays as written");
 });

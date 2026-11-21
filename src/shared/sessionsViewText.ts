@@ -194,13 +194,18 @@ export function sessionsViewReplyText(content: string, authorHandle: string | un
   return content.split(/(\n{2,})/).map((part) => (appMade.test(part) ? sessionsViewText(part, names) : part)).join("");
 }
 
+/** A tool's own request, worded by its CLI's ask: a Claude tool ("Use Bash:
+ *  <command or reason>") or Codex ("Codex wants to run: <command>", "Codex
+ *  Auto Review denied: <command>"). Never reworded. */
+const TOOL_REQUEST_SUMMARY = /^(?:Use [^\s:]+(?::|$)|Codex )/;
+
 /**
  * An approval's summary, as the sessions view shows it: the app's words about
  * who asks and whom it names ("Grant @drew file edits", "Remove @gera from
  * this chat") without handles; a tool's request ("Use Bash: <the command or
- * the member's reason>") exactly as written.
+ * the member's reason>", "Codex wants to run: <command>") exactly as written.
  */
 export function sessionsViewSummaryText(summary: string, names: SessionsViewNames | undefined): string {
-  if (typeof summary !== "string" || /^Use [^\s:]+(?::|$)/.test(summary)) return summary;
+  if (typeof summary !== "string" || TOOL_REQUEST_SUMMARY.test(summary)) return summary;
   return sessionsViewText(summary, names);
 }

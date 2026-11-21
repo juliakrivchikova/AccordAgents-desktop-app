@@ -6570,24 +6570,29 @@
     return chatViewOf(chat) === "sessions" ? "" : who;
   }
 
-  /** The chat list's subtitle is the desktop's 84-character cut of the last
-   *  message with its line breaks already collapsed, so the line-based rule
-   *  cannot find the block inside it: what follows the marker on that one line
-   *  is protocol, and the User should read the sentence before it instead. Her
-   *  own messages and the app's are left exactly as they are, as the desktop
-   *  leaves them. */
+  const ARTIFACT_NOTE_SNIPPET = /^@[A-Za-z0-9][A-Za-z0-9_-]* (?:created|revised|renamed|signed|archived|restored|submitted|withdrew|published) /;
+
   /** A sessions-view chat's subtitle: when its newest message is a reply the
    *  app ended (its lines start with its member's own handle: "@main stopped
    *  before it returned a response."), those words name nobody by handle, as
    *  in the chat (sessionsViewReplyText); a member's own words stay. */
   function sessionsViewSnippet(chat, text) {
     const who = typeof chat.who === "string" ? chat.who.trim().replace(/:$/, "") : "";
-    if (!who || /^(you|system)$/i.test(who) || typeof text !== "string" || text.indexOf("@") < 0) return text;
+    if (typeof text !== "string" || text.indexOf("@") < 0) return text;
+    // A document's note ("@drew revised Plan · v3") is the app's line too.
+    if (/^system$/i.test(who) && ARTIFACT_NOTE_SNIPPET.test(text)) return sessionsViewTextFor(chat.id, text);
+    if (!who || /^(you|system)$/i.test(who)) return text;
     const shared = sessionsRules();
     const names = sessionsViewNamesFor(chat.id);
     return names && shared && typeof shared.sessionsViewReplyText === "function" ? shared.sessionsViewReplyText(text, who, names) : text;
   }
 
+  /** The chat list's subtitle is the desktop's 84-character cut of the last
+   *  message with its line breaks already collapsed, so the line-based rule
+   *  cannot find the block inside it: what follows the marker on that one line
+   *  is protocol, and the User should read the sentence before it instead. Her
+   *  own messages and the app's are left exactly as they are, as the desktop
+   *  leaves them. */
   function snippetDisplayText(chat) {
     const snippet = typeof chat.snippet === "string" ? chat.snippet : "";
     const who = typeof chat.who === "string" ? chat.who.trim().toLowerCase() : "";
@@ -8031,14 +8036,14 @@
     const open = lastSessionsState && lastSessionsState.conversationId === conversationId ? lastSessionsState : undefined;
     // Worked out once per chat list and drawing of the open chat, not per
     // label: Activity and a chat's cards ask for every row.
-    const known = sessionsNamesCache.get(conversationId);
-    if (known && cachedChatList && known.list === cachedChatList && known.state === open) return known.names;
     // A chat not open now names its members by the tasks it had when it was
     // last open here (titles are read from its messages, which only an open
     // chat has); a member it had no task for, by its handle as a plain word.
     const titled = open ? undefined : sessionsTitledNames.get(conversationId);
+    const known = sessionsNamesCache.get(conversationId);
+    if (known && cachedChatList && known.list === cachedChatList && known.state === open && known.titled === titled) return known.names;
     const names = sessionsViewNamesUncached(shared, conversationId, titled);
-    if (cachedChatList) sessionsNamesCache.set(conversationId, { list: cachedChatList, state: open, names: names });
+    if (cachedChatList) sessionsNamesCache.set(conversationId, { list: cachedChatList, state: open, titled: titled, names: names });
     if (open && names) sessionsTitledNames.set(conversationId, names);
     return names;
   }
@@ -12010,7 +12015,8 @@
     if (!names || entry.author !== "agent" || (entry.status !== "error" && entry.status !== "Error") || typeof content !== "string" || content.indexOf("@") < 0) return content;
     const shared = sessionsRules();
     if (!shared || typeof shared.sessionsViewReplyText !== "function") return content;
-    const author = entry.participantLabel || (lastSessionsState.members.find(function (member) { return member.id === entry.participantId; }) || {}).handle;
+    const member = lastSessionsState.members.find(function (item) { return item.id === entry.participantId; });
+    const author = (member && member.handle) || entry.participantLabel;
     return shared.sessionsViewReplyText(content, author, names);
   }
 

@@ -75,6 +75,13 @@ test("a sessions-view chat names nobody by handle on the phone (failed replies, 
     metadata: { mainSessionParticipantId: MAIN.id, chatView: "sessions" }, messages: chatMessages() });
   await hub.createChat("conv-classic", { title: "Login page classic", participants: [MAIN, DREW], createdAt: at(31),
     metadata: { mainSessionParticipantId: MAIN.id, chatView: "classic" }, messages: chatMessages().map((message) => ({ ...message, id: `c-${message.id}` })) });
+  // A chat whose newest line is a document's note: its row in the chat list.
+  await hub.createChat("conv-noted", { title: "Noted chat", participants: [MAIN, DREW], createdAt: at(40),
+    metadata: { mainSessionParticipantId: MAIN.id, chatView: "sessions" }, messages: [
+      { id: "n-u", role: "user", content: "Write it down", status: "done", createdAt: at(39), metadata: { deliveryTargets: [MAIN.id] } },
+      { id: "n-note", role: "system", content: "@main created artifact [Plan](#artifact:art-9) · v1", status: "done", createdAt: at(38),
+        metadata: { appMessageSource: "app_artifact_note", artifactEventId: "e-n" } }
+    ] });
   await hub.raiseApproval("conv-sessions", permission("conv-sessions", MAIN, "card-main"), { participantId: MAIN.id });
   await hub.raiseApproval("conv-sessions", permission("conv-sessions", DREW, "card-drew"), { participantId: DREW.id });
   await hub.raiseApproval("conv-classic", permission("conv-classic", MAIN, "card-classic"), { participantId: MAIN.id });
@@ -82,6 +89,12 @@ test("a sessions-view chat names nobody by handle on the phone (failed replies, 
   await hub.raiseApproval("conv-sessions", { ...permission("conv-sessions", MAIN, "card-cmd"), summary: "Use Bash: echo @drew" }, { participantId: MAIN.id });
   app = await attachApp({ port: 9552 });
   await pairPage(app, { hub, siteOrigin: site.origin, query: "qa=1" });
+
+  // --- the chat list: a sessions-view chat's app lines name nobody ---------
+  await app.waitFor(`Boolean(document.querySelector('.mobile-chat-row[data-conversation-id="conv-noted"] .mobile-chat-snippet'))`, "the noted chat's row");
+  const notedRow = await app.evaluate(`document.querySelector('.mobile-chat-row[data-conversation-id="conv-noted"] .mobile-chat-snippet').textContent`);
+  assert.match(notedRow, /created artifact/i, "the row shows the note's line");
+  assert.doesNotMatch(notedRow, HANDLES, notedRow);
 
   // --- the sessions view ---------------------------------------------------
   await openChat(app, "conv-sessions");
