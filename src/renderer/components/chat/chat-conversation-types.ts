@@ -5,6 +5,7 @@ import type {
   ChatAppToolApprovalScope,
   ChatImageInput,
   ChatSkillMention,
+  ChatViewState,
   Conversation,
   RepoFileMention,
   RepoFileExternalOpenAction,
@@ -16,6 +17,7 @@ import type { ArtifactsState } from "../artifacts/use-artifacts";
 import type { ChatChoiceResponse } from "./chat-message-item";
 import type { ChatParticipantRosterStatus } from "./chat-participant-menu";
 import type { ChatComposerPicks } from "./chat-composer";
+import type { ChatMemberSendRequest } from "./chat-member-session-panel";
 
 export interface ChatMessageFocusRequest {
   conversationId?: string;
@@ -47,7 +49,9 @@ export interface ChatConversationViewProps {
     repoFileMentions?: RepoFileMention[],
     imageAttachments?: ChatImageInput[],
     skillMentions?: ChatSkillMention[],
-    content?: string
+    content?: string,
+    /** The sessions view: exactly these members (the main session). */
+    targetParticipantIds?: string[]
   ) => Promise<boolean>;
   accordDisabledReason?: string;
   onOpenAccord?: () => void;
@@ -58,6 +62,16 @@ export interface ChatConversationViewProps {
     imageAttachments?: ChatImageInput[],
     skillMentions?: ChatSkillMention[]
   ) => Promise<boolean>;
+  /** A member's session panel (the sessions view): to that member only. */
+  onSendToMember?: (request: ChatMemberSendRequest) => Promise<boolean>;
+  /** The sessions view: a member's settings (a gear opening its model,
+   *  effort, mode, rights, where it runs, remove), and its model chip in a
+   *  composer opening the same. */
+  renderMemberSettings?: (participantId: string) => ReactNode;
+  renderMemberChip?: (participantId: string) => ReactNode;
+  /** The chat's view as her server saved it, and a switch that failed. */
+  onChatViewSaved?: (saved: ChatViewState) => void;
+  onChatViewError?: (message: string) => void;
   onApproveMentions: (sourceMessageId: string, targetParticipantIds: string[], continueRequester: boolean) => void;
   onRejectMentions: (sourceMessageId: string, targetParticipantIds: string[]) => void;
   onRespondToChoice: (sourceMessageId: string, choiceId: string, response: ChatChoiceResponse) => void | Promise<void>;

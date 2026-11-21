@@ -29,6 +29,20 @@ export function defaultChatAgentPermissions(): ChatAgentPermissions {
   return cloneChatAgentPermissions(DEFAULT_CHAT_AGENT_PERMISSIONS);
 }
 
+/** What an ordinary member starts with in a new chat: the generic member the
+ *  app seeds for each CLI reads the chat's project when it has one (and is
+ *  given nothing else); it asks for anything more. The main session starts
+ *  the same way (docs/main-session.md). */
+export function newChatMemberPermissions(hasProject: boolean): ChatAgentPermissions {
+  return {
+    ...defaultChatAgentPermissions(),
+    repoRead: hasProject,
+    workspaceWrite: false,
+    webAccess: false,
+    shell: { enabled: false, rules: [] }
+  };
+}
+
 export function cloneChatAgentPermissions(permissions: ChatAgentPermissions): ChatAgentPermissions {
   const providerNative = cloneProviderNativePermissions(permissions.providerNative);
   const manageRolesParticipants = normalizeOptionalChatParticipantRequestPermission(permissions.manageRolesParticipants);
@@ -165,6 +179,121 @@ export function resolveChatManageRolesParticipantsPermission(
     effective,
     exceedsRoleDefault: chatParticipantRequestPermissionExceeds(effective, roleDefault)
   };
+}
+
+const CHAT_AGENT_MODE_RANK: Record<ChatAgentMode, number> = { plan: 0, default: 1, auto: 2 };
+
+/** A member's mode never above its ceiling's: plan < default < auto. */
+export function clampChatAgentMode(requested: ChatAgentMode | undefined, ceiling: ChatAgentMode | undefined): ChatAgentMode {
+  const wanted = normalizeChatAgentMode(requested);
+  const limit = normalizeChatAgentMode(ceiling);
+  return CHAT_AGENT_MODE_RANK[wanted] <= CHAT_AGENT_MODE_RANK[limit] ? wanted : limit;
+}
+
+function lowerChatParticipantRequestPermission(
+  left: ChatParticipantRequestPermission,
+  right: ChatParticipantRequestPermission
+): ChatParticipantRequestPermission {
+  return chatParticipantRequestPermissionRank(left) <= chatParticipantRequestPermissionRank(right) ? left : right;
+}
+
+function shellRuleKey(rule: ChatShellPermissionRule): string {
+  return `${rule.action}\0${rule.match}\0${rule.pattern}`;
+}
+
+/**
+ * The rights a member gets when another member makes it (the main session
+ * delegating, docs/main-session.md): what was asked for, never more than the
+ * ceiling has. Pass as the ceiling what the parent really has: its effective
+ * permissions for its mode (effectiveChatAgentPermissionsForProvider), with
+ * `manageRolesParticipants` set to its resolved right to manage members.
+ *
+ * - repo, edits and web: only when both have them;
+ * - shell: on only when the ceiling's is; a rule that lets a command run
+ *   (allow or ask) only when the ceiling has the same rule; every deny rule
+ *   of either is kept;
+ * - Claude Code native tools: only those the ceiling has;
+ * - member requests and compaction requests: deny < ask < allow, never above
+ *   the ceiling's;
+ * - managing members: "deny" unless asked for explicitly, and never above
+ *   the ceiling's (a member does not create members unless its task says so).
+ *
+ * The User's server holds a machine's additions to the same rule
+ * (chatAgentPermissionsWithin, hub/hubMachineScope.ts).
+ */
+export function clampChatAgentPermissions(
+  requested: ChatAgentPermissions,
+  ceiling: ChatAgentPermissions
+): ChatAgentPermissions {
+  const wanted = normalizeChatAgentPermissions(requested);
+  const limit = normalizeChatAgentPermissions(ceiling);
+  const limitRules = new Set(limit.shell.rules.map(shellRuleKey));
+  const rules = normalizeChatShellPermissionRules([
+    ...wanted.shell.rules.filter((rule) => rule.action === "deny" || limitRules.has(shellRuleKey(rule))),
+    ...limit.shell.rules.filter((rule) => rule.action === "deny")
+  ]);
+  const limitTools = new Set(limit.providerNative?.["claude-code"]?.allowedTools ?? []);
+  const allowedTools = (wanted.providerNative?.["claude-code"]?.allowedTools ?? []).filter((tool) => limitTools.has(tool));
+  const explicitManage = normalizeOptionalChatParticipantRequestPermission(requested?.manageRolesParticipants);
+  const manageRolesParticipants = explicitManage
+    ? lowerChatParticipantRequestPermission(explicitManage, normalizeChatRoleManagementPermission(limit.manageRolesParticipants))
+    : "deny";
+  return {
+    repoRead: wanted.repoRead && limit.repoRead,
+    workspaceWrite: wanted.workspaceWrite && limit.workspaceWrite,
+    webAccess: wanted.webAccess && limit.webAccess,
+    requestParticipants: lowerChatParticipantRequestPermission(wanted.requestParticipants, limit.requestParticipants),
+    requestCompaction: lowerChatParticipantRequestPermission(
+      normalizeChatParticipantRequestPermission(wanted.requestCompaction),
+      normalizeChatParticipantRequestPermission(limit.requestCompaction)
+    ),
+    manageRolesParticipants,
+    shell: {
+      enabled: wanted.shell.enabled && limit.shell.enabled,
+      rules
+    },
+    ...(allowedTools.length > 0 ? { providerNative: { "claude-code": { allowedTools } } } : {})
+  };
+}
+
+/**
+ * Whether a member's permissions give it nothing beyond `ceiling` (managing
+ * members aside: it depends on the member's role, so callers check it with
+ * resolveChatManageRolesParticipantsPermission). What clampChatAgentPermissions
+ * returns is always within its ceiling.
+ */
+export function chatAgentPermissionsWithin(actual: ChatAgentPermissions, ceiling: ChatAgentPermissions): boolean {
+  const member = normalizeChatAgentPermissions(actual);
+  const limit = normalizeChatAgentPermissions(ceiling);
+  if ((member.repoRead && !limit.repoRead) || (member.workspaceWrite && !limit.workspaceWrite) || (member.webAccess && !limit.webAccess)) {
+    return false;
+  }
+  if (member.shell.enabled && !limit.shell.enabled) {
+    return false;
+  }
+  const limitRules = new Set(limit.shell.rules.map(shellRuleKey));
+  if (member.shell.rules.some((rule) => rule.action !== "deny" && !limitRules.has(shellRuleKey(rule)))) {
+    return false;
+  }
+  // A command the ceiling may not run stays forbidden: a member with a shell
+  // keeps every deny rule of the ceiling (clampChatAgentPermissions carries
+  // them), dropping one is a broader right.
+  const memberRules = new Set(member.shell.rules.map(shellRuleKey));
+  if (member.shell.enabled && limit.shell.rules.some((rule) => rule.action === "deny" && !memberRules.has(shellRuleKey(rule)))) {
+    return false;
+  }
+  const limitTools = new Set(limit.providerNative?.["claude-code"]?.allowedTools ?? []);
+  if ((member.providerNative?.["claude-code"]?.allowedTools ?? []).some((tool) => !limitTools.has(tool))) {
+    return false;
+  }
+  return chatParticipantRequestPermissionRank(member.requestParticipants) <= chatParticipantRequestPermissionRank(limit.requestParticipants) &&
+    chatParticipantRequestPermissionRank(normalizeChatParticipantRequestPermission(member.requestCompaction)) <=
+      chatParticipantRequestPermissionRank(normalizeChatParticipantRequestPermission(limit.requestCompaction));
+}
+
+/** Whether a member's mode is not above `ceiling`'s. */
+export function chatAgentModeWithin(actual: ChatAgentMode | undefined, ceiling: ChatAgentMode | undefined): boolean {
+  return CHAT_AGENT_MODE_RANK[normalizeChatAgentMode(actual)] <= CHAT_AGENT_MODE_RANK[normalizeChatAgentMode(ceiling)];
 }
 
 export function isChatShellPermissionPatternSafe(pattern: string): boolean {

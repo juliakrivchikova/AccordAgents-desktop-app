@@ -47,6 +47,8 @@ import { CHAT_AUTO_WATCH_WAKE_LIMIT_DEFAULT } from "../../shared/chatAutoWatch";
 import { DEFAULT_CHAT_PROMPT_CONTEXT } from "../../shared/chatPromptContext";
 import { EMPTY_MOBILE_CONTROL_SETTINGS } from "../../shared/mobilePairing";
 import { preferredReadyAssistantProviderKind } from "../../shared/cliReadiness";
+import { MAIN_SESSION_ROLE_ID } from "../../shared/mainSession";
+import { CHAT_INTERIM_POSTS_MAX_CHARS } from "../../shared/interimPosts";
 import type {
   AgentHealth,
   ReviewProgress,
@@ -98,6 +100,29 @@ const ROLE: ChatRoleConfig = {
   appToolCapabilities: [],
   updatedAt: NOW
 };
+
+/** The main session's built-in role (settings.ts), as every install has it. */
+const MAIN_SESSION_ROLE: ChatRoleConfig = {
+  id: MAIN_SESSION_ROLE_ID,
+  label: "Main session",
+  instructions: "Work on User's requests and delegate when it helps.",
+  version: 1,
+  appToolCapabilities: ["participants.manage", "participants.delegate", "accord.start"],
+  participantDefaults: {
+    autoWatch: false,
+    requestParticipants: "allow",
+    requestCompaction: "ask",
+    manageRolesParticipants: "allow"
+  },
+  builtIn: true,
+  updatedAt: NOW
+};
+
+/** Built-in roles are always in Settings (SettingsService.mergeDefaultRoles):
+ *  the main session's too, whatever roles a test names. */
+function withBuiltInMainSessionRole(roles: ChatRoleConfig[]): ChatRoleConfig[] {
+  return roles.some((role) => role.id === MAIN_SESSION_ROLE_ID) ? roles : [...roles, MAIN_SESSION_ROLE];
+}
 
 const ADMIN_ROLE: ChatRoleConfig = {
   id: "administrator",
@@ -3233,7 +3258,8 @@ test("chat add paths normalize legacy run location to concrete local or remote",
     ]
   });
 
-  const createdParticipants = created.conversation.metadata.participants as ChatParticipant[];
+  // The members asked for (the chat's main session runs here too).
+  const createdParticipants = (created.conversation.metadata.participants as ChatParticipant[]).filter((participant) => participant.roleConfigId === ROLE.id);
   assert.deepEqual(createdParticipants.map((participant) => participant.remoteExecution), ["local", "local", "remote"]);
 
   const conversation = chatConversation([chatParticipant("codex-cli")]);
@@ -4204,7 +4230,8 @@ test("the phone's New chat options come out the same while nothing changed, each
   assert.ok(first);
   // An unchanged offer is not published again (hubPhonePublisher compares).
   assert.equal(JSON.stringify(second), JSON.stringify(first));
-  assert.equal(first.assistant.id, "administrator");
+  assert.equal(first.mainSession?.id, MAIN_SESSION_ROLE_ID, "named by its role, not a fresh id");
+  assert.deepEqual(first.assistant, first.mainSession, "a phone from before reads the same main session");
   const drew = first.members.find((member) => member.configId === saved.id);
   assert.equal(drew?.participant.id, saved.id);
   assert.equal(drew?.participant.handle, "drew");
@@ -4217,7 +4244,8 @@ test("with no CLI ready the phone's New chat says why in the computer's words, a
   const offered = await service.newChatOptions([]);
   assert.ok(offered);
   assert.equal(offered.unavailable, "Set up and sign in to at least one CLI provider to start a chat.");
-  assert.equal(offered.assistant.roleConfigId, "administrator");
+  assert.equal(offered.mainSession?.roleConfigId, MAIN_SESSION_ROLE_ID);
+  assert.equal(offered.assistant.roleConfigId, MAIN_SESSION_ROLE_ID);
   assert.deepEqual(offered.members.map((member) => member.configId), ["saved-drew"]);
 });
 
@@ -5128,7 +5156,7 @@ test("Chat Assistant prompt suppresses repo edit shell escalation while preservi
   assert.doesNotMatch(prompt, /shellRules/);
 });
 
-test("chat creation does not seed a visible Chat Assistant setup message", async () => {
+test("chat creation does not seed a visible setup message", async () => {
   const { service, storage } = testService({
     agents: [{ kind: "codex-cli", installed: true } as AgentHealth],
     settings: { chatRoleConfigs: [ADMIN_ROLE, ROLE] }
@@ -5141,13 +5169,156 @@ test("chat creation does not seed a visible Chat Assistant setup message", async
   });
   const participants = result.conversation.metadata.participants as ChatParticipant[];
 
-  assert.equal(participants.some((participant) => participant.roleConfigId === ADMIN_ROLE.id), true);
+  assert.equal(participants.some((participant) => participant.roleConfigId === MAIN_SESSION_ROLE_ID), true);
   assert.equal(result.conversation.messages.length, 1);
   assert.equal(result.conversation.messages[0].role, "system");
   assert.equal(result.conversation.messages.some((message) => message.role === "participant"), false);
   assert.equal(storage.current.messages.some((message: ChatMessage) =>
     message.metadata?.appMessageSource === "chat-assistant-cold-start"
   ), false);
+});
+
+test("a new chat gets a main session instead of the Chat Assistant: an ordinary member on the saved provider, named in the chat with the view it opens in", async () => {
+  const agents: AgentHealth[] = [
+    { kind: "codex-cli", label: "Codex", installed: true, detection: "detected", runnable: "ready", authentication: "ready" },
+    { kind: "claude-code", label: "Claude Code", installed: true, detection: "detected", runnable: "ready", authentication: "ready" }
+  ];
+  const { service } = testService({ agents, settings: { chatRoleConfigs: [ADMIN_ROLE, ROLE], assistantProviderKind: "claude-code" } });
+
+  const withProject = await service.createConversation({
+    title: "Fresh chat", repoPath: "/test/project", participants: [{ handle: "codex", roleConfigId: ROLE.id, kind: "codex-cli" }]
+  });
+  const participants = withProject.conversation.metadata.participants as ChatParticipant[];
+  const main = participants[0];
+  assert.deepEqual(participants.map((item) => [item.handle, item.roleConfigId]), [["main", MAIN_SESSION_ROLE_ID], ["codex", ROLE.id]],
+    "the main session first, and no Chat Assistant");
+  assert.equal(main.kind, "claude-code", "the provider Settings names for it");
+  assert.equal(main.agentMode, "default");
+  assert.equal(main.participantConfigId, undefined);
+  assert.equal(main.permissions?.repoRead, true, "it reads the chat's project, as an ordinary member does");
+  assert.equal(main.permissions?.workspaceWrite, false);
+  assert.equal(main.permissions?.webAccess, false);
+  assert.equal(main.permissions?.shell.enabled, false);
+  assert.equal(main.permissions?.requestParticipants, "allow", "its role asks members without a card");
+  assert.equal(withProject.conversation.metadata.mainSessionParticipantId, main.id);
+  assert.equal(withProject.conversation.metadata.chatView, "sessions", "unset in Settings: the sessions view");
+  assert.match(withProject.conversation.messages[0].content, /- @main\n- @codex/, "the first line lists the main session");
+
+  const withoutProject = await service.createConversation({ title: "Fresh chat", participants: [], skipDefaultParticipants: true });
+  const alone = withoutProject.conversation.metadata.participants as ChatParticipant[];
+  assert.deepEqual(alone.map((item) => item.roleConfigId), [MAIN_SESSION_ROLE_ID]);
+  assert.equal(alone[0].permissions?.repoRead, false, "no project to read, as for an ordinary member");
+
+  const classic = testService({ agents, settings: { chatRoleConfigs: [ADMIN_ROLE, ROLE], defaultChatView: "classic" } });
+  const classicChat = await classic.service.createConversation({ title: "Fresh chat", participants: [], skipDefaultParticipants: true });
+  assert.equal(classicChat.conversation.metadata.chatView, "classic", "Settings → General picks the view a new chat opens in");
+});
+
+test("the New chat screen's own row is the main session as the User set it; a chat has one, and no other member gets its role", async () => {
+  const { service, storage } = testService({ agents: installedChatAgents(), settings: { chatRoleConfigs: [ADMIN_ROLE, ROLE] } });
+  const row = {
+    handle: "main", roleConfigId: MAIN_SESSION_ROLE_ID, kind: "codex-cli" as const, model: "gpt-5.5", reasoningEffort: "high" as const,
+    agentMode: "auto" as const, permissions: { ...defaultChatAgentPermissions(), workspaceWrite: true, requestParticipants: "allow" as const }
+  };
+  const created = await service.createConversation({
+    title: "Fresh chat", participants: [{ handle: "main", roleConfigId: ROLE.id, kind: "claude-code" }, row]
+  });
+  const participants = created.conversation.metadata.participants as ChatParticipant[];
+  const main = participants.find((item) => item.roleConfigId === MAIN_SESSION_ROLE_ID)!;
+  assert.equal(participants[0], participants.find((item) => item.id === main.id), "first among the members");
+  assert.deepEqual([main.handle, main.kind, main.model, main.reasoningEffort, main.agentMode, main.permissions?.workspaceWrite],
+    ["main-2", "codex-cli", "gpt-5.5", "high", "auto", true], "as the User set the row; its name moves aside for a member's");
+  assert.equal(participants.filter((item) => item.roleConfigId === MAIN_SESSION_ROLE_ID).length, 1);
+  assert.equal(created.conversation.metadata.mainSessionParticipantId, main.id);
+
+  await assert.rejects(() => service.createConversation({ title: "Two", participants: [row, { ...row, handle: "other" }] }), /one main session/);
+
+  storage.current = created.conversation;
+  await assert.rejects(
+    () => service.addParticipant({ conversationId: created.conversation.id, participant: { handle: "second", roleConfigId: MAIN_SESSION_ROLE_ID, kind: "codex-cli" } }),
+    /a chat makes its own main session/
+  );
+});
+
+test("the main session cannot be removed from its chat", async () => {
+  const main = { ...chatParticipant("claude-code"), id: "main-participant", handle: "main", roleConfigId: MAIN_SESSION_ROLE_ID };
+  const codex = chatParticipant("codex-cli");
+  const conversation = chatConversation([main, codex], { mainSessionParticipantId: main.id });
+  const { service, storage } = testService({ conversation });
+  await assert.rejects(
+    () => service.removeParticipant({ conversationId: conversation.id, participantId: main.id }),
+    /main session cannot be removed/
+  );
+  await service.removeParticipant({ conversationId: conversation.id, participantId: codex.id });
+  assert.deepEqual((storage.current.metadata.participants as ChatParticipant[]).map((item) => item.id), [main.id], "another member can be");
+});
+
+test("members' tools are not offered the main session's or the Workflow Manager's role for a new member", async () => {
+  const main = { ...chatParticipant("claude-code"), id: "main-participant", handle: "main", roleConfigId: MAIN_SESSION_ROLE_ID };
+  const workflowManager: ChatRoleConfig = { ...ROLE, id: "workflow-manager", label: "Workflow Manager", builtIn: true };
+  const conversation = chatConversation([main], { mainSessionParticipantId: main.id });
+  const { service } = testService({ conversation, agents: installedChatAgents(), settings: { chatRoleConfigs: [ROLE, workflowManager] } });
+  const actor = participantManagerActor(conversation.id, main);
+  const roles = await service.describeRoleOptionsForTool(actor) as { roles: Array<{ id: string }> };
+  const participants = await service.describeParticipantOptionsForTool(actor) as { roles: Array<{ id: string }>; currentParticipants: Array<{ id: string; roleConfigId: string }> };
+  for (const offered of [roles.roles, participants.roles]) {
+    assert.deepEqual(offered.map((role) => role.id), [ROLE.id]);
+  }
+  assert.equal(participants.currentParticipants[0].roleConfigId, MAIN_SESSION_ROLE_ID, "the main session itself is still described");
+});
+
+test("a message written to chosen members goes to exactly those, whatever @handles it has; an id that is not a member is refused", async () => {
+  const main = { ...chatParticipant("claude-code"), id: "main-participant", handle: "main", roleConfigId: MAIN_SESSION_ROLE_ID };
+  const codex = chatParticipant("codex-cli");
+  const gemini = chatParticipant("gemini-cli");
+  const conversation = chatConversation([main, codex, gemini], { mainSessionParticipantId: main.id });
+  const runs: ParticipantConfig[] = [];
+  const { service, storage, tempRoot } = testService({
+    conversation,
+    agents: installedChatAgents(),
+    run: async (participant) => {
+      runs.push(participant);
+      return { participant, ok: true, content: `reply from ${participant.id}`, durationMs: 1 };
+    }
+  });
+  (service as any).ensureHistoryFiles = async () => tempRoot;
+
+  await service.sendMessage({ conversationId: conversation.id, runId: "explicit", content: "@gemini please look", targetParticipantIds: [codex.id] });
+  await waitFor(() => runs.length === 1);
+  assert.deepEqual(runs.map((run) => run.id), [codex.id], "the panel's member only: not @gemini, not the main session");
+  const sent = storage.current.messages.find((message: ChatMessage) => message.content === "@gemini please look");
+  assert.deepEqual(sent?.metadata?.askedParticipantIds, [codex.id]);
+  assert.equal(storage.current.messages.some((message: ChatMessage) => /No member named/.test(message.content)), false);
+
+  await assert.rejects(
+    () => service.sendMessage({ conversationId: conversation.id, content: "hello", targetParticipantIds: ["not-a-member"] }),
+    /No member of this chat has id not-a-member/
+  );
+  assert.equal(storage.current.messages.some((message: ChatMessage) => message.content === "hello"), false, "nothing is posted");
+
+  await waitFor(async () => service.liveRunIds().length === 0, 5_000);
+  runs.length = 0;
+  await service.sendMessage({ conversationId: conversation.id, runId: "unaddressed", content: "and now?" });
+  await waitFor(() => runs.length === 1);
+  assert.deepEqual(runs.map((run) => run.id), [main.id], "without an addressee: the main session, not the member that spoke last");
+});
+
+test("the chat's view switches only in a chat with a main session", async () => {
+  const main = { ...chatParticipant("claude-code"), id: "main-participant", handle: "main", roleConfigId: MAIN_SESSION_ROLE_ID };
+  const mainChat = chatConversation([main], { mainSessionParticipantId: main.id, chatView: "sessions" });
+  const { service, storage } = testService({ conversation: mainChat });
+  const before = storage.current.updatedAt;
+  const saved = await service.setChatView({ conversationId: mainChat.id, view: "classic" });
+  assert.equal(saved?.metadata.chatView, "classic");
+  assert.equal(storage.current.metadata.chatView, "classic");
+  assert.equal(storage.current.updatedAt, before, "a view is not activity in the chat");
+  await assert.rejects(() => service.setChatView({ conversationId: mainChat.id, view: "grid" as never }), /Unknown chat view/);
+
+  const assistant = { ...chatParticipant("codex-cli"), id: "assistant-participant", handle: "assistant", roleConfigId: ADMIN_ROLE.id };
+  const oldChat = chatConversation([assistant]);
+  const old = testService({ conversation: oldChat });
+  await assert.rejects(() => old.service.setChatView({ conversationId: oldChat.id, view: "sessions" }), /one view only/);
+  assert.equal(old.storage.current.metadata.chatView, undefined);
 });
 
 test("static chat instructions include structured participant request and reply guidance", () => {
@@ -5174,7 +5345,7 @@ test("chat creation is blocked when no local CLI is installed", async () => {
   );
 });
 
-test("chat creation initializes the persisted default from the sole ready provider", async () => {
+test("chat creation initializes the persisted default from the sole ready provider for the main session", async () => {
   const { service } = testService({
     agents: [{ kind: "gemini-cli", label: "Antigravity", installed: true }],
     settings: { chatRoleConfigs: [ADMIN_ROLE, ROLE] }
@@ -5186,11 +5357,11 @@ test("chat creation initializes the persisted default from the sole ready provid
     skipDefaultParticipants: true
   });
   const assistant = (result.conversation.metadata.participants as ChatParticipant[])
-    .find((participant) => participant.roleConfigId === ADMIN_ROLE.id);
+    .find((participant) => participant.roleConfigId === MAIN_SESSION_ROLE_ID);
   assert.equal(assistant?.kind, "gemini-cli");
 });
 
-test("chat creation uses the saved Assistant provider when multiple CLIs are ready", async () => {
+test("chat creation puts the main session on the saved provider when multiple CLIs are ready", async () => {
   const agents: AgentHealth[] = [
     { kind: "codex-cli", label: "Codex", installed: true, detection: "detected", runnable: "ready", authentication: "ready" },
     { kind: "claude-code", label: "Claude Code", installed: true, detection: "detected", runnable: "ready", authentication: "ready" }
@@ -5206,11 +5377,11 @@ test("chat creation uses the saved Assistant provider when multiple CLIs are rea
     skipDefaultParticipants: true
   });
   const assistant = (result.conversation.metadata.participants as ChatParticipant[])
-    .find((participant) => participant.roleConfigId === ADMIN_ROLE.id);
+    .find((participant) => participant.roleConfigId === MAIN_SESSION_ROLE_ID);
   assert.equal(assistant?.kind, "codex-cli");
 });
 
-test("a saved Assistant CLI that is not ready gives way to a ready one, on the computer and the phone, and the saved choice stays", { timeout: 10_000 }, async () => {
+test("a saved main session CLI that is not ready gives way to a ready one, on the computer and the phone, and the saved choice stays", { timeout: 10_000 }, async () => {
   // The User, 2026-11-07: once one CLI is signed in nothing else stands in
   // the way of a chat.
   const agents: AgentHealth[] = [
@@ -5224,13 +5395,13 @@ test("a saved Assistant CLI that is not ready gives way to a ready one, on the c
 
   const result = await service.createConversation({ title: "Fresh chat", participants: [], skipDefaultParticipants: true });
   const assistant = (result.conversation.metadata.participants as ChatParticipant[])
-    .find((participant) => participant.roleConfigId === ADMIN_ROLE.id);
+    .find((participant) => participant.roleConfigId === MAIN_SESSION_ROLE_ID);
   assert.equal(assistant?.kind, "codex-cli");
 
   const offered = await service.newChatOptions([]);
   assert.equal(offered?.unavailable, undefined);
   assert.equal(offered?.assistant.kind, "codex-cli");
-  assert.equal(offered?.assistantNote, "The Assistant uses Codex in this chat: Claude Code, your saved choice, needs sign-in.",
+  assert.equal(offered?.assistantNote, "The main session uses Codex in this chat: Claude Code, your saved choice, needs sign-in.",
     "the note names the saved CLI, so the saved choice is still Claude Code");
 });
 
@@ -9265,6 +9436,256 @@ test("app_chat_send_message publishes a participant message and lets the author 
   });
   assert.equal(reacted.status, "added");
   assert.equal(storage.current.messages[1].metadata.reactions["✅"][0].actorLabel, "@codex");
+});
+
+/** A member's turn in progress: its reply, still running, under the User's
+ *  message (the run's pending bubble). */
+function runningReply(participant: ChatParticipant, patch: Partial<ChatMessage> = {}): ChatMessage {
+  return {
+    id: "reply-1",
+    role: "participant",
+    participantId: participant.id,
+    participantLabel: `@${participant.handle}`,
+    content: "",
+    createdAt: NOW,
+    status: "pending",
+    ...patch,
+    metadata: {
+      threadId: "user-message",
+      parentMessageId: "user-message",
+      sourceMessageId: "user-message",
+      runId: "turn-run-1",
+      turnSegmentId: "turn-segment-1",
+      participantRequestDepth: 0,
+      ...patch.metadata
+    }
+  };
+}
+
+/** The turn the running reply belongs to, live in this process. */
+function liveTurn(service: ChatService, participant: ChatParticipant): void {
+  (service as any).registerTargetRun("turn-run-1", new AbortController(), {
+    conversationId: "conversation-1", participantId: participant.id, participantHandle: participant.handle
+  });
+  (service as any).setTargetRunPendingMessageId("turn-run-1", "reply-1");
+}
+
+function turnActor(participant: ChatParticipant, patch: Record<string, unknown> = {}): any {
+  return {
+    ...participantRequestActor(participant),
+    capabilities: [],
+    runId: "turn-run-1",
+    turnSegmentId: "turn-segment-1",
+    ...patch
+  };
+}
+
+test("a post during the member's own running turn goes into its running reply, in order, and the reply stays the last message", async () => {
+  const participant = chatParticipant("codex-cli");
+  const reader = chatParticipant("claude-code");
+  const conversation = chatConversation([participant, reader]);
+  conversation.messages.push(runningReply(participant));
+  const { service, storage } = testService({ conversation });
+  liveTurn(service, participant);
+  const actor = turnActor(participant);
+
+  const first = await service.sendChatMessageFromTool(actor, { content: "Found the cause." });
+  const second = await service.sendChatMessageFromTool(actor, { content: "Fixing it now." });
+
+  assert.equal(storage.current.messages.length, 2, "no message of its own: the reply is still the last one");
+  assert.deepEqual([first.messageId, second.messageId], ["reply-1", "reply-1"], "the reply's id comes back");
+  assert.equal(first.sequence, 1);
+  assert.equal(first.postedInto, "running-reply");
+  assert.equal(typeof first.postId, "string");
+  assert.notEqual(first.postId, second.postId);
+  const reply = storage.current.messages[1] as ChatMessage;
+  assert.equal(reply.status, "pending", "the turn goes on");
+  assert.deepEqual(reply.metadata?.interimPosts?.map((post) => [post.id, post.content]), [
+    [first.postId, "Found the cause."],
+    [second.postId, "Fixing it now."]
+  ]);
+  assert.equal(actor.snapshotMaxSequence, 1, "the same run can read its reply now, as it read a posted message");
+
+  // Two posts at once both land, oldest first.
+  await Promise.all([
+    service.sendChatMessageFromTool(actor, { content: "Third." }),
+    service.sendChatMessageFromTool(actor, { content: "Fourth." })
+  ]);
+  const posts = (storage.current.messages[1] as ChatMessage).metadata?.interimPosts ?? [];
+  assert.equal(posts.length, 4);
+  assert.deepEqual(posts.slice(2).map((post) => post.content).sort(), ["Fourth.", "Third."]);
+  assert.deepEqual(posts.map((post) => post.createdAt), [...posts.map((post) => post.createdAt)].sort(), "in the order they were made");
+
+  // Another member reads them as part of the running reply.
+  const read = await service.readChatMessagesForTool({ ...turnActor(reader), runId: "reader-run", snapshotMaxSequence: undefined }, { limit: 10 });
+  const seen = (read.messages as Array<{ id: string; content: string; interimPosts?: Array<{ content: string }>; metadata?: Record<string, unknown> }>)
+    .find((message) => message.id === "reply-1");
+  assert.deepEqual(seen?.interimPosts?.map((post) => post.content).slice(0, 2), ["Found the cause.", "Fixing it now."]);
+  assert.equal(seen?.content, "", "its final words are not written yet");
+  assert.equal(seen?.metadata?.interimPosts, undefined, "said once, not again inside the metadata");
+});
+
+test("a member whose turn starts while another is still running reads that member's posts, as finished words with its handle, without passing its running reply", async () => {
+  const participant = chatParticipant("codex-cli");
+  const reader = chatParticipant("claude-code");
+  const conversation = chatConversation([participant, reader]);
+  conversation.messages.push(runningReply(participant));
+  const { service, storage } = testService({ conversation });
+  liveTurn(service, participant);
+  const posted = await service.sendChatMessageFromTool(turnActor(participant), { content: "Found the cause: the token expires early." });
+  assert.equal(posted.postedInto, "running-reply");
+  assert.equal(typeof posted.postId, "string", "the post keeps its own id");
+  assert.match(String(posted.note), /app_chat_react with it reacts to your whole reply/);
+
+  // The User asks the other member while the first one still runs.
+  const ask: ChatMessage = { id: "ask-reader", role: "user", content: "@claude what do you think?", createdAt: new Date(Date.now() + 1000).toISOString(), status: "done" };
+  storage.current.messages.push(ask);
+  const current = clone(storage.current) as Conversation;
+  const internals = service as any;
+  const prepared = await internals.preparePromptContextForRun(current, current, reader, ask, { type: "timeline" }, false);
+  assert.match(prepared.block, /Found the cause: the token expires early\./, "the post is in its context");
+  assert.match(prepared.block, new RegExp(`\\] @${participant.handle}\\n`), "under the poster's handle");
+  assert.equal(prepared.pointerAdvance?.entry.messageId, "ask-reader", "the running reply is not passed by its posts");
+});
+
+test("posts a member read when its turn started are not read again by its next turn, though made after the question that turn answered", async () => {
+  const participant = chatParticipant("codex-cli");
+  const reader = chatParticipant("claude-code");
+  const conversation = chatConversation([participant, reader]);
+  conversation.messages.push(runningReply(participant));
+  // The User asks the other member first; its turn starts later, after a post.
+  const ask: ChatMessage = { id: "ask-reader", role: "user", content: "@claude what do you think?", createdAt: new Date(Date.now() - 10_000).toISOString(), status: "done" };
+  conversation.messages.push(ask);
+  const { service, storage } = testService({ conversation });
+  liveTurn(service, participant);
+  await service.sendChatMessageFromTool(turnActor(participant), { content: "First finding." });
+  const internals = service as any;
+  let current = clone(storage.current) as Conversation;
+  const first = await internals.preparePromptContextForRun(current, current, reader, ask, { type: "timeline" }, false);
+  assert.match(first.block, /First finding\./, "its turn reads the post made before it started");
+  internals.commitPromptContextPointerAdvance(storage.current, reader.id, first.pointerAdvance);
+  await new Promise((resolve) => setTimeout(resolve, 5));
+  await service.sendChatMessageFromTool(turnActor(participant), { content: "Second finding." });
+  const again: ChatMessage = { id: "ask-reader-2", role: "user", content: "@claude and now?", createdAt: new Date(Date.now() + 1000).toISOString(), status: "done" };
+  storage.current.messages.push(again);
+  current = clone(storage.current) as Conversation;
+  const second = await internals.preparePromptContextForRun(current, current, reader, again, { type: "timeline" }, false);
+  assert.match(second.block, /Second finding\./, "a later post is read");
+  assert.doesNotMatch(second.block, /First finding\./, "a post already read is not read again");
+});
+
+test("posts that are messages of their own stay so: an Accord resolution, another thread or parent, no turn running, a turn already ended", async () => {
+  const participant = chatParticipant("codex-cli");
+  const conversation = chatConversation([participant]);
+  conversation.messages.push(
+    { id: "other-root", role: "user", content: "Another question.", createdAt: NOW, status: "done" },
+    runningReply(participant)
+  );
+  const { service, storage } = testService({ conversation });
+  liveTurn(service, participant);
+  const actor = turnActor(participant, { snapshotMaxSequence: 1 });
+  const separate = async (request: Record<string, unknown>, who = actor): Promise<ChatMessage> => {
+    const sent = await service.sendChatMessageFromTool(who, request);
+    assert.notEqual(sent.messageId, "reply-1", JSON.stringify(request));
+    assert.equal(sent.postId, undefined);
+    const message = storage.current.messages.find((item: ChatMessage) => item.id === sent.messageId) as ChatMessage;
+    assert.equal(message.metadata?.appMessageSource, "app_chat_send_message");
+    return message;
+  };
+
+  const resolution = await separate({ content: "Resolution v1.", accordResolution: { version: 1 } });
+  assert.equal(resolution.metadata?.accordResolution?.version, 1);
+  await separate({ content: "In the other thread.", threadId: "other-root" });
+  await separate({ content: "Under the other message.", parentMessageId: "other-root" });
+  await separate({ content: "Rooted elsewhere.", chatThreadRootId: "other-root" });
+  await separate({ content: "From a run that is not this reply's." }, turnActor(participant, { runId: "finished-run", snapshotMaxSequence: 1 }));
+  await separate({ content: "From no run at all." }, turnActor(participant, { runId: undefined, snapshotMaxSequence: 1 }));
+
+  // The same place, named explicitly, is still the reply's.
+  const same = await service.sendChatMessageFromTool(actor, { content: "Same place.", threadId: "user-message", parentMessageId: "user-message" });
+  assert.equal(same.messageId, "reply-1");
+
+  // The turn ended before the post arrived: a message of its own.
+  const ended = storage.current.messages.find((item: ChatMessage) => item.id === "reply-1") as ChatMessage;
+  ended.status = "done";
+  ended.content = "All done.";
+  await separate({ content: "Late post." });
+  assert.deepEqual(ended.metadata?.interimPosts?.map((post) => post.content), ["Same place."]);
+});
+
+test("a reply's posts stop at the cap: the post that would pass it is a message of its own", async () => {
+  const participant = chatParticipant("codex-cli");
+  const conversation = chatConversation([participant]);
+  conversation.messages.push(runningReply(participant));
+  const { service, storage } = testService({ conversation });
+  liveTurn(service, participant);
+  const actor = turnActor(participant);
+  await service.sendChatMessageFromTool(actor, { content: "x".repeat(CHAT_INTERIM_POSTS_MAX_CHARS - 10) });
+  const over = await service.sendChatMessageFromTool(actor, { content: "This one is twenty+." });
+  assert.notEqual(over.messageId, "reply-1");
+  assert.equal(storage.current.messages.at(-1).content, "This one is twenty+.");
+  assert.equal((storage.current.messages.find((item: ChatMessage) => item.id === "reply-1") as ChatMessage).metadata?.interimPosts?.length, 1);
+});
+
+for (const ending of ["done", "error", "stopped"] as const) {
+  test(`a reply whose turn ends ${ending} keeps the posts made during it, though the turn held a copy of the reply without them`, async () => {
+    const participant = chatParticipant("codex-cli");
+    const conversation = chatConversation([participant]);
+    conversation.messages.push(runningReply(participant));
+    const { service, storage } = testService({ conversation });
+    liveTurn(service, participant);
+    // The turn's own copy of the chat, read when the turn began.
+    const turnCopy = clone(storage.current) as Conversation;
+    const turnReply = turnCopy.messages[1];
+    await service.sendChatMessageFromTool(turnActor(participant), { content: "Found the cause." });
+    await service.sendChatMessageFromTool(turnActor(participant), { content: "Fixing it now." });
+    if (ending === "done") {
+      turnReply.status = "done";
+      turnReply.content = "Fixed: the button fits.";
+      await (service as any).finalizePendingParticipantMessage(turnCopy, participant, turnReply);
+    } else if (ending === "error") {
+      turnReply.status = "error";
+      turnReply.content = "@codex: the CLI exited.";
+      await (service as any).finalizePendingParticipantMessage(turnCopy, participant, turnReply);
+    } else {
+      turnReply.status = "error";
+      turnReply.content = "Stopped.";
+      turnReply.metadata = { ...turnReply.metadata, terminalReason: "user-stopped" };
+      await (service as any).discardStoppedTargetRun(turnCopy, "turn-run-1", participant, "reply-1");
+    }
+    const reply = storage.current.messages.find((item: ChatMessage) => item.id === "reply-1") as ChatMessage;
+    assert.equal(reply.status, ending === "done" ? "done" : "error");
+    assert.deepEqual(reply.metadata?.interimPosts?.map((post) => post.content), ["Found the cause.", "Fixing it now."]);
+    assert.equal(storage.current.messages.filter((item: ChatMessage) => item.metadata?.appMessageSource === "app_turn_finished_note").length, 0,
+      "nothing came below the reply: no note");
+    // A copy that saw neither the posts nor the end (another flow's) cannot take them back.
+    const stale = clone(conversation) as Conversation;
+    await (service as any).withChatMutation(stale, async () => {
+      (service as any).queueSnapshot(stale);
+    });
+    await (service as any).waitForQueuedSave("conversation-1");
+    assert.equal((storage.current.messages.find((item: ChatMessage) => item.id === "reply-1") as ChatMessage).metadata?.interimPosts?.length, 2);
+  });
+}
+
+test("a post's mention asks that member once; the reply's final words naming it again do not ask again", async () => {
+  const requester = chatParticipant("codex-cli", { requestParticipants: "ask" });
+  const target = chatParticipant("claude-code");
+  const conversation = chatConversation([requester, target]);
+  conversation.messages.push(runningReply(requester));
+  const { service, storage } = testService({ conversation });
+  liveTurn(service, requester);
+  const turnCopy = clone(storage.current) as Conversation;
+  await service.sendChatMessageFromTool(turnActor(requester, { capabilities: ["participants.request"] }), { content: "@drew please review X." });
+  const asked = inferredRequestMessages(storage.current);
+  assert.equal(asked.length, 1);
+  assert.equal(asked[0].metadata?.participantRequest?.triggerMessageId, "reply-1", "filed under the reply the post is part of");
+  completeParticipantRequest(asked[0]);
+  const turnReply = turnCopy.messages[1];
+  turnReply.status = "done";
+  turnReply.content = "I asked @drew to review X.";
+  await (service as any).finalizePendingParticipantMessage(turnCopy, requester, turnReply);
+  assert.equal(inferredRequestMessages(storage.current).length, 1, "asked once");
 });
 
 test("app_chat_send_message infers one runnable request per mentioned target", async () => {
@@ -14449,6 +14870,7 @@ function testService(options: {
     providers?: ProviderSettings[];
     assistantProviderKind?: ChatProviderKind;
     lastSuccessfulChatProviderKind?: ChatProviderKind;
+    defaultChatView?: AppSettings["defaultChatView"];
   };
   machines?: Array<{ id: string; name: string; awsInstanceId?: string; deviceId?: string; lastHello?: { providers: Array<{ kind: string; installed: boolean }> } }>;
   machineInstalls?: Array<{ machineId: string; projects?: Record<string, string>; target?: { hostKeyAlias?: string } }>;
@@ -14495,7 +14917,7 @@ function testService(options: {
     }
   };
   const settingsState = {
-    chatRoleConfigs: clone(options.settings?.chatRoleConfigs ?? [ROLE]),
+    chatRoleConfigs: clone(withBuiltInMainSessionRole(options.settings?.chatRoleConfigs ?? [ROLE])),
     chatBehaviorRules: clone(options.settings?.chatBehaviorRules ?? []),
     chatParticipantConfigs: clone(options.settings?.chatParticipantConfigs ?? []),
     batchWriteCount: 0,
@@ -14538,7 +14960,8 @@ function testService(options: {
     chatParticipantSeedState: {},
     cliProviderHosts: [],
     assistantProviderKind,
-    lastSuccessfulChatProviderKind: options.settings?.lastSuccessfulChatProviderKind
+    lastSuccessfulChatProviderKind: options.settings?.lastSuccessfulChatProviderKind,
+    ...(options.settings?.defaultChatView ? { defaultChatView: options.settings.defaultChatView } : {})
   });
   const roleIdFromLabel = (label: string): string =>
     `custom-${label.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 40) || "role"}-test`;

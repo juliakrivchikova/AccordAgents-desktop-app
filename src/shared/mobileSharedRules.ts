@@ -29,7 +29,7 @@ export { nativeGoalObjective, parseNativeGoalCommand } from "./nativeGoalCommand
 // A new chat from the phone, made as the computer's New chat makes it: its
 // members from what the computer prepared, its first system line and its
 // title (the User, 2026-10-29).
-export { newChatIntro, newChatMemberFitsProject, newChatParticipants, newChatPickedMembers, newChatTitle } from "./newChat";
+export { newChatIntro, newChatMemberFitsProject, newChatMetadata, newChatParticipants, newChatPickedMembers, newChatTitle } from "./newChat";
 // The list row of a chat the phone started, as the server will list it.
 export { mobileChatGroupLabel, mobileSnippet } from "./mobileChatRow";
 // An artifact note becomes a card on the timeline: the same reading of the
@@ -54,3 +54,24 @@ export {
 export {
   HUB_ALERTS_PATH, urgentAlertAwaitsGotIt, urgentAlertCountdown, urgentAlertFailureText, urgentAlertOutcome, urgentAlertStatus
 } from "./urgentAlerts";
+// The main session and the chat's two views (docs/main-session.md): which
+// view a chat opens in, where each message lives in the sessions view, the
+// task cards, the members list and the "Waiting on" line, by the desktop's
+// own rules.
+export {
+  MAIN_SESSION_ROLE_ID, buildSessionsViewIndex, canSwitchChatView, chatViewFor, isChatViewMode, isMainSessionTaskMessage, isSessionsHiddenTurnFinishedNote,
+  mainSessionMemberOf, mainSessionParticipantId, mainTimelineMessages, memberSessionMessages, membersMainSessionWaitsOn, sessionsFormerMembers,
+  sessionsTaskPlacement, sessionsViewLane, withoutLeadingMention
+} from "./mainSession";
+export {
+  SESSIONS_REMOVED_MEMBER_DETAIL, SESSIONS_WORK_STATUS_LABELS, firstTextLine, isMainSessionDelegationRosterCard, isMemberWorking, latestTaskByMember, memberRunningSince,
+  openMemberCardMessages, sessionsDelegationSummary, sessionsFormerMemberStatus, sessionsMemberActivity, sessionsMemberDetail, sessionsMemberRows,
+  sessionsMemberStatus, sessionsMemberTitle, sessionsTaskEntries, sessionsTaskGroupLabel, sessionsTaskReplyLine, sessionsTaskRunningSince,
+  sessionsTaskStatus, sessionsWaitingText
+} from "./mainSessionView";
+// A member's handle in a message, in code and outside it: which `@handle`
+// is the member's chip and what stays as written, by the desktop's rule.
+export { sessionsMentionPieces } from "./mainSessionView";
+// Which message is an Accord launch card: the User's own launch, and the
+// main session's (accordLaunchByMainSession), by the desktop's rule.
+export { accordLaunchCardForMessage } from "./accordLaunchCard";

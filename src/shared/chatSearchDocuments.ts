@@ -3,6 +3,7 @@ import {
   chatMessageVisualThreadRootId,
   chatParticipantRequestReplyRootMap
 } from "./chatParticipantRequestThreads";
+import { chatMessageMemberText } from "./interimPosts";
 import type { ChatMessage, ChatParticipant, Conversation } from "./types";
 
 export interface ChatSearchTitleDocument {
@@ -33,7 +34,8 @@ export function buildChatSearchDocuments(
     if (!isSearchableTimelineMessage(conversation, message)) {
       return [];
     }
-    const body = message.content.trim();
+    // A reply's posts during its turn are found with it.
+    const body = chatMessageMemberText(message).trim();
     const threadRootId = chatMessageVisualThreadRootId(conversation, message, participantRequestReplyRoots);
     return [{
       kind: "message",
@@ -60,7 +62,7 @@ function isSearchableTimelineMessage(
   if (message.role !== "user" && message.role !== "participant") {
     return false;
   }
-  if (message.status === "pending" || !message.content.trim()) {
+  if (message.status === "pending" || !chatMessageMemberText(message).trim()) {
     return false;
   }
   return !chatMessageHiddenFromTimeline(conversation, message);

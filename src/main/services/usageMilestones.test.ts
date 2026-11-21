@@ -4,7 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import type { AgentHealth, ChatMessage, Conversation } from "../../shared/types";
-import { USAGE_ASSISTANT_ROLE_ID, USAGE_BUILTIN_ROLE_IDS, USAGE_DEFAULT_MEMBER_ROLE_ID, type UsageSignalAttributes, type UsageSignalName, type UsageWeeklySnapshot } from "../../shared/usageSignals";
+import { USAGE_ASSISTANT_ROLE_ID, USAGE_BUILTIN_ROLE_IDS, USAGE_DEFAULT_MEMBER_ROLE_ID, USAGE_MAIN_SESSION_ROLE_ID, type UsageSignalAttributes, type UsageSignalName, type UsageWeeklySnapshot } from "../../shared/usageSignals";
 import { BUILTIN_CHAT_ROLE_IDS, DEFAULT_MEMBER_ROLE_ID } from "./settings";
 import { USAGE_MILESTONES_FILE, UsageMilestones, chatUsageFacts, usageFeatureHistoryFrom, usageHistoryFrom, usageProfileUsedBefore, type UsageFeatureHistory, type UsageHistory, type UsageMilestonesOptions } from "./usageMilestones";
 
@@ -20,7 +20,8 @@ const NO_FEATURES: UsageFeatureHistory = {
 };
 const EMPTY_SNAPSHOT: UsageWeeklySnapshot = {
   week: "", members_total: "0", max_members_in_chat: "0", chats_with_2plus_members: "0",
-  distinct_roles_in_use: 0, custom_roles_count: 0, builtin_roles_in_use: "none"
+  distinct_roles_in_use: 0, custom_roles_count: 0, builtin_roles_in_use: "none",
+  chats_sessions_view_active: "0", chats_classic_view_active: "0"
 };
 const NO_HISTORY: UsageHistory = { hasChat: false, families: [], mixedFamilies: false, accordStarted: false, accordSigned: false, hasMachine: false };
 
@@ -511,6 +512,7 @@ test("the role ids a weekly snapshot may name are exactly the app's built-in rol
   assert.deepEqual([...USAGE_BUILTIN_ROLE_IDS].sort(), [...BUILTIN_CHAT_ROLE_IDS].sort());
   assert.equal(USAGE_DEFAULT_MEMBER_ROLE_ID, DEFAULT_MEMBER_ROLE_ID);
   assert.ok(BUILTIN_CHAT_ROLE_IDS.includes(USAGE_ASSISTANT_ROLE_ID));
+  assert.ok(BUILTIN_CHAT_ROLE_IDS.includes(USAGE_MAIN_SESSION_ROLE_ID));
 });
 
 const ENGINEER = { kind: "claude-code", handle: "drew", roleConfigId: "software-engineer" };
@@ -579,7 +581,8 @@ test("the weekly snapshot goes once a week, also from an existing installation, 
     let on = true;
     const snapshot: UsageWeeklySnapshot = {
       week: "", members_total: "3-5", max_members_in_chat: "2", chats_with_2plus_members: "1",
-      distinct_roles_in_use: 2, custom_roles_count: 1, builtin_roles_in_use: "software-engineer"
+      distinct_roles_in_use: 2, custom_roles_count: 1, builtin_roles_in_use: "software-engineer",
+      chats_sessions_view_active: "1", chats_classic_view_active: "0"
     };
     const first = harness(dir, { profileUsedBefore: true, now: () => now, reportsOn: () => on, readWeeklySnapshot: async (week) => ({ ...snapshot, week }) });
     await first.milestones.start();

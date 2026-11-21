@@ -1,5 +1,5 @@
 import React, { useLayoutEffect, useMemo, useRef } from "react";
-import { ArrowUp, ImagePlus, RefreshCw } from "lucide-react";
+import { ImagePlus } from "lucide-react";
 
 import { IconButton, ResizableTextarea } from "@/renderer/components/primitives";
 import { AccordMergeIcon } from "./accord-merge-icon";
@@ -21,6 +21,7 @@ import {
 import { renderSlashHighlightedDraft } from "./chat-composer-draft-highlights";
 import { ChatActiveRunPopover, type ChatActiveRunParticipantRow } from "./chat-active-run-popover";
 import { ChatComposerMenus } from "./chat-composer-menus";
+import { ChatComposerSendButton, type ChatComposerStop } from "./chat-composer-send-button";
 import {
   revokePendingImageUrls,
   useChatComposerImages
@@ -80,6 +81,11 @@ export interface ChatComposerProps {
   /** What a dictation belongs to (a chat, or a thread in it); changing it
    *  drops a dictation in progress. Defaults to the chat. */
   dictationSession?: string;
+  /** The sessions view: the member's model chip, opening its settings. */
+  footerChip?: React.ReactNode;
+  /** The sessions view: Stop for the main session's run, in the send
+   *  button's place while there is nothing to send. */
+  stop?: ChatComposerStop;
 }
 
 export function ChatComposer(props: ChatComposerProps): JSX.Element {
@@ -116,6 +122,9 @@ export function ChatComposer(props: ChatComposerProps): JSX.Element {
     images.readyImages.length > 0 ||
     mentions.selectedSkillMentions.length > 0
   );
+  // Stop takes the button's place only for a truly empty draft: a picture
+  // still loading is something to send.
+  const draftEmpty = !props.draft.trim() && images.pendingImages.length === 0 && mentions.selectedSkillMentions.length === 0;
   const hasLeadingPluginToken = draftStartsWithPluginMention(props.draft, mentions.selectedPluginMentions);
   const accordTooltip = props.accordDisabledReason ?? "Start an Accord: reach agreement among chat members";
   const activeRunCount = props.activeRunCount ?? 0;
@@ -352,12 +361,7 @@ export function ChatComposer(props: ChatComposerProps): JSX.Element {
             {suggestions.offered && (
               <span className="chat-composer-hint" data-testid="chat-composer-suggestion-hint">
                 <kbd>Tab</kbd> to use
-                {suggestions.count > 1 && (
-                  <>
-                    <em>·</em>
-                    <kbd>↑</kbd><kbd>↓</kbd> {suggestions.position} of {suggestions.count}
-                  </>
-                )}
+                {suggestions.count > 1 && <><em>·</em><kbd>↑</kbd><kbd>↓</kbd> {suggestions.position} of {suggestions.count}</>}
               </span>
             )}
             {props.onOpenAccord && (
@@ -376,22 +380,14 @@ export function ChatComposer(props: ChatComposerProps): JSX.Element {
                 <TooltipContent side="top">{accordTooltip}</TooltipContent>
               </Tooltip>
             )}
+            {props.footerChip}
             <SpeechToTextButton
               session={props.dictationSession ?? props.conversationId}
               getTextarea={() => rootRef.current?.querySelector("textarea") ?? null}
               draft={props.draft}
               onDraftChange={props.onDraftChange}
             />
-            <button
-              type="button"
-              className="composer-send-button"
-              title="Send"
-              aria-label="Send message"
-              disabled={!canSend}
-              onClick={() => void sendDraft()}
-            >
-              {props.isRunning ? <RefreshCw size={17} className="spin" /> : <ArrowUp size={18} strokeWidth={2.4} />}
-            </button>
+            <ChatComposerSendButton canSend={canSend} draftEmpty={draftEmpty} isRunning={props.isRunning} onSend={() => void sendDraft()} stop={props.stop} />
           </div>
         </div>
       </div>

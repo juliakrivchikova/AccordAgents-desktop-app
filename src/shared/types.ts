@@ -597,6 +597,9 @@ export interface AppSettings {
   chatCustomAvatars: CustomAvatarSummary[];
   chatParticipantSeedState?: ChatParticipantSeedState;
   assistantProviderKind?: ChatProviderKind;
+  /** The view a new chat opens in (Settings → General); the chat's own
+   *  switch changes it afterwards. Unset means "sessions". */
+  defaultChatView?: ChatViewMode;
   lastSuccessfulChatProviderKind?: ChatProviderKind;
   lastRepoPath?: string;
   repoFileOpenAction?: RepoFileOpenAction;
@@ -656,6 +659,13 @@ export interface ChatBehaviorRuleSnapshot {
 }
 
 export type ChatProviderKind = Extract<ProviderKind, "codex-cli" | "claude-code" | "gemini-cli">;
+
+/** How a chat with a main session is shown (shared/mainSession.ts): "classic"
+ *  is the timeline with avatars where every member's reply is on it;
+ *  "sessions" shows only the main session on the timeline and each member's
+ *  session in the right panel. A view only: the chat works the same in both.
+ *  A chat made before the main session existed is always "classic". */
+export type ChatViewMode = "classic" | "sessions";
 
 /** Which local CLI an added provider runs through. */
 export type CliProviderHostCli = Extract<ChatProviderKind, "claude-code" | "codex-cli" | "gemini-cli">;
@@ -870,7 +880,7 @@ export interface PluginListResult {
 
 export type ChatRoleRuntime = "claude-agent" | "codex-developer-instructions" | "prompt-fallback";
 
-export type ChatAppToolCapability = "participants.manage" | "participants.request" | "compaction.request" | "permissions.request" | "scripts.request";
+export type ChatAppToolCapability = "participants.manage" | "participants.request" | "compaction.request" | "permissions.request" | "scripts.request" | "participants.delegate" | "accord.start";
 
 export type ChatReactionActorKind = "user" | "participant";
 
@@ -966,11 +976,36 @@ export interface ChatParticipant {
   sessionHandoff?: import("./memberSessionMove").ChatSessionHandoff;
   skipToolchainPreflight?: boolean;
   autoWatch?: boolean;
+  /** In a chat with a main session, the member that added this one without
+   *  a card (the main session delegating, or a member it made adding its
+   *  own): its rights and mode never go above the main session's as they are
+   *  at each turn (docs/main-session.md). Absent for members the User added
+   *  or approved herself. Set once, when the member is added. */
+  delegatedByParticipantId?: string;
+}
+
+export interface ChatSessionForkSource {
+  participantId: string;
+  sessionId: string;
+  kind: ChatProviderKind;
+  /** Turns whose fork failed because the source session could not be read.
+   *  After the retry fails too, the member starts a clean session instead. */
+  failedAttempts?: number;
 }
 
 export interface ChatParticipantSession {
   participantId: string;
   sessionId: string;
+  /** The member was made as a fork of another member's session (the main
+   *  session delegating with start "fork"): its first turn starts from a copy
+   *  of that session instead of an empty one, through the CLI's own fork
+   *  (Claude --resume <id> --fork-session, Codex thread/fork). Cleared once
+   *  the fork has its own sessionId. */
+  forkFrom?: ChatSessionForkSource;
+  /** The member whose session this one was forked from. Kept after the fork
+   *  has its own id: both CLIs keep the source's system and developer
+   *  instructions in a fork, so each turn reminds the member who it is. */
+  forkedFromParticipantId?: string;
   executionSessionId?: string;
   roleConfigId: string;
   roleConfigVersion: number;
@@ -1272,7 +1307,14 @@ export type ChatParticipantRequestStatus =
 export interface ChatParticipantRequestItem {
   targetParticipantId: string;
   targetHandle: string;
+  /** The target's provider when it was asked: a member removed later keeps
+   *  its logo in the sessions view (sessionsFormerMembers). */
+  targetKind?: ChatProviderKind;
   prompt: string;
+  /** The main session's short title for its task (app_chat_delegate_task),
+   *  as T3 Code titles a thread: the sessions view names the member by it.
+   *  Without one the task's first sentence stands in (sessionsTaskTitle). */
+  title?: string;
   reason?: string;
   status: ChatParticipantRequestStatus;
   replyMessageId?: string;
@@ -1296,6 +1338,12 @@ export interface ChatParticipantRequestBatch {
   triggerMessageId?: string;
   completedInToolCall?: boolean;
   autoResumeMessageId?: string;
+  /** The main session's task to a member it made for it
+   *  (app_chat_delegate_task): how the member started. Such a request is not
+   *  held to the one-request-per-turn limit of app_chat_request_participants.
+   *  `turnId`: the main-session turn that gave it; the tasks of one turn
+   *  resume the main session once, when all of them have ended. */
+  delegation?: { start: "clean" | "fork"; turnId?: string };
   items: ChatParticipantRequestItem[];
   error?: string;
 }
@@ -1577,6 +1625,22 @@ export interface ChatServerCardMark {
   machineName: string;
 }
 
+/** What a member wrote during its turn with app_chat_send_message, kept in
+ *  its running reply (shared/interimPosts.ts): shown inside the reply, in
+ *  order, like the text a CLI writes between its tool calls. */
+export interface ChatInterimPost {
+  id: string;
+  content: string;
+  createdAt: string;
+  /** Where the turn's streamed text stood when it was posted (its length),
+   *  and the newest activity of the turn then, so a running reply shows the
+   *  post in order with them. */
+  afterContentLength?: number;
+  afterActivitySequence?: number;
+  /** Its pictures, among the reply's imageAttachments. */
+  attachmentIds?: string[];
+}
+
 /** The reply a turn-finished note points at, and the member who wrote it. */
 export interface ChatTurnFinishedNoteMetadata {
   messageId: string;
@@ -1585,6 +1649,10 @@ export interface ChatTurnFinishedNoteMetadata {
 }
 
 export interface ChatMessageMetadata {
+  /** The launch of an Accord the chat's main session started
+   *  (app_chat_start_accord, docs/main-session.md): written as its message,
+   *  read as an Accord card like the User's own launch (accordLaunchCard.ts). */
+  accordLaunchByMainSession?: boolean;
   /** An urgent alert a member raised (shared/urgentAlerts.ts): the User's
    *  server writes this message and keeps the alert's state in it. */
   urgentAlert?: UrgentAlertView;
@@ -1695,6 +1763,8 @@ export interface ChatMessageMetadata {
    *  member's reply it points at, which had other messages below it when the
    *  turn ended. */
   turnFinishedNote?: ChatTurnFinishedNoteMetadata;
+  /** A member's reply: what it posted during its turn, oldest first. */
+  interimPosts?: ChatInterimPost[];
   activityEvents?: ChatAgentActivityEvent[];
   processingTranscript?: ChatProcessingTranscript;
   remoteRunStatus?: ChatRemoteRunStatus;
@@ -1786,6 +1856,10 @@ export interface ChatPromptContextPointerEntry {
   messageId: string;
   sequence: number;
   createdAt?: string;
+  /** The newest post of a reply still being written that the member has
+   *  read (pendingReplyPostsForPromptContext), when newer than the message
+   *  above: its next turn reads only posts made after it. */
+  postsReadThrough?: string;
 }
 
 export type ChatPromptContextPointerScope =
@@ -1976,6 +2050,17 @@ export interface SetChatArchivedRequest {
   onlyIfEmpty?: boolean;
 }
 
+export interface SetChatViewRequest {
+  conversationId: string;
+  view: ChatViewMode;
+}
+
+/** A chat's view as saved (shared/mainSession.ts). */
+export interface ChatViewState {
+  conversationId: string;
+  view: ChatViewMode;
+}
+
 export interface SetChatPinnedRequest {
   conversationId: string;
   pinned: boolean;
@@ -2021,6 +2106,10 @@ export interface SendChatMessageRequest {
   threadId?: string;
   parentMessageId?: string;
   chatThreadRootId?: string;
+  /** Exactly these members get the message (a member's session panel):
+   *  the @handles in its text are not read for addressees, and there is no
+   *  fallback to the main session or the last speaker. */
+  targetParticipantIds?: string[];
 }
 
 export interface ToggleChatReactionRequest {
@@ -2614,6 +2703,13 @@ export interface ChatPromptSuggestionsUpdate {
 }
 
 export type ConversationMetadata = Record<string, unknown> & {
+  /** The chat's main session (shared/mainSession.ts): the member every
+   *  message without an addressee goes to. Set when the chat is made and
+   *  never changed; a chat without it is an Assistant chat from before. */
+  mainSessionParticipantId?: string;
+  /** The chat's view, switched by the User any number of times and shared
+   *  through her server like the pin. Read it through chatViewFor(). */
+  chatView?: ChatViewMode;
   /** This device's own record of the Accords folded into the chat (a line
    *  her server took), worked out from the whole chat, not the loaded page:
    *  their cards are not pinned (accordProgress.ts). Never shared. */
@@ -3360,6 +3456,7 @@ export interface AppBridge {
   deleteCliProviderHost(id: string): Promise<AppSettings>;
   getSettings(): Promise<AppSettings>;
   setAssistantProviderKind(kind: ChatProviderKind): Promise<AppSettings>;
+  setDefaultChatView(view: ChatViewMode): Promise<AppSettings>;
   updateProviderSettings(update: ProviderSettingsUpdate): Promise<AppSettings>;
   saveChatRoleConfig(update: ChatRoleConfigUpdate): Promise<AppSettings>;
   archiveChatRoleConfig(id: string): Promise<AppSettings>;
@@ -3423,6 +3520,7 @@ export interface AppBridge {
   renameChatConversation(request: RenameChatConversationRequest): Promise<Conversation | undefined>;
   setChatArchived(request: SetChatArchivedRequest): Promise<Conversation | undefined>;
   setChatPinned(request: SetChatPinnedRequest): Promise<ChatPinState | undefined>;
+  setChatView(request: SetChatViewRequest): Promise<ChatViewState | undefined>;
   deleteChatConversation(request: DeleteChatConversationRequest): Promise<boolean>;
   startChatAccord(request: StartChatAccordRequest): Promise<StartChatAccordResult>;
   dismissConversationWarnings(request: DismissConversationWarningsRequest): Promise<Conversation | undefined>;

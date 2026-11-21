@@ -1,4 +1,5 @@
 import { URGENT_ALERT_USER_ACTIONS, type UrgentAlertUserRequest, type UrgentAlertSettingsView } from "../shared/urgentAlerts";
+import { chatViewFor } from "../shared/mainSession";
 import { spawn } from "node:child_process";
 import { homedir } from "node:os";
 import path from "node:path";
@@ -30,6 +31,7 @@ import type {
   AgentHealth,
   ChatBehaviorRuleConfigUpdate,
   ChatProviderKind,
+  ChatViewMode,
   ChatPromptContextSettings,
   ChatSearchRequest,
   ChatSavedPromptConfigUpdate,
@@ -66,6 +68,8 @@ import type {
   RenameChatConversationRequest,
   SetChatArchivedRequest,
   SetChatPinnedRequest,
+  SetChatViewRequest,
+  ChatViewState,
   ChatPinState,
   RepoFileSearchRequest,
   RespondToChatAppToolApprovalRequest,
@@ -175,8 +179,8 @@ import { AppSkillsService } from "./services/appSkills";
 import { AvatarStudioService } from "./services/avatarStudio";
 import { AgentEnvironmentService } from "./services/agentEnvironment";
 import { CRASH_REPORTS_ACTIVE_ARG, crashReportingActive, sendUsageSignal, startCrashReporting, stopCrashReporting } from "./services/crashReporting";
-import { UsageMilestones, usageFeatureHistoryFrom, usageHistoryFrom, usageProfileUsedBefore } from "./services/usageMilestones";
-import { usageCustomRoleCount, usageLocale, usageMultiRoleChat, usageOs, usageRoleChosen, usageWeeklySnapshot } from "../shared/usageSignals";
+import { UsageMilestones, usageActiveChatViews, usageFeatureHistoryFrom, usageHistoryFrom, usageProfileUsedBefore } from "./services/usageMilestones";
+import { USAGE_ACTIVE_CHAT_WINDOW_MS, usageCustomRoleCount, usageLocale, usageMultiRoleChat, usageOs, usageRoleChosen, usageWeeklySnapshot } from "../shared/usageSignals";
 import { discardCrashReportData, loadOrCreateCrashReportInstallId, readCrashReportsEnabled } from "./services/crashReportPreferences";
 import { readTeamDevice } from "./services/teamDevice";
 import { isServerUpdateLoaderWindow, openServerUpdateLoader, updateServerBeforeOpening } from "./services/serverUpdateLoader";
@@ -529,8 +533,14 @@ const usageMilestones = crashReportingStart.active
       });
     },
     readWeeklySnapshot: async (week) => {
-      const [chats, settings] = await Promise.all([storageService.listChatMemberProviders(), settingsService.getPublicSettings()]);
-      return usageWeeklySnapshot(week, chats, usageCustomRoleCount(settings.chatRoleConfigs));
+      // Chats in use the seven days before, by their view (docs/main-session.md).
+      const activeSince = new Date(Date.now() - USAGE_ACTIVE_CHAT_WINDOW_MS).toISOString();
+      const [chats, settings, activeChats] = await Promise.all([
+        storageService.listChatMemberProviders(),
+        settingsService.getPublicSettings(),
+        storageService.listChatViewsWithUserMessagesSince(activeSince)
+      ]);
+      return usageWeeklySnapshot(week, chats, usageCustomRoleCount(settings.chatRoleConfigs), usageActiveChatViews(activeChats, settings.defaultChatView));
     },
     readDocuments: (since, plainSince) => artifactStore.multiSignerDocumentStatus(since, plainSince),
     log: (event, payload) => {
@@ -2351,6 +2361,8 @@ function registerIpc(): void {
   });
   ipcMain.handle("settings:set-assistant-provider", (_event, kind: ChatProviderKind) =>
     settingsService.setAssistantProviderKind(kind));
+  ipcMain.handle("settings:set-default-chat-view", (_event, view: ChatViewMode) =>
+    settingsService.setDefaultChatView(view));
   ipcMain.handle("settings:save-chat-role", (_event, update: ChatRoleConfigUpdate) => settingsService.saveChatRoleConfig(update));
   ipcMain.handle("settings:archive-chat-role", (_event, id: string) => settingsService.archiveChatRoleConfig(id));
   ipcMain.handle("settings:save-chat-behavior-rule", (_event, update: ChatBehaviorRuleConfigUpdate) => settingsService.saveChatBehaviorRuleConfig(update));
@@ -2622,6 +2634,10 @@ function registerIpc(): void {
     const pinned = saved.metadata.pinned === true;
     const pinnedAt = typeof saved.metadata.pinnedAt === "string" ? saved.metadata.pinnedAt : undefined;
     return { conversationId: saved.id, pinned, ...(pinned && pinnedAt ? { pinnedAt } : {}) };
+  });
+  ipcMain.handle("chat:set-view", async (_event, request: SetChatViewRequest): Promise<ChatViewState | undefined> => {
+    const saved = await chatService.setChatView(request);
+    return saved ? { conversationId: saved.id, view: chatViewFor(saved.metadata) } : undefined;
   });
   ipcMain.handle("chat:delete", async (_event, request: DeleteChatConversationRequest) => {
     return chatService.deleteConversation(request);

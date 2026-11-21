@@ -1,3 +1,4 @@
+import { newChatMemberPermissions } from "../../shared/agentPermissions";
 import assert from "node:assert/strict";
 import test from "node:test";
 import type { SetStateAction } from "react";
@@ -9,7 +10,7 @@ import type { AppState } from "./app-state";
 import { useChatActions, type ChatActions } from "./use-chat-actions";
 import type { ConversationActions } from "./use-conversation-actions";
 
-test("a saved Assistant CLI that is not ready gives way to a ready one; with none ready the chat is not created", async () => {
+test("a saved CLI that is not ready gives way to a ready one; with none ready the chat is not created", async () => {
   let createCalls = 0;
   (globalThis as any).window = {
     consensus: {
@@ -120,7 +121,7 @@ test("stale readiness refreshes before creating without a per-chat provider over
   renderer.unmount();
 });
 
-test("New Chat runtime overrides are sent for edited Assistant and selected saved members", async () => {
+test("a new chat is made with its main session first (ordinary member rights, its New Chat settings) and the selected saved members", async () => {
   let createRequest: { participants: ChatParticipantInput[]; skipDefaultParticipants?: boolean } | undefined;
   (globalThis as any).window = {
     consensus: {
@@ -172,8 +173,8 @@ test("New Chat runtime overrides are sent for edited Assistant and selected save
     settings: currentSettings,
     selectedChatParticipantConfigIds: new Set<string>(["member-codex"]),
     selectedChatParticipantRuntimeOverrides: {
-      "__new-chat-assistant__": {
-        model: "assistant-model",
+      "__new-chat-main-session__": {
+        model: "main-model",
         reasoningEffort: "high"
       },
       "member-codex": {
@@ -212,11 +213,17 @@ test("New Chat runtime overrides are sent for edited Assistant and selected save
   assert.equal(error, "stop after create request");
   assert.equal(createRequest?.skipDefaultParticipants, false);
   assert.equal(createRequest?.participants.length, 2);
-  const [assistant, member] = createRequest?.participants ?? [];
-  assert.equal(assistant?.handle, "assistant");
-  assert.equal(assistant?.roleConfigId, "administrator");
-  assert.equal(assistant?.model, "assistant-model");
-  assert.equal(assistant?.reasoningEffort, "high");
+  const [main, member] = createRequest?.participants ?? [];
+  assert.equal(main?.handle, "main");
+  assert.equal(main?.roleConfigId, "main-session");
+  assert.equal(main?.model, "main-model");
+  assert.equal(main?.reasoningEffort, "high");
+  assert.equal(main?.participantConfigId, undefined, "no saved member is behind it");
+  assert.equal(main?.permissions?.requestParticipants, "allow", "its role's rights, not the Assistant's");
+  assert.equal(main?.permissions?.manageRolesParticipants, "allow");
+  // An ordinary member's rights for a chat without a project: no repo read.
+  assert.equal(main?.permissions?.shell.enabled, newChatMemberPermissions(false).shell.enabled);
+  assert.equal(main?.permissions?.repoRead, newChatMemberPermissions(false).repoRead);
   assert.equal(member?.participantConfigId, "member-codex");
   assert.equal(member?.model, "member-model");
   assert.equal(member?.reasoningEffort, "low");
@@ -412,6 +419,15 @@ function settings(): AppSettings {
       appToolCapabilities: [],
       builtIn: true,
       updatedAt: "2026-07-13T00:00:00.000Z"
+    }, {
+      id: "main-session",
+      label: "Main session",
+      instructions: "Work on the User's requests.",
+      version: 1,
+      appToolCapabilities: ["participants.manage", "participants.delegate", "accord.start"],
+      builtIn: true,
+      participantDefaults: { requestParticipants: "allow", manageRolesParticipants: "allow" },
+      updatedAt: "2026-11-20T00:00:00.000Z"
     }],
     chatBehaviorRules: [],
     chatSavedPrompts: [],

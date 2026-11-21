@@ -1,6 +1,18 @@
 import { URGENT_ALERT_SERVER_WRITER, type UrgentAlertView } from "../../shared/urgentAlerts";
-import type { ChatMessage, ChatParticipant, ChatTurnFinishedNoteMetadata, Conversation } from "../../shared/types";
+import type {
+  ChatMessage,
+  ChatParticipant,
+  ChatParticipantRequestBatch,
+  ChatParticipantRequestStatus,
+  ChatProviderKind,
+  ChatTurnFinishedNoteMetadata,
+  ChatViewMode,
+  Conversation
+} from "../../shared/types";
+import { chatMessageAddressees } from "../../shared/mainSession";
+import { firstTextLine, sessionsTaskTitle } from "../../shared/mainSessionView";
 import { APP_CHAT_SEND_MESSAGE_TOOL } from "../../shared/appMcpToolContracts";
+import { chatInterimPostsOf } from "../../shared/interimPosts";
 import { turnFinishedNoteOf } from "../../shared/turnFinishedNoteSource";
 import { accordClosedLaunchId, accordClosedLineTitle } from "../../shared/accordProgress";
 import {
@@ -9,6 +21,7 @@ import {
   chatParticipantRequestReplyRootMap
 } from "../../shared/chatParticipantRequestThreads";
 import type { MobileControlCard } from "../../shared/mobileControlCards";
+import { isChatProviderKind } from "../../shared/chatProviders";
 
 /**
  * What the phone reads of the chats, as the User's server answers it: the
@@ -42,6 +55,14 @@ export interface MobileChatListItem {
   pinnedAt?: string;
   /** A member's choice card in it waits for the User's answer. */
   waitingChoice?: boolean;
+  /** The chat's main session (docs/main-session.md), while it is a member:
+   *  only such a chat has two views. */
+  mainSessionParticipantId?: string;
+  /** The view the chat is shown in (shared/mainSession.ts chatViewFor), for
+   *  a chat with a main session; every other chat is classic. */
+  chatView?: ChatViewMode;
+  /** The chat's view switch works (a chat with a main session). */
+  canSwitchView?: true;
 }
 
 export interface MobileChatMember {
@@ -135,7 +156,74 @@ export interface MobileTimelineEvent {
   accordClosed?: { launchMessageId: string; title?: string };
   /** Who leads that Accord and who is in it (the card without its launch). */
   accordLaunch?: { facilitator: string; members: string[] };
+  /** The User's message: the members it was addressed to where it was
+   *  written (shared/mainSession.ts chatMessageAddressees), which the
+   *  sessions view places it by. */
+  addressees?: string[];
+  /** A member's request to other members, as the sessions view's task card
+   *  and the members list show it. */
+  participantRequest?: MobileTaskBatch;
+  /** An Accord launch the chat's main session wrote (app_chat_start_accord):
+   *  read as an Accord card like the User's own (accordLaunchCard.ts). */
+  accordLaunchByMainSession?: true;
+  /** A member's finished turn: how long it worked (its "Worked for …"). */
+  workedMs?: number;
+  /** A member's reply: what it posted during its turn, shown inside the
+   *  reply above its final text (shared/interimPosts.ts). Their pictures are
+   *  among the reply's attachments. */
+  interimPosts?: MobileInterimPost[];
 }
+
+export interface MobileInterimPost {
+  id: string;
+  content: string;
+  createdAt: string;
+  attachmentIds?: string[];
+}
+
+/**
+ * A member request as the phone's sessions view needs it: who asked, and per
+ * member the task's first line, where it stands and which reply answered it.
+ * The whole task is the message's own text, which travels anyway; a reply's
+ * line is read from the reply the phone holds, as the desktop reads it.
+ */
+export interface MobileTaskBatch {
+  id: string;
+  requesterParticipantId: string;
+  requesterHandle: string;
+  /** False: the requester does not wait for the answers. */
+  resumeRequester: boolean;
+  autoResumeMessageId?: string;
+  items: MobileTaskItem[];
+}
+
+export interface MobileTaskItem {
+  targetParticipantId: string;
+  targetHandle: string;
+  /** The task's first line (PHONE_TASK_LINE_CHARS at most). */
+  prompt: string;
+  /** The task's short title (shared/mainSessionView.ts sessionsTaskTitle):
+   *  the main session's, else made from the whole task as the desktop makes
+   *  it. */
+  title: string;
+  status: ChatParticipantRequestStatus;
+  createdAt: string;
+  /** When its status last changed: how long an ended task took. */
+  updatedAt?: string;
+  replyMessageId?: string;
+  /** Why it failed, its first line. */
+  error?: string;
+  /** The member's provider when the task was given: its logo stays once the
+   *  member has left the chat. */
+  targetKind?: ChatProviderKind;
+}
+
+/** The members of one request the phone is told of at most. */
+export const PHONE_TASK_ITEMS_MAX = 24;
+/** A task's or an error's line as the phone gets it. */
+export const PHONE_TASK_LINE_CHARS = 160;
+/** The addressees of one message the phone is told of at most. */
+export const PHONE_ADDRESSEES_MAX = 16;
 
 export interface MobileTimelineTurn {
   participantId: string;
@@ -167,7 +255,11 @@ export function phoneActivityEvents(conversation: Conversation, now = Date.now()
     const status = message.status ?? "done";
     if (status === "done" && !(now - Date.parse(message.createdAt) <= PHONE_ACTIVITY_DONE_MS)) continue;
     if (status !== "pending" && status !== "done") continue;
-    const { attachments: _attachments, ...event } = timelineEventFromMessage(message, message.id, conversation, threadRoots);
+    // Activity shows the text: no pictures, no task card or addressees, no
+    // posts made during the turn (the chat's page carries them), and no
+    // Accord launch mark or working time.
+    const { attachments: _attachments, participantRequest: _request, addressees: _addressees, interimPosts: _posts, accordLaunchByMainSession: _launch, workedMs: _worked, ...event } =
+      timelineEventFromMessage(message, message.id, conversation, threadRoots);
     const short = { ...event, content: event.content.slice(0, PHONE_ACTIVITY_CONTENT_CHARS) };
     // Messages are oldest first: a later one of the same run or member wins.
     const member = message.participantId ?? message.participantLabel ?? short.id;
@@ -201,7 +293,7 @@ export function timelineEventsFromSnapshot(conversation: Conversation, limit = 4
  *  caption is still a message. Both must survive a timeline reload. */
 function messageIsVisibleOnPhone(message: ChatMessage): boolean {
   return Boolean(message.content.trim()) || timelineAttachmentsFromMessage(message).length > 0 ||
-    (message.role === "participant" && message.status === "pending");
+    (message.role === "participant" && (message.status === "pending" || chatInterimPostsOf(message).length > 0));
 }
 
 /** What the desktop keeps off its timeline — internal system triggers such as
@@ -227,7 +319,8 @@ function isEmptyFinishedTurn(message: ChatMessage): boolean {
   return message.role === "participant" && message.status !== "pending" &&
     typeof message.metadata?.runId === "string" && Boolean(message.metadata.runId) &&
     message.metadata?.appMessageSource !== APP_CHAT_SEND_MESSAGE_TOOL &&
-    !message.content.trim() && timelineAttachmentsFromMessage(message).length === 0;
+    !message.content.trim() && timelineAttachmentsFromMessage(message).length === 0 &&
+    chatInterimPostsOf(message).length === 0;
 }
 
 function messageTravelsToPhone(conversation: Pick<Conversation, "messages">, message: ChatMessage): boolean {
@@ -241,7 +334,7 @@ function pendingParticipantContent(participantLabel?: string): string {
   return participantLabel?.trim() ? `${participantLabel.trim()} is running...` : "Running...";
 }
 
-function timelineAttachmentsFromMessage(message: ChatMessage): MobileTimelineAttachment[] {
+export function timelineAttachmentsFromMessage(message: ChatMessage): MobileTimelineAttachment[] {
   const attachments = message.metadata?.imageAttachments;
   if (!Array.isArray(attachments)) {
     return [];
@@ -277,6 +370,9 @@ function timelineEventFromMessage(
   const midTurn = message.role === "participant" && message.status === "done" &&
     message.metadata?.appMessageSource === APP_CHAT_SEND_MESSAGE_TOOL;
   const finishedNote = turnFinishedNoteOf(message);
+  const addressees = message.role === "user" ? chatMessageAddressees(message).slice(0, PHONE_ADDRESSEES_MAX) : [];
+  const request = message.role === "participant" && !hidden ? mobileTaskBatch(message.metadata?.participantRequest) : undefined;
+  const interimPosts = message.role === "participant" && !hidden ? mobileInterimPosts(message) : [];
   return {
     id: message.id,
     ...(threadRootId && threadRootId !== message.id ? { threadRootId } : {}),
@@ -292,6 +388,11 @@ function timelineEventFromMessage(
       ? { accordClosed: { launchMessageId: accordClosedLaunchId(message) as string, ...(accordClosedLineTitle(message) ? { title: accordClosedLineTitle(message) } : {}) } }
       : {}),
     ...(message.role === "system" && message.metadata?.accordLaunch ? { accordLaunch: message.metadata.accordLaunch } : {}),
+    ...(addressees.length ? { addressees } : {}),
+    ...(request ? { participantRequest: request } : {}),
+    ...(message.role === "participant" && message.metadata?.accordLaunchByMainSession === true ? { accordLaunchByMainSession: true as const } : {}),
+    ...(message.role === "participant" && message.status !== "pending" && typeof message.metadata?.workedMs === "number" &&
+      Number.isFinite(message.metadata.workedMs) && message.metadata.workedMs >= 0 ? { workedMs: Math.round(message.metadata.workedMs) } : {}),
     // A scheduled script's message is not the User's: the phone has no script
     // author, so it shows as an author named after the script.
     role: message.role === "participant" || message.role === "script" ? "participant" : message.role === "system" ? "system" : "you",
@@ -304,11 +405,61 @@ function timelineEventFromMessage(
       ? message.content
       : pendingParticipantContent(message.participantLabel),
     ...(attachments.length > 0 ? { attachments } : {}),
+    ...(interimPosts.length > 0 ? { interimPosts } : {}),
     status: message.status ?? "done",
     createdAt: message.createdAt,
     runId,
     messageId: message.id,
     ...(mobileEventId ? { mobileEventId } : {})
+  };
+}
+
+/** A reply's posts as the phone draws them: the words and which of the
+ *  reply's pictures each carries. The live copy of a running reply carries
+ *  them too (hubPhoneState.ts liveTimelineEvents). */
+export function mobileInterimPosts(message: ChatMessage): MobileInterimPost[] {
+  return chatInterimPostsOf(message).map((post) => ({
+    id: post.id,
+    content: post.content,
+    createdAt: post.createdAt,
+    ...(post.attachmentIds?.length ? { attachmentIds: [...post.attachmentIds] } : {})
+  }));
+}
+
+/** A request's batch, cut to what the task card and the members list show:
+ *  a line per task instead of the whole task (the message's text carries it
+ *  already), no reasons. A batch the phone cannot read is not sent. */
+export function mobileTaskBatch(batch: ChatParticipantRequestBatch | undefined): MobileTaskBatch | undefined {
+  if (!batch || typeof batch !== "object" || typeof batch.id !== "string" || typeof batch.requesterParticipantId !== "string" ||
+    !Array.isArray(batch.items)) {
+    return undefined;
+  }
+  const items: MobileTaskItem[] = [];
+  for (const item of batch.items) {
+    if (items.length >= PHONE_TASK_ITEMS_MAX) break;
+    if (!item || typeof item.targetParticipantId !== "string" || !item.targetParticipantId) continue;
+    const error = typeof item.error === "string" ? firstTextLine(item.error, PHONE_TASK_LINE_CHARS) : "";
+    items.push({
+      targetParticipantId: item.targetParticipantId,
+      targetHandle: typeof item.targetHandle === "string" ? item.targetHandle : "",
+      prompt: firstTextLine(typeof item.prompt === "string" ? item.prompt : "", PHONE_TASK_LINE_CHARS),
+      title: sessionsTaskTitle(item),
+      status: item.status,
+      createdAt: typeof item.createdAt === "string" ? item.createdAt : batch.createdAt,
+      ...(typeof item.updatedAt === "string" && item.updatedAt ? { updatedAt: item.updatedAt } : {}),
+      ...(typeof item.replyMessageId === "string" && item.replyMessageId ? { replyMessageId: item.replyMessageId } : {}),
+      ...(error ? { error } : {}),
+      ...(isChatProviderKind((item as { targetKind?: unknown }).targetKind) ? { targetKind: (item as { targetKind: ChatProviderKind }).targetKind } : {})
+    });
+  }
+  if (items.length === 0) return undefined;
+  return {
+    id: batch.id,
+    requesterParticipantId: batch.requesterParticipantId,
+    requesterHandle: typeof batch.requesterHandle === "string" ? batch.requesterHandle : "",
+    resumeRequester: batch.resumeRequester !== false,
+    ...(typeof batch.autoResumeMessageId === "string" && batch.autoResumeMessageId ? { autoResumeMessageId: batch.autoResumeMessageId } : {}),
+    items
   };
 }
 

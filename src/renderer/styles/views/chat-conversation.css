@@ -5485,3 +5485,22 @@ button.composer-active-run-row-main:focus-visible {
 .chat-turn-finished-note-dismiss {
   flex: none;
 }
+
+/* What a member posted during its turn, inside its reply (shared/interimPosts.ts):
+   the reply's own text, block after block, above its final answer. */
+.chat-interim-posts,
+.chat-interim-stream,
+.chat-interim-post {
+  display: grid;
+  gap: 8px;
+  min-width: 0;
+}
+
+.chat-interim-posts {
+  gap: 9px;
+}
+
+.chat-interim-post {
+  color: var(--app-text-strong);
+  word-wrap: break-word;
+}

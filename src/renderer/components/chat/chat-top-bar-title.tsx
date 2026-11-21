@@ -4,6 +4,7 @@ import { Check, Pencil, X } from "lucide-react";
 import { Input } from "@/components/ui/input";
 import { IconButton } from "../primitives";
 import type { Conversation } from "../../../shared/types";
+import { ChatViewTitleMenu } from "./chat-view-switch";
 
 export function normalizeChatTitle(value: string): string {
   return value.trim().slice(0, 80) || "Chat";
@@ -116,6 +117,7 @@ export function ChatTopBarTitle(props: {
       ) : (
         <div className="topbar-chat-title-row">
           <span className="topbar-chat-title-text">{props.conversation.title}</span>
+          <ChatViewTitleMenu />
           <IconButton
             size="xs"
             icon={Pencil}

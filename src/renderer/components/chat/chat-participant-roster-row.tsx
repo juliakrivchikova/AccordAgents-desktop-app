@@ -13,6 +13,7 @@ import type {
 import type { MemberRestartInProgress } from "../../../shared/memberRestart";
 import { IconButton } from "../primitives";
 import { chatParticipantDisplayName } from "../conversation/conversation-display";
+import { useChatSessionsLinks } from "./chat-sessions-links";
 import { ParticipantRuntimeControls } from "./chat-participant-runtime-controls";
 import { chatCliProviderLabel, type ChatParticipantRuntimeOverride } from "./chat-participant-drafts";
 import { cliProviderHostForParticipant } from "../../../shared/cliProviderHosts";
@@ -49,11 +50,19 @@ export function ChatParticipantRosterRow(props: {
   /** Its restart has not ended (also after this row closed and opened again). */
   restartStatus?: MemberRestartInProgress;
   onRemoveParticipant: (participantId: string) => void;
+  /** Opened at its settings (one member's settings, the sessions view). */
+  defaultExpanded?: boolean;
 }): JSX.Element {
-  const displayName = chatParticipantDisplayName(props.participant);
+  // The sessions view names no handles: the main session, or the member's task title.
+  const sessionsLinks = useChatSessionsLinks();
+  const displayName = (sessionsLinks
+    ? props.participant.id === sessionsLinks.mainSessionId
+      ? "Main session"
+      : sessionsLinks.byHandle.get(props.participant.handle.toLowerCase())?.title
+    : undefined) || chatParticipantDisplayName(props.participant);
   const roleLabel = props.participantRoleLabel(props.participant);
   const roleArchived = props.participantRoleArchived(props.participant);
-  const [expanded, setExpanded] = useState(false);
+  const [expanded, setExpanded] = useState(props.defaultExpanded === true);
   const compactDisabled = !canCompactParticipant(props.status);
   const backgroundTasks = useContext(ChatBackgroundTasksContext).get(props.participant.id) ?? [];
   const [confirmingRestart, setConfirmingRestart] = useState(false);

@@ -19,15 +19,13 @@ import {
   activeChatRoleConfigs,
   chatParticipantConfigToDraft,
   defaultChatParticipantDraft,
-  hasChatParticipantRuntimeOverride,
-  NEW_CHAT_ASSISTANT_PARTICIPANT_ID,
-  newChatAssistantParticipantDraft,
   normalizedChatDrafts,
   selectedOrMentionedChatParticipantDrafts,
   validateChatCliAgents,
   validateChatParticipantDrafts,
   validateChatStartupDrafts
 } from "../components/chat/chat-participant-drafts";
+import { NEW_CHAT_MAIN_SESSION_PARTICIPANT_ID, newChatMainSessionParticipantDraft } from "../components/chat/chat-main-session-draft";
 import {
   errorText,
   mergeProgressIntoConversation
@@ -78,6 +76,11 @@ export interface SendChatMessageOptions extends ChatRunScopeOptions {
   skillMentions?: ChatSkillMention[];
   repoFileMentions?: RepoFileMention[];
   imageAttachments?: ChatImageInput[];
+  /** Exactly these members (a member's session panel, or the sessions
+   *  view's main composer to the main session). */
+  targetParticipantIds?: string[];
+  /** Sent from the main composer: its draft is this message's. */
+  fromMainComposer?: boolean;
 }
 
 export interface StartChatOptions {
@@ -118,7 +121,7 @@ export function useChatActions(state: AppState, conversationActions: Conversatio
       providers: state.settings.providers,
       explicitKind: state.settings.assistantProviderKind
     });
-    // The Assistant's CLI the screen showed: settings made for it in the
+    // The main session's CLI the screen showed: settings made for it in the
     // member list do not carry over to another one.
     const shownAssistantKind = resolveProvider(state.agents);
     let agents = state.agents;
@@ -132,17 +135,17 @@ export function useChatActions(state: AppState, conversationActions: Conversatio
     }
     const assistantProviderKind = resolveProvider(agents);
     if (!assistantProviderKind) {
-      // The saved Assistant CLI gives way to any ready one: none is ready.
+      // The saved CLI gives way to any ready one: none is ready.
       state.setError(NO_READY_CLI_MESSAGE);
       return false;
     }
-    const assistantRuntimeOverride = assistantProviderKind === shownAssistantKind
-      ? state.selectedChatParticipantRuntimeOverrides[NEW_CHAT_ASSISTANT_PARTICIPANT_ID]
+    const mainSessionRuntimeOverride = assistantProviderKind === shownAssistantKind
+      ? state.selectedChatParticipantRuntimeOverrides[NEW_CHAT_MAIN_SESSION_PARTICIPANT_ID]
       : undefined;
+    // Every new chat has its main session first, instead of the Chat
+    // Assistant (docs/main-session.md).
     const participants = [
-      ...(hasChatParticipantRuntimeOverride(assistantRuntimeOverride)
-        ? [newChatAssistantParticipantDraft(assistantProviderKind, assistantRuntimeOverride)]
-        : []),
+      newChatMainSessionParticipantDraft(assistantProviderKind, mainSessionRuntimeOverride, Boolean(state.repoPath.trim())),
       ...selectedOrMentionedChatParticipantDrafts(
         state.settings.chatParticipantConfigs,
         state.selectedChatParticipantConfigIds,
@@ -385,14 +388,18 @@ export function useChatActions(state: AppState, conversationActions: Conversatio
       state.setError("Enter a chat message or attach an image.");
       return false;
     }
-    if (skillMentions.length > 0 && hasMultipleMentionedParticipants(content, state.conversation)) {
+    const targetParticipantIds = options.targetParticipantIds?.length ? options.targetParticipantIds : undefined;
+    // A thread or a member's panel keeps its own draft; the sessions view's
+    // main composer writes to the main session from the main draft.
+    const ownsMainDraft = !options.chatThreadRootId && (!targetParticipantIds || options.fromMainComposer === true);
+    if (skillMentions.length > 0 && !targetParticipantIds && hasMultipleMentionedParticipants(content, state.conversation)) {
       state.setError("A selected skill runs on a single member. Mention exactly one member, or remove the skill. Other members can be brought in by the running skill itself.");
       return false;
     }
     const runId = crypto.randomUUID();
     state.setError(undefined);
     state.setWarnings([]);
-    if (!options.chatThreadRootId) {
+    if (ownsMainDraft) {
       state.setChatMessageDraftForConversation(conversationId, "");
     }
     try {
@@ -405,7 +412,8 @@ export function useChatActions(state: AppState, conversationActions: Conversatio
         imageAttachments,
         threadId: options.threadId,
         parentMessageId: options.parentMessageId,
-        chatThreadRootId: options.chatThreadRootId
+        chatThreadRootId: options.chatThreadRootId,
+        ...(targetParticipantIds ? { targetParticipantIds } : {})
       });
       state.setConversation((current) => {
         if (!current || current.id !== result.conversation.id) {
@@ -423,7 +431,7 @@ export function useChatActions(state: AppState, conversationActions: Conversatio
       await refreshPersistedProviderPreference();
       return true;
     } catch (caught) {
-      if (!options.chatThreadRootId) {
+      if (ownsMainDraft) {
         state.setChatMessageDraftForConversation(conversationId, (current) => current || draftBeforeSend);
       }
       const message = errorText(caught);

@@ -424,6 +424,25 @@ test("a chat pinned on the computer is pinned on every device through the server
   assert.equal(unpinned!.updatedAt, machineBefore);
 });
 
+test("a chat's view switched on the computer reaches the server and every device as a change of the chat, and keeps its time everywhere", async (t) => {
+  const base = localChat("chat-view");
+  // The server names as a chat's main session only a member with its role.
+  const main = { ...desk, roleConfigId: "main-session" };
+  const h = await linked(t, { ...base, metadata: { ...base.metadata, participants: [main, remote], mainSessionParticipantId: desk.id, chatView: "sessions" } });
+  const server0 = await until(() => h.page("chat-view"), (page) => page.conversation?.metadata?.chatView === "sessions");
+  assert.equal(server0.conversation.metadata.mainSessionParticipantId, desk.id, "the main session is the chat's own, shared");
+  const before = (await h.desktopStorage.getConversation("chat-view"))!.updatedAt;
+  const machineBefore = (await until(() => h.machineStorage.getConversation("chat-view"), (chat) => chat?.metadata.chatView === "sessions"))!.updatedAt;
+  await h.desktopChat.setChatView({ conversationId: "chat-view", view: "classic" });
+  const server = await until(() => h.page("chat-view"), (page) => page.conversation?.metadata?.chatView === "classic");
+  assert.equal(server.conversation.updatedAt, before, "the server keeps the chat's time");
+  const machine = await until(() => h.machineStorage.getConversation("chat-view"), (chat) => chat?.metadata.chatView === "classic");
+  assert.equal(machine!.updatedAt, machineBefore, "a device that receives the view keeps the chat's time");
+  assert.equal(machine!.metadata.mainSessionParticipantId, desk.id);
+  const listed = (await h.desktopStorage.listConversations()).find((summary) => summary.id === "chat-view");
+  assert.equal(listed?.updatedAt, before, "the computer's own list keeps its time too");
+});
+
 test("an unpin made while a member's turn holds an older copy of the chat stays unpinned, here and on the server", async (t) => {
   const h = await linked(t, localChat("chat-pin-run"));
   await h.desktopChat.setPinned({ conversationId: "chat-pin-run", pinned: true });
@@ -675,6 +694,96 @@ for (const where of ["machine", "desktop"] as const) {
     assert.ok(after.messages.some((message) => message.id === reply.id), "the reply is still on the server");
   });
 }
+
+for (const where of ["machine", "desktop"] as const) {
+  test(`a ${where} member's posts during its turn go into its running reply on the server and the computer, in order, and need no note`, async (t) => {
+    // The User, 2026-11-20: what a member writes during its turn belongs in
+    // its reply, as in the CLI, so the reply stays the last thing it wrote.
+    const id = `chat-posts-${where}`;
+    const h = await linked(t, localChat(id));
+    const member = where === "machine" ? remote : desk;
+    const control = where === "machine" ? h.machineControl : h.desktopControl;
+    const chat = where === "machine" ? h.machineChat : h.desktopChat;
+    const storage = where === "machine" ? h.machineStorage : h.desktopStorage;
+    control.hold = true;
+    await h.desktopChat.sendMessage({ conversationId: id, content: `@${member.handle} fix the button` } as never);
+    await until(async () => control.releases.length, (count) => count === 1);
+    const running = await until(() => storage.getConversation(id), (current) => Boolean(current?.messages.some((message) =>
+      message.participantId === member.id && message.status === "pending" && !message.metadata?.serverPlaceholder)));
+    const pending = running!.messages.find((message) => message.participantId === member.id && message.status === "pending" && !message.metadata?.serverPlaceholder)!;
+    const actor = {
+      conversationId: id, participantId: member.id, roleConfigId: member.roleConfigId, roleConfigVersion: 1, capabilities: [],
+      runId: pending.metadata?.runId, runPermissions: normalizeChatAgentPermissions(defaultChatAgentPermissions())
+    } as never;
+    const first = await chat.sendChatMessageFromTool(actor, { content: "Found the cause." });
+    const second = await chat.sendChatMessageFromTool(actor, { content: "Fixing it now." });
+    assert.deepEqual([first.messageId, second.messageId], [pending.id, pending.id]);
+    // The server holds them in the reply while the turn runs.
+    const live = await until(() => h.page(id), (page) => (page.messages.find((message) => message.id === pending.id)?.metadata?.interimPosts?.length ?? 0) === 2);
+    assert.equal(live.messages.find((message) => message.id === pending.id)!.status, "pending");
+    assert.equal(live.messages.filter((message) => message.role === "participant").length, 1, "no message of their own");
+    // And so does the computer.
+    await until(() => h.desktopStorage.getConversation(id), (current) =>
+      current?.messages.find((message) => message.id === pending.id)?.metadata?.interimPosts?.length === 2);
+    control.releases.splice(0).forEach((release) => release());
+    const page = await until(() => h.page(id), (current) => current.messages.some((message) => message.id === pending.id && message.status === "done"));
+    const reply = page.messages.find((message) => message.id === pending.id)!;
+    assert.equal(reply.content, `${where} reply to @${member.handle} fix the button`);
+    assert.deepEqual(reply.metadata?.interimPosts?.map((post) => post.content), ["Found the cause.", "Fixing it now."], "kept, in order, by the turn's end");
+    assert.equal(page.messages.at(-1)?.id, reply.id, "the reply is the last message");
+    assert.equal(page.messages.some(isFinishedNote), false, "nothing came below it: no note");
+    const shown = await until(() => h.desktopStorage.getConversation(id), (current) =>
+      current?.messages.find((message) => message.id === pending.id)?.status === "done");
+    assert.deepEqual(shown!.messages.find((message) => message.id === pending.id)!.metadata?.interimPosts?.map((post) => post.content),
+      ["Found the cause.", "Fixing it now."], "the computer shows them in the finished reply");
+  });
+}
+
+test("a picture a machine member posts during its turn goes into its running reply, up to the server before the reply's update, and the computer opens it", async (t) => {
+  const project = await mkdtemp(path.join(tmpdir(), "accord-post-picture-"));
+  t.after(() => rm(project, { recursive: true, force: true }));
+  const bytes = pictureBytes(300_000);
+  await writeFile(path.join(project, "shot.png"), bytes);
+  const id = "chat-post-picture";
+  const h = await linked(t, localChat(id, { repoPath: project }));
+  await ownPictureFolders(t, h);
+  h.desktopChat.setHubBlobReader((reference) => h.desktopHub.downloadBytes(reference));
+  await until(() => h.machineStorage.getConversation(id), (chat) => chat?.repoPath === project);
+  // Each reply update is checked, as it is written, for whether the server holds its posts' pictures.
+  const seen: boolean[] = [];
+  const original = HubClient.prototype.writeOps;
+  HubClient.prototype.writeOps = async function (this: HubClient, ops: Parameters<HubClient["writeOps"]>[0]) {
+    for (const op of ops) {
+      if (op.kind !== "message.update") continue;
+      for (const attachment of op.message.metadata?.imageAttachments ?? []) {
+        if (attachment.hubBlob) seen.push(await h.hubStorage.deviceEventBlobs().verify(attachment.hubBlob).catch(() => false));
+      }
+    }
+    return original.call(this, ops);
+  };
+  t.after(() => { HubClient.prototype.writeOps = original; });
+  h.machineControl.hold = true;
+  await h.desktopChat.sendMessage({ conversationId: id, content: "@drew show me" } as never);
+  await until(async () => h.machineControl.releases.length, (count) => count === 1);
+  const running = await until(() => h.machineStorage.getConversation(id), (current) => Boolean(current?.messages.some((message) => message.participantId === remote.id && message.status === "pending")));
+  const pending = running!.messages.find((message) => message.participantId === remote.id && message.status === "pending")!;
+  const sent = await h.machineChat.sendChatMessageFromTool({
+    conversationId: id, participantId: remote.id, roleConfigId: remote.roleConfigId, roleConfigVersion: 1, capabilities: [], runId: pending.metadata?.runId,
+    runPermissions: normalizeChatAgentPermissions({ ...defaultChatAgentPermissions(), repoRead: true })
+  } as never, { content: "Here it is.", attachments: [{ kind: "image", sourcePath: "shot.png" }] });
+  assert.equal(sent.messageId, pending.id, "in the running reply");
+  const page = await until(() => h.page(id), (current) => Boolean(current.messages.find((message) => message.id === pending.id)?.metadata?.imageAttachments?.length));
+  const reply = page.messages.find((message) => message.id === pending.id)!;
+  const named = reply.metadata!.imageAttachments![0];
+  assert.deepEqual(reply.metadata?.interimPosts?.[0].attachmentIds, [named.id], "the post names its picture");
+  assert.ok(isDeviceEventBlobReference(named.hubBlob));
+  assert.ok(seen.length > 0 && seen.every(Boolean), `the server held the picture whenever the reply named it: ${JSON.stringify(seen)}`);
+  await until(() => h.desktopStorage.getConversation(id), (chat) => Boolean(chat?.messages.find((message) => message.id === pending.id)?.metadata?.imageAttachments?.length));
+  const read = await h.desktopChat.readChatAttachment({ conversationId: id, attachmentId: named.id });
+  assert.ok(Buffer.from(read.dataBase64, "base64").equals(bytes), "the computer opens the post's picture");
+  h.machineControl.releases.splice(0).forEach((release) => release());
+  await until(() => h.page(id), (current) => current.messages.some((message) => message.id === pending.id && message.status === "done"));
+});
 
 test("the cross on the pinned Accord leaves one line at the end of the chat on the server; the chat keeps its time and members never read it", async (t) => {
   // The User, 2026-11-16: closing the Accord folds it into a line, placed last

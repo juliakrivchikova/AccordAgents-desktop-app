@@ -1,3 +1,4 @@
+import { mainSessionMemberOf } from "./mainSession";
 import type { ChatMessage, ChatParticipant, Conversation } from "./types";
 
 export interface ChatDispatchReplyContext {
@@ -42,11 +43,26 @@ export type ChatDeliveryPolicySnapshotResult =
       reason: "missing-snapshot" | "stale-snapshot" | "conversation-mismatch";
     };
 
+/**
+ * Who a message goes to: the members it names with @; without one, in a chat
+ * with a main session (shared/mainSession.ts) a message on the timeline goes
+ * to the main session, as every message goes to the CLI; in a thread, and in
+ * a chat from before, to the newest member that spoke there, then to the
+ * chat's own member (the main session, or the Chat Assistant of a chat from
+ * before). The main session is told by its role, so the phone and the
+ * User's server, which pass the members they know, route the same way.
+ */
 export function resolveChatDeliveryTargets(input: ChatDeliveryPolicyInput): ChatDeliveryPolicyResult {
   let dispatch = resolveChatMentionTargets(input.participants, input.content, input.options);
   if (dispatch.targets.length === 0 && dispatch.unknownHandles.length === 0) {
-    const fallback = resolveLastSenderTarget(input.conversation, input.participants, input.context)
-      ?? defaultAdministratorDispatchTarget(input.participants, input.options);
+    const mainSessionId = input.conversation.metadata?.mainSessionParticipantId;
+    const mainSession = mainSessionMemberOf(input.participants, typeof mainSessionId === "string" ? mainSessionId : undefined);
+    const threadScoped = Boolean(input.context?.threadId || input.context?.chatThreadRootId);
+    const fallback = mainSession && !threadScoped
+      ? mainSession
+      : resolveLastSenderTarget(input.conversation, input.participants, input.context)
+        ?? mainSession
+        ?? defaultAdministratorDispatchTarget(input.participants, input.options);
     if (fallback) {
       dispatch = { ...dispatch, targets: [fallback] };
     }

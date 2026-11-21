@@ -14,10 +14,11 @@ import type {
   ChatRoleConfig,
   ChatRoleParticipantChangeRequest
 } from "../../../shared/types";
-import { Avatar, avatarForParticipant } from "../avatar/avatar";
+import { avatarForParticipant } from "../avatar/avatar";
 import { chatParticipantDisplayName, chatParticipantReference } from "../conversation/conversation-display";
 import { MarkdownText } from "../content/markdown-text";
 import { avatarForChatParticipant } from "./chat-avatars";
+import { ChatMemberMark } from "./chat-member-mark";
 import { formatChatTime } from "./chat-format";
 import { APP_ROSTER_REQUEST_CHANGE_TOOL, CHAT_CODEX_APPROVAL_CANCEL_DECISION_ID, chatApprovalKeyboardAction, chatApprovalShowsGenericSkip, chatCodexApprovalRequest, chatCodexApprovalShowsCancel, chatParticipantChangeRequest, chatParticipantRequestApprovalRequest, chatPermissionChangeRequest, chatRoleChangeRequest, chatRoleParticipantChangeRequest, chatSelfCompactionRequest, chatToolPermissionRequest, participantProviderLabel } from "./chat-conversation-data";
 import { chatCodexApprovalShowsCompactResult } from "./chat-codex-approval-presentation";
@@ -146,7 +147,7 @@ function GenericChatAppToolApprovalCard(props: {
     return (
       <section className="chat-app-tool-approval-card is-compact-result" aria-label={displayPrompt}
         data-app-tool-approval-id={props.approval.id} tabIndex={-1}>
-        <Avatar className="message-avatar chat-app-tool-approval-avatar" spec={requesterAvatar} />
+        <ChatMemberMark className="message-avatar chat-app-tool-approval-avatar" markClassName="is-large" avatar={requesterAvatar} member={requester} />
         <div className="chat-app-tool-approval-body">
           <strong>{queuedDecision.approve ? "Approval saved" : "Refusal saved"}</strong>
           <p>Waiting for machine {queuedDecision.machineName} to confirm the decision.</p>
@@ -222,7 +223,7 @@ function GenericChatAppToolApprovalCard(props: {
       data-app-tool-approval-id={props.approval.id}
       tabIndex={-1}
     >
-      <Avatar className="message-avatar chat-app-tool-approval-avatar" spec={requesterAvatar} />
+      <ChatMemberMark className="message-avatar chat-app-tool-approval-avatar" markClassName="is-large" avatar={requesterAvatar} member={requester} />
       <div className="chat-app-tool-approval-body">
         <div className="chat-app-tool-approval-meta">
           <strong>{requesterLabel}</strong>

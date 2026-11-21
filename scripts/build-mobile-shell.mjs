@@ -28,6 +28,12 @@ await cp(
   path.join(rendererAssets, "accordagents-mark.png"),
   path.join(assetTarget, "accordagents-mark.png")
 );
+// The providers' logo tiles the sessions view marks members with (the
+// desktop's ProviderIcon pictures; Codex's mark is drawn inline).
+const providerTarget = path.join(assetTarget, "providers");
+await mkdir(providerTarget, { recursive: true });
+await cp(path.join(rendererAssets, "claude-avatar.png"), path.join(providerTarget, "claude.png"));
+await cp(path.join(rendererAssets, "antigravity-logo.png"), path.join(providerTarget, "antigravity.png"));
 // Every built-in avatar the desktop can show, copied under its catalog id so
 // the phone resolves `assetId` -> file without a list of its own. The catalog
 // is read from the same module the desktop ships, bundled as ESM in memory:

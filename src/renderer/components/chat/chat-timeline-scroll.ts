@@ -342,10 +342,17 @@ export function useOlderMessagesTopUp(
     hasOlderMessages: boolean;
     olderMessagesLoading: boolean;
     onLoadOlderMessages: () => void;
+    /** The rows the timeline shows of the loaded messages. */
+    visibleRowCount?: number;
+    /** A timeline that shows few of the loaded messages (the sessions view's
+     *  main timeline): after this many pages in a row that added no row it
+     *  stops loading by itself, and "Load older messages" goes on. */
+    maxBarrenLoads?: number;
   },
   canLoad: () => boolean = () => true
 ): () => void {
   const requestedAtCountRef = useRef<number | undefined>();
+  const barrenRef = useRef({ loads: 0, rows: state.visibleRowCount });
   const stateRef = useRef(state);
   stateRef.current = state;
   const requestOlderMessages = (): void => {
@@ -357,6 +364,15 @@ export function useOlderMessagesTopUp(
     if (requestedAtCountRef.current === current.loadedMessageCount || !shouldLoadOlderMessages(timeline)) {
       return;
     }
+    const barren = barrenRef.current;
+    if (current.maxBarrenLoads !== undefined && requestedAtCountRef.current !== undefined) {
+      // A page asked for by this check has landed: did it add a row?
+      barren.loads = current.visibleRowCount === barren.rows ? barren.loads + 1 : 0;
+      if (barren.loads >= current.maxBarrenLoads) {
+        return;
+      }
+    }
+    barren.rows = current.visibleRowCount;
     requestedAtCountRef.current = current.loadedMessageCount;
     current.onLoadOlderMessages();
   };

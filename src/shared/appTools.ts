@@ -1,6 +1,15 @@
 import type { ChatAppToolCapability } from "./types";
 
-export const CHAT_APP_TOOL_CAPABILITIES: ChatAppToolCapability[] = ["participants.manage", "participants.request", "compaction.request", "permissions.request"];
+export const CHAT_APP_TOOL_CAPABILITIES: ChatAppToolCapability[] = [
+  "participants.manage",
+  "participants.request",
+  "compaction.request",
+  "permissions.request",
+  // The main session's own (shared/mainSession.ts): give a member a task
+  // without a card, and start an Accord.
+  "participants.delegate",
+  "accord.start"
+];
 
 export function normalizeChatAppToolCapabilities(value: unknown): ChatAppToolCapability[] {
   if (!Array.isArray(value)) {
@@ -8,8 +17,8 @@ export function normalizeChatAppToolCapabilities(value: unknown): ChatAppToolCap
   }
   const capabilities = new Set<ChatAppToolCapability>();
   for (const item of value) {
-    if (item === "participants.manage" || item === "participants.request" || item === "compaction.request" || item === "permissions.request") {
-      capabilities.add(item);
+    if (typeof item === "string" && (CHAT_APP_TOOL_CAPABILITIES as string[]).includes(item)) {
+      capabilities.add(item as ChatAppToolCapability);
     }
   }
   return Array.from(capabilities);

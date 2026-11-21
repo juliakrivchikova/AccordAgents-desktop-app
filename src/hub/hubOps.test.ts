@@ -135,6 +135,90 @@ test("pinning a chat, from any device, orders the User's list without making the
   assert.ok(page.body.conversation.updatedAt > before, "a rename moves the chat's time");
 });
 
+test("a new chat names its main session and view; the view switches from any device without making the chat recent, the main session never changes", async (t) => {
+  const h = await hub(t);
+  const chat = id("chat");
+  const main = { id: "p-main", handle: "main", roleConfigId: "main-session", kind: "claude-code" };
+  await h.write(h.phone, { opId: id("op"), kind: "conversation.create", conversationId: chat,
+    conversation: { title: "Plans", kind: "chat", createdAt: new Date().toISOString(), metadata: { participants: [main, ...members], mainSessionParticipantId: main.id, chatView: "sessions" } } });
+  let page = await h.call<HubChatPage>(h.owner, "GET", `/v3/chat?conversationId=${chat}`);
+  assert.deepEqual([page.body.conversation.metadata.mainSessionParticipantId, page.body.conversation.metadata.chatView], [main.id, "sessions"]);
+  const feed = (await h.call<HubFeedResponse>(h.owner, "GET", "/v3/feed?after=0")).body;
+  const created = feed.entries.find((entry) => entry.conversationId === chat && entry.effect.kind === "conversation.create");
+  assert.deepEqual((created?.effect as { conversation: { metadata: Record<string, unknown> } }).conversation.metadata.chatView, "sessions", "every device hears it");
+  const before = page.body.conversation.updatedAt;
+  await new Promise((resolve) => setTimeout(resolve, 5));
+
+  const switched = await h.write(h.phone, { opId: id("op"), kind: "conversation.update", conversationId: chat, metadata: { chatView: "classic" } });
+  assert.equal(switched.body.results[0].status, "accepted");
+  page = await h.call<HubChatPage>(h.owner, "GET", `/v3/chat?conversationId=${chat}`);
+  assert.equal(page.body.conversation.metadata.chatView, "classic");
+  assert.equal(page.body.conversation.updatedAt, before, "a view is not activity: the chat keeps its time");
+
+  // Only the two views, and the main session named when the chat was made.
+  await h.write(h.owner, { opId: id("op"), kind: "conversation.update", conversationId: chat, metadata: { chatView: "grid", mainSessionParticipantId: "p-desk" } });
+  await h.write(h.owner, { opId: id("op"), kind: "conversation.update", conversationId: chat, removedMetadataKeys: ["mainSessionParticipantId"] });
+  page = await h.call<HubChatPage>(h.owner, "GET", `/v3/chat?conversationId=${chat}`);
+  assert.deepEqual([page.body.conversation.metadata.mainSessionParticipantId, page.body.conversation.metadata.chatView], [main.id, "classic"]);
+
+  // A chat from before is not made a main-session chat afterwards.
+  const old = id("chat");
+  await h.write(h.owner, createChat(old));
+  await h.write(h.owner, { opId: id("op"), kind: "conversation.update", conversationId: old, metadata: { mainSessionParticipantId: "p-desk" } });
+  page = await h.call<HubChatPage>(h.owner, "GET", `/v3/chat?conversationId=${old}`);
+  assert.equal(page.body.conversation.metadata.mainSessionParticipantId, undefined);
+});
+
+test("a phone from before starts a chat with the main session it was offered without naming it: the server names it", async (t) => {
+  const h = await hub(t);
+  const chat = id("chat");
+  const main = { id: "p-main", handle: "main", roleConfigId: "main-session", kind: "claude-code" };
+  await h.write(h.phone, { opId: id("op"), kind: "conversation.create", conversationId: chat,
+    conversation: { title: "Plans", kind: "chat", createdAt: new Date().toISOString(), metadata: { participants: [main, ...members] } } });
+  const page = await h.call<HubChatPage>(h.owner, "GET", `/v3/chat?conversationId=${chat}`);
+  assert.equal(page.body.conversation.metadata.mainSessionParticipantId, main.id);
+  assert.equal(page.body.conversation.metadata.chatView, undefined, "each device opens it in its own default view");
+  const feed = (await h.call<HubFeedResponse>(h.owner, "GET", "/v3/feed?after=0")).body;
+  const created = feed.entries.find((entry) => entry.conversationId === chat && entry.effect.kind === "conversation.create");
+  assert.equal((created?.effect as { conversation: { metadata: Record<string, unknown> } }).conversation.metadata.mainSessionParticipantId, main.id,
+    "the devices hear the chat as the server keeps it");
+
+  const plain = id("chat");
+  await h.write(h.phone, createChat(plain));
+  assert.equal((await h.call<HubChatPage>(h.owner, "GET", `/v3/chat?conversationId=${plain}`)).body.conversation.metadata.mainSessionParticipantId, undefined,
+    "an Assistant chat from an older computer's offer stays one");
+});
+
+test("a chat's main session is a member with the main session's role, named when it is made; a move to the server keeps it", async (t) => {
+  const h = await hub(t);
+  const main = { id: "p-main", handle: "main", roleConfigId: "main-session", kind: "claude-code" };
+  const page = async (chat: string) => (await h.call<HubChatPage>(h.owner, "GET", `/v3/chat?conversationId=${chat}`)).body.conversation.metadata;
+  // A name for an ordinary member is not taken.
+  const plain = id("chat");
+  await h.write(h.phone, { opId: id("op"), kind: "conversation.create", conversationId: plain,
+    conversation: { title: "Plans", kind: "chat", createdAt: new Date().toISOString(), metadata: { participants: members, mainSessionParticipantId: "p-desk" } } });
+  assert.equal((await page(plain)).mainSessionParticipantId, undefined);
+  // Nor a member that is not there; the one with the role is named instead.
+  const chat = id("chat");
+  await h.write(h.phone, { opId: id("op"), kind: "conversation.create", conversationId: chat,
+    conversation: { title: "Plans", kind: "chat", createdAt: new Date().toISOString(), metadata: { participants: [main, ...members], mainSessionParticipantId: "p-ghost" } } });
+  assert.equal((await page(chat)).mainSessionParticipantId, main.id);
+
+  // The computer moving the chat again cannot rename or drop it.
+  const fields = (mainSessionParticipantId?: string) => ({ title: "Moved", kind: "chat" as const, createdAt: new Date().toISOString(),
+    metadata: { participants: [main, ...members], ...(mainSessionParticipantId ? { mainSessionParticipantId } : {}) } });
+  assert.equal((await h.write(h.owner, { opId: id("op"), kind: "chat.import", conversationId: chat, conversation: fields("p-desk"), messages: [] })).body.results[0].status, "accepted");
+  assert.equal((await page(chat)).mainSessionParticipantId, main.id);
+  await h.write(h.owner, { opId: id("op"), kind: "chat.import", conversationId: chat, conversation: fields(), messages: [] });
+  assert.equal((await page(chat)).mainSessionParticipantId, main.id);
+  // A chat from before stays one; a new chat moved names only a real main session.
+  await h.write(h.owner, { opId: id("op"), kind: "chat.import", conversationId: plain, conversation: { ...fields("p-desk"), metadata: { participants: members, mainSessionParticipantId: "p-desk" } }, messages: [] });
+  assert.equal((await page(plain)).mainSessionParticipantId, undefined);
+  const moved = id("chat");
+  await h.write(h.owner, { opId: id("op"), kind: "chat.import", conversationId: moved, conversation: { ...fields("p-desk") }, messages: [] });
+  assert.equal((await page(moved)).mainSessionParticipantId, main.id);
+});
+
 test("every device may change the chat's own fields; only a member's home writes the member's messages", async (t) => {
   const h = await hub(t);
   const chat = id("chat");

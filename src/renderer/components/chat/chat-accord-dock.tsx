@@ -1,18 +1,20 @@
 import { useContext, useEffect, useRef, useSyncExternalStore, type ReactNode } from "react";
-import { Check, ChevronDown, X } from "lucide-react";
+import { Check, ChevronDown, ChevronRight, X } from "lucide-react";
 import {
   accordProgressNoteHead, accordProgressStages, accordProgressStatus, type AccordStage, type AccordStepState
 } from "../../../shared/accordProgress";
 import type { ChatParticipant } from "../../../shared/types";
 import type { DockedAccord } from "./use-accord-progress";
 import { ArtifactsContext } from "../artifacts/artifacts-context";
-import { Avatar, avatarForParticipant } from "../avatar/avatar";
+import { avatarForParticipant } from "../avatar/avatar";
 import { IconButton } from "../primitives";
 import { AccordMergeIcon } from "./accord-merge-icon";
 import {
   accordDockClosing, accordDockFolded, accordDockVersion, setAccordDockClosing, setAccordDockFolded, subscribeAccordDock
 } from "./accord-dock-store";
 import { avatarForChatParticipant } from "./chat-avatars";
+import { ChatMemberMark } from "./chat-member-mark";
+import { useChatSessionsLinks } from "./chat-sessions-links";
 
 // The chat's newest Accord, pinned above the composer (the User, 2026-11-08):
 // where it stands, with every member's draft and signature, the current
@@ -20,7 +22,9 @@ import { avatarForChatParticipant } from "./chat-avatars";
 // line (this device's own choice, accord-dock-store.ts). Its cross folds it
 // into a line at the end of the chat as it stands then, on every device (the
 // User, 2026-11-16): the line opens the same card there, and its cross folds
-// it back (ChatAccordClosedLine).
+// it back (ChatAccordClosedLine). In the sessions view (docs/main-session.md)
+// the card is in the right panel (ChatAccordPanel) and above the composer
+// stays one line that opens it there (the User, 2026-11-20).
 
 /** Folded, for the Accord the dock shows, and whether its cross was just
  *  pressed here: a newer Accord in the chat shows again, unfolded. */
@@ -41,10 +45,26 @@ function StageMark(props: { state: AccordStepState }): JSX.Element {
   );
 }
 
-function memberAvatar(handle: string, participants?: ChatParticipant[]) {
-  const label = `@${handle}`;
-  const participant = participants?.find((item) => item.handle.toLowerCase() === handle.toLowerCase());
-  return participant ? avatarForChatParticipant(participant, label) : avatarForParticipant(label);
+function MemberMark(props: { handle: string; participants?: ChatParticipant[] }): JSX.Element | null {
+  const label = `@${props.handle}`;
+  const participant = props.participants?.find((item) => item.handle.toLowerCase() === props.handle.toLowerCase());
+  const avatar = participant ? avatarForChatParticipant(participant, label) : avatarForParticipant(label);
+  return <ChatMemberMark className="chat-accord-progress-avatar" markClassName="is-chip" avatar={avatar} member={participant} tooltip={null} />;
+}
+
+/** A member's name on an Accord's card: its handle, or in the sessions view
+ *  (no handles there) its task's title, the main session by that name. */
+function useMemberName(): (handle: string) => string {
+  const links = useChatSessionsLinks();
+  return (handle) => {
+    const key = handle.replace(/^@/, "").toLowerCase();
+    if (!links) return `@${handle.replace(/^@/, "")}`;
+    return key === links.mainHandle?.toLowerCase() ? "Main session" : links.byHandle.get(key)?.title ?? handle.replace(/^@/, "");
+  };
+}
+
+function MemberName(props: { handle: string }): JSX.Element {
+  return <span>{useMemberName()(props.handle)}</span>;
 }
 
 function Stage(props: { stage: AccordStage; participants?: ChatParticipant[] }): JSX.Element {
@@ -63,9 +83,9 @@ function Stage(props: { stage: AccordStage; participants?: ChatParticipant[] }):
                 className={`chat-accord-progress-member${member.given ? " is-given" : member.waiting ? " is-waiting" : ""}`}
               >
                 <span aria-hidden="true" className="chat-accord-progress-avatar-slot">
-                  <Avatar className="chat-accord-progress-avatar" spec={memberAvatar(member.handle, props.participants)} tooltip={null} />
+                  <MemberMark handle={member.handle} participants={props.participants} />
                 </span>
-                <span>@{member.handle}</span>
+                <MemberName handle={member.handle} />
                 {member.given && <Check className="chat-accord-progress-member-check" size={12} strokeWidth={3} aria-label="done" />}
               </span>
             ))}
@@ -86,17 +106,18 @@ export function accordDisplayTitle(
 }
 
 /** The Accord's card: its head (which folds it into one line), its stages
- *  and the current version's note with Open. Pinned above the composer, and
- *  opened from the line a closed Accord left in the chat. */
+ *  and the current version's note with Open. Pinned above the composer,
+ *  opened from the line a closed Accord left in the chat, and whole in the
+ *  sessions view's right panel (no fold, no cross there). */
 export function ChatAccordCard(props: {
   launch: DockedAccord;
   participants?: ChatParticipant[];
   folded: boolean;
-  onToggleFold: () => void;
-  closeLabel: string;
-  onClose: () => void;
+  onToggleFold?: () => void;
+  closeLabel?: string;
+  onClose?: () => void;
 }): JSX.Element {
-  const { progress, card } = props.launch;
+  const { progress } = props.launch;
   const artifacts = useContext(ArtifactsContext);
   const title = accordDisplayTitle(artifacts, progress);
   const { version } = progress;
@@ -108,29 +129,25 @@ export function ChatAccordCard(props: {
       data-testid="chat-accord-dock"
     >
       <div className="chat-accord-dock-head">
-        <button
-          type="button"
-          className="chat-accord-dock-toggle"
-          aria-expanded={!folded}
-          title={folded ? "Show the Accord's steps" : "Fold into one line"}
-          onClick={props.onToggleFold}
-        >
-          <span className="chat-accord-dock-icon" aria-hidden="true">
-            <AccordMergeIcon className="chat-accord-dock-glyph" />
-          </span>
-          <span className="chat-accord-dock-heading">
-            <span className="chat-accord-dock-title">{title}</span>
-            {!folded && (
-              <span className="chat-accord-dock-meta">
-                <span className="chat-accord-dock-kind">Accord</span>
-                {` · led by @${card.facilitator} · with ${card.members.map((handle) => `@${handle}`).join(", ")}`}
-              </span>
-            )}
-          </span>
-          <span className="chat-accord-progress-status">{accordProgressStatus(progress)}</span>
-          <ChevronDown className="chat-accord-dock-chevron" size={16} aria-hidden="true" />
-        </button>
-        <IconButton className="chat-accord-dock-close" size="xs" label={props.closeLabel} icon={X} onClick={props.onClose} />
+        {props.onToggleFold ? (
+          <button
+            type="button"
+            className="chat-accord-dock-toggle"
+            aria-expanded={!folded}
+            title={folded ? "Show the Accord's steps" : "Fold into one line"}
+            onClick={props.onToggleFold}
+          >
+            <AccordHeading launch={props.launch} title={title} folded={folded} />
+            <ChevronDown className="chat-accord-dock-chevron" size={16} aria-hidden="true" />
+          </button>
+        ) : (
+          <div className="chat-accord-dock-toggle is-static">
+            <AccordHeading launch={props.launch} title={title} folded={folded} />
+          </div>
+        )}
+        {props.onClose && (
+          <IconButton className="chat-accord-dock-close" size="xs" label={props.closeLabel ?? "Close"} icon={X} onClick={props.onClose} />
+        )}
       </div>
       {!folded && (
         <>
@@ -159,10 +176,60 @@ export function ChatAccordCard(props: {
   );
 }
 
+function AccordHeading(props: { launch: DockedAccord; title: string; folded: boolean }): JSX.Element {
+  const { card, progress } = props.launch;
+  const name = useMemberName();
+  return (
+    <>
+      <span className="chat-accord-dock-icon" aria-hidden="true">
+        <AccordMergeIcon className="chat-accord-dock-glyph" />
+      </span>
+      <span className="chat-accord-dock-heading">
+        <span className="chat-accord-dock-title">{props.title}</span>
+        {!props.folded && (
+          <span className="chat-accord-dock-meta">
+            <span className="chat-accord-dock-kind">Accord</span>
+            {` · led by ${name(card.facilitator)} · with ${card.members.map(name).join(", ")}`}
+          </span>
+        )}
+      </span>
+      <span className="chat-accord-progress-status">{accordProgressStatus(progress)}</span>
+    </>
+  );
+}
+
+/** An Accord in one line: "Accord · its name · where it stands ›". Above the
+ *  composer in the sessions view, and at the top of its members panel; it
+ *  opens the Accord in the right panel. */
+export function ChatAccordRow(props: { launch: DockedAccord; open?: boolean; testId: string; onOpen: () => void }): JSX.Element {
+  const artifacts = useContext(ArtifactsContext);
+  const title = accordDisplayTitle(artifacts, props.launch.progress);
+  return (
+    <button
+      type="button"
+      className="chat-accord-row"
+      aria-pressed={props.open}
+      title={`Open the Accord "${title}"`}
+      data-testid={props.testId}
+      data-launch-id={props.launch.launchId}
+      onClick={props.onOpen}
+    >
+      <AccordMergeIcon className="chat-accord-row-glyph" />
+      <span className="chat-accord-row-kind">Accord</span>
+      <span className="chat-accord-row-title">{title}</span>
+      <span className="chat-accord-row-status">{accordProgressStatus(props.launch.progress)}</span>
+      <ChevronRight className="chat-accord-row-chevron" size={14} aria-hidden="true" />
+    </button>
+  );
+}
+
 export function ChatAccordDock(props: {
   conversationId: string;
   launch: DockedAccord;
   participants?: ChatParticipant[];
+  /** The sessions view: one line that opens the Accord in the right panel. */
+  onOpenInPanel?: (launchId: string) => void;
+  panelOpen?: boolean;
 }): JSX.Element | null {
   const { launch } = props;
   const choice = useDockChoice(launch.launchId);
@@ -184,6 +251,15 @@ export function ChatAccordDock(props: {
       // Not written: the card stays where it was, for another try.
       setAccordDockClosing(launch.launchId, false);
     }
+  }
+  if (props.onOpenInPanel) {
+    const open = props.onOpenInPanel;
+    return (
+      <div className="chat-accord-strip" aria-label="Accord" data-testid="chat-accord-strip">
+        <ChatAccordRow launch={launch} open={props.panelOpen} testId="chat-accord-strip-open" onOpen={() => open(launch.launchId)} />
+        <IconButton className="chat-accord-dock-close" size="xs" label="Close" icon={X} onClick={() => void close()} />
+      </div>
+    );
   }
   return (
     <ChatAccordCard
@@ -207,6 +283,9 @@ export function ChatAccordDockSlot(props: {
   /** The reader is at the latest message: keep her there as the card's
    *  height changes (it appears, folds, grows a stage). */
   keepAtLatest?: () => void;
+  /** The sessions view: the pinned card is one line opening the right panel. */
+  onOpenInPanel?: (launchId: string) => void;
+  panelLaunchId?: string;
   children?: ReactNode;
 }): JSX.Element {
   const wrapRef = useRef<HTMLDivElement>(null);
@@ -237,6 +316,8 @@ export function ChatAccordDockSlot(props: {
         conversationId={props.conversationId}
         launch={props.docked}
         participants={props.participants}
+        onOpenInPanel={props.onOpenInPanel}
+        panelOpen={props.panelLaunchId === props.docked.launchId}
       />
     </div>
   );

@@ -38,13 +38,15 @@ import {
   type AddableSavedParticipantConfig,
   type ChatParticipantRuntimeOverride,
   addableSavedParticipantConfigs,
-  hasChatParticipantRuntimeOverride,
-  NEW_CHAT_ASSISTANT_PARTICIPANT_ID,
-  newChatAssistantParticipantConfig,
-  newChatAssistantParticipantDraft,
   selectedOrMentionedChatParticipantDrafts,
   validateChatStartupDrafts
 } from "./chat-participant-drafts";
+import {
+  isNewChatMainSessionOption,
+  NEW_CHAT_MAIN_SESSION_PARTICIPANT_ID,
+  newChatMainSessionParticipantConfig,
+  newChatMainSessionParticipantDraft
+} from "./chat-main-session-draft";
 import { participantOptionInvalidReason } from "./chat-cli-readiness";
 import {
   assistantSubstituteNote,
@@ -65,9 +67,6 @@ import { DICTATION_SESSION_ATTRIBUTE } from "./dictation-target";
 import { useChatComposerImages } from "./use-chat-composer-images";
 import { useChatComposerMentions } from "./use-chat-composer-mentions";
 import { sortSavedParticipantOptionsByUsage } from "./new-chat-participant-usage";
-import {
-  isChatAssistantParticipant
-} from "../conversation/conversation-display";
 
 const ACCORDAGENTS_MARK_URL = new URL("../../assets/accordagents-mark.png", import.meta.url).href;
 const NEW_CHAT_MENU_OFFSET = 8;
@@ -129,16 +128,17 @@ export function NewChatScreen(props: {
     }),
     [props.agents, props.settings.assistantProviderKind, props.settings.providers]
   );
-  // The saved Assistant CLI is not ready: this chat takes a ready one, and says so.
+  // The main session's saved CLI is not ready: this chat takes a ready one, and says so.
   const assistantNote = useMemo(
     () => assistantSubstituteNote({
       agents: props.agents,
       providers: props.settings.providers,
-      explicitKind: props.settings.assistantProviderKind
+      explicitKind: props.settings.assistantProviderKind,
+      subject: "The main session"
     }),
     [props.agents, props.settings.assistantProviderKind, props.settings.providers]
   );
-  // The Assistant moved to another CLI (its saved one signed in or out):
+  // The main session moved to another CLI (its saved one signed in or out):
   // model, effort and where it runs were chosen for the one before.
   const assistantKindShown = useRef(assistantProviderKind);
   const { onSelectedParticipantRuntimeOverridesChange } = props;
@@ -147,31 +147,31 @@ export function NewChatScreen(props: {
     assistantKindShown.current = assistantProviderKind;
     if (!before || !assistantProviderKind || before === assistantProviderKind) return;
     onSelectedParticipantRuntimeOverridesChange((current) => {
-      if (!(NEW_CHAT_ASSISTANT_PARTICIPANT_ID in current)) return current;
-      const { [NEW_CHAT_ASSISTANT_PARTICIPANT_ID]: _forTheOtherCli, ...rest } = current;
+      if (!(NEW_CHAT_MAIN_SESSION_PARTICIPANT_ID in current)) return current;
+      const { [NEW_CHAT_MAIN_SESSION_PARTICIPANT_ID]: _forTheOtherCli, ...rest } = current;
       return rest;
     });
   }, [assistantProviderKind, onSelectedParticipantRuntimeOverridesChange]);
-  const assistantParticipant = useMemo(
-    () => assistantProviderKind ? newChatAssistantParticipantConfig(assistantProviderKind) : undefined,
-    [assistantProviderKind]
+  const mainSessionParticipant = useMemo(
+    () => assistantProviderKind ? newChatMainSessionParticipantConfig(assistantProviderKind, Boolean(props.repoPath.trim())) : undefined,
+    [assistantProviderKind, props.repoPath]
   );
   const savedParticipantOptions = useMemo(
     () => sortSavedParticipantOptionsByUsage(
       addableSavedParticipantConfigs(props.settings, props.agents, new Set())
-        .filter(({ config }) => !isChatAssistantParticipant(config)),
+        .filter(({ config }) => !isNewChatMainSessionOption(config)),
       props.summaries
     ),
     [props.agents, props.settings, props.summaries]
   );
   const mentionParticipants = useMemo<ChatParticipant[]>(
     () => [
-      ...(assistantParticipant ? [assistantParticipant] : []),
+      ...(mainSessionParticipant ? [mainSessionParticipant] : []),
       ...savedParticipantOptions
         .filter((option) => !participantOptionInvalidReason(option, props.selectedParticipantRuntimeOverrides[option.config.id]))
         .map(({ config }) => config)
     ],
-    [assistantParticipant, savedParticipantOptions, props.selectedParticipantRuntimeOverrides]
+    [mainSessionParticipant, savedParticipantOptions, props.selectedParticipantRuntimeOverrides]
   );
   const prospectiveParticipantDrafts = useMemo(() => {
     const drafts = selectedOrMentionedChatParticipantDrafts(
@@ -180,13 +180,15 @@ export function NewChatScreen(props: {
       props.prompt,
       props.selectedParticipantRuntimeOverrides
     );
-    const assistantRuntimeOverride = props.selectedParticipantRuntimeOverrides[NEW_CHAT_ASSISTANT_PARTICIPANT_ID];
-    if (!assistantProviderKind || !hasChatParticipantRuntimeOverride(assistantRuntimeOverride)) {
+    // Every new chat has its main session first (docs/main-session.md).
+    if (!assistantProviderKind) {
       return drafts;
     }
-    return [newChatAssistantParticipantDraft(assistantProviderKind, assistantRuntimeOverride), ...drafts];
+    const mainSessionOverride = props.selectedParticipantRuntimeOverrides[NEW_CHAT_MAIN_SESSION_PARTICIPANT_ID];
+    return [newChatMainSessionParticipantDraft(assistantProviderKind, mainSessionOverride, Boolean(props.repoPath.trim())), ...drafts];
   }, [
     assistantProviderKind,
+    props.settings.chatRoleConfigs,
     props.prompt,
     props.selectedParticipantIds,
     props.selectedParticipantRuntimeOverrides,
@@ -217,7 +219,7 @@ export function NewChatScreen(props: {
     onSelectedPluginMentionsChange: props.onSelectedPluginMentionsChange,
     onSelectedSkillMentionsChange: props.onSelectedSkillMentionsChange,
     onMentionInserted: (participant) => {
-      if (!isNewChatAssistantOption(participant)) {
+      if (!isNewChatMainSessionOption(participant)) {
         props.onSelectedParticipantIdsChange((current) => new Set(current).add(participant.id));
       }
     }
@@ -502,7 +504,7 @@ export function NewChatScreen(props: {
           />
           <span className="new-chat-toolbar-spacer" />
           <ParticipantPicker
-            assistantParticipant={assistantParticipant}
+            mainSessionParticipant={mainSessionParticipant}
             savedParticipantOptions={savedParticipantOptions}
             cliProviderHosts={props.settings.cliProviderHosts}
             selectedParticipantIds={props.selectedParticipantIds}
@@ -642,7 +644,7 @@ function FolderPicker(props: {
 }
 
 function ParticipantPicker(props: {
-  assistantParticipant?: ChatParticipantConfig;
+  mainSessionParticipant?: ChatParticipantConfig;
   cliProviderHosts: CliProviderHost[];
   savedParticipantOptions: AddableSavedParticipantConfig[];
   selectedParticipantIds: Set<string>;
@@ -657,7 +659,7 @@ function ParticipantPicker(props: {
   const rootRef = useCloseOnOutside<HTMLDivElement>(open, () => setOpen(false));
   const participantMenuMaxHeight = useNewChatMenuMaxHeight(rootRef, open);
   const participantOptions: Array<AddableSavedParticipantConfig & { locked?: boolean }> = [
-    ...(props.assistantParticipant ? [{ config: props.assistantParticipant, locked: true }] : []),
+    ...(props.mainSessionParticipant ? [{ config: props.mainSessionParticipant, locked: true }] : []),
     ...props.savedParticipantOptions
   ];
   const selectedOptions = participantOptions.filter(({ config, locked }) => locked || props.selectedParticipantIds.has(config.id));
@@ -705,7 +707,7 @@ function ParticipantPicker(props: {
     }));
     // Changing a member's settings adds it, once it can run where they put it.
     const option = participantOptions.find(({ config }) => config.id === participant.id);
-    if (option && !isNewChatAssistantOption(participant) && !participantOptionInvalidReason(option, runtimeOverride)) {
+    if (option && !isNewChatMainSessionOption(participant) && !participantOptionInvalidReason(option, runtimeOverride)) {
       props.onSelectedParticipantIdsChange((current) => new Set(current).add(participant.id));
     }
   }
@@ -780,10 +782,6 @@ function ParticipantPicker(props: {
       )}
     </div>
   );
-}
-
-function isNewChatAssistantOption(participant: Pick<ChatParticipantConfig, "id" | "handle" | "roleConfigId">): boolean {
-  return participant.id === NEW_CHAT_ASSISTANT_PARTICIPANT_ID || isChatAssistantParticipant(participant);
 }
 
 function useCloseOnOutside<T extends HTMLElement>(open: boolean, onClose: () => void): RefObject<T> {

@@ -399,7 +399,7 @@ export async function serveMobileShell({ port = 0, hubOrigins = [], intercept } 
   const originHeaders = loadMobileOriginHeaders(mobileRoot);
   const types = {
     ".html": "text/html; charset=utf-8", ".js": "text/javascript", ".css": "text/css", ".png": "image/png",
-    ".webmanifest": "application/manifest+json", ".json": "application/json"
+    ".webmanifest": "application/manifest+json", ".json": "application/json", ".svg": "image/svg+xml"
   };
   const widen = (headers) => {
     const policy = headers["Content-Security-Policy"];

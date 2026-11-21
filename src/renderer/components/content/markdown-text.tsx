@@ -11,6 +11,9 @@ import { FileLink } from "./local-file-link";
 import { MentionDirectoryContext, ParticipantHoverCard, profileHandleLabel, useHoverCard } from "./participant-hover-card";
 import { ArtifactsContext } from "../artifacts/artifacts-context";
 import { artifactSummaryStatusLabel } from "../../../shared/artifacts";
+import { sessionsMentionPieces } from "../../../shared/mainSessionView";
+import { useChatSessionsLinks, type ChatSessionsLinks } from "../chat/chat-sessions-links";
+import { ProviderIcon } from "../chat/provider-icon";
 
 // A clickable reference to another chat message. Authors write `[label](#msg:<id>)` (or a bare
 // `#msg:<id>`); we render a link that scrolls the referenced message into view and flashes it.
@@ -20,7 +23,83 @@ export type MessageFocusHandler = (messageId: string) => boolean | void;
 
 export const MessageLinkContext = createContext<MessageFocusHandler | undefined>(undefined);
 
+// In the sessions view (docs/main-session.md) a member is a chip with its
+// provider's logo and its task's title that opens its session. Which `@handle`
+// is a member's chip, in prose and in code, is one rule with the phone's
+// (sessionsMentionPieces); everything else stays as written.
+function SessionsMention({ handle, links }: { handle: string; links: ChatSessionsLinks }): JSX.Element {
+  const member = links.byHandle.get(handle.toLowerCase());
+  if (!member) {
+    return <>{`@${handle}`}</>;
+  }
+  return (
+    <button
+      type="button"
+      className="chat-member-chip"
+      data-testid="chat-member-chip"
+      data-participant-id={member.id}
+      onClick={(event) => {
+        event.preventDefault();
+        links.openMember(member.id, member.focusMessageId);
+      }}
+    >
+      {member.kind && <ProviderIcon className="chat-provider-icon is-chip" kind={member.kind} label={member.title} />}
+      <span>{member.title}</span>
+    </button>
+  );
+}
+
+/** Inline code. In the sessions view a member's handle in it is the
+ *  member's chip, between the code around it; the rest of the code stays as
+ *  written. */
+function InlineCode({ text }: { text: string }): JSX.Element {
+  const links = useChatSessionsLinks();
+  const pieces = links ? sessionsMentionPieces(text, (handle) => links.byHandle.has(handle), (handle) => handle === links.mainHandle?.toLowerCase()) : [];
+  if (!links || !pieces.some((piece) => piece.handle !== undefined)) {
+    return <code>{text}</code>;
+  }
+  return (
+    <>
+      {pieces.map((piece, index) => piece.handle !== undefined
+        ? <SessionsMention key={index} handle={piece.handle} links={links} />
+        : piece.text.trim() ? <code key={index}>{piece.text}</code> : piece.text)}
+    </>
+  );
+}
+
 function Mention({ handle }: { handle: string }): JSX.Element {
+  const links = useChatSessionsLinks();
+  return links ? <SessionsMention handle={handle} links={links} /> : <DirectoryMention handle={handle} />;
+}
+
+/** The sessions view's reading of a run of text and mentions: the parser's
+ *  mentions are written back as text and read again by the shared rule, so
+ *  only a member's exact `@handle` stays a mention (its chip). */
+function withSessionsMentions(nodes: MarkdownInlineNode[], links: ChatSessionsLinks): MarkdownInlineNode[] {
+  const result: MarkdownInlineNode[] = [];
+  let run = "";
+  const flush = (): void => {
+    if (!run) return;
+    for (const piece of sessionsMentionPieces(run, (handle) => links.byHandle.has(handle), (handle) => handle === links.mainHandle?.toLowerCase())) {
+      result.push(piece.handle !== undefined ? { type: "mention", handle: piece.handle } : { type: "text", text: piece.text });
+    }
+    run = "";
+  };
+  for (const node of nodes) {
+    if (node.type === "text") {
+      run += node.text;
+    } else if (node.type === "mention") {
+      run += `@${node.handle}`;
+    } else {
+      flush();
+      result.push(node.type === "strong" ? { ...node, children: withSessionsMentions(node.children, links) } : node);
+    }
+  }
+  flush();
+  return result;
+}
+
+function DirectoryMention({ handle }: { handle: string }): JSX.Element {
   const directory = useContext(MentionDirectoryContext);
   const profile = directory?.get(handle.toLowerCase());
   const { open, setOpen, openCard, scheduleClose } = useHoverCard();
@@ -183,22 +262,28 @@ function ExternalLink({ url, label }: { url: string; label: string }): JSX.Eleme
 
 function MarkdownTextView({ content, recognizedCommand }: { content: string; recognizedCommand?: "goal" }): JSX.Element {
   const blocks = useMemo(() => markdownBlocks(content), [content]);
+  const sessionsLinks = useChatSessionsLinks();
   if (blocks.length === 0) {
     return <div className="markdown-text" />;
   }
-  return <div className="markdown-text">{blocks.map((block, index) => renderMarkdownBlock(block, index, recognizedCommand))}</div>;
+  const inline: InlineOptions = { recognizedCommand, sessionsLinks };
+  return <div className="markdown-text">{blocks.map((block, index) => renderMarkdownBlock(block, index, inline))}</div>;
 }
+
+/** How a message's inline text is read: `/goal` as the command it starts,
+ *  and in the sessions view members' handles by the shared rule. */
+type InlineOptions = { recognizedCommand?: "goal"; sessionsLinks?: ChatSessionsLinks };
 
 export const MarkdownText = memo(MarkdownTextView);
 MarkdownText.displayName = "MarkdownText";
 
-function renderMarkdownBlock(block: MarkdownBlock, index: number, recognizedCommand?: "goal"): ReactNode {
+function renderMarkdownBlock(block: MarkdownBlock, index: number, inline: InlineOptions): ReactNode {
   if (block.type === "heading") {
     return (
       // Every level renders as h4 so the element never competes with the surrounding
       // page structure; aria-level carries the real depth so heading navigation is not flat.
       <h4 key={index} className={`markdown-heading markdown-heading-${block.level}`} aria-level={block.level + 3}>
-        {renderInlineWithBreaks(block.text, `h-${index}`, recognizedCommand)}
+        {renderInlineWithBreaks(block.text, `h-${index}`, inline)}
       </h4>
     );
   }
@@ -213,7 +298,7 @@ function renderMarkdownBlock(block: MarkdownBlock, index: number, recognizedComm
     return (
       <ol className="markdown-list" key={index} start={block.start}>
         {block.items.map((item, itemIndex) => (
-          <li key={itemIndex}>{renderInlineWithBreaks(item, `li-${index}-${itemIndex}`, recognizedCommand)}</li>
+          <li key={itemIndex}>{renderInlineWithBreaks(item, `li-${index}-${itemIndex}`, inline)}</li>
         ))}
       </ol>
     );
@@ -222,7 +307,7 @@ function renderMarkdownBlock(block: MarkdownBlock, index: number, recognizedComm
     return (
       <ul className="markdown-list" key={index}>
         {block.items.map((item, itemIndex) => (
-          <li key={itemIndex}>{renderInlineWithBreaks(item, `li-${index}-${itemIndex}`, recognizedCommand)}</li>
+          <li key={itemIndex}>{renderInlineWithBreaks(item, `li-${index}-${itemIndex}`, inline)}</li>
         ))}
       </ul>
     );
@@ -235,7 +320,7 @@ function renderMarkdownBlock(block: MarkdownBlock, index: number, recognizedComm
             <tr>
               {block.headers.map((header, headerIndex) => (
                 <th key={headerIndex} scope="col">
-                  {renderInlineWithBreaks(header, `t-${index}-h-${headerIndex}`, recognizedCommand)}
+                  {renderInlineWithBreaks(header, `t-${index}-h-${headerIndex}`, inline)}
                 </th>
               ))}
             </tr>
@@ -244,7 +329,7 @@ function renderMarkdownBlock(block: MarkdownBlock, index: number, recognizedComm
             {block.rows.map((row, rowIndex) => (
               <tr key={rowIndex}>
                 {block.headers.map((_, cellIndex) => (
-                  <td key={cellIndex}>{renderInlineWithBreaks(row[cellIndex] ?? "", `t-${index}-${rowIndex}-${cellIndex}`, recognizedCommand)}</td>
+                  <td key={cellIndex}>{renderInlineWithBreaks(row[cellIndex] ?? "", `t-${index}-${rowIndex}-${cellIndex}`, inline)}</td>
                 ))}
               </tr>
             ))}
@@ -254,20 +339,22 @@ function renderMarkdownBlock(block: MarkdownBlock, index: number, recognizedComm
     );
   }
   if (block.type === "paragraph") {
-    return <p key={index}>{renderInlineWithBreaks(block.lines.join("\n"), `p-${index}`, recognizedCommand)}</p>;
+    return <p key={index}>{renderInlineWithBreaks(block.lines.join("\n"), `p-${index}`, inline)}</p>;
   }
   return null;
 }
 
-function renderInlineWithBreaks(text: string, keyPrefix: string, recognizedCommand?: "goal"): ReactNode[] {
+function renderInlineWithBreaks(text: string, keyPrefix: string, inline: InlineOptions): ReactNode[] {
   return text.split("\n").flatMap((line, index, lines) => {
-    const nodes = renderInline(line, `${keyPrefix}-${index}`, recognizedCommand);
+    const nodes = renderInline(line, `${keyPrefix}-${index}`, inline);
     return index < lines.length - 1 ? [...nodes, <br key={`${keyPrefix}-br-${index}`} />] : nodes;
   });
 }
 
-function renderInline(text: string, keyPrefix: string, recognizedCommand?: "goal"): ReactNode[] {
-  return parseMarkdownInline(text, { recognizedCommand }).map((node, index) => renderInlineNode(node, `${keyPrefix}-${index}`));
+function renderInline(text: string, keyPrefix: string, inline: InlineOptions): ReactNode[] {
+  const nodes = parseMarkdownInline(text, { recognizedCommand: inline.recognizedCommand });
+  return (inline.sessionsLinks ? withSessionsMentions(nodes, inline.sessionsLinks) : nodes)
+    .map((node, index) => renderInlineNode(node, `${keyPrefix}-${index}`));
 }
 
 function renderInlineNode(node: MarkdownInlineNode, key: string): ReactNode {
@@ -291,7 +378,7 @@ function renderInlineNode(node: MarkdownInlineNode, key: string): ReactNode {
         />
       );
     }
-    return <code key={key}>{node.text}</code>;
+    return <InlineCode key={key} text={node.text} />;
   }
   if (node.type === "command") {
     return <span key={key} className="chat-command-token">/{node.command}</span>;
