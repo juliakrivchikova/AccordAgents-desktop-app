@@ -17,6 +17,10 @@ verbatim there). Modelled on T3 Code (`~/reference/t3code`,
   `--resume <id> --fork-session`, Codex app-server `thread/fork`). Antigravity
   has no fork, and a fork cannot cross providers or devices: the tool refuses
   it and the main session starts a clean member with a full brief instead.
+- **The main session is woken only by its own tasks** (the User,
+  2026-11-21): when the tasks it gave end. A member's turn that is not its
+  task (the User's message in that member's session, a scheduled task's
+  wake-up) does not wake it; it reads those messages on its next turn.
 - **The tasks of one turn come back as one turn.** The main session is
   resumed once for all the tasks it gave in one turn: when that turn is over
   and every one of them has ended (answered, failed or stopped), with every
@@ -71,7 +75,10 @@ chat without a main session is always `classic`; its switch is disabled.
 - `classic`: today's timeline: avatars, every member's reply on it.
 - `sessions` (like T3 Code / Claude desktop):
   - no avatars, author names or handles anywhere: a member is its
-    provider's logo tile and its current or latest task's short title, as
+    provider's bare glyph (Claude's orange asterisk, Codex's glyph,
+    Antigravity's "A", sized to the text line, no tile; `ProviderIcon`
+    `bare`, the phone's `providerLogoElement`; Settings → Local CLI setup and
+    the classic New chat keep the tile) and its current or latest task's short title, as
     T3 Code titles a thread: the 2–6 word `title` the main session gives
     the task in `app_chat_delegate_task`, else the task's first sentence cut
     at a word to 40 characters (`sessionsTaskTitle`, `sessionsMemberTitle`;
@@ -92,7 +99,18 @@ chat without a main session is always `classic`; its switch is disabled.
     (`targetParticipantIds=[main]`, `deliveryTargets=[main]` on the phone),
     offers no members to mention (`/` and `#` stay), and carries the main
     session's model chip, which opens its settings; a member's composer
-    the same for that member. The chip names the member's own model, else
+    the same for that member. The settings are a compact picker, T3 Code's
+    (`ChatModelAccessPanel`): the model (the CLI's default first), the
+    effort, the access in the CLI's own terms (`chat-access-modes.ts`:
+    Claude Code's Default / Accept edits / Plan mode / Auto mode, Codex's
+    Read only / Workspace write / Auto-review / Plan mode, the app's mode
+    and file-edit right underneath) and, once a machine exists, where it
+    runs. Its provider stays the one it was made with. No name, status,
+    member rights or auto-watch: the main session's chat behaviour is fixed
+    (it creates and asks members, request and manage are allowed as its role
+    gives them, and it is told when its tasks end). A member other than the
+    main session is removed from the picker's … menu; the gear in its
+    session's header opens the same picker. The chip names the member's own model, else
     the one its CLI runs on by default (the CLI's model list: Claude Code's
     initialize answer, Codex's model/list, `agy models`; an added
     provider's vendor default), else the CLI ("Claude Code"), with the
@@ -121,14 +139,18 @@ chat without a main session is always `classic`; its switch is disabled.
     the muted text alone); the classic view keeps its pill;
   - one icon at the top right opens the side panel (a running count on it,
     a dot while an Accord is open); the view switch is in the chat title's
-    menu and the roster's popover is not shown. The side panel lists the
-    chat's latest Accord, the main session (its settings), the members
-    (provider, task, status, elapsed time, Stop) with Stop all; while some
-    member runs or waits for the User the ended ones are under "Previous";
-    members no longer in the chat are under "Removed"
-    (`sessionsFormerMembers`). A member opens its **whole session** in the
+    menu and the roster's popover is not shown. The side panel has no title,
+    only its close button, as Claude desktop's right panel (the User,
+    2026-11-21); it lists the chat's latest Accord and the sessions the main
+    session delegated (provider, task, status, elapsed time, Stop) with Stop
+    all, never the main session itself (its settings are its composer chip);
+    while one runs or waits for the User the ended ones are under
+    "Previous"; those no longer in the chat are under "Removed"
+    (`sessionsFormerMembers`). With nothing delegated it says nothing. A member opens its **whole session** in the
     same panel (Back to the list) with its settings (gear) and a composer
     that writes to it only; a removed member's session is read-only;
+  - the word "members" is never shown (desktop and phone): "Waiting on N
+    tasks", "Side panel", "Back", "Close";
   - no threads UI: every message has one place (`sessionsViewLane`); the
     main session's answer to a member's question is in that member's
     session from its first token (placed by the request it answers);
@@ -146,6 +168,30 @@ chat without a main session is always `classic`; its switch is disabled.
     pages that added nothing to it ("Load older messages" goes on); "Load
     older" in a member's session goes on until a message of that member
     arrives or the chat's start, six pages at most.
+
+## New chat
+
+A new chat opens in the view Settings → General names (`newChatViewFor`).
+
+- **Sessions view** (the User, 2026-11-21: "как в T3, выбираешь просто
+  провайдера и модель"): no members picker, no avatars, handles or
+  "members" on the screen. The composer's chip at its bottom right shows
+  the main session's provider glyph, model and effort ("✳ Opus 5.5 High")
+  and opens the compact picker with the provider choosable: every ready CLI
+  and every added provider whose CLI is ready and which has its key
+  (`mainSessionProviderOptions`). The default provider is Settings →
+  General's "Main session provider" (`resolveMainSessionProvider`); the
+  chip's choice is for that one chat and never changes the setting. The
+  chat is made with that main session alone; an @handle in the first
+  message picks nobody. Folder and attach stay.
+- **Classic view**: today's New chat, with its members picker.
+- **The phone** gets the same from the New chat offer
+  (`HubNewChatOptions.mainSessionProviders`: each provider with its
+  default model's name, its models, at most 24, and efforts;
+  `newChatProviderOffer`), shows the same chip and sheet, and makes the chat
+  with the offered main session on the chosen provider, model and effort
+  (`newChatMainSessionFor`). An offer from a computer from before has no
+  list: the chip shows the offered main session's CLI.
 
 The placement rules are in `src/shared/mainSession.ts` and are the same on
 the desktop and on the phone (bundled through `mobileSharedRules.ts`).
