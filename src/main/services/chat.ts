@@ -21161,22 +21161,6 @@ export class ChatService {
     const participants = this.chatParticipants(conversation)
       .filter((participant) => participant.id !== sourceParticipant.id);
     const cleaned = this.stripInferenceIgnoredText(content);
-    // Its task's title is the reply's words as written, inline code as its
-    // text: read from the reply without fenced code, where inline code is
-    // blanked out (same length) only to find the mention the request is made
-    // from, as the request itself ignores mentions in code.
-    let titleSource: { text: string; search: string; handles: string[] } | undefined;
-    const titleSourceOf = () => {
-      if (!titleSource) {
-        const text = this.withoutFencedCode(content);
-        titleSource = {
-          text,
-          search: text.replace(/`[^`\n]+`/g, (code) => " ".repeat(code.length)),
-          handles: this.chatParticipants(conversation).flatMap((participant) => this.mentionHandlesForParticipant(participant))
-        };
-      }
-      return titleSource;
-    };
     const inferred: Array<{ targetHandle: string; snippet: string; title: string }> = [];
     for (const participant of participants) {
       const handles = this.mentionHandlesForParticipant(participant);
@@ -21191,11 +21175,7 @@ export class ChatService {
       const snippet = cleaned.slice(start, end).replace(/\s+/g, " ").trim();
       // The sessions view names its task by the reply's sentence that
       // mentions it, without @-names (sessionsMentionSentenceTitle).
-      const mentioned = match[0].slice(1);
-      const source = titleSourceOf();
-      const at = source.search.search(new RegExp(`@${this.escapeRegExp(mentioned)}\\b`, "i"));
-      const title = sessionsMentionSentenceTitle(source.text, mentioned, { ...(at >= 0 ? { at } : {}), handles: source.handles });
-      inferred.push({ targetHandle: participant.handle, snippet, title });
+      inferred.push({ targetHandle: participant.handle, snippet, title: sessionsMentionSentenceTitle(cleaned, participant.handle) });
     }
     return inferred;
   }

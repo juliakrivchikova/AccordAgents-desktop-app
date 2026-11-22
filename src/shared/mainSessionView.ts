@@ -155,7 +155,7 @@ export function sessionsTaskTitle(item: Pick<ChatParticipantRequestItem, "prompt
   // A task the app made from a reply that mentioned the member, before such
   // tasks were titled when made: titled from the reply's words it quotes.
   const excerpt = inferredTaskExcerpt(item.prompt);
-  if (excerpt !== undefined) return sessionsMentionSentenceTitle(excerpt, item.targetHandle, { excerpt: true });
+  if (excerpt !== undefined) return sessionsMentionSentenceTitle(excerpt, item.targetHandle);
   const line = firstTextLine(typeof item.prompt === "string" ? item.prompt : "", Number.MAX_SAFE_INTEGER);
   const sentence = /^.+?[.!?…](?=\s|$)/u.exec(line)?.[0] ?? line;
   const plain = sentence.replace(/[\s.,;:]+$/u, "") || sentence;
@@ -166,91 +166,52 @@ export function sessionsTaskTitle(item: Pick<ChatParticipantRequestItem, "prompt
  *  gone (sessionsMentionSentenceTitle). */
 export const SESSIONS_UNNAMED_TASK_TITLE = "Agent";
 
-/** The most of a sentence read for a title: far more than a title keeps, so
- *  a sentence of any length costs the same (a very long reply line must not
- *  stall the app). */
-const MENTION_SENTENCE_MAX_CHARS = 400;
-
-/** An `@handle` of anybody (letters, digits, "_" and "-") as a word, not
- *  inside an e-mail address, a path or a package name such as `@types/node`;
- *  a possessive "'s" after it goes with it. */
-const ANY_MENTION_PATTERN = /(^|[^A-Za-z0-9_@./\\-])@[A-Za-z0-9_-]+(?:['’]s)?(?![A-Za-z0-9_\-/])/g;
-
-function escapeForPattern(text: string): string {
-  return text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-}
-
-/** A known member's `@handle` wherever it stands (after a dot, a slash or a
- *  dash too, as a reply mentions it), not inside a longer word or an e-mail
- *  address; a possessive "'s" after it goes with it. */
-function knownMentionPattern(handle: string): RegExp {
-  return new RegExp(`(^|[^A-Za-z0-9_])@${escapeForPattern(handle)}(?:['’]s)?(?![A-Za-z0-9_-])`, "gi");
-}
+/** An `@handle` as a word (not inside an e-mail address, a path or a package
+ *  name such as `@types/node`), as sessionsMentionPieces reads one. */
+const MENTION_PATTERN = /(^|[^A-Za-z0-9_@./\\-])@([A-Za-z0-9][A-Za-z0-9_-]*)(?![A-Za-z0-9_\-/])/g;
 
 /** The words a task the app made from a member's reply quotes from it
  *  (ChatService.inferredParticipantRequestPrompt: its first line says who
  *  appeared to ask, the next one quotes the reply); undefined for any other
  *  task. */
 function inferredTaskExcerpt(prompt: unknown): string | undefined {
-  if (typeof prompt !== "string" || !prompt.startsWith("@")) return undefined;
-  const firstEnd = prompt.indexOf("\n");
-  if (firstEnd < 0) return undefined;
-  if (!/^@[A-Za-z0-9_-]{1,32} appeared to request your input in this chat reply\.$/.test(prompt.slice(0, firstEnd).trim())) return undefined;
-  const secondEnd = prompt.indexOf("\n", firstEnd + 1);
-  const quoted = /^Relevant excerpt: ?(.*)$/s.exec(prompt.slice(firstEnd + 1, secondEnd < 0 ? undefined : secondEnd));
+  if (typeof prompt !== "string") return undefined;
+  const [first, second] = prompt.split("\n");
+  if (!first || !/^@[A-Za-z0-9][A-Za-z0-9_-]* appeared to request your input in this chat reply\.$/.test(first.trim())) return undefined;
+  const quoted = /^Relevant excerpt: ?(.*)$/s.exec(second ?? "");
   return quoted ? quoted[1]! : undefined;
 }
 
 /**
  * The title of a task the app made because a member's reply mentioned
  * another member (an inferred request): the reply's first sentence that
- * mentions `@targetHandle`, with no @-names, since the sessions view names
- * nobody by handle (the User, 2026-11-22). Its words stay as written (inline
- * code as its text); what removing a name leaves empty (brackets, emphasis,
- * a table cell) goes too. Cut at a word to SESSIONS_TASK_TITLE_MAX_CHARS, as
- * a task's own first sentence is; SESSIONS_UNNAMED_TASK_TITLE when no words
- * remain.
- *
- * `at`: where the mention the request was made from starts (its "@"), when
- * known; otherwise the first mention of `targetHandle`, else of anybody.
- * `handles`: the chat's members' handles, removed wherever they stand.
- * `excerpt`: the text is a quote that may start inside a word (a task made
- * before such tasks were titled), so a sentence that starts with the quote
- * drops its first, possibly cut, word.
+ * mentions `@targetHandle` (any member, when not given or not found), with
+ * no @-names, since the sessions view names nobody by handle (the User,
+ * 2026-11-22). Cut at a word to SESSIONS_TASK_TITLE_MAX_CHARS, as a task's
+ * own first sentence is; SESSIONS_UNNAMED_TASK_TITLE when no words remain.
  */
-export function sessionsMentionSentenceTitle(
-  reply: string,
-  targetHandle?: string,
-  options: { at?: number; handles?: readonly string[]; excerpt?: boolean } = {}
-): string {
+export function sessionsMentionSentenceTitle(reply: string, targetHandle?: string): string {
   const text = typeof reply === "string" ? reply : "";
-  const wanted = targetHandle?.trim().replace(/^@/, "");
-  let at = typeof options.at === "number" && options.at >= 0 && options.at < text.length ? options.at : -1;
-  if (at < 0 && wanted) {
-    const found = new RegExp(`@${escapeForPattern(wanted)}(?![A-Za-z0-9_-])`, "i").exec(text);
-    if (found) at = found.index;
+  const wanted = targetHandle?.trim().replace(/^@/, "").toLowerCase();
+  let at = -1;
+  let anyAt = -1;
+  for (const match of text.matchAll(MENTION_PATTERN)) {
+    const index = (match.index ?? 0) + match[1]!.length;
+    if (anyAt < 0) anyAt = index;
+    if (wanted && match[2]!.toLowerCase() === wanted) {
+      at = index;
+      break;
+    }
   }
-  if (at < 0) {
-    ANY_MENTION_PATTERN.lastIndex = 0;
-    const found = ANY_MENTION_PATTERN.exec(text);
-    ANY_MENTION_PATTERN.lastIndex = 0;
-    at = found ? found.index + found[1]!.length : 0;
-  }
+  if (at < 0) at = Math.max(0, anyAt);
   // Its sentence: from the end of the one before (or the line's start) to
   // its own end; a dot inside a word or a number ends none.
-  let start = -1;
+  let start = 0;
   for (let index = at - 1; index >= 0; index -= 1) {
     const char = text[index]!;
     if (char === "\n" || (/[.!?…]/u.test(char) && /\s/u.test(text[index + 1] ?? ""))) {
       start = index + 1;
       break;
-    }
-  }
-  if (start < 0) {
-    start = 0;
-    if (options.excerpt && at >= 100) {
-      const space = text.search(/\s/u);
-      if (space >= 0 && space < at) start = space + 1;
     }
   }
   let end = text.length;
@@ -265,22 +226,16 @@ export function sessionsMentionSentenceTitle(
       break;
     }
   }
-  let sentence = text.slice(start, Math.min(end, start + MENTION_SENTENCE_MAX_CHARS)).replace(/[\u200B-\u200D\uFEFF]/gu, "");
-  const known = [...new Set([...(options.handles ?? []), ...(wanted ? [wanted] : [])].map((handle) => handle.trim().replace(/^@/, "")).filter(Boolean))]
-    .sort((left, right) => right.length - left.length);
-  for (const handle of known) sentence = sentence.replace(knownMentionPattern(handle), "$1");
-  const plain = firstTextLine(sentence.replace(ANY_MENTION_PATTERN, "$1"), Number.MAX_SAFE_INTEGER)
-    .replace(/~~|\*/g, "")
-    .replace(/<(\w+)[^>]*>\s*<\/\1>|\(\s*\)|\[\s*\]|\{\s*\}/g, "")
-    .replace(/\|(?:\s*\|)+/g, "|")
+  const sentence = firstTextLine(text.slice(start, end), Number.MAX_SAFE_INTEGER);
+  const plain = sentence
+    .replace(MENTION_PATTERN, "$1")
     .replace(/\s+/g, " ")
-    .replace(/\s+([,;:.!?…)\]])/gu, "$1")
-    .replace(/([(\[])\s+/gu, "$1")
-    .replace(/^[\s,;:.!?…—–|/-]+/u, "")
-    .replace(/[\s.,;:—–|/-]+$/u, "")
+    .replace(/\s+([,;:.!?…])/gu, "$1")
+    .replace(/^[\s,;:.!?…—–-]+/u, "")
+    .replace(/[\s.,;:—–-]+$/u, "")
     .trim();
   if (!/[\p{L}\p{N}]/u.test(plain)) return SESSIONS_UNNAMED_TASK_TITLE;
-  return shortenAtWord(plain, SESSIONS_TASK_TITLE_MAX_CHARS);
+  return shortenAtWord(`${plain.charAt(0).toLocaleUpperCase()}${plain.slice(1)}`, SESSIONS_TASK_TITLE_MAX_CHARS);
 }
 
 /** A member's title in the sessions view (as in T3 Code): its current or
