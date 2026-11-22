@@ -13,7 +13,7 @@ import type { ChatAppToolApproval, ChatAppToolApprovalScope, ChatSelfCompactionR
  */
 export const COMPACTION_CARD_TITLE = "Compact the conversation?";
 export const COMPACTION_CARD_SENTENCE =
-  "The context is almost full. After this reply the older part of the conversation is replaced by a short summary, and work continues from it.";
+  "After this reply the older part of the conversation is replaced by a short summary, and work continues from it.";
 export const COMPACTION_CARD_KEEPS = "Summary keeps:";
 export const COMPACTION_CARD_CHAT_SCOPE = "Don't ask again in this chat";
 export const COMPACTION_CARD_COMPACT = "Compact";

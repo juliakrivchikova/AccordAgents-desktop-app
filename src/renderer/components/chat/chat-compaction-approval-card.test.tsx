@@ -14,7 +14,7 @@ import { ChatSessionsLinksContext, ChatSessionsNamesContext, sessionsViewNamesFr
 import { DREW, MAIN, PARTICIPANTS } from "./chat-sessions-fixtures.test";
 
 const AT = "2026-11-22T08:59:00.000Z";
-const SENTENCE = "The context is almost full. After this reply the older part of the conversation is replaced by a short summary, and work continues from it.";
+const SENTENCE = "After this reply the older part of the conversation is replaced by a short summary, and work continues from it.";
 
 const LINKS: ChatSessionsLinks = {
   mainSessionId: MAIN.id,

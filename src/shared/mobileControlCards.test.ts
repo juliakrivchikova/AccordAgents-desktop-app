@@ -267,7 +267,7 @@ test("a compaction card on the phone says what the desktop card says and answers
     createdAt: "2026-11-22T08:59:00.000Z", updatedAt: "2026-11-22T08:59:00.000Z" } as unknown as ChatAppToolApproval;
   const pending = controlCardFromHubCard(hubCard({ cardId: "approval-compact", card: { approval } }));
   assert.equal(pending?.title, "Compact the conversation?");
-  assert.equal(pending?.summary, "The context is almost full. After this reply the older part of the conversation is replaced by a short summary, and work continues from it.");
+  assert.equal(pending?.summary, "After this reply the older part of the conversation is replaced by a short summary, and work continues from it.");
   assert.doesNotMatch(`${pending?.title} ${pending?.summary}`, /\bit to\b|provider session|@drew/);
   assert.deepEqual(pending?.meter, { percentage: 82, label: "82% of context used", name: "Context used" });
   assert.deepEqual(pending?.keeps, { label: "Summary keeps:", text: "beta.3 status, your rules, open defects" });
