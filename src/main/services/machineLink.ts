@@ -930,11 +930,14 @@ export class MachineLinkService {
       connection.helloRequestTimer = undefined;
     }
     const { type: _type, ...rest } = hello;
+    // A runtime that just started greets before its CLIs have said what they
+    // start in: what it said before stays until it says it again.
+    const previousStart = connection.record.lastHello?.cliStartDefaults;
     connection.record = {
       ...connection.record,
       deviceId: hello.deviceId,
       lastSeenAt: this.now().toISOString(),
-      lastHello: rest
+      lastHello: rest.cliStartDefaults || !previousStart || rest.cliModesSupported !== true ? rest : { ...rest, cliStartDefaults: previousStart }
     };
     await this.persistRecord(connection, true);
     if (this.options.desktopDeviceId === connection.pairing.issuer.originId) {

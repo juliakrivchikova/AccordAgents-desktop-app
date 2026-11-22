@@ -3712,7 +3712,9 @@
     const start = newChatStartDefaults(offer, provider, homeMachineId);
     // The modes the computer's picker lists, and one it lists only while it
     // is the mode (Codex's Read Only) when her config starts the CLI in it.
-    const startHidden = start && start.access && accessSet ? accessSet.options.find(function (item) { return item.id === start.access && item.hidden; }) : undefined;
+    const shared = mobileSharedRules();
+    const startOption = start && start.access && shared && typeof shared.startChatAccessOption === "function" ? shared.startChatAccessOption(provider.kind, start.access) : undefined;
+    const startHidden = startOption && startOption.hidden ? startOption : undefined;
     const accessOptions = newChatAccessOptions(provider.kind).concat(startHidden ? [startHidden] : [])
       .filter(function (item) { return modesHere || item.agentMode !== "full-access"; });
     const defaultAccess = accessOptions.length > 0 ? newChatDefaultAccess(provider.kind, start && start.access, accessOptions) : undefined;

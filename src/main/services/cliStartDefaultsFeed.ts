@@ -8,7 +8,8 @@ import type { CliStartDefaultsByKind } from "../../shared/cliStartDefaults";
  */
 export class CliStartDefaultsFeed {
   private value?: CliStartDefaultsByKind;
-  private readAt = 0;
+  /** When the last read ended (none yet: never read). */
+  private readAt?: number;
   private reading?: Promise<void>;
   private said?: string;
 
@@ -32,7 +33,7 @@ export class CliStartDefaultsFeed {
   }
 
   private refresh(changed: () => void, failed?: (error: unknown) => void): void {
-    if (this.reading || (this.readAt > 0 && this.now() - this.readAt < this.freshMs)) return;
+    if (this.reading || (this.readAt !== undefined && this.now() - this.readAt < this.freshMs)) return;
     this.reading = this.read()
       .then((value) => {
         this.value = value;

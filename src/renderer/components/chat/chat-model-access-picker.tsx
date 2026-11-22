@@ -12,9 +12,9 @@ import { ChatProviderMark } from "./chat-member-mark";
 import { chipModelLabel, memberDefaultModelName, memberModelName, useMemberModelCatalog } from "./chat-member-model-name";
 import { latestAndOlderModels } from "./chat-model-groups";
 import { ComposerMenu, ComposerMenuDisclosure, ComposerMenuItem, ComposerMenuNote, ComposerMenuSection } from "./composer-menu";
-import { ChatAccessControl, ChatCodexPlanToggle, ComposerControlIcon, TURN_RUNNING_NOTE } from "./chat-access-controls";
+import { ChatAccessControl, ChatCodexPlanToggle, ComposerControlIcon, iconTriggerProps, TURN_RUNNING_NOTE } from "./chat-access-controls";
 import { machineOf, useCliStartDefaults, useMachineList } from "./use-cli-start-defaults";
-import { useComposerDensity } from "./use-composer-density";
+import { COMPOSER_DENSITY, useComposerDensity } from "./use-composer-density";
 import { ParticipantRunLocation } from "./participant-run-location";
 
 /** What the composer's controls show and change of a member: its provider
@@ -102,7 +102,8 @@ export function ChatMemberComposerControls(props: {
   const rowRef = useRef<HTMLDivElement>(null);
   const density = useComposerDensity(rowRef, [modelName, effortLabel, access?.id ?? "custom", value.kind, showRunsOn ? runsOn : "",
     codexPlanModeOn(value.kind, value.agentMode, value.permissions) ? "plan" : ""].join("\u0000"));
-  const effortIcon = density >= 4;
+  const effortIcon = density >= COMPOSER_DENSITY.effortIcon;
+  const runsOnIcon = density >= COMPOSER_DENSITY.runsOnIcon;
 
   return (
     <div ref={rowRef} className="chat-composer-controls" data-testid={prefix} data-density={density} aria-disabled={props.disabled || undefined}>
@@ -113,8 +114,8 @@ export function ChatMemberComposerControls(props: {
         align="end"
         label={(
           <span className="chat-model-chip-label">
-            {density < 5 && <ChatProviderMark member={value} className="is-mini" />}
-            <span className={density >= 6 ? "chat-composer-control-text is-model is-shortened" : "chat-composer-control-text is-model"}>{modelName}</span>
+            {density < COMPOSER_DENSITY.modelWithoutGlyph && <ChatProviderMark member={value} className="is-mini" />}
+            <span className={density >= COMPOSER_DENSITY.modelShortened ? "chat-composer-control-text is-model is-shortened" : "chat-composer-control-text is-model"}>{modelName}</span>
           </span>
         )}
       >
@@ -142,8 +143,7 @@ export function ChatMemberComposerControls(props: {
           title={`Effort: ${effortLabel}`}
           width={240}
           align="end"
-          bare={effortIcon}
-          triggerClassName={effortIcon ? "chat-model-chip composer-menu-trigger is-icon" : undefined}
+          {...iconTriggerProps(effortIcon)}
           label={effortIcon
             ? <ComposerControlIcon icon={Gauge} label={effortLabel} />
             : <span className={effort || configEffort ? "chat-composer-control-text" : "chat-composer-control-text is-muted"}>{effortLabel}</span>}
@@ -163,9 +163,9 @@ export function ChatMemberComposerControls(props: {
         </ComposerMenu>
       )}
       <ChatAccessControl value={value} mainSession={props.mainSession} disabled={props.disabled} modesReason={modesReason} onChange={onChange} testId={prefix}
-        iconOnly={density >= 3} />
+        iconOnly={density >= COMPOSER_DENSITY.modeIcon} />
       {value.kind === "codex-cli" && (
-        <ChatCodexPlanToggle value={value} disabled={props.disabled} modesReason={modesReason} onChange={onChange} testId={prefix} iconOnly={density >= 2} />
+        <ChatCodexPlanToggle value={value} disabled={props.disabled} modesReason={modesReason} onChange={onChange} testId={prefix} iconOnly={density >= COMPOSER_DENSITY.planIcon} />
       )}
       {showRunsOn && (
         <ComposerMenu
@@ -173,9 +173,8 @@ export function ChatMemberComposerControls(props: {
           title={`Runs on: ${runsOn}`}
           width={300}
           align="end"
-          bare={density >= 1}
-          triggerClassName={density >= 1 ? "chat-model-chip composer-menu-trigger is-icon" : undefined}
-          label={density >= 1
+          {...iconTriggerProps(runsOnIcon)}
+          label={runsOnIcon
             ? <ComposerControlIcon icon={value.cloudRun ? Cloud : value.homeMachineId ? Server : Laptop} label={runsOn} />
             : <span className="chat-composer-control-text">{runsOn}</span>}
         >
@@ -297,7 +296,7 @@ function defaultModelOf(catalog: ProviderModelCatalog | undefined, startModel: s
 /** The models offered besides the default row: the CLI's list without the
  *  one it runs by default (the default row names it) and hidden ones. */
 function explicitModels(catalog: ProviderModelCatalog | undefined, defaultModel: ProviderModel | undefined): ProviderModel[] {
-  return (catalog?.models ?? []).filter((model) => !model.hidden && model !== defaultModel && !(model.recommended && model.source !== "configured" && !defaultModel));
+  return (catalog?.models ?? []).filter((model) => !model.hidden && model !== defaultModel);
 }
 
 /** The efforts of the chosen model (of the one it runs by default while none

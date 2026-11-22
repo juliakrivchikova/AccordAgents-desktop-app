@@ -1,4 +1,5 @@
 import { useCallback, useRef, useState } from "react";
+import type { NewChatStartAccess } from "../components/chat/use-cli-start-defaults";
 import type {
   AgentHealth,
   AppSettings,
@@ -126,6 +127,11 @@ export interface AppState {
    *  the New chat screen were made for. */
   newChatMainSessionOverrideFor: string | undefined;
   setNewChatMainSessionOverrideFor: StateSetter<string | undefined>;
+  /** The mode the New chat screen showed the main session starting in (her
+   *  CLI config's where it runs, none: the CLI's built-in), and for which
+   *  provider and place: the chat is made in what was shown. */
+  newChatMainSessionStartAccess: NewChatStartAccess | undefined;
+  setNewChatMainSessionStartAccess: StateSetter<NewChatStartAccess | undefined>;
   /** Unsent composer text of the open chat; each chat keeps its own. */
   chatMessageDraft: string;
   /** Changes the open chat's unsent text; does nothing when no chat is open. */
@@ -238,6 +244,7 @@ export function useAppState(): AppState {
   const [selectedChatParticipantRuntimeOverrides, setSelectedChatParticipantRuntimeOverrides] = useState<Record<string, ChatParticipantRuntimeOverride>>({});
   const [newChatMainSessionProvider, setNewChatMainSessionProvider] = useState<MainSessionProviderChoice | undefined>();
   const [newChatMainSessionOverrideFor, setNewChatMainSessionOverrideFor] = useState<string | undefined>();
+  const [newChatMainSessionStartAccess, setNewChatMainSessionStartAccess] = useState<NewChatStartAccess | undefined>();
   const openConversationId = conversation?.id;
   const messageDrafts = usePerChatState<string>(openConversationId, NO_DRAFT_TEXT, isEmptyDraftText);
   const skillMentionDrafts = usePerChatState<ChatSkillMention[]>(openConversationId, NO_SKILL_MENTIONS, isEmptyList);
@@ -318,6 +325,7 @@ export function useAppState(): AppState {
     selectedChatParticipantRuntimeOverrides, setSelectedChatParticipantRuntimeOverrides,
     newChatMainSessionProvider, setNewChatMainSessionProvider,
     newChatMainSessionOverrideFor, setNewChatMainSessionOverrideFor,
+    newChatMainSessionStartAccess, setNewChatMainSessionStartAccess,
     chatMessageDraft, setChatMessageDraft, setChatMessageDraftForConversation, chatComposerSkillMentions,
     setChatComposerSkillMentions, chatComposerPluginMentions, setChatComposerPluginMentions, chatComposerFileMentions,
     setChatComposerFileMentions, clearChatMessageDraft, chatAddParticipantDraft, setChatAddParticipantDraft,

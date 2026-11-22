@@ -178,8 +178,9 @@ export function defaultChatAccessOption(kind: ChatProviderKind): ChatAccessOptio
  *  CLI's built-in default. */
 export function startChatAccessOption(kind: ChatProviderKind, access: string | undefined): ChatAccessOption {
   const id = currentChatAccessId(kind, access);
-  return chatAccessModeSet(kind).options.find((option) => option.id === id && (!option.hidden || option.id === "read-only")) ??
-    defaultChatAccessOption(kind);
+  // A mode the menu lists only while it is the mode (Codex's Read Only) is
+  // one her config can start the CLI in too: the menu then lists it.
+  return chatAccessModeSet(kind).options.find((option) => option.id === id) ?? defaultChatAccessOption(kind);
 }
 
 /** Whether Codex's Plan mode is on for a member in its own mode (a member

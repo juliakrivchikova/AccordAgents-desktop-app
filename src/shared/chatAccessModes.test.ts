@@ -34,7 +34,7 @@ import {
   withClassicChatPermissions,
   withCodexPlanMode
 } from "./chatAccessModes";
-import { antigravityStartAccess, claudeStartAccess, codexStartAccess, normalizeCliStartDefaultsByKind } from "./cliStartDefaults";
+import { antigravityStartAccess, antigravityStartAccessFromText, claudeStartAccess, codexStartAccess, modelNameWithoutId, normalizeCliStartDefaultsByKind } from "./cliStartDefaults";
 import { forkedMainSessionPermissions, memberAsItRunsNow } from "./forkToNewChat";
 import { newChatMainSessionFor } from "./newChat";
 import { chatPermissionPromptLines, chatPermissionSummaryLine } from "./permissionPrompt";
@@ -284,13 +284,20 @@ test("a new main session starts in the mode the User's own config starts its CLI
   assert.equal(claudeStartAccess("plan"), "plan");
   assert.equal(claudeStartAccess("auto"), "auto");
   assert.equal(claudeStartAccess("bypassPermissions"), undefined, "not offered by the composer");
-  // agy 1.5.14: settings.json agentMode; none saved: Auto where it has it.
-  assert.equal(antigravityStartAccess(undefined, "darwin"), "auto");
-  assert.equal(antigravityStartAccess({}, "linux"), "auto");
-  assert.equal(antigravityStartAccess({}, "win32"), "default");
-  assert.equal(antigravityStartAccess({ agentMode: "" }, "darwin"), "default");
-  assert.equal(antigravityStartAccess({ agentMode: "accept-edits" }, "darwin"), "accept-edits");
-  assert.equal(antigravityStartAccess({ agentMode: "plan" }, "darwin"), "plan");
+  // agy 1.5.14: settings.json agentMode. None saved: Auto only where the
+  // account has it, which the app cannot read, so the built-in Default.
+  assert.equal(antigravityStartAccess(undefined), undefined);
+  assert.equal(antigravityStartAccess({}), undefined);
+  assert.equal(antigravityStartAccess({ agentMode: "" }), "default");
+  assert.equal(antigravityStartAccess({ agentMode: "auto" }), "auto", "saved by her: honoured");
+  assert.equal(antigravityStartAccess({ agentMode: "accept-edits" }), "accept-edits");
+  assert.equal(antigravityStartAccess({ agentMode: "plan" }), "plan");
+  assert.equal(antigravityStartAccess({ agentMode: "turbo" }), undefined, "a mode agy does not have");
+  assert.equal(antigravityStartAccessFromText(undefined), undefined, "no file");
+  assert.equal(antigravityStartAccessFromText('\uFEFF{"agentMode":"plan"}'), "plan", "a BOM");
+  assert.equal(antigravityStartAccessFromText("{ // comment\n}"), undefined, "not plain JSON");
+  assert.equal(antigravityStartAccessFromText("[]"), undefined, "not an object");
+  assert.equal(startChatAccessOption("gemini-cli", antigravityStartAccess({})).label, "Default");
   // The mode it starts in: that one when offered (Read Only too), else the built-in.
   assert.equal(startChatAccessOption("codex-cli", "auto-review").label, "Approve for me");
   assert.equal(startChatAccessOption("codex-cli", "read-only").label, "Read Only");
@@ -307,6 +314,9 @@ test("a new main session starts in the mode the User's own config starts its CLI
   assert.deepEqual(normalizeCliStartDefaultsByKind({ "codex-cli": { access: "auto-review", model: "gpt-5.6-luna", modelLabel: "GPT-5.6-Luna", reasoningEffort: "low", extra: 1 }, bogus: {} }),
     { "codex-cli": { access: "auto-review", model: "gpt-5.6-luna", modelLabel: "GPT-5.6-Luna", reasoningEffort: "low" } });
   assert.equal(normalizeCliStartDefaultsByKind("nope"), undefined);
+  assert.equal(modelNameWithoutId("GPT-5.6-Luna (gpt-5.6-luna)", "gpt-5.6-luna"), "GPT-5.6-Luna");
+  assert.equal(modelNameWithoutId("Sonnet 5.5", "sonnet"), "Sonnet 5.5");
+  assert.equal(modelNameWithoutId(" ", "gpt-x"), "gpt-x");
 });
 
 test("the phone's main session takes the start mode its provider offers when it names none", () => {

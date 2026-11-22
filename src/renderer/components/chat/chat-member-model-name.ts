@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 
 import { cliProviderHostDefaultModelLabel, cliProviderHostModelCatalog } from "../../../shared/cliProviderHosts";
-import type { CliStartDefaults } from "../../../shared/cliStartDefaults";
+import { modelNameWithoutId, type CliStartDefaults } from "../../../shared/cliStartDefaults";
 import type { ChatParticipant, ProviderModel, ProviderModelCatalog } from "../../../shared/types";
 import { chatCliProviderLabel } from "./chat-participant-drafts";
 
@@ -10,9 +10,7 @@ type ModelNamedMember = Pick<ChatParticipant, "kind"> & Partial<Pick<ChatPartici
 /** A model's name for a chip: its label without the id Codex repeats in
  *  brackets ("GPT-5.5 (gpt-5.5)" reads "GPT-5.5"). */
 export function chipModelLabel(model: ProviderModel): string {
-  const label = model.label.trim() || model.id;
-  const repeated = ` (${model.id})`;
-  return label.endsWith(repeated) && label.length > repeated.length ? label.slice(0, -repeated.length) : label;
+  return modelNameWithoutId(model.label, model.id);
 }
 
 /**
@@ -44,20 +42,23 @@ function catalogKey(member: ModelNamedMember): { key: string; hostId?: string } 
 
 /** The CLI's model list, asked once in a while for every chip that shows
  *  it (the main process keeps it as well). */
-function catalogFor(member: ModelNamedMember): Promise<ProviderModelCatalog | undefined> {
+function catalogFor(member: ModelNamedMember, reuseMs = CATALOG_REUSE_MS): Promise<ProviderModelCatalog | undefined> {
   const list = typeof window === "undefined" ? undefined : window.consensus?.listProviderModels;
   if (!list) return Promise.resolve(undefined);
   const { key, hostId } = catalogKey(member);
   const known = catalogs.get(key);
-  if (known && Date.now() - known.at < CATALOG_REUSE_MS) return known.catalog;
+  if (known && Date.now() - known.at < reuseMs) return known.catalog;
+  // The list read before stays shown while it is read again (a chip never
+  // goes back to the CLI's name meanwhile), and when that read fails.
   const entry: { at: number; catalog: Promise<ProviderModelCatalog | undefined>; value?: ProviderModelCatalog } = {
     at: Date.now(),
-    catalog: Promise.resolve(undefined)
+    catalog: Promise.resolve(known?.value),
+    ...(known?.value ? { value: known.value } : {})
   };
   entry.catalog = list(member.kind, hostId).then((catalog) => {
-    entry.value = catalog;
-    return catalog;
-  }, () => undefined);
+    entry.value = catalog ?? entry.value;
+    return entry.value;
+  }, () => entry.value);
   catalogs.set(key, entry);
   return entry.catalog;
 }
@@ -66,6 +67,12 @@ function catalogFor(member: ModelNamedMember): Promise<ProviderModelCatalog | un
  *  every control shares), for one asked outside a component. */
 export function memberModelCatalogFor(member: ModelNamedMember): Promise<ProviderModelCatalog | undefined> {
   return catalogFor(member);
+}
+
+/** The CLI's model list as last read here, however old; none before the
+ *  first read. */
+export function memberModelCatalogKnown(member: ModelNamedMember): ProviderModelCatalog | undefined {
+  return catalogs.get(catalogKey(member).key)?.value;
 }
 
 /** memberDefaultModelName for a chip, once its CLI's list is known; the
@@ -100,7 +107,7 @@ export function memberModelName(member: ModelNamedMember & { model?: string }, c
  *  fixed list, else the CLI's list, asked once in a while for every control
  *  that shows it (catalogFor), so a composer's controls ask nothing more
  *  than its chip did. */
-export function useMemberModelCatalog(member: ModelNamedMember): { catalog: ProviderModelCatalog | undefined; loading: boolean } {
+export function useMemberModelCatalog(member: ModelNamedMember, enabled = true, reuseMs = CATALOG_REUSE_MS): { catalog: ProviderModelCatalog | undefined; loading: boolean } {
   // An added provider's fixed list, the same object while its vendor is.
   const fixed = useMemo(() => member.hostVendor && member.kind !== "gemini-cli"
     ? cliProviderHostModelCatalog({ vendor: member.hostVendor, cli: member.kind })
@@ -111,21 +118,21 @@ export function useMemberModelCatalog(member: ModelNamedMember): { catalog: Prov
     return { key, catalog: known, loading: !fixed && !known };
   });
   useEffect(() => {
-    if (fixed) return;
+    if (fixed || !enabled) return;
     let cancelled = false;
     // Unchanged, nothing renders again.
     const take = (next: { key: string; catalog: ProviderModelCatalog | undefined; loading: boolean }): void =>
       setState((current) => current.key === next.key && current.catalog === next.catalog && current.loading === next.loading ? current : next);
     const known = catalogs.get(key)?.value;
     take({ key, catalog: known, loading: !known });
-    void catalogFor(member).then((next) => {
+    void catalogFor(member, reuseMs).then((next) => {
       if (!cancelled) take({ key, catalog: next, loading: false });
     });
     return () => {
       cancelled = true;
     };
     // The list depends on the CLI and the provider only (its key).
-  }, [Boolean(fixed), key]);
+  }, [Boolean(fixed), key, enabled]);
   if (fixed) return { catalog: fixed, loading: false };
   return state.key === key ? { catalog: state.catalog, loading: state.loading } : { catalog: catalogs.get(key)?.value, loading: true };
 }

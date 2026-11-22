@@ -1607,8 +1607,6 @@ export class ChatService {
     this.machineForkToNewChatSupport = lookup;
   }
 
-  /** Desktop side: whether a machine runs Codex's Full Access and Plan mode
-   *  (its last hello), for the phone's New chat offer. */
   /** What each CLI on a machine starts a new session in with that machine's
    *  own config (its last hello): the phone's New chat starts a main session
    *  that runs there in it. */
@@ -1616,6 +1614,8 @@ export class ChatService {
     this.machineCliStartDefaults = lookup;
   }
 
+  /** Desktop side: whether a machine runs Codex's Full Access and Plan mode
+   *  (its last hello), for the phone's New chat offer. */
   setMachineCliModesSupport(lookup: ((machineId: string) => boolean) | undefined): void {
     this.machineCliModesSupport = lookup;
   }

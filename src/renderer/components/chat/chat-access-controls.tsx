@@ -39,7 +39,7 @@ export function ChatAccessControl(props: {
   const label = access?.label ?? "Custom";
   return (
     <ComposerMenu testId={`${props.testId}-mode`} title={`${set.title}: ${label}`} width={320} align="end"
-      bare={props.iconOnly} triggerClassName={props.iconOnly ? "chat-model-chip composer-menu-trigger is-icon" : undefined}
+      {...iconTriggerProps(Boolean(props.iconOnly))}
       label={props.iconOnly ? <ComposerControlIcon icon={accessIcon(access)} label={label} /> : <span className="chat-composer-control-text">{label}</span>}>
       {(close) => (
         <ChatAccessMenu value={value} mainSession={props.mainSession} disabled={props.disabled} modesReason={props.modesReason}
@@ -51,6 +51,12 @@ export function ChatAccessControl(props: {
       )}
     </ComposerMenu>
   );
+}
+
+/** A composer control drawn as an icon (a narrow composer): no chevron, its
+ *  quieter padding. */
+export function iconTriggerProps(iconOnly: boolean): { bare: boolean; triggerClassName?: string } {
+  return iconOnly ? { bare: true, triggerClassName: "chat-model-chip composer-menu-trigger is-icon" } : { bare: false };
 }
 
 /** A control's value as an icon in a narrow composer; its name stays for
@@ -95,7 +101,8 @@ export function ChatAccessMenu(props: {
   if (confirming) {
     return (
       <FullAccessConfirmation
-        onConfirm={() => props.onSelect(confirming)}
+        disabled={props.disabled}
+        onConfirm={() => { if (!props.disabled) props.onSelect(confirming); }}
         onBack={() => setConfirming(undefined)} />
     );
   }
@@ -122,7 +129,7 @@ export function ChatAccessMenu(props: {
 /** Codex's question before Full Access, in place of its list (Codex 0.155.1's
  *  `/permissions`): only "Yes, continue anyway" switches; "Cancel" goes back
  *  to the list. The keyboard lands on "Yes", as Codex's cursor does. */
-function FullAccessConfirmation(props: { onConfirm: () => void; onBack: () => void }): JSX.Element {
+function FullAccessConfirmation(props: { disabled?: boolean; onConfirm: () => void; onBack: () => void }): JSX.Element {
   const ref = useRef<HTMLDivElement>(null);
   useEffect(() => {
     ref.current?.querySelector<HTMLElement>("[role='menuitem']")?.focus({ preventScroll: true });
@@ -131,7 +138,8 @@ function FullAccessConfirmation(props: { onConfirm: () => void; onBack: () => vo
     <div ref={ref} className="composer-menu-confirm" data-testid="chat-full-access-confirm">
       <ComposerMenuSection label={FULL_ACCESS_CONFIRMATION.title} testId="chat-full-access-confirm-section">
         <ComposerMenuNote testId="chat-full-access-confirm-body">{FULL_ACCESS_CONFIRMATION.body}</ComposerMenuNote>
-        <ComposerMenuItem role="menuitem" testId="chat-full-access-confirm-yes" label={FULL_ACCESS_CONFIRMATION.confirm.label}
+        {props.disabled && <ComposerMenuNote testId="chat-full-access-confirm-busy">{TURN_RUNNING_NOTE}</ComposerMenuNote>}
+        <ComposerMenuItem role="menuitem" testId="chat-full-access-confirm-yes" disabled={props.disabled} label={FULL_ACCESS_CONFIRMATION.confirm.label}
           detail={FULL_ACCESS_CONFIRMATION.confirm.detail} onSelect={props.onConfirm} />
         <ComposerMenuItem role="menuitem" testId="chat-full-access-confirm-cancel" label={FULL_ACCESS_CONFIRMATION.cancel.label}
           detail={FULL_ACCESS_CONFIRMATION.cancel.detail} onSelect={props.onBack} />

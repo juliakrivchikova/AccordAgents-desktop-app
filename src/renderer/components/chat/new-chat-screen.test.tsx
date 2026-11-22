@@ -471,6 +471,28 @@ function trackedHarness(settingsFor: () => AppSettings, agentsFor: () => AgentHe
   return { state, Harness };
 }
 
+test("a new chat's main session starts in the mode her own CLI config starts it in, as the screen shows it, and is made in what was shown", async () => {
+  resetMemberModelCatalogs();
+  const withConfig: Record<string, ProviderModelCatalog> = {
+    ...CATALOGS,
+    "codex-cli": { ...CATALOGS["codex-cli"]!, startDefaults: { access: "auto-review", model: "gpt-5.5", modelLabel: "GPT-5.5", reasoningEffort: "low" } }
+  };
+  installWindowBridge({ listProviderModels: async (kind: string) => withConfig[kind], listMachines: async () => ({ machines: [] }) });
+  (globalThis as any).document = { addEventListener: () => undefined, removeEventListener: () => undefined, querySelector: () => null };
+  const shown: Array<{ key: string; access?: string } | undefined> = [];
+  const renderer = create(<NewChatScreen {...baseProps(readyAgents(), {
+    settings: { ...SETTINGS, assistantProviderKind: "codex-cli" },
+    onMainSessionStartAccessChange: (value: { key: string; access?: string } | undefined) => { shown.push(value); }
+  })} />);
+  await settle();
+  await settle();
+  await openModes(renderer.root);
+  assert.equal(checkedMode(renderer.root), "Approve for me", "her config's Approve for me, not Ask for approval");
+  assert.equal(textOf(control(renderer.root, "effort")), "Low", "the effort her config sets");
+  assert.equal(shown.at(-1)?.access, "auto-review", "the mode shown is what the chat is made in");
+  act(() => renderer.unmount());
+});
+
 const modeRows = (root: ReactTestInstance): ReactTestInstance[] => rowsOf(root, "chat-access-option");
 const checkedMode = (root: ReactTestInstance): string | undefined => {
   const row = modeRows(root).find((candidate) => candidate.props["aria-checked"] === true);
@@ -507,6 +529,9 @@ test("a new chat's main session in the sessions view starts in its CLI's own def
   assert.equal(checkedMode(renderer.root), "Ask for approval", "Codex's own default preset (workspace write, asking to go further)");
   assert.equal(textOf(control(renderer.root, "model")), "GPT-5.5", "Codex's own default model");
   await click(modeRows(renderer.root).find((row) => rowLabel(row) === "Full Access")!);
+  // Codex's own question first; only Yes switches.
+  assert.equal(state.overrides["__new-chat-main-session__"]?.agentMode, undefined, "not before the question is answered");
+  await click(renderer.root.find((node) => typeof node.type === "string" && node.props["data-testid"] === "chat-full-access-confirm-yes"));
   await click(control(renderer.root, "plan"));
   await settle();
   assert.equal(state.overrides["__new-chat-main-session__"]?.agentMode, "full-access", "Codex's Full Access");

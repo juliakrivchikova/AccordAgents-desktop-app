@@ -26,6 +26,15 @@ export interface CliStartDefaults {
 
 export type CliStartDefaultsByKind = Partial<Record<ChatProviderKind, CliStartDefaults>>;
 
+/** A model's name as a chip says it: its label without the id Codex repeats
+ *  in brackets ("GPT-5.5 (gpt-5.5)" reads "GPT-5.5"); one rule for this
+ *  computer's chips and what a machine says in its hello. */
+export function modelNameWithoutId(label: string, id: string): string {
+  const name = label.trim() || id;
+  const repeated = ` (${id})`;
+  return name.endsWith(repeated) && name.length > repeated.length ? name.slice(0, -repeated.length) : name;
+}
+
 function text(value: unknown): string | undefined {
   return typeof value === "string" && value.trim() ? value.trim() : undefined;
 }
@@ -61,17 +70,31 @@ export function claudeStartAccess(permissionMode: unknown): string | undefined {
   return mode === "acceptEdits" || mode === "plan" || mode === "auto" ? mode : undefined;
 }
 
-/** The mode agy 1.5.14 starts in (`-p` runs too): its settings.json
- *  `agentMode` ("" is Default), and with none saved Auto where Auto mode
- *  exists (macOS and Linux), Default elsewhere (its changelog: "sessions
- *  with no saved mode, including headless -p runs, now start in Auto
- *  wherever Auto mode is available and in Default elsewhere"). */
-export function antigravityStartAccess(settings: { agentMode?: unknown } | undefined, platform: string): string | undefined {
+/** The mode agy 1.5.14 starts in (`-p` runs too) as its settings.json
+ *  `agentMode` saves it ("" is Default). With none saved agy starts in Auto
+ *  "wherever Auto mode is available and in Default elsewhere" (its
+ *  changelog), and Auto depends on the account as well as the platform
+ *  (`--mode auto` "is not available for this account" on hers, 2026-11-21),
+ *  which the app cannot read: none then, so the CLI's built-in Default,
+ *  which every account runs. */
+export function antigravityStartAccess(settings: { agentMode?: unknown } | undefined): string | undefined {
   const saved = settings?.agentMode;
-  if (saved === undefined || saved === null) return platform === "win32" ? "default" : "auto";
+  if (saved === undefined || saved === null) return undefined;
   if (saved === "") return "default";
   const mode = text(saved);
   return mode === "accept-edits" || mode === "auto" || mode === "plan" || mode === "default" ? mode : undefined;
+}
+
+/** antigravityStartAccess from agy's settings.json text (none: no file); a
+ *  file that is not a plain JSON object says nothing. */
+export function antigravityStartAccessFromText(settingsText: string | undefined): string | undefined {
+  if (settingsText === undefined) return undefined;
+  try {
+    const parsed = JSON.parse(settingsText.replace(/^\uFEFF/, "")) as unknown;
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? antigravityStartAccess(parsed as { agentMode?: unknown }) : undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 /** Start defaults as they travel (a machine's hello, the phone's offer):

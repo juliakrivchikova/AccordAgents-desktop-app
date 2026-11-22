@@ -6,14 +6,26 @@ import { flushSync } from "react-dom";
  * Code fits its composer footer (composerFooterLayout.ts) and Claude's
  * desktop app its narrow composers: never a one-letter stub ("D…"), each
  * control either shows its full value or turns into an icon whose tooltip
- * and menu name the value; the model keeps its name longest.
- *
- * 0: every control by its name. 1: where it runs as an icon. 2: Codex's Plan
- * mode as an icon. 3: the permission mode as an icon. 4: the effort as an
- * icon. 5: the model without its provider's glyph. 6: the model's name
- * shortened with an ellipsis (never under a few letters).
+ * and menu name the value; the model keeps its name longest. Each level
+ * keeps the ones below it.
  */
-export const COMPOSER_DENSITY_MAX = 6;
+export const COMPOSER_DENSITY = {
+  /** Where it runs as an icon. */
+  runsOnIcon: 1,
+  /** Codex's Plan mode as an icon. */
+  planIcon: 2,
+  /** The permission mode as an icon. */
+  modeIcon: 3,
+  /** The effort as an icon. */
+  effortIcon: 4,
+  /** The model without its provider's glyph. */
+  modelWithoutGlyph: 5,
+  /** The model's name shortened with an ellipsis (never under a few
+   *  letters). */
+  modelShortened: 6
+} as const;
+
+const COMPOSER_DENSITY_MAX = COMPOSER_DENSITY.modelShortened;
 
 /** The row a composer's controls live in: its width is the composer's, never
  *  the controls' own. */
@@ -23,10 +35,13 @@ const ROW_SELECTOR = ".chat-composer-toolbar, .new-chat-toolbar";
  * The density at which `ref`'s controls fit (they overflow their own box,
  * which shrinks with the row, when they do not). Measured before paint each
  * time the row's width or what the controls say (`contentKey`) changes:
- * from the fullest form down, one step at a time.
+ * from the fullest form, one step at a time.
  */
 export function useComposerDensity(ref: RefObject<HTMLElement>, contentKey: string): number {
   const [density, setDensity] = useState(0);
+  // Bumped to measure again even when the density is already 0 (a row that
+  // narrowed from its fullest form renders nothing new by itself).
+  const [, setMeasure] = useState(0);
   const measured = useRef<{ key: string; width: number }>({ key: contentKey, width: -1 });
 
   // New content starts from its fullest form again.
@@ -57,7 +72,10 @@ export function useComposerDensity(ref: RefObject<HTMLElement>, contentKey: stri
       const first = measured.current.width < 0;
       measured.current = { ...measured.current, width };
       if (first) return;
-      flushSync(() => setDensity(0));
+      flushSync(() => {
+        setDensity(0);
+        setMeasure((count) => count + 1);
+      });
     });
     observer.observe(row);
     return () => observer.disconnect();

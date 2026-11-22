@@ -4,15 +4,19 @@
 // actions in the chat title's menu.
 import assert from "node:assert/strict";
 import test from "node:test";
+import { useRef } from "react";
+import { createRoot } from "react-dom/client";
 import { act, create, type ReactTestInstance } from "react-test-renderer";
 
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { defaultChatAgentPermissions } from "../../../shared/agentPermissions";
-import { chatAccessOptions, selectedChatAccessOption, codexPlanModeOn } from "../../../shared/chatAccessModes";
+import { chatAccessModeSet, chatAccessOptions, selectedChatAccessOption, codexPlanModeOn } from "../../../shared/chatAccessModes";
 import type { ChatAgentMode, ChatParticipant } from "../../../shared/types";
 import { ChatMemberComposerControls, type ChatModelAccessPatch } from "./chat-model-access-picker";
-import { accessHeldReason, accessIcon, applyChatAccessOptionKeepingPlan, ComposerControlIcon } from "./chat-access-controls";
+import { ClipboardList, Eye, Lock, PenLine, ShieldCheck, ShieldOff, SlidersHorizontal } from "lucide-react";
+import { accessHeldReason, accessIcon, applyChatAccessOptionKeepingPlan, ChatAccessMenu, ComposerControlIcon } from "./chat-access-controls";
 import { newChatMainSessionParticipantConfig } from "./chat-main-session-draft";
+import { COMPOSER_DENSITY, useComposerDensity } from "./use-composer-density";
 import { ChatMemberActionsMenu } from "./chat-member-model-access";
 import { resetMemberModelCatalogs } from "./chat-member-model-name";
 import { ChatTitleMenuContent, type ChatViewHeaderState } from "./chat-view-switch";
@@ -247,12 +251,97 @@ test("a new main session in the sessions view starts in the mode her config star
   assert.equal(selectedChatAccessOption("claude-code", unknown.agentMode, unknown.permissions)?.label, "Manual");
 });
 
-test("in a narrow composer a control turns into an icon whose name stays in its tooltip, never a one-letter stub", () => {
+test("in a narrow composer a mode turns into its own icon whose name stays for screen readers", () => {
+  const icons: Record<string, unknown> = { Manual: Lock, "Accept edits": PenLine, Plan: ClipboardList, Auto: ShieldCheck,
+    "Ask for approval": PenLine, "Approve for me": ShieldCheck, "Full Access": ShieldOff,
+    Default: Lock, "Accept-edits mode": PenLine, "Auto mode": ShieldCheck, "Plan mode": ClipboardList };
   for (const option of [...chatAccessOptions("claude-code"), ...chatAccessOptions("codex-cli"), ...chatAccessOptions("gemini-cli")]) {
-    assert.ok(accessIcon(option), `${option.label} has an icon`);
+    assert.equal(accessIcon(option), icons[option.label], `${option.label}'s icon`);
   }
+  assert.equal(accessIcon(chatAccessModeSet("codex-cli").options.find((option) => option.id === "read-only")), Eye, "Read Only");
+  assert.equal(accessIcon(undefined), SlidersHorizontal, "Custom");
   let renderer: ReturnType<typeof create> | undefined;
   act(() => { renderer = create(<ComposerControlIcon icon={accessIcon(chatAccessOptions("claude-code")[0])} label="Manual" />); });
   assert.equal(textOf(renderer!.root), "Manual", "the name for screen readers");
   act(() => renderer!.unmount());
+});
+
+test("while its turn runs, Codex's question cannot switch to Full Access", async () => {
+  const host = window as unknown as { consensus?: unknown };
+  const previous = host.consensus;
+  resetMemberModelCatalogs();
+  host.consensus = { listProviderModels: async () => undefined, listMachines: async () => ({ machines: [], status: [] }) };
+  const patches: ChatModelAccessPatch[] = [];
+  let renderer: ReturnType<typeof create> | undefined;
+  try {
+    await act(async () => {
+      renderer = create(<TooltipProvider><ChatAccessMenu value={CODEX} onSelect={(option) => patches.push(applyChatAccessOptionKeepingPlan(CODEX, option))} /></TooltipProvider>);
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+    await act(async () => { renderer!.root.findAll(byTestId("chat-access-option")).find((row) => row.props["data-value"] === "full-access")!.props.onClick(); });
+    // The turn starts while the question is open.
+    await act(async () => {
+      renderer!.update(<TooltipProvider><ChatAccessMenu value={CODEX} disabled onSelect={(option) => patches.push(applyChatAccessOptionKeepingPlan(CODEX, option))} /></TooltipProvider>);
+    });
+    const yes = renderer!.root.find(byTestId("chat-full-access-confirm-yes"));
+    assert.equal(yes.props.disabled, true);
+    await act(async () => { yes.props.onClick(); });
+    assert.deepEqual(patches, [], "nothing switched");
+    assert.match(textOf(renderer!.root.find(byTestId("chat-full-access-confirm-busy"))), /Its turn is running/);
+  } finally {
+    if (renderer) act(() => renderer!.unmount());
+    host.consensus = previous;
+  }
+});
+
+test("narrow controls step down one level at a time until they fit, and measure again when their row narrows, widens or what they say changes", async () => {
+  // How wide the controls are at each level, and how wide their row lets them be.
+  const contentAt = [300, 270, 240, 210, 180, 160, 140];
+  let available = 400;
+  let observed: ((entries: Array<{ contentRect: { width: number } }>) => void) | undefined;
+  const globals = globalThis as unknown as { ResizeObserver?: unknown };
+  const previousObserver = globals.ResizeObserver;
+  globals.ResizeObserver = class {
+    constructor(callback: (entries: Array<{ contentRect: { width: number } }>) => void) { observed = callback; }
+    observe(): void { /* the row */ }
+    disconnect(): void { observed = undefined; }
+  };
+  const proto = HTMLDivElement.prototype as unknown as Record<string, unknown>;
+  const scroll = Object.getOwnPropertyDescriptor(proto, "scrollWidth");
+  const client = Object.getOwnPropertyDescriptor(proto, "clientWidth");
+  Object.defineProperty(proto, "scrollWidth", { configurable: true, get(this: HTMLElement) { return this.dataset.density ? contentAt[Number(this.dataset.density)] : 0; } });
+  Object.defineProperty(proto, "clientWidth", { configurable: true, get(this: HTMLElement) { return this.dataset.density ? Math.min(available, contentAt[Number(this.dataset.density)]!) : 0; } });
+  function Probe(props: { content: string }): JSX.Element {
+    const ref = useRef<HTMLDivElement>(null);
+    const density = useComposerDensity(ref, props.content);
+    return <div className="chat-composer-toolbar"><div ref={ref} data-density={String(density)} /></div>;
+  }
+  const host = document.createElement("div");
+  document.body.append(host);
+  const root = createRoot(host);
+  const density = (): number => Number(host.querySelector("[data-density]")?.getAttribute("data-density"));
+  const resize = async (width: number): Promise<void> => {
+    available = width;
+    await act(async () => { observed?.([{ contentRect: { width } }]); });
+  };
+  try {
+    await act(async () => { root.render(<Probe content="a" />); });
+    assert.equal(density(), 0, "it fits: every control by its name");
+    await resize(400);
+    await resize(250);
+    assert.equal(density(), 2, "narrowed from the fullest form: two steps to fit");
+    await resize(400);
+    assert.equal(density(), 0, "widened: back to every control by its name");
+    await resize(100);
+    assert.equal(density(), COMPOSER_DENSITY.modelShortened, "never past the last level");
+    await resize(250);
+    await act(async () => { root.render(<Probe content="b" />); });
+    assert.equal(density(), 2, "new content measured again from the fullest form");
+  } finally {
+    act(() => root.unmount());
+    host.remove();
+    globals.ResizeObserver = previousObserver;
+    if (scroll) Object.defineProperty(proto, "scrollWidth", scroll); else delete proto.scrollWidth;
+    if (client) Object.defineProperty(proto, "clientWidth", client); else delete proto.clientWidth;
+  }
 });

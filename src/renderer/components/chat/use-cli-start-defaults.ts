@@ -4,13 +4,27 @@ import { normalizeCliStartDefaultsByKind, type CliStartDefaults } from "../../..
 import type { CloudRunSelection } from "../../../shared/cloudRunPreparation";
 import type { MachineListResult, MachineRecord } from "../../../shared/machineLink";
 import type { ChatParticipant, ProviderModelCatalog } from "../../../shared/types";
-import { memberModelCatalogFor, useMemberModelCatalog } from "./chat-member-model-name";
+import { memberModelCatalogFor, memberModelCatalogKnown, useMemberModelCatalog } from "./chat-member-model-name";
 
 /** Where a member runs, as its start defaults are read: this computer, or a
  *  machine (its own, or the AWS instance's for Cloud run). */
 export type StartDefaultsPlace = Pick<ChatParticipant, "kind"> & { homeMachineId?: string; cloudRun?: CloudRunSelection };
 
 const NO_MACHINES: MachineListResult = { machines: [], status: [] };
+/** How long a screen that shows start defaults trusts the list it has. */
+const START_DEFAULTS_REUSE_MS = 15_000;
+
+/** The start mode the New chat screen showed, for the provider and place it
+ *  was shown for (startAccessKey). */
+export interface NewChatStartAccess {
+  key: string;
+  access?: string;
+}
+
+/** Which provider and place a shown start mode belongs to. */
+export function startAccessKey(providerKey: string, place: Pick<StartDefaultsPlace, "homeMachineId" | "cloudRun">): string {
+  return [providerKey, place.homeMachineId ?? "", place.cloudRun ? place.cloudRun.instanceId ?? "cloud" : ""].join("\u0000");
+}
 
 /** A machine by its id, with its last hello (connected or not). */
 export function machineOf(list: MachineListResult, machineId: string | undefined): { name?: string; lastHello?: MachineRecord["lastHello"] } | undefined {
@@ -47,12 +61,16 @@ export function cliStartDefaultsOf(place: StartDefaultsPlace, localCatalog: Prov
  *  and the machines' hellos. */
 export function useCliStartDefaults(place: StartDefaultsPlace | undefined, machines: MachineListResult): CliStartDefaults | undefined {
   // The CLI's own list (not an added provider's): her config is that CLI's.
-  const { catalog } = useMemberModelCatalog({ kind: place?.kind ?? "codex-cli" });
+  // Not asked when it runs on a machine (the machine says its own) or there
+  // is nothing to ask about.
+  // Asked again when shown after a while: the main process reads the list
+  // anew once her CLI config file changed.
+  const { catalog } = useMemberModelCatalog({ kind: place?.kind ?? "codex-cli" }, Boolean(place) && !place?.homeMachineId && !place?.cloudRun, START_DEFAULTS_REUSE_MS);
   return place ? cliStartDefaultsOf(place, catalog, machines) : undefined;
 }
 
-/** cliStartDefaultsOf when a chat is made: waits for the CLI's list a
- *  moment (it is usually read already), then goes without. */
+/** cliStartDefaultsOf when a chat is made: the CLI's list as the screen had
+ *  it, else waited for a moment, then without. */
 export async function cliStartDefaultsFor(place: StartDefaultsPlace, waitMs = 4_000): Promise<CliStartDefaults | undefined> {
   const bridge = typeof window === "undefined" ? undefined : window.consensus;
   let timer: ReturnType<typeof setTimeout> | undefined;
@@ -62,7 +80,9 @@ export async function cliStartDefaultsFor(place: StartDefaultsPlace, waitMs = 4_
       const list = await Promise.race([bridge?.listMachines?.().catch(() => undefined), late]);
       return cliStartDefaultsOf(place, undefined, { machines: list?.machines ?? [], status: list?.status ?? [] });
     }
-    const catalog = await Promise.race([memberModelCatalogFor({ kind: place.kind }), late]);
+    // The list the New chat screen already read (as its controls showed it),
+    // without waiting for a fresh read; read and waited for only when none.
+    const catalog = memberModelCatalogKnown({ kind: place.kind }) ?? await Promise.race([memberModelCatalogFor({ kind: place.kind }), late]);
     return cliStartDefaultsOf(place, catalog, NO_MACHINES);
   } finally {
     if (timer) clearTimeout(timer);

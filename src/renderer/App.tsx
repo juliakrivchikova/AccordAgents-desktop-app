@@ -627,6 +627,7 @@ function App(): JSX.Element {
                 onMainSessionProviderChange={state.setNewChatMainSessionProvider}
                 mainSessionOverrideFor={state.newChatMainSessionOverrideFor}
                 onMainSessionOverrideForChange={state.setNewChatMainSessionOverrideFor}
+                onMainSessionStartAccessChange={state.setNewChatMainSessionStartAccess}
                 settings={state.settings}
                 summaries={state.summaries}
                 agents={state.agents}

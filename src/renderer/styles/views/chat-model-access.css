@@ -28,7 +28,7 @@
   flex: 0 0 auto;
 }
 
-.chat-composer-controls[data-density="6"] > [data-testid$="-model"] {
+.chat-composer-controls > .chat-model-chip:has(.is-shortened) {
   flex: 0 1 auto;
   min-width: 0;
   overflow: hidden;

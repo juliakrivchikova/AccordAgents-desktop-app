@@ -200,13 +200,19 @@ chat without a main session is always `classic`; its switch is disabled.
     Approve for me), Claude Code's `initialize` answer
     (`current_permission_mode`, from `permissions.defaultMode`) and its
     `get_settings` answer (`applied.model`, `applied.effort`), agy's
-    settings.json `agentMode` (none saved: Auto mode, as agy 1.5.14 starts
-    `-p` runs too; `""`: Default). A machine reads its own and says them in
-    its hello (`cliStartDefaults`, re-sent when a read changes them); the
+    settings.json `agentMode` (`""`: Default; none saved: agy starts in Auto
+    only where the account has Auto mode, which the app cannot read, so
+    Default). A machine reads its own and says them in its hello
+    (`cliStartDefaults`, re-sent when a read changes them; a hello without
+    them keeps what the machine said before); the
     phone gets this computer's with each provider
     (`NewChatProviderOffer.start`) and each machine's
     (`HubNewChatOptions.cliStart`). The mode follows where it runs until
-    one is chosen; a mode chosen stays. When the config names a
+    one is chosen; a mode chosen stays. The chat is made in the mode the
+    screen showed (`newChatMainSessionStartAccess`), never one read again at
+    send. A changed config file (Codex's config.toml, Claude Code's
+    settings.json, agy's settings.json) is read again the next time a
+    composer shows these (`cliConfigStamp`). When the config names a
     combination the CLI's own picker has no entry for (Codex's "Custom
     permissions", Claude Code's Bypass Permissions or Don't Ask), it cannot
     be read, or a machine's program predates it, the CLI's built-in default

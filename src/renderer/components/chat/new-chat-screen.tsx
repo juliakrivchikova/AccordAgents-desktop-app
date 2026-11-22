@@ -47,7 +47,7 @@ import {
   newChatMainSessionParticipantConfig,
   newChatMainSessionParticipantDraft
 } from "./chat-main-session-draft";
-import { useCliStartDefaults, useMachineList } from "./use-cli-start-defaults";
+import { startAccessKey, useCliStartDefaults, useMachineList, type NewChatStartAccess } from "./use-cli-start-defaults";
 import { participantOptionInvalidReason } from "./chat-cli-readiness";
 import {
   assistantSubstituteNote,
@@ -112,6 +112,9 @@ export function NewChatScreen(props: {
    *  this screen were made for; settings made for another one are dropped. */
   mainSessionOverrideFor?: string;
   onMainSessionOverrideForChange?: (key: string | undefined) => void;
+  /** Told the mode the main session is shown starting in (her CLI config's
+   *  where it runs): the chat is made in what was shown. */
+  onMainSessionStartAccessChange?: (shown: NewChatStartAccess | undefined) => void;
   settings: AppSettings;
   summaries: ConversationSummary[];
   agents: AgentHealth[];
@@ -237,6 +240,14 @@ export function NewChatScreen(props: {
     () => mainKind ? newChatMainSessionParticipantConfig(mainKind, Boolean(props.repoPath.trim()), mainHostId, sessionsView, startAccess) : undefined,
     [mainHostId, mainKind, props.repoPath, sessionsView, startAccess]
   );
+  const { onMainSessionStartAccessChange } = props;
+  const startShownKey = mainProviderKey
+    ? startAccessKey(mainProviderKey, { homeMachineId: mainSessionOverride?.homeMachineId, cloudRun: mainSessionOverride?.cloudRun })
+    : undefined;
+  useEffect(() => {
+    if (!sessionsView) return;
+    onMainSessionStartAccessChange?.(startShownKey ? { key: startShownKey, ...(startAccess ? { access: startAccess } : {}) } : undefined);
+  }, [onMainSessionStartAccessChange, sessionsView, startAccess, startShownKey]);
   const savedParticipantOptions = useMemo(
     () => sortSavedParticipantOptionsByUsage(
       addableSavedParticipantConfigs(props.settings, props.agents, new Set())

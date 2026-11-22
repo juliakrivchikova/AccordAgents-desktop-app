@@ -3129,6 +3129,9 @@ readline.createInterface({ input: process.stdin }).on("line", (line) => {
     const catalog = await runner.listModelCatalog("codex-cli");
     assert.equal(catalog.authoritative, true, catalog.error);
     assert.equal(catalog.models[0]?.id, "gpt-fixture");
+    // A Codex that cannot say its config: the list as it marked it, no start defaults.
+    assert.equal(catalog.startDefaults, undefined);
+    assert.equal(catalog.models[0]?.recommended, true);
   } finally {
     await runner.shutdownWarmAgents();
     process.chdir(originalCwd);
@@ -7246,6 +7249,10 @@ test("Codex's Plan mode is its collaboration mode, said on every turn (a thread 
   // thread came back from a turn in Plan mode without one.
   runner.modelCatalogs.set("codex-cli", { catalog: { kind: "codex-cli", models: [], authoritative: true, fetchedAt: "t", startDefaults: { reasoningEffort: "low" } }, expiresAt: Date.now() + 60_000 });
   assert.equal(runner.codexCollaborationMode(noEffort, "chat", ownModeOptions("default", true), "gpt-5.6-luna", undefined).settings.reasoning_effort, "low");
+  // A model of the member's own, or an added provider: the thread's effort
+  // (Codex's own choice for it), never her config's.
+  assert.equal(runner.codexCollaborationMode({ ...noEffort, model: "gpt-6-luna" }, "chat", ownModeOptions("default", true), "gpt-6-luna", "medium").settings.reasoning_effort, "medium");
+  assert.equal(runner.codexCollaborationMode({ ...noEffort, codexConfigOverrides: ['model_provider="accordagents_host"'] }, "chat", ownModeOptions("default", true), "glm-5.3", undefined).settings.reasoning_effort, null);
   runner.modelCatalogs.delete("codex-cli");
   assert.equal(runner.codexCollaborationMode({ ...participant, model: "gpt-5.6-terra" }, "chat", planned, "gpt-6-luna").settings.model, "gpt-5.6-terra", "the member's own model");
   assert.equal(runner.codexCollaborationMode(participant, "chat", planned, undefined), undefined, "no model known: nothing said");

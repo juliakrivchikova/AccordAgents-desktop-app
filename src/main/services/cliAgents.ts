@@ -36,7 +36,7 @@ import type {
 } from "../../shared/types";
 import { chatAgentModeForKind, effectiveChatAgentPermissionsForProvider, normalizeChatAgentMode, normalizeChatAgentPermissions } from "../../shared/agentPermissions";
 import { codexPlanModeOn, withCodexPlanMode } from "../../shared/chatAccessModes";
-import { antigravityStartAccess, claudeStartAccess, codexStartAccess, type CliStartDefaults, type CliStartDefaultsByKind } from "../../shared/cliStartDefaults";
+import { antigravityStartAccessFromText, claudeStartAccess, codexStartAccess, modelNameWithoutId, type CliStartDefaults, type CliStartDefaultsByKind } from "../../shared/cliStartDefaults";
 import { buildAgentContextUsage, contextWindowForModel } from "../../shared/agentContext";
 import { agentEnvironmentKeyValidationError, filterAllowedAgentEnvironment } from "../../shared/agentEnvironment";
 import { GEMINI_API_KEY_SETTINGS, geminiApiKeyEnv } from "../../shared/cliProviderHosts";
@@ -257,6 +257,24 @@ export const COMPACTION_CANCELLED_BEFORE_START = "Compaction was cancelled befor
  *  while it waited there for a reply in progress). */
 export const COMPACTION_CANCELLED = "Compaction was cancelled.";
 
+/** The User's own config file of a CLI (where its start defaults come
+ *  from), as its size and change time: Codex's config.toml, Claude Code's
+ *  settings.json, agy's settings.json. */
+async function cliConfigStamp(kind: ChatProviderKind): Promise<string> {
+  const env = commandEnvironment();
+  const file = kind === "codex-cli"
+    ? path.join(env.CODEX_HOME?.trim() || path.join(homedir(), ".codex"), "config.toml")
+    : kind === "claude-code"
+      ? path.join(env.CLAUDE_CONFIG_DIR?.trim() || path.join(homedir(), ".claude"), "settings.json")
+      : geminiUserSettingsPath(homedir());
+  try {
+    const info = await stat(file);
+    return `${info.size}:${info.mtimeMs}`;
+  } catch {
+    return "none";
+  }
+}
+
 function textField(value: unknown): string | undefined {
   return typeof value === "string" && value.trim() ? value.trim() : undefined;
 }
@@ -279,12 +297,6 @@ export function withCliStartModel(models: readonly ProviderModel[], startModel: 
   return models.map((model, position) => position === index
     ? (model.recommended ? model : { ...model, recommended: true })
     : (model.recommended ? { ...model, recommended: false } : model));
-}
-
-/** A Codex model's name without the id its label repeats in brackets. */
-function codexModelName(model: ProviderModel): string {
-  const repeated = ` (${model.id})`;
-  return model.label.endsWith(repeated) && model.label.length > repeated.length ? model.label.slice(0, -repeated.length) : model.label;
 }
 
 /** `agy models` prints `<id>\t<label>` per line (seen on agy 1.5.11;
@@ -837,6 +849,9 @@ interface CodexAppServerPendingGuardianApproval {
 interface CachedModelCatalog {
   catalog: ProviderModelCatalog;
   expiresAt: number;
+  /** The User's CLI config file as it was when the list was read (its start
+   *  defaults come from it): another one reads the list again. */
+  configStamp?: string;
 }
 
 interface CodexAppServerPendingTurn {
@@ -1859,7 +1874,10 @@ export class CliAgentRunner {
 
   async listModelCatalog(kind: ChatProviderKind, configuredModel?: string, probeCwd?: string): Promise<ProviderModelCatalog> {
     const cached = this.modelCatalogs.get(kind);
-    if (cached && cached.expiresAt > Date.now()) {
+    // Her CLI config changed since the list was read: what a new session
+    // starts in (and its model) may have changed with it.
+    const configStamp = await cliConfigStamp(kind);
+    if (cached && cached.expiresAt > Date.now() && cached.configStamp === configStamp) {
       return kind === "claude-code" && process.platform === "win32"
         ? cached.catalog
         : this.withConfiguredModel(cached.catalog, configuredModel);
@@ -1881,7 +1899,8 @@ export class CliAgentRunner {
       if (!(kind === "claude-code" && !catalog.authoritative)) {
         this.modelCatalogs.set(kind, {
           catalog: normalized,
-          expiresAt: Date.now() + MODEL_CATALOG_CACHE_MS
+          expiresAt: Date.now() + MODEL_CATALOG_CACHE_MS,
+          configStamp
         });
       }
       return normalized;
@@ -2344,7 +2363,7 @@ export class CliAgentRunner {
       const access = codexStartAccess(config);
       const startDefaults: CliStartDefaults | undefined = config ? {
         ...(access ? { access } : {}),
-        ...(startModel ? { model: startModel.id, modelLabel: codexModelName(startModel) } : {}),
+        ...(startModel ? { model: startModel.id, modelLabel: modelNameWithoutId(startModel.label, startModel.id) } : {}),
         ...(reasoningEffort ? { reasoningEffort } : {})
       } : undefined;
       return {
@@ -2366,10 +2385,15 @@ export class CliAgentRunner {
   private async readCodexStartConfig(sendRequest: (method: string, params: unknown) => Promise<unknown>): Promise<Record<string, unknown> | undefined> {
     let timer: NodeJS.Timeout | undefined;
     try {
+      const late = Symbol("late");
       const answer = await Promise.race([
         sendRequest("config/read", {}),
-        new Promise<undefined>((resolve) => { timer = setTimeout(() => resolve(undefined), CODEX_CONFIG_READ_TIMEOUT_MS); })
+        new Promise<typeof late>((resolve) => { timer = setTimeout(() => resolve(late), CODEX_CONFIG_READ_TIMEOUT_MS); })
       ]);
+      if (answer === late) {
+        await this.debugLogs?.write("cli.model-catalog.codex-config-timeout", { timeoutMs: CODEX_CONFIG_READ_TIMEOUT_MS });
+        return undefined;
+      }
       return this.asRecord(this.asRecord(answer)?.config);
     } catch (error) {
       await this.debugLogs?.write("cli.model-catalog.codex-config-unread", { message: error instanceof Error ? error.message : String(error) });
@@ -2653,22 +2677,13 @@ export class CliAgentRunner {
     return { kind: "gemini-cli", models, authoritative: true, fetchedAt, ...(Object.keys(startDefaults).length > 0 ? { startDefaults } : {}) };
   }
 
-  /** The mode agy starts in with the User's settings.json (its `agentMode`;
-   *  none saved: Auto where it has it); none when the file is not plain JSON. */
+  /** The mode agy starts in as the User's settings.json saves it (its
+   *  `agentMode`); none when nothing is saved or the file cannot be read. */
   private async antigravityStartAccess(): Promise<string | undefined> {
-    let settingsText: string | undefined;
     try {
-      settingsText = await readFile(geminiUserSettingsPath(homedir()), "utf8");
+      return antigravityStartAccessFromText(await readFile(geminiUserSettingsPath(homedir()), "utf8"));
     } catch {
-      settingsText = undefined;
-    }
-    if (settingsText === undefined) return antigravityStartAccess(undefined, process.platform);
-    try {
-      const parsed = JSON.parse(settingsText.replace(/^\uFEFF/, "")) as unknown;
-      return parsed && typeof parsed === "object" && !Array.isArray(parsed)
-        ? antigravityStartAccess(parsed as { agentMode?: unknown }, process.platform)
-        : undefined;
-    } catch {
+      // No file, or one that cannot be read: nothing saved that the app can see.
       return undefined;
     }
   }
@@ -3791,6 +3806,12 @@ export class CliAgentRunner {
     // The effort the thread runs at as Codex says (her config's when the
     // member sets none): a collaboration mode said on a turn keeps it.
     let activeEffort: ChatReasoningEffort | undefined;
+    // The model and effort the thread runs at, as Codex said on start,
+    // resume or fork.
+    const takeThread = (result: CodexAppServerThreadStartResult): void => {
+      activeModel = result.model ?? activeModel;
+      activeEffort = this.codexReasoningEffort((result.reasoningEffort ?? undefined) as ChatReasoningEffort | undefined) ?? activeEffort;
+    };
     // Fork to new chat: why the fork just made copied the whole thread
     // instead of ending where it was asked to (the next run reports it).
     let forkCutMissed: string | undefined;
@@ -4025,16 +4046,14 @@ export class CliAgentRunner {
         }
         threadId = forkedThreadId;
         threadLoaded = true;
-        activeModel = result.model ?? activeModel;
-        activeEffort = this.codexReasoningEffort((result.reasoningEffort ?? undefined) as ChatReasoningEffort | undefined) ?? activeEffort;
+        takeThread(result);
         return forkedThreadId;
       }
       if (threadId) {
         if (options.sessionId && threadId === options.sessionId) {
           const result = await sendRequest("thread/resume", this.codexAppServerThreadResumeParams(options.sessionId, participant, repoPath, kind, options), timeoutMs) as CodexAppServerThreadStartResult;
           threadId = result.thread?.id ?? options.sessionId;
-          activeModel = result.model ?? activeModel;
-          activeEffort = this.codexReasoningEffort((result.reasoningEffort ?? undefined) as ChatReasoningEffort | undefined) ?? activeEffort;
+          takeThread(result);
         }
         threadLoaded = true;
         return threadId;
@@ -4046,8 +4065,7 @@ export class CliAgentRunner {
       }
       threadId = nextThreadId;
       threadLoaded = true;
-      activeModel = result.model ?? activeModel;
-      activeEffort = this.codexReasoningEffort((result.reasoningEffort ?? undefined) as ChatReasoningEffort | undefined) ?? activeEffort;
+      takeThread(result);
       return nextThreadId;
     };
 
@@ -4693,8 +4711,7 @@ export class CliAgentRunner {
         const compactThreadId = resumeResult.thread?.id ?? currentThreadId;
         threadId = compactThreadId;
         threadLoaded = true;
-        activeModel = resumeResult.model ?? activeModel;
-        activeEffort = this.codexReasoningEffort((resumeResult.reasoningEffort ?? undefined) as ChatReasoningEffort | undefined) ?? activeEffort;
+        takeThread(resumeResult);
         this.reportSessionId(onSessionId, compactThreadId);
         if (pendingCompact) {
           return { participant, ok: false, error: "codex app-server already has an active compact operation" };
@@ -5015,6 +5032,10 @@ export class CliAgentRunner {
     const model = participant.model ?? threadModel;
     if (kind !== "chat" || !model) return undefined;
     const { plan } = this.codexRunAccess(kind, options);
+    // Her config's effort goes with her config's model only (a model of the
+    // member's own, or an added provider's, takes the thread's: Codex's own
+    // choice for it).
+    const runsConfigModel = !participant.model && !(participant.codexConfigOverrides?.length);
     return {
       mode: plan ? "plan" : "default",
       settings: {
@@ -5022,7 +5043,8 @@ export class CliAgentRunner {
         // Default keeps the member's effort, else her config.toml's (what her
         // terminal's Default runs at, also after a turn in Plan mode), else
         // the thread's: a null here would reset it to the model's own.
-        reasoning_effort: plan ? null : this.codexReasoningEffort(participant.reasoningEffort) ?? this.codexConfigEffort() ?? threadEffort ?? null,
+        reasoning_effort: plan ? null : this.codexReasoningEffort(participant.reasoningEffort) ??
+          (runsConfigModel ? this.codexConfigEffort() : undefined) ?? threadEffort ?? null,
         developer_instructions: null
       }
     };
