@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { timelineEventsFromSnapshot } from "./mobileTimeline";
 import { mobileWhoLabel } from "./mobileChatCatalog";
-import type { Conversation } from "../../shared/types";
+import type { ChatMessage, Conversation } from "../../shared/types";
 
 // What the User's server serves the phone as a chat's page (mobileChatCatalog
 // builds it with these), carried over from the relay's control tests.
@@ -683,4 +683,18 @@ test("a task travels to the phone saying whether the main session gave its title
   const items = (id: string) => events.find((event) => event.id === id)?.participantRequest?.items ?? [];
   assert.deepEqual(items("delegate").map((entry) => [entry.title, entry.titled]), [["Новые чаты в General", true]]);
   assert.deepEqual(items("follow-up").map((entry) => [entry.titled]), [[false]], "a title made from its text is not the main session's");
+});
+
+test("a reply a Stop or the User's quit ended reaches the phone as stopped, not as an error", () => {
+  const at = "2026-11-22T10:00:00.000Z";
+  const reply = (id: string, terminalReason?: "user-stopped" | "stop-unconfirmed"): ChatMessage => ({ id, role: "participant", participantId: "p", participantLabel: "@p",
+    content: "Interrupted before completion.", createdAt: at, status: "error", ...(terminalReason ? { metadata: { terminalReason } } : {}) });
+  const chat: Conversation = { id: "quit-chat", kind: "chat", title: "Quit", createdAt: at, updatedAt: at, findings: [], metadata: {},
+    messages: [reply("stopped", "user-stopped"), reply("failed"), reply("unconfirmed", "stop-unconfirmed")] } as Conversation;
+  const events = timelineEventsFromSnapshot(chat);
+  const byId = new Map(events.map((event) => [event.id, event]));
+  assert.equal(byId.get("stopped")?.stopped, true);
+  assert.equal(byId.get("stopped")?.status, "error");
+  assert.equal(byId.get("failed")?.stopped, undefined);
+  assert.equal(byId.get("unconfirmed")?.stopped, undefined, "a Stop nobody confirmed is not said to have stopped");
 });

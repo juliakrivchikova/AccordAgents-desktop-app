@@ -393,6 +393,27 @@ function markInterruptedForRecovery(message: ChatMessage): void {
   if (!message.content) message.content = INTERRUPTED_REPLY_TEXT;
   message.metadata = { ...message.metadata, staleRunRecovery: { runId: message.metadata?.runId, at: new Date().toISOString() } };
 }
+
+/** Whether a failed run failed because its process was closed or cancelled
+ *  (what quitting does to it), not for a reason of its own (sign-in, a
+ *  limit, a missing folder), which the reply keeps saying even then. */
+function closedByQuit(error: string | undefined): boolean {
+  return /process exited|exited with code|transport channel closed|stdin is closed|process is not running|worker quit|cancelled|canceled|interrupted|SIGTERM|SIGKILL/i.test(error ?? "");
+}
+
+/** A member's turn the User's quit ended (2026-11-22): stopped, as a Stop
+ *  is, and saying it was interrupted, alike on the computer and the phone,
+ *  whichever ended it first, the quit or the run itself as its process
+ *  closed (which alone would say the member "stopped before it returned a
+ *  response", an error). */
+function markStoppedByQuit(message: ChatMessage, recovery: boolean): void {
+  if (recovery) markInterruptedForRecovery(message);
+  else {
+    message.status = "error";
+    message.content = INTERRUPTED_REPLY_TEXT;
+  }
+  message.metadata = { ...message.metadata, terminalReason: "user-stopped" };
+}
 /** How long the phone's New chat offer keeps a provider's model list before
  *  reading it again (in the background), and how soon a failed read is tried
  *  again. */
@@ -11513,6 +11534,10 @@ export class ChatService {
         this.markParticipantMessageStoppedByUser(pendingMessage, participant, {
           preserveContent: result.ok && result.content.trim().length > 0
         });
+      } else if (!result.ok && this.quitting && closedByQuit(result.error)) {
+        // Its process closed because the User quits: what the quit says of
+        // the turns it ends (endTurnsForQuit), not a failure of the member.
+        markStoppedByQuit(pendingMessage, false);
       } else {
         pendingMessage.status = result.ok ? "done" : "error";
       }
@@ -11522,7 +11547,8 @@ export class ChatService {
         const { queuedBehind: _queuedBehind, turnQueued: _turnQueued, ...metadata } = pendingMessage.metadata;
         pendingMessage.metadata = metadata;
       }
-      const notReady = !signal?.aborted && !result.ok && firstTurnHere ? await this.firstTurnProviderProblem(participant) : undefined;
+      const endedByQuit = !signal?.aborted && !result.ok && this.quitting && closedByQuit(result.error);
+      const notReady = !signal?.aborted && !result.ok && !endedByQuit && firstTurnHere ? await this.firstTurnProviderProblem(participant) : undefined;
       if (notReady) {
         pendingMessage.content = pendingMessage.content.trim() ? `${notReady}\n\n${pendingMessage.content}` : notReady;
         options.warnings.push(notReady);
@@ -11531,10 +11557,10 @@ export class ChatService {
         this.markPendingAppToolApprovalsForRunTerminal(
           conversation,
           runId,
-          result.error ?? `@${participant.handle} failed before pending approval was resolved.`
+          endedByQuit ? INTERRUPTED_REPLY_TEXT : result.error ?? `@${participant.handle} failed before pending approval was resolved.`
         );
       }
-      if (!signal?.aborted && !result.ok && result.error) {
+      if (!signal?.aborted && !result.ok && !endedByQuit && result.error) {
         options.warnings.push(`@${participant.handle}: ${result.error}`);
       }
       if (result.ok && result.turnContinues && !signal?.aborted) {
@@ -18406,6 +18432,9 @@ export class ChatService {
           );
           const now = new Date().toISOString();
           const remoteReplyStillRunning = false;
+          // A reply the User's quit ended is interrupted, as the requests the
+          // quit itself ends are (endTurnsForQuit), however it ended first.
+          const endedByQuit = this.quitting && reply?.metadata?.terminalReason === "user-stopped";
           const stoppedByUser = reply?.metadata?.terminalReason === "user-stopped";
           this.updateParticipantRequestBatch(conversation, requestMessageId, (current) => ({
             ...current,
@@ -18422,9 +18451,11 @@ export class ChatService {
                   replyMessageId: reply?.id,
                   error: waitingOnPermissionApproval || remoteReplyStillRunning
                     ? undefined
-                    : stoppedByUser
-                      ? PARTICIPANT_REQUEST_STOPPED_BY_USER
-                      : reply?.status === "error" ? reply.content : undefined,
+                    : endedByQuit
+                      ? PARTICIPANT_REQUEST_INTERRUPTED_BEFORE_COMPLETION
+                      : stoppedByUser
+                        ? PARTICIPANT_REQUEST_STOPPED_BY_USER
+                        : reply?.status === "error" ? reply.content : undefined,
                   updatedAt: now
                 }
               : candidate),
@@ -26541,7 +26572,7 @@ export class ChatService {
           for (const message of conversation.messages) {
             if (message.role !== "participant" || message.participantId !== run.participantId || message.metadata?.runId !== run.runId ||
                 message.status !== "pending" || message.metadata?.serverPlaceholder) continue;
-            markInterruptedForRecovery(message);
+            markStoppedByQuit(message, true);
             changed = true;
           }
           this.finishServerTurn(run.runId, "interrupted");

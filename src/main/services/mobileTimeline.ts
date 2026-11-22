@@ -120,6 +120,10 @@ export interface MobileTimelineEvent {
   content: string;
   attachments?: MobileTimelineAttachment[];
   status: "pending" | "done" | "error";
+  /** An ended reply its member did not finish because it was stopped (a
+   *  Stop, the User quitting the app): the phone says Stopped, as the
+   *  computer does, not Error. */
+  stopped?: true;
   createdAt: string;
   /** A running reply still waiting behind its member's turn before it. */
   queued?: true;
@@ -447,6 +451,7 @@ function timelineEventFromMessage(
     ...(activity ?? {}),
     ...turnTiming,
     status: message.status ?? "done",
+    ...(message.role === "participant" && message.status === "error" && message.metadata?.terminalReason === "user-stopped" ? { stopped: true as const } : {}),
     createdAt: message.createdAt,
     runId,
     messageId: message.id,

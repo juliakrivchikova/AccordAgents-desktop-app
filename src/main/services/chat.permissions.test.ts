@@ -16323,3 +16323,41 @@ test("a model list that fails is tried again after a minute, never replacing the
   assert.deepEqual(offer?.mainSessionProviders?.[0]?.models.map((model) => model.id), ["gpt-5.5-mini"], "the last good list stays through a failed refresh");
   assert.equal(republished, 1, "and a flapping read publishes nothing");
 });
+
+test("a member's turn whose process closes as the User quits ends stopped and interrupted, never as the member's failure", async () => {
+  const participant = chatParticipant("claude-code");
+  const conversation = chatConversation([participant]);
+  const { service, storage, tempRoot } = testService({
+    conversation,
+    run: async (runParticipant) => ({ participant: runParticipant, ok: false, content: `${runParticipant.label} stopped before it returned a response.`,
+      error: "claude warm process exited with code 143", durationMs: 1 })
+  });
+  (service as any).ensureHistoryFiles = async () => tempRoot;
+  const warnings: string[] = [];
+  service.beginQuit();
+  await (service as any).runParticipantTurnSerialized(storage.current, participant, storage.current.messages[0], "run-quit", undefined, undefined, { warnings })
+    .catch(() => undefined);
+  const reply = storage.current.messages.filter((message: ChatMessage) => message.role === "participant").at(-1)!;
+  assert.equal(reply.status, "error");
+  assert.equal(reply.content, "Interrupted before completion.");
+  assert.equal(reply.metadata?.terminalReason, "user-stopped");
+  assert.equal(warnings.some((warning) => warning.includes("exited")), false, "a quit is not the member's failure");
+});
+
+test("a member's own failure in the last seconds of a quit still says what failed", async () => {
+  const participant = chatParticipant("claude-code");
+  const conversation = chatConversation([participant]);
+  const { service, storage, tempRoot } = testService({
+    conversation,
+    run: async (runParticipant) => ({ participant: runParticipant, ok: false,
+      content: `${runParticipant.label} could not finish because Claude Code needs authorization.`, error: "Please run /login: authentication required", durationMs: 1 })
+  });
+  (service as any).ensureHistoryFiles = async () => tempRoot;
+  service.beginQuit();
+  await (service as any).runParticipantTurnSerialized(storage.current, participant, storage.current.messages[0], "run-quit-auth", undefined, undefined, { warnings: [] })
+    .catch(() => undefined);
+  const reply = storage.current.messages.filter((message: ChatMessage) => message.role === "participant").at(-1)!;
+  assert.equal(reply.status, "error");
+  assert.match(reply.content, /needs authorization/);
+  assert.equal(reply.metadata?.terminalReason, undefined, "not stopped by the quit");
+});
