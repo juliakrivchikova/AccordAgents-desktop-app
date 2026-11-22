@@ -1087,6 +1087,13 @@ export const CLAUDE_PERMISSION_MODE_LABELS: Readonly<Record<ClaudePermissionMode
   auto: "Auto"
 };
 
+/** How much a mode lets Claude Code do without asking: Plan edits nothing,
+ *  Manual asks before edits and commands, Accept edits makes edits, Auto
+ *  decides commands too. */
+export function claudePermissionModeRank(mode: ClaudePermissionMode): number {
+  return mode === "plan" ? 0 : mode === "default" ? 1 : mode === "acceptEdits" ? 2 : 3;
+}
+
 /** Claude Code's `--permission-mode` for a chat member's mode and rights:
  *  Manual (`default`) or Accept edits by the file-edit right, Plan, or Auto.
  *  Codex's Full Access is not a Claude Code mode: Auto, the broadest one

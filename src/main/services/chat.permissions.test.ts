@@ -2020,6 +2020,52 @@ test("Claude Code's own modes: a mode change keeps the member's live process, is
   assert.ok(debugEvents.some((entry) => entry.event === "chat.member-mode.apply-failed"));
 });
 
+test("Claude Code's own modes: a lowered mode that its live process does not take is never written back up; a reply it is writing is stopped", async () => {
+  let release: (() => void) | undefined;
+  const drew = { ...chatParticipant("claude-code", { repoRead: true }), agentMode: "auto" as const,
+    permissions: { ...normalizeChatAgentPermissions({ ...defaultChatAgentPermissions(), repoRead: true }), cliApprovals: true as const } };
+  const conversation = chatConversation([drew]);
+  const { service, storage, tempRoot, debugEvents } = testService({
+    conversation,
+    run: async (runParticipant, _prompt, _repoPath, _diffMode, _kind, signal) => {
+      // The reply runs until it is stopped (or released).
+      await new Promise<void>((resolve) => {
+        release = resolve;
+        signal?.addEventListener("abort", () => resolve(), { once: true });
+      });
+      return { participant: runParticipant, ok: !signal?.aborted, content: signal?.aborted ? "" : "ok", durationMs: 1, sessionId: "session-drew", ...(signal?.aborted ? { error: "Stopped." } : {}) };
+    }
+  });
+  (service as any).ensureHistoryFiles = async () => tempRoot;
+  const process = liveClaudeProcess(service);
+  process.mode = "auto";
+  const own = { ...drew.permissions };
+  await service.sendMessage({ conversationId: conversation.id, runId: "run-1", content: "@drew go on" });
+  await waitFor(() => release !== undefined && storage.current.messages.some((message: ChatMessage) => message.participantId === drew.id && message.status === "pending"));
+
+  // She lowers Auto to Manual; the switch times out and the process stays in Auto.
+  process.refuse = "Claude Code did not answer within 15 seconds";
+  await service.updateParticipantRuntime({ conversationId: conversation.id, participantId: drew.id, agentMode: "default", permissions: own });
+  const line = "Claude Code did not switch @drew to Manual: Claude Code did not answer within 15 seconds. Its reply was stopped so it does not go on in Auto; its next message switches it to Manual first.";
+  await waitFor(() => (storage.current.metadata.warnings ?? []).includes(line));
+  await waitFor(() => !storage.current.messages.some((message: ChatMessage) => message.participantId === drew.id && message.status === "pending"));
+  const member = (storage.current.metadata.participants as ChatParticipant[])[0];
+  assert.equal(member.agentMode, "default", "her Manual stays the member's mode, never Auto again");
+  assert.equal(normalizeChatAgentPermissions(member.permissions).workspaceWrite, false);
+  await flushMicrotasks();
+  assert.equal((storage.current.metadata.participants as ChatParticipant[])[0].agentMode, "default", "nothing writes it back later");
+  assert.equal(debugEvents.filter((entry) => entry.event === "chat.member-mode.followed-cli").length, 0, "the CLI's wider mode is not followed");
+
+  // The CLI answers with a wider mode than the one asked, while idle: kept
+  // hers too, nothing to stop.
+  process.refuse = undefined;
+  process.mode = "default";
+  process.answer = "acceptEdits";
+  await service.updateParticipantRuntime({ conversationId: conversation.id, participantId: drew.id, agentMode: "plan", permissions: own });
+  await waitFor(() => (storage.current.metadata.warnings ?? []).includes("Claude Code switched @drew to Accept edits instead of Plan. Its next message switches it to Plan first."));
+  assert.equal((storage.current.metadata.participants as ChatParticipant[])[0].agentMode, "plan");
+});
+
 function fakeAppMcp() {
   const grants: any[] = [];
   return {
@@ -2068,18 +2114,21 @@ test("Claude Code's own modes: the app tool grant issued as the CLI takes a mess
   assert.equal(normalizeChatAgentPermissions(grant.runPermissions).workspaceWrite, true, "Auto's rights");
 });
 
-test("Claude Code's own modes: after a turn that ran in Accept edits by a once-only grant, the member's live process goes back to its own mode", async () => {
+test("Claude Code's own modes: a once-only grant of file edits lets that run's next file edit through once, and is no mode of the shared live process", async () => {
   const drew = ownModeClaude();
   const approval = permissionApproval(drew, { kind: "portable", permissions: ["workspaceWrite"] }, { status: "approved", approvalScope: "once" });
   const conversation = chatConversation([drew], { pendingAppToolApprovals: [approval] });
   let process!: ReturnType<typeof liveClaudeProcess>;
   const runs: any[] = [];
-  const { service, tempRoot } = testService({
+  let finish: (() => void) | undefined;
+  const appMcp = fakeAppMcp();
+  const { service, storage, tempRoot } = testService({
     conversation,
+    appMcp: appMcp as never,
     run: async (runParticipant, _prompt, _repoPath, _diffMode, _kind, _signal, options) => {
       runs.push(options);
-      // The runner switched the process before the message (alignment).
       process.mode = options.warm.permissionMode?.() ?? "default";
+      await new Promise<void>((resolve) => { finish = resolve; });
       return { participant: runParticipant, ok: true, content: "ok", durationMs: 1, sessionId: "session-drew" };
     }
   });
@@ -2087,9 +2136,35 @@ test("Claude Code's own modes: after a turn that ran in Accept edits by a once-o
   process = liveClaudeProcess(service);
   await service.sendMessage({ conversationId: conversation.id, runId: "run-once", content: "@drew edit it" });
   await waitFor(() => runs.length === 1);
-  assert.equal(runs[0].warm.permissionMode(), "acceptEdits", "the once-only grant: Accept edits for this turn");
-  await waitFor(() => process.sent.some((request) => request.mode === "default"));
-  assert.equal(process.mode, "default", "back in Manual for what it does on its own afterwards");
+  assert.equal(runs[0].warm.permissionMode(), "default", "its live process stays in Manual: overlapping turns share it");
+  assert.equal(normalizeChatAgentPermissions(runs[0].permissions).workspaceWrite, false, "the CLI is not started wider either");
+  assert.ok(appMcp.grants.length > 0 && appMcp.grants.every((grant) => grant.runPermissions?.workspaceWrite !== true), "nor its app tools");
+  // The member's run (its own id, as the app tool token names it).
+  const granted = [...((service as any).claudeOnceEditGrants as Map<string, string[]>).keys()];
+  assert.equal(granted.length, 1, "this run holds the grant");
+  const onceRun = granted[0]!;
+  const actor = (runId: string) => ({
+    conversationId: conversation.id, participantId: drew.id, roleConfigId: drew.roleConfigId, roleConfigVersion: 0,
+    capabilities: ["permissions.request" as const], runId, triggerMessageId: "user-message", agentMode: "default"
+  }) as never;
+  const pendingCards = () => ((storage.current.metadata.pendingAppToolApprovals ?? []) as ChatAppToolApproval[]).filter((item) => item.status === "pending");
+  // Another run of the member (a turn that overlaps) gets nothing of it.
+  const other = service.requestToolPermissionFromTool(actor("run-other"), { tool_name: "Edit", input: { file_path: "/repo/a.ts", old_string: "a", new_string: "b" }, tool_use_id: "t0" });
+  await waitFor(() => pendingCards().length === 1);
+  // This run's next file edit goes through, once.
+  const first = await service.requestToolPermissionFromTool(actor(onceRun), { tool_name: "Write", input: { file_path: "/repo/b.ts", content: "x" }, tool_use_id: "t1" });
+  assert.equal(first.behavior, "allow");
+  // A command is not a file edit; the next edit asks again.
+  const second = service.requestToolPermissionFromTool(actor(onceRun), { tool_name: "Edit", input: { file_path: "/repo/c.ts", old_string: "a", new_string: "b" }, tool_use_id: "t2" });
+  await waitFor(() => pendingCards().length === 2);
+  for (const card of pendingCards()) await service.respondToAppToolApproval({ conversationId: conversation.id, approvalId: card.id, approve: false });
+  assert.equal((await other).behavior, "deny");
+  assert.equal((await second).behavior, "deny");
+  finish?.();
+  await waitFor(() => storage.current.messages.some((message: ChatMessage) => message.participantId === drew.id && message.status === "done"));
+  assert.ok(!process.sent.some((request) => request.mode === "acceptEdits"), "never switched to Accept edits");
+  const used = ((storage.current.metadata.pendingAppToolApprovals ?? []) as ChatAppToolApproval[]).find((item) => item.id === approval.id);
+  assert.ok(used?.consumedAt, "the grant is used up with its turn");
 });
 
 test("Claude Code's own modes: a command the CLI asks about is never answered by the app from a stored shell rule (its rules are the CLI's own)", async () => {
@@ -2198,7 +2273,8 @@ test("Claude Code's plan approval: ExitPlanMode raises the CLI's own card; a Yes
 
   // An answer that is not one of its rows (an older phone's Allow, auto
   // mode the card did not offer) is refused; the card still asks.
-  await assert.rejects(service.respondToAppToolApproval({ conversationId: conversation.id, approvalId: card.id, approve: true }), /This answer is not one this card takes\./);
+  await assert.rejects(service.respondToAppToolApproval({ conversationId: conversation.id, approvalId: card.id, approve: true }), /^Error: Update the phone app to answer this card\.$/,
+    "an older phone's Allow: told why");
   await assert.rejects(service.respondToAppToolApproval({ conversationId: conversation.id, approvalId: card.id, approve: true,
     planDecision: { optionId: "yes-resume-auto-mode" } }), /This answer is not one this card takes\./);
   await service.respondToAppToolApproval({ conversationId: conversation.id, approvalId: card.id, approve: true,
@@ -2236,10 +2312,9 @@ test("Claude Code's plan approval: ExitPlanMode raises the CLI's own card; a Yes
   const asked = service.requestToolPermissionFromTool({ ...actor, runId: "run-45" }, { tool_name: "ExitPlanMode", input: { plan: "" }, tool_use_id: "toolu_plan_4" });
   const askedCard = await pendingToolPermission(storage, "ExitPlanMode");
   assert.deepEqual((askedCard.request as { planApproval?: unknown }).planApproval, { plan: "" });
-  // A Deny without a row (an older phone's) is refused too; "No, keep
-  // planning" with nothing typed is the CLI's rejection that waits for her.
-  await assert.rejects(service.respondToAppToolApproval({ conversationId: conversation.id, approvalId: askedCard.id, approve: false }), /This answer is not one this card takes\./);
-  await service.respondToAppToolApproval({ conversationId: conversation.id, approvalId: askedCard.id, approve: false, planDecision: { optionId: "no" } });
+  // A Deny without a row (Activity's Cancel, an older phone's Deny) is "No,
+  // keep planning" with nothing typed: the CLI's rejection that waits for her.
+  await service.respondToAppToolApproval({ conversationId: conversation.id, approvalId: askedCard.id, approve: false });
   assert.deepEqual(await asked, {
     behavior: "deny",
     message: "The user doesn't want to proceed with this tool use. The tool use was rejected (eg. if it was a file edit, the new_string was NOT written to the file). STOP what you are doing and wait for the user to tell you how to proceed."
@@ -3541,6 +3616,47 @@ test("a reply the Claude CLI starts on its own after background work becomes a n
   assert.equal(done.content, "The soak passed.");
   assert.ok(done.metadata.activityEvents?.some((event: { label: string }) => /Background task finished: soak/.test(event.label)));
   await waitFor(() => !(storage.current.metadata.activeRunIds ?? []).includes(pending.metadata.runId));
+});
+
+test("Claude Code's own modes: a reply the CLI starts on its own in a wider mode than the member's is switched first, else stopped", async () => {
+  const drew = ownModeClaude();
+  const conversation = chatConversation([drew]);
+  let warmOptions: any;
+  const { service, storage, tempRoot } = testService({
+    conversation,
+    run: async (runParticipant, _prompt, _repoPath, _diffMode, _kind, _signal, runOptions: any) => {
+      warmOptions = runOptions.warm;
+      return { participant: runParticipant, ok: true, content: "Started.", durationMs: 1 };
+    }
+  });
+  (service as any).ensureHistoryFiles = async () => tempRoot;
+  const process = liveClaudeProcess(service);
+  await service.sendMessage({ conversationId: conversation.id, runId: "send-1", content: "@drew start it" });
+  await waitFor(() => storage.current.messages.some((message: ChatMessage) => message.content === "Started." && message.status === "done"));
+  const selfStarted = () => {
+    let attachedSignal: AbortSignal | undefined;
+    warmOptions.onSelfResumedTurn({
+      origin: warmOptions.origin,
+      attach: (handlers: any) => {
+        attachedSignal = handlers.signal;
+        return Promise.resolve({ participant: drew, ok: !handlers.signal?.aborted, content: handlers.signal?.aborted ? "" : "Done on its own.", durationMs: 1 });
+      }
+    });
+    return () => attachedSignal;
+  };
+  // Its process still runs Auto (a lowered mode it did not take): switched to Manual first.
+  process.mode = "auto";
+  const first = selfStarted();
+  await waitFor(() => first() !== undefined);
+  assert.deepEqual(process.sent.at(-1), { subtype: "set_permission_mode", mode: "default" });
+  assert.equal(first()!.aborted, false, "switched: the reply goes on in Manual");
+  // It refuses the switch: the reply is stopped and the chat says so.
+  process.mode = "auto";
+  process.refuse = "Claude Code did not answer within 15 seconds";
+  const second = selfStarted();
+  await waitFor(() => second() !== undefined);
+  assert.equal(second()!.aborted, true, "stopped rather than go on in Auto");
+  await waitFor(() => (storage.current.metadata.warnings ?? []).some((warning: string) => warning.includes("started a reply on its own in Auto")));
 });
 
 test("a reply the Claude CLI started on its own that her next message joins keeps its steps open with no Worked for of its own", async () => {

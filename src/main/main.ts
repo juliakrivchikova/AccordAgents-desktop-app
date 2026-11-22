@@ -3542,6 +3542,11 @@ void app.whenReady().then(async () => {
       // A minute past the record's own retry window, so the key is due again.
       powerRetryMs: MACHINE_POWER_RETRY_MS + 60_000,
       powerMaxAttempts: MACHINE_POWER_MAX_ATTEMPTS,
+      // Her server updates itself after this desktop does: a machine waits for it.
+      serverVersion: async () => {
+        const client = hubOwnerConfirmed ? hubClient : undefined;
+        return client ? (await client.health()).version : undefined;
+      },
       holdTurns: (machineId, reason) => link.holdTurns(machineId, reason),
       onProgress: (snapshot) => sendToMainWindow("machines:install-progress", snapshot),
       onChanged: async () => { sendToMainWindow("machines:updated", await machineListResult()); },

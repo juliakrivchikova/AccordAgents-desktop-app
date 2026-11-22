@@ -86,7 +86,10 @@ test("Settings → General → New chats: compaction without asking by default, 
     }));
     const reread = await make().getPublicSettings();
     assert.deepEqual(reread.newChatDefaults, { kind: "codex-cli", access: "full-access", compactWithoutAsking: true });
-    assert.equal((reread as unknown as { defaultChatView?: unknown }).defaultChatView, undefined, "every new chat opens in the sessions view");
+    assert.equal((reread as unknown as { defaultChatView?: unknown }).defaultChatView, undefined, "not read: every new chat opens in the sessions view");
+    // Yet kept in the file through a save, so a downgrade keeps her choice.
+    await make().setNewChatDefaults({ compactWithoutAsking: false });
+    assert.equal(JSON.parse(await readFile(file, "utf8")).defaultChatView, "classic");
   });
 });
 

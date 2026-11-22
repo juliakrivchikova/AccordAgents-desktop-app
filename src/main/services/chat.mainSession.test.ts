@@ -1114,6 +1114,17 @@ test("a chat in the sessions view opened on the computer moves its classic-right
   assert.equal(normalizeChatAgentPermissions(participantsOf(fresh.storage.current).find((participant) => participant.id === "worker-id")!.permissions).cliApprovals, undefined,
     "marked: not converted again, also after a restart");
   assert.equal(fresh.storage.current.metadata.cliModesConvertedAt, marked);
+  assert.equal(fresh.storage.current.metadata.cliModesConvertedHereAt, marked, "and recorded on this computer");
+
+  // A server on an older program drops the shared mark (a full read from it
+  // deletes it here): the computer's own record keeps it from converting again.
+  const dropped = clone(fresh.storage.current);
+  delete (dropped.metadata as Record<string, unknown>).cliModesConvertedAt;
+  const afterOldServer = testService({ conversation: dropped });
+  await afterOldServer.service.hydrateContextUsage(clone(afterOldServer.storage.current));
+  await new Promise((resolve) => setTimeout(resolve, 50));
+  assert.equal(normalizeChatAgentPermissions(participantsOf(afterOldServer.storage.current).find((participant) => participant.id === "worker-id")!.permissions).cliApprovals, undefined,
+    "not converted again after an older server dropped the mark");
 });
 
 test("a chat shown in the classic view, and any chat on a machine, is not converted when opened", async () => {

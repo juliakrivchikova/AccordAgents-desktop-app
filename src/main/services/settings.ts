@@ -251,10 +251,12 @@ interface StoredSettings {
   agentEnvironment?: StoredAgentEnvironmentSettings;
   cliProviderHosts?: StoredCliProviderHost[];
   assistantProviderKind?: ChatProviderKind;
-  /** How a new chat starts besides its CLI (shared/newChatDefaults.ts). A
-   *  `defaultChatView` from before is dropped when the file is read: every
-   *  new chat opens in the sessions view. */
+  /** How a new chat starts besides its CLI (shared/newChatDefaults.ts). */
   newChatDefaults?: unknown;
+  /** The view new chats opened in before every new chat opened in the
+   *  sessions view: no longer read, but kept in the file as stored, so a
+   *  downgrade keeps her choice. */
+  defaultChatView?: unknown;
   lastSuccessfulChatProviderKind?: ChatProviderKind;
   lastRepoPath?: string;
   repoFileOpenAction?: RepoFileOpenAction;
@@ -3291,9 +3293,10 @@ export class SettingsService {
       },
       cliProviderHosts: this.normalizedCliProviderHosts(settings),
       assistantProviderKind: this.normalizeChatProviderKind(settings.assistantProviderKind),
-      // A `defaultChatView` from before is dropped: every new chat opens in
-      // the sessions view.
       newChatDefaults: settings.newChatDefaults === undefined ? undefined : normalizeNewChatDefaults(settings.newChatDefaults),
+      // Not read (every new chat opens in the sessions view); kept as stored
+      // for a downgrade.
+      ...(settings.defaultChatView === "classic" || settings.defaultChatView === "sessions" ? { defaultChatView: settings.defaultChatView } : {}),
       lastSuccessfulChatProviderKind: this.normalizeChatProviderKind(settings.lastSuccessfulChatProviderKind),
       lastRepoPath: typeof settings.lastRepoPath === "string" ? settings.lastRepoPath.trim() || undefined : undefined,
       ...this.mergeRepoFileOpenSettings(settings),
