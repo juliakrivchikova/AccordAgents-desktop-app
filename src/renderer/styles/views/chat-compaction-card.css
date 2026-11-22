@@ -143,9 +143,14 @@
   line-height: 18px;
 }
 
+/* A member's instructions can be long: three lines, the rest on hover. */
 .chat-compaction-card-keeps {
+  display: -webkit-box;
   margin: 10px 0 0;
+  overflow: hidden;
   overflow-wrap: anywhere;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 3;
 }
 
 .chat-compaction-card-keeps b {

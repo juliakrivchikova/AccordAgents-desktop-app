@@ -2204,7 +2204,9 @@ export class CliAgentRunner {
     if (participant.kind === "claude-code") {
       // The window the CLI reported for this model at the member's last
       // turn: Claude's session log names none.
-      const known = options.known?.source === "claude-code"
+      // Only a window the CLI reported: one an older build stored came from
+      // the map or from another model's entry.
+      const known = options.known?.source === "claude-code" && options.known.windowFromCli
         ? { contextWindowTokens: options.known.contextWindowTokens, model: options.known.model }
         : undefined;
       return this.extractClaudeSessionLogContextUsageWithRetry(sessionId, participant, attempts, known);
@@ -5248,8 +5250,9 @@ export class CliAgentRunner {
 
   private isCodexAppServerTokenUsageEventName(name: string): boolean {
     const normalized = this.normalizedCodexAppServerEventName(name);
-    // The CLI-style event the app-server notification mirrors.
-    return normalized === "thread_tokenusage_updated" || normalized === "token_count";
+    // The CLI-style event the app-server notification mirrors (`token_count`,
+    // or `codex/event/token_count` with it in `params.msg`).
+    return normalized === "thread_tokenusage_updated" || normalized === "token_count" || normalized.endsWith("_token_count");
   }
 
   private isCodexAppServerCompactCompleteEventName(name: string): boolean {
@@ -6482,7 +6485,8 @@ export class CliAgentRunner {
                 usedTokens: streamState.usedTokens,
                 contextWindowTokens: streamState.contextWindowTokens ?? contextWindowForModel(participant.kind, streamState.contextModel ?? streamState.model),
                 source: "claude-code",
-                model: streamState.contextModel ?? streamState.model
+                model: streamState.contextModel ?? streamState.model,
+                windowFromCli: streamState.contextWindowTokens !== undefined
               })
             : undefined) ??
           // `--output-format json` prints only the result, whose usage sums
@@ -7127,7 +7131,8 @@ export class CliAgentRunner {
           usedTokens: typeof answer?.totalTokens === "number" ? answer.totalTokens : undefined,
           contextWindowTokens: typeof answer?.maxTokens === "number" ? answer.maxTokens : undefined,
           source: "claude-code",
-          model: state.model ?? participant.model
+          model: state.model ?? participant.model,
+          windowFromCli: true
         });
       },
       control: async (request: Record<string, unknown>, timeoutMs: number, signal?: AbortSignal) => {
@@ -7910,7 +7915,8 @@ export class CliAgentRunner {
       usedTokens: reply.usedTokens,
       contextWindowTokens: reply.contextWindowTokens ?? contextWindowForModel(participant.kind, contextModel),
       source: "claude-code",
-      model: contextModel
+      model: contextModel,
+      windowFromCli: reply.contextWindowTokens !== undefined
     });
     let result: ParticipantRunResult = {
       participant,
@@ -9722,7 +9728,8 @@ export class CliAgentRunner {
       usedTokens: reading.usedTokens,
       contextWindowTokens: reading.contextWindowTokens ?? contextWindowForModel(participant.kind, participant.model),
       source: "codex-cli",
-      model: participant.model
+      model: participant.model,
+      windowFromCli: reading.contextWindowTokens !== undefined
     });
   }
 
@@ -9857,17 +9864,20 @@ export class CliAgentRunner {
       usedTokens: reading.usedTokens,
       contextWindowTokens: (knownApplies ? known.contextWindowTokens : undefined) ?? contextWindowForModel(participant.kind, model),
       source: "claude-code",
-      model
+      model,
+      windowFromCli: Boolean(knownApplies)
     });
   }
 
   private async findClaudeSessionLogPath(sessionId: string): Promise<string | undefined> {
-    return this.findFileByName(path.join(homedir(), ".claude", "projects"), `${sessionId}.jsonl`, 5);
+    // Where the CLI keeps them: CLAUDE_CONFIG_DIR when set (cliConfigStamp).
+    const configDir = commandEnvironment().CLAUDE_CONFIG_DIR?.trim() || path.join(homedir(), ".claude");
+    return this.findFileByName(path.join(configDir, "projects"), `${sessionId}.jsonl`, 5);
   }
 
   private async findCodexSessionLogPath(sessionId: string): Promise<string | undefined> {
     return this.findFileByNameMatch(
-      path.join(homedir(), ".codex", "sessions"),
+      path.join(commandEnvironment().CODEX_HOME?.trim() || path.join(homedir(), ".codex"), "sessions"),
       (fileName) => fileName.endsWith(".jsonl") && fileName.includes(sessionId),
       6
     );

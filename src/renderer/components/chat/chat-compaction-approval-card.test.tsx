@@ -105,27 +105,36 @@ test("Compact allows once, Compact with the box allows for this chat, Not now de
   assert.deepEqual(once.answers, [["approval-compact", true, "once"]]);
   act(() => once.renderer.unmount());
 
-  const always = render(approval());
+  const always = render(approval({ id: "approval-always" }));
   const box = always.root.find((node) => node.type === "input" && node.props.type === "checkbox");
   act(() => { box.props.onChange({ target: { checked: true } }); });
-  act(() => { button(always.root, "Compact").props.onClick(); });
-  assert.deepEqual(always.answers, [["approval-compact", true, "chat"]]);
   act(() => always.renderer.unmount());
+  // Drawn again (the timeline topping up, the view switching): still ticked.
+  const redrawn = render(approval({ id: "approval-always" }));
+  assert.equal(redrawn.root.find((node) => node.type === "input" && node.props.type === "checkbox").props.checked, true);
+  act(() => { button(redrawn.root, "Compact").props.onClick(); });
+  assert.deepEqual(redrawn.answers, [["approval-always", true, "chat"]]);
+  act(() => redrawn.renderer.unmount());
 
-  const notNow = render(approval());
+  const notNow = render(approval({ id: "approval-not-now" }));
   act(() => { button(notNow.root, "Not now").props.onClick(); });
-  assert.deepEqual(notNow.answers, [["approval-compact", false, undefined]]);
+  assert.deepEqual(notNow.answers, [["approval-not-now", false, undefined]]);
   act(() => notNow.renderer.unmount());
 
   const enter = render(approval());
   const section = byClass(enter.root, "chat-compaction-card")[0];
-  const onCard = { closest: () => null };
-  const onControl = { closest: () => ({}) };
-  // Enter on a control is that control's (Not now, the box), Shift+Enter is not Compact.
-  act(() => { section.props.onKeyDown({ key: "Enter", target: onControl, preventDefault: () => undefined }); });
-  act(() => { section.props.onKeyDown({ key: "Enter", shiftKey: true, target: onCard, preventDefault: () => undefined }); });
+  const card = (ring: boolean) => ({ matches: () => ring });
+  const key = (patch: Record<string, unknown>, current = card(true)) =>
+    act(() => { section.props.onKeyDown({ key: "Enter", currentTarget: current, target: current, preventDefault: () => undefined, ...patch }); });
+  // Enter on a control is that control's (Not now, the box); Shift+Enter,
+  // a held key, and a card focused by a click on its text (no ring) are not Compact.
+  key({ target: { closest: () => ({}) } });
+  key({ shiftKey: true });
+  key({ repeat: true });
+  const clicked = card(false);
+  key({}, clicked);
   assert.deepEqual(enter.answers, []);
-  act(() => { section.props.onKeyDown({ key: "Enter", target: onCard, preventDefault: () => undefined }); });
+  key({});
   assert.deepEqual(enter.answers, [["approval-compact", true, "once"]]);
   act(() => enter.renderer.unmount());
 });

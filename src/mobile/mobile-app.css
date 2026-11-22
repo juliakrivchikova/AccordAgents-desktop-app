@@ -5514,9 +5514,15 @@ button.card-row:focus-visible {
   line-height: 18px;
 }
 
+/* A member's instructions can be long: three lines, never pushing the
+   answers off the screen. */
 .control-card-keeps {
+  display: -webkit-box;
   margin-top: 8px;
+  overflow: hidden;
   overflow-wrap: anywhere;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 3;
 }
 
 .control-card-keeps b {

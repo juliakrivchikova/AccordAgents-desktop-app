@@ -909,6 +909,9 @@ export interface AgentContextUsage {
   source: AgentContextUsageSource;
   updatedAt: string;
   model?: string;
+  /** The window is the one the CLI itself reported for the model (not the
+   *  app's map): reading the session log again keeps it for that model. */
+  windowFromCli?: true;
 }
 
 /** A member's mode. "full-access" is Codex's Full Access preset (its

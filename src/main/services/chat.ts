@@ -5985,9 +5985,13 @@ export class ChatService {
     }
     const request = this.normalizeSelfCompactionRequest(rawRequest);
     const summary = `Compact @${requester.handle} context`;
-    // The card's meter: the member's context indicator as it stands now
-    // (its figure from its last finished turn), the same on every device.
-    const contextPercentage = this.agentContextUsageByParticipant(conversation)[requester.id]?.percentage;
+    // The card's meter: the member's context as it stands now. It asks in
+    // the middle of its turn, so its session log (written as it goes) is
+    // read again; the indicator's figure from its last finished turn stays
+    // when the log cannot be read. The card carries the figure, the same on
+    // every device.
+    const liveUsage = await this.liveContextUsage(conversation, requester);
+    const contextPercentage = (liveUsage ?? this.agentContextUsageByParticipant(conversation)[requester.id])?.percentage;
     const cardRequest: ChatSelfCompactionRequest = contextPercentage === undefined ? request : { ...request, contextPercentage };
     // Checked and recorded on the chat as saved now, through the queue.
     let compactingRequester = requester;
@@ -6007,6 +6011,8 @@ export class ChatService {
       if (guard) {
         return { ok: false, ...guard };
       }
+      // The indicator shows what the card does.
+      this.updateParticipantContextUsage(conversation, requesterNow.id, liveUsage);
       if (permissionNow === "ask") {
         const approval = this.newAppToolApproval(
           conversation,
@@ -6044,6 +6050,28 @@ export class ChatService {
       runId,
       summary
     };
+  }
+
+  /** A member's context read from its CLI's session log now (the member's
+   *  own device only); undefined when there is no log to read. */
+  private async liveContextUsage(conversation: Conversation, participant: ChatParticipant): Promise<AgentContextUsage | undefined> {
+    const session = this.chatSessions(conversation).find((item) => item.participantId === participant.id && Boolean(item.sessionId?.trim()));
+    if (!session?.sessionId || !this.ownsParticipant(participant)) {
+      return undefined;
+    }
+    try {
+      return await this.cliRunner.contextUsageForSession(this.cliParticipantForSession(participant, session), session.sessionId, {
+        waitForLog: false,
+        known: this.agentContextUsageByParticipant(conversation)[participant.id]
+      });
+    } catch (error) {
+      await this.debugLogs.write("chat.context-usage-live.error", {
+        conversationId: conversation.id,
+        participantId: participant.id,
+        message: error instanceof Error ? error.message : String(error)
+      });
+      return undefined;
+    }
   }
 
   async participantRequestStatusForTool(actor: ChatAppMcpActor, rawRequest: unknown): Promise<Record<string, unknown>> {

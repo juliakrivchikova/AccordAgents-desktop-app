@@ -640,6 +640,26 @@ test("requestSelfCompactionFromTool puts the member's context indicator on the c
   await other.service.requestSelfCompactionFromTool(selfCompactionActor(fresh), { contextPercentage: 50 });
   const freshApprovals = other.storage.current.metadata.pendingAppToolApprovals as Array<Record<string, unknown>>;
   assert.deepEqual(freshApprovals[0].request, { type: "self_compaction" });
+
+  // It asks in the middle of its turn: the session log read now gives the
+  // figure, and the indicator shows the same.
+  const live = chatParticipant({ id: "participant-live", handle: "live" });
+  const third = chatConversation([live], [chatSession(live, "session-3")]);
+  third.metadata.agentContextUsageByParticipant = {
+    [live.id]: { usedTokens: 500_000, contextWindowTokens: 1_000_000, percentage: 50, source: "claude-code", updatedAt: "2026-01-01T00:00:00.000Z" }
+  };
+  const liveService = testService({
+    conversation: third,
+    compactSession: neverCompacts,
+    contextUsageForSession: async (_participant, sessionId) => {
+      assert.equal(sessionId, "session-3");
+      return { usedTokens: 910_000, contextWindowTokens: 1_000_000, percentage: 91, source: "claude-code", updatedAt: new Date().toISOString() };
+    }
+  });
+  await liveService.service.requestSelfCompactionFromTool(selfCompactionActor(live), {});
+  const liveApprovals = liveService.storage.current.metadata.pendingAppToolApprovals as Array<Record<string, unknown>>;
+  assert.deepEqual(liveApprovals[0].request, { type: "self_compaction", contextPercentage: 91 });
+  assert.equal(liveService.storage.current.metadata.agentContextUsageByParticipant?.[live.id]?.percentage, 91);
 });
 
 test("requestSelfCompactionFromTool queues behind the current participant turn and resumes the same session", async () => {

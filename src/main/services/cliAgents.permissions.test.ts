@@ -81,12 +81,16 @@ test("a session log's context: subagent lines skipped, the CLI's own window kept
     assert.deepEqual([plain?.usedTokens, plain?.contextWindowTokens, plain?.model], [97_902, 200_000, "claude-haiku-4-5"], "the member's call, not the subagent's");
     const stored = { usedTokens: 1, percentage: 0, source: "claude-code" as const, updatedAt: "2026-11-22T00:00:00.000Z" };
     // The window the CLI named for this model at the last turn wins over the map...
-    const same = await runner.contextUsageForSession(claude, "s", { waitForLog: false, known: { ...stored, contextWindowTokens: 1_000_000, model: "claude-haiku-4-5" } });
+    const same = await runner.contextUsageForSession(claude, "s", { waitForLog: false, known: { ...stored, contextWindowTokens: 1_000_000, model: "claude-haiku-4-5", windowFromCli: true } });
     assert.equal(same?.contextWindowTokens, 1_000_000);
+    assert.equal(same?.windowFromCli, true);
+    // A window an older build stored (the map's, or another model's entry) is not kept.
+    const legacy = await runner.contextUsageForSession(claude, "s", { waitForLog: false, known: { ...stored, contextWindowTokens: 1_000_000, model: "claude-haiku-4-5" } });
+    assert.equal(legacy?.contextWindowTokens, 200_000);
     // ...but not another model's, nor another CLI's.
-    const other = await runner.contextUsageForSession(claude, "s", { waitForLog: false, known: { ...stored, contextWindowTokens: 1_000_000, model: "claude-sonnet-5-5" } });
+    const other = await runner.contextUsageForSession(claude, "s", { waitForLog: false, known: { ...stored, contextWindowTokens: 1_000_000, model: "claude-sonnet-5-5", windowFromCli: true } });
     assert.equal(other?.contextWindowTokens, 200_000);
-    const codex = await runner.contextUsageForSession(claude, "s", { waitForLog: false, known: { ...stored, source: "codex-cli", contextWindowTokens: 258_400, model: "claude-haiku-4-5" } });
+    const codex = await runner.contextUsageForSession(claude, "s", { waitForLog: false, known: { ...stored, source: "codex-cli", contextWindowTokens: 258_400, model: "claude-haiku-4-5", windowFromCli: true } });
     assert.equal(codex?.contextWindowTokens, 200_000);
   } finally {
     await rm(dir, { recursive: true, force: true });

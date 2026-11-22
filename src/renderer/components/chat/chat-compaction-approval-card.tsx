@@ -22,6 +22,11 @@ import { ChatMemberMark, useChatSessionsPresentation } from "./chat-member-mark"
 import { useSessionsViewLabel, useSessionsViewText } from "./chat-sessions-links";
 import { ChatUsedApprovalLine } from "./chat-used-card-row";
 
+/** Cards whose "Don't ask again" box is ticked in this window: the tick
+ *  survives the card being drawn again (the timeline topping up, the view
+ *  switching), as the phone keeps it. */
+const tickedCards = new Set<string>();
+
 /**
  * The card a member raises to compact its own conversation, as the User
  * approved it on 2026-11-22 (src/shared/compactionCard.ts has its words).
@@ -39,7 +44,12 @@ export function ChatCompactionApprovalCard(props: {
   onRespond: (approvalId: string, approve: boolean, scope?: ChatAppToolApprovalScope) => Promise<void>;
 }): JSX.Element {
   const { approval, request } = props;
-  const [dontAskAgain, setDontAskAgain] = useState(false);
+  const [dontAskAgain, setDontAskAgainState] = useState(() => tickedCards.has(props.approval.id));
+  const setDontAskAgain = (value: boolean): void => {
+    if (value) tickedCards.add(props.approval.id);
+    else tickedCards.delete(props.approval.id);
+    setDontAskAgainState(value);
+  };
   const sessions = useChatSessionsPresentation();
   const appText = useSessionsViewText();
   const requester = props.participants.find((participant) => participant.id === approval.requesterParticipantId);
@@ -82,10 +92,13 @@ export function ChatCompactionApprovalCard(props: {
     if (!props.submitting) void props.onRespond(approval.id, true, dontAskAgain ? "chat" : "once");
   };
   const onKeyDown = (event: KeyboardEvent<HTMLElement>): void => {
-    // Enter is Compact, as its key hint says, unless a control has the key.
-    const target = event.target as HTMLElement;
-    if (event.key !== "Enter" || event.shiftKey || event.metaKey || event.ctrlKey || event.altKey) return;
-    if (target.closest("button, input, a, textarea")) return;
+    // Enter is Compact, as its key hint says: on the card itself while its
+    // ring shows (keyboard focus, or Activity's Open in chat). Never on a
+    // control, never held down, and not after a mouse click on its text,
+    // which focuses it without a ring.
+    if (event.key !== "Enter" || event.repeat || event.shiftKey || event.metaKey || event.ctrlKey || event.altKey) return;
+    const card = event.currentTarget;
+    if (event.target !== card || !card.matches(":focus-visible, .approval-focused")) return;
     event.preventDefault();
     compact();
   };
@@ -122,7 +135,7 @@ export function ChatCompactionApprovalCard(props: {
               </div>
             )}
             {request.instructions && (
-              <p className="chat-compaction-card-keeps"><b>{COMPACTION_CARD_KEEPS}</b> {request.instructions}</p>
+              <p className="chat-compaction-card-keeps" title={request.instructions}><b>{COMPACTION_CARD_KEEPS}</b> {request.instructions}</p>
             )}
           </div>
         </div>

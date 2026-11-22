@@ -76,6 +76,10 @@ test("Claude: the window is the CLI's own for the main model", () => {
   assert.equal(claudeContextWindowFromResult(result, "sonnet"), undefined, "two models and no match: the map decides");
   assert.equal(claudeContextWindowFromResult({ type: "result", modelUsage: { "claude-haiku-4-5": { contextWindow: 200_000 } } }, "haiku"), 200_000);
   assert.equal(claudeContextWindowFromResult({ type: "assistant" }, "claude-sonnet-5-5"), undefined);
+  // After a switch both can be there: the model's own entry wins.
+  const switched = { type: "result", modelUsage: { "claude-opus-4-8": { contextWindow: 200_000 }, "claude-opus-4-8[1m]": { contextWindow: 1_000_000 } } };
+  assert.equal(claudeContextWindowFromResult(switched, "claude-opus-4-8[1m]"), 1_000_000);
+  assert.equal(claudeContextWindowFromResult(switched, "claude-opus-4-8"), 200_000);
 });
 
 test("Claude model windows match what Claude Code 2.1.330 reports", () => {
@@ -106,6 +110,11 @@ test("Codex: the context is the last call's total against Codex's own window", (
     { usedTokens: 151_216, contextWindowTokens: 258400 }
   );
   assert.equal(codexContextFromEvent({ type: "event_msg", payload: { type: "token_count", info: null, rate_limits: {} } }), undefined);
+  // The app-server's legacy mirror of the CLI event.
+  assert.deepEqual(
+    codexContextFromEvent({ method: "codex/event/token_count", params: { msg: { type: "token_count", info: { last_token_usage: { total_tokens: 5519 }, model_context_window: 258400 } } } }),
+    { usedTokens: 5519, contextWindowTokens: 258400 }
+  );
   // exec --json: the turn's summed usage is not the context.
   assert.equal(codexContextFromEvent({ type: "turn.completed", usage: { input_tokens: 44961, cached_input_tokens: 32000, output_tokens: 138 } }), undefined);
 });

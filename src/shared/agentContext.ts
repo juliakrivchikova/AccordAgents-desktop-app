@@ -143,6 +143,7 @@ export function buildAgentContextUsage(input: {
   source: AgentContextUsageSource;
   updatedAt?: string;
   model?: string;
+  windowFromCli?: boolean;
 }): AgentContextUsage | undefined {
   const usedTokens = positiveInteger(input.usedTokens);
   const contextWindowTokens = positiveInteger(input.contextWindowTokens);
@@ -156,7 +157,8 @@ export function buildAgentContextUsage(input: {
     percentage,
     source: input.source,
     updatedAt: input.updatedAt ?? new Date().toISOString(),
-    model: input.model?.trim() || undefined
+    model: input.model?.trim() || undefined,
+    ...(input.windowFromCli ? { windowFromCli: true as const } : {})
   };
 }
 
@@ -217,7 +219,8 @@ export function normalizeAgentContextUsage(value: unknown): AgentContextUsage | 
     contextWindowTokens: record.contextWindowTokens,
     source,
     updatedAt: record.updatedAt,
-    model: typeof record.model === "string" ? record.model : undefined
+    model: typeof record.model === "string" ? record.model : undefined,
+    windowFromCli: record.windowFromCli === true
   });
 }
 

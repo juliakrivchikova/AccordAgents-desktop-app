@@ -94,8 +94,12 @@ export function claudeContextWindowFromResult(event: unknown, model: string | un
     return undefined;
   }
   const entries = Object.entries(modelUsage);
+  const exact = model?.trim().toLowerCase();
   const wanted = claudeCanonicalModelId(model);
-  const match = (wanted ? entries.find(([id]) => claudeCanonicalModelId(id) === wanted) : undefined)
+  // The model's own entry first (`opus[1m]` and `opus` can both be there
+  // after a switch), then its id without the window suffix.
+  const match = (exact ? entries.find(([id]) => id.trim().toLowerCase() === exact) : undefined)
+    ?? (wanted ? entries.find(([id]) => claudeCanonicalModelId(id) === wanted) : undefined)
     ?? (entries.length === 1 ? entries[0] : undefined);
   return positiveNumber(asRecord(match?.[1])?.contextWindow);
 }
@@ -123,7 +127,7 @@ export function codexContextFromEvent(event: unknown): CliContextReading | undef
     const contextWindowTokens = positiveNumber(tokenUsage?.modelContextWindow);
     return usedTokens || contextWindowTokens ? { usedTokens, contextWindowTokens } : undefined;
   }
-  const payload = asRecord(record.payload) ?? asRecord(record.msg);
+  const payload = asRecord(record.payload) ?? asRecord(record.msg) ?? asRecord(asRecord(record.params)?.msg);
   const info = payload?.type === "token_count" ? asRecord(payload.info) : undefined;
   if (!info) {
     return undefined;
