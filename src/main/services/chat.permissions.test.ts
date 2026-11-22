@@ -1777,10 +1777,16 @@ test("tool permission request denies and marks approval on timeout", async (t) =
       input: { query: "incidents" }
     });
 
-    await flushMicrotasks();
-    const approval = ((storage.current.metadata.pendingAppToolApprovals ?? []) as ChatAppToolApproval[]).find(
+    // Timers are mocked for the 30-minute timeout; the request's own short
+    // waits (its save) need the clock to move a little before it is stored.
+    const findApproval = () => ((storage.current.metadata.pendingAppToolApprovals ?? []) as ChatAppToolApproval[]).find(
       (item) => item.toolName === APP_TOOL_PERMISSION_TOOL
     );
+    for (let index = 0; index < 50 && !findApproval(); index += 1) {
+      (t.mock.timers as any).tick(1);
+      await flushMicrotasks();
+    }
+    const approval = findApproval();
     assert.equal(approval?.status, "pending");
     for (let index = 0; index < 20 && !(service as any).toolPermissionResolvers.has(approval?.id); index += 1) {
       await Promise.resolve();

@@ -333,7 +333,9 @@ test("a setup hidden while it ran shows again when it is tried again after it st
   await ui.click(ui.find("aws-setup-progress-hide"));
   await send(setupSnapshot(operationId, [{ id: "instance", state: "failed", detail: "AWS refused." }], { phase: "error", message: "AWS refused." }));
   assert.equal(ui.find("aws-setup-progress"), null, "hidden stays hidden while nothing runs");
-  await send(setupSnapshot(operationId, [{ id: "instance", state: "current", detail: "Looking…" }]));
+  // The retry comes later than the failure, as it does in the app: a live
+  // snapshot stamped the same as the failure is a late event and is dropped.
+  await send(setupSnapshot(operationId, [{ id: "instance", state: "current", detail: "Looking…" }], { updatedAt: new Date(Date.now() + 1000).toISOString() }));
   assert.ok(ui.find("aws-setup-progress"), "the retried setup shows its steps again");
   await unmount();
 });
