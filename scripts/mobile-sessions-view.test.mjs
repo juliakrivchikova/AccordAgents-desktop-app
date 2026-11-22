@@ -311,6 +311,8 @@ test("the sessions view (T3 Code's way): tasks inside the turn's Worked fold, ch
     const handle = row.querySelector(".message-handle");
     return { logo: handle.querySelector(".provider-logo")?.dataset.providerKind ?? "", text: handle.textContent }; })()`), { logo: "claude-code", text: "" });
   assert.doesNotMatch(await app.evaluate(`document.getElementById("message-list").innerText`), /main session/i);
+  // Its question to the main session reads alone, as on the desktop.
+  assert.equal(await app.evaluate(`document.querySelector('#message-list .message-row[data-thread-root="drew-q"] .message-content')?.textContent.trim()`), "which shade?");
   await app.evaluate(`document.getElementById("back-to-timeline").click()`);
   await app.waitFor(mainShown, "back");
   assert.equal(await app.evaluate(`document.querySelector('#message-list .message-row[data-thread-root="main-answer"]') === null`), true, "not on the main timeline while it is written");

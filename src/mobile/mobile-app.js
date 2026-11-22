@@ -12699,7 +12699,11 @@
       const given = batch && batch.requesterParticipantId !== participantId
         ? batch.items.find(function (item) { return item.targetParticipantId === participantId; })
         : undefined;
-      const base = { ...drawn, presentation: "sessions", replyCount: undefined };
+      // A question this member asked the main session reads alone, as on the
+      // desktop: the main session is named by nothing.
+      const asksMain = batch && batch.requesterParticipantId === participantId && typeof shared.withoutLeadingMention === "function";
+      const base = { ...drawn, presentation: "sessions", replyCount: undefined,
+        ...(asksMain ? { content: shared.withoutLeadingMention(String(drawn.content || ""), state.mainHandle) } : {}) };
       if (given) {
         const key = drawn.rowKey || drawn.id;
         rows.push({ ...base, taskFold: {
