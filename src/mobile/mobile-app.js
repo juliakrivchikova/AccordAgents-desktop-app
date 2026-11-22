@@ -563,6 +563,7 @@
       // heads its delegations.
       Boolean(left.accordLaunchByMainSession) === Boolean(right.accordLaunchByMainSession) &&
       (left.workedMs || 0) === (right.workedMs || 0) &&
+      Boolean(left.stopped) === Boolean(right.stopped) &&
       // A running reply's steps, and what its Worked for opens to.
       activitySignature(left) === activitySignature(right) &&
       Boolean(left.liveStatus) === Boolean(right.liveStatus);
@@ -5898,6 +5899,8 @@
         // How long the turn worked: the sessions view's "Worked for …".
         ...(role === "participant" && typeof event.workedMs === "number" && Number.isFinite(event.workedMs) && event.workedMs >= 0
           ? { workedMs: event.workedMs } : {}),
+        // A reply stopped before its member finished (a Stop, a quit).
+        ...(role === "participant" && status === "error" && event.stopped === true ? { stopped: true } : {}),
         ...(settledAt ? { settledAt: settledAt } : {})
       }, openedAt ? { arrivedAt: openedAt } : undefined);
       if (written) {
@@ -9983,7 +9986,8 @@
         // Scaffolding stands for a message, not a run that can be stopped.
         cancellable: !isScaffoldingEntry(entry),
         content: entry.content,
-        status: entry.role === "you" ? "Sent" : entry.status === "error" ? "Error" : entry.status === "done" ? "Done" : "Running",
+        // Stopped, as the computer names a reply a Stop or a quit ended.
+        status: entry.role === "you" ? "Sent" : entry.status === "error" ? (entry.stopped ? "Stopped" : "Error") : entry.status === "done" ? "Done" : "Running",
         // What a Stop names the member's turn on the server by.
         ...(entry.participantId ? { participantId: entry.participantId } : {}),
         ...(entry.sourceMessageId ? { sourceMessageId: entry.sourceMessageId } : {}),
@@ -12233,7 +12237,7 @@
   function entryShownContent(entry) {
     const content = entry.content;
     const names = lastSessionsState && lastSessionsState.viewNames;
-    if (!names || entry.author !== "agent" || (entry.status !== "error" && entry.status !== "Error") || typeof content !== "string" || content.indexOf("@") < 0) return content;
+    if (!names || entry.author !== "agent" || (entry.status !== "error" && entry.status !== "Error" && entry.status !== "Stopped") || typeof content !== "string" || content.indexOf("@") < 0) return content;
     const shared = sessionsRules();
     if (!shared || typeof shared.sessionsViewReplyText !== "function") return content;
     const member = lastSessionsState.members.find(function (item) { return item.id === entry.participantId; });
@@ -12502,10 +12506,12 @@
       role: role,
       content: row.content || "",
       createdAt: row.createdAt,
-      status: row.status === "Running" ? "pending" : row.status === "Error" ? "error" : "done",
+      status: row.status === "Running" ? "pending" : row.status === "Error" || row.status === "Stopped" ? "error" : "done",
       ...(row.participantId ? { participantId: row.participantId } : {}),
       ...(role === "participant" && row.participantLabel ? { participantLabel: row.participantLabel } : {}),
       metadata: {
+        // As the computer holds it: a reply a Stop or a quit ended.
+        ...(row.status === "Stopped" ? { terminalReason: "user-stopped" } : {}),
         ...(Array.isArray(row.addressees) && row.addressees.length ? { deliveryTargets: row.addressees } : {}),
         ...(row.participantRequest ? { participantRequest: row.participantRequest } : {}),
         ...(waitingChoice ? { pendingChoice: { status: "pending" } } : {}),

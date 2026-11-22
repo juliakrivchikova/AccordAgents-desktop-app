@@ -435,6 +435,7 @@ test("quitting ends the turns it stops on the server while the link stands, star
   const reply = ended.messages.find((message) => message.id === replyId)!;
   assert.equal(reply.status, "error");
   assert.equal(reply.content, "Interrupted before completion.");
+  assert.equal(reply.metadata?.terminalReason, "user-stopped", "stopped by the quit on the server too, not an error");
   const turn = ended.turns.find((item) => item.messageId !== "phone-quit")!;
   assert.equal(turn.state, "finished");
   assert.equal(turn.outcome, "interrupted");
