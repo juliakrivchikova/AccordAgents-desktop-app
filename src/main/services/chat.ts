@@ -27,7 +27,7 @@ import {
 import { mainSessionProviderKey, mainSessionProviderOptions, type MainSessionProviderOption } from "../../shared/mainSessionProviders";
 import { normalizedChatAvatarId } from "../../shared/chatAvatarCatalog";
 import type { HubNewChatOptions } from "../../shared/hubProtocol";
-import { chatChangesToOps, furthestTurnMarks, newOpId, serverSeqOf, sortByServerOrder, turnMark, turnsOfEffect, type ChatServerLink, type ChatServerQueue } from "./chatServerOps";
+import { chatChangesToOps, furthestTurnMarks, messageForServer, newOpId, serverSeqOf, sortByServerOrder, turnMark, turnsOfEffect, type ChatServerLink, type ChatServerQueue } from "./chatServerOps";
 import { CHAT_LIST_ORDER_METADATA_KEYS, LOCAL_MESSAGE_METADATA_KEYS, SHARED_CONVERSATION_METADATA_KEYS } from "./chatChanges";
 import { hubTurnRunId, isHubTurnRunId, type HubCard, type HubCardState, type HubFeedEntry, type HubOp, type HubTurn } from "../../shared/hubOps";
 import {
@@ -1227,6 +1227,9 @@ export class ChatService {
   /** While no link stands after one did: where saves still queue what they
    *  change for the server, sent once a link starts again. */
   private parkedServerQueue?: ChatServerQueue;
+  /** The app quits (main.ts, before-quit): as a machine drains, no new turn
+   *  starts here, so what the quit stops is all the server has to be told. */
+  private quitting = false;
   /** Each chat's timer for its next waiting choice to expire. */
   private readonly choiceExpiryTimers = new Map<string, { atMs: number; timer: NodeJS.Timeout }>();
   /** The clock choices expire by (tests move it). */
@@ -18494,6 +18497,11 @@ export class ChatService {
     options: { groupCheck?: boolean } = {}
   ): Promise<void> {
     const resumeProgress = progress ?? this.onReviewProgress;
+    // Quitting: the requester is resumed at the next start (its recovery).
+    if (this.quitting) {
+      void this.logParticipantRequestAutoResumeSkipped(conversationId, requestMessageId, "quitting");
+      return;
+    }
     const ownsEntry = !this.participantRequestAutoResumes.has(requestMessageId);
     if (!ownsEntry && !options.groupCheck) {
       void this.logParticipantRequestAutoResumeSkipped(conversationId, requestMessageId, "already-auto-resuming");
@@ -25805,7 +25813,8 @@ export class ChatService {
   /** Runs, here, a turn the server asked of one of this device's members
    *  (a User's message from any device, a request from a member elsewhere). */
   async startServerTurn(turn: HubTurn): Promise<void> {
-    if (!this.serverLink || turn.state !== "requested") return;
+    // Quitting: the turn waits on the server for this device's next start.
+    if (!this.serverLink || turn.state !== "requested" || this.quitting) return;
     const runId = turn.runId;
     if (this.inProcessServerTurns.has(runId) || this.pendingServerTurns.has(runId) || this.conversationIdForRun(runId)) return;
     // Taken here before anything awaits: the feed and a resume after a
@@ -25986,6 +25995,9 @@ export class ChatService {
   async resumeServerTurns(): Promise<void> {
     const link = this.serverLink;
     if (!link) return;
+    await this.repairRepliesLeftRunning(link).catch((error) => {
+      void this.debugLogs.write("chat.server.replies-repair-error", { message: error instanceof Error ? error.message : String(error) });
+    });
     const { requested, claimed } = await link.waitingTurns();
     for (const turn of claimed) {
       await this.closeOrphanedServerTurn(turn).catch((error) => {
@@ -25993,6 +26005,100 @@ export class ChatService {
       });
     }
     for (const turn of requested) await this.startServerTurn(turn).catch(() => undefined);
+  }
+
+  private static readonly REPLIES_REPAIRED_KEY = "chat.replies-left-running.repaired";
+
+  /** Once on this device (2026-11-22): a member's reply that ended here
+   *  while the app quit, after its link to the server had stopped, was saved
+   *  here only, and the server kept it running for good (the phone showed it
+   *  with its time growing and Stop). Its end as this device holds it goes
+   *  now; a reply removed here goes from the server too. Read from the
+   *  operations this device still keeps (a week), so older ones stay. */
+  private async repairRepliesLeftRunning(link: ChatServerLink): Promise<void> {
+    const hub = this.storage.hub();
+    if (await hub.clientState(ChatService.REPLIES_REPAIRED_KEY)) return;
+    const left = await this.storage.hubClientOps().repliesLeftRunning();
+    const byChat = new Map<string, string[]>();
+    for (const row of left) byChat.set(row.conversationId, [...(byChat.get(row.conversationId) ?? []), row.messageId]);
+    let sent = 0;
+    for (const [conversationId, messageIds] of byChat) {
+      const conversation = await this.storage.getConversation(conversationId).catch(() => undefined);
+      if (!conversation || conversation.kind !== "chat") continue;
+      const removed = new Set(this.normalizedRemovedChatMessageIds(conversation.metadata.removedChatMessageIds));
+      const ops: HubOp[] = [];
+      for (const messageId of messageIds) {
+        const message = conversation.messages.find((item) => item.id === messageId);
+        if (!message) {
+          if (removed.has(messageId)) ops.push({ opId: newOpId(), kind: "message.remove", conversationId, messageId });
+          continue;
+        }
+        // Still running here, or not this device's to write: left as it is.
+        if (message.status === "pending" || !this.mayWriteOnServer(conversation, message)) continue;
+        ops.push({ opId: newOpId(), kind: "message.update", conversationId, message: messageForServer(message) });
+      }
+      if (!ops.length) continue;
+      await link.enqueue(ops);
+      sent += ops.length;
+    }
+    await hub.setClientState(ChatService.REPLIES_REPAIRED_KEY, new Date().toISOString());
+    void this.debugLogs.write("chat.server.replies-repaired", { found: left.length, sent });
+  }
+
+  /** The app quits (main.ts, before-quit), as a machine drains: no turn
+   *  starts here from now on (a server's ask waits there, a requester is
+   *  resumed at the next start). */
+  beginQuit(): void {
+    this.quitting = true;
+  }
+
+  /** Resolves once no member's turn runs here (each saved how it ended, so
+   *  its end is queued for the server), or after `timeoutMs`. */
+  async waitForRunsToEnd(timeoutMs: number): Promise<boolean> {
+    const deadline = Date.now() + timeoutMs;
+    while (this.chatRunMeta.size > 0 || this.activeRunIds.size > 0) {
+      if (Date.now() >= deadline) return false;
+      await new Promise((resolve) => setTimeout(resolve, 25));
+    }
+    await this.settleChatSaves();
+    return true;
+  }
+
+  /** Quitting, once the members' processes are closed: a turn that has not
+   *  ended by itself ends now as the next start would close it
+   *  (closeOrphanedServerTurn), its bubble and its turn on the server in one
+   *  save, so the server hears it before the link closes. Its own end comes
+   *  seconds later (a closed process is told apart from a missing CLI), past
+   *  the quit's time. Returns how many turns it ended. */
+  async endTurnsForQuit(): Promise<number> {
+    const byChat = new Map<string, Array<{ runId: string; participantId: string }>>();
+    for (const [runId, meta] of this.chatRunMeta) {
+      byChat.set(meta.conversationId, [...(byChat.get(meta.conversationId) ?? []), { runId, participantId: meta.participantId }]);
+    }
+    let ended = 0;
+    for (const [conversationId, runs] of byChat) {
+      const conversation = await this.requireChat(conversationId).catch(() => undefined);
+      if (!conversation) continue;
+      await this.withChatMutation(conversation, async () => {
+        let changed = false;
+        for (const run of runs) {
+          for (const message of conversation.messages) {
+            if (message.role !== "participant" || message.participantId !== run.participantId || message.metadata?.runId !== run.runId || message.status !== "pending") continue;
+            message.status = "error";
+            if (!message.content) message.content = "Interrupted before completion.";
+            changed = true;
+          }
+          this.finishServerTurn(run.runId, "interrupted");
+          ended += 1;
+        }
+        if (changed) {
+          conversation.updatedAt = new Date().toISOString();
+          this.queueSnapshot(conversation);
+        }
+      });
+      await this.waitForQueuedSave(conversationId);
+    }
+    return ended;
   }
 
   /** Takes a turn the server asked of a member here, for a run that has no

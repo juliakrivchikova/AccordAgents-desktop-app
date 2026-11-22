@@ -152,6 +152,23 @@ export class HubClientOpsStore {
     return rows.map(fromRow);
   }
 
+  /** Members' replies this device created on the server as running and
+   *  never ended there by an operation it still holds (answered ones are kept
+   *  ANSWERED_KEEP_MS): an end saved while no link stood was never queued
+   *  before 2026-11-22, and the server shows such a reply running for good. */
+  async repliesLeftRunning(): Promise<Array<{ conversationId: string; messageId: string }>> {
+    await this.init();
+    const created = await this.database.query<{ conversationId: string; messageId: string }>(`select conversation_id as conversationId, message_id as messageId
+      from hub_client_ops where kind = 'message.create' and status = 'accepted' and message_id is not null
+        and json_extract(op_json, '$.message.role') = 'participant' and json_extract(op_json, '$.message.status') = 'pending';`);
+    if (!created.length) return [];
+    const ended = await this.database.query<{ messageId: string | null }>(`select coalesce(json_extract(op_json, '$.message.id'), json_extract(op_json, '$.messageId')) as messageId
+      from hub_client_ops where status in ('accepted', 'queued') and (kind = 'message.remove'
+        or (kind = 'message.update' and coalesce(json_extract(op_json, '$.message.status'), '') != 'pending'));`);
+    const endedIds = new Set(ended.map((row) => row.messageId).filter((id): id is string => typeof id === "string"));
+    return created.filter((row) => !endedIds.has(row.messageId));
+  }
+
   /** The newest operation that writes this message. */
   async forMessage(conversationId: string, messageId: string): Promise<HubClientOpRow | undefined> {
     await this.init();

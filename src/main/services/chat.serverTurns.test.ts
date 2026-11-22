@@ -377,3 +377,65 @@ test("a save that began before the link stopped still commits, and what it wrote
   await until(() => h.page("chat-r"), (page) => page.messages.some((message) => message.content === "hello there"));
   h.release();
 });
+
+test("a reply an older build left running on the server (its end saved here only) is ended there once at the next start", async (t) => {
+  const h = await setup(t);
+  await save(h.chat, localChat("chat-o"));
+  await h.link.start();
+  await until(async () => (await h.link.status())?.ready ?? false, (ready) => ready);
+  h.hold();
+  await h.chat.sendMessage({ conversationId: "chat-o", content: "@taylor long essay" } as never);
+  await until(async () => h.turns.length, (count) => count === 1);
+  const running = await until(() => h.page("chat-o"), (page) => page.messages.some((message) => message.role === "participant" && message.status === "pending"));
+  const replyId = running.messages.find((message) => message.role === "participant")!.id;
+  await h.link.stop();
+  h.release();
+  await until(async () => (await h.storage.getConversation("chat-o"))?.messages.find((message) => message.id === replyId)?.status, (status) => status === "done");
+  await h.chat.settleChatSaves();
+  // As a build from before 2026-11-22 left it: the end saved here, never
+  // queued; the next start is the first of this build (its repair not run).
+  const outbox = h.storage.hubClientOps();
+  for (const row of await outbox.forConversation("chat-o")) await outbox.withdraw(row.opId);
+  await h.storage.hub().setClientState("chat.replies-left-running.repaired", "");
+  const again = await h.restart();
+  const settled = await until(() => h.page("chat-o"), (page) => page.messages.find((message) => message.id === replyId)?.status === "done", 15_000);
+  assert.equal(settled.messages.find((message) => message.id === replyId)?.content, "reply to @taylor long essay");
+  // Once: the next resume (a reconnect, a later start) does not look again.
+  const original = outbox.repliesLeftRunning.bind(outbox);
+  let looked = 0;
+  outbox.repliesLeftRunning = async () => { looked += 1; return original(); };
+  await again.chat.resumeServerTurns();
+  outbox.repliesLeftRunning = original;
+  assert.equal(looked, 0);
+});
+
+test("quitting ends the turns it stops on the server while the link stands, and starts nothing new", async (t) => {
+  const h = await setup(t);
+  await save(h.chat, localChat("chat-x"));
+  await h.link.start();
+  await until(async () => (await h.link.status())?.ready ?? false, (ready) => ready);
+  h.hold();
+  await h.chat.sendMessage({ conversationId: "chat-x", content: "@taylor long essay" } as never);
+  await until(async () => h.turns.length, (count) => count === 1);
+  const running = await until(() => h.page("chat-x"), (page) => page.messages.some((message) => message.role === "participant" && message.status === "pending"));
+  const replyId = running.messages.find((message) => message.role === "participant")!.id;
+  // main.ts, before-quit: no new turn, a short wait for the turns to end by
+  // themselves, the rest ended here, then sent before the link stops.
+  h.chat.beginQuit();
+  assert.equal(await h.chat.waitForRunsToEnd(200), false, "the member's turn has not ended by itself");
+  assert.equal(await h.chat.endTurnsForQuit(), 1);
+  const ended = await until(() => h.page("chat-x"), (page) => page.messages.find((message) => message.id === replyId)?.status !== "pending" &&
+    page.turns.every((turn) => turn.state === "finished"));
+  const reply = ended.messages.find((message) => message.id === replyId)!;
+  assert.equal(reply.status, "error");
+  assert.equal(reply.content, "Interrupted before completion.");
+  assert.equal(ended.turns[0].outcome, "interrupted");
+  // A message from the phone meanwhile waits on the server for the next start.
+  await h.phoneWrite({ opId: "op-phone-quit", kind: "message.create", conversationId: "chat-x",
+    message: { id: "phone-quit", role: "user", content: "@taylor one more", createdAt: new Date().toISOString(), metadata: { deliveryTargets: [desk.id] } } as ChatMessage });
+  const asked = await until(() => h.page("chat-x"), (page) => page.turns.some((turn) => turn.runId === hubTurnRunId("phone-quit", desk.id)));
+  await new Promise((resolve) => setTimeout(resolve, 500));
+  assert.equal(h.turns.length, 1, "nothing new starts while the app quits");
+  assert.equal(asked.turns.find((turn) => turn.runId === hubTurnRunId("phone-quit", desk.id))?.state, "requested");
+  h.release();
+});

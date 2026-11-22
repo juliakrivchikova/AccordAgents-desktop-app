@@ -3790,6 +3790,42 @@ autoUpdater.on("error", (error: Error) => {
   });
 });
 
+/** How long a quit lets the members it stops end their turns by themselves
+ *  (a reply that was just written is kept whole), and then how long it waits
+ *  for those ends to reach the User's server. Both fit the quit's own five
+ *  seconds; what is left goes at the next start. */
+const QUIT_TURNS_END_MS = 1_000;
+const QUIT_SERVER_SEND_MS = 1_500;
+
+/**
+ * Quitting stops the members as a machine does (src/machine/main.ts): their
+ * turns end, how they ended goes to the User's server while the link still
+ * stands, and only then does the link close. The phone sees them end at
+ * once; before, the link closed alongside and a turn's end waited for the
+ * app's next start (2026-11-22). Nothing new starts meanwhile. Closing the
+ * members' processes runs alongside: it can take seconds of its own.
+ */
+async function stopMembersThenServerLink(): Promise<void> {
+  chatService.beginQuit();
+  const membersClosed = cliAgentRunner.shutdownWarmAgents();
+  try {
+    const ended = await chatService.waitForRunsToEnd(QUIT_TURNS_END_MS);
+    // The rest end now, as the next start would have closed them.
+    const interrupted = ended ? 0 : await chatService.endTurnsForQuit().catch(() => 0);
+    const deadline = Date.now() + QUIT_SERVER_SEND_MS;
+    let queued: number | undefined;
+    for (;;) {
+      queued = (await serverChatLink.status().catch(() => undefined))?.queued;
+      if (!queued || Date.now() >= deadline) break;
+      await new Promise((resolve) => setTimeout(resolve, 100));
+    }
+    debugLogService.writeNow("app-quit.server-sent", { turnsEnded: ended, interrupted, queued: queued ?? 0 });
+  } finally {
+    await serverChatLink.stop();
+  }
+  await membersClosed;
+}
+
 app.on("before-quit", (event) => {
   debugLogService.writeNow("app-quit.before-quit", {
     forUpdate: quittingForUpdate,
@@ -3820,8 +3856,7 @@ app.on("before-quit", (event) => {
   const cleanup = Promise.allSettled([
     // The file panel saves first; its unsaved text is also in userData if it cannot.
     flushRendererFileEdits(),
-    serverChatLink.stop(),
-    cliAgentRunner.shutdownWarmAgents(),
+    stopMembersThenServerLink(),
     scriptService.stop().then(() => appMcpService.stop())
   ]).then(() => { cleanupDone = true; });
   const timeout = new Promise<void>((resolve) => setTimeout(resolve, 5_000));
