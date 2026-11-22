@@ -1157,10 +1157,13 @@ export interface ChatParticipantSession {
   /** Device-local: it moved here with this session, and its next turn tells
    *  it so (memberMovedNote); cleared once a turn of it succeeded. */
   movedHere?: { from: string; to: string; at: string };
-  /** A hash of the member's access (repository, mode, permissions) as its
-   *  CLI session was last told it, in its instructions or a note: the CLI
-   *  keeps the instructions a session started with, so a turn whose access
-   *  differs says the change once. Absent for a session told nothing yet. */
+  /** A hash of the member's access (repository, mode, permissions, what an
+   *  @handle does) as its CLI session was last told it, in its instructions
+   *  or a note: the CLI keeps the instructions a session started with, so a
+   *  turn whose access differs says the change once. Absent for a session
+   *  told nothing yet; "restate" after its conversation was compacted (the
+   *  CLI rebuilt its instructions from the text its process was launched
+   *  with, which may be older): its next turn says its access again. */
   instructionsAccessHash?: string;
   updatedAt: string;
 }

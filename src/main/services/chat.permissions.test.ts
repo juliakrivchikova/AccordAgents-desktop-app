@@ -2735,7 +2735,7 @@ test("permission resume attaches resumed participant-request reply to the origin
 
   assert.equal(runs.length, 1);
   // The request again (a new session: its access is in its instructions).
-  assert.ok(runs[0].prompt.endsWith("\n\nRequest from @codex:\nRun git diff."), runs[0].prompt);
+  assert.match(runs[0].prompt, /\n\n<<<REQUEST ([0-9a-f]{8}) from @codex>>>\nRun git diff\.\n<<<END REQUEST \1>>>$/, runs[0].prompt);
   assert.match(String(runs[0].options.role?.instructions), /allow prefix "git diff"/);
   assert.equal(runs[0].options.permissions.shell.enabled, true);
   assert.deepEqual(runs[0].options.permissions.shell.rules, [{ action: "allow", match: "prefix", pattern: "git diff" }]);
@@ -16422,10 +16422,13 @@ async function waitFor(predicate: () => boolean | Promise<boolean>, timeoutMs = 
   throw new Error("Timed out waiting for condition.");
 }
 
+/** The unseen-chat part of a prompt: its heading (the app's note) and its
+ *  CHAT block, without the app note's end marker between them. */
 function promptContextBlockFromPrompt(prompt: string): string {
-  const match = /(?:Chat messages(?: in this thread)? you have not seen|Replies to the tasks you gave in one turn)[^\n]*\n<<<CHAT ([0-9a-f]{8})>>>[\s\S]*?<<<END CHAT \1>>>/.exec(prompt) ??
-    /Chat messages(?: in this thread)? you have not seen \([^\n]*\)\./.exec(prompt);
-  return match ? match[0] : "";
+  const block = /((?:Chat messages(?: in this thread)? you have not seen|Replies to the tasks you gave in one turn)[^\n]*)\n(?:<<<END APP [0-9a-f]{8}>>>\n)?(<<<CHAT ([0-9a-f]{8})>>>[\s\S]*?<<<END CHAT \3>>>)/.exec(prompt);
+  if (block) return `${block[1]}\n${block[2]}`;
+  const empty = /Chat messages(?: in this thread)? you have not seen \([^\n]*\)\./.exec(prompt);
+  return empty ? empty[0] : "";
 }
 
 async function flushMicrotasks(iterations = 8): Promise<void> {

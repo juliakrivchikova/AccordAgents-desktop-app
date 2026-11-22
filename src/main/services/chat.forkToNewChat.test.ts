@@ -397,7 +397,7 @@ test("the new chat's first message forks the member's CLI session; the copy is t
   assert.equal(first.options.forkFromSessionId, "src-cli-session");
   assert.deepEqual(first.options.forkCut, { finishedBy: REPLY_FINISHED }, "only up to the reply she saw, by its finish");
   assert.equal(first.options.sessionId || undefined, undefined);
-  assert.match(first.prompt, /^You were forked from @reviewer's session in the chat "Old chat": you keep everything it knew, but from now on you are the main session of a new chat, "Old chat \(fork\)"\./);
+  assert.match(first.prompt, /^<<<APP [0-9a-f]{8}>>>\nYou were forked from @reviewer's session in the chat "Old chat": you keep everything it knew, but from now on you are the main session of a new chat, "Old chat \(fork\)"\./);
   assert.match(first.prompt, /You are @main, role: Main session\. The instructions this session started with for @reviewer no longer apply to you/);
   assert.match(first.prompt, /Your role instructions:\nYou are the main session\./, "the main session's role, not the member's");
   assert.doesNotMatch(first.prompt, /You are not the main session/);
@@ -561,7 +561,7 @@ test("a fork the CLI cannot make because its source session is gone starts clean
     assert.equal(runs[1]!.options.forkFromSessionId, undefined, kind);
     assert.equal(runs[1]!.options.sessionId, undefined, kind);
     assert.equal(runs[1]!.options.forkCut, undefined, kind);
-    assert.match(runs[1]!.prompt, /^You were to start from a copy of @reviewer's session in the chat "Old chat", but it could not be copied/, `${kind}: told who it is`);
+    assert.match(runs[1]!.prompt, /^<<<APP [0-9a-f]{8}>>>\nYou were to start from a copy of @reviewer's session in the chat "Old chat", but it could not be copied/, `${kind}: told who it is`);
     assert.match(runs[1]!.prompt, /You are the main session\./, `${kind}: with its role's instructions`);
     const replies = () => storage.store.get(id)!.messages.filter((message) => message.participantId === mainId && message.role === "participant");
     await waitFor(() => replies().every((message) => message.status !== "pending"));
@@ -783,7 +783,7 @@ test("Claude Code starting the copy clean (its source gone) still tells it it is
   });
   const { id } = await forkAndSend(service, storage);
   const fallback = String(runs[0]!.options.resumeFallbackPrompt);
-  assert.match(fallback, /^You were to start from a copy of @reviewer's session in the chat "Old chat", but it could not be copied/);
+  assert.match(fallback, /^<<<APP [0-9a-f]{8}>>>\nYou were to start from a copy of @reviewer's session in the chat "Old chat", but it could not be copied/);
   assert.match(fallback, /You are @main, role: Main session: the main session of this chat\./);
   assert.match(fallback, /You are the main session\./, "its role's instructions");
   const notice = "@main could not start from a copy of @reviewer's session in the chat \"Old chat\", so it started a clean session from the saved chat context.";

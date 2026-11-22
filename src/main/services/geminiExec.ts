@@ -190,8 +190,9 @@ function geminiPermissionArgs(
     args.push("--dangerously-skip-permissions");
   } else {
     // Best effort: agy has no OS-enforced read-only sandbox. `--sandbox` only
-    // restricts terminal commands; the prompt preamble carries the read-only
-    // contract for file tools.
+    // restricts terminal commands; for file tools the read-only rule is in
+    // words, in the member's instructions and with every chat message
+    // (ChatService ANTIGRAVITY_READ_ONLY_NOTE).
     args.push("--sandbox");
   }
   const skipsConfirmations = !ownMode && (mode === "auto" || permissions.workspaceWrite);
@@ -455,9 +456,10 @@ function geminiPrompt(
       prompt
     ].join("\n\n");
   }
-  // A chat turn is the member's message as it is: its mode, workspace and
-  // what print mode cannot ask are in its session's instructions, said once
-  // (ChatService.antigravityAccessLines).
+  // A chat turn is the member's message as ChatService built it: its mode,
+  // workspace and what print mode cannot ask are in its session's
+  // instructions, said once (ChatService.antigravityAccessLines), and a
+  // read-only member is reminded with every message (ANTIGRAVITY_READ_ONLY_NOTE).
   return prompt;
 }
 

@@ -178,7 +178,8 @@ test("buildPromptParts: a resumed session's message is User's text alone; its in
   const fullNoRepoRead = build(conversationWithRepo, permBlocked, true);
   for (const parts of [fullRepoRead, fullNoRepoRead]) {
     assert.ok(parts.prompt.endsWith("\n\nShort trigger."));
-    assert.ok(parts.sections.staticEnvelope < 13500, `staticEnvelope too large: ${parts.sections.staticEnvelope}`);
+    // 14,500: the nonce blocks are explained once (beta.4 review).
+    assert.ok(parts.sections.staticEnvelope < 14500, `staticEnvelope too large: ${parts.sections.staticEnvelope}`);
   }
   assert.match(fullRepoRead.prompt, /Repository: \/repo \(repoRead allowed\)/);
   assert.match(fullNoRepoRead.prompt, /Repository: \/repo \(repoRead blocked\)/);

@@ -198,7 +198,7 @@ test("compactParticipant refreshes stored context usage from the session after c
   const tempRoot = await mkdtemp(path.join(tmpdir(), "accordagents-chat-compact-usage-"));
   try {
     const participant = chatParticipant();
-    const conversation = chatConversation([participant], [chatSession(participant, "session-1")]);
+    const conversation = chatConversation([participant], [{ ...chatSession(participant, "session-1"), instructionsAccessHash: "abc123" }]);
     conversation.metadata.agentContextUsageByParticipant = {
       [participant.id]: {
         usedTokens: 900,
@@ -239,6 +239,10 @@ test("compactParticipant refreshes stored context usage from the session after c
     assert.deepEqual(readParticipantCompactions(storage.current.metadata), {});
     // The list of memory notes was in the compacted context: the next turn shows it again.
     assert.ok((service as any).memoryIndexDue.has((service as any).memoryIndexKey(conversation.id, participant.id)));
+    // The CLI rebuilt its instructions from its launch's text: the next turn
+    // says its access again.
+    const session = (storage.current.metadata.participantSessions as ChatParticipantSession[]).find((item) => item.participantId === participant.id);
+    assert.equal(session?.instructionsAccessHash, "restate");
   } finally {
     await rm(tempRoot, { recursive: true, force: true });
   }
@@ -1282,7 +1286,7 @@ test("a compaction gives Codex its app tools as a Codex turn does, gives Gemini 
       chatSession(gemini, "gemini-session"),
       // At the current config version: one at an older version tries the
       // CLI's own mechanism again (refreshExistingSessionForParticipant).
-      { ...chatSession(fallback, "fallback-session"), roleRuntime: "prompt-fallback" as const, runtimeConfigVersion: 23 }
+      { ...chatSession(fallback, "fallback-session"), roleRuntime: "prompt-fallback" as const, runtimeConfigVersion: 24 }
     ]);
     const issued: Array<Record<string, unknown>> = [];
     const appMcp = {

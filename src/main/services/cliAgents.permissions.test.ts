@@ -4920,6 +4920,35 @@ readline.createInterface({ input: process.stdin }).on("line", (line) => {
     send({ type: "command_lifecycle", command_uuid: uuid, state: "completed" });
     return;
   }
+  if (text === "Fill the context.") {
+    // Claude Code compacting on its own while it answers, its context full
+    // (the boundary it emits for an automatic compaction).
+    send({ type: "system", subtype: "init", session_id: "fixture-session" });
+    const pre = baseline + messagesTokens + 900000;
+    messagesTokens = 9000;
+    send({ type: "system", subtype: "compact_boundary", session_id: "fixture-session", compact_metadata: { trigger: "auto", pre_tokens: pre, post_tokens: messagesTokens } });
+    send({ type: "assistant", message: { role: "assistant", content: [{ type: "text", text: "Answered after compacting." }] } });
+    send({ type: "result", subtype: "success", result: "Answered after compacting.", session_id: "fixture-session" });
+    send({ type: "command_lifecycle", command_uuid: uuid, state: "completed" });
+    return;
+  }
+  if (text === "Fill then fail.") {
+    // Compacting on its own, then failing in the same step.
+    send({ type: "system", subtype: "init", session_id: "fixture-session" });
+    send({ type: "system", subtype: "compact_boundary", session_id: "fixture-session", compact_metadata: { trigger: "auto", pre_tokens: 950000, post_tokens: 9000 } });
+    send({ type: "result", subtype: "error_during_execution", is_error: true, result: "", session_id: "fixture-session" });
+    send({ type: "command_lifecycle", command_uuid: uuid, state: "completed" });
+    return;
+  }
+  if (text === "Subagent compacts.") {
+    // A subagent's own compaction (its own context): the member's is as it was.
+    send({ type: "system", subtype: "init", session_id: "fixture-session" });
+    send({ type: "system", subtype: "compact_boundary", session_id: "fixture-session", parent_tool_use_id: "toolu_sub", compact_metadata: { trigger: "auto", pre_tokens: 190000, post_tokens: 9000 } });
+    send({ type: "assistant", message: { role: "assistant", content: [{ type: "text", text: "Subagent done." }] } });
+    send({ type: "result", subtype: "success", result: "Subagent done.", session_id: "fixture-session" });
+    send({ type: "command_lifecycle", command_uuid: uuid, state: "completed" });
+    return;
+  }
   if (text.startsWith("/compact") && messagesTokens === 0) {
     // What Claude Code 2.1.280 answers with nothing to compact (verified).
     send({ type: "system", subtype: "init", session_id: "fixture-session" });
@@ -4970,6 +4999,37 @@ test("Claude's context after a turn of tool calls and a subagent is its last mai
     assert.equal(reply.contextUsage?.contextWindowTokens, 1000000, "the main model's window from the result, not the subagent model's 200k");
     assert.equal(reply.contextUsage?.percentage, 6);
     assert.equal(reply.contextUsage?.model, "claude-sonnet-5-5");
+  } finally {
+    await runner.shutdownWarmAgents();
+    await rm(fixtureDir, { recursive: true, force: true });
+  }
+});
+
+test("each compaction the member's live Claude Code process runs is told once, whatever reply it happened in, a failed one too; a subagent's is not", { timeout: 15_000 }, async () => {
+  if (process.platform === "win32") return;
+  const fixtureDir = await mkdtemp(path.join(tmpdir(), "accord-claude-auto-compact-"));
+  const { claudePath } = await writeClaudeCompactionFixture(fixtureDir);
+  const runner = makeRunner() as any;
+  runner.nativeProcessDbPath = path.join(fixtureDir, "native-processes.sqlite3");
+  runner.providerExecutableForRun = async () => claudePath;
+  const participant = { id: "claude-auto-compact", kind: "claude-code", label: "Claude", model: "sonnet" };
+  const warm = { conversationId: "conversation-auto-compact", participantId: participant.id, contextKey: "context-auto-compact", idleTimeoutMs: 60_000 };
+  const take = () => runner.takeMemberClaudeCompactions(warm.conversationId, participant.id);
+  try {
+    const before = await runner.run(participant, "Write a lot.", fixtureDir, undefined, "chat", undefined, { agentMode: "default", warm, sessionId: "fixture-session" });
+    assert.equal(before.ok, true, JSON.stringify(before));
+    assert.equal(take(), 0);
+    const filled = await runner.run(participant, "Fill the context.", fixtureDir, undefined, "chat", undefined, { agentMode: "default", warm, sessionId: "fixture-session" });
+    assert.equal(filled.content, "Answered after compacting.");
+    assert.equal(take(), 1, "the CLI rebuilt its system prompt from its launch's text: ChatService says the member's access again");
+    assert.equal(take(), 0, "told once");
+    const failed = await runner.run(participant, "Fill then fail.", fixtureDir, undefined, "chat", undefined, { agentMode: "default", warm, sessionId: "fixture-session" });
+    assert.equal(failed.ok, false, JSON.stringify(failed));
+    assert.equal(take(), 1, "a reply that failed after compacting still counts");
+    const subagent = await runner.run(participant, "Subagent compacts.", fixtureDir, undefined, "chat", undefined, { agentMode: "default", warm, sessionId: "fixture-session" });
+    assert.equal(subagent.ok, true, JSON.stringify(subagent));
+    assert.equal(take(), 0, "a subagent's compaction leaves the member's system prompt as it was");
+    assert.equal(runner.takeMemberClaudeCompactions("another-conversation", participant.id), 0, "counted per member");
   } finally {
     await runner.shutdownWarmAgents();
     await rm(fixtureDir, { recursive: true, force: true });
