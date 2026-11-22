@@ -665,6 +665,31 @@ test("the phone's New chat starts the main session in the mode, model and effort
     rows: ["Yes, continue anywayApply full access for this session", "CancelGo back without enabling full access"],
     list: 0
   });
+  // Drawn as the phone's question before a pairing code is used: the question
+  // in the sheet's own words (not a small capitals section label), the step
+  // as its filled button and going back as its outlined one, with no colour
+  // of its own and no empty choice circles.
+  const drawn = await app.evaluate(`(() => {
+    const colour = (value) => { const probe = document.createElement("span"); probe.style.color = value; document.body.append(probe); const read = getComputedStyle(probe).color; probe.remove(); return read; };
+    const style = (selector) => getComputedStyle(document.querySelector('#new-chat-model-options ' + selector));
+    const pair = document.createElement("button"); pair.className = "pairing-submit"; document.body.append(pair);
+    const back = document.createElement("button"); back.className = "pairing-cancel"; document.body.append(back);
+    const filled = getComputedStyle(pair), outlined = getComputedStyle(back);
+    const result = {
+      title: [style('.new-chat-confirm-title').textTransform, style('.new-chat-confirm-title').color === colour("var(--fg1)"), Number(style('.new-chat-confirm-title').fontSize.replace("px", "")) >= 15],
+      body: [style('.new-chat-confirm-body').color === colour("var(--mut)"), style('.new-chat-confirm-body').marginLeft, style('.new-chat-confirm-body').marginRight],
+      yes: ['backgroundColor', 'color', 'borderRadius', 'fontWeight', 'paddingTop'].every((key) => style('[data-confirm="yes"]')[key] === filled[key]),
+      cancel: ['backgroundColor', 'color', 'borderRadius', 'borderTopColor', 'borderTopWidth', 'fontWeight'].every((key) => style('[data-confirm="cancel"]')[key] === outlined[key]),
+      circles: document.querySelectorAll('#new-chat-model-options [data-confirm] .new-chat-check').length,
+      inside: [...document.querySelectorAll('#new-chat-model-options [data-confirm]')].every((button) => {
+        const box = button.getBoundingClientRect(), sheet = document.querySelector('#new-chat-model-sheet .members-sheet-panel').getBoundingClientRect();
+        return box.width > 0 && box.left >= sheet.left && box.right <= sheet.right;
+      })
+    };
+    pair.remove(); back.remove();
+    return result;
+  })()`);
+  assert.deepEqual(drawn, { title: ["none", true, true], body: [true, "0px", "0px"], yes: true, cancel: true, circles: 0, inside: true });
   await app.evaluate(`document.querySelector('#new-chat-model-options [data-confirm="cancel"]').click()`);
   await app.waitFor(`document.querySelectorAll('#new-chat-model-options [data-access]').length > 0`, "back to the list");
   assert.deepEqual(await chosenAccess(), ["auto-review"], "Cancel switched nothing");

@@ -2808,6 +2808,44 @@ button.mobile-chat-group-title:active {
   font: 400 12.5px var(--sans);
 }
 
+/* Codex's question before Full Access, in place of the sheet's choices: as
+   the phone asks before a pairing code is used (.pairing-confirm and
+   .pairing-form): the question, then the filled and the outlined button. */
+.new-chat-confirm {
+  padding: 8px 8px 4px;
+}
+
+.new-chat-confirm-title {
+  color: var(--fg1);
+  font: 600 17px var(--disp);
+  letter-spacing: -0.012em;
+}
+
+.new-chat-confirm-body {
+  margin: 8px 0 0;
+  color: var(--mut);
+  font: 400 14px var(--sans);
+  line-height: 1.45;
+}
+
+.new-chat-confirm-actions {
+  margin: 16px 0 0;
+}
+
+.new-chat-confirm-action {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 2px;
+  width: 100%;
+  text-align: center;
+}
+
+.new-chat-confirm-detail {
+  font: 400 12.5px var(--sans);
+  opacity: 0.72;
+}
+
 /* --- New chat ------------------------------------------------------------- */
 
 /* A screen of its own over the chats list and its bottom bar, as the

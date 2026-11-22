@@ -244,7 +244,10 @@ chat without a main session is always `classic`; its switch is disabled.
     full access. This significantly increases the risk of data loss, leaks,
     or unexpected behavior." with "Yes, continue anyway" ("Apply full
     access for this session") and "Cancel" ("Go back without enabling full
-    access"), which goes back to the list; the phone's sheet asks the same.
+    access"), which goes back to the list; the phone's sheet asks the same,
+    drawn as its question before a pairing code is used: the question, then
+    "Yes, continue anyway" as its filled button and "Cancel" as its
+    outlined one, each with Codex's line under it.
     Codex 0.155.1 asks it even with `notice.hide_full_access_warning` set.
     Stored choices keep working: a member saved
     with Claude Code's old Default is Manual (same mode), a phone sending

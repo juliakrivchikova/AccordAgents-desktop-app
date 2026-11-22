@@ -3919,15 +3919,36 @@
       return;
     }
     list.replaceChildren();
+    // Laid out as the phone's other question before a step that matters (a
+    // pairing code's): the question, then the step as the filled button and
+    // going back as the outlined one, each with Codex's line under it.
+    const box = document.createElement("div");
+    box.className = "new-chat-confirm";
     const title = document.createElement("div");
-    title.className = "members-sheet-section new-chat-confirm-title";
+    title.className = "new-chat-confirm-title";
     title.textContent = words.title;
     const body = document.createElement("p");
-    body.className = "members-sheet-note new-chat-confirm-body";
+    body.className = "new-chat-confirm-body";
     body.textContent = words.body;
-    list.append(title, body,
-      newChatOptionRow({ label: words.confirm.label, detail: words.confirm.detail, chosen: false, data: { confirm: "yes" }, onClick: confirm }),
-      newChatOptionRow({ label: words.cancel.label, detail: words.cancel.detail, chosen: false, data: { confirm: "cancel" }, onClick: back }));
+    const actions = document.createElement("div");
+    actions.className = "pairing-form new-chat-confirm-actions";
+    const action = function (className, choice, which, onClick) {
+      const button = document.createElement("button");
+      button.type = "button";
+      button.className = className + " new-chat-confirm-action";
+      button.dataset.confirm = which;
+      const label = document.createElement("span");
+      label.textContent = choice.label;
+      const detail = document.createElement("span");
+      detail.className = "new-chat-confirm-detail";
+      detail.textContent = choice.detail;
+      button.append(label, detail);
+      button.addEventListener("click", onClick);
+      return button;
+    };
+    actions.append(action("pairing-submit", words.confirm, "yes", confirm), action("pairing-cancel", words.cancel, "cancel", back));
+    box.append(title, body, actions);
+    list.append(box);
   }
 
   function newChatMemberName(participant) {
