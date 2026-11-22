@@ -660,6 +660,9 @@ const CHAT_GITHUB_APP_REPOSITORY_PATTERN = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/;
 const CHAT_GITHUB_APP_PERMISSION_PATTERN = /^[A-Za-z0-9_:-]+$/;
 const PARTICIPANT_REQUEST_SCRUTINY_APPENDIX =
   "Review for blockers, incorrect assumptions, missing edge cases, or simpler alternatives. If none, reply with only `No objections.` Do not restate the proposal.";
+/** Why the main session cannot be taken out of its chat, in words that name
+ *  no main session (the User, 2026-11-22). */
+const MAIN_SESSION_NOT_REMOVABLE_MESSAGE = "This chat's own session cannot be removed.";
 const CHAT_CONTEXT_READ_DEFAULT_LIMIT = 50;
 const CHAT_CONTEXT_READ_MAX_LIMIT = 200;
 
@@ -2969,7 +2972,7 @@ export class ChatService {
       throw new Error("Chat Assistant cannot be removed from the chat.");
     }
     if (targets.some((target) => this.isChatMainSession(conversation, target))) {
-      throw new Error("This chat's own session cannot be removed.");
+      throw new Error(MAIN_SESSION_NOT_REMOVABLE_MESSAGE);
     }
     if (participants.length - targets.length < 1) {
       throw new Error("The last chat member cannot be removed.");
@@ -6786,7 +6789,7 @@ export class ChatService {
         throw new Error("Chat Assistant cannot be removed from the chat.");
       }
       if (this.isChatMainSession(conversation, member)) {
-        throw new Error("This chat's own session cannot be removed.");
+        throw new Error(MAIN_SESSION_NOT_REMOVABLE_MESSAGE);
       }
       if (!operations.some((operation) => operation.participantId === member.id)) {
         operations.push({ type: "remove_participant_from_chat", participantId: member.id, handle: member.handle });

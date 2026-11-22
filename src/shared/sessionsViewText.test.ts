@@ -22,6 +22,7 @@ function appTexts(main: string, member: string): string[] {
     `@${main} could not start from a copy of @other's session in the chat "T": that session is not on the cloud machine @${main} runs on, so it starts a clean session.`,
     `@${member} could not start from a copy of @${main}'s session, so its next turn starts a clean session.`,
     `@${member} could not start from a copy of the main session's session, so it started a clean session from the saved chat context.`,
+    `@${member} could not start from a copy of the session it was forked from, so this turn started a clean session.`,
     // Failed and stopped replies (cliFailureNoticeText, machineTurnOutcome, chat.ts).
     ...[main, member].flatMap((handle) => [
       cliFailureNoticeText("process exited", { label: `@${handle}` }),

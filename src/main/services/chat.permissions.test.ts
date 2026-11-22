@@ -5577,7 +5577,7 @@ test("the New chat screen's own row is the main session as the User set it; a ch
   storage.current = created.conversation;
   await assert.rejects(
     () => service.addParticipant({ conversationId: created.conversation.id, participant: { handle: "second", roleConfigId: MAIN_SESSION_ROLE_ID, kind: "codex-cli" } }),
-    /a chat gives it only to its own session\.$/
+    /^Error: The "Main session" role cannot be given to @second: a chat gives it only to its own session\.$/
   );
 });
 
@@ -8263,6 +8263,14 @@ test("a denied member removal changes nothing and tells the asking member", asyn
   assert.ok(storage.current.messages.some((message: ChatMessage) =>
     message.content === "User declined @manager's request to remove @target. @target stays in this chat."
   ));
+});
+
+test("a member cannot remove the chat's own session, and is told so in words that name no main session", async () => {
+  const { service, actor, target } = memberRemovalFixture({ metadata: { mainSessionParticipantId: "target-participant" } });
+  await assert.rejects(
+    () => service.requestParticipantChangeFromTool(actor, { operations: [{ type: "remove_participant_from_chat", handle: target.handle }] }),
+    (error: Error) => error.message.endsWith("This chat's own session cannot be removed.") && !/main session/i.test(error.message)
+  );
 });
 
 test("a member cannot remove the Chat Assistant, the last member, or someone not in the chat", async () => {

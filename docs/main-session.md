@@ -329,8 +329,9 @@ chat without a main session is always `classic`; its switch is disabled.
     session's (Restart, Fork to new chat) are in the chat title's menu under
     the view switch, after a hairline and with no label (no label names the
     main session); Fork's line there and in a member's … menu reads "A new
-    chat that starts from a copy of this session" (the classic view's keeps
-    its own words). Its provider stays the one it was made with. No name,
+    chat that starts from a copy of this session", as it does in the classic
+    view (no words in either view name a main session, the User,
+    2026-11-22). Its provider stays the one it was made with. No name,
     status, member rights or auto-watch: the main session's chat behaviour
     is fixed (it creates and asks members, request and manage are allowed
     as its role gives them, and it is told when its tasks end). The model
@@ -452,7 +453,7 @@ A new chat opens in the view Settings → General names (`newChatViewFor`).
   mode, where it runs once a machine exists); the model's menu lists the
   providers first: every ready CLI and every added provider whose CLI is
   ready and which has its key (`mainSessionProviderOptions`). The default provider is Settings →
-  General's "Main session provider" (`resolveMainSessionProvider`); the
+  General's "Default provider for new chats" (`resolveMainSessionProvider`); the
   controls' choice is for that one chat and never changes the setting, and
   is forgotten when the User leaves New chat without sending. What was set
   for one provider (model, effort, access, where it runs) is dropped when

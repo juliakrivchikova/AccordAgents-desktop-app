@@ -115,6 +115,8 @@ const STATIVE = "(?:is|was|has|had|does|did|runs|belongs|cannot|can't|isn't|wasn
 const FORK_COPY_MAY_INCLUDE = new RegExp(`^${MAIN}'s copy of ${ANY}'s session may include what ${ANY} did after you tapped Fork:`);
 const FORK_STARTED_FROM = new RegExp(`^${MAIN} could not start from a copy of ${ANY}'s session in the chat `);
 const FORK_COPY_OF_MAIN = new RegExp(`copy of ${MAIN}'s session`, "g");
+/** The words such a notice used before 2026-11-22, kept for the notices
+ *  stored with them; it now says "the session it was forked from". */
 const FORK_COPY_OF_LABEL = /copy of the main session's session/g;
 
 /** The main session's mark, wherever it is left, as a sentence without a

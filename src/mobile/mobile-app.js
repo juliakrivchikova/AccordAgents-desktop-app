@@ -3951,10 +3951,12 @@
     list.append(box);
   }
 
-  /** A member's name on New chat. The main session is named by its provider,
-   *  as the computer names it (chatCliProviderLabel): an added provider by its
-   *  own name, else its CLI's. No words name a main session (the User,
-   *  2026-11-22). */
+  /** A member's name on New chat. The main session is named by its provider
+   *  (an added provider by its own name, else its CLI's, spelled as the
+   *  computer's chatCliProviderLabel spells it), as the computer's sessions
+   *  view names it; no words name a main session (the User, 2026-11-22).
+   *  The computer's classic New chat names it by its @ name, which this row
+   *  shows on its second line. */
   function newChatMemberName(participant) {
     if (isMainSessionMember(participant)) return newChatProviderName(participant);
     return participant.roleConfigId === "administrator" ? "Chat Assistant" : "@" + participant.handle;

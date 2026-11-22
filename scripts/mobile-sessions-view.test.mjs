@@ -481,6 +481,21 @@ test("classic New chat on the phone names the main session by its provider, neve
   })()`);
   assert.deepEqual([shown.name, shown.role, shown.button], ["Claude Code", "@main", "Members: Claude Code"], "its provider's name, as the computer names it");
   assert.doesNotMatch(shown.words, /main session/i, "no main session named");
+
+  // On an added provider: that provider's own name; on Antigravity: the
+  // computer's name for it.
+  for (const [lead, name] of [
+    [{ ...mainSession, hostId: "zai", hostLabel: "Z.ai GLM", hostVendor: "zai" }, "Z.ai GLM"],
+    [{ ...mainSession, kind: "gemini-cli" }, "Antigravity"]
+  ]) {
+    await app.evaluate(`document.getElementById("new-chat-close").click()`);
+    await hub.call("PUT", "/v1/catalog", { catalog: { version: 1, publishedAt: new Date().toISOString(),
+      roles: { "software-engineer": "Engineer", "main-session": "Main session" }, prompts: [], skills: [], avatars: {},
+      newChat: { ...newChat, assistant: lead, mainSession: lead } } });
+    await app.evaluate(`document.getElementById("new-chat-button").click()`);
+    await app.waitFor(`document.querySelector('#new-chat-members .new-chat-member[data-handle="main"] strong')?.textContent === ${JSON.stringify(name)}`, name);
+    assert.equal(await app.evaluate(`document.getElementById("new-chat-members-button").getAttribute("aria-label")`), `Members: ${name}`);
+  }
 });
 
 test("New chat on the phone leads with the main session, and the chat it makes has it", { timeout: 120_000 }, async (t) => {
