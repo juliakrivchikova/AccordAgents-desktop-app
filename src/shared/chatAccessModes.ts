@@ -355,9 +355,11 @@ export function applyChatAccessOptionById(
  * unchanged when it is in one; else the mode it runs in now (its mode, and
  * for the ordinary mode its file-edit right: Claude Code's Manual or Accept
  * edits, Codex's Ask for approval or Read Only, Antigravity's Default or
- * Accept-edits mode; a Codex member in Plan from before is Read Only with
- * Plan mode on), every other right kept as it was. Never wider: what it was
- * not granted its CLI now asks about instead of refusing it silently.
+ * Accept-edits mode), every other right kept as it was. Without its own mode
+ * Codex runs a stored Full Access as Approve for me and a stored Plan as Read
+ * Only with Plan mode off (CliAgentRunner.codexRunAccess): those are the
+ * modes it gets, never Full Access or Plan mode. Never wider: what it was not
+ * granted its CLI now asks about instead of refusing it silently.
  */
 export function inCliOwnMode(
   kind: ChatProviderKind,
@@ -367,9 +369,10 @@ export function inCliOwnMode(
   const normalized = normalizeChatAgentPermissions(permissions);
   const mode = chatAgentModeForKind(kind, agentMode);
   if (normalized.cliApprovals) return { agentMode: mode, permissions: normalized };
-  const legacyCodexPlan = kind === "codex-cli" && mode === "plan";
-  const option = legacyCodexPlan ? undefined : selectedChatAccessOption(kind, mode, { ...normalized, cliApprovals: true });
-  return applyChatAccessOptionById(kind, legacyCodexPlan ? "plan" : option?.id, normalized);
+  if (kind === "codex-cli" && mode === "plan") return applyChatAccessOptionById(kind, "read-only", normalized, false);
+  const ran = kind === "codex-cli" && mode === "full-access" ? "auto" : mode;
+  const option = selectedChatAccessOption(kind, ran, { ...normalized, cliApprovals: true });
+  return applyChatAccessOptionById(kind, option?.id, normalized);
 }
 
 /** A chat's members in their CLI's own mode (inCliOwnMode), for a chat shown

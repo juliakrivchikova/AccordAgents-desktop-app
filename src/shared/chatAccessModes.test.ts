@@ -434,8 +434,10 @@ test("a member with rights set in the classic view runs in its CLI's own mode, t
     ["Claude Code stored with Codex's Full Access", "claude-code", "full-access", classic(), "auto"],
     ["Codex editing", "codex-cli", "default", classic({ workspaceWrite: true }), "workspace-write"],
     ["Codex read-only", "codex-cli", "default", classic({ workspaceWrite: false }), "read-only"],
-    ["Codex Full Access", "codex-cli", "full-access", classic(), "full-access"],
-    ["Codex in Plan from before", "codex-cli", "plan", classic(), "read-only", true],
+    // Without its own mode Codex ran these as Approve for me and Read Only
+    // (codexRunAccess): never Full Access or Plan mode.
+    ["Codex stored with Full Access in the classic view", "codex-cli", "full-access", classic(), "auto-review"],
+    ["Codex stored in Plan in the classic view", "codex-cli", "plan", classic(), "read-only", false],
     ["Antigravity editing", "gemini-cli", "default", classic({ workspaceWrite: true }), "accept-edits"]
   ];
   for (const [label, kind, mode, permissions, expected, plan] of cases) {
