@@ -104,7 +104,14 @@ switch is disabled.
     T3 Code titles a thread: the 2–6 word `title` the main session gives
     the task in `app_chat_delegate_task`, else the task's first sentence cut
     at a word to 40 characters (`sessionsTaskTitle`, `sessionsMemberTitle`;
-    the phone gets it with the task), with provider, model and a non-generic role
+    the phone gets it with the task). A task the app makes because a reply
+    mentioned the member (an inferred request) is titled by the reply's
+    first sentence that mentions it, with no @-names, "Agent" when no words
+    remain (`sessionsMentionSentenceTitle`, the User, 2026-11-22); one made
+    before such tasks were titled is read the same way from the reply's
+    words its text quotes. The phone never receives inferred tasks (their
+    carrier is hidden), so there such a member is named by its handle
+    without "@" — an open divergence. With provider, model and a non-generic role
     under it (`sessionsMemberDetail`); in a message, in prose and in code
     alike, only an exact `@handle` of a member or a former member (at most
     32 characters, not part of a longer word, an e-mail address, a path or
@@ -984,7 +991,9 @@ the phone alike, and that the member's mode then follows the CLI.
   unknown failure, the copy was not the cause: the member stays a fork, its
   next turn makes the copy, and nothing says it started clean.
 - `ChatParticipantRequestItem.title?`: the main session's short title for
-  its task (`app_chat_delegate_task`'s `title`, at most 80 characters).
+  its task (`app_chat_delegate_task`'s `title`, at most 80 characters), or
+  the app's for an inferred request (`sessionsMentionSentenceTitle`, at
+  most 40); a member's MCP request cannot set one.
 - `ChatParticipantRequestBatch.delegation.turnId?`: the main-session turn (its `turnSegmentId`) that gave the task while that
   turn ran on this device. `autoResumeParticipantRequest` resumes the tasks
   of one `turnId` once: not while the turn runs (`liveTurnSegments`; its end

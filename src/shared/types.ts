@@ -1425,6 +1425,9 @@ export interface ChatConnectorSignInRequest {
 export interface ChatParticipantRequestInput {
   target: string;
   prompt: string;
+  /** Its short title, set by the app only: an inferred request's is the
+   *  reply's sentence that mentions the member (sessionsMentionSentenceTitle). */
+  title?: string;
   reason?: string;
 }
 

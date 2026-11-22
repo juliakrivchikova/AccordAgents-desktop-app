@@ -149,13 +149,93 @@ export function shortenAtWord(text: string, max: number): string {
  *  дела"): the one the main session gave it (app_chat_delegate_task), else
  *  the task's first sentence without its full stop, cut at a word to
  *  SESSIONS_TASK_TITLE_MAX_CHARS. Empty for a task without text. */
-export function sessionsTaskTitle(item: Pick<ChatParticipantRequestItem, "prompt"> & { title?: unknown }): string {
+export function sessionsTaskTitle(item: Pick<ChatParticipantRequestItem, "prompt"> & { title?: unknown; targetHandle?: string }): string {
   const given = typeof item.title === "string" ? item.title.replace(/\s+/g, " ").trim() : "";
   if (given) return shortenAtWord(given, SESSIONS_TASK_GIVEN_TITLE_MAX_CHARS);
+  // A task the app made from a reply that mentioned the member, before such
+  // tasks were titled when made: titled from the reply's words it quotes.
+  const excerpt = inferredTaskExcerpt(item.prompt);
+  if (excerpt !== undefined) return sessionsMentionSentenceTitle(excerpt, item.targetHandle);
   const line = firstTextLine(typeof item.prompt === "string" ? item.prompt : "", Number.MAX_SAFE_INTEGER);
   const sentence = /^.+?[.!?…](?=\s|$)/u.exec(line)?.[0] ?? line;
   const plain = sentence.replace(/[\s.,;:]+$/u, "") || sentence;
   return shortenAtWord(plain, SESSIONS_TASK_TITLE_MAX_CHARS);
+}
+
+/** The title of a task with no words of its own left once its @-names are
+ *  gone (sessionsMentionSentenceTitle). */
+export const SESSIONS_UNNAMED_TASK_TITLE = "Agent";
+
+/** An `@handle` as a word (not inside an e-mail address, a path or a package
+ *  name such as `@types/node`), as sessionsMentionPieces reads one. */
+const MENTION_PATTERN = /(^|[^A-Za-z0-9_@./\\-])@([A-Za-z0-9][A-Za-z0-9_-]*)(?![A-Za-z0-9_\-/])/g;
+
+/** The words a task the app made from a member's reply quotes from it
+ *  (ChatService.inferredParticipantRequestPrompt: its first line says who
+ *  appeared to ask, the next one quotes the reply); undefined for any other
+ *  task. */
+function inferredTaskExcerpt(prompt: unknown): string | undefined {
+  if (typeof prompt !== "string") return undefined;
+  const [first, second] = prompt.split("\n");
+  if (!first || !/^@[A-Za-z0-9][A-Za-z0-9_-]* appeared to request your input in this chat reply\.$/.test(first.trim())) return undefined;
+  const quoted = /^Relevant excerpt: ?(.*)$/s.exec(second ?? "");
+  return quoted ? quoted[1]! : undefined;
+}
+
+/**
+ * The title of a task the app made because a member's reply mentioned
+ * another member (an inferred request): the reply's first sentence that
+ * mentions `@targetHandle` (any member, when not given or not found), with
+ * no @-names, since the sessions view names nobody by handle (the User,
+ * 2026-11-22). Cut at a word to SESSIONS_TASK_TITLE_MAX_CHARS, as a task's
+ * own first sentence is; SESSIONS_UNNAMED_TASK_TITLE when no words remain.
+ */
+export function sessionsMentionSentenceTitle(reply: string, targetHandle?: string): string {
+  const text = typeof reply === "string" ? reply : "";
+  const wanted = targetHandle?.trim().replace(/^@/, "").toLowerCase();
+  let at = -1;
+  let anyAt = -1;
+  for (const match of text.matchAll(MENTION_PATTERN)) {
+    const index = (match.index ?? 0) + match[1]!.length;
+    if (anyAt < 0) anyAt = index;
+    if (wanted && match[2]!.toLowerCase() === wanted) {
+      at = index;
+      break;
+    }
+  }
+  if (at < 0) at = Math.max(0, anyAt);
+  // Its sentence: from the end of the one before (or the line's start) to
+  // its own end; a dot inside a word or a number ends none.
+  let start = 0;
+  for (let index = at - 1; index >= 0; index -= 1) {
+    const char = text[index]!;
+    if (char === "\n" || (/[.!?…]/u.test(char) && /\s/u.test(text[index + 1] ?? ""))) {
+      start = index + 1;
+      break;
+    }
+  }
+  let end = text.length;
+  for (let index = at; index < text.length; index += 1) {
+    const char = text[index]!;
+    if (char === "\n") {
+      end = index;
+      break;
+    }
+    if (/[.!?…]/u.test(char) && (index + 1 === text.length || /\s/u.test(text[index + 1]!))) {
+      end = index + 1;
+      break;
+    }
+  }
+  const sentence = firstTextLine(text.slice(start, end), Number.MAX_SAFE_INTEGER);
+  const plain = sentence
+    .replace(MENTION_PATTERN, "$1")
+    .replace(/\s+/g, " ")
+    .replace(/\s+([,;:.!?…])/gu, "$1")
+    .replace(/^[\s,;:.!?…—–-]+/u, "")
+    .replace(/[\s.,;:—–-]+$/u, "")
+    .trim();
+  if (!/[\p{L}\p{N}]/u.test(plain)) return SESSIONS_UNNAMED_TASK_TITLE;
+  return shortenAtWord(`${plain.charAt(0).toLocaleUpperCase()}${plain.slice(1)}`, SESSIONS_TASK_TITLE_MAX_CHARS);
 }
 
 /** A member's title in the sessions view (as in T3 Code): its current or
