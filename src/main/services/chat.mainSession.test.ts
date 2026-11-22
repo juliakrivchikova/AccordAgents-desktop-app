@@ -486,8 +486,12 @@ test("a delegated fork whose clean start fails too: the main session reads why i
   const notice = `@${String(result.handle).slice(1)} could not start from a copy of @main's session, so this turn started a clean session.`;
   const failed = storage.current.messages.find((message: ChatMessage) => message.participantId === childId && message.status === "error");
   assert.ok(failed?.content.includes(notice), failed?.content);
-  const pointers = (storage.current.metadata.promptContextPointers ?? {}) as Record<string, unknown>;
-  assert.equal(pointers[childId], undefined, "its chat context starts over");
+  const pointers = (storage.current.metadata.promptContextPointers ?? {}) as Record<string, { timeline?: unknown; threads?: unknown; forgottenAt?: string }>;
+  // Its chat context starts over: no pointer, only the marker that keeps an
+  // older copy of the chat from bringing its pointers back.
+  assert.equal(pointers[childId]?.timeline, undefined, "its chat context starts over");
+  assert.equal(pointers[childId]?.threads, undefined);
+  assert.ok(pointers[childId]?.forgottenAt);
   // Its next turn: a new session's first, given the chat from its start.
   overloaded = false;
   const asked = await service.requestParticipantsFromTool(mainActor(undefined, { triggerMessageId: "trigger-next" }), { requests: [{ target: String(result.handle), prompt: "Try again." }] });
