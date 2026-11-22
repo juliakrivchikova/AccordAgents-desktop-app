@@ -345,9 +345,12 @@ export function memberAsItRunsNow(participant: ChatParticipant, mainSession: Cha
 
 /**
  * The new chat's main session's rights: the member's access as it runs now
- * (what it may read, edit, run and reach, and its CLI's own mode) with the
- * main session's own say over members (`base`: what its role gives a new
- * main session). Never more than the member has, besides that say.
+ * (what it may read, edit, run and reach, its CLI's own mode, and whether it
+ * compacts its context without asking) with the main session's own say over
+ * members (`base`: what its role gives a new main session). Never more than
+ * the member has, besides that say. Settings → General's defaults for new
+ * chats are not used: the fork is the member as it is (the User, 2026-11-22:
+ * a forked member allowed to compact must not be asked).
  */
 export function forkedMainSessionPermissions(base: ChatAgentPermissions, memberPermissions: ChatAgentPermissions | undefined): ChatAgentPermissions {
   const own = normalizeChatAgentPermissions(memberPermissions);
@@ -357,6 +360,7 @@ export function forkedMainSessionPermissions(base: ChatAgentPermissions, memberP
     repoRead: own.repoRead,
     workspaceWrite: own.workspaceWrite,
     webAccess: own.webAccess,
+    requestCompaction: own.requestCompaction,
     shell: { enabled: own.shell.enabled, rules: own.shell.rules.map((rule) => ({ ...rule })) },
     ...(own.providerNative ? { providerNative: own.providerNative } : {}),
     ...(own.cliApprovals ? { cliApprovals: true as const } : {}),

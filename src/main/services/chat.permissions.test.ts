@@ -5550,9 +5550,51 @@ test("a new chat gets a main session instead of the Chat Assistant: an ordinary 
   assert.deepEqual(alone.map((item) => item.roleConfigId), [MAIN_SESSION_ROLE_ID]);
   assert.equal(alone[0].permissions?.repoRead, false, "no project to read, as for an ordinary member");
 
-  const classic = testService({ agents, settings: { chatRoleConfigs: [ADMIN_ROLE, ROLE], defaultChatView: "classic" } });
+  // The view Settings once named for new chats is gone: a stored "classic"
+  // no longer makes a new chat open classic (the User, 2026-11-22).
+  const classic = testService({ agents, settings: { chatRoleConfigs: [ADMIN_ROLE, ROLE], legacyDefaultChatView: "classic" } });
   const classicChat = await classic.service.createConversation({ title: "Fresh chat", participants: [], skipDefaultParticipants: true });
-  assert.equal(classicChat.conversation.metadata.chatView, "classic", "Settings → General picks the view a new chat opens in");
+  assert.equal(classicChat.conversation.metadata.chatView, "sessions", "every new chat opens in the sessions view");
+});
+
+test("Settings → General → New chats: a new chat's main session compacts without asking unless turned off, made on the computer or offered to the phone", { timeout: 10_000 }, async () => {
+  const agents = installedChatAgents();
+  const row = { handle: "main", roleConfigId: MAIN_SESSION_ROLE_ID, kind: "claude-code" as const, permissions: { ...defaultChatAgentPermissions(), requestCompaction: "ask" as const } };
+  for (const [label, newChatDefaults, right] of [
+    ["unset", undefined, "allow"],
+    ["on", { compactWithoutAsking: true }, "allow"],
+    ["off", { compactWithoutAsking: false }, "ask"]
+  ] as const) {
+    const { service } = testService({ agents, settings: { chatRoleConfigs: [ADMIN_ROLE, ROLE], assistantProviderKind: "claude-code", newChatDefaults } });
+    const alone = await service.createConversation({ title: "Fresh chat", participants: [], skipDefaultParticipants: true });
+    assert.equal((alone.conversation.metadata.participants as ChatParticipant[])[0].permissions?.requestCompaction, right, `${label}: made without a row from the screen`);
+    // The screen has no control for it: Settings decides.
+    const fromScreen = await service.createConversation({ title: "Fresh chat", participants: [row] });
+    assert.equal((fromScreen.conversation.metadata.participants as ChatParticipant[])[0].permissions?.requestCompaction, right, `${label}: made from the screen's row`);
+    const offered = await service.newChatOptions([]);
+    assert.equal(offered?.mainSession?.permissions?.requestCompaction, right, `${label}: the phone's new chat`);
+  }
+});
+
+test("the phone's New chat offers the main session as Settings → General → New chats starts it: model, effort, mode and machine for its CLI", { timeout: 10_000 }, async () => {
+  const agents = installedChatAgents();
+  const newChatDefaults = { kind: "claude-code" as const, model: "claude-opus-5-5", reasoningEffort: "high" as const, access: "acceptEdits", homeMachineId: "m-hand", compactWithoutAsking: true };
+  const { service } = testService({ agents, settings: { chatRoleConfigs: [ADMIN_ROLE, ROLE], assistantProviderKind: "claude-code", newChatDefaults },
+    machines: [{ id: "m-hand", name: "Studio", deviceId: "device-hand" }] });
+  const offered = (await service.newChatOptions([]))!.mainSession!;
+  assert.deepEqual([offered.kind, offered.model, offered.reasoningEffort, offered.agentMode, offered.homeMachineId], ["claude-code", "claude-opus-5-5", "high", "default", "m-hand"]);
+  assert.deepEqual([offered.permissions?.cliApprovals, offered.permissions?.workspaceWrite], [true, true], "Claude Code's Accept edits");
+  assert.deepEqual([offered.permissions?.requestParticipants, offered.permissions?.manageRolesParticipants], ["allow", undefined],
+    "it asks members without a card, and adds them as its role always lets it (inherited)");
+
+  // Chosen for another CLI than new chats run on: that CLI's own; a machine
+  // no longer set up: this computer.
+  const other = testService({ agents, settings: { chatRoleConfigs: [ADMIN_ROLE, ROLE], assistantProviderKind: "codex-cli", newChatDefaults: { ...newChatDefaults, homeMachineId: "m-gone" } },
+    machines: [{ id: "m-hand", name: "Studio", deviceId: "device-hand" }] });
+  const codex = (await other.service.newChatOptions([]))!.mainSession!;
+  assert.deepEqual([codex.kind, codex.model, codex.reasoningEffort, codex.agentMode, codex.homeMachineId, codex.permissions?.cliApprovals],
+    ["codex-cli", undefined, undefined, "default", undefined, undefined]);
+  assert.equal(codex.permissions?.requestCompaction, "allow");
 });
 
 test("the New chat screen's own row is the main session as the User set it; a chat has one, and no other member gets its role", async () => {
@@ -15211,7 +15253,9 @@ function testService(options: {
     providers?: ProviderSettings[];
     assistantProviderKind?: ChatProviderKind;
     lastSuccessfulChatProviderKind?: ChatProviderKind;
-    defaultChatView?: AppSettings["defaultChatView"];
+    newChatDefaults?: AppSettings["newChatDefaults"];
+    /** A field a settings file from before may still hold (ignored). */
+    legacyDefaultChatView?: string;
   };
   machines?: Array<{ id: string; name: string; awsInstanceId?: string; deviceId?: string; lastHello?: { providers: Array<{ kind: string; installed: boolean }> } }>;
   machineInstalls?: Array<{ machineId: string; projects?: Record<string, string>; target?: { hostKeyAlias?: string } }>;
@@ -15302,7 +15346,8 @@ function testService(options: {
     cliProviderHosts: [],
     assistantProviderKind,
     lastSuccessfulChatProviderKind: options.settings?.lastSuccessfulChatProviderKind,
-    ...(options.settings?.defaultChatView ? { defaultChatView: options.settings.defaultChatView } : {})
+    ...(options.settings?.newChatDefaults ? { newChatDefaults: options.settings.newChatDefaults } : {}),
+    ...(options.settings?.legacyDefaultChatView ? { defaultChatView: options.settings.legacyDefaultChatView } : {})
   });
   const roleIdFromLabel = (label: string): string =>
     `custom-${label.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 40) || "role"}-test`;

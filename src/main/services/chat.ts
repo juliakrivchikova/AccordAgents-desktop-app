@@ -4,7 +4,8 @@ import {
   forkCutFor, forkedChatTitle, forkedMainSessionPermissions, forkOriginFor, forkToNewChatLocalProviders, forkToNewChatReasonInChat, isForkableSessionKind,
   lastMemberTurnEnd, memberAsItRunsNow, memberHasFinishedReply, type ForkToNewChatMachineSupport, type ForkToNewChatOffer
 } from "../../shared/forkToNewChat";
-import { cliModesTurnRefusal, type CliModesMachineSupport } from "../../shared/chatAccessModes";
+import { applyChatAccessOptionById, cliModesTurnRefusal, type CliModesMachineSupport } from "../../shared/chatAccessModes";
+import { newChatMainSessionStart } from "../../shared/newChatDefaults";
 import { DEFAULT_CHAT_VIEW, MAIN_SESSION_HANDLE, MAIN_SESSION_ROLE_ID, canSwitchChatView, isChatViewMode, isMainSessionChat, isMainSessionParticipant, isRoleOfferedForNewMembers, mainSessionMemberOf, mainSessionParticipantId } from "../../shared/mainSession";
 import { SESSIONS_TASK_GIVEN_TITLE_MAX_CHARS, firstTextLine, sessionsTaskTitle, shortenAtWord } from "../../shared/mainSessionView";
 import { createHash, randomUUID } from "node:crypto";
@@ -1849,7 +1850,8 @@ export class ChatService {
       const requestedParticipants = await this.validateParticipants(memberInputs, [], true);
       const participants = await this.ensureMainSessionParticipant(requestedParticipants, assistantProviderKind, {
         repoPath: requestedRepoPath,
-        requested: mainSessionInput
+        requested: mainSessionInput,
+        newChatDefaults: true
       });
       const mainSession = mainSessionMemberOf(participants);
       signal?.throwIfAborted();
@@ -1871,10 +1873,9 @@ export class ChatService {
           participantSessions: [],
           warnings: [],
           running: false,
-          ...(mainSession ? {
-            mainSessionParticipantId: mainSession.id,
-            chatView: isChatViewMode(settings.defaultChatView) ? settings.defaultChatView : DEFAULT_CHAT_VIEW
-          } : {})
+          // Every new chat opens in the sessions view (the User, 2026-11-22);
+          // its header switches it afterwards.
+          ...(mainSession ? { mainSessionParticipantId: mainSession.id, chatView: DEFAULT_CHAT_VIEW } : {})
         }
       };
       this.rebuildLastMessagesByParticipant(conversation);
@@ -1995,7 +1996,7 @@ export class ChatService {
           warnings: [],
           running: false,
           mainSessionParticipantId: mainSession.id,
-          chatView: isChatViewMode(settings.defaultChatView) ? settings.defaultChatView : DEFAULT_CHAT_VIEW
+          chatView: DEFAULT_CHAT_VIEW
         }
       };
       this.rebuildLastMessagesByParticipant(conversation);
@@ -2119,8 +2120,8 @@ export class ChatService {
    * What the phone's New chat offers, as this computer's New chat screen
    * does (the User, 2026-10-29): its projects (the folders its chats are in,
    * newest first), the folder a new chat starts in, the main session and
-   * every saved member as this computer would add them, the view a new chat
-   * opens in, and why none could be started now. The phone puts the chat
+   * every saved member as this computer would add them, and why none could
+   * be started now. The phone puts the chat
    * together from these (src/shared/newChat) and writes it to the User's
    * server.
    */
@@ -2136,7 +2137,9 @@ export class ChatService {
     try {
       // As a chat in a project has it (most phone chats are); the phone's
       // newChatParticipants takes repository reading away for a chat without one.
-      [mainSession] = await this.ensureMainSessionParticipant([], assistantKind, { hasProject: true });
+      // Started as Settings → General → New chats says (the model, effort,
+      // mode, machine and compaction right travel with it to the phone).
+      [mainSession] = await this.ensureMainSessionParticipant([], assistantKind, { hasProject: true, newChatDefaults: true });
     } catch (error) {
       if (!unavailable) throw error;
     }
@@ -2236,7 +2239,6 @@ export class ChatService {
       ...(defaultProject ? { defaultProject } : {}),
       mainSession: offeredMainSession,
       assistant: offeredMainSession,
-      ...(isChatViewMode(settings.defaultChatView) ? { defaultChatView: settings.defaultChatView } : {}),
       ...(mainSessionProviders.length > 0 ? { mainSessionProviders } : {}),
       members,
       ...(unavailable ? { unavailable } : {}),
@@ -15080,11 +15082,15 @@ export class ChatService {
    * rights an ordinary member starts with in this chat. Its role lets it ask
    * and add members without a card. The New chat screen's own row for it
    * (`requested`, when the User changed it there) is used as given.
+   * `newChatDefaults`: a new chat (not a fork), which starts as Settings →
+   * General → New chats says (src/shared/newChatDefaults.ts): without a row
+   * from the screen, on its model, effort, mode and machine; always with its
+   * compaction right, which the screen has no control for.
    */
   private async ensureMainSessionParticipant(
     participants: ChatParticipant[],
     preferredKind: ChatProviderKind | undefined,
-    options: { repoPath?: string; hasProject?: boolean; requested?: ChatParticipantInput } = {}
+    options: { repoPath?: string; hasProject?: boolean; requested?: ChatParticipantInput; newChatDefaults?: boolean } = {}
   ): Promise<ChatParticipant[]> {
     const existing = mainSessionMemberOf(participants);
     if (existing) {
@@ -15103,17 +15109,35 @@ export class ChatService {
       ?? participants[0]?.kind
       ?? await this.defaultAdministratorProviderKind(settings.providers);
     const hasProject = options.hasProject ?? Boolean(options.repoPath?.trim());
+    let agentMode: ChatAgentMode = requested?.agentMode ?? "default";
+    let permissions: ChatAgentPermissions = requested?.permissions
+      ?? this.normalizeParticipantPermissionsForRole(role, newChatMemberPermissions(hasProject), true);
+    let started: Pick<ChatParticipantInput, "model" | "reasoningEffort" | "homeMachineId"> = {};
+    if (options.newChatDefaults) {
+      const machineIds = await Promise.resolve().then(() => this.settings.listMachines())
+        .then((machines) => machines.map((machine) => machine.id), () => undefined);
+      const start = newChatMainSessionStart(settings.newChatDefaults, { kind, hostId: requested?.hostId?.trim() || undefined }, machineIds);
+      if (!requested) {
+        if (start.access) ({ agentMode, permissions } = applyChatAccessOptionById(kind, start.access, permissions));
+        started = {
+          ...(start.model ? { model: start.model } : {}),
+          ...(start.reasoningEffort ? { reasoningEffort: start.reasoningEffort } : {}),
+          ...(start.homeMachineId ? { homeMachineId: start.homeMachineId } : {})
+        };
+      }
+      permissions = { ...permissions, requestCompaction: start.requestCompaction };
+    }
     const [mainSession] = await this.validateParticipants([
       {
         ...(requested ?? {}),
+        ...started,
         // Never a saved member: each chat makes its own main session.
         participantConfigId: undefined,
         handle,
         roleConfigId: role.id,
         kind,
-        agentMode: requested?.agentMode ?? "default",
-        permissions: requested?.permissions
-          ?? this.normalizeParticipantPermissionsForRole(role, newChatMemberPermissions(hasProject), true)
+        agentMode,
+        permissions
       }
     ], participants, false, undefined, { mainSession: true });
     return mainSession ? [mainSession, ...participants] : participants;

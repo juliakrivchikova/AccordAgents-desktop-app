@@ -108,7 +108,6 @@ export function ChatConversationView(props: ChatConversationViewProps): JSX.Elem
   ]);
   const viewMode = useChatViewMode({
     conversation: props.conversation,
-    defaultView: props.settings.defaultChatView,
     onSaved: props.onChatViewSaved,
     onError: props.onChatViewError
   });

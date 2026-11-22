@@ -45,8 +45,10 @@ import {
   isNewChatMainSessionOption,
   NEW_CHAT_MAIN_SESSION_PARTICIPANT_ID,
   newChatMainSessionParticipantConfig,
-  newChatMainSessionParticipantDraft
+  newChatMainSessionParticipantDraft,
+  newChatMainSessionPlace
 } from "./chat-main-session-draft";
+import { newChatMainSessionStart } from "../../../shared/newChatDefaults";
 import { startAccessKey, useCliStartDefaults, useMachineList, type NewChatStartAccess } from "./use-cli-start-defaults";
 import { participantOptionInvalidReason } from "./chat-cli-readiness";
 import {
@@ -160,7 +162,7 @@ export function NewChatScreen(props: {
   // composer's model chip chooses the main session's provider, model, effort
   // and access, as T3 Code's does (the User, 2026-11-21). The classic view's
   // New chat stays as it was.
-  const sessionsView = newChatViewFor(props.settings.defaultChatView) === "sessions";
+  const sessionsView = newChatViewFor() === "sessions";
   const providerOptions = useMemo(
     () => mainSessionProviderOptions(props.agents, props.settings.providers, props.settings.cliProviderHosts),
     [props.agents, props.settings.cliProviderHosts, props.settings.providers]
@@ -229,20 +231,28 @@ export function NewChatScreen(props: {
     });
   }, []);
   const mainSessionOverride = overrideForOtherProvider ? undefined : props.selectedParticipantRuntimeOverrides[NEW_CHAT_MAIN_SESSION_PARTICIPANT_ID];
+  const machineList = useMachineList();
+  // How Settings → General → New chats starts it on this provider: the
+  // controls start from it (a machine no longer set up: this computer).
+  const machineIdsKey = machineList.machines.map((machine) => machine.id).join("\u0000");
+  const newChatStart = useMemo(
+    () => mainKind
+      ? newChatMainSessionStart(props.settings.newChatDefaults, { kind: mainKind, hostId: mainHostId }, machineIdsKey ? machineIdsKey.split("\u0000") : [])
+      : undefined,
+    [mainHostId, mainKind, machineIdsKey, props.settings.newChatDefaults]
+  );
   // The mode the User's own config starts its CLI in where the main session
   // runs (this computer, or the machine chosen for it): it starts there.
-  const machineList = useMachineList();
+  const place = newChatMainSessionPlace(mainSessionOverride, newChatStart);
   const startAccess = useCliStartDefaults(mainKind
-    ? { kind: mainKind, homeMachineId: mainSessionOverride?.homeMachineId, cloudRun: mainSessionOverride?.cloudRun }
+    ? { kind: mainKind, homeMachineId: place.homeMachineId, cloudRun: place.cloudRun }
     : undefined, machineList)?.access;
   const mainSessionParticipant = useMemo(
-    () => mainKind ? newChatMainSessionParticipantConfig(mainKind, Boolean(props.repoPath.trim()), mainHostId, sessionsView, startAccess) : undefined,
-    [mainHostId, mainKind, props.repoPath, sessionsView, startAccess]
+    () => mainKind ? newChatMainSessionParticipantConfig(mainKind, Boolean(props.repoPath.trim()), mainHostId, sessionsView, startAccess, newChatStart) : undefined,
+    [mainHostId, mainKind, newChatStart, props.repoPath, sessionsView, startAccess]
   );
   const { onMainSessionStartAccessChange } = props;
-  const startShownKey = mainProviderKey
-    ? startAccessKey(mainProviderKey, { homeMachineId: mainSessionOverride?.homeMachineId, cloudRun: mainSessionOverride?.cloudRun })
-    : undefined;
+  const startShownKey = mainProviderKey ? startAccessKey(mainProviderKey, place) : undefined;
   useEffect(() => {
     if (!sessionsView) return;
     onMainSessionStartAccessChange?.(startShownKey ? { key: startShownKey, ...(startAccess ? { access: startAccess } : {}) } : undefined);
@@ -266,9 +276,9 @@ export function NewChatScreen(props: {
   );
   const mainSessionDraft = useMemo(
     () => mainKind
-      ? newChatMainSessionParticipantDraft(mainKind, mainSessionOverride, Boolean(props.repoPath.trim()), mainHostId, sessionsView, startAccess)
+      ? newChatMainSessionParticipantDraft(mainKind, mainSessionOverride, Boolean(props.repoPath.trim()), mainHostId, sessionsView, startAccess, newChatStart)
       : undefined,
-    [mainHostId, mainKind, mainSessionOverride, props.repoPath, sessionsView, startAccess]
+    [mainHostId, mainKind, mainSessionOverride, newChatStart, props.repoPath, sessionsView, startAccess]
   );
   const prospectiveParticipantDrafts = useMemo(() => {
     // In the sessions view the chat is made with its main session alone: it

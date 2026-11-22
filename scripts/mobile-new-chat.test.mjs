@@ -712,3 +712,84 @@ test("the phone's New chat starts the main session in the mode, model and effort
   assert.deepEqual([main.homeMachineId, main.agentMode, main.permissions.cliApprovals, main.model], [undefined, "full-access", true, undefined]);
   assert.equal(selectedChatAccessOption(main.kind, main.agentMode, main.permissions)?.label, "Full Access", "confirmed, it is made in Full Access");
 });
+
+test("the phone's New chat starts from the computer's Settings → General → New chats, and what she chooses there is that chat's only", { timeout: 120_000 }, async (t) => {
+  const { createDeviceIdentity } = require("../dist/main/main/services/deviceIdentity.js");
+  const box = createDeviceIdentity(new Date().toISOString());
+  const hub = await startMobileHub({ rosterDevices: [
+    { deviceId: box.originId, publicKeyDerBase64: box.publicKeyDerBase64, role: "machine", name: "Cloud box", machineId: "m-box" }
+  ] });
+  const site = await serveMobileShell({ port: 8414, hubOrigins: [hub.base] });
+  const profile = await tempProfile("aa-mobile-new-chat-defaults-");
+  const chrome = launchChrome({ port: 9564, profile, url: `${site.origin}/`, width: 402, height: 874 });
+  let app;
+  t.after(async () => {
+    app?.close();
+    chrome.kill("SIGKILL");
+    await site.close();
+    await hub.close();
+    await rm(profile, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
+  });
+  await hub.createChat("conv-old", { title: "Old", participants: [member("drew")] });
+  // The main session as the computer offers it (ChatService.newChatOptions):
+  // made as Settings → General → New chats starts a new chat: GPT-6-Luna at
+  // High, Codex's Approve for me, on the cloud box, compacting without asking.
+  const mainSession = { id: "main-session", handle: "main", roleConfigId: "main-session", kind: "codex-cli", model: "gpt-6-luna", reasoningEffort: "high",
+    homeMachineId: "m-box", agentMode: "auto",
+    permissions: { repoRead: true, workspaceWrite: false, webAccess: false, requestParticipants: "allow", requestCompaction: "allow", shell: { enabled: false, rules: [] }, cliApprovals: true } };
+  const efforts = [{ id: "low", label: "Low" }, { id: "high", label: "High" }];
+  const newChat = {
+    projects: [{ path: "/Users/u/api", label: "api" }], defaultProject: "/Users/u/api", mainSession, assistant: mainSession,
+    members: [{ configId: "c-boxy", uses: 0, participant: member("boxy", { id: "t-boxy", participantConfigId: "c-boxy", kind: "codex-cli" }), machineId: "m-box", projects: ["/Users/u/api"] }],
+    mainSessionProviders: [
+      { kind: "codex-cli", label: "Codex", defaultModelLabel: "GPT-5.6-Luna", models: [{ id: "gpt-6-luna", label: "GPT-6-Luna" }], efforts, start: { access: "workspace-write" } },
+      { kind: "claude-code", label: "Claude Code", defaultModelLabel: "Opus 5.5", models: [{ id: "haiku", label: "Haiku 5.5" }], efforts }
+    ],
+    cliModes: { machines: { "m-box": true } }
+  };
+  const published = await hub.call("PUT", "/v1/catalog", { catalog: { version: 1, publishedAt: new Date().toISOString(), roles: { "main-session": "Main session" }, prompts: [], skills: [], avatars: {}, newChat } });
+  assert.equal(published.ok, true);
+  app = await attachApp({ port: 9564 });
+  await pairPage(app, { hub, siteOrigin: site.origin, query: "qa=1" });
+  await app.waitFor(`!document.getElementById("new-chat-button").hidden`, "the New chat button");
+  await app.evaluate(`document.getElementById("new-chat-button").click()`);
+  await app.waitFor(`!document.getElementById("new-chat-model-button").hidden && !document.getElementById("new-chat-model-button").disabled`, "the model chip");
+  assert.equal(await app.evaluate(`document.getElementById("new-chat-model-label").textContent`), "GPT-6-LunaHigh", "Settings' model and effort");
+  await app.evaluate(`document.getElementById("new-chat-model-button").click()`);
+  await app.waitFor(`!document.getElementById("new-chat-model-sheet").hidden`, "the chip's sheet");
+  const chosen = () => app.evaluate(`Object.fromEntries(["model", "effort", "access", "runsOn", "providerKind"].map((key) => [key,
+    [...document.querySelectorAll('#new-chat-model-options [data-' + key.replace(/[A-Z]/g, (c) => "-" + c.toLowerCase()) + ']')]
+      .filter((row) => row.getAttribute("aria-pressed") === "true").map((row) => row.dataset[key])[0]]))`);
+  assert.deepEqual(await chosen(), { model: "gpt-6-luna", effort: "high", access: "auto-review", runsOn: "m-box", providerKind: "codex-cli" },
+    "every control starts from Settings");
+
+  // Another provider: its own model, effort and mode; where it runs stays.
+  await app.evaluate(`document.querySelector('#new-chat-model-options [data-provider-kind="claude-code"]').click()`);
+  await app.waitFor(`document.querySelector('#new-chat-model-options [data-provider-kind="claude-code"]').getAttribute("aria-pressed") === "true"`, "Claude Code chosen");
+  assert.deepEqual(await chosen(), { model: "", effort: "", access: "manual", runsOn: "m-box", providerKind: "claude-code" });
+  // Back on Codex: Settings again, as the computer's New chat does.
+  await app.evaluate(`document.querySelector('#new-chat-model-options [data-provider-kind="codex-cli"]').click()`);
+  await app.waitFor(`document.querySelector('#new-chat-model-options [data-provider-kind="codex-cli"]').getAttribute("aria-pressed") === "true"`, "Codex again");
+  assert.deepEqual(await chosen(), { model: "gpt-6-luna", effort: "high", access: "auto-review", runsOn: "m-box", providerKind: "codex-cli" });
+  // She takes the CLI's own model for this chat: kept while she changes the effort.
+  await app.evaluate(`document.querySelector('#new-chat-model-options [data-model=""]').click()`);
+  await app.waitFor(`document.querySelector('#new-chat-model-options [data-model=""]').getAttribute("aria-pressed") === "true"`, "the CLI's own model");
+  await app.evaluate(`document.querySelector('#new-chat-model-options [data-effort="low"]').click()`);
+  await app.waitFor(`document.querySelector('#new-chat-model-options [data-effort="low"]').getAttribute("aria-pressed") === "true"`, "Low");
+  assert.deepEqual(await chosen(), { model: "", effort: "low", access: "auto-review", runsOn: "m-box", providerKind: "codex-cli" });
+  await app.evaluate(`document.querySelector('#new-chat-model-sheet [data-new-chat-picker-close]').click()`);
+
+  const type = (text) => app.evaluate(`(() => { const input = document.getElementById("new-chat-input"); input.value = ${JSON.stringify(text)}; input.dispatchEvent(new Event("input", { bubbles: true })); })()`);
+  await type("Check the login page");
+  await app.evaluate(`document.getElementById("new-chat-start").click()`);
+  let created;
+  for (let attempt = 0; attempt < 100 && !created; attempt += 1) {
+    created = (await hub.storage.listConversations()).find((summary) => /login page/.test(summary.title));
+    if (!created) await new Promise((resolve) => setTimeout(resolve, 100));
+  }
+  assert.ok(created, "the chat is on the server");
+  const chat = await hub.storage.getConversation(created.id);
+  const [main] = chat.metadata.participants;
+  assert.deepEqual([main.kind, main.model, main.reasoningEffort, main.agentMode, main.permissions.cliApprovals, main.homeMachineId, main.permissions.requestCompaction, chat.metadata.chatView],
+    ["codex-cli", undefined, "low", "auto", true, "m-box", "allow", "sessions"], "as she chose for this chat over Settings, compacting without asking");
+});

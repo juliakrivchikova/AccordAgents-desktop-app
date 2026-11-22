@@ -289,7 +289,7 @@ export function shownEffort<T extends string>(effort: T | undefined, efforts: Re
 /** The model the CLI runs when none is chosen (the default row names it):
  *  the one the User's config starts it on where it runs, when this list has
  *  it, else the one the list marks (her config's on this computer). */
-function defaultModelOf(catalog: ProviderModelCatalog | undefined, startModel: string | undefined): ProviderModel | undefined {
+export function defaultModelOf(catalog: ProviderModelCatalog | undefined, startModel: string | undefined): ProviderModel | undefined {
   const usable = (model: ProviderModel): boolean => model.source !== "configured" && !model.hidden;
   return (startModel ? catalog?.models.find((model) => model.id === startModel && usable(model)) : undefined) ??
     catalog?.models.find((model) => model.recommended && usable(model));
@@ -297,13 +297,13 @@ function defaultModelOf(catalog: ProviderModelCatalog | undefined, startModel: s
 
 /** The models offered besides the default row: the CLI's list without the
  *  one it runs by default (the default row names it) and hidden ones. */
-function explicitModels(catalog: ProviderModelCatalog | undefined, defaultModel: ProviderModel | undefined): ProviderModel[] {
+export function explicitModels(catalog: ProviderModelCatalog | undefined, defaultModel: ProviderModel | undefined): ProviderModel[] {
   return (catalog?.models ?? []).filter((model) => !model.hidden && model !== defaultModel);
 }
 
 /** The efforts of the chosen model (of the one it runs by default while none
  *  is chosen), else the CLI's own list. */
-function effortOptions(kind: ChatParticipant["kind"], catalog: ProviderModelCatalog | undefined, model: string | undefined): ProviderReasoningEffortOption[] {
+export function effortOptions(kind: ChatParticipant["kind"], catalog: ProviderModelCatalog | undefined, model: string | undefined): ProviderReasoningEffortOption[] {
   const listed = catalog?.models.find((item) => model ? item.id === model : item.recommended && item.source !== "configured");
   return listed?.supportedReasoningEfforts?.length ? listed.supportedReasoningEfforts : reasoningEffortOptionsForProvider(kind);
 }

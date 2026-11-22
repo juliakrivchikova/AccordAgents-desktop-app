@@ -26,7 +26,8 @@ import {
   validateChatParticipantDrafts,
   validateChatStartupDrafts
 } from "../components/chat/chat-participant-drafts";
-import { NEW_CHAT_MAIN_SESSION_PARTICIPANT_ID, newChatMainSessionParticipantDraft } from "../components/chat/chat-main-session-draft";
+import { NEW_CHAT_MAIN_SESSION_PARTICIPANT_ID, newChatMainSessionParticipantDraft, newChatMainSessionPlace } from "../components/chat/chat-main-session-draft";
+import { newChatMainSessionStart } from "../../shared/newChatDefaults";
 import { cliStartDefaultsFor, startAccessKey } from "../components/chat/use-cli-start-defaults";
 import { newChatViewFor } from "../../shared/mainSession";
 import { sessionsViewNamesOf, sessionsViewText } from "../../shared/sessionsViewText";
@@ -184,7 +185,7 @@ export function useChatActions(state: AppState, conversationActions: Conversatio
     // In the sessions view the main session runs on what the New chat chip
     // chose for this chat (else Settings → General's CLI), and the chat is
     // made with it alone; the classic view's New chat is as before.
-    const sessionsView = newChatViewFor(state.settings.defaultChatView) === "sessions";
+    const sessionsView = newChatViewFor() === "sessions";
     const resolveProvider = (agents: typeof state.agents): MainSessionProviderOption | undefined => {
       const kind = resolveAssistantProviderKind({
         agents,
@@ -236,7 +237,14 @@ export function useChatActions(state: AppState, conversationActions: Conversatio
     // The mode the User's own config starts its CLI in where it will run
     // (this computer, or the machine chosen for it on New chat): the one the
     // screen showed for this provider and place, else read now.
-    const place = { kind: mainProvider.kind, homeMachineId: mainSessionRuntimeOverride?.homeMachineId, cloudRun: mainSessionRuntimeOverride?.cloudRun };
+    // How Settings → General → New chats starts it on this provider (a
+    // machine no longer set up: this computer), under what was chosen on
+    // the screen.
+    const machineIds = sessionsView
+      ? await Promise.resolve(window.consensus.listMachines?.()).then((list) => list?.machines.map((machine) => machine.id), () => undefined)
+      : undefined;
+    const newChatStart = sessionsView ? newChatMainSessionStart(state.settings.newChatDefaults, mainProvider, machineIds ?? []) : undefined;
+    const place = { kind: mainProvider.kind, ...newChatMainSessionPlace(mainSessionRuntimeOverride, newChatStart) };
     const shownStart = state.newChatMainSessionStartAccess;
     const startAccess = !sessionsView
       ? undefined
@@ -244,7 +252,7 @@ export function useChatActions(state: AppState, conversationActions: Conversatio
         ? shownStart.access
         : (await cliStartDefaultsFor(place))?.access;
     const participants = [
-      newChatMainSessionParticipantDraft(mainProvider.kind, mainSessionRuntimeOverride, Boolean(state.repoPath.trim()), mainProvider.hostId, sessionsView, startAccess),
+      newChatMainSessionParticipantDraft(mainProvider.kind, mainSessionRuntimeOverride, Boolean(state.repoPath.trim()), mainProvider.hostId, sessionsView, startAccess, newChatStart),
       ...(sessionsView ? [] : selectedOrMentionedChatParticipantDrafts(
         state.settings.chatParticipantConfigs,
         state.selectedChatParticipantConfigIds,
@@ -721,7 +729,6 @@ export function useChatActions(state: AppState, conversationActions: Conversatio
     // A refusal said by a notice once she has gone elsewhere is worded by the
     // chat she forked from (its sessions view names nobody by handle).
     const source = state.conversation?.id === conversationId ? state.conversation : undefined;
-    const defaultChatView = state.settings?.defaultChatView;
     const stillHere = (): boolean =>
       state.railViewRef.current === railViewAtClick &&
       (state.openConversationRequestRef.current === openRequestAtClick || state.openConversationTargetRef.current === conversationId);
@@ -741,7 +748,7 @@ export function useChatActions(state: AppState, conversationActions: Conversatio
       // she has gone elsewhere (an error banner there would be about a chat
       // she is not looking at).
       if (stillHere()) state.setError(cleanIpcError(caught));
-      else toast.error(sessionsViewText(cleanIpcError(caught), source ? sessionsViewNamesOf(source, defaultChatView) : undefined));
+      else toast.error(sessionsViewText(cleanIpcError(caught), source ? sessionsViewNamesOf(source) : undefined));
       return false;
     } finally {
       notice.end();

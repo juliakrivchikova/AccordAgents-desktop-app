@@ -68,9 +68,11 @@ full).
 ## The two views (a view only)
 
 Switched per chat by the User any number of times (the chat header), shared
-through her server like the pin (`metadata.chatView`); Settings → General
-sets the view a new chat opens in (`defaultChatView`, default `sessions`). A
-chat without a main session is always `classic`; its switch is disabled.
+through her server like the pin (`metadata.chatView`). Every new chat opens
+in `sessions`, on the computer and from the phone (the User, 2026-11-22:
+Settings no longer names a view for new chats; a `defaultChatView` stored
+before is dropped). A chat without a main session is always `classic`; its
+switch is disabled.
 
 - `classic`: today's timeline: avatars, every member's reply on it.
 - `sessions` (like T3 Code / Claude desktop):
@@ -443,7 +445,53 @@ chat without a main session is always `classic`; its switch is disabled.
 
 ## New chat
 
-A new chat opens in the view Settings → General names (`newChatViewFor`).
+A new chat opens in the sessions view (`newChatViewFor`).
+
+**Settings → General → New chats** (the User, 2026-11-22: "для нового режима
+— это просто должна быть секция в settings с дефолтными значениями
+провайдера, модели и вещей типа этой"; mockup `general-new-chats`): a section
+of the General page between Local CLI setup and General, one card. Its words
+name no main session.
+
+- **Provider**, "The CLI a new chat runs on." (`assistantProviderKind`, the
+  setting the Chat Assistant used; the provider's glyph in the select).
+- **Model**, "From <CLI>'s own model list.": the model the CLI runs by
+  default first, named (the composer's model menu's list:
+  `defaultModelOf`/`explicitModels`), then the others.
+- **Effort**: "Default" (with the effort her config sets, when it sets one)
+  and the model's efforts; a model without the chosen effort takes the CLI's
+  own.
+- **Mode**: exactly that CLI's own permission modes as the composer's mode
+  control lists them (`chatAccessModes.ts`), its description naming them
+  ("Claude Code's modes: Manual, Accept edits, Plan, Auto.", and
+  Antigravity's note); none chosen, the one her config starts the CLI in
+  where a new chat runs. Codex's Full Access asks Codex's own "Enable full
+  access?" first. Codex's Plan mode stays a New chat toggle.
+- **Runs on**: This Mac (This computer elsewhere) or one of her machines
+  (Settings → Machines' list); a machine no longer set up is this computer.
+- **Compact without asking**, a switch, on by default: the main session's
+  right to compact its context without a card (`requestCompaction` `allow`;
+  off: `ask`).
+
+Changing the provider takes model, effort and mode back to that CLI's own
+(`newChatDefaultsForProvider`); where it runs and compaction stay. Model,
+effort and mode apply only while a new chat runs on the CLI they were
+chosen for, on its own sign-in (`newChatMainSessionStart`); an added
+provider or another CLI chosen on New chat starts from its own. The rights
+to ask and add members are not settings: the main session's role always
+gives them. Stored as `AppSettings.newChatDefaults`
+(`src/shared/newChatDefaults.ts`, normalized on read: anything missing or
+invalid is the CLI's own); existing chats keep their own settings.
+
+New chat's controls start from these (`newChatMainSessionParticipantConfig`
+with `newChatMainSessionStart`); a choice there is that chat's only and
+never changes Settings. The computer's `createConversation` gives the main
+session the compaction right Settings names (the screen has no control for
+it). The phone's New chat offer carries the same main session
+(`ensureMainSessionParticipant` with `newChatDefaults`): its model, effort,
+mode, machine and compaction right; the phone's controls start from it
+(`newChatLeadStart`) the way the computer's start from Settings, another
+provider from its own, and a choice made there wins for that chat.
 
 - **Sessions view** (the User, 2026-11-21: "как в T3, выбираешь просто
   провайдера и модель"): no members picker, no avatars, handles or
@@ -452,7 +500,7 @@ A new chat opens in the view Settings → General names (`newChatViewFor`).
   mode, where it runs once a machine exists); the model's menu lists the
   providers first: every ready CLI and every added provider whose CLI is
   ready and which has its key (`mainSessionProviderOptions`). The default provider is Settings →
-  General's "Main session provider" (`resolveMainSessionProvider`); the
+  General → New chats' Provider (`resolveMainSessionProvider`); the
   controls' choice is for that one chat and never changes the setting, and
   is forgotten when the User leaves New chat without sending. What was set
   for one provider (model, effort, access, where it runs) is dropped when
@@ -527,9 +575,11 @@ chat as that chat's main session, with everything it knew
 - The new chat is made through the same path as every new chat
   (`createConversation` with `forkOf`, saved and so put on the User's server):
   titled "<chat> (fork)" until its first reply names it, in the member's
-  project, in Settings → General's view, with one member: its main session on
+  project, in the sessions view, with one member: its main session on
   the member's provider, model, effort, access (its CLI's mode and what it
-  may read, edit, run and reach, as it runs now) and place (this computer or
+  may read, edit, run and reach, and whether it compacts without asking, as
+  it runs now; never Settings → General → New chats: the User, 2026-11-22, a fork
+  of a member allowed to compact is not asked) and place (this computer or
   the same machine: a fork never crosses devices), with the main session's
   role and its say over members, marked `ChatParticipant.forkOrigin`
   (written only by the computer; her server keeps a machine from writing
@@ -782,8 +832,10 @@ Verified in the installed CLIs, the way the User sees them:
   never changed. `isMainSessionChat()` reads it (and checks the member is
   still there).
 - `ConversationMetadata.chatView?: ChatViewMode` (`"classic" | "sessions"`),
-  read through `chatViewFor(metadata, settings.defaultChatView)`.
-- `AppSettings.defaultChatView?: ChatViewMode`.
+  read through `chatViewFor(metadata)` (unset: `sessions`).
+- `AppSettings.newChatDefaults?: NewChatDefaults` (`src/shared/newChatDefaults.ts`),
+  changed with `setNewChatDefaults(NewChatDefaultsUpdate)`
+  (`settings:set-new-chat-defaults`).
 - `SendChatMessageRequest.targetParticipantIds?: string[]`: exactly these
   members, no @-parsing for addressees, no fallback.
 - `ChatParticipantSession.forkFrom?: { participantId, sessionId, kind }`: the

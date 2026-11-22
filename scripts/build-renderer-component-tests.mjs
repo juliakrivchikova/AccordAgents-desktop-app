@@ -56,6 +56,7 @@ await build({
     "renderer/components/settings/alerts-dialog-wizard.test.tsx",
     "renderer/components/settings/hub-server-section.test.tsx",
     "renderer/components/settings/speech-to-text-row.test.tsx",
+    "renderer/components/settings/new-chat-defaults-rows.test.tsx",
     "renderer/components/chat/speech-to-text-button.test.tsx",
     "renderer/components/chat/dictation-hold-key.test.tsx",
     "renderer/components/chat/dictation-pieces.test.tsx",

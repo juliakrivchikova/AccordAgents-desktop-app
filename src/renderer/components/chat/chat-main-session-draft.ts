@@ -2,6 +2,7 @@ import { MAIN_SESSION_HANDLE, MAIN_SESSION_ROLE_ID } from "../../../shared/mainS
 import type { ChatParticipantConfig, ChatProviderKind } from "../../../shared/types";
 import { newChatMemberPermissions } from "../../../shared/agentPermissions";
 import { applyChatAccessOption, startChatAccessOption } from "../../../shared/chatAccessModes";
+import type { NewChatMainSessionStart } from "../../../shared/newChatDefaults";
 import { isChatAssistantParticipant } from "../conversation/conversation-display";
 import {
   type ChatParticipantDraft,
@@ -25,10 +26,21 @@ export function newChatMainSessionParticipantConfig(
   sessionsView = false,
   /** That mode by the CLI's name, as the User's own config sets it where the
    *  main session runs (CliStartDefaults.access); none: the CLI's built-in. */
-  startAccess?: string
+  startAccess?: string,
+  /** How Settings → General → New chats starts it on this provider
+   *  (newChatMainSessionStart): its model, effort, mode (over the one her
+   *  config starts the CLI in), machine and compaction right. */
+  start?: NewChatMainSessionStart
 ): ChatParticipantConfig {
-  const permissions = { ...newChatMemberPermissions(hasProject), requestParticipants: "allow" as const, manageRolesParticipants: "allow" as const };
-  const access = sessionsView ? applyChatAccessOption(startChatAccessOption(kind, startAccess), permissions) : { agentMode: "default" as const, permissions };
+  const permissions = {
+    ...newChatMemberPermissions(hasProject),
+    requestParticipants: "allow" as const,
+    manageRolesParticipants: "allow" as const,
+    ...(start ? { requestCompaction: start.requestCompaction } : {})
+  };
+  const access = sessionsView
+    ? applyChatAccessOption(startChatAccessOption(kind, start?.access ?? startAccess), permissions)
+    : { agentMode: "default" as const, permissions };
   return {
     id: NEW_CHAT_MAIN_SESSION_PARTICIPANT_ID,
     handle: MAIN_SESSION_HANDLE,
@@ -37,6 +49,9 @@ export function newChatMainSessionParticipantConfig(
     kind,
     // An added provider the New chat chip chose for it (sessions view).
     ...(hostId ? { hostId } : {}),
+    ...(start?.model ? { model: start.model } : {}),
+    ...(start?.reasoningEffort ? { reasoningEffort: start.reasoningEffort } : {}),
+    ...(start?.homeMachineId ? { homeMachineId: start.homeMachineId } : {}),
     // The rights an ordinary member starts with in this chat (reading its
     // project when it has one), asking members without a card as its role
     // does; the app makes the same one (ChatService.ensureMainSessionParticipant).
@@ -58,10 +73,11 @@ export function newChatMainSessionParticipantDraft(
   hasProject = true,
   hostId?: string,
   sessionsView = false,
-  startAccess?: string
+  startAccess?: string,
+  start?: NewChatMainSessionStart
 ): ChatParticipantDraft {
   const draft = chatParticipantConfigToDraftWithRuntimeOverrides(
-    newChatMainSessionParticipantConfig(kind, hasProject, hostId, sessionsView, startAccess),
+    newChatMainSessionParticipantConfig(kind, hasProject, hostId, sessionsView, startAccess, start),
     runtimeOverride ? { [NEW_CHAT_MAIN_SESSION_PARTICIPANT_ID]: runtimeOverride } : {}
   );
   // The sessions view's picker has no repository switch: the main session
@@ -77,4 +93,16 @@ export function isNewChatMainSessionOption(participant: Pick<ChatParticipantConf
   return participant.id === NEW_CHAT_MAIN_SESSION_PARTICIPANT_ID ||
     participant.roleConfigId === MAIN_SESSION_ROLE_ID ||
     isChatAssistantParticipant(participant);
+}
+
+/** Where the New chat screen's main session runs: what its controls chose
+ *  (Local included), else the machine Settings → General → New chats names. */
+export function newChatMainSessionPlace(
+  runtimeOverride: ChatParticipantRuntimeOverride | undefined,
+  start: Pick<NewChatMainSessionStart, "homeMachineId"> | undefined
+): Pick<ChatParticipantRuntimeOverride, "homeMachineId" | "cloudRun"> {
+  const chose = Boolean(runtimeOverride) && ("homeMachineId" in runtimeOverride! || "cloudRun" in runtimeOverride!);
+  return chose
+    ? { homeMachineId: runtimeOverride!.homeMachineId, cloudRun: runtimeOverride!.cloudRun }
+    : { homeMachineId: start?.homeMachineId, cloudRun: undefined };
 }

@@ -48,10 +48,10 @@ export function useAppViewModel(state: AppState) {
     let names: SessionsViewNames | undefined | null = null;
     return (text: string): string => {
       if (!text.includes("@")) return text;
-      if (names === null) names = conversation?.kind === "chat" ? sessionsViewNamesOf(conversation, state.settings.defaultChatView) : undefined;
+      if (names === null) names = conversation?.kind === "chat" ? sessionsViewNamesOf(conversation) : undefined;
       return sessionsViewText(text, names);
     };
-  }, [state.conversation, state.settings.defaultChatView]);
+  }, [state.conversation]);
   const visibleWarnings = warningNoticeEntries([...state.warnings, ...conversationMetadataWarnings], dismissedWarningKeys, noticeText);
   const chatSummaries = useMemo(() => state.summaries.filter((summary) => summary.kind === "chat"), [state.summaries]);
   const projectSessionGroups = useMemo(() => buildProjectSessionGroups(chatSummaries), [chatSummaries]);

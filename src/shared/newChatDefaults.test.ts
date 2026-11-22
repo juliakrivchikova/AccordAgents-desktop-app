@@ -1,0 +1,70 @@
+import assert from "node:assert/strict";
+import test from "node:test";
+
+import {
+  applyNewChatDefaultsUpdate,
+  newChatCompactionPermission,
+  newChatDefaultsForProvider,
+  newChatMainSessionStart,
+  normalizeNewChatDefaults
+} from "./newChatDefaults";
+import { newChatLeadStart } from "./newChat";
+import type { ChatParticipant } from "./types";
+
+test("what Settings stores is read as the CLI's own when missing or invalid, with compaction without asking unless turned off", () => {
+  assert.deepEqual(normalizeNewChatDefaults(undefined), { compactWithoutAsking: true });
+  assert.deepEqual(normalizeNewChatDefaults("junk"), { compactWithoutAsking: true });
+  assert.deepEqual(normalizeNewChatDefaults({ compactWithoutAsking: false }), { compactWithoutAsking: false });
+  assert.deepEqual(normalizeNewChatDefaults({ compactWithoutAsking: "no" }), { compactWithoutAsking: true });
+  // Model, effort and mode need the CLI they were chosen for.
+  assert.deepEqual(normalizeNewChatDefaults({ model: "opus", reasoningEffort: "high", access: "auto" }), { compactWithoutAsking: true });
+  assert.deepEqual(normalizeNewChatDefaults({ kind: "claude-code", model: " opus ", reasoningEffort: "HIGH", access: "default" }),
+    { kind: "claude-code", model: "opus", reasoningEffort: "high", access: "manual", compactWithoutAsking: true }, "Claude Code's Default is called Manual now");
+  assert.deepEqual(normalizeNewChatDefaults({ kind: "codex-cli", access: "acceptEdits", reasoningEffort: "loud" }), { compactWithoutAsking: true },
+    "a mode Codex does not have, an effort nobody has");
+  assert.deepEqual(normalizeNewChatDefaults({ kind: "codex-cli", access: "read-only" }), { kind: "codex-cli", access: "read-only", compactWithoutAsking: true },
+    "Codex's Read Only is one of its presets, though its picker lists it only while it is the mode");
+  assert.deepEqual(normalizeNewChatDefaults({ kind: "nope", model: "x", homeMachineId: "x".repeat(300) }), { compactWithoutAsking: true });
+});
+
+test("a change keeps what it does not touch; model, effort and mode for another CLI start from that CLI's own", () => {
+  const claude = applyNewChatDefaultsUpdate(undefined, { kind: "claude-code", model: "opus", reasoningEffort: "high" });
+  assert.deepEqual(claude, { kind: "claude-code", model: "opus", reasoningEffort: "high", compactWithoutAsking: true });
+  assert.deepEqual(applyNewChatDefaultsUpdate(claude, { homeMachineId: "m-1", compactWithoutAsking: false }),
+    { ...claude, homeMachineId: "m-1", compactWithoutAsking: false });
+  assert.deepEqual(applyNewChatDefaultsUpdate(claude, { kind: "claude-code", model: null }), { kind: "claude-code", reasoningEffort: "high", compactWithoutAsking: true });
+  assert.deepEqual(applyNewChatDefaultsUpdate({ ...claude, homeMachineId: "m-1" }, { kind: "codex-cli", access: "auto-review" }),
+    { kind: "codex-cli", access: "auto-review", homeMachineId: "m-1", compactWithoutAsking: true });
+  // A kind alone never relabels another CLI's choices.
+  assert.deepEqual(applyNewChatDefaultsUpdate(claude, { kind: "codex-cli", compactWithoutAsking: false }), { ...claude, compactWithoutAsking: false });
+  assert.deepEqual(newChatDefaultsForProvider({ ...claude, homeMachineId: "m-1", compactWithoutAsking: false }), { homeMachineId: "m-1", compactWithoutAsking: false });
+});
+
+test("a new chat's main session starts with the choices for its own CLI, on a machine still set up, with its compaction right", () => {
+  const defaults = { kind: "claude-code", model: "opus", reasoningEffort: "high", access: "plan", homeMachineId: "m-1", compactWithoutAsking: false };
+  assert.deepEqual(newChatMainSessionStart(defaults, { kind: "claude-code" }, ["m-1"]),
+    { model: "opus", reasoningEffort: "high", access: "plan", homeMachineId: "m-1", requestCompaction: "ask" });
+  assert.deepEqual(newChatMainSessionStart(defaults, { kind: "codex-cli" }, ["m-1"]), { homeMachineId: "m-1", requestCompaction: "ask" }, "another CLI: its own");
+  assert.deepEqual(newChatMainSessionStart(defaults, { kind: "claude-code", hostId: "zai" }, ["m-1"]), { homeMachineId: "m-1", requestCompaction: "ask" },
+    "an added provider: its own");
+  assert.deepEqual(newChatMainSessionStart(defaults, { kind: "claude-code" }, []).homeMachineId, undefined, "a machine no longer set up: this computer");
+  assert.equal(newChatMainSessionStart(defaults, { kind: "claude-code" }).homeMachineId, "m-1", "machines not known: as stored");
+  assert.equal(newChatMainSessionStart(undefined, { kind: "claude-code" }).requestCompaction, "allow");
+  assert.equal(newChatCompactionPermission({ compactWithoutAsking: true }), "allow");
+  assert.equal(newChatCompactionPermission(undefined), "allow");
+});
+
+test("the phone starts its New chat controls from the main session the computer offers, on that provider only", () => {
+  const lead = {
+    id: "main-session", handle: "main", roleConfigId: "main-session", kind: "codex-cli", model: "gpt-5.5", reasoningEffort: "high", homeMachineId: "m-1",
+    agentMode: "auto", permissions: { repoRead: true, workspaceWrite: false, webAccess: false, requestParticipants: "allow", requestCompaction: "allow", shell: { enabled: false, rules: [] }, cliApprovals: true }
+  } as ChatParticipant;
+  assert.deepEqual(newChatLeadStart(lead, { kind: "codex-cli" }), { model: "gpt-5.5", reasoningEffort: "high", access: "auto-review", homeMachineId: "m-1" });
+  assert.deepEqual(newChatLeadStart(lead, { kind: "claude-code" }), { homeMachineId: "m-1" }, "another provider: where it runs only");
+  assert.deepEqual(newChatLeadStart(lead, { kind: "codex-cli", hostId: "zai" }), { homeMachineId: "m-1" });
+  // The mode her config starts the CLI in (no mode of its own yet): none.
+  const plain = { ...lead, model: undefined, reasoningEffort: undefined, homeMachineId: undefined, agentMode: "default",
+    permissions: { ...lead.permissions!, cliApprovals: undefined } } as ChatParticipant;
+  assert.deepEqual(newChatLeadStart(plain, { kind: "codex-cli" }), {});
+  assert.deepEqual(newChatLeadStart(undefined, { kind: "codex-cli" }), {});
+});

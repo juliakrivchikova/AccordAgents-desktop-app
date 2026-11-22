@@ -1,6 +1,6 @@
 import { normalizeAutoChatTitle, normalizeManualChatTitle } from "./chatTitles";
 import type { CliStartDefaults } from "./cliStartDefaults";
-import { applyChatAccessOptionById } from "./chatAccessModes";
+import { applyChatAccessOptionById, selectedChatAccessOption } from "./chatAccessModes";
 import { DEFAULT_CHAT_VIEW, MAIN_SESSION_ROLE_ID, isChatViewMode, mainSessionMemberOf } from "./mainSession";
 import type {
   ChatParticipant,
@@ -369,5 +369,26 @@ export function newChatMainSessionFor(
     ...(reasoningEffort ? { reasoningEffort } : {}),
     ...applyChatAccessOptionById(provider.kind, choice.access, offered.permissions, choice.plan, provider.start?.access),
     ...(choice.homeMachineId ? { homeMachineId: choice.homeMachineId } : {})
+  };
+}
+
+/** What the phone's New chat controls start from, read from the main session
+ *  the computer offers (made as Settings → General → New chats starts it,
+ *  src/shared/newChatDefaults.ts): on its own provider its model, effort and
+ *  mode (none: the CLI's own; no mode of its own: the one her config starts
+ *  the CLI in); on any provider where it runs. A choice on the phone wins,
+ *  as on the computer's New chat. */
+export function newChatLeadStart(
+  lead: ChatParticipant | undefined,
+  provider: { kind: ChatProviderKind; hostId?: string }
+): Pick<NewChatMainSessionChoice, "model" | "reasoningEffort" | "access" | "homeMachineId"> {
+  if (!lead) return {};
+  const own = lead.kind === provider.kind && !provider.hostId && !lead.hostId;
+  const access = own ? selectedChatAccessOption(lead.kind, lead.agentMode, lead.permissions)?.id : undefined;
+  return {
+    ...(own && lead.model ? { model: lead.model } : {}),
+    ...(own && lead.reasoningEffort ? { reasoningEffort: lead.reasoningEffort } : {}),
+    ...(access ? { access } : {}),
+    ...(lead.homeMachineId ? { homeMachineId: lead.homeMachineId } : {})
   };
 }

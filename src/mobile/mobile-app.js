@@ -3693,15 +3693,26 @@
     const chosen = newChatMainChoice && providers.find(function (item) { return same(item, newChatMainChoice); });
     const provider = chosen || (lead && providers.find(function (item) { return same(item, { kind: lead.kind, hostId: lead.hostId }); })) || providers[0];
     if (!provider) return undefined;
-    const model = chosen && newChatMainChoice.model && provider.models.some(function (item) { return item.id === newChatMainChoice.model; }) ? newChatMainChoice.model : undefined;
+    // What she chose here for this chat; else how the computer's Settings →
+    // General → New chats starts a new chat, carried by the offered main
+    // session (its model, effort and mode on its own provider, where it runs
+    // on any), as the computer's New chat starts from them.
+    const rules = mobileSharedRules();
+    const base = rules && typeof rules.newChatLeadStart === "function" ? rules.newChatLeadStart(lead, provider) : {};
+    const pick = function (key) {
+      return chosen && Object.prototype.hasOwnProperty.call(newChatMainChoice, key) ? newChatMainChoice[key] : base[key];
+    };
+    const modelWanted = pick("model");
+    const model = modelWanted && provider.models.some(function (item) { return item.id === modelWanted; }) ? modelWanted : undefined;
     const modelEntry = model ? provider.models.find(function (item) { return item.id === model; }) : undefined;
     const efforts = (modelEntry && modelEntry.efforts) || provider.efforts || [];
-    const effort = chosen && newChatMainChoice.reasoningEffort && efforts.some(function (item) { return item.id === newChatMainChoice.reasoningEffort; }) ? newChatMainChoice.reasoningEffort : undefined;
+    const effortWanted = pick("reasoningEffort");
+    const effort = effortWanted && efforts.some(function (item) { return item.id === effortWanted; }) ? effortWanted : undefined;
     // Its CLI's mode in the CLI's own terms, the computer's picker's modes and
     // words (chatAccessModes): the one its CLI starts in until one is chosen.
     // Where it runs: one of the machines, once there is one; else this computer.
-    const homeMachineId = chosen && newChatMainChoice.homeMachineId && newChatMachineList().some(function (item) { return item.id === newChatMainChoice.homeMachineId; })
-      ? newChatMainChoice.homeMachineId : undefined;
+    const homeWanted = pick("homeMachineId");
+    const homeMachineId = homeWanted && newChatMachineList().some(function (item) { return item.id === homeWanted; }) ? homeWanted : undefined;
     // Codex's Full Access and Plan mode only where they run: a computer that
     // offers them, and a machine whose program does (the computer's offer).
     const modes = offer && offer.cliModes;
@@ -3718,10 +3729,11 @@
     const accessOptions = newChatAccessOptions(provider.kind).concat(startHidden ? [startHidden] : [])
       .filter(function (item) { return modesHere || item.agentMode !== "full-access"; });
     const defaultAccess = accessOptions.length > 0 ? newChatDefaultAccess(provider.kind, start && start.access, accessOptions) : undefined;
-    // A mode she chose; none: the one her config starts the CLI in there,
-    // which follows where it runs until she chooses one.
-    const accessChosen = chosen && newChatMainChoice.access && accessOptions.some(function (item) { return item.id === newChatMainChoice.access; })
-      ? newChatMainChoice.access : undefined;
+    // A mode she chose (or the computer's Settings start a new chat in);
+    // none: the one her config starts the CLI in there, which follows where
+    // it runs until she chooses one.
+    const accessWanted = pick("access");
+    const accessChosen = accessWanted && accessOptions.some(function (item) { return item.id === accessWanted; }) ? accessWanted : undefined;
     const access = accessChosen || defaultAccess;
     // Codex's Plan mode: its own toggle beside the permissions, as on the computer.
     const planOffered = Boolean(accessSet && accessSet.plan && modesHere);
@@ -3836,9 +3848,20 @@
       head.textContent = text;
       list.append(head);
     };
+    // Only what she chose here is hers; the rest follows the computer's
+    // Settings → General → New chats (newChatMainSelection). Another provider
+    // starts from its own, as the computer drops what was chosen for the one
+    // before.
     const choose = function (patch) {
-      const current = { kind: selection.provider.kind, hostId: selection.provider.hostId, model: selection.model, reasoningEffort: selection.effort,
-        access: selection.accessChosen, plan: selection.plan, homeMachineId: selection.homeMachineId };
+      const sameProvider = function (item) {
+        return Boolean(item) && item.kind === selection.provider.kind && (item.hostId || "") === (selection.provider.hostId || "");
+      };
+      const current = { kind: selection.provider.kind, hostId: selection.provider.hostId };
+      if (sameProvider(newChatMainChoice) && (patch.kind === undefined || sameProvider(patch))) {
+        for (const key of ["model", "reasoningEffort", "access", "plan", "homeMachineId"]) {
+          if (Object.prototype.hasOwnProperty.call(newChatMainChoice, key)) current[key] = newChatMainChoice[key];
+        }
+      }
       newChatMainChoice = Object.assign(current, patch);
       renderNewChat("");
     };
@@ -3851,7 +3874,7 @@
         // computer drops what was chosen for the one before.
         onClick: function () {
           if (chosen) return;
-          choose({ kind: provider.kind, hostId: provider.hostId, model: undefined, reasoningEffort: undefined, access: undefined, plan: undefined, homeMachineId: undefined });
+          choose({ kind: provider.kind, hostId: provider.hostId });
         } }));
     }
     section("Model");

@@ -124,7 +124,7 @@ test("stale readiness refreshes before creating without a per-chat provider over
   renderer.unmount();
 });
 
-test("a new chat is made with its main session first (ordinary member rights, its New Chat settings) and the selected saved members", async () => {
+test("a new chat is made with its main session alone (ordinary member rights, its New Chat settings), a view stored from before and saved members picked then notwithstanding", async () => {
   let createRequest: { participants: ChatParticipantInput[]; skipDefaultParticipants?: boolean } | undefined;
   (globalThis as any).window = {
     consensus: {
@@ -136,8 +136,9 @@ test("a new chat is made with its main session first (ordinary member rights, it
   };
   let error: string | undefined;
   const currentSettings = settings();
-  // The classic view's New chat: the members picker adds saved members.
-  currentSettings.defaultChatView = "classic";
+  // A view Settings once named for new chats: every new chat opens in the
+  // sessions view now (the User, 2026-11-22), whose New chat picks no members.
+  (currentSettings as unknown as { defaultChatView?: string }).defaultChatView = "classic";
   currentSettings.providers = [{ kind: "codex-cli", label: "Codex", enabled: true }];
   currentSettings.assistantProviderKind = "codex-cli";
   currentSettings.chatRoleConfigs = [
@@ -217,8 +218,8 @@ test("a new chat is made with its main session first (ordinary member rights, it
   assert.equal(started, false);
   assert.equal(error, "stop after create request");
   assert.equal(createRequest?.skipDefaultParticipants, false);
-  assert.equal(createRequest?.participants.length, 2);
-  const [main, member] = createRequest?.participants ?? [];
+  assert.equal(createRequest?.participants.length, 1, "the main session alone: it makes members itself");
+  const [main] = createRequest?.participants ?? [];
   assert.equal(main?.handle, "main");
   assert.equal(main?.roleConfigId, "main-session");
   assert.equal(main?.model, "main-model");
@@ -226,19 +227,10 @@ test("a new chat is made with its main session first (ordinary member rights, it
   assert.equal(main?.participantConfigId, undefined, "no saved member is behind it");
   assert.equal(main?.permissions?.requestParticipants, "allow", "its role's rights, not the Assistant's");
   assert.equal(main?.permissions?.manageRolesParticipants, "allow");
+  assert.equal(main?.permissions?.requestCompaction, "allow", "Settings → General → New chats: compaction without asking unless turned off");
   // An ordinary member's rights for a chat without a project: no repo read.
   assert.equal(main?.permissions?.shell.enabled, newChatMemberPermissions(false).shell.enabled);
   assert.equal(main?.permissions?.repoRead, newChatMemberPermissions(false).repoRead);
-  assert.equal(member?.participantConfigId, "member-codex");
-  assert.equal(member?.model, "member-model");
-  assert.equal(member?.reasoningEffort, "low");
-  assert.equal(member?.agentMode, "auto");
-  assert.equal(member?.permissions?.workspaceWrite, true);
-  // A member still carrying the old cloud-worker flag keeps it: it is what
-  // marks the member as one that needs a machine, and nothing rewrites it.
-  assert.equal(member?.remoteExecution, "remote");
-  assert.equal(member?.skipToolchainPreflight, true);
-  assert.equal(member?.autoWatch, true);
   renderer.unmount();
 });
 
@@ -310,6 +302,69 @@ for (const scenario of [
     renderer.unmount();
   });
 }
+
+test("a new chat starts as Settings → General → New chats says, and what was chosen on New chat wins for that chat only", async () => {
+  const requests: Array<{ participants: ChatParticipantInput[] }> = [];
+  (globalThis as any).window = {
+    consensus: {
+      listMachines: async () => ({ machines: [{ id: "m-1", name: "Studio" }], status: [] }),
+      createChatConversation: async (request: { participants: ChatParticipantInput[] }) => {
+        requests.push(request);
+        throw new Error("stop after create request");
+      }
+    }
+  };
+  const currentSettings = settings();
+  currentSettings.providers = [{ kind: "codex-cli", label: "Codex", enabled: true }];
+  currentSettings.assistantProviderKind = "codex-cli";
+  currentSettings.newChatDefaults = { kind: "codex-cli", model: "gpt-5.5", reasoningEffort: "high", access: "auto-review", homeMachineId: "m-1", compactWithoutAsking: false };
+  const startWith = async (overrides: Record<string, unknown>): Promise<ChatParticipantInput | undefined> => {
+    const state = {
+      question: "Look at the login",
+      agents: [readyAgent("codex-cli")],
+      settings: currentSettings,
+      selectedChatParticipantConfigIds: new Set<string>(),
+      selectedChatParticipantRuntimeOverrides: overrides,
+      startingChatRef: { current: false },
+      chatCreationRef: { current: undefined },
+      chatBeforeActivityRef: { current: undefined }, openConversationRequestRef: { current: 0 }, railViewRef: { current: "chats" },
+      repoPath: "",
+      setError: () => undefined,
+      setWarnings: () => undefined,
+      setCurrentRunId: () => undefined,
+      setBusy: () => undefined
+    } as unknown as AppState;
+    let actions: ChatActions | undefined;
+    function Harness(): null {
+      actions = useChatActions(state, {} as ConversationActions);
+      return null;
+    }
+    const renderer = create(<Harness />);
+    await act(async () => { await actions?.startChat(); });
+    renderer.unmount();
+    return requests.at(-1)?.participants[0];
+  };
+
+  const fromSettings = await startWith({});
+  assert.deepEqual([fromSettings?.kind, fromSettings?.model, fromSettings?.reasoningEffort, fromSettings?.agentMode, fromSettings?.homeMachineId],
+    ["codex-cli", "gpt-5.5", "high", "auto", "m-1"], "Settings' model, effort, Codex's Approve for me and the machine");
+  assert.equal(fromSettings?.permissions?.cliApprovals, true);
+  assert.equal(fromSettings?.permissions?.requestCompaction, "ask", "Compact without asking is off");
+
+  // On New chat she chose the CLI's own model, Local and Ask for approval.
+  const chosen = await startWith({ "__new-chat-main-session__": {
+    model: undefined, homeMachineId: undefined, cloudRun: undefined, remoteExecution: "local", agentMode: "default",
+    permissions: { ...fromSettings!.permissions!, workspaceWrite: true }
+  } });
+  assert.deepEqual([chosen?.model, chosen?.reasoningEffort, chosen?.agentMode, chosen?.homeMachineId], [undefined, "high", "default", undefined]);
+  assert.equal(chosen?.permissions?.requestCompaction, "ask");
+  assert.deepEqual(currentSettings.newChatDefaults, { kind: "codex-cli", model: "gpt-5.5", reasoningEffort: "high", access: "auto-review", homeMachineId: "m-1", compactWithoutAsking: false },
+    "the choice is that chat's only");
+
+  // Its machine is no longer set up: this computer.
+  (globalThis as any).window.consensus.listMachines = async () => ({ machines: [], status: [] });
+  assert.equal((await startWith({}))?.homeMachineId, undefined);
+});
 
 test("a sessions-view New chat whose chip provider stopped being ready refuses the send and says so, instead of starting on another CLI", async () => {
   let createCalls = 0;

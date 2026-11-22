@@ -140,6 +140,8 @@ function testService(options: {
   run?: (participant: ParticipantConfig, prompt: string, options: any) => Promise<any>;
   /** The readiness check itself fails (it could not run). */
   readinessFails?: boolean;
+  /** Settings → General → New chats. */
+  newChatDefaults?: AppSettings["newChatDefaults"];
 }) {
   const tempRoot = path.join(tmpdir(), "accordagents-fork-to-new-chat-test");
   const store = new Map(options.conversations.map((conversation) => [conversation.id, clone(conversation)]));
@@ -190,7 +192,9 @@ function testService(options: {
     chatParticipantConfigs: [],
     chatParticipantSeedState: {},
     cliProviderHosts: [],
-    defaultChatView: "sessions"
+    // A view Settings once named for new chats: never read any more.
+    defaultChatView: "classic",
+    ...(options.newChatDefaults ? { newChatDefaults: options.newChatDefaults } : {})
   } as unknown as AppSettings);
   const settings = {
     async getPublicSettings() { return publicSettings(); },
@@ -350,7 +354,7 @@ test("a member of a chat from before becomes the main session of a new sessions-
   const chat = created.conversation;
   assert.equal(chat.title, "Old chat (fork)");
   assert.equal(chat.repoPath, "/projects/app", "the member's project: its CLI session belongs to that folder");
-  assert.equal(chat.metadata.chatView, "sessions", "the view Settings names for a new chat");
+  assert.equal(chat.metadata.chatView, "sessions", "every new chat opens in the sessions view, a view stored from before notwithstanding");
   const [main, ...others] = participantsOf(chat);
   assert.equal(others.length, 0, "the main session alone");
   assert.equal(chat.metadata.mainSessionParticipantId, main!.id);
@@ -1067,6 +1071,30 @@ test("the computer's offer says why each of its CLIs cannot run a forked member,
   const unjudged = forkToNewChatLocalProviders([], providers, []);
   assert.equal(forkLocalProviderUnavailable({ kind: "claude-code", hostId: "gone" }, unjudged), localProviderUnavailableReason({ kind: "claude-code", hostId: "gone" }, [], providers, []));
   assert.equal(offer!.fork!.basePermissions.requestParticipants, "allow", "the main session's role's say over members");
+});
+
+test("a fork keeps the member's own compaction right on the computer and the phone, never Settings' default for new chats", async () => {
+  const cases = [
+    ["allowed to compact, Settings asking", "allow", false],
+    ["asking, Settings compacting without asking", "ask", true],
+    ["never compacting", "deny", true]
+  ] as const;
+  for (const [label, right, compactWithoutAsking] of cases) {
+    const member: ChatParticipant = { ...REVIEWER, permissions: { ...REVIEWER.permissions!, requestCompaction: right } };
+    const source = oldChat([ASSISTANT, member]);
+    const { service } = testService({ conversations: [source], agents: READY_AGENTS, newChatDefaults: { compactWithoutAsking, model: "opus", kind: "claude-code", access: "plan" } });
+    const created = await service.createConversation({ participants: [], forkOf: { conversationId: source.id, participantId: member.id } });
+    const [desktopMain] = participantsOf(created.conversation);
+    assert.equal(normalizeChatAgentPermissions(desktopMain!.permissions).requestCompaction, right, `${label}: the member's own on the computer`);
+    assert.deepEqual([desktopMain!.model, desktopMain!.agentMode], ["sonnet", "default"], `${label}: the member's model and mode, not Settings'`);
+    const offer = await service.newChatOptions([]);
+    assert.equal(offer!.mainSession!.permissions!.requestCompaction, compactWithoutAsking ? "allow" : "ask", `${label}: a new chat's main session follows Settings`);
+    const phoneMain = forkedMainSessionFor({
+      mainSession: offer!.mainSession!, basePermissions: offer!.fork!.basePermissions, member: memberAsItRunsNow(member, undefined),
+      source: { id: source.id, title: source.title }, seen: lastMemberTurnEnd(source.messages, member.id), id: desktopMain!.id
+    });
+    assert.deepEqual(clone(phoneMain), clone(desktopMain), `${label}: the phone makes the same main session`);
+  }
 });
 
 test("a forked main session never gets more than the member had, besides the main session's say over members", () => {

@@ -1,5 +1,6 @@
 import { usageRoleChosen } from "../../shared/usageSignals";
-import { MAIN_SESSION_ROLE_ID, isChatViewMode } from "../../shared/mainSession";
+import { MAIN_SESSION_ROLE_ID } from "../../shared/mainSession";
+import { applyNewChatDefaultsUpdate, newChatDefaultsForProvider, normalizeNewChatDefaults } from "../../shared/newChatDefaults";
 import { cloudRunSelection } from "../../shared/cloudRunPreparation";
 import { mkdir, open, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { createHash, randomUUID } from "node:crypto";
@@ -46,7 +47,7 @@ import type {
   ChatRoleConfig,
   ChatRoleParticipantDefaults,
   ChatRoleConfigUpdate,
-  ChatViewMode,
+  NewChatDefaultsUpdate,
   AgentEnvironmentVariable,
   ProviderKind,
   ProviderSettings,
@@ -250,8 +251,10 @@ interface StoredSettings {
   agentEnvironment?: StoredAgentEnvironmentSettings;
   cliProviderHosts?: StoredCliProviderHost[];
   assistantProviderKind?: ChatProviderKind;
-  /** The view a new chat opens in (shared/mainSession.ts); unset: sessions. */
-  defaultChatView?: ChatViewMode;
+  /** How a new chat starts besides its CLI (shared/newChatDefaults.ts). A
+   *  `defaultChatView` from before is dropped when the file is read: every
+   *  new chat opens in the sessions view. */
+  newChatDefaults?: unknown;
   lastSuccessfulChatProviderKind?: ChatProviderKind;
   lastRepoPath?: string;
   repoFileOpenAction?: RepoFileOpenAction;
@@ -2107,7 +2110,7 @@ export class SettingsService {
       cloudRuns: this.normalizeCloudRunsSettings(stored),
       mobileControl: mobileControlSettingsFromEnvironment(process.env),
       assistantProviderKind: this.normalizeChatProviderKind(stored.assistantProviderKind),
-      ...(isChatViewMode(stored.defaultChatView) ? { defaultChatView: stored.defaultChatView } : {}),
+      newChatDefaults: normalizeNewChatDefaults(stored.newChatDefaults),
       lastSuccessfulChatProviderKind: this.normalizeChatProviderKind(stored.lastSuccessfulChatProviderKind),
       lastRepoPath: stored.lastRepoPath,
       repoFileOpenAction: stored.repoFileOpenAction,
@@ -2224,24 +2227,32 @@ export class SettingsService {
         return this.getPublicSettings();
       }
       stored.assistantProviderKind = normalized;
+      // Another CLI: a new chat's model, effort and mode go back to its own.
+      stored.newChatDefaults = newChatDefaultsForProvider(stored.newChatDefaults);
       await this.writeStored(stored);
       return this.getPublicSettings();
     });
   }
 
-  /** The view a new chat opens in (Settings → General); a chat's own switch
-   *  changes it afterwards (shared/mainSession.ts). */
-  async setDefaultChatView(view: ChatViewMode): Promise<AppSettings> {
-    if (!isChatViewMode(view)) {
-      throw new Error(`Unknown chat view: ${String(view)}`);
+  /** How a new chat starts besides its CLI (Settings → General → New chats,
+   *  shared/newChatDefaults.ts). */
+  async setNewChatDefaults(update: NewChatDefaultsUpdate): Promise<AppSettings> {
+    if (!update || typeof update !== "object" || Array.isArray(update)) {
+      throw new Error("Invalid new chat settings.");
     }
-    const stored = await this.readStored();
-    if (stored.defaultChatView === view) {
+    if (update.kind !== undefined && !this.normalizeChatProviderKind(update.kind)) {
+      throw new Error(`Unknown provider: ${String(update.kind)}`);
+    }
+    return this.withAssistantProviderMutation(async () => {
+      const stored = await this.readStored();
+      const next = applyNewChatDefaultsUpdate(stored.newChatDefaults, update);
+      if (JSON.stringify(next) === JSON.stringify(normalizeNewChatDefaults(stored.newChatDefaults))) {
+        return this.getPublicSettings();
+      }
+      stored.newChatDefaults = next;
+      await this.writeStored(stored);
       return this.getPublicSettings();
-    }
-    stored.defaultChatView = view;
-    await this.writeStored(stored);
-    return this.getPublicSettings();
+    });
   }
 
   async ensureAssistantProviderDefault(agents: AgentHealth[]): Promise<AppSettings> {
@@ -3280,8 +3291,9 @@ export class SettingsService {
       },
       cliProviderHosts: this.normalizedCliProviderHosts(settings),
       assistantProviderKind: this.normalizeChatProviderKind(settings.assistantProviderKind),
-      // Only the two views are kept; anything else is the default (sessions).
-      defaultChatView: isChatViewMode(settings.defaultChatView) ? settings.defaultChatView : undefined,
+      // A `defaultChatView` from before is dropped: every new chat opens in
+      // the sessions view.
+      newChatDefaults: settings.newChatDefaults === undefined ? undefined : normalizeNewChatDefaults(settings.newChatDefaults),
       lastSuccessfulChatProviderKind: this.normalizeChatProviderKind(settings.lastSuccessfulChatProviderKind),
       lastRepoPath: typeof settings.lastRepoPath === "string" ? settings.lastRepoPath.trim() || undefined : undefined,
       ...this.mergeRepoFileOpenSettings(settings),

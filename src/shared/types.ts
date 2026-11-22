@@ -598,10 +598,10 @@ export interface AppSettings {
   chatParticipantConfigs: ChatParticipantConfig[];
   chatCustomAvatars: CustomAvatarSummary[];
   chatParticipantSeedState?: ChatParticipantSeedState;
+  /** The CLI a new chat runs on (Settings → General → New chats). */
   assistantProviderKind?: ChatProviderKind;
-  /** The view a new chat opens in (Settings → General); the chat's own
-   *  switch changes it afterwards. Unset means "sessions". */
-  defaultChatView?: ChatViewMode;
+  /** How a new chat starts besides its CLI (src/shared/newChatDefaults.ts). */
+  newChatDefaults?: NewChatDefaults;
   lastSuccessfulChatProviderKind?: ChatProviderKind;
   lastRepoPath?: string;
   repoFileOpenAction?: RepoFileOpenAction;
@@ -661,6 +661,36 @@ export interface ChatBehaviorRuleSnapshot {
 }
 
 export type ChatProviderKind = Extract<ProviderKind, "codex-cli" | "claude-code" | "gemini-cli">;
+
+export interface NewChatDefaults {
+  /** The CLI the model, effort and mode were chosen for: they apply only
+   *  while a new chat runs on that CLI's own sign-in. */
+  kind?: ChatProviderKind;
+  /** None: the model the CLI runs by default. */
+  model?: string;
+  /** None: the CLI's own effort. */
+  reasoningEffort?: ChatReasoningEffort;
+  /** The CLI's mode by its own id (chatAccessModes.ts); none: the mode the
+   *  User's own config starts the CLI in where it runs. */
+  access?: string;
+  /** The machine a new chat runs on; none: this computer. */
+  homeMachineId?: string;
+  /** Compaction without a card (the agent's own request to compact its
+   *  context). Off: it asks first. */
+  compactWithoutAsking: boolean;
+}
+
+/** A change from Settings: a value, `null` to go back to the CLI's own, or
+ *  absent to keep it. Model, effort and mode name the CLI (`kind`) they are
+ *  for. */
+export interface NewChatDefaultsUpdate {
+  kind?: ChatProviderKind;
+  model?: string | null;
+  reasoningEffort?: ChatReasoningEffort | null;
+  access?: string | null;
+  homeMachineId?: string | null;
+  compactWithoutAsking?: boolean;
+}
 
 /** How a chat with a main session is shown (shared/mainSession.ts): "classic"
  *  is the timeline with avatars where every member's reply is on it;
@@ -3584,7 +3614,7 @@ export interface AppBridge {
   deleteCliProviderHost(id: string): Promise<AppSettings>;
   getSettings(): Promise<AppSettings>;
   setAssistantProviderKind(kind: ChatProviderKind): Promise<AppSettings>;
-  setDefaultChatView(view: ChatViewMode): Promise<AppSettings>;
+  setNewChatDefaults(update: NewChatDefaultsUpdate): Promise<AppSettings>;
   updateProviderSettings(update: ProviderSettingsUpdate): Promise<AppSettings>;
   saveChatRoleConfig(update: ChatRoleConfigUpdate): Promise<AppSettings>;
   archiveChatRoleConfig(id: string): Promise<AppSettings>;

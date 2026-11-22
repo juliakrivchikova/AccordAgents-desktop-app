@@ -4,7 +4,7 @@ import type {
   ChatParticipantConfigUpdate,
   CliProviderHostUpdate,
   ChatProviderKind,
-  ChatViewMode,
+  NewChatDefaultsUpdate,
   ChatPromptContextSettings,
   ChatRoleConfigUpdate,
   ChatSavedPromptConfigUpdate,
@@ -21,7 +21,7 @@ import type { AppState } from "./app-state";
 export interface SettingsActions {
   updateProvider: (provider: ProviderSettings, patch: { enabled?: boolean; model?: string }) => Promise<void>;
   setAssistantProviderKind: (kind: ChatProviderKind) => Promise<void>;
-  setDefaultChatView: (view: ChatViewMode) => Promise<void>;
+  setNewChatDefaults: (update: NewChatDefaultsUpdate) => Promise<void>;
   setRepoFileOpenPreference: (action: RepoFileOpenAction | null) => Promise<void>;
   setRepoFileExternalOpenPreference: (action: RepoFileExternalOpenAction | null) => Promise<void>;
   setBetaUpdates: (enabled: boolean) => Promise<void>;
@@ -79,8 +79,8 @@ export function useSettingsActions(state: AppState): SettingsActions {
     }
   }
 
-  async function setDefaultChatView(view: ChatViewMode): Promise<void> {
-    await updateSettings(() => window.consensus.setDefaultChatView(view));
+  async function setNewChatDefaults(update: NewChatDefaultsUpdate): Promise<void> {
+    await updateSettings(() => window.consensus.setNewChatDefaults(update));
   }
 
   async function setRepoFileOpenPreference(action: RepoFileOpenAction | null): Promise<void> {
@@ -251,7 +251,7 @@ export function useSettingsActions(state: AppState): SettingsActions {
   return {
     updateProvider,
     setAssistantProviderKind,
-    setDefaultChatView,
+    setNewChatDefaults,
     setRepoFileOpenPreference,
     setRepoFileExternalOpenPreference,
     setBetaUpdates,
