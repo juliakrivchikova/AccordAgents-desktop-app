@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { ChevronDown } from "lucide-react";
+import { CaretDownIcon } from "@phosphor-icons/react";
 import { Button } from "@/components/ui/button";
 import { AWS_WORKER_INSTANCE_TYPE_OPTIONS } from "../../../shared/cloudRuns";
 import type { AwsWorkerOperationSnapshot } from "../../../shared/types";
@@ -113,7 +113,7 @@ function AwsTypeDialog(props: { open: boolean; control: AwsWorkerControl; onClos
               <option key={option} value={option}>{option} · {instanceTypeSpecs(option)}{option === current ? " (now)" : ""}</option>
             ))}
           </select>
-          <ChevronDown size={14} aria-hidden />
+          <CaretDownIcon size={14} aria-hidden />
         </span>
       </label>
     </AwsDialog>

@@ -1,4 +1,4 @@
-import { Trash2 } from "lucide-react";
+import { TrashIcon } from "@phosphor-icons/react";
 
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogClose, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
@@ -40,7 +40,7 @@ export function DeleteConfirmationDialog(props: {
             </Button>
           </DialogClose>
           <Button type="button" variant="destructive" size="sm" disabled={props.pending} onClick={() => void confirm()}>
-            <Trash2 size={14} aria-hidden />
+            <TrashIcon size={14} aria-hidden />
             {props.pending ? "Deleting..." : props.confirmLabel}
           </Button>
         </DialogFooter>

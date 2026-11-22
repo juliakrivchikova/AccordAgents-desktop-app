@@ -1,5 +1,5 @@
 import { useState, type KeyboardEvent } from "react";
-import { ArrowDown, ArrowUp, CornerDownLeft, Sparkles } from "lucide-react";
+import { ArrowDownIcon, ArrowUpIcon, ArrowElbowDownLeftIcon, SparkleIcon } from "@phosphor-icons/react";
 
 import { Button } from "@/components/ui/button";
 import type {
@@ -250,7 +250,7 @@ function GenericChatAppToolApprovalCard(props: {
           {reviewChange && (
             <div className="chat-app-tool-review-header">
               <div className="chat-app-tool-review-chip">
-                <Sparkles size={13} aria-hidden />
+                <SparkleIcon size={13} aria-hidden />
                 {effectiveCombinedRequest ? "Role + member" : effectiveRoleRequest ? roleReviewChipLabel(effectiveRoleRequest) : participantReviewChipLabel(effectiveParticipantChange)}
               </div>
             </div>
@@ -386,8 +386,8 @@ function GenericChatAppToolApprovalCard(props: {
                 </span>
                 {index === selectedIndex && (
                   <span className="chat-approval-option-keys" aria-hidden>
-                    <ArrowUp size={16} />
-                    <ArrowDown size={16} />
+                    <ArrowUpIcon size={16} />
+                    <ArrowDownIcon size={16} />
                   </span>
                 )}
               </button>
@@ -412,7 +412,7 @@ function GenericChatAppToolApprovalCard(props: {
                 )}
                 <Button variant="default" size="sm" className="chat-approval-submit" disabled={props.submitting} onClick={submit}>
                   <span>Submit</span>
-                  <CornerDownLeft size={14} aria-hidden />
+                  <ArrowElbowDownLeftIcon size={14} aria-hidden />
                 </Button>
               </div>
             </>

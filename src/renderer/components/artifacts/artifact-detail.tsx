@@ -1,11 +1,12 @@
 import { useState } from "react";
-import { Check, Eye, History, Pencil, X } from "lucide-react";
+import { CheckIcon, EyeIcon, ClockCounterClockwiseIcon, PencilSimpleIcon, XIcon } from "@phosphor-icons/react";
 
 import type { ArtifactDraftContent, ArtifactDraftView, ArtifactError, PublishedArtifactReadResult } from "../../../shared/types";
 import { artifactMemberLabel } from "../../../shared/artifacts";
 import { ArtifactContentSurface } from "./artifact-content-surface";
 import { IconButton } from "../primitives";
 import { MarkdownText } from "../content/markdown-text";
+import { Delayed } from "@/components/ui/delayed";
 
 export interface ArtifactCompareState {
   fromVersion: number;
@@ -73,7 +74,7 @@ export function ArtifactDetailView(props: {
     <div className="artifacts-panel-body artifact-detail" tabIndex={0} aria-label="Artifact details">
       {selectedDraft || viewingOlder ? (
         <div className="artifact-view-notice" role="status" data-testid="artifact-view-notice">
-          <History size={14} aria-hidden />
+          <ClockCounterClockwiseIcon size={14} aria-hidden />
           <span>
             {selectedDraft
               ? <>Viewing a draft by <strong>{artifactMemberLabel(selectedDraft.author)}</strong></>
@@ -137,7 +138,7 @@ export function ArtifactDetailView(props: {
                 </pre>
               ) : (
                 <div className="artifact-diff-loading" role="status">
-                  {props.busy || staleDiff ? "Loading diff…" : "Diff unavailable."}
+                  {props.busy || staleDiff ? <Delayed>Loading diff…</Delayed> : "Diff unavailable."}
                 </div>
               )}
             </>
@@ -181,7 +182,7 @@ function ArtifactRevisionSurface(props: {
             data-testid="artifact-revise-preview-toggle"
             onClick={() => setPreview(true)}
           >
-            <Eye size={14} aria-hidden /> Preview
+            <EyeIcon size={14} aria-hidden /> Preview
           </button>
           <button
             type="button"
@@ -191,14 +192,14 @@ function ArtifactRevisionSurface(props: {
             data-testid="artifact-revise-edit-toggle"
             onClick={() => setPreview(false)}
           >
-            <Pencil size={14} aria-hidden /> Edit
+            <PencilSimpleIcon size={14} aria-hidden /> Edit
           </button>
         </div>
-        <IconButton floating label="Cancel editing" icon={X} onClick={props.onCancel} />
+        <IconButton floating label="Cancel editing" icon={XIcon} onClick={props.onCancel} />
         <IconButton
           floating
           label={`Save as v${props.baseVersion + 1}`}
-          icon={Check}
+          icon={CheckIcon}
           disabled={props.busy || !content}
           onClick={() => props.onSubmit(content, note.trim() ? note : undefined)}
         />

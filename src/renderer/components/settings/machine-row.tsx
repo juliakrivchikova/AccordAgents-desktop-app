@@ -1,4 +1,4 @@
-import { Server, Settings2, Trash2 } from "lucide-react";
+import { HardDrivesIcon, GearSixIcon, TrashIcon } from "@phosphor-icons/react";
 import type { MachineLinkStatus, MachineRecord } from "../../../shared/machineLink";
 import { machineRuntimeStatus, type MachineInstallRecord, type MachineInstallSnapshot } from "../../../shared/machineInstall";
 import { MachineSetupPanel } from "./machine-setup-panel";
@@ -28,7 +28,7 @@ export function MachineRow(props: {
     <li className="gen-row machines-row" data-testid="machine-row" data-connected={connected ? "true" : "false"}>
       <div className="gen-row-text">
         <div className="gen-row-title machines-row-title">
-          <Server size={14} aria-hidden />
+          <HardDrivesIcon size={14} aria-hidden />
           <span>{machine.name}</span>
           <span className={`machines-state${connected ? " is-connected" : ""}`}>{connected ? "Connected" : "Not connected"}</span>
           {live?.warning && <span className="machines-warning" role="status">{live.warning}</span>}
@@ -66,14 +66,14 @@ export function MachineRow(props: {
           aria-expanded={props.setupOpen}
           onClick={props.onToggleSetup}
         >
-          <span className="gen-pill-lead"><Settings2 size={14} aria-hidden /></span>
+          <span className="gen-pill-lead"><GearSixIcon size={14} aria-hidden /></span>
           <span className="gen-pill-label">{install?.installedVersion ? "Upgrade" : "Set up"}</span>
         </button>
         <button type="button" className="gen-pill" onClick={props.onShowEnrollment} data-testid="machine-show-enrollment">
           <span className="gen-pill-label">Enrollment</span>
         </button>
         <button type="button" className="gen-pill machines-remove" onClick={props.onRemove} data-testid="machine-remove" disabled={props.busy}>
-          <span className="gen-pill-lead"><Trash2 size={14} aria-hidden /></span>
+          <span className="gen-pill-lead"><TrashIcon size={14} aria-hidden /></span>
           <span className="gen-pill-label">Remove</span>
         </button>
       </div>

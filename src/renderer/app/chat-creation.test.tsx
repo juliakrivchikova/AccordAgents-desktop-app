@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { act, create, type ReactTestRenderer } from "react-test-renderer";
-import type { ChatActivityItem, ChatMessage, Conversation, ReviewProgress, StartReviewResult } from "../../shared/types";
+import type { AgentHealth, ChatActivityItem, ChatMessage, Conversation, ReviewProgress, StartReviewResult } from "../../shared/types";
 import { useAppState, type AppState } from "./app-state";
 import { DEFAULT_SETTINGS } from "./constants";
 import { useAppEffects } from "./use-app-effects";
@@ -13,6 +13,7 @@ import { ConversationPanel } from "../components/conversation/conversation-panel
 import { toast } from "sonner";
 import { takeComposerFocusRequest } from "./composer-focus-request";
 import { upsertConversationSummary } from "./conversation-summaries";
+import { chatCreationStatus } from "../components/chat/chat-creation-state";
 
 function deferred<T>() {
   let resolve!: (value: T) => void;
@@ -28,6 +29,7 @@ async function harness() {
   const creation = deferred<StartReviewResult>();
   const sent = deferred<StartReviewResult>();
   const opened = deferred<{ conversation: Conversation }>();
+  const detect = deferred<AgentHealth[]>();
   const calls: string[] = [];
   let saved = conversation();
   let state!: AppState;
@@ -41,6 +43,7 @@ async function harness() {
     onConversationDeleted: () => () => {},
     onConversationUpdated: (callback: (update: Conversation) => void) => { announce = callback; return () => {}; },
     onReviewProgress: callback => { progress = callback; return () => {}; },
+    detectAgents: () => { calls.push("detect"); return detect.promise; },
     createChatConversation: request => { calls.push("create"); createRunId = request.runId; return creation.promise; },
     sendChatMessage: request => { calls.push(`send:${request.runId}`); return sent.promise; },
     cancelReview: async runId => { calls.push(`stop:${runId}`); },
@@ -67,7 +70,7 @@ async function harness() {
     // The coordinating creation path is real; ChatConversationView itself is
     // covered separately once the created conversation is selected.
     return state.conversation ? null : <ConversationPanel state={state} view={view}
-      chatActions={actions} conversationActions={navigation} openingConversationDescription="Loading"
+      chatActions={actions} conversationActions={navigation}
       reviewDecisionActions={{} as never} reviewPlanActions={{} as never} settingsActions={{} as never}
       artifacts={{} as never} onOpenAccord={() => {}} />;
   }
@@ -86,7 +89,7 @@ async function harness() {
     state.setRepoPath("/project");
     state.setNewChatRepoFileMentions([{ path: "src/main.ts" }]);
   });
-  return { renderer, creation, sent, opened, calls, state: () => state, actions: () => actions, navigation: () => navigation, appNavigation: () => appNavigation,
+  return { renderer, creation, sent, opened, detect, calls, state: () => state, actions: () => actions, navigation: () => navigation, appNavigation: () => appNavigation,
     progress: (event: ReviewProgress) => progress(event), runId: () => createRunId,
     /** The app's snapshot of a chat, as conversations:updated announces it. */
     announce: (update: Conversation) => announce?.(update),
@@ -98,23 +101,47 @@ test("New Chat shows only its own preparation progress; Stop preserves the draft
   let pending!: Promise<boolean>;
   await act(async () => { pending = h.actions().startChat(); });
   assert.ok(h.runId(), h.state().error);
-  assert.match(JSON.stringify(h.renderer.toJSON()), /Starting chat/);
-  assert.doesNotMatch(JSON.stringify(h.renderer.toJSON()), /No conversation selected/);
+  // New chat stays on screen while the chat is made (no card, no blank
+  // frame, the User 2026-11-22); its status line says what this start does.
+  assert.equal(h.renderer.toJSON(), null);
+  const status = (): string => chatCreationStatus(h.state().progressLog, h.state().currentRunId, Boolean(h.state().chatCreationRef.current?.signal.aborted));
+  assert.equal(status(), "Creating your chat…");
   await act(async () => {
     h.progress({ runId: h.runId()!, phase: "initial", message: "Copying project · 42%", createdAt: new Date().toISOString() });
     h.progress({ runId: "other-chat", phase: "initial", message: "UNRELATED", createdAt: new Date().toISOString() });
     await new Promise(resolve => setTimeout(resolve, 30));
   });
-  assert.match(JSON.stringify(h.renderer.toJSON()), /42%/);
-  assert.doesNotMatch(JSON.stringify(h.renderer.toJSON()), /UNRELATED/);
+  assert.match(status(), /42%/);
+  assert.doesNotMatch(status(), /UNRELATED/);
   await act(async () => { await h.navigation().cancelReview(); });
-  assert.match(JSON.stringify(h.renderer.toJSON()), /Stopping preparation/);
+  assert.equal(status(), "Stopping preparation…");
   await act(async () => { h.creation.reject(new Error("Chat creation cancelled.")); assert.equal(await pending, false); });
   assert.equal(h.state().busy, false);
   assert.equal(h.state().question, "Draft must survive");
   assert.deepEqual(h.state().newChatRepoFileMentions, [{ path: "src/main.ts" }]);
   assert.equal(h.state().startingChatRef.current, false);
   assert.deepEqual(h.calls, ["create", `stop:${h.runId()}`]);
+  await act(async () => { h.renderer.unmount(); });
+});
+
+test("a send that waits for the CLI check shows at once, and Stop meanwhile makes no chat", async () => {
+  const h = await harness();
+  const agents = h.state().agents;
+  await act(async () => { h.state().setAgents(agents.map((agent) => ({ ...agent, lastCheckedAt: "2026-09-13T00:00:00.000Z" }))); });
+  let pending!: Promise<boolean>;
+  await act(async () => { pending = h.actions().startChat(); });
+  assert.deepEqual(h.calls, ["detect"]);
+  // Enter shows at once (the User, 2026-11-22): the send is busy while New
+  // chat, with its choices, stays on screen; no run exists in main yet.
+  assert.equal(h.state().busy, true);
+  assert.equal(h.state().currentRunId, undefined);
+  assert.equal(h.renderer.toJSON(), null, "New chat stays: no creation card over it");
+  await act(async () => { await h.navigation().cancelReview(); });
+  await act(async () => { h.detect.resolve(agents); assert.equal(await pending, false); });
+  assert.deepEqual(h.calls, ["detect"], "Stop makes no chat and asks main for nothing");
+  assert.equal(h.state().busy, false);
+  assert.equal(h.state().question, "Draft must survive");
+  assert.equal(h.state().startingChatRef.current, false);
   await act(async () => { h.renderer.unmount(); });
 });
 
@@ -196,6 +223,25 @@ test("a preview still loading when Back is pressed never lands on screen or coun
   assert.equal(h.state().openingConversationId, undefined);
   assert.equal(h.state().lastViewedAtRef.current.late, undefined);
   assert.equal(h.state().question, "Draft must survive");
+  await act(async () => { h.renderer.unmount(); });
+});
+
+// The User, 2026-11-22: a "Loading chat" card flashed for a tenth of a second
+// on every open. A quick open keeps the screen as it was; a slow one shows
+// only a thin bar.
+test("opening a chat shows no loading card: the screen stays, then only a bar if the wait lasts", async () => {
+  globalThis.requestAnimationFrame ??= (callback) => setTimeout(() => callback(0), 0) as unknown as number;
+  const h = await harness();
+  let loading!: Promise<void>;
+  await act(async () => { loading = h.navigation().openConversation("slow"); });
+  assert.equal(h.state().openingConversationId, "slow");
+  assert.equal(h.renderer.toJSON(), null, "the New chat screen stays: no panel, no card");
+  await act(async () => { await new Promise((resolve) => setTimeout(resolve, 450)); });
+  const shown = JSON.stringify(h.renderer.toJSON());
+  assert.doesNotMatch(shown, /app-loading-state/);
+  assert.equal(h.renderer.root.findAll((node) => node.props?.role === "progressbar").length, 1, "a slow open shows the bar");
+  await act(async () => { h.opened.resolve({ conversation: { ...conversation(), id: "slow" } }); await loading; });
+  assert.equal(h.state().conversation?.id, "slow");
   await act(async () => { h.renderer.unmount(); });
 });
 

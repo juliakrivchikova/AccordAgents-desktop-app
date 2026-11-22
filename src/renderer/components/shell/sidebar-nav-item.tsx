@@ -1,4 +1,4 @@
-import type { LucideIcon } from "lucide-react";
+import type { Icon as PhosphorIcon } from "@phosphor-icons/react";
 
 import { cn } from "@/lib/utils";
 
@@ -11,7 +11,7 @@ export function SidebarNavItem({
   testId,
   onClick
 }: {
-  icon: LucideIcon;
+  icon: PhosphorIcon;
   label: string;
   ariaLabel?: string;
   disabled?: boolean;
@@ -27,17 +27,17 @@ export function SidebarNavItem({
       aria-label={ariaLabel}
       data-testid={testId}
       className={cn(
-        "inline-flex h-8 w-full items-center justify-start gap-2 rounded-md px-2.5 text-[13px] font-medium",
-        "transition-colors disabled:cursor-not-allowed disabled:opacity-50",
-        "focus-visible:outline-none focus-visible:shadow-[var(--focus-ring)]",
-        "text-[var(--app-text)] hover:bg-[var(--app-surface-hover)] hover:text-[var(--app-text-strong)]"
+        "flex h-7 w-full items-center gap-2 rounded-ui-8 px-2 text-left text-ui-13 text-ui-text",
+        "transition-colors duration-120 ease-ui-out hover:bg-ui-row-hover",
+        "disabled:cursor-not-allowed disabled:opacity-50",
+        "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ui-focus-ring"
       )}
     >
-      <Icon className="size-[15px] shrink-0 text-muted-foreground" aria-hidden />
-      <span className="min-w-0 flex-1 truncate text-left">{label}</span>
+      <Icon className="size-4 shrink-0 text-ui-text-2" aria-hidden />
+      <span className="min-w-0 flex-1 truncate">{label}</span>
       {badge && (
         <span
-          className="inline-flex h-[18px] min-w-[18px] shrink-0 items-center justify-center rounded-full bg-[var(--app-accent)] px-1.5 text-[11px] font-semibold leading-none text-[var(--app-primary-fg)]"
+          className="inline-flex h-[18px] min-w-[18px] shrink-0 items-center justify-center rounded-full bg-ui-muted px-1.5 text-ui-11 font-medium tabular-nums text-ui-text-2"
           aria-hidden="true"
           data-testid={`${testId}-badge`}
         >

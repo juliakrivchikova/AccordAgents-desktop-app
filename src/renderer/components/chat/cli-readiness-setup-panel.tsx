@@ -1,16 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import {
-  Check,
-  CheckCheck,
-  ChevronDown,
-  ChevronUp,
-  Copy,
-  ExternalLink,
-  RefreshCw,
-  Settings,
-  ShieldCheck,
-  Terminal
-} from "lucide-react";
+import { CheckIcon, ChecksIcon, CaretDownIcon, CaretUpIcon, CopyIcon, ArrowSquareOutIcon, ArrowsClockwiseIcon, GearSixIcon, ShieldCheckIcon, TerminalIcon } from "@phosphor-icons/react";
 
 import type {
   AgentHealth,
@@ -30,6 +19,7 @@ import {
 import { IconButton } from "../primitives";
 import { CliSignInStep, useCliSignIns } from "./cli-sign-in-step";
 import { ProviderIcon } from "./provider-icon";
+import { Spinner } from "@/components/ui/spinner";
 
 export function CliReadinessSetupPanel(props: {
   agents: AgentHealth[];
@@ -101,7 +91,7 @@ export function CliReadinessSetupPanel(props: {
           disabled={checking}
           onClick={() => void refreshAll()}
         >
-          <RefreshCw className={checking ? "spin" : undefined} size={15} aria-hidden />
+          {checking ? <Spinner size={15} /> : <ArrowsClockwiseIcon size={15} aria-hidden />}
           Check again
         </button>
       </div>
@@ -127,7 +117,7 @@ export function CliReadinessSetupPanel(props: {
                 <IconButton
                   className="cli-readiness-toggle"
                   label={`${expanded ? "Hide" : "Set up"} ${metadata.label}`}
-                  icon={expanded ? ChevronUp : ChevronDown}
+                  icon={expanded ? CaretUpIcon : CaretDownIcon}
                   aria-expanded={expanded}
                   onClick={() => toggleProvider(kind)}
                 />
@@ -153,7 +143,7 @@ export function CliReadinessSetupPanel(props: {
       </div>
       {actionError && <p className="inline-error cli-readiness-error">{actionError}</p>}
       <p className="cli-readiness-note">
-        <ShieldCheck size={15} aria-hidden />
+        <ShieldCheckIcon size={15} aria-hidden />
         <span>AccordAgents never installs software. <strong>Sign in</strong> runs the CLI's own sign-in; the CLI keeps your credentials.</span>
       </p>
     </section>
@@ -181,7 +171,7 @@ function CliReadinessDetails(props: {
       <div className="cli-readiness-steps">
         <p>This provider is disabled in AccordAgents.</p>
         <button type="button" className="cli-readiness-settings-action" onClick={props.onOpenSettings}>
-          <Settings size={15} aria-hidden /> Enable in Settings
+          <GearSixIcon size={15} aria-hidden /> Enable in Settings
         </button>
       </div>
     );
@@ -190,7 +180,7 @@ function CliReadinessDetails(props: {
   if (props.readiness === "ready") {
     return (
       <div className="cli-readiness-steps">
-        <p className="cli-readiness-ready"><Check size={15} aria-hidden /> Ready to use.</p>
+        <p className="cli-readiness-ready"><CheckIcon size={15} aria-hidden /> Ready to use.</p>
       </div>
     );
   }
@@ -204,7 +194,7 @@ function CliReadinessDetails(props: {
           className="cli-readiness-settings-action"
           onClick={() => void window.consensus.openExternal(props.metadata.guideUrl).catch(() => props.onError("Could not open the official guide."))}
         >
-          <ExternalLink size={15} aria-hidden /> Official guide
+          <ArrowSquareOutIcon size={15} aria-hidden /> Official guide
         </button>
       </div>
     );
@@ -270,14 +260,14 @@ function CliReadinessActionButtons(props: {
         className="cli-readiness-detail-action"
         onClick={() => void window.consensus.openTerminal().catch(() => props.onError("Could not open Terminal."))}
       >
-        <Terminal size={15} aria-hidden /> Open Terminal
+        <TerminalIcon size={15} aria-hidden /> Open Terminal
       </button>
       <button
         type="button"
         className="cli-readiness-detail-action"
         onClick={() => void window.consensus.openExternal(props.guideUrl).catch(() => props.onError("Could not open the official guide."))}
       >
-        <ExternalLink size={15} aria-hidden /> Official guide
+        <ArrowSquareOutIcon size={15} aria-hidden /> Official guide
       </button>
     </div>
   );
@@ -292,7 +282,7 @@ function SetupStep(props: {
     <div className="cli-readiness-step">
       <span className="cli-readiness-step-number">{props.number}</span>
       <span>{props.children}</span>
-      {props.done && <CheckCheck className="cli-readiness-step-done" size={17} aria-label="Done" />}
+      {props.done && <ChecksIcon className="cli-readiness-step-done" size={17} aria-label="Done" />}
     </div>
   );
 }
@@ -313,7 +303,7 @@ function SetupCommand(props: {
         size="xs"
         label={`Copy ${props.label} command`}
         tooltip={props.copiedValue === props.command ? "Copied" : "Copy"}
-        icon={props.copiedValue === props.command ? Check : Copy}
+        icon={props.copiedValue === props.command ? CheckIcon : CopyIcon}
         onClick={() => void props.onCopy(props.command as string)}
       />
     </div>

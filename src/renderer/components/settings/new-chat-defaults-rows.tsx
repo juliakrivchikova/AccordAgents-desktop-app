@@ -37,7 +37,7 @@ import { defaultModelOf, effortOptions, explicitModels } from "../chat/chat-mode
 import { machineOf, useCliStartDefaults, useMachineList } from "../chat/use-cli-start-defaults";
 import { isMacPlatform } from "../../lib/platform";
 
-const SELECT_CLASS_NAME = "assistant-provider-select min-h-7 data-[size=sm]:rounded-[10px] border-[var(--app-hairline)] bg-[var(--app-surface)] text-[14px] dark:bg-[var(--app-surface)]";
+const SELECT_CLASS_NAME = "assistant-provider-select min-h-7 border-ui-border bg-ui-bg text-ui-13";
 
 /** The select's value for "the CLI's own" (a select has no empty value). */
 const CLI_OWN = "__cli-own__";

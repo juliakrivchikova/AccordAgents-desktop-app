@@ -1,4 +1,4 @@
-import { ArrowRight, CheckCheck, CircleX, Eraser, MessageSquare, RefreshCw, X } from "lucide-react";
+import { ArrowRightIcon, ChecksIcon, XCircleIcon, EraserIcon, ChatIcon, ArrowsClockwiseIcon, XIcon } from "@phosphor-icons/react";
 import { useEffect, useRef, useState } from "react";
 import type React from "react";
 import type { ChatActivityItem, ChatActivityParticipantSummary } from "../../../shared/types";
@@ -22,6 +22,7 @@ import {
 import { chatActivityShowsGenericCancel } from "../chat/chat-codex-approval-presentation";
 import { MIN_ACTIVITY_DETAIL_WIDTH, MIN_ACTIVITY_LIST_WIDTH, NARROW_ACTIVITY_LIST_MAX_WIDTH } from "../../lib/activity-sizing";
 import { ChatProviderMark } from "../chat/chat-member-mark";
+import { Delayed } from "@/components/ui/delayed";
 
 type ActivityStatusTab = "running" | "pending" | "rest";
 
@@ -59,7 +60,7 @@ export interface ActivityViewProps {
 export function ActivityConversationTitle({ title }: { title: string }): JSX.Element {
   return (
     <h2 className="activity-conversation-title">
-      <MessageSquare aria-hidden size={17} strokeWidth={1.75} />
+      <ChatIcon aria-hidden size={17} />
       <span>{title}</span>
     </h2>
   );
@@ -196,14 +197,21 @@ export function ActivityView({
               <h2>Activity unavailable</h2>
               <p>{error}</p>
               <Button type="button" variant="outline" size="sm" onClick={onRetry}>
-                <RefreshCw aria-hidden />
+                <ArrowsClockwiseIcon aria-hidden />
                 Retry
               </Button>
             </div>
+          ) : items.length === 0 && loading ? (
+            <Delayed>
+              <div className="activity-empty">
+                <h2>Loading activity</h2>
+                <p>Checking recent chats.</p>
+              </div>
+            </Delayed>
           ) : items.length === 0 ? (
             <div className="activity-empty">
-              <h2>{loading ? "Loading activity" : "No current activity"}</h2>
-              <p>{loading ? "Checking recent chats." : "Running, pending, and recent runs will appear here."}</p>
+              <h2>No current activity</h2>
+              <p>Running, pending, and recent runs will appear here.</p>
             </div>
           ) : filteredItems.length === 0 ? (
             <div className="activity-empty">
@@ -245,7 +253,7 @@ export function ActivityView({
         {!(selectedItem && detailHasHeader) && (
           <div className="activity-detail-header" data-titlebar>
             <ActivityConversationTitle title={selectedItem?.conversationTitle ?? "Select an item"} />
-            {selectedItem && <IconButton label="Open in chat" icon={ArrowRight} onClick={() => onOpenInChat(selectedItem)} />}
+            {selectedItem && <IconButton label="Open in chat" icon={ArrowRightIcon} onClick={() => onOpenInChat(selectedItem)} />}
           </div>
         )}
         <div className="activity-detail-body">
@@ -254,7 +262,7 @@ export function ActivityView({
             <div className={selectedItem && detailHasHeader ? "activity-detail-error-overlay" : "mx-3 mt-2"} role="alert">
               <Notice
                 tone="error"
-                action={onDismissDetailError && <IconButton label="Dismiss" icon={X} size="xs" onClick={onDismissDetailError} />}
+                action={onDismissDetailError && <IconButton label="Dismiss" icon={XIcon} size="xs" onClick={onDismissDetailError} />}
               >
                 {detailError}
               </Notice>
@@ -354,13 +362,13 @@ export function ActivityRow({
       </button>
       <span className="activity-row-actions">
         {item.status === "recent" && !item.read ? (
-          <IconButton label="Mark read" icon={CheckCheck} onClick={onMarkRead} />
+          <IconButton label="Mark read" icon={ChecksIcon} onClick={onMarkRead} />
         ) : null}
         {canCancelPending ? (
-          <IconButton label={cancelling ? "Cancelling pending card" : "Cancel pending card"} icon={CircleX} tone="danger" disabled={cancelling} onClick={onCancelPending} />
+          <IconButton label={cancelling ? "Cancelling pending card" : "Cancel pending card"} icon={XCircleIcon} tone="danger" disabled={cancelling} onClick={onCancelPending} />
         ) : null}
         {item.status !== "pending" ? (
-          <IconButton label="Clear from activity" icon={Eraser} onClick={onClear} />
+          <IconButton label="Clear from activity" icon={EraserIcon} onClick={onClear} />
         ) : null}
       </span>
     </div>

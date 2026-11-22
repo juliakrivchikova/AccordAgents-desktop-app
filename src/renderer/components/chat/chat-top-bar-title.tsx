@@ -1,5 +1,5 @@
 import React, { useEffect, useRef, useState } from "react";
-import { Check, Pencil, X } from "lucide-react";
+import { CheckIcon, PencilSimpleIcon, XIcon } from "@phosphor-icons/react";
 
 import { Input } from "@/components/ui/input";
 import { IconButton } from "../primitives";
@@ -97,7 +97,7 @@ export function ChatTopBarTitle(props: {
           />
           <IconButton
             size="xs"
-            icon={Check}
+            icon={CheckIcon}
             label="Save chat name"
             tooltip="Save chat name"
             disabled={titleSaveDisabled}
@@ -106,7 +106,7 @@ export function ChatTopBarTitle(props: {
           />
           <IconButton
             size="xs"
-            icon={X}
+            icon={XIcon}
             label="Cancel chat name edit"
             tooltip="Cancel chat name edit"
             disabled={titleSaving}
@@ -120,7 +120,7 @@ export function ChatTopBarTitle(props: {
           <ChatViewTitleMenu />
           <IconButton
             size="xs"
-            icon={Pencil}
+            icon={PencilSimpleIcon}
             label="Edit chat name"
             tooltip={props.isRunning ? "Chat name cannot be edited while members are running" : "Edit chat name"}
             disabled={props.isRunning}

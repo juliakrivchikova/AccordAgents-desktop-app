@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { Trash2, X } from "lucide-react";
+import { TrashIcon, XIcon } from "@phosphor-icons/react";
 
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogClose, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
@@ -9,6 +9,7 @@ import { IconButton } from "../primitives";
 import { errorText } from "../review/review-conversation-data";
 import { DeleteConfirmationDialog } from "./delete-confirmation-dialog";
 import { MEMORY_KIND_LABELS, memoryDate, memoryScopeLabel } from "./memory-settings-item";
+import { Delayed } from "@/components/ui/delayed";
 
 /** A note opened from Settings → Memory: read it whole, or delete it. Laid
  *  out like the role editor; nothing here edits a note (members do). */
@@ -84,7 +85,7 @@ export function MemoryNoteDialog(props: {
               </span>
               {shown && <span className="roles-kind-badge is-built-in">{MEMORY_KIND_LABELS[shown.kind]}</span>}
               <DialogClose asChild>
-                <IconButton className="roles-editor-close" label="Close note" icon={X} data-testid="memory-note-close" />
+                <IconButton className="roles-editor-close" label="Close note" icon={XIcon} data-testid="memory-note-close" />
               </DialogClose>
             </div>
           </DialogHeader>
@@ -92,15 +93,15 @@ export function MemoryNoteDialog(props: {
             <div className="memory-note-meta">{meta.join(" · ")}</div>
             {shown && shown.tags.length > 0 && <div className="memory-note-meta">{shown.tags.map((tag) => `#${tag}`).join(" ")}</div>}
             <div className="roles-preview-box markdown-preview is-readonly memory-note-body" data-testid="memory-note-body">
-              {full ? <MarkdownText content={full.body} /> : <span className="memory-note-meta">{error ? "" : "Loading"}</span>}
+              {full ? <MarkdownText content={full.body} /> : <span className="memory-note-meta">{error ? "" : <Delayed>Loading</Delayed>}</span>}
             </div>
             {full?.source && <div className="memory-note-meta memory-note-source">Source: {full.source}</div>}
             {error && <div className="inline-error roles-editor-error">{error}</div>}
           </div>
           <DialogFooter className="roles-editor-footer">
-            <Button type="button" variant="outline" size="sm" className="roles-editor-delete" disabled={!note || deleting}
+            <Button type="button" variant="destructive" size="sm" className="roles-editor-delete" disabled={!note || deleting}
               data-testid="memory-note-delete" onClick={() => setConfirmOpen(true)}>
-              <Trash2 size={14} aria-hidden />
+              <TrashIcon size={14} aria-hidden />
               Delete note
             </Button>
             <DialogClose asChild>

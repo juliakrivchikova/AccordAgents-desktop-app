@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
-import { Maximize2, Minus, Plus } from "lucide-react";
+import { ArrowsOutSimpleIcon, MinusIcon, PlusIcon } from "@phosphor-icons/react";
 
 import { IconButton } from "../primitives";
 import { ZOOM_MAX, ZOOM_MIN, ZOOM_STEP } from "./zoom";
@@ -107,11 +107,11 @@ export function ImageViewer(props: { src: string; alt: string }): JSX.Element {
   return (
     <div className="file-image-viewer">
       <div className="file-viewer-toolbar" role="toolbar" aria-label="Image zoom">
-        <IconButton label="Zoom out" icon={Minus} onClick={() => zoomAt(1 / ZOOM_STEP)} />
+        <IconButton label="Zoom out" icon={MinusIcon} onClick={() => zoomAt(1 / ZOOM_STEP)} />
         <span className="file-viewer-zoom-value">{percent}%</span>
-        <IconButton label="Zoom in" icon={Plus} onClick={() => zoomAt(ZOOM_STEP)} />
+        <IconButton label="Zoom in" icon={PlusIcon} onClick={() => zoomAt(ZOOM_STEP)} />
         <button type="button" className="file-viewer-text-button" aria-pressed={view.fit} onClick={() => { const next = fitView(); if (next) setView(next); }}>
-          <Maximize2 size={13} aria-hidden /> Fit
+          <ArrowsOutSimpleIcon size={13} aria-hidden /> Fit
         </button>
         <button type="button" className="file-viewer-text-button" aria-pressed={!view.fit && view.scale === 1} onClick={() => { const next = actualSize(); if (next) setView(next); }}>
           100%

@@ -16,6 +16,7 @@ import {
 } from "../components/review/review-conversation-data";
 import { buildProjectSessionGroups, compareConversationSummaries, pinnedChatSummaries, recentChatSummaries } from "./conversation-summaries";
 import type { AppState } from "./app-state";
+import { useDelayedFlag } from "@/components/ui/delayed";
 import { warningDismissScope, warningNoticeEntries } from "./warnings";
 import { sessionsViewNamesOf, sessionsViewText, type SessionsViewNames } from "../../shared/sessionsViewText";
 
@@ -24,7 +25,15 @@ export function useAppViewModel(state: AppState) {
     ? state.summaries.find((summary) => summary.id === state.openingConversationId)
     : undefined;
   const isOpeningConversation = Boolean(state.openingConversationId);
-  const hasResultContext = Boolean(state.conversation) || state.busy || isOpeningConversation;
+  // A chat being opened takes the screen once it is in, or once the wait
+  // lasts: a quick open keeps what was there (the New chat screen, say)
+  // instead of a blank panel for a tenth of a second.
+  const openingSlow = useDelayedFlag(isOpeningConversation);
+  // A new chat being started keeps New chat on screen, its send button busy,
+  // its choices in place and its composer where the chat will have it, until
+  // the chat itself takes the screen: no card and no blank frame between.
+  const startingChat = state.busy && state.startingChatRef.current && !state.conversation;
+  const hasResultContext = Boolean(state.conversation) || (state.busy && !startingChat) || (isOpeningConversation && openingSlow);
   const pendingDecisions = pendingPlanDecisions(state.conversation);
   const reviewablePlanItems = requiredPlanItemReviewFindings(state.conversation);
   const reviewedPlanItemCount = reviewablePlanItems.filter((finding) => planItemReviewForFinding(finding, planItemReviews(state.conversation))).length;

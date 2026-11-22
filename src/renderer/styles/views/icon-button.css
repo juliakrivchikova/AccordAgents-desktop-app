@@ -3,27 +3,29 @@
 
 button.aa-icon-button {
   display: inline-flex;
-  width: 28px;
+  width: var(--ui-control-sm);
   min-width: 0;
-  height: 28px;
+  height: var(--ui-control-sm);
   min-height: 0;
   flex: 0 0 auto;
   align-items: center;
   justify-content: center;
   border: 0;
-  border-radius: 7px;
+  border-radius: var(--ui-radius-8);
   padding: 0;
-  color: var(--app-muted);
+  color: var(--ui-text-2);
   background: transparent;
   box-shadow: none;
   cursor: pointer;
-  transition: background-color 120ms ease, color 120ms ease;
+  transition:
+    background-color var(--ui-duration-fast) var(--ui-ease-out),
+    color var(--ui-duration-fast) var(--ui-ease-out);
 }
 
 button.aa-icon-button[data-size="xs"] {
-  width: 24px;
-  height: 24px;
-  border-radius: 6px;
+  width: var(--ui-control-xs);
+  height: var(--ui-control-xs);
+  border-radius: var(--ui-radius-8);
 }
 
 button.aa-icon-button > svg {
@@ -33,8 +35,8 @@ button.aa-icon-button > svg {
 }
 
 button.aa-icon-button[data-size="xs"] > svg {
-  width: 15px;
-  height: 15px;
+  width: 14px;
+  height: 14px;
 }
 
 /* Menus and popovers mark their open trigger with data-state="open";
@@ -42,26 +44,26 @@ button.aa-icon-button[data-size="xs"] > svg {
    while it sits at rest. */
 button.aa-icon-button:hover:not(:disabled),
 button.aa-icon-button[data-state="open"] {
-  color: var(--app-text-strong);
-  background: var(--app-surface-hover);
+  color: var(--ui-text);
+  background: var(--ui-row-hover);
 }
 
 button.aa-icon-button[aria-pressed="true"] {
-  color: var(--app-text-strong);
-  background: var(--app-surface-active);
+  color: var(--ui-select-fg);
+  background: var(--ui-select-bg);
 }
 
 button.aa-icon-button[data-tone="danger"]:hover:not(:disabled) {
-  color: var(--app-danger);
+  color: var(--ui-danger);
 }
 
 button.aa-icon-button[data-floating="true"] {
-  background: var(--app-surface);
-  box-shadow: 0 1px 3px color-mix(in srgb, var(--shadow-color) 16%, transparent);
+  background: var(--ui-bg-elevated);
+  box-shadow: var(--ui-shadow-sm);
 }
 
 button.aa-icon-button[data-floating="true"]:hover:not(:disabled) {
-  background: var(--app-surface-hover);
+  background: var(--ui-row-hover);
 }
 
 button.aa-icon-button:focus-visible {

@@ -1,5 +1,6 @@
 import { Fragment, memo, useMemo, useState, type ReactNode } from "react";
-import { Activity, Brain, FileText, Globe, Pencil, Terminal, Wrench, type LucideIcon } from "lucide-react";
+import { PulseIcon, BrainIcon, FileTextIcon, GlobeIcon, PencilSimpleIcon, TerminalIcon, WrenchIcon } from "@phosphor-icons/react";
+import type { Icon as PhosphorIcon } from "@phosphor-icons/react";
 
 import { MarkdownText } from "../content/markdown-text";
 import { splitLiveContentAtInterimPosts } from "../../../shared/interimPosts";
@@ -27,14 +28,14 @@ import { formatWorkedDuration } from "./chat-worked-row";
  * the same rows are what its "Worked for …" opens to.
  */
 
-const ROW_ICONS: Record<SessionsActivityKind, LucideIcon> = {
-  thinking: Brain,
-  web: Globe,
-  shell: Terminal,
-  read: FileText,
-  edit: Pencil,
-  tool: Wrench,
-  status: Activity
+const ROW_ICONS: Record<SessionsActivityKind, PhosphorIcon> = {
+  thinking: BrainIcon,
+  web: GlobeIcon,
+  shell: TerminalIcon,
+  read: FileTextIcon,
+  edit: PencilSimpleIcon,
+  tool: WrenchIcon,
+  status: PulseIcon
 };
 
 /** How many of a running reply's newest steps are drawn; the earlier ones
@@ -54,7 +55,7 @@ export const ChatSessionsActivityRow = memo(function ChatSessionsActivityRow(pro
       data-activity-kind={row.kind}
       title={row.text}
     >
-      <Icon className="chat-sessions-activity-icon" size={14} strokeWidth={1.75} aria-hidden />
+      <Icon className="chat-sessions-activity-icon" size={14} aria-hidden />
       <span className="chat-sessions-activity-text">{row.text}</span>
     </div>
   );

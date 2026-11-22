@@ -1,5 +1,5 @@
 import { useCallback, useContext, useEffect, useMemo, useRef, useState } from "react";
-import { MoreHorizontal } from "lucide-react";
+import { DotsThreeIcon } from "@phosphor-icons/react";
 
 import { canRestartParticipant, memberProcessRestartable } from "../../../shared/chatParticipantStatus";
 import { FORK_TO_NEW_CHAT_DETAIL, FORK_TO_NEW_CHAT_LABEL } from "../../../shared/forkToNewChat";
@@ -113,7 +113,7 @@ export function ChatMemberActionsMenu(props: {
       align="end"
       bare
       triggerClassName="chat-member-actions-trigger"
-      label={<MoreHorizontal size={16} aria-hidden />}
+      label={<DotsThreeIcon size={16} aria-hidden />}
     >
       {(close) => <ChatMemberActionItems actions={actions(close)} />}
     </ComposerMenu>

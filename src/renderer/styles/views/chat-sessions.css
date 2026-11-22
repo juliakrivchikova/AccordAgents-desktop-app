@@ -83,7 +83,7 @@
 
 .chat-members-button:hover,
 .chat-members-button.is-open {
-  background: var(--app-surface-hover);
+  background: var(--ui-row-hover);
   color: var(--app-text-strong);
 }
 
@@ -147,6 +147,25 @@
   grid-template-columns: minmax(0, 1fr);
 }
 
+/* A message's box reaches down over the row of controls shown under it on
+   hover (26px), so the pointer stays on the message on its way to them;
+   the negative margin keeps 26px between messages, the row's own height. */
+.chat-view.is-sessions-view .message.chat-message.is-sessions {
+  padding-bottom: 26px;
+  margin-bottom: -14px;
+}
+
+/* A message followed in its own row by more (its choice card): that starts
+   below the row of controls, never under it. */
+.chat-view.is-sessions-view .message.chat-message.is-sessions:not(:last-child) {
+  margin-bottom: 4px;
+}
+
+.chat-view.is-sessions-view .message.chat-message.is-sessions:hover .message-actions {
+  opacity: 1;
+  pointer-events: auto;
+}
+
 .message.chat-message.is-sessions.user {
   justify-items: end;
 }
@@ -155,7 +174,7 @@
   width: fit-content;
   max-width: 80%;
   padding: 9px 14px;
-  border-radius: 16px;
+  border-radius: 12px;
   background: var(--app-user-bub);
 }
 
@@ -189,15 +208,54 @@
   margin-left: 0;
 }
 
-.chat-view.is-sessions-view .chat-accord-line,
-.chat-view.is-sessions-view .chat-used-approval {
-  max-width: min(653px, 100%);
+/* Cards and their folded lines take the whole reading column. */
+.chat-view.is-sessions-view :is(.chat-accord-line, .chat-used-approval, .chat-urgent-alert, .chat-artifact-note) {
+  max-width: none;
   margin-left: 0;
+}
+
+.chat-view.is-sessions-view .chat-choice-row.is-sessions .chat-choice-row-body {
+  width: 100%;
+  max-width: none;
+}
+
+.chat-view.is-sessions-view :is(.chat-card-row, .chat-urgent-alert-folded, .chat-urgent-alert-panel) {
+  max-width: none;
 }
 
 /* A finished message's time, among its controls on hover. */
 .chat-message .message-actions-when {
   padding: 0 6px 0 4px;
+}
+
+/* Sessions view: a message's controls are a quiet row under it on hover,
+   as in Claude and Codex (copy, react, then the time), left under a reply
+   and right under the User's bubble. The row sits in the gap to the next
+   message, so showing it moves nothing. */
+.chat-view.is-sessions-view .chat-message .message-actions:not(.is-sessions-stop) {
+  top: 100%;
+  right: auto;
+  left: -6px;
+  gap: 0;
+  margin-top: 0;
+  padding: 1px 0 0;
+  border: 0;
+  background: transparent;
+  box-shadow: none;
+  transform: none;
+  transition: opacity var(--ui-duration-fast) var(--ui-ease-out);
+}
+
+.chat-view.is-sessions-view .chat-message.user .message-actions:not(.is-sessions-stop) {
+  right: -6px;
+  left: auto;
+}
+
+.chat-view.is-sessions-view .chat-message .message-actions .message-actions-when {
+  order: 1;
+  padding: 0 6px;
+  color: var(--ui-text-3);
+  font-size: 11px;
 }
 
 /* Provider marks at row size */
@@ -233,7 +291,7 @@
 .chat-provider-icon.is-chip {
   width: 16px;
   height: 16px;
-  border-radius: 5px;
+  border-radius: 6px;
 }
 
 .chat-provider-icon.is-chip svg,
@@ -246,7 +304,7 @@
 .chat-provider-icon.is-mini {
   width: 24px;
   height: 24px;
-  border-radius: 7px;
+  border-radius: 8px;
 }
 
 .chat-provider-icon.is-mini svg,
@@ -327,7 +385,7 @@
   align-items: center;
   gap: 5px;
   color: var(--st, var(--app-muted));
-  font-size: 11.5px;
+  font-size: 11px;
   font-weight: 600;
   line-height: 1;
   white-space: nowrap;
@@ -342,7 +400,7 @@
 }
 
 .chat-work-status.is-running {
-  --st: var(--app-accent);
+  --st: var(--ui-link);
 }
 
 .chat-work-status.is-running .chat-work-status-dot {
@@ -382,7 +440,7 @@
 
 .chat-members-row-elapsed {
   color: var(--app-muted);
-  font-size: 11.5px;
+  font-size: 11px;
   font-variant-numeric: tabular-nums;
 }
 
@@ -405,13 +463,13 @@
   border-radius: var(--radius-control);
   background: transparent;
   color: var(--app-text-secondary);
-  font-size: 12.5px;
+  font-size: 12px;
   font-weight: 500;
   cursor: pointer;
 }
 
 .chat-sessions-choice-from:hover {
-  background: var(--app-surface-hover);
+  background: var(--ui-row-hover);
   color: var(--app-text-strong);
 }
 
@@ -459,7 +517,7 @@
 
 .chat-members-panel .chat-accord-row:hover,
 .chat-members-panel .chat-accord-row[aria-pressed="true"] {
-  background: var(--app-surface-hover);
+  background: var(--ui-row-hover);
 }
 
 .chat-agent-list {
@@ -475,12 +533,13 @@
   display: flex;
   align-items: center;
   height: 32px;
-  border-radius: var(--radius-control);
+  border-radius: var(--ui-radius-8);
+  transition: background-color var(--ui-duration-fast) var(--ui-ease-out), box-shadow var(--ui-duration-fast) var(--ui-ease-out);
 }
 
 .chat-agent-row:hover,
 .chat-agent-row:focus-within {
-  background: var(--app-surface-hover);
+  background: var(--ui-row-hover);
 }
 
 .chat-agent-row-main {
@@ -557,7 +616,7 @@
   gap: 4px;
   min-width: 0;
   color: var(--app-muted);
-  font-size: 11.5px;
+  font-size: 11px;
   font-variant-numeric: tabular-nums;
   white-space: nowrap;
 }
@@ -603,10 +662,9 @@
   pointer-events: auto;
 }
 
-.chat-agent-stop-icon {
-  width: 10px;
-  height: 10px;
-  fill: currentColor;
+button.aa-icon-button > svg.chat-agent-stop-icon {
+  width: 12px;
+  height: 12px;
 }
 
 /* Without hover (a touch screen): Stop stands after the row's words, always
@@ -638,7 +696,7 @@
   background: var(--app-surface);
   box-shadow: var(--shadow-md);
   color: var(--app-text-secondary);
-  font-size: 12.5px;
+  font-size: 12px;
   line-height: 18px;
 }
 
@@ -655,7 +713,7 @@
 }
 
 .chat-agent-card-status.is-running {
-  color: var(--app-accent);
+  color: var(--ui-link);
   font-weight: 500;
 }
 
@@ -700,7 +758,7 @@
 }
 
 .chat-agents-group-toggle:hover {
-  background: var(--app-surface-hover);
+  background: var(--ui-row-hover);
 }
 
 .chat-agents-group-icon,
@@ -727,7 +785,7 @@
 
 .chat-agents-group-count {
   color: var(--app-muted);
-  font-size: 11.5px;
+  font-size: 11px;
   font-weight: 400;
   font-variant-numeric: tabular-nums;
 }
@@ -744,20 +802,26 @@
   gap: 8px;
 }
 
+/* The task over its CLI, model and effort: two tight lines (30px) that fit
+   the workspace's 34px title row. */
 .chat-member-session-title {
   display: grid;
   min-width: 0;
 }
 
 .thread-panel-head.chat-member-session-head .chat-member-session-title h2 {
-  font-size: 14px;
-  line-height: 18px;
+  overflow: hidden;
+  font-size: 13px;
+  line-height: 16px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .chat-member-session-provider {
   overflow: hidden;
-  color: var(--app-muted);
-  font-size: 11.5px;
+  color: var(--ui-text-3);
+  font-size: 11px;
+  line-height: 14px;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -780,7 +844,7 @@
   background: transparent;
   color: var(--app-text);
   font: inherit;
-  font-size: 12.5px;
+  font-size: 12px;
   text-align: left;
   cursor: pointer;
 }
@@ -827,7 +891,7 @@
 
 .chat-accord-row:hover,
 .chat-accord-row[aria-pressed="true"] {
-  background: var(--app-surface-hover);
+  background: var(--ui-row-hover);
 }
 
 .chat-accord-row:focus-visible {
@@ -866,7 +930,7 @@
 .chat-accord-row-status {
   flex: none;
   color: var(--app-text-secondary);
-  font-size: 12.5px;
+  font-size: 12px;
   font-variant-numeric: tabular-nums;
 }
 
@@ -918,6 +982,61 @@
   padding-inline: 0;
 }
 
+/* The column's inset is the items' own: the timeline adds none, so replies,
+   the cards the User answers and the composer share one left edge. */
+.chat-view.is-sessions-view .chat-main > .chat-timeline {
+  padding-inline: 0;
+}
+
+.chat-view.is-sessions-view .chat-main .chat-app-tool-approval-slot {
+  padding-inline: max(28px, var(--chat-reading-inset));
+}
+
+.chat-view.is-sessions-view .chat-main .chat-app-tool-approval-slot.has-approvals {
+  border-top: 0;
+}
+
+/* No avatars in the main timeline: the asking member is named above its card. */
+.chat-view.is-sessions-view .chat-app-tool-approval-card {
+  position: relative;
+  grid-template-columns: minmax(0, 1fr);
+  max-width: none;
+}
+
+/* An embedded card names nobody (its message does): no glyph. A one-line
+   result has no name line: its text makes room for the glyph instead. */
+.chat-view.is-sessions-view .chat-app-tool-approval-card.is-embedded > :not(.chat-app-tool-approval-body) {
+  display: none;
+}
+
+.chat-view.is-sessions-view .chat-app-tool-approval-card.is-compact-result > .chat-app-tool-approval-body {
+  padding-left: 22px;
+}
+
+/* The member's glyph sits on its name line, as in an agent row. */
+.chat-view.is-sessions-view .chat-app-tool-approval-card:not(.is-embedded) > :not(.chat-app-tool-approval-body) {
+  position: absolute;
+  top: 2px;
+  left: 0;
+  width: 16px;
+  height: 16px;
+  min-width: 0;
+  border-radius: var(--ui-radius-4);
+}
+
+.chat-view.is-sessions-view .chat-app-tool-approval-card > :not(.chat-app-tool-approval-body) :is(svg, img, span) {
+  width: 16px;
+  height: 16px;
+}
+
+.chat-view.is-sessions-view .chat-app-tool-approval-card .chat-app-tool-approval-meta {
+  padding-left: 22px;
+}
+
+.chat-view.is-sessions-view .chat-app-tool-approval-panel {
+  max-width: none;
+}
+
 /* The header: no text buttons; one icon opens the side panel. */
 .chat-view-header-controls.is-sessions {
   gap: 0;
@@ -930,16 +1049,17 @@
 
 .chat-side-panel-badge {
   position: absolute;
-  top: 0;
+  top: 1px;
   right: 0;
   min-width: 14px;
   height: 14px;
   padding: 0 3px;
-  border-radius: 7px;
-  background: var(--app-accent);
-  color: var(--app-surface);
-  font-size: 9.5px;
+  border-radius: 999px;
+  background: var(--ui-primary);
+  color: var(--ui-primary-fg);
+  font-size: 11px;
   font-weight: 600;
+  font-variant-numeric: tabular-nums;
   line-height: 14px;
   text-align: center;
   pointer-events: none;
@@ -952,7 +1072,7 @@
   width: 6px;
   height: 6px;
   border-radius: 50%;
-  background: var(--app-accent);
+  background: var(--ui-primary);
   pointer-events: none;
 }
 
@@ -965,7 +1085,7 @@
 .chat-title-menu-label {
   padding: 6px 8px 4px;
   color: var(--app-muted);
-  font-size: 11.5px;
+  font-size: 11px;
   font-weight: 600;
 }
 
@@ -985,7 +1105,7 @@
 }
 
 .chat-title-menu-item:hover:not(:disabled) {
-  background: var(--app-surface-hover);
+  background: var(--ui-row-hover);
 }
 
 .chat-title-menu-item:disabled {
@@ -1051,7 +1171,7 @@
   gap: 6px;
   padding: 4px 0;
   color: var(--app-muted);
-  font-size: 12.5px;
+  font-size: 12px;
 }
 
 .chat-delegation-row {
@@ -1072,7 +1192,7 @@
 }
 
 .chat-delegation-row:hover {
-  background: var(--app-surface-hover);
+  background: var(--ui-row-hover);
 }
 
 .chat-delegation-mark {
@@ -1128,7 +1248,7 @@
 
 .chat-delegation-line {
   color: var(--app-muted);
-  font-size: 12.5px;
+  font-size: 12px;
 }
 
 /* A state ("Stopped"), not the member's words. */
@@ -1138,7 +1258,7 @@
 
 .chat-delegation-time {
   color: var(--app-muted);
-  font-size: 11.5px;
+  font-size: 11px;
   font-variant-numeric: tabular-nums;
 }
 
@@ -1176,20 +1296,25 @@
 .chat-model-chip {
   display: inline-flex;
   align-items: center;
-  height: 28px;
+  height: var(--ui-control-sm);
   padding: 0 8px;
   border: 0;
-  border-radius: var(--radius-control);
+  border-radius: var(--ui-radius-8);
   background: transparent;
-  color: var(--app-text-secondary);
+  color: var(--ui-text-2);
   font: inherit;
-  font-size: 12.5px;
+  font-size: 12px;
+  font-weight: 500;
   cursor: pointer;
+  transition:
+    background-color var(--ui-duration-fast) var(--ui-ease-out),
+    color var(--ui-duration-fast) var(--ui-ease-out);
 }
 
-.chat-model-chip:hover {
-  background: var(--app-surface-hover);
-  color: var(--app-text-strong);
+.chat-model-chip:hover,
+.chat-model-chip[data-state="open"] {
+  background: var(--ui-row-hover);
+  color: var(--ui-text);
 }
 
 .chat-model-chip-label {
@@ -1199,13 +1324,12 @@
   white-space: nowrap;
 }
 
-
 /* A former member's session. */
 .chat-member-session-gone {
   margin: 0;
   padding: 10px 16px 14px;
   color: var(--app-muted);
-  font-size: 12.5px;
+  font-size: 12px;
 }
 
 /* The Accord above the composer: a quiet line, no box. */
@@ -1215,7 +1339,7 @@
   border: 0;
   background: transparent;
   color: var(--app-text-secondary);
-  font-size: 12.5px;
+  font-size: 12px;
 }
 
 .chat-view.is-sessions-view .chat-accord-strip .chat-accord-row:hover {
@@ -1257,18 +1381,25 @@
   }
 }
 
-/* Stop next to Send while something is typed: secondary, the accent stays
-   with Send. */
+/* Stop in place of Send (nothing typed): the strong neutral circle. */
+.composer-send-button.is-stop {
+  background: var(--ui-text);
+  color: var(--ui-bg);
+}
+
+.composer-send-button.is-stop:hover:not(:disabled) {
+  background: var(--ui-text-2);
+}
+
+/* Stop next to Send while something is typed: a plain icon button, the
+   accent stays with Send. */
 .composer-send-button.is-stop.is-beside-send {
-  width: 30px;
-  height: 30px;
-  margin-right: 6px;
-  background: var(--app-surface-hover);
-  color: var(--app-text-strong);
-  box-shadow: none;
+  border-radius: var(--ui-radius-8);
+  background: transparent;
+  color: var(--ui-text-2);
 }
 
 .composer-send-button.is-stop.is-beside-send:hover:not(:disabled) {
-  background: var(--app-surface-subtle);
-  box-shadow: none;
+  background: var(--ui-row-hover);
+  color: var(--ui-text);
 }

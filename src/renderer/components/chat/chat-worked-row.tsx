@@ -1,10 +1,10 @@
-import { Sparkles } from "lucide-react";
+import { SparkleIcon } from "@phosphor-icons/react";
 
 export function WorkedRow({ workedMs }: { workedMs: number }): JSX.Element {
   return (
     <div className="chat-worked-wrap">
       <div className="chat-worked">
-        <Sparkles size={13} aria-hidden />
+        <SparkleIcon size={13} aria-hidden />
         <span>Worked for {formatWorkedDuration(workedMs)}</span>
       </div>
     </div>

@@ -1,8 +1,9 @@
 import type { ReactNode } from "react";
-import { Loader2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { CopyButton } from "../primitives";
+import { Spinner } from "@/components/ui/spinner";
+import { Delayed } from "@/components/ui/delayed";
 
 /**
  * The one dialog shape of the AWS page: a title, what happens in plain words,
@@ -82,7 +83,7 @@ export function AwsConfirmDialog(props: {
       actions={<>
         <Button type="button" variant="outline" size="sm" disabled={props.pending} onClick={props.onClose}>Cancel</Button>
         <Button type="button" variant={props.danger ? "destructive" : "default"} size="sm" disabled={props.pending} data-testid={props.testId ? `${props.testId}-confirm` : undefined} onClick={props.onConfirm}>
-          {props.pending ? <Loader2 size={14} className="gen-aws-spinner" aria-hidden /> : null}
+          {props.pending ? <Delayed><Spinner size={14} /></Delayed> : null}
           {props.confirmLabel}
         </Button>
       </>}
@@ -107,5 +108,5 @@ export function AwsCommandBox(props: { command: string; error?: string; label: s
 
 /** A small spinner with words, for something the page is waiting on. */
 export function AwsWaiting(props: { children: ReactNode }): JSX.Element {
-  return <span className="gen-aws-waiting"><Loader2 size={13} className="gen-aws-spinner" aria-hidden />{props.children}</span>;
+  return <span className="gen-aws-waiting"><Spinner size={13} />{props.children}</span>;
 }

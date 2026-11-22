@@ -1,4 +1,5 @@
-import { ArrowUp, RefreshCw, Square } from "lucide-react";
+import { ArrowUpIcon, SquareIcon } from "@phosphor-icons/react";
+import { Spinner } from "@/components/ui/spinner";
 
 /** What the composer's button stops instead of sending, while there is
  *  nothing to send: the sessions view's main session at work (T3 Code's and
@@ -28,12 +29,11 @@ export function ChatComposerSendButton(props: {
     <button
       type="button"
       className={props.draftEmpty ? "composer-send-button is-stop" : "composer-send-button is-stop is-beside-send"}
-      title={props.stop.label}
       aria-label={props.stop.label}
       data-testid="chat-composer-stop"
       onClick={props.stop.onStop}
     >
-      <Square size={12} fill="currentColor" strokeWidth={0} />
+      <SquareIcon size={props.draftEmpty ? 10 : 14} weight="fill" />
     </button>
   ) : null;
   if (stopButton && props.draftEmpty) {
@@ -43,12 +43,11 @@ export function ChatComposerSendButton(props: {
     <button
       type="button"
       className="composer-send-button"
-      title="Send"
       aria-label="Send message"
       disabled={!props.canSend}
       onClick={props.onSend}
     >
-      {props.isRunning ? <RefreshCw size={17} className="spin" /> : <ArrowUp size={18} strokeWidth={2.4} />}
+      {props.isRunning ? <Spinner size={14} /> : <ArrowUpIcon size={14} weight="bold" />}
     </button>
   );
   return stopButton ? <>{stopButton}{sendButton}</> : sendButton;

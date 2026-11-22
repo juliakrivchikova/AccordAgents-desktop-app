@@ -1,11 +1,13 @@
 import { useEffect, useRef, useState } from "react";
-import { Check, Loader2, Minus, X } from "lucide-react";
+import { CheckIcon, MinusIcon, XIcon } from "@phosphor-icons/react";
 import { Button } from "@/components/ui/button";
 import type { AwsSetupStep, AwsWorkerOperationSnapshot } from "../../../shared/types";
 import { CopyButton } from "../primitives";
 import { AwsDialog, AwsWaiting } from "./aws-dialog";
 import { cleanError } from "./aws-shared";
 import { isLiveAwsPhase, type AwsWorkerControl } from "./use-aws-worker-control";
+import { Spinner } from "@/components/ui/spinner";
+import { Delayed } from "@/components/ui/delayed";
 
 const STEP_LABEL: Record<AwsSetupStep["id"], string> = {
   "instance": "AWS instance",
@@ -124,10 +126,10 @@ export function AwsSetupProgressDialog(props: { control: AwsWorkerControl; view:
 }
 
 function StepMark(props: { state: AwsSetupStep["state"] }): JSX.Element {
-  if (props.state === "done") return <Check size={14} />;
-  if (props.state === "current") return <Loader2 size={14} className="gen-aws-spinner" />;
-  if (props.state === "failed") return <X size={14} />;
-  if (props.state === "skipped") return <Minus size={14} />;
+  if (props.state === "done") return <CheckIcon size={14} />;
+  if (props.state === "current") return <Spinner size={14} />;
+  if (props.state === "failed") return <XIcon size={14} />;
+  if (props.state === "skipped") return <MinusIcon size={14} />;
   return <span className="gen-aws-step-dot" />;
 }
 
@@ -214,7 +216,7 @@ function SignInPanel(props: { operation: AwsWorkerOperationSnapshot }): JSX.Elem
         {ready ? <Button type="button" variant="outline" size="sm" data-testid="aws-setup-sign-in-open" onClick={() => void openPage()}>Open sign-in page</Button> : null}
         {ready && claude ? (
           <Button type="button" variant="outline" size="sm" data-testid="aws-setup-sign-in-finish" disabled={!code.trim() || state !== "input"} onClick={() => void finish()}>
-            {state === "submitting" ? <Loader2 size={14} className="gen-aws-spinner" aria-hidden /> : null}
+            {state === "submitting" ? <Delayed><Spinner size={14} /></Delayed> : null}
             Finish sign-in
           </Button>
         ) : null}

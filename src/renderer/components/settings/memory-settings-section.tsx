@@ -1,10 +1,11 @@
 import { useEffect, useState } from "react";
-import { Search } from "lucide-react";
+import { MagnifyingGlassIcon } from "@phosphor-icons/react";
 
 import type { MemoryNoteKind, MemoryNoteSummary, MemoryScope, MemorySettingsListRequest, MemorySettingsListResult } from "../../../shared/memory";
 import { errorText } from "../review/review-conversation-data";
 import { MemoryNoteCard } from "./memory-settings-item";
 import { MemoryNoteDialog } from "./memory-note-dialog";
+import { Delayed } from "@/components/ui/delayed";
 
 type KindFilter = "all" | MemoryNoteKind;
 type ScopeFilter = "all" | MemoryScope;
@@ -70,12 +71,12 @@ export function MemorySettingsSection(): JSX.Element {
 
   const notes = result?.notes ?? [];
   const filtered = Boolean(query.trim() || kind !== "all" || scope !== "all" || archived);
-  const count = result ? `${notes.length}${result.truncated ? "+" : ""} ${notes.length === 1 ? "note" : "notes"}` : error ? "" : "Loading";
+  const count = result ? `${notes.length}${result.truncated ? "+" : ""} ${notes.length === 1 ? "note" : "notes"}` : error ? "" : <Delayed>Loading</Delayed>;
   return (
     <section className="roles-settings-screen" data-testid="memory-settings">
       <div className="roles-toolbar">
         <label className="roles-search">
-          <Search size={16} aria-hidden />
+          <MagnifyingGlassIcon size={16} aria-hidden />
           <input
             data-testid="memory-settings-search"
             value={query}

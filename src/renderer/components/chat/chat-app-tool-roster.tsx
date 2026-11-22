@@ -1,4 +1,4 @@
-import { ShieldCheck } from "lucide-react";
+import { ShieldCheckIcon } from "@phosphor-icons/react";
 import type { ChatAppToolApproval, ChatRoleConfig, ChatRosterChangeOperation, ChatRosterChangeParticipantInput } from "../../../shared/types";
 import { chatParticipantDisplayName, chatParticipantReference } from "../conversation/conversation-display";
 import { chatReasoningEffortLabel } from "../../../shared/reasoningEffort";
@@ -74,7 +74,7 @@ export function ChatAppToolRosterPermissionEnvelope({ operations }: { operations
       <div className="chat-app-tool-roster-grants">
         {labels.map((label) => (
           <span className="chat-app-tool-roster-grant" key={label}>
-            <ShieldCheck size={12} aria-hidden />
+            <ShieldCheckIcon size={12} aria-hidden />
             {label}
           </span>
         ))}

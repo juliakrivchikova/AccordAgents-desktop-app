@@ -44,6 +44,7 @@
 }
 
 .conversation-panel {
+  position: relative;
   flex: 1 1 auto;
   min-width: 0;
   min-height: 0;
@@ -223,28 +224,6 @@
   padding: 24px;
 }
 
-.settings-section {
-  margin-top: 18px;
-}
-
-.settings-section-head {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-  margin-bottom: 10px;
-}
-
-.settings-section-head h2 {
-  margin: 0;
-  font-size: var(--text-lg);
-}
-
-.settings-section-head span {
-  color: var(--app-muted);
-  font-size: var(--text-sm);
-}
-
 .role-config-list {
   display: grid;
   gap: 12px;
@@ -258,4 +237,157 @@
   border: 1px solid var(--app-border);
   border-radius: var(--radius-card);
   background: var(--app-surface);
+}
+
+/* One segmented control for every hand-made tab list (Activity status,
+   artifact status and edit mode, the plugin catalog, the Roles, Memory and
+   Environment filters): a quiet track, the
+   chosen tab raised on it. */
+:is(.activity-status-tabs, .artifact-list-tabs, .artifact-fab-segment, .plugins-tabs, .roles-filter-tabs) {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  align-self: flex-start;
+  gap: 2px;
+  width: fit-content;
+  padding: 2px;
+  border-radius: var(--ui-radius-8);
+  background: var(--ui-bg-subtle);
+}
+
+:is(.activity-status-tabs, .artifact-list-tabs) {
+  margin: 8px 12px;
+}
+
+:is(.activity-status-tab, .artifact-list-tab, .artifact-fab-segment button, .plugins-tabs button, .roles-filter-tab) {
+  display: inline-flex;
+  height: var(--ui-control-xs);
+  align-items: center;
+  gap: 6px;
+  padding: 0 10px;
+  border: 0;
+  border-radius: var(--ui-radius-6);
+  background: transparent;
+  color: var(--ui-text-2);
+  font: 500 12px/16px var(--font-body);
+  cursor: pointer;
+  transition:
+    background-color var(--ui-duration-base) var(--ui-ease-out),
+    color var(--ui-duration-base) var(--ui-ease-out),
+    box-shadow var(--ui-duration-base) var(--ui-ease-out);
+}
+
+:is(.activity-status-tab, .artifact-list-tab, .artifact-fab-segment button, .plugins-tabs button, .roles-filter-tab):hover {
+  color: var(--ui-text);
+}
+
+:is(.activity-status-tab[data-active="true"], .artifact-list-tab.is-active, .artifact-fab-segment button.is-selected, .plugins-tabs button[aria-selected="true"], .roles-filter-tab.is-selected) {
+  background: var(--ui-bg);
+  color: var(--ui-text);
+  box-shadow: var(--ui-shadow-sm), 0 0 0 1px var(--ui-border-subtle);
+}
+
+:is(.activity-status-tab, .artifact-list-tab, .artifact-fab-segment button, .plugins-tabs button, .roles-filter-tab):focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring);
+}
+
+:is(.activity-status-tab, .artifact-list-tab, .artifact-fab-segment button, .plugins-tabs button, .roles-filter-tab):disabled {
+  cursor: default;
+  opacity: 0.5;
+}
+
+:is(.activity-status-tab-count, .artifact-list-tab span) {
+  color: var(--ui-text-3);
+  font-variant-numeric: tabular-nums;
+}
+
+.plugins-tabs button svg {
+  width: 14px;
+  height: 14px;
+}
+
+/* The app's one spinner (primitives/spinner.tsx): a six-ray star, its rays
+   shrinking in a wave around it while it turns a sixth of a turn per beat.
+   Brand violet by default; inside a button it takes the button's color. */
+.aa-spinner {
+  /* The size comes inline from the component (its size prop). */
+  --aa-spinner-size: 16px;
+  --aa-spinner-beat: 1.2s;
+  display: inline-flex;
+  width: var(--aa-spinner-size);
+  height: var(--aa-spinner-size);
+  flex: none;
+  /* In a line of text it sits on the middle of the lowercase letters. */
+  vertical-align: middle;
+  color: var(--ui-link);
+}
+
+:is(button, [role="button"], [data-slot="button"]) .aa-spinner {
+  color: inherit;
+}
+
+.aa-spinner svg {
+  width: 100%;
+  height: 100%;
+  animation: aa-spinner-turn calc(var(--aa-spinner-beat) * 2) cubic-bezier(0.65, 0, 0.35, 1) infinite;
+}
+
+.aa-spinner line {
+  stroke: currentColor;
+  stroke-width: 3.2;
+  stroke-linecap: round;
+  transform-origin: 12px 12px;
+  animation: aa-spinner-ray var(--aa-spinner-beat) ease-in-out infinite;
+}
+
+/* Every other ray breathes half a beat later, as on the variant the User
+   chose (B, 2026-11-22): three long and three short in turn. */
+.aa-spinner g:nth-child(even) line { animation-delay: calc(var(--aa-spinner-beat) / -2); }
+
+/* A sixth of a turn per beat; the star looks the same every 60 degrees, so
+   the loop has no seam. */
+@keyframes aa-spinner-turn {
+  0% { transform: rotate(0deg); }
+  50% { transform: rotate(60deg); }
+  100% { transform: rotate(120deg); }
+}
+
+@keyframes aa-spinner-ray {
+  0%, 100% { transform: scale(1); }
+  50% { transform: scale(0.45); }
+}
+
+/* LoadingBar: a third of the width sweeping across the top edge. It keeps
+   moving in an inactive window: paused, it would stop off the edge and show
+   nothing, and it runs only during a slow load. */
+.aa-loading-bar {
+  position: absolute;
+  z-index: 5;
+  top: 0;
+  right: 0;
+  left: 0;
+  height: 2px;
+  overflow: hidden;
+  pointer-events: none;
+}
+
+.aa-loading-bar::before {
+  content: "";
+  position: absolute;
+  inset: 0 auto 0 0;
+  width: 30%;
+  border-radius: 999px;
+  background: var(--ui-primary);
+  animation: aa-loading-bar 1.2s cubic-bezier(0.65, 0, 0.35, 1) infinite;
+}
+
+@keyframes aa-loading-bar {
+  from { transform: translateX(-100%); }
+  to { transform: translateX(340%); }
+}
+
+.app-inactive .aa-spinner svg,
+.app-inactive .aa-spinner line {
+  animation-play-state: paused;
 }

@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { Copy, Loader2, X } from "lucide-react";
+import { CopyIcon, XIcon } from "@phosphor-icons/react";
 
 import { writeClipboardText } from "../../../shared/clipboard";
 import {
@@ -11,6 +11,7 @@ import {
 import { useSpeechToTextState } from "../../app/use-speech-to-text";
 import { currentDictationTarget, insertDictation, type DictationTarget } from "./dictation-target";
 import { useDictation } from "./use-dictation";
+import { Spinner } from "@/components/ui/spinner";
 
 /** Held this long alone, the key starts dictation; sooner, or with another
  *  key or a click, it is the usual Option (a shortcut or a special character). */
@@ -162,14 +163,14 @@ export function DictationHoldKey(): JSX.Element | null {
             </>
           ) : dictation.phase === "starting" || dictation.phase === "recognizing" ? (
             <>
-              <Loader2 size={13} className="spin" aria-hidden />
+              <Spinner size={13} />
               <span>{dictation.phase === "starting" ? "Starting the microphone…" : "Recognizing…"}</span>
             </>
           ) : dictation.notice ? (
             <>
               <span className={dictation.notice.kind === "error" ? "dictation-hold-error" : undefined}>{dictation.notice.text}</span>
               <button type="button" className="dictation-hold-close" aria-label="Dismiss" onClick={dictation.dismissNotice}>
-                <X size={13} aria-hidden />
+                <XIcon size={13} aria-hidden />
               </button>
             </>
           ) : null}
@@ -219,7 +220,7 @@ function DictationResult(props: { text: string; reason: ResultReason; onClose: (
             {/* The ring empties in the same time the window takes to close. */}
             <circle cx="12" cy="12" r="10.5" key={paused ? "paused" : "counting"} style={{ animationDuration: `${RESULT_VISIBLE_MS}ms` }} />
           </svg>
-          <X size={12} aria-hidden />
+          <XIcon size={12} aria-hidden />
         </button>
       </div>
       <p className="dictation-result-text" data-testid="dictation-result-text">{props.text}</p>
@@ -233,7 +234,7 @@ function DictationResult(props: { text: string; reason: ResultReason; onClose: (
             void writeClipboardText(props.text, (value) => navigator.clipboard.writeText(value)).then(setCopy);
           }}
         >
-          <Copy size={13} aria-hidden />
+          <CopyIcon size={13} aria-hidden />
           {copy === "copied" ? "Copied" : "Copy"}
         </button>
       </div>

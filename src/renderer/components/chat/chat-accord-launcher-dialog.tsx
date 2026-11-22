@@ -1,5 +1,5 @@
 import React from "react";
-import { Check, Loader2 } from "lucide-react";
+import { CheckIcon } from "@phosphor-icons/react";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Textarea } from "@/components/ui/textarea";
@@ -21,6 +21,8 @@ import { ChatMemberMark, ChatSessionsPresentationContext } from "./chat-member-m
 import { AccordMergeIcon } from "./accord-merge-icon";
 import { providerLabel } from "./chat-conversation-data";
 import { sessionsViewLabel, type SessionsViewNames } from "../../../shared/sessionsViewText";
+import { Spinner } from "@/components/ui/spinner";
+import { Delayed } from "@/components/ui/delayed";
 
 export interface ChatAccordLauncherPayload {
   facilitatorParticipantId: string;
@@ -224,7 +226,7 @@ export function ChatAccordLauncherDialog(props: {
                       onChange={() => toggleTarget(participant.id)}
                     />
                     <span className="chat-accord-target-check" aria-hidden="true">
-                      <Check size={12} strokeWidth={3.4} />
+                      <CheckIcon size={12} />
                     </span>
                     <ChatMemberMark className="chat-accord-target-avatar" markClassName="is-mini" avatar={avatarForChatParticipant(participant, displayName)} member={participant} tooltip={null} />
                     <span className="chat-accord-target-title" title={props.participantRoleLabel(participant)}>
@@ -248,7 +250,7 @@ export function ChatAccordLauncherDialog(props: {
             Cancel
           </Button>
           <Button type="button" size="sm" disabled={!canSubmit} data-testid="chat-accord-start" onClick={() => void submit()}>
-            {saving && <Loader2 className="chat-accord-spinner" aria-hidden />}
+            {saving && <Delayed><Spinner size={14} /></Delayed>}
             Start Accord
           </Button>
         </DialogFooter>

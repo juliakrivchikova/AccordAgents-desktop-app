@@ -1,9 +1,10 @@
 import { useEffect, useState } from "react";
-import { Loader2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { CopyButton } from "../primitives";
 import { AwsDialog, AwsWaiting } from "./aws-dialog";
 import { cleanError } from "./aws-shared";
+import { Spinner } from "@/components/ui/spinner";
+import { Delayed } from "@/components/ui/delayed";
 
 /** A provider sign-in the instance is waiting on, as setup reports it. */
 export interface AwsSignInRequest {
@@ -84,7 +85,7 @@ export function AwsSignInDialog(props: {
       actions={provider === "claude-code" ? <>
         <Button type="button" variant="outline" size="sm" disabled={cancelling} onClick={() => void close()}>Cancel</Button>
         <Button type="button" size="sm" data-testid="aws-sign-in-finish" disabled={!request || !code.trim() || phase !== "input"} onClick={() => void finish()}>
-          {phase === "submitting" ? <Loader2 size={14} className="gen-aws-spinner" aria-hidden /> : null}
+          {phase === "submitting" ? <Delayed><Spinner size={14} /></Delayed> : null}
           Finish sign-in
         </Button>
       </> : <>

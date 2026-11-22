@@ -13,37 +13,6 @@
   gap: 10px;
 }
 
-.plugins-tabs {
-  display: inline-flex;
-  overflow: hidden;
-  border: 1px solid var(--app-border);
-  border-radius: var(--radius-control);
-  background: var(--app-surface);
-}
-
-.plugins-tabs button {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  min-height: 34px;
-  border: 0;
-  border-right: 1px solid var(--app-border-subtle);
-  padding: 0 12px;
-  background: transparent;
-  color: var(--app-muted);
-  font-size: 13px;
-  font-weight: 600;
-}
-
-.plugins-tabs button:last-child {
-  border-right: 0;
-}
-
-.plugins-tabs button[aria-selected="true"] {
-  background: var(--app-surface-active);
-  color: var(--app-text-strong);
-}
-
 .plugins-search {
   display: inline-flex;
   min-width: min(320px, 100%);
@@ -60,7 +29,7 @@
 .plugins-search input {
   width: 100%;
   min-width: 0;
-  min-height: 34px;
+  min-height: 26px;
   border: 0;
   background: transparent;
   color: var(--app-text-strong);
@@ -86,7 +55,7 @@
   background: transparent;
   color: var(--app-muted);
   font: inherit;
-  font-size: 12.5px;
+  font-size: 12px;
   font-weight: 600;
 }
 
@@ -97,9 +66,7 @@
 }
 
 .plugins-count,
-.plugins-status-row,
-.plugins-card-foot,
-.plugins-muted-action {
+.plugins-status-row {
   color: var(--app-muted);
   font-size: 12px;
 }
@@ -117,7 +84,7 @@
 }
 
 .plugins-copy-status {
-  color: var(--app-accent);
+  color: var(--ui-link);
   font-weight: 600;
 }
 
@@ -199,13 +166,6 @@
   align-items: center;
 }
 
-.plugins-card-head {
-  display: grid;
-  grid-template-columns: 34px minmax(0, 1fr);
-  gap: 10px;
-  align-items: center;
-}
-
 .plugins-card-icon {
   display: inline-flex;
   width: 34px;
@@ -221,7 +181,7 @@
 .plugins-skill-list .plugins-card-icon {
   width: 44px;
   height: 44px;
-  border-radius: 10px;
+  border-radius: 8px;
 }
 
 .plugins-card-icon.has-image {
@@ -231,14 +191,14 @@
 .plugins-card-icon.has-image img {
   width: 24px;
   height: 24px;
-  border-radius: 5px;
+  border-radius: 6px;
   object-fit: contain;
 }
 
 .plugins-plugin-list .plugins-card-icon.has-image img {
   width: 32px;
   height: 32px;
-  border-radius: 7px;
+  border-radius: 8px;
 }
 
 .plugins-card-copy {
@@ -256,7 +216,7 @@
   margin: 0;
   overflow: hidden;
   color: var(--app-text-strong);
-  font-size: 15px;
+  font-size: 13px;
   line-height: 1.35;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -266,7 +226,6 @@
   flex: 0 0 auto;
 }
 
-.plugins-card-head span,
 .plugins-card p {
   margin: 0;
   color: var(--app-muted);
@@ -332,16 +291,7 @@
 }
 
 .plugins-row-actions > button {
-  min-height: 34px;
-  border-radius: 10px;
-  padding-inline: 13px;
-  font-size: 13px;
-}
-
-.plugins-provider-status {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 6px;
+  min-height: var(--ui-control-sm);
 }
 
 .plugins-provider-mark {
@@ -374,55 +324,6 @@
   background: currentColor;
 }
 
-.plugins-install-status {
-  margin-bottom: -4px;
-}
-
-.plugins-provider-chip {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  border: 1px solid var(--app-border);
-  border-radius: 999px;
-  padding: 3px 8px;
-  color: var(--app-muted);
-  font-size: 11px;
-}
-
-.plugins-provider-chip strong {
-  color: var(--app-text-strong);
-  font-size: 10.5px;
-}
-
-.plugins-provider-chip.is-invocable,
-.plugins-provider-chip.is-available,
-.plugins-provider-chip.is-installed {
-  border-color: color-mix(in srgb, var(--app-success) 36%, var(--app-border));
-}
-
-.plugins-provider-chip.is-composer {
-  border-color: color-mix(in srgb, var(--app-accent) 34%, var(--app-border));
-}
-
-.plugins-provider-chip.is-needs-setup {
-  border-color: var(--app-warning-border);
-}
-
-.plugins-provider-chip.is-unsupported,
-.plugins-provider-chip.is-malformed {
-  opacity: 0.72;
-}
-
-.plugins-card-foot {
-  display: flex;
-  min-height: 34px;
-  align-items: center;
-  justify-content: space-between;
-  gap: 10px;
-  border-top: 1px solid var(--app-border-subtle);
-  padding-top: 10px;
-}
-
 .plugins-empty-state,
 .plugins-diagnostics {
   border: 1px dashed var(--app-border);
@@ -443,19 +344,13 @@
     align-items: stretch;
   }
 
-  .plugins-tabs,
   .plugins-provider-switch,
-  .plugins-settings-toolbar button {
+.plugins-settings-toolbar button {
     width: 100%;
   }
 
   .plugins-provider-switch {
     margin-left: 0;
-  }
-
-  .plugins-tabs button {
-    flex: 1;
-    justify-content: center;
   }
 
   .plugins-plugin-list,
@@ -472,8 +367,7 @@
     justify-content: flex-start;
   }
 
-  .plugins-status-row,
-  .plugins-card-foot {
+  .plugins-status-row {
     align-items: flex-start;
     flex-direction: column;
   }

@@ -17,7 +17,6 @@ const copyButton = read("src/renderer/components/primitives/copy-button.tsx");
 const awsFiles = ["aws-settings-page", "aws-status-section", "aws-program-section", "aws-instance-section", "aws-disk-section",
   "aws-disk-browser", "aws-setup-section", "aws-connect-section", "aws-dialog", "aws-sign-in-dialog", "aws-worker-auto-stop", "aws-shared"]
   .map((name) => read(`src/renderer/components/settings/${name}.tsx`));
-const environmentSettings = read("src/renderer/components/settings/environment-settings-section.tsx");
 const toggleCss = read("src/renderer/styles/views/content-markdown.css");
 const approvalCss = read("src/renderer/styles/views/chat-conversation.css");
 const providerAuthCss = read("src/renderer/styles/views/provider-device-auth.css");
@@ -42,7 +41,7 @@ test("the machine instance page offers nothing the deleted worker used to need",
   // Checking and preparing the instance are retained by the resolution and
   // must stay reachable; the page checks by itself and fixes from each row.
   assert.match(awsSetup, /diagnoseCloudRunWorker\(undefined\)/);
-  assert.match(awsSetup, /setupCloudRunWorker\(undefined\)/);
+  assert.match(awsSetup, /setupCloudRunWorker\(undefined,/);
 });
 
 test("every copy control is the shared icon with a guarded exact-payload clipboard write", () => {
@@ -95,5 +94,4 @@ test("copy focus and manual toggle accessibility contracts remain explicit", () 
     /button\.aa-icon-button:focus-visible\s*\{[^}]*box-shadow:\s*var\(--focus-ring\)/s
   );
   assert.match(appCss, /@import "\.\/views\/icon-button\.css"/);
-  assert.match(environmentSettings, /aria-label=\{`Enable \$\{variable\.key\}`\}/);
 });

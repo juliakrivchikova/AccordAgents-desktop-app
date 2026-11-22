@@ -7,7 +7,7 @@
   gap: 0 !important;
   overflow: hidden;
   padding: 0 !important;
-  border-radius: 16px !important;
+  border-radius: 12px !important;
 }
 
 .chat-accord-header {
@@ -48,7 +48,7 @@
 .chat-accord-hint {
   margin: -2px 0 0;
   color: var(--app-muted);
-  font-size: 12.5px;
+  font-size: 12px;
   line-height: 1.45;
 }
 
@@ -58,8 +58,8 @@
   height: 20px !important;
   padding: 0 !important;
   flex: 0 0 auto;
-  border-radius: 5px;
-  font-size: 9px;
+  border-radius: 6px;
+  font-size: 11px;
 }
 
 .chat-accord-field {
@@ -71,7 +71,7 @@
 .chat-accord-field .app-select-trigger {
   width: 100% !important;
   border-color: var(--app-border) !important;
-  border-radius: 9px !important;
+  border-radius: 8px !important;
   box-shadow: none !important;
 }
 
@@ -82,7 +82,7 @@
   max-height: min(252px, 32vh);
   overflow: auto;
   border: 1px solid var(--app-border);
-  border-radius: 10px;
+  border-radius: 8px;
 }
 
 .chat-accord-target {
@@ -103,7 +103,7 @@
 }
 
 .chat-accord-target:not(:has(input:disabled)):hover {
-  background: var(--app-surface-hover);
+  background: var(--ui-row-hover);
 }
 
 .chat-accord-target:has(input:disabled) {
@@ -129,16 +129,19 @@
   flex: none;
   align-items: center;
   justify-content: center;
-  border: 1.5px solid var(--app-border-strong);
-  border-radius: 4px;
-  background: var(--app-surface);
+  border: 1px solid var(--ui-border-strong);
+  border-radius: var(--ui-radius-4);
+  background: var(--ui-bg);
   color: transparent;
+  transition:
+    background-color var(--ui-duration-fast) var(--ui-ease-out),
+    border-color var(--ui-duration-fast) var(--ui-ease-out);
 }
 
 .chat-accord-target.is-selected .chat-accord-target-check {
-  border-color: var(--app-text-strong);
-  background: var(--app-text-strong);
-  color: var(--app-surface);
+  border-color: var(--ui-primary);
+  background: var(--ui-primary);
+  color: var(--ui-primary-fg);
 }
 
 .chat-accord-target-checkbox:focus-visible + .chat-accord-target-check {
@@ -152,7 +155,7 @@
   padding: 0 !important;
   flex: 0 0 auto;
   border-radius: 6px;
-  font-size: 10px;
+  font-size: 11px;
 }
 
 .chat-accord-target-title {
@@ -176,16 +179,16 @@
 .chat-accord-target-title span {
   flex: 0 0 auto;
   color: var(--app-muted);
-  font-size: 12.5px;
+  font-size: 12px;
 }
 
 .chat-accord-empty {
   padding: 12px;
   border: 1px dashed var(--app-border-strong);
-  border-radius: 9px;
+  border-radius: 8px;
   background: var(--app-surface-subtle);
   color: var(--app-muted);
-  font-size: 12.5px;
+  font-size: 12px;
   text-align: center;
 }
 
@@ -193,7 +196,7 @@
   min-height: 76px !important;
   padding: 11px 12px !important;
   border: 1px solid var(--app-border) !important;
-  border-radius: 9px !important;
+  border-radius: 8px !important;
   background: var(--app-surface) !important;
   color: var(--app-text-strong) !important;
   font-size: 13px !important;
@@ -234,7 +237,7 @@
 .chat-accord-subject-chip:hover:not(:disabled),
 .chat-accord-subject-chip:focus-visible {
   border-color: var(--app-border-strong);
-  background: var(--app-surface-subtle);
+  background: var(--ui-row-hover);
   color: var(--app-text-strong);
 }
 
@@ -271,22 +274,10 @@
   background: var(--app-surface) !important;
 }
 
-.chat-accord-spinner {
-  width: 14px;
-  height: 14px;
-  animation: chat-accord-spin 0.8s linear infinite;
-}
-
-@keyframes chat-accord-spin {
-  to {
-    transform: rotate(360deg);
-  }
-}
-
 /* Labels in the app's text color: each field already has its grey hint. */
 .chat-accord-field > [data-slot="label"] {
   color: var(--app-text-strong) !important;
-  font-size: 12.5px !important;
+  font-size: 12px !important;
   font-weight: 500 !important;
   letter-spacing: 0 !important;
 }

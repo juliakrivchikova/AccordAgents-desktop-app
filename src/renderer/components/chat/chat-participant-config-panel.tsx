@@ -1,6 +1,6 @@
 import { useMemo, useState } from "react";
 import type React from "react";
-import { Check, ChevronDown, ShieldCheck, Sparkles } from "lucide-react";
+import { CheckIcon, CaretDownIcon, ShieldCheckIcon, SparkleIcon } from "@phosphor-icons/react";
 
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { ScrollArea } from "@/components/ui/scroll-area";
@@ -76,7 +76,7 @@ export function ChatParticipantAvatarField(props: {
         <button type="button" className="chat-app-tool-inline-avatar" aria-label="Change avatar">
           <Avatar className="chat-app-tool-review-avatar" spec={spec} />
           <span className="chat-app-tool-inline-avatar-badge" aria-hidden>
-            <ChevronDown size={11} />
+            <CaretDownIcon size={11} />
           </span>
         </button>
       </PopoverTrigger>
@@ -94,7 +94,7 @@ export function ChatParticipantAvatarField(props: {
                 setStudioOpen(true);
               }}
             >
-              <Sparkles size={16} aria-hidden />
+              <SparkleIcon size={16} aria-hidden />
               <span>Create</span>
             </button>
           )}
@@ -189,7 +189,7 @@ export function ChatParticipantInlineSelectRow(props: {
         }}
       >
         <span>{option.label}</span>
-        {option.value === props.current && <Check size={14} aria-hidden />}
+        {option.value === props.current && <CheckIcon size={14} aria-hidden />}
       </button>
     ))
   ) : (
@@ -229,7 +229,7 @@ export function ChatParticipantInlineSelectRow(props: {
         <PopoverTrigger asChild>
           <button type="button" className="chat-app-tool-inline-edit" aria-label={`Change ${props.label.toLowerCase()}`}>
             <span>{props.value}</span>
-            <ChevronDown size={14} aria-hidden />
+            <CaretDownIcon size={14} aria-hidden />
           </button>
         </PopoverTrigger>
         <PopoverContent align="end" sideOffset={6} className={contentClassName}>
@@ -245,7 +245,7 @@ export function ChatParticipantInlineSelectRow(props: {
             </div>
           )}
           {usePersistentScrollArea ? (
-            <ScrollArea type="always" className="chat-app-tool-inline-options-scroll" onWheelCapture={scrollPersistentOptions}>
+            <ScrollArea type="hover" className="chat-app-tool-inline-options-scroll" onWheelCapture={scrollPersistentOptions}>
               <div className="chat-app-tool-inline-options">{optionsContent}</div>
             </ScrollArea>
           ) : (
@@ -288,7 +288,7 @@ export function ChatParticipantInlineModelRow(props: {
         <PopoverTrigger asChild>
           <button type="button" className="chat-app-tool-inline-edit" aria-label="Change model">
             <span>{value ?? inheritedLabel}</span>
-            <ChevronDown size={14} aria-hidden />
+            <CaretDownIcon size={14} aria-hidden />
           </button>
         </PopoverTrigger>
         <PopoverContent align="end" sideOffset={6} className="chat-app-tool-inline-menu chat-app-tool-inline-model-menu">
@@ -302,7 +302,7 @@ export function ChatParticipantInlineModelRow(props: {
               }}
             >
               <span>{inheritedLabel}</span>
-              {!value && <Check size={14} aria-hidden />}
+              {!value && <CheckIcon size={14} aria-hidden />}
             </button>
             {models.map((item) => (
               <button
@@ -315,7 +315,7 @@ export function ChatParticipantInlineModelRow(props: {
                 }}
               >
                 <span>{item.label}</span>
-                {item.id === value && <Check size={14} aria-hidden />}
+                {item.id === value && <CheckIcon size={14} aria-hidden />}
               </button>
             ))}
             {listStatus && <span className="chat-app-tool-inline-empty" role="status">{listStatus}</span>}
@@ -377,7 +377,7 @@ export function ChatParticipantInlinePermissionsRow(props: {
                 title={basePermissionsLocked ? lockedTitle : undefined}
                 onClick={() => props.onChange(toggle.next(!toggle.checked))}
               >
-                <ShieldCheck className="chat-app-tool-permission-pill-icon" size={12} aria-hidden />
+                <ShieldCheckIcon className="chat-app-tool-permission-pill-icon" size={12} aria-hidden />
                 {toggle.label}
               </button>
             );

@@ -1,5 +1,5 @@
 import type { ComponentProps } from "react";
-import { ChevronRight } from "lucide-react";
+import { CaretRightIcon } from "@phosphor-icons/react";
 
 import { isWaitingChoice } from "../../../shared/chatActiveRuns";
 import { isMainSessionTaskMessage } from "../../../shared/mainSession";
@@ -93,7 +93,7 @@ export function ChatSessionsChoiceRow(props: {
       >
         {participant && <ChatProviderMark member={participant} />}
         <span>{props.title} asks</span>
-        <ChevronRight size={14} aria-hidden />
+        <CaretRightIcon size={14} aria-hidden />
       </button>
       <ChatChoiceCard
         choice={choice}

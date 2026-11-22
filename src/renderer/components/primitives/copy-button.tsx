@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { Check, Copy } from "lucide-react";
+import { CheckIcon, CopyIcon } from "@phosphor-icons/react";
 
 import { writeClipboardText, type ClipboardWriteResult } from "../../../shared/clipboard";
 import { IconButton, type IconButtonSize } from "./icon-button";
@@ -35,7 +35,7 @@ export function CopyButton(props: {
   return (
     <>
       <IconButton
-        icon={result === "copied" ? Check : Copy}
+        icon={result === "copied" ? CheckIcon : CopyIcon}
         label={result === "failed" ? `${props.label}: copy failed` : props.label}
         tooltip={tooltip}
         size={props.size}

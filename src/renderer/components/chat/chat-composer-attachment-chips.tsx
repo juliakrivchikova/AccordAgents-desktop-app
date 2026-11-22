@@ -1,4 +1,4 @@
-import { FileText, ImagePlus, ListChecks, X } from "lucide-react";
+import { FileTextIcon, ImageIcon, ListChecksIcon, XIcon } from "@phosphor-icons/react";
 
 import type {
   ChatSkillMention,
@@ -23,10 +23,10 @@ export function ChatComposerAttachmentChips(props: {
         <div className="file-mention-chips skill-mention-chips" aria-label="Selected skills">
           {props.selectedSkillMentions.map((mention) => (
             <button type="button" onClick={() => props.removeSkillMention(mention)} key={mention.skillId}>
-              <ListChecks size={14} />
+              <ListChecksIcon size={14} />
               <span>{mention.displayName}</span>
               <small>{mention.variants.map((variant) => providerLabel(variant.providerKind)).join(", ")}</small>
-              <X size={13} />
+              <XIcon size={13} />
             </button>
           ))}
         </div>
@@ -35,9 +35,9 @@ export function ChatComposerAttachmentChips(props: {
         <div className="file-mention-chips" aria-label="Referenced repository files">
           {props.selectedFileMentions.map((mention) => (
             <button type="button" onClick={() => props.removeFileMention(mention.path)} key={mention.path}>
-              <FileText size={14} />
+              <FileTextIcon size={14} />
               <span>{mention.path}</span>
-              <X size={13} />
+              <XIcon size={13} />
             </button>
           ))}
         </div>
@@ -49,13 +49,13 @@ export function ChatComposerAttachmentChips(props: {
               {image.objectUrl ? (
                 <img src={image.objectUrl} alt="" />
               ) : (
-                <ImagePlus size={18} aria-hidden />
+                <ImageIcon size={18} aria-hidden />
               )}
               <div>
                 <strong>{image.filename}</strong>
                 <span>{image.error ?? `${formatBytes(image.sizeBytes)}${image.status === "loading" ? " · reading" : ""}`}</span>
               </div>
-              <IconButton size="xs" icon={X} label={`Remove ${image.filename}`} onClick={() => props.removePendingImage(image.id)} />
+              <IconButton size="xs" icon={XIcon} label={`Remove ${image.filename}`} onClick={() => props.removePendingImage(image.id)} />
             </div>
           ))}
         </div>

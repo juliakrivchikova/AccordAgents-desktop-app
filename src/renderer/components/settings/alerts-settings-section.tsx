@@ -1,4 +1,4 @@
-import { Loader2, Phone, Send, Server } from "lucide-react";
+import { DeviceMobileIcon, PaperPlaneTiltIcon, HardDrivesIcon } from "@phosphor-icons/react";
 import { useCallback, useContext, useEffect, useState } from "react";
 import { Button } from "@/components/ui/button";
 import {
@@ -19,6 +19,8 @@ import { alertRequest, useSettingsWatch } from "./alerts-shared";
 import { PhoneConnectDialog } from "./alerts-phone-dialog";
 import { AlertsBandPlaceholder, AlertsChannelRow, AlertsFlow, AlertsStatusBand } from "./alerts-settings-parts";
 import { AwsConfirmDialog } from "./aws-dialog";
+import { Spinner } from "@/components/ui/spinner";
+import { Delayed } from "@/components/ui/delayed";
 
 type Confirm = "remove-telegram" | "different-bot" | "remove-phone";
 
@@ -131,7 +133,7 @@ export function AlertsSettingsSection(): JSX.Element {
   const bandAction = band?.action === "reconnect-telegram" ? <Button type="button" size="sm" onClick={() => setDialog("telegram")}>Reconnect Telegram</Button>
     : band?.action === "reconnect-phone" ? <Button type="button" size="sm" onClick={() => setDialog("phone")}>Reconnect phone call</Button>
     : band?.action === "change-phone" ? <Button type="button" size="sm" onClick={() => setDialog("phone")}>Change phone call</Button>
-    : band?.action === "set-up-server" && actions ? <Button type="button" variant="outline" size="sm" onClick={() => actions.openServerSettings()}><Server size={13} aria-hidden /> Set up your server</Button>
+    : band?.action === "set-up-server" && actions ? <Button type="button" variant="outline" size="sm" onClick={() => actions.openServerSettings()}><HardDrivesIcon size={13} aria-hidden /> Set up your server</Button>
     : undefined;
 
   const telegramStatus = settings ? alertsTelegramStatus(settings) : "not-set-up";
@@ -164,7 +166,7 @@ export function AlertsSettingsSection(): JSX.Element {
           <div className="gen-card">
             <AlertsChannelRow
               testId="alerts-telegram"
-              icon={<Send size={17} />}
+              icon={<PaperPlaneTiltIcon size={17} />}
               name="Telegram"
               status={telegramStatus}
               lines={telegramStatus === "not-set-up" ? [{ text: "Your own bot sends you each alert with a Got it button." }, errorFor("telegram")]
@@ -177,7 +179,7 @@ export function AlertsSettingsSection(): JSX.Element {
               action={telegramStatus === "ready"
                 ? <Button type="button" variant="outline" size="sm" disabled={Boolean(busy)} data-testid="alerts-telegram-test"
                   onClick={() => void act("telegram.test", "telegram", () => alertRequest({ action: "telegram.test" }))}>
-                  {busy === "telegram.test" ? <Loader2 size={13} className="gen-aws-spinner" aria-hidden /> : null}Send test message
+                  {busy === "telegram.test" ? <Delayed><Spinner size={13} /></Delayed> : null}Send test message
                 </Button>
                 : <Button type="button" size="sm" data-testid="alerts-connect-telegram" onClick={() => setDialog("telegram")}>
                   {telegramStatus === "attention" ? "Reconnect" : telegramStatus === "not-finished" ? "Continue" : "Connect Telegram"}
@@ -190,7 +192,7 @@ export function AlertsSettingsSection(): JSX.Element {
             <div className="gen-card-divider" />
             <AlertsChannelRow
               testId="alerts-phone"
-              icon={<Phone size={17} />}
+              icon={<DeviceMobileIcon size={17} />}
               name="Phone call"
               status={phoneStatus}
               lines={!phone ? [{ text: "Calls you if you don't press Got it in Telegram." }, { text: "Needs a Twilio account · optional" }]
@@ -207,7 +209,7 @@ export function AlertsSettingsSection(): JSX.Element {
                   ? <Button type="button" size="sm" data-testid="alerts-connect-phone" onClick={() => setDialog("phone")}>Reconnect</Button>
                   : <Button type="button" variant={phoneStatus === "ready" ? "outline" : "default"} size="sm" disabled={Boolean(busy) || testing} data-testid="alerts-phone-test"
                     onClick={() => void act("phone.test", "phone", () => alertRequest({ action: "phone.test" }))}>
-                    {busy === "phone.test" || testing ? <Loader2 size={13} className="gen-aws-spinner" aria-hidden /> : null}Test call
+                    {busy === "phone.test" || testing ? <Delayed><Spinner size={13} /></Delayed> : null}Test call
                   </Button>}
               menu={phone ? [
                 ...(phone.error ? [] : [{ label: "Change", onSelect: () => setDialog("phone") }]),

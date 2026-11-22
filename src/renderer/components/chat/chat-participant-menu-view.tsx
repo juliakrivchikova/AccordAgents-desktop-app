@@ -1,7 +1,7 @@
 import type { MemberRestartInProgress } from "../../../shared/memberRestart";
 import { memberSessionMoves } from "../../../shared/memberSessionMove";
 import React, { useState } from "react";
-import { ChevronLeft, ChevronRight, Plus, Settings2, Users } from "lucide-react";
+import { CaretLeftIcon, CaretRightIcon, PlusIcon, GearSixIcon, UsersIcon } from "@phosphor-icons/react";
 
 import { Button } from "@/components/ui/button";
 import { IconButton } from "../primitives";
@@ -153,11 +153,11 @@ export function ChatParticipantMenuView(props: ChatParticipantMenuViewProps): JS
     <Popover open={open} onOpenChange={handleOpenChange}>
       <PopoverTrigger asChild>
         {only ? props.trigger ?? (
-          <IconButton label="Member settings" icon={Settings2} tooltip="Settings" data-testid="chat-member-settings-trigger" />
+          <IconButton label="Member settings" icon={GearSixIcon} tooltip="Settings" data-testid="chat-member-settings-trigger" />
         ) : (
           <IconButton
             label={participantCountLabel}
-            icon={Users}
+            icon={UsersIcon}
             tooltip="Members"
             data-testid="chat-participants-trigger"
           />
@@ -176,7 +176,7 @@ export function ChatParticipantMenuView(props: ChatParticipantMenuViewProps): JS
         ) : view === "create" ? (
           <div className="chat-participant-create">
             <div className="chat-participant-create-head">
-              <IconButton size="xs" label="Back to members" icon={ChevronLeft} onClick={() => setView("roster")} />
+              <IconButton size="xs" label="Back to members" icon={CaretLeftIcon} onClick={() => setView("roster")} />
               <span className="chat-popover-section-title">New member</span>
             </div>
             {props.addParticipantEditor}
@@ -193,7 +193,7 @@ export function ChatParticipantMenuView(props: ChatParticipantMenuViewProps): JS
                   setView("roster");
                 }}
               >
-                <Plus size={16} />
+                <PlusIcon size={16} />
                 Add to chat
               </Button>
             </div>
@@ -209,9 +209,9 @@ export function ChatParticipantMenuView(props: ChatParticipantMenuViewProps): JS
               aria-expanded={showSaved}
               onClick={() => setShowSaved((value) => !value)}
             >
-              <Plus size={15} aria-hidden className="chat-addsaved-plus" />
+              <PlusIcon size={15} aria-hidden className="chat-addsaved-plus" />
               Add a saved member
-              <ChevronRight size={15} aria-hidden className={`chat-addsaved-chev${showSaved ? " is-open" : ""}`} />
+              <CaretRightIcon size={15} aria-hidden className={`chat-addsaved-chev${showSaved ? " is-open" : ""}`} />
             </button>
             {showSaved && (
               props.savedParticipants.length === 0 ? (
@@ -234,7 +234,7 @@ export function ChatParticipantMenuView(props: ChatParticipantMenuViewProps): JS
                         disabled={Boolean(invalidReason)}
                         onClick={() => props.onAddSavedParticipant(config)}
                       >
-                        <Plus size={16} />
+                        <PlusIcon size={16} />
                         Add
                       </Button>
                     </div>

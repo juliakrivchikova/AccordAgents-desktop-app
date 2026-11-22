@@ -1,5 +1,5 @@
 import { useMemo, useState } from "react";
-import { ChevronRight, Plus, Search } from "lucide-react";
+import { CaretRightIcon, PlusIcon, MagnifyingGlassIcon } from "@phosphor-icons/react";
 
 import { Button } from "@/components/ui/button";
 import type { AgentHealth, AppSettings, ChatParticipantConfigUpdate } from "../../../shared/types";
@@ -50,7 +50,7 @@ export function ParticipantsSettingsScreen(props: {
     <section className="participants-settings-screen" data-testid="settings-participants-screen">
       <div className="participants-settings-toolbar">
         <div className="participants-search">
-          <Search size={16} aria-hidden />
+          <MagnifyingGlassIcon size={16} aria-hidden />
           <input
             value={query}
             onChange={(event) => setQuery(event.currentTarget.value)}
@@ -63,8 +63,8 @@ export function ParticipantsSettingsScreen(props: {
           {visibleCount === totalCount ? `${totalCount}` : `${visibleCount} of ${totalCount}`}
         </span>
         <span className="participants-toolbar-spacer" />
-        <Button className="participants-settings-new-button" size="lg" onClick={() => setEditor({ type: "new" })}>
-          <Plus size={16} aria-hidden />
+        <Button className="participants-settings-new-button" onClick={() => setEditor({ type: "new" })}>
+          <PlusIcon size={14} aria-hidden />
           New Member
         </Button>
       </div>
@@ -92,7 +92,7 @@ export function ParticipantsSettingsScreen(props: {
                   aria-expanded={open}
                   onClick={() => toggleRole(group.id)}
                 >
-                  <ChevronRight className="participants-role-chevron" size={17} aria-hidden />
+                  <CaretRightIcon className="participants-role-chevron" size={17} aria-hidden />
                   <span className="participants-role-row-text">
                     <strong>{group.label}</strong>
                     <small>{providerSummary(group.participants, props.settings.cliProviderHosts)}</small>

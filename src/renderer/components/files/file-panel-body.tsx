@@ -7,6 +7,7 @@ import { CsvTable } from "./csv-table";
 import type { FileDocument } from "./use-file-document";
 import { ImageViewer } from "./image-viewer";
 import { PdfView } from "./pdf-view";
+import { Delayed } from "@/components/ui/delayed";
 
 // CodeMirror loads the first time a file is shown, not with the app.
 const CodeEditor = lazy(() => import("./code-editor"));
@@ -85,7 +86,7 @@ export function FilePanelBody(props: {
   };
 
   if (document.status === "loading" && !preview) {
-    return <p className="file-panel-message">Loading…</p>;
+    return <Delayed><p className="file-panel-message">Loading…</p></Delayed>;
   }
   if (document.status === "error" || !preview) {
     return <p className="file-panel-message" role="alert">{document.error ?? "This file could not be opened."}</p>;
@@ -100,7 +101,7 @@ export function FilePanelBody(props: {
   const name = fileBasename(preview.realPath);
   const text = document.buffer?.text ?? preview.text ?? "";
   const editor = (
-    <Suspense fallback={<p className="file-panel-message">Loading editor…</p>}>
+    <Suspense fallback={<Delayed><p className="file-panel-message">Loading editor…</p></Delayed>}>
       <CodeEditor
         key={preview.realPath}
         text={text}

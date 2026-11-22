@@ -1,4 +1,4 @@
-import { ArrowLeft, X } from "lucide-react";
+import { ArrowLeftIcon, XIcon } from "@phosphor-icons/react";
 
 import type { DockedAccord } from "../../../shared/accordProgress";
 import type { ChatParticipant } from "../../../shared/types";
@@ -23,11 +23,11 @@ export function ChatAccordPanel(props: {
     <section className="chat-thread-panel chat-accord-panel" aria-label="Accord" data-testid="chat-accord-panel" data-launch-id={props.launchId}>
       <header className="thread-panel-head chat-thread-head chat-member-session-head" data-titlebar>
         <div>
-          <IconButton icon={ArrowLeft} label="Back to members" tooltip="Back to members" data-testid="chat-accord-panel-back" onClick={props.onBack} />
+          <IconButton icon={ArrowLeftIcon} label="Back to members" tooltip="Back to members" data-testid="chat-accord-panel-back" onClick={props.onBack} />
           <h2>Accord</h2>
         </div>
         <div className="thread-panel-actions">
-          <IconButton icon={X} label="Close Accord" tooltip="Close" onClick={props.onClose} />
+          <IconButton icon={XIcon} label="Close Accord" tooltip="Close" onClick={props.onClose} />
         </div>
       </header>
       <div className="chat-thread-body chat-accord-panel-body">

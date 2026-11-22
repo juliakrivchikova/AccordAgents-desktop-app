@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import { Plus, Search, Users, X } from "lucide-react";
+import { PlusIcon, MagnifyingGlassIcon, UsersIcon, XIcon } from "@phosphor-icons/react";
 
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogClose, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle, DialogTrigger } from "@/components/ui/dialog";
@@ -38,7 +38,7 @@ export function BehaviorRuleSettingsSection(props: {
     <section className="rules-settings-screen">
       <div className="rules-settings-toolbar">
         <label className="rules-search" aria-label="Search rules">
-          <Search size={16} aria-hidden />
+          <MagnifyingGlassIcon size={16} aria-hidden />
           <input
             value={search}
             onChange={(event) => setSearch(event.target.value)}
@@ -47,8 +47,8 @@ export function BehaviorRuleSettingsSection(props: {
         </label>
         <span className="rules-count">{countLabel}</span>
         <span className="rules-toolbar-spacer" />
-        <Button className="rules-new-button" size="lg" onClick={() => setEditor({ type: "new" })}>
-          <Plus size={16} aria-hidden />
+        <Button className="rules-new-button" onClick={() => setEditor({ type: "new" })}>
+          <PlusIcon size={16} aria-hidden />
           New rule
         </Button>
       </div>
@@ -101,7 +101,7 @@ function BehaviorRuleCard(props: {
         <BehaviorRuleAvatarStack participants={props.participants} />
       ) : (
         <span className="behavior-rule-no-participants">
-          <Users size={15} aria-hidden />
+          <UsersIcon size={15} aria-hidden />
           No members yet
         </span>
       )}
@@ -196,7 +196,7 @@ function BehaviorRuleEditorDialog(props: {
               <DialogDescription>{rule ? `v${rule.version} behavior rule` : "Reusable behavior rule"}</DialogDescription>
             </span>
             <DialogClose asChild>
-              <IconButton label="Close rule editor" icon={X} />
+              <IconButton label="Close rule editor" icon={XIcon} />
             </DialogClose>
           </div>
         </DialogHeader>
@@ -291,7 +291,7 @@ function ConfirmDeleteButton(props: {
     <Dialog open={open} onOpenChange={setOpen}>
       <DialogTrigger asChild>
         <Button variant="destructive" size="sm">
-          <X size={16} />
+          <XIcon size={16} />
           {props.label}
         </Button>
       </DialogTrigger>
@@ -307,7 +307,7 @@ function ConfirmDeleteButton(props: {
             </Button>
           </DialogClose>
           <Button variant="destructive" size="sm" disabled={pending} onClick={() => void confirm()}>
-            <X size={16} />
+            <XIcon size={16} />
             {pending ? "Deleting..." : props.confirmLabel ?? props.label}
           </Button>
         </DialogFooter>

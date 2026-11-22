@@ -3,7 +3,7 @@ import { memo, useState, type ReactNode } from "react";
 import { messageDelivery } from "../../../shared/messageDelivery";
 import { isEmptyContinuedTurnPart } from "../../../shared/turnContinues";
 import { ChatMessageRefusal } from "./chat-message-refusal";
-import { AlertTriangle, CheckCircle2, ChevronDown, ChevronUp, Copy, FileText, ListChecks, RefreshCw, Reply, Smile, X } from "lucide-react";
+import { WarningIcon, CheckCircleIcon, CaretDownIcon, CaretUpIcon, CopyIcon, FileTextIcon, ListChecksIcon, ArrowsClockwiseIcon, ArrowBendUpLeftIcon, SmileyIcon, XIcon } from "@phosphor-icons/react";
 
 import { Button } from "@/components/ui/button";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
@@ -336,7 +336,7 @@ export const ChatMessageItem = memo(function ChatMessageItem(props: {
           <PopoverTrigger asChild>
             <IconButton
               size="xs"
-              icon={Smile}
+              icon={SmileyIcon}
               label="Add reaction"
               tooltip="Add reaction"
             />
@@ -355,7 +355,7 @@ export const ChatMessageItem = memo(function ChatMessageItem(props: {
       {showThreadActions && (
         <IconButton
           size="xs"
-          icon={Reply}
+          icon={ArrowBendUpLeftIcon}
           label="Reply in thread"
           tooltip="Reply in thread"
           onClick={() => props.onOpenThread?.(message.id)}
@@ -393,7 +393,7 @@ export const ChatMessageItem = memo(function ChatMessageItem(props: {
               <IconButton
                 className="message-action-stop"
                 size="xs"
-                icon={X}
+                icon={XIcon}
                 label="Cancel queued reply"
                 tooltip="Cancel queued reply"
                 data-testid="chat-sessions-reply-stop"
@@ -408,7 +408,7 @@ export const ChatMessageItem = memo(function ChatMessageItem(props: {
                 className="message-action-stop"
                 size="xs"
                 tone="danger"
-                icon={X}
+                icon={XIcon}
                 label="Stop response"
                 tooltip="Stop response"
                 onClick={() => props.onStopRun?.(message.metadata!.runId!)}
@@ -417,7 +417,7 @@ export const ChatMessageItem = memo(function ChatMessageItem(props: {
             {hasProcessingTranscript && !sessionsFoldActivity && (
               <IconButton
                 size="xs"
-                icon={processingTranscriptOpen ? ChevronUp : ChevronDown}
+                icon={processingTranscriptOpen ? CaretUpIcon : CaretDownIcon}
                 label={processingTranscriptOpen ? "Hide full stream" : "Show full stream"}
                 tooltip={processingTranscriptOpen ? "Hide full stream" : "Show full stream"}
                 pressed={processingTranscriptOpen}
@@ -428,7 +428,7 @@ export const ChatMessageItem = memo(function ChatMessageItem(props: {
             {!accordLaunch && (
               <IconButton
                 size="xs"
-                icon={copied ? CheckCircle2 : Copy}
+                icon={copied ? CheckCircleIcon : CopyIcon}
                 label={copied ? "Copied" : "Copy message"}
                 tooltip={copied ? "Copied" : "Copy message"}
                 disabled={!canCopy}
@@ -541,13 +541,13 @@ export const ChatMessageItem = memo(function ChatMessageItem(props: {
           )}
           {repoFileMentions.length > 0 && (
             <div className="repo-file-reference-footer">
-              <FileText size={14} />
+              <FileTextIcon size={14} />
               <span>Referenced: {repoFileMentions.map((mention) => mention.path).join(", ")}</span>
             </div>
           )}
           {skillMentions.length > 0 && !accordLaunch && (
             <div className="repo-file-reference-footer skill-reference-footer">
-              <ListChecks size={14} />
+              <ListChecksIcon size={14} />
               <span>Skills: {skillMentions.map((mention) => `${mention.displayName} (${mention.variants.map((variant) => providerLabel(variant.providerKind)).join(", ")})`).join(", ")}</span>
             </div>
           )}
@@ -558,7 +558,7 @@ export const ChatMessageItem = memo(function ChatMessageItem(props: {
           <ChatMessageReactionList reactions={reactionEntries} onToggleReaction={toggleReaction} />
           {participantRequests.map((request) => (
             <div className={`chat-approval-note ${participantRequestNoteClass(request)}`} key={request.id}>
-              {isNegativeParticipantRequestStatus(request.status) && <AlertTriangle size={14} aria-hidden />}
+              {isNegativeParticipantRequestStatus(request.status) && <WarningIcon size={14} aria-hidden />}
               <span>{appText(participantRequestStatusLabel(request))}</span>
               {request.source === "inferred" && <StatusBadge tone="neutral">inferred request</StatusBadge>}
             </div>
@@ -568,7 +568,7 @@ export const ChatMessageItem = memo(function ChatMessageItem(props: {
               <span>{appText(`Approved: ${approved.map((mention) => chatParticipantReference(mention.targetHandle)).join(", ")}`)}</span>
               {canContinueRequester && (
                 <Button variant="outline" size="sm" onClick={() => props.onApproveMentions(message.id, [], true)}>
-                  <RefreshCw size={15} />
+                  <ArrowsClockwiseIcon size={15} />
                   {authorName ? `Continue ${authorName}` : "Continue"}
                 </Button>
               )}
@@ -583,7 +583,7 @@ export const ChatMessageItem = memo(function ChatMessageItem(props: {
               </div>
               <div className="chat-approval-actions">
                 <Button variant="outline" size="sm" onClick={() => props.onApproveMentions(message.id, allPendingIds, continuationRequested)}>
-                  <CheckCircle2 size={16} />
+                  <CheckCircleIcon size={16} />
                   {approvePendingLabel}
                 </Button>
                 {continuationRequested && (

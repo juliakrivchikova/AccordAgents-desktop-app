@@ -1,5 +1,5 @@
 import { memo, useState, type ReactNode } from "react";
-import { ChevronDown, ChevronRight, Hammer } from "lucide-react";
+import { CaretDownIcon, CaretRightIcon, HammerIcon } from "@phosphor-icons/react";
 
 import { SESSIONS_WORK_STATUS_LABELS, sessionsDelegationSummary, type SessionsTaskEntry } from "../../../shared/mainSessionView";
 import type { ChatParticipant } from "../../../shared/types";
@@ -40,7 +40,7 @@ export const ChatWorkedFold = memo(function ChatWorkedFold(props: {
       {toggle ? (
         <button type="button" className="chat-worked-fold-toggle" aria-expanded={open} onClick={toggle}>
           <span>{label}</span>
-          {open ? <ChevronDown size={14} aria-hidden /> : <ChevronRight size={14} aria-hidden />}
+          {open ? <CaretDownIcon size={14} aria-hidden /> : <CaretRightIcon size={14} aria-hidden />}
         </button>
       ) : (
         <span className="chat-worked-fold-toggle is-static">{label}</span>
@@ -63,7 +63,7 @@ export const ChatDelegationRows = memo(function ChatDelegationRows(props: {
     <div className="chat-delegations" data-testid="chat-delegations">
       {!props.bare && (
         <div className="chat-delegations-summary">
-          <Hammer size={13} aria-hidden />
+          <HammerIcon size={13} aria-hidden />
           <span>{sessionsDelegationSummary(props.entries.length)}</span>
         </div>
       )}
@@ -110,7 +110,7 @@ function ChatDelegationRow(props: {
           ? <ChatElapsed className="chat-delegation-elapsed" since={entry.since} />
           : entry.durationMs !== undefined ? formatWorkedDuration(entry.durationMs) : null}
       </span>
-      <ChevronRight className="chat-delegation-chevron" size={15} aria-hidden />
+      <CaretRightIcon className="chat-delegation-chevron" size={15} aria-hidden />
     </button>
   );
 }

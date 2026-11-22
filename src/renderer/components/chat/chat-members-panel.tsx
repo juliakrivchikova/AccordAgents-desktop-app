@@ -1,5 +1,5 @@
 import { useState, type ReactNode } from "react";
-import { Bot, ChevronDown, X } from "lucide-react";
+import { RobotIcon, CaretDownIcon, XIcon } from "@phosphor-icons/react";
 
 import type { DockedAccord } from "../../../shared/accordProgress";
 import { SESSIONS_REMOVED_MEMBER_DETAIL, sessionsRunningCount, type SessionsMemberActivity, type SessionsMemberRow, type SessionsMemberTask } from "../../../shared/mainSessionView";
@@ -91,7 +91,7 @@ export function ChatMembersPanel(props: ChatMembersPanelProps): JSX.Element {
       <header className="thread-panel-head chat-thread-head chat-members-head" data-titlebar>
         <div />
         <div className="thread-panel-actions">
-          <IconButton icon={X} label="Close" tooltip="Close" onClick={props.onClose} />
+          <IconButton icon={XIcon} label="Close" tooltip="Close" onClick={props.onClose} />
         </div>
       </header>
       <div className="chat-thread-body chat-members-body" data-testid="chat-members-body">
@@ -141,10 +141,10 @@ function ChatAgentsGroup(props: { label: string; testId: string; count: number; 
   return (
     <div className="chat-side-section" data-testid={props.testId}>
       <button type="button" className="chat-agents-group-toggle" aria-expanded={open} onClick={() => setOpen((current) => !current)}>
-        <Bot className="chat-agents-group-icon" size={16} strokeWidth={1.75} aria-hidden="true" />
+        <RobotIcon className="chat-agents-group-icon" size={16} aria-hidden="true" />
         <span className="chat-agents-group-label">{props.label}</span>
         {!open && <span className="chat-agents-group-count">{props.count}</span>}
-        <ChevronDown className={open ? "chat-agents-group-chevron" : "chat-agents-group-chevron is-folded"} size={16} strokeWidth={1.75} aria-hidden="true" />
+        <CaretDownIcon className={open ? "chat-agents-group-chevron" : "chat-agents-group-chevron is-folded"} size={16} aria-hidden="true" />
       </button>
       {open && <ul className="chat-agent-list">{props.children}</ul>}
     </div>

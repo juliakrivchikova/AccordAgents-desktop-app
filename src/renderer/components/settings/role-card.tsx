@@ -1,4 +1,4 @@
-import { UsersRound } from "lucide-react";
+import { UsersIcon } from "@phosphor-icons/react";
 import type { ChatParticipantConfig, ChatRoleConfig } from "../../../shared/types";
 import { Avatar } from "../avatar/avatar";
 import { avatarForChatParticipant } from "../chat/chat-avatars";
@@ -49,7 +49,7 @@ export function RoleCard(props: {
         </span>
       ) : (
         <span className="roles-no-participants">
-          <UsersRound size={15} aria-hidden />
+          <UsersIcon size={15} aria-hidden />
           No saved presets
         </span>
       )}

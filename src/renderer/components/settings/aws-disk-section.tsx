@@ -1,5 +1,4 @@
 import { Fragment, useEffect, useState } from "react";
-import { Loader2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { AWS_DISK_JOURNAL_KEEP_BYTES, AWS_WORKER_ROOT_VOLUME_SIZE_GB_MAX } from "../../../shared/cloudRuns";
 import type { AwsDiskCategory, AwsDiskCategoryId, AwsDiskCleanCategory } from "../../../shared/types";
@@ -10,6 +9,8 @@ import { publishAwsAttention } from "./use-aws-attention";
 import { AWS_DISK_LOW_BYTES, formatBytes, keptText, plural, type AwsDiskControl } from "./use-aws-disk";
 import { cleanError } from "./aws-shared";
 import type { AwsWorkerControl } from "./use-aws-worker-control";
+import { Spinner } from "@/components/ui/spinner";
+import { Delayed } from "@/components/ui/delayed";
 
 interface CategoryText {
   label: string;
@@ -22,7 +23,6 @@ interface CategoryText {
 }
 
 const JOURNAL_KEEP = formatBytes(AWS_DISK_JOURNAL_KEEP_BYTES);
-
 
 const CATEGORY: Record<AwsDiskCategoryId, CategoryText> = {
   "system": { label: "Operating system and tools", tone: "is-c2", describe: () => "Ubuntu, Node.js, git, Java and the rest the agents use" },
@@ -164,7 +164,7 @@ function AwsCleanDialog(props: { category?: AwsDiskCategory; disk: AwsDiskContro
       actions={<>
         <Button type="button" variant="outline" size="sm" disabled={pending} onClick={props.onClose}>Cancel</Button>
         <Button type="button" size="sm" data-testid="aws-disk-clean-confirm" disabled={pending} onClick={() => void confirm()}>
-          {pending ? <Loader2 size={14} className="gen-aws-spinner" aria-hidden /> : null}
+          {pending ? <Delayed><Spinner size={14} /></Delayed> : null}
           {pending ? "Cleaning up…" : `Clean up ${formatBytes(category?.cleanableBytes ?? 0)}`}
         </Button>
       </>}

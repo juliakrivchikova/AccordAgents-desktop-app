@@ -13,7 +13,7 @@ import { defaultChatAgentPermissions } from "../../../shared/agentPermissions";
 import { chatAccessModeSet, chatAccessOptions, selectedChatAccessOption, codexPlanModeOn } from "../../../shared/chatAccessModes";
 import type { ChatAgentMode, ChatParticipant } from "../../../shared/types";
 import { ChatMemberComposerControls, type ChatModelAccessPatch } from "./chat-model-access-picker";
-import { ClipboardList, Eye, Lock, PenLine, ShieldCheck, ShieldOff, SlidersHorizontal } from "lucide-react";
+import { ClipboardTextIcon, EyeIcon, LockSimpleIcon, PencilLineIcon, ShieldCheckIcon, ShieldSlashIcon, SlidersHorizontalIcon } from "@phosphor-icons/react";
 import { accessHeldReason, accessIcon, applyChatAccessOptionKeepingPlan, ChatAccessMenu, ComposerControlIcon } from "./chat-access-controls";
 import { newChatMainSessionParticipantConfig } from "./chat-main-session-draft";
 import { COMPOSER_DENSITY, useComposerDensity } from "./use-composer-density";
@@ -70,7 +70,7 @@ test("on a machine whose program is older, Full Access and Plan mode are disable
   try {
     const plan = old.root.find(byTestId("chat-model-plan"));
     assert.equal(plan.props.disabled, true, "Plan mode cannot be turned on there");
-    assert.match(plan.props.title, /Box runs an older program: Settings → Machines → Upgrade runtime\./);
+    assert.match(plan.props["aria-label"], /Box runs an older program: Settings → Machines → Upgrade runtime\./);
     await act(async () => { old.root.find(byTestId("chat-model-mode")).props.onClick(); });
     const full = old.root.findAll(byTestId("chat-access-option")).find((row) => row.props["data-value"] === "full-access")!;
     assert.equal(full.props.disabled, true);
@@ -98,7 +98,7 @@ test("a Cloud run member is held back by the machine on its AWS instance; its ow
   try {
     const plan = cloud.root.find(byTestId("chat-model-plan"));
     assert.equal(plan.props.disabled, true, "Plan mode cannot be turned on for a member that will run there");
-    assert.match(plan.props.title, /Old box runs an older program: Settings → Machines → Upgrade runtime\./);
+    assert.match(plan.props["aria-label"], /Old box runs an older program: Settings → Machines → Upgrade runtime\./);
     await act(async () => { cloud.root.find(byTestId("chat-model-mode")).props.onClick(); });
     const full = cloud.root.findAll(byTestId("chat-access-option")).find((row) => row.props["data-value"] === "full-access")!;
     assert.equal(full.props.disabled, true, "nor Full Access");
@@ -119,7 +119,7 @@ test("a Cloud run member is held back by the machine on its AWS instance; its ow
   try {
     const plan = stored.root.find(byTestId("chat-model-plan"));
     assert.equal(plan.props.disabled, false, "Plan mode can be turned off");
-    assert.match(plan.props.title, /Old box runs an older program/);
+    assert.match(plan.props["aria-label"], /Old box runs an older program/);
     await act(async () => { stored.root.find(byTestId("chat-model-mode")).props.onClick(); });
     assert.match(textOf(stored.root.find(byTestId("chat-access-machine-outdated"))), /Old box runs an older program: Settings → Machines → Upgrade runtime\./);
     assert.equal(stored.root.findAll(byTestId("chat-access-option")).find((row) => row.props["data-value"] === "auto-review")!.props.disabled, false, "another mode can be chosen");
@@ -370,7 +370,7 @@ test("a second quick choice is made on top of the first one not saved yet: Full 
     assert.equal(saves.length, 1);
     assert.equal(selectedChatAccessOption("codex-cli", saves[0]!.patch.agentMode, saves[0]!.patch.permissions)?.label, "Ask for approval");
     // Shown at once, before it is saved.
-    assert.match(root.find(byTestId("chat-member-controls-mode")).props.title, /Ask for approval/);
+    assert.match(root.find(byTestId("chat-member-controls-mode")).props["aria-label"], /Ask for approval/);
     // Plan clicked while the first choice is still being saved.
     await act(async () => { root.find(byTestId("chat-member-controls-plan")).props.onClick(); });
     assert.equal(saves.length, 2);
@@ -385,17 +385,17 @@ test("a second quick choice is made on top of the first one not saved yet: Full 
       saves[1]!.resolve(true);
       await new Promise((resolve) => setTimeout(resolve, 0));
     });
-    assert.match(root.find(byTestId("chat-member-controls-mode")).props.title, /Ask for approval/);
+    assert.match(root.find(byTestId("chat-member-controls-mode")).props["aria-label"], /Ask for approval/);
     assert.equal(root.find(byTestId("chat-member-controls-plan")).props["aria-pressed"], true);
     // A save that fails shows the member as stored.
     await act(async () => { root.find(byTestId("chat-member-controls-mode")).props.onClick(); });
     await act(async () => { root.findAll(byTestId("chat-access-option")).find((row) => row.props["data-value"] === "auto-review")!.props.onClick(); });
-    assert.match(root.find(byTestId("chat-member-controls-mode")).props.title, /Approve for me/);
+    assert.match(root.find(byTestId("chat-member-controls-mode")).props["aria-label"], /Approve for me/);
     await act(async () => {
       saves[2]!.resolve(false);
       await new Promise((resolve) => setTimeout(resolve, 0));
     });
-    assert.match(root.find(byTestId("chat-member-controls-mode")).props.title, /Ask for approval/, "the failed choice is not left on screen");
+    assert.match(root.find(byTestId("chat-member-controls-mode")).props["aria-label"], /Ask for approval/, "the failed choice is not left on screen");
   } finally {
     if (renderer) act(() => renderer!.unmount());
     host.consensus = previous;
@@ -412,14 +412,14 @@ test("a new main session in the sessions view starts in the mode her config star
 });
 
 test("in a narrow composer a mode turns into its own icon whose name stays for screen readers", () => {
-  const icons: Record<string, unknown> = { Manual: Lock, "Accept edits": PenLine, Plan: ClipboardList, Auto: ShieldCheck,
-    "Ask for approval": PenLine, "Approve for me": ShieldCheck, "Full Access": ShieldOff,
-    Default: Lock, "Accept-edits mode": PenLine, "Auto mode": ShieldCheck, "Plan mode": ClipboardList };
+  const icons: Record<string, unknown> = { Manual: LockSimpleIcon, "Accept edits": PencilLineIcon, Plan: ClipboardTextIcon, Auto: ShieldCheckIcon,
+    "Ask for approval": PencilLineIcon, "Approve for me": ShieldCheckIcon, "Full Access": ShieldSlashIcon,
+    Default: LockSimpleIcon, "Accept-edits mode": PencilLineIcon, "Auto mode": ShieldCheckIcon, "Plan mode": ClipboardTextIcon };
   for (const option of [...chatAccessOptions("claude-code"), ...chatAccessOptions("codex-cli"), ...chatAccessOptions("gemini-cli")]) {
     assert.equal(accessIcon(option), icons[option.label], `${option.label}'s icon`);
   }
-  assert.equal(accessIcon(chatAccessModeSet("codex-cli").options.find((option) => option.id === "read-only")), Eye, "Read Only");
-  assert.equal(accessIcon(undefined), SlidersHorizontal, "Custom");
+  assert.equal(accessIcon(chatAccessModeSet("codex-cli").options.find((option) => option.id === "read-only")), EyeIcon, "Read Only");
+  assert.equal(accessIcon(undefined), SlidersHorizontalIcon, "Custom");
   let renderer: ReturnType<typeof create> | undefined;
   act(() => { renderer = create(<ComposerControlIcon icon={accessIcon(chatAccessOptions("claude-code")[0])} label="Manual" />); });
   assert.equal(textOf(renderer!.root), "Manual", "the name for screen readers");

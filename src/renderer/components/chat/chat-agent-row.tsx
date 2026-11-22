@@ -1,6 +1,6 @@
 import { useContext, type ReactNode } from "react";
 import { HoverCard } from "radix-ui";
-import { Square } from "lucide-react";
+import { SquareIcon } from "@phosphor-icons/react";
 
 import { SESSIONS_WORK_STATUS_LABELS, sessionsCompactDuration, type SessionsWorkStatus } from "../../../shared/mainSessionView";
 import type { MachineListResult } from "../../../shared/machineLink";
@@ -158,7 +158,8 @@ function AgentRowView(props: { row: ChatAgentRowData; detail: string }): JSX.Ele
         <IconButton
           size="xs"
           tone="danger"
-          icon={Square}
+          icon={SquareIcon}
+          iconWeight="fill"
           className="chat-agent-stop"
           iconClassName="chat-agent-stop-icon"
           label={`Stop ${row.title}`}

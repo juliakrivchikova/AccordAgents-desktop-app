@@ -79,6 +79,15 @@ function participantFallbackKey(participant: Pick<ChatParticipantConfig, "handle
 }
 
 /** A project's folder, as the computer's sidebar groups chats by it. */
+/** Why a folder's branch cannot be switched now: a chat working there would
+ *  find its files changed under it. Main checks the same before it switches. */
+export const FOLDER_BUSY_REASON = "A chat is working in this folder: switch the branch when it finishes.";
+
+export function folderBusy(summaries: ReadonlyArray<{ repoPath?: string; running?: boolean; replyPending?: boolean }>, repoPath: string | undefined): boolean {
+  const folder = normalizeProjectPath(repoPath);
+  return Boolean(folder) && summaries.some((summary) => (summary.running || summary.replyPending) && normalizeProjectPath(summary.repoPath) === folder);
+}
+
 export function normalizeProjectPath(repoPath: string | undefined): string | undefined {
   const trimmed = repoPath?.trim();
   if (!trimmed) return undefined;

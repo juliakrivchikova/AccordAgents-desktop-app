@@ -1,5 +1,6 @@
 import { useState } from "react";
-import { History, Play, Trash2 } from "lucide-react";
+import { Switch } from "@/components/ui/switch";
+import { ClockCounterClockwiseIcon, PlayIcon, TrashIcon } from "@phosphor-icons/react";
 
 import { Button } from "@/components/ui/button";
 import { scriptHealthLabel, type ScheduledScriptSummary, type ScriptRunRow } from "../../../shared/scripts";
@@ -72,16 +73,12 @@ export function ScriptSettingsItem(props: {
             {script.running ? "Running" : scriptHealthLabel(script.health)}
           </span>
           {script.approved && (
-            <label className="toggle" title={script.enabled ? "Switch off" : "Switch on"}>
-              <input
-                type="checkbox"
-                aria-label={`Switch ${script.name} ${script.enabled ? "off" : "on"}`}
-                checked={script.enabled}
-                disabled={busy}
-                onChange={(event) => void act(() => window.consensus.setScriptEnabled({ ...target, enabled: event.target.checked }))}
-              />
-              <span />
-            </label>
+            <Switch title={script.enabled ? "Switch off" : "Switch on"}
+              aria-label={`Switch ${script.name} ${script.enabled ? "off" : "on"}`}
+              checked={script.enabled}
+              disabled={busy}
+              onChange={(event) => void act(() => window.consensus.setScriptEnabled({ ...target, enabled: event.target.checked }))}
+            />
           )}
         </div>
       </div>
@@ -163,11 +160,11 @@ export function ScriptSettingsItem(props: {
           {script.approved && script.enabled && (
             <Button type="button" variant="outline" size="sm" disabled={busy || script.running}
               onClick={() => void act(() => window.consensus.runScriptNow(target))}>
-              <Play size={14} aria-hidden /> Run now
+              <PlayIcon size={14} aria-hidden /> Run now
             </Button>
           )}
           <Button type="button" variant="outline" size="sm" disabled={busy} onClick={() => void toggleRuns()}>
-            <History size={14} aria-hidden /> {showRuns ? "Hide history" : "History"}
+            <ClockCounterClockwiseIcon size={14} aria-hidden /> {showRuns ? "Hide history" : "History"}
           </Button>
           {confirmDelete ? (
             <>
@@ -178,7 +175,7 @@ export function ScriptSettingsItem(props: {
             </>
           ) : (
             <Button type="button" variant="outline" size="sm" disabled={busy} onClick={() => setConfirmDelete(true)}>
-              <Trash2 size={14} aria-hidden /> Delete
+              <TrashIcon size={14} aria-hidden /> Delete
             </Button>
           )}
         </div>

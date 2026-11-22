@@ -10,7 +10,7 @@ import { SpeechToTextService, resolveSpeechEngine } from "./services/speechToTex
 import { SPEECH_PROMPT_MAX_CHARS, isSpeechLanguage } from "../shared/speechToText";
 import { CloudRunPreparationService, cloudEnvironmentDirectory } from "./services/cloudRunPreparation";
 import { AwsInstanceProjectsService, AwsProjectAddCancelled } from "./services/awsInstanceProjects";
-import { newChatProjects } from "../shared/newChat";
+import { FOLDER_BUSY_REASON, folderBusy, newChatProjects } from "../shared/newChat";
 import { isCliTerminalPlatform } from "../shared/cliReadiness";
 import { AwsInstanceDiskService } from "./services/awsInstanceDisk";
 import { createHash, randomBytes, randomUUID } from "node:crypto";
@@ -53,6 +53,7 @@ import type {
   DeleteChatConversationRequest,
   DismissConversationWarningsRequest,
   GitDiffRequest,
+  GitSwitchBranchRequest,
   InspectLocalFileRequest,
   ReadFilePreviewRequest,
   UnsavedFileEdit,
@@ -1809,9 +1810,12 @@ function createWindow(): void {
     backgroundColor: "#f5f2ec",
     ...(process.platform === "darwin" ? {
       titleBarStyle: "hiddenInset" as const,
-      // Centred in the renderer's 46px title rows (--app-header-height); rows
-      // leave --app-traffic-light-inset (80px) clear for the lights.
-      trafficLightPosition: { x: 16, y: 17 }
+      // Centred in the renderer's 46px title rows (--app-header-height): the
+      // buttons are 14px tall, so a top of 16 puts their middle at 23, level
+      // with the sidebar's brand row and the workspace title (17 left them a
+      // pixel low, the User, 2026-11-22). Rows leave
+      // --app-traffic-light-inset (80px) clear for the lights.
+      trafficLightPosition: { x: 16, y: 16 }
     } : {}),
     webPreferences: {
       preload: path.join(__dirname, "../preload/index.js"),
@@ -2443,6 +2447,17 @@ function registerIpc(): void {
     return agents;
   });
   ipcMain.handle("git:inspect-repo", (_event, repoPath: string) => gitService.inspectRepo(repoPath));
+  ipcMain.handle("git:switch-branch", async (_event, request: GitSwitchBranchRequest) => {
+    // A switch changes the whole working tree: refused while a chat works
+    // anywhere in it, in this folder or in another folder of the same tree.
+    const running = (await storageService.listConversations()).filter((summary) => summary.repoPath && (summary.running || summary.replyPending));
+    if (folderBusy(running, request.repoPath)) throw new Error(FOLDER_BUSY_REASON);
+    const root = running.length ? await gitService.worktreeRoot(request.repoPath) : undefined;
+    for (const summary of root ? running : []) {
+      if (await gitService.worktreeRoot(summary.repoPath!) === root) throw new Error(FOLDER_BUSY_REASON);
+    }
+    return gitService.switchBranch(request.repoPath, request.branch);
+  });
   ipcMain.handle("git:get-diff", (_event, request: GitDiffRequest) => gitService.getDiff(request));
   ipcMain.handle("git:search-repo-files", async (_event, request: RepoFileSearchRequest) => {
     const conversationId = typeof request?.conversationId === "string" ? request.conversationId : "";

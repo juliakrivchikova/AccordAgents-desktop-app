@@ -1,9 +1,10 @@
 import { createContext, useContext, useState, type ReactNode } from "react";
-import { Check, ChevronDown, MessagesSquare, PanelRight, PanelRightClose, type LucideIcon } from "lucide-react";
+import { CheckIcon, CaretDownIcon, ChatsIcon, type IconProps } from "@phosphor-icons/react";
+import type { ComponentType } from "react";
 
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
-import { IconButton } from "../primitives";
+import { IconButton, SidePanelIcon } from "../primitives";
 import type { ChatViewMode } from "../../../shared/types";
 import type { ChatModelAccessAction } from "./chat-model-access-picker";
 import { ChatMemberActionItems } from "./chat-member-model-access";
@@ -12,9 +13,9 @@ import { ChatBackgroundTasksContext } from "./chat-roster-status";
 export const CHAT_VIEW_SWITCH_DISABLED_REASON = "This chat was made before the Sessions view, so it has the Classic view only.";
 
 // The icon stands in for the label when the header is narrow (chat-sessions.css).
-const VIEW_OPTIONS: ReadonlyArray<{ view: ChatViewMode; label: string; icon: LucideIcon }> = [
-  { view: "sessions", label: "Sessions", icon: PanelRight },
-  { view: "classic", label: "Classic", icon: MessagesSquare }
+const VIEW_OPTIONS: ReadonlyArray<{ view: ChatViewMode; label: string; icon: ComponentType<IconProps> }> = [
+  { view: "sessions", label: "Sessions", icon: SidePanelIcon },
+  { view: "classic", label: "Classic", icon: ChatsIcon }
 ];
 
 /** The chat's two views (docs/main-session.md), switched from the header. */
@@ -116,7 +117,8 @@ export function ChatViewHeaderControls(): JSX.Element | null {
       <div className="chat-view-header-controls is-sessions">
         <span className="chat-side-panel-toggle">
           <IconButton
-            icon={members.open ? PanelRightClose : PanelRight}
+            icon={SidePanelIcon}
+            iconWeight={members.open ? "fill" : "regular"}
             label={label}
             tooltip={label}
             pressed={members.open}
@@ -151,7 +153,7 @@ export function ChatViewTitleMenu(): JSX.Element | null {
   return (
     <Popover open={open} onOpenChange={setOpen}>
       <PopoverTrigger asChild>
-        <IconButton size="xs" icon={ChevronDown} label="Chat menu" tooltip="Chat menu" data-testid="chat-title-menu" />
+        <IconButton size="xs" icon={CaretDownIcon} label="Chat menu" tooltip="Chat menu" data-testid="chat-title-menu" />
       </PopoverTrigger>
       <PopoverContent align="start" sideOffset={6} className="chat-title-menu" data-testid="chat-title-menu-content">
         <ChatTitleMenuContent state={state} onPicked={() => setOpen(false)} mainSessionBackgroundTasks={mainTasks} />
@@ -201,7 +203,7 @@ export function ChatViewMenuItems(props: { state: ChatViewHeaderState; onPicked?
         >
           <option.icon size={14} aria-hidden />
           <span>{option.label}</span>
-          {state.view === option.view && <Check size={14} aria-hidden className="chat-title-menu-check" />}
+          {state.view === option.view && <CheckIcon size={14} aria-hidden className="chat-title-menu-check" />}
         </button>
       ))}
     </>

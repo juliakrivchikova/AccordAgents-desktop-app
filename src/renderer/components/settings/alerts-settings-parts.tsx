@@ -1,4 +1,4 @@
-import { AlertTriangle, Bell, BellOff, CircleCheck, Loader2, Moon, MoreHorizontal, Phone, Send, Server } from "lucide-react";
+import { WarningIcon, BellIcon, BellSlashIcon, CheckCircleIcon, MoonIcon, DotsThreeIcon, DeviceMobileIcon, PaperPlaneTiltIcon, HardDrivesIcon } from "@phosphor-icons/react";
 import { useRef, useState, type ReactNode } from "react";
 import { Button } from "@/components/ui/button";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
@@ -12,13 +12,15 @@ import {
   type AlertsFlowChannel
 } from "../../../shared/urgentAlertSettings";
 import { AppSelect } from "../primitives";
+import { Spinner } from "@/components/ui/spinner";
+import { Delayed } from "@/components/ui/delayed";
 
-const BAND_ICONS: Record<AlertsBand["kind"], typeof Bell> = {
-  ok: CircleCheck,
-  bad: AlertTriangle,
-  warn: Moon,
-  off: BellOff,
-  partial: Bell
+const BAND_ICONS: Record<AlertsBand["kind"], typeof BellIcon> = {
+  ok: CheckCircleIcon,
+  bad: WarningIcon,
+  warn: MoonIcon,
+  off: BellSlashIcon,
+  partial: BellIcon
 };
 
 /** The one line on top of the page: whether an alert reaches her now. */
@@ -36,19 +38,22 @@ export function AlertsStatusBand(props: { band: AlertsBand; action?: ReactNode }
   );
 }
 
-export function AlertsBandPlaceholder(props: { loading: boolean; error?: { code: string; message: string }; onRetry: () => void }): JSX.Element {
+export function AlertsBandPlaceholder(props: { loading: boolean; error?: { code: string; message: string }; onRetry: () => void }): JSX.Element | null {
   // Reached, but not to be changed from here (another computer set the server
   // up), or reached, but too old for alerts: neither is "can't reach".
   const notOwner = props.error?.code === "access_denied";
   const older = /older than this app/.test(props.error?.message ?? "");
+  // A check that answers quickly shows nothing; a failure shows at once.
   return props.loading ? (
-    <div className="alerts-band is-off" role="status" data-testid="alerts-band">
-      <span className="alerts-band-icon" aria-hidden><Loader2 size={18} className="gen-aws-spinner" /></span>
-      <div className="alerts-band-text"><div className="alerts-band-title">Checking your server…</div></div>
-    </div>
+    <Delayed>
+      <div className="alerts-band is-off" role="status" data-testid="alerts-band">
+        <span className="alerts-band-icon" aria-hidden><Spinner size={18} /></span>
+        <div className="alerts-band-text"><div className="alerts-band-title">Checking your server…</div></div>
+      </div>
+    </Delayed>
   ) : (
     <div className="alerts-band is-bad" role="alert" data-testid="alerts-band">
-      <span className="alerts-band-icon" aria-hidden><Server size={18} /></span>
+      <span className="alerts-band-icon" aria-hidden><HardDrivesIcon size={18} /></span>
       <div className="alerts-band-text">
         <div className="alerts-band-title">{notOwner ? "Alerts are set up on another computer" : older ? "Your server hasn't updated yet" : "Can't reach your server"}</div>
         <div className="alerts-band-detail">{props.error ? `${props.error.message} ` : ""}{notOwner || older ? "" : "Alerts may not go out either."}</div>
@@ -85,9 +90,9 @@ export function AlertsFlow(props: {
         />
       </div>
       <ol className="alerts-chain" aria-label="When each step comes">
-        <FlowNode icon={<Bell size={14} />} label="Alert" time={clock(0)} state="on" />
+        <FlowNode icon={<BellIcon size={14} />} label="Alert" time={clock(0)} state="on" />
         <FlowEdge on={props.telegram === "ready"} />
-        <FlowNode icon={<Send size={14} />} label="Telegram" time={props.telegram === "ready" ? "at once" : ALERTS_FLOW_CHANNEL_WORD[props.telegram]} state={flowState(props.telegram)} />
+        <FlowNode icon={<PaperPlaneTiltIcon size={14} />} label="Telegram" time={props.telegram === "ready" ? "at once" : ALERTS_FLOW_CHANNEL_WORD[props.telegram]} state={flowState(props.telegram)} />
         <FlowEdge label={`${props.waitMinutes} min`} on={props.phone === "ready"} />
         {calls.map((minutes, index) => (
           <FlowCall key={minutes} index={index} minutes={minutes} retry={retry} phone={props.phone} />
@@ -104,7 +109,7 @@ function FlowCall(props: { index: number; minutes: number; retry: number; phone:
   const ready = props.phone === "ready";
   return <>
     {props.index > 0 ? <FlowEdge label={`${props.retry} min`} on={ready} /> : null}
-    <FlowNode icon={<Phone size={14} />} label={`Call ${props.index + 1}`} time={ready ? clock(props.minutes) : props.index === 0 ? ALERTS_FLOW_CHANNEL_WORD[props.phone as Exclude<AlertsFlowChannel, "ready">] : ""}
+    <FlowNode icon={<DeviceMobileIcon size={14} />} label={`Call ${props.index + 1}`} time={ready ? clock(props.minutes) : props.index === 0 ? ALERTS_FLOW_CHANNEL_WORD[props.phone as Exclude<AlertsFlowChannel, "ready">] : ""}
       // Later calls show no reason (the first one says it); a screen reader still hears it.
       spoken={!ready && props.index > 0 ? ALERTS_FLOW_CHANNEL_WORD[props.phone as Exclude<AlertsFlowChannel, "ready">] : undefined}
       state={props.index === 0 ? flowState(props.phone) : ready ? "on" : "off"} />
@@ -176,7 +181,7 @@ export function AlertsChannelRow(props: {
           <Popover open={open} onOpenChange={setOpen}>
             <PopoverTrigger asChild>
               <button type="button" className="alerts-more" aria-label={`More for ${props.name}`} data-testid={`${props.testId}-more`}>
-                <MoreHorizontal size={16} aria-hidden />
+                <DotsThreeIcon size={16} aria-hidden />
               </button>
             </PopoverTrigger>
             <PopoverContent align="end" className="alerts-menu w-[200px] gap-0 p-[5px]" aria-label={`${props.name} options`}

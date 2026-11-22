@@ -18,12 +18,11 @@
   margin-left: 0;
 }
 
-/* In the sessions view (no avatars) the waiting cards' slot is not a
-   timeline row: the card takes the rows' reading inset, so it starts where
-   the text does and where its folded line will. */
+/* In the sessions view the waiting cards' slot carries the reading column
+   (chat-sessions.css): the card fills it, starting where the text does. */
 .chat-view.is-sessions-view .chat-app-tool-approval-slot .chat-compaction-card.is-sessions {
-  margin-left: max(28px, var(--chat-reading-inset));
-  max-width: min(683px, calc(100% - 2 * max(28px, var(--chat-reading-inset))));
+  margin-left: 0;
+  max-width: none;
 }
 
 .chat-compaction-card-who {
@@ -33,7 +32,7 @@
   min-width: 0;
   margin: 0 0 6px 2px;
   color: var(--app-text-secondary);
-  font-size: 12.5px;
+  font-size: 12px;
   font-weight: 500;
 }
 
@@ -43,7 +42,7 @@
   width: 20px;
   height: 20px;
   border-radius: 6px;
-  font-size: 10px;
+  font-size: 11px;
 }
 
 .chat-compaction-card-who-name {
@@ -53,11 +52,11 @@
 }
 
 .chat-compaction-card-panel {
-  padding: 18px 20px 16px;
-  border: 1px solid var(--app-border);
-  border-radius: 16px;
-  background: var(--app-surface);
-  box-shadow: 0 1px 2px var(--app-shadow);
+  padding: 12px;
+  border: 1px solid var(--ui-border);
+  border-radius: var(--ui-radius-8);
+  background: var(--ui-bg);
+  box-shadow: var(--ui-shadow-sm);
 }
 
 /* Focused (by keyboard, or by Activity's Open in chat): the ring every
@@ -81,7 +80,7 @@
   width: 30px;
   height: 30px;
   margin-top: 1px;
-  border-radius: 9px;
+  border-radius: 8px;
   background: var(--app-surface-muted);
   color: var(--app-text-secondary);
 }
@@ -94,7 +93,7 @@
 .chat-compaction-card-title {
   margin: 0;
   color: var(--app-text-strong);
-  font-size: 15px;
+  font-size: 13px;
   font-weight: 600;
   line-height: 22px;
 }
@@ -102,14 +101,14 @@
 .chat-compaction-card-desc {
   margin: 3px 0 0;
   color: var(--app-text);
-  font-size: 14px;
+  font-size: 13px;
   line-height: 21px;
 }
 
 .chat-compaction-card-refusal {
   margin: 8px 0 0;
   color: var(--app-danger);
-  font-size: 12.5px;
+  font-size: 12px;
   line-height: 18px;
 }
 
@@ -139,7 +138,7 @@
 .chat-compaction-card-meter-label,
 .chat-compaction-card-keeps {
   color: var(--app-text-secondary);
-  font-size: 12.5px;
+  font-size: 12px;
   line-height: 18px;
 }
 
@@ -187,14 +186,14 @@
 }
 
 .chat-compaction-card-not-now {
-  min-height: 34px;
-  padding: 0 12px;
+  height: var(--ui-control-sm);
+  padding: 0 8px;
   border: 0;
-  border-radius: 9px;
+  border-radius: var(--ui-radius-8);
   background: transparent;
   color: var(--app-text-secondary);
   font-family: var(--font-sans);
-  font-size: 14px;
+  font-size: 13px;
   cursor: pointer;
 }
 
@@ -216,8 +215,4 @@
 
 .chat-compaction-card-compact {
   gap: 8px !important;
-  min-height: 36px;
-  padding-inline: 16px !important;
-  border-radius: 10px !important;
-  font-size: 14px !important;
 }

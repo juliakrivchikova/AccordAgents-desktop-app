@@ -1,4 +1,4 @@
-import { Check } from "lucide-react";
+import { CheckIcon } from "@phosphor-icons/react";
 import { Fragment, useEffect, useRef, type ReactNode } from "react";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
@@ -96,7 +96,7 @@ export function AlertsWizard(props: {
               <Fragment key={label}>
                 {index > 0 ? <li className="alerts-wizard-sep" /> : null}
                 <li className={`alerts-wizard-step is-${index < current ? "done" : index === current ? "now" : "later"}`}>
-                  <span className="alerts-wizard-dot">{index < current ? <Check size={11} strokeWidth={2.5} /> : index + 1}</span>
+                  <span className="alerts-wizard-dot">{index < current ? <CheckIcon size={11} /> : index + 1}</span>
                   {label}
                 </li>
               </Fragment>

@@ -1,5 +1,5 @@
 import React, { useRef, useState } from "react";
-import { MessageSquare, Play, RefreshCw } from "lucide-react";
+import { ChatIcon, PlayIcon, ArrowsClockwiseIcon } from "@phosphor-icons/react";
 
 import { Button } from "@/components/ui/button";
 import type {
@@ -37,6 +37,7 @@ import {
 } from "./review-timeline-messages";
 import type { TimelineItem } from "./review-timeline-types";
 import { VirtualSlackTimeline } from "./review-virtual-timeline";
+import { Spinner } from "@/components/ui/spinner";
 
 export function SlackView(props: {
   conversation?: Conversation;
@@ -246,19 +247,19 @@ export function SlackView(props: {
               </span>
               {canRecoverPlan && (
                 <Button size="sm" disabled={isRunning} onClick={onRecoverPlan}>
-                  {isRunning ? <RefreshCw size={17} className="spin" /> : <Play size={17} />}
+                  {isRunning ? <Spinner size={17} /> : <PlayIcon size={17} />}
                   {isRunning ? "Resuming..." : "Resume plan"}
                 </Button>
               )}
               {canRetryFinalPlan && (
                 <Button size="sm" disabled={isRunning} onClick={onRetryFinalPlan}>
-                  {isRunning ? <RefreshCw size={17} className="spin" /> : <RefreshCw size={17} />}
+                  {isRunning ? <Spinner size={17} /> : <ArrowsClockwiseIcon size={17} />}
                   {isRunning ? "Retrying..." : "Retry final plan"}
                 </Button>
               )}
               {pendingDecisions.length === 0 && isReviewingPlanItems && (
                 <Button size="sm" disabled={isRunning || !canComposePlan} onClick={onComposePlan}>
-                  {isRunning ? <RefreshCw size={17} className="spin" /> : <Play size={17} />}
+                  {isRunning ? <Spinner size={17} /> : <PlayIcon size={17} />}
                   {isRunning ? "Composing..." : "Compose final plan"}
                 </Button>
               )}
@@ -336,7 +337,7 @@ export function SlackView(props: {
             />
           ) : (
             <div className="thread-empty-state">
-              <MessageSquare size={24} />
+              <ChatIcon size={24} />
               <h2>
                 {pendingDecisions.length
                   ? "Decision thread"
@@ -363,7 +364,7 @@ export function SlackView(props: {
                 <strong>{decisionActionTitle}</strong>
               </div>
               <Button size="sm" disabled={isRunning || !hasAnyDecisionInput} onClick={onContinue}>
-                {isRunning ? <RefreshCw size={17} className="spin" /> : <Play size={17} />}
+                {isRunning ? <Spinner size={17} /> : <PlayIcon size={17} />}
                 {isRunning ? "Continuing..." : "Continue plan"}
               </Button>
             </div>

@@ -1,5 +1,5 @@
 import React, { useEffect, useLayoutEffect, useMemo, useRef } from "react";
-import { ImagePlus } from "lucide-react";
+import { ImageIcon } from "@phosphor-icons/react";
 
 import { IconButton, ResizableTextarea } from "@/renderer/components/primitives";
 import { AccordMergeIcon } from "./accord-merge-icon";
@@ -31,6 +31,7 @@ import { useChatComposerSuggestions, type ChatComposerSuggestion } from "./use-c
 import { useComposerNoticeClearance } from "./use-composer-notice-clearance";
 import { SpeechToTextButton } from "./speech-to-text-button";
 import { DICTATION_SESSION_ATTRIBUTE } from "./dictation-target";
+import { ComposerContextStrip, ComposerFooterSlot } from "./composer-context";
 import { onComposerFocusRequest, takeComposerFocusRequest } from "../../app/composer-focus-request";
 
 /**
@@ -83,8 +84,11 @@ export interface ChatComposerProps {
    *  drops a dictation in progress. Defaults to the chat. */
   dictationSession?: string;
   /** The sessions view: the member's controls (model, effort, permission
-   *  mode, Codex's Plan mode, where it runs), each with its own menu. */
+   *  mode, Codex's Plan mode, where it runs), each with its own menu, in the
+   *  context strip above the text (Plan mode goes to the footer by Send). */
   footerChip?: React.ReactNode;
+  /** The context strip's left side: the chat's folder and branch. */
+  contextLead?: React.ReactNode;
   /** The sessions view: Stop for the main session's run, in the send
    *  button's place while there is nothing to send. */
   stop?: ChatComposerStop;
@@ -95,6 +99,7 @@ export interface ChatComposerProps {
 
 export function ChatComposer(props: ChatComposerProps): JSX.Element {
   const rootRef = useRef<HTMLDivElement>(null);
+  const [footerSlot, setFooterSlot] = React.useState<HTMLElement | null>(null);
   useComposerNoticeClearance(rootRef);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const highlightRef = useRef<HTMLDivElement>(null);
@@ -211,7 +216,9 @@ export function ChatComposer(props: ChatComposerProps): JSX.Element {
         selectedFileMentions={mentions.selectedFileMentions}
         selectedSkillMentions={mentions.selectedSkillMentions}
       />
+      <ComposerFooterSlot.Provider value={footerSlot}>
       <div className="chat-composer-shell">
+        {props.footerChip && <ComposerContextStrip lead={props.contextLead}>{props.footerChip}</ComposerContextStrip>}
         <div className={["chat-input-wrap", mentions.showSkillHighlights ? "has-skill-highlights" : ""].filter(Boolean).join(" ")}>
         <ChatComposerMenus
           artifactOptions={mentions.visibleArtifactOptions}
@@ -359,7 +366,23 @@ export function ChatComposer(props: ChatComposerProps): JSX.Element {
                 void images.addImageFiles(files);
               }}
             />
-            <IconButton label="Attach image" icon={ImagePlus} onClick={() => fileInputRef.current?.click()} />
+            <IconButton label="Attach image" icon={ImageIcon} onClick={() => fileInputRef.current?.click()} />
+            {props.onOpenAccord && (
+              <Tooltip>
+                <TooltipTrigger asChild>
+                  <span className="composer-accord-tooltip-trigger">
+                    <IconButton
+                      label="Start Accord"
+                      icon={AccordMergeIcon}
+                      disabled={Boolean(props.accordDisabledReason)}
+                      data-testid="chat-accord-button"
+                      onClick={props.onOpenAccord}
+                    />
+                  </span>
+                </TooltipTrigger>
+                <TooltipContent side="top">{accordTooltip}</TooltipContent>
+              </Tooltip>
+            )}
             {activeRunCount > 0 && props.onStopAllRuns && (
               <ChatActiveRunPopover
                 activeRunCount={activeRunCount}
@@ -379,23 +402,7 @@ export function ChatComposer(props: ChatComposerProps): JSX.Element {
                 {suggestions.count > 1 && <><em>·</em><kbd>↑</kbd><kbd>↓</kbd> {suggestions.position} of {suggestions.count}</>}
               </span>
             )}
-            {props.onOpenAccord && (
-              <Tooltip>
-                <TooltipTrigger asChild>
-                  <span className="composer-accord-tooltip-trigger">
-                    <IconButton
-                      label="Start Accord"
-                      icon={AccordMergeIcon}
-                      disabled={Boolean(props.accordDisabledReason)}
-                      data-testid="chat-accord-button"
-                      onClick={props.onOpenAccord}
-                    />
-                  </span>
-                </TooltipTrigger>
-                <TooltipContent side="top">{accordTooltip}</TooltipContent>
-              </Tooltip>
-            )}
-            {props.footerChip}
+            <span ref={setFooterSlot} className="chat-composer-footer-slot" />
             <SpeechToTextButton
               session={props.dictationSession ?? props.conversationId}
               getTextarea={() => rootRef.current?.querySelector("textarea") ?? null}
@@ -406,6 +413,7 @@ export function ChatComposer(props: ChatComposerProps): JSX.Element {
           </div>
         </div>
       </div>
+      </ComposerFooterSlot.Provider>
     </div>
   );
 }

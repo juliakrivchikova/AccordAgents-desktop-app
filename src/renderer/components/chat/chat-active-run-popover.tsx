@@ -1,4 +1,4 @@
-import { Loader2, X } from "lucide-react";
+import { XIcon } from "@phosphor-icons/react";
 import { useState } from "react";
 import type React from "react";
 
@@ -7,6 +7,7 @@ import { IconButton } from "../primitives";
 import type { ChatParticipant } from "../../../shared/types";
 import { chatParticipantDisplayName } from "../conversation/conversation-display";
 import { RosterStatusIndicator, type ChatParticipantRosterStatus } from "./chat-roster-status";
+import { Spinner } from "@/components/ui/spinner";
 
 export interface ChatActiveRunParticipantRow {
   participant: ChatParticipant;
@@ -53,7 +54,7 @@ export function ChatActiveRunRow(props: ChatActiveRunParticipantRow & {
         <IconButton
           size="xs"
           tone="danger"
-          icon={X}
+          icon={XIcon}
           label={`Stop ${participantName} ${participantRunLabel}`}
           tooltip={`Stop ${participantName}`}
           data-testid="composer-active-run-row-stop"
@@ -85,14 +86,14 @@ export function ChatActiveRunPopover(props: {
             title="Show running members"
             aria-label={`${activeRunLabel}. Show running members.`}
           >
-            <Loader2 size={13} className="spin" aria-hidden />
+            <Spinner size={13} />
             <span>{activeRunLabel}</span>
           </button>
         </PopoverTrigger>
         <IconButton
           size="xs"
           tone="danger"
-          icon={X}
+          icon={XIcon}
           label={`Stop ${activeRunLabel}`}
           tooltip="Stop running members"
           data-testid="composer-active-run-stop"

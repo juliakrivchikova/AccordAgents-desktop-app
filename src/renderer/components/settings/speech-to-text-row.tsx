@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { Loader2 } from "lucide-react";
+import { Switch } from "@/components/ui/switch";
 
 import { Button } from "@/components/ui/button";
 import { SPEECH_HOLD_KEYS, SPEECH_HOLD_KEY_LABELS, formatSpeechBytes, isSpeechHoldKey } from "../../../shared/speechToText";
@@ -9,6 +9,8 @@ import { cleanIpcError } from "../../lib/ipc-error";
 import { isWindowsPlatform } from "../../lib/platform";
 import { AppSelect } from "../primitives";
 import { AwsDialog } from "./aws-dialog";
+import { Spinner } from "@/components/ui/spinner";
+import { Delayed } from "@/components/ui/delayed";
 
 const HOLD_KEY_OPTIONS = SPEECH_HOLD_KEYS.map((value) => ({ value, label: SPEECH_HOLD_KEY_LABELS[value] }));
 
@@ -91,17 +93,13 @@ export function SpeechToTextRow(): JSX.Element | null {
             </div>
           ) : null}
         </div>
-        <label className="toggle">
-          <input
-            type="checkbox"
-            data-testid="speech-to-text-toggle"
-            aria-label="Speech to text"
-            checked={on}
-            disabled={pending || state.status === "unavailable" || state.status === "verifying"}
-            onChange={(event) => toggle(event.target.checked)}
-          />
-          <span />
-        </label>
+        <Switch
+          data-testid="speech-to-text-toggle"
+          aria-label="Speech to text"
+          checked={on}
+          disabled={pending || state.status === "unavailable" || state.status === "verifying"}
+          onChange={(event) => toggle(event.target.checked)}
+        />
       </div>
       {state.status !== "unavailable" ? (
         <>
@@ -139,7 +137,7 @@ export function SpeechToTextRow(): JSX.Element | null {
           <Button type="button" variant="outline" size="sm" disabled={pending} onClick={() => setDialog(undefined)}>Cancel</Button>
           <Button type="button" size="sm" disabled={pending} data-testid="speech-to-text-download-confirm"
             onClick={() => void act(() => window.consensus.enableSpeechToText())}>
-            {pending ? <Loader2 size={14} className="gen-aws-spinner" aria-hidden /> : null}
+            {pending ? <Delayed><Spinner size={14} /></Delayed> : null}
             Download and install
           </Button>
         </>}

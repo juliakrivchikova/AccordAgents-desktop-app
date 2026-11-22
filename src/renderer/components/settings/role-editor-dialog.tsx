@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { Eye, LockKeyhole, Pencil, Trash2, X } from "lucide-react";
+import { EyeIcon, LockKeyIcon, PencilSimpleIcon, TrashIcon, XIcon } from "@phosphor-icons/react";
 
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogClose, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
@@ -205,14 +205,14 @@ export function ChatRoleEditorDialog(props: {
             </span>
             <RoleKindBadge builtIn={Boolean(role?.builtIn && props.editor?.type === "edit")} />
             <DialogClose asChild>
-              <IconButton className="roles-editor-close" label="Close role editor" icon={X} data-testid="settings-role-modal-close" />
+              <IconButton className="roles-editor-close" label="Close role editor" icon={XIcon} data-testid="settings-role-modal-close" />
             </DialogClose>
           </div>
         </DialogHeader>
         <div className="roles-editor-body">
           {readOnly && role && (
             <div className="roles-readonly-banner" data-testid="settings-role-builtin-banner">
-              <LockKeyhole size={17} aria-hidden />
+              <LockKeyIcon size={17} aria-hidden />
               <span>This is a built-in role and is read-only. Duplicate it to create an editable copy.</span>
               <Button
                 type="button"
@@ -345,7 +345,7 @@ export function ChatRoleEditorDialog(props: {
                   data-testid="settings-role-modal-preview"
                   onClick={() => setPreview(true)}
                 >
-                  <Eye size={14} aria-hidden />
+                  <EyeIcon size={14} aria-hidden />
                   Preview
                 </button>
                 <button
@@ -354,7 +354,7 @@ export function ChatRoleEditorDialog(props: {
                   data-testid="settings-role-modal-edit"
                   onClick={() => setPreview(false)}
                 >
-                  <Pencil size={14} aria-hidden />
+                  <PencilSimpleIcon size={14} aria-hidden />
                   Edit
                 </button>
               </span>
@@ -386,7 +386,7 @@ export function ChatRoleEditorDialog(props: {
           {showDelete && (
             <Button
               type="button"
-              variant="outline"
+              variant="destructive"
               size="sm"
               className="roles-editor-delete"
               disabled={!canDelete}
@@ -396,7 +396,7 @@ export function ChatRoleEditorDialog(props: {
               data-testid="settings-role-modal-delete"
               onClick={() => setDeleteConfirmOpen(true)}
             >
-              <Trash2 size={14} aria-hidden />
+              <TrashIcon size={14} aria-hidden />
               Delete role
             </Button>
           )}

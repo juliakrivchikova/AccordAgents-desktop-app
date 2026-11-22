@@ -1,7 +1,7 @@
 // The number and context controls of Settings → General, each with its own
 // Save (moved out of general-settings-section.tsx to keep it readable).
 import { useEffect, useState } from "react";
-import { ChevronDown } from "lucide-react";
+import { CaretDownIcon } from "@phosphor-icons/react";
 
 import type {
   ChatPromptContextMode,
@@ -156,7 +156,7 @@ function PromptContextScopeControl(props: {
           <option value="all_unseen">{props.label}: All unseen</option>
           <option value="latest_unseen">{props.label}: Latest unseen</option>
         </select>
-        <ChevronDown aria-hidden="true" size={14} />
+        <CaretDownIcon aria-hidden="true" size={14} />
       </label>
       <div className="gen-timeout-field">
         <input

@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { ListChecks, PencilLine } from "lucide-react";
+import { ListChecksIcon, PencilLineIcon } from "@phosphor-icons/react";
 
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
@@ -43,7 +43,7 @@ export function ChatChoiceCard(props: {
     return (
       <section className="chat-choice-card is-folded" aria-label={`${choice.title}: ${outcome.text}`}>
         <div className="chat-card-row">
-          <ListChecks className="chat-card-row-icon" size={14} aria-hidden="true" />
+          <ListChecksIcon className="chat-card-row-icon" size={14} aria-hidden="true" />
           <span className="chat-card-row-preview">{choice.title}</span>
           <span className="chat-card-row-outcome" title={outcome.text}>
             {requesterLabel ? `${requesterLabel} · ` : ""}{outcome.text}{outcome.at ? ` ${formatChatTime(outcome.at)}` : ""}
@@ -119,7 +119,7 @@ export function ChatChoiceCard(props: {
             onChange={() => setDraftSelection(CHAT_CUSTOM_CHOICE_OPTION_ID)}
           />
           <span className="chat-choice-num chat-choice-custom-icon" aria-hidden="true">
-            <PencilLine size={14} />
+            <PencilLineIcon size={14} />
           </span>
           <span className="chat-choice-option-body">
             <span className="chat-choice-option-title">

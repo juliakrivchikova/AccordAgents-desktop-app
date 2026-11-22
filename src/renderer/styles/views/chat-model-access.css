@@ -77,7 +77,7 @@
 }
 
 .composer-menu-trigger[aria-expanded="true"] {
-  background: var(--app-surface-hover);
+  background: var(--ui-row-hover);
   color: var(--app-text-strong);
 }
 
@@ -117,7 +117,7 @@
 
 .chat-member-actions-trigger:hover,
 .chat-member-actions-trigger[aria-expanded="true"] {
-  background: var(--app-surface-hover);
+  background: var(--ui-row-hover);
   color: var(--app-text-strong);
 }
 
@@ -190,7 +190,7 @@
 
 .composer-menu-item:hover:not(:disabled),
 .composer-menu-item:focus-visible {
-  background: var(--app-surface-hover);
+  background: var(--ui-row-hover);
 }
 
 .composer-menu-item:disabled {
@@ -287,4 +287,127 @@
 .is-sessions-view .chat-composer-shell,
 .is-sessions-view .chat-composer-toolbar {
   min-width: 0;
+}
+
+/* The composer's context strip (composer-context.tsx): the folder and branch
+   on the left, the main session's controls on the right, over the text. */
+.chat-composer-context {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  min-width: 0;
+  margin: -2px -4px 0;
+  padding-bottom: 6px;
+  border-bottom: 1px solid var(--ui-border-subtle);
+}
+
+.chat-composer-context-lead {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  min-width: 0;
+  flex: 0 1 auto;
+}
+
+.chat-composer-context-spacer {
+  flex: 1 1 auto;
+  min-width: 8px;
+}
+
+.chat-composer-context-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  height: 28px;
+  padding: 0 8px;
+  border-radius: var(--ui-radius-8);
+  color: var(--ui-text-2);
+  font-size: 13px;
+  white-space: nowrap;
+}
+
+.chat-composer-context-item:focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring);
+}
+
+.chat-composer-context-item.is-quiet {
+  color: var(--ui-text-3);
+}
+
+.chat-composer-context-text {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* Plan mode by Send: a small switch and its name; the switch says on or off. */
+.chat-composer-footer-slot {
+  display: contents;
+}
+
+.chat-composer-toggle.is-footer,
+.chat-composer-toggle.is-footer.is-on {
+  gap: 6px;
+  background: transparent;
+  color: var(--ui-text-2);
+}
+
+.chat-composer-toggle.is-footer:hover:not(:disabled) {
+  background: var(--ui-row-hover);
+  color: var(--ui-text);
+}
+
+.chat-composer-toggle-track {
+  position: relative;
+  flex: none;
+  width: 24px;
+  height: 14px;
+  border-radius: 999px;
+  background: var(--ui-bg-muted);
+  transition: background-color var(--ui-duration-fast) var(--ui-ease-out);
+}
+
+.chat-composer-toggle-track::after {
+  content: "";
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  background: var(--ui-bg);
+  box-shadow: var(--ui-shadow-sm);
+  transition: transform var(--ui-duration-fast) var(--ui-ease-out);
+}
+
+.chat-composer-toggle.is-on .chat-composer-toggle-track {
+  background: var(--ui-primary);
+}
+
+.chat-composer-toggle.is-on .chat-composer-toggle-track::after {
+  transform: translateX(10px);
+}
+
+/* The branch in the strip opens its menu (composer-context.tsx). */
+button.chat-composer-context-item.is-menu {
+  border: 0;
+  background: transparent;
+  font: inherit;
+  font-size: 13px;
+  cursor: pointer;
+  transition:
+    background-color var(--ui-duration-fast) var(--ui-ease-out),
+    color var(--ui-duration-fast) var(--ui-ease-out);
+}
+
+button.chat-composer-context-item.is-menu:hover:not(:disabled),
+button.chat-composer-context-item.is-menu[aria-expanded="true"] {
+  background: var(--ui-row-hover);
+  color: var(--ui-text);
+}
+
+button.chat-composer-context-item.is-menu:disabled {
+  cursor: default;
 }

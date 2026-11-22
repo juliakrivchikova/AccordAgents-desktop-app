@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import { Trash2, X } from "lucide-react";
+import { TrashIcon, XIcon } from "@phosphor-icons/react";
 
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogClose, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
@@ -181,7 +181,7 @@ export function ParticipantEditorDialog(props: {
               <DialogDescription>{roleLabel || "Saved member preset"}</DialogDescription>
             </span>
             <DialogClose asChild>
-              <IconButton label="Close member editor" icon={X} />
+              <IconButton label="Close member editor" icon={XIcon} />
             </DialogClose>
           </div>
         </DialogHeader>
@@ -302,7 +302,7 @@ export function ParticipantEditorDialog(props: {
               data-testid="settings-participant-modal-delete"
               onClick={() => setDeleteConfirmOpen(true)}
             >
-              <Trash2 size={14} aria-hidden />
+              <TrashIcon size={14} aria-hidden />
               Delete preset
             </Button>
           )}

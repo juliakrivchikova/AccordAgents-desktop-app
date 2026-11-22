@@ -28,6 +28,16 @@ function cleanBranchRefs(value: string): string[] {
   return branches;
 }
 
+/** The branches a folder has of its own (refs/heads), the ones it can switch to. */
+function localBranchRefs(value: string): string[] {
+  return value
+    .split(/\r?\n/)
+    .map((line) => line.split("\t").map((part) => part.trim()))
+    // A name git would read as an option (an imported "-x") is never offered.
+    .filter(([fullRef = "", shortRef = ""]) => fullRef.startsWith("refs/heads/") && Boolean(shortRef) && !shortRef.startsWith("-"))
+    .map(([, shortRef = ""]) => shortRef);
+}
+
 function gitError(error: unknown): string {
   if (error instanceof CommandError) {
     return (error.result.stderr || error.result.stdout || error.message).trim();
@@ -153,6 +163,7 @@ export class GitService {
         isRepo: true,
         currentBranch: branch.stdout.trim() || undefined,
         branches: cleanBranchRefs(branches.stdout),
+        localBranches: localBranchRefs(branches.stdout),
         statusLines: cleanLines(status.stdout)
       };
     } catch (error) {
@@ -164,6 +175,41 @@ export class GitService {
         statusLines: [],
         error: message
       };
+    }
+  }
+
+  /**
+   * Switches the folder's working tree to one of its own branches, as
+   * `git switch` does at a terminal: git refuses when uncommitted changes
+   * would be overwritten, and its own words come back as the error. Only a
+   * branch the folder already has is accepted, so nothing else reaches git.
+   */
+  async switchBranch(repoPath: string, branch: string): Promise<GitRepoInfo> {
+    const info = await this.inspectRepo(repoPath);
+    if (!info.isRepo) {
+      throw new Error(info.error ?? "This folder is not a git repository.");
+    }
+    if (!info.localBranches?.includes(branch)) {
+      throw new Error(`This folder has no branch ${branch}.`);
+    }
+    if (branch !== info.currentBranch) {
+      try {
+        await runCommand(await this.gitCommand(), ["switch", branch], { cwd: info.repoPath, timeoutMs: 30_000 });
+      } catch (error) {
+        throw new Error(gitError(error));
+      }
+    }
+    return this.inspectRepo(info.repoPath);
+  }
+
+  /** The top of the git working tree a folder is in: a switch changes all of
+   *  it, whichever folder inside it a chat works in. */
+  async worktreeRoot(folder: string): Promise<string | undefined> {
+    try {
+      const result = await runCommand(await this.gitCommand(), ["rev-parse", "--show-toplevel"], { cwd: folder.trim(), timeoutMs: 8000 });
+      return result.stdout.trim() || undefined;
+    } catch {
+      return undefined;
     }
   }
 

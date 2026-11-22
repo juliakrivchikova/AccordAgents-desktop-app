@@ -1,15 +1,22 @@
-import { useEffect, useState } from "react";
 import type { ReviewProgress } from "../../../shared/types";
-import { AppLoadingState } from "../loading-states";
+import { Delayed } from "@/components/ui/delayed";
+import { Spinner } from "@/components/ui/spinner";
 
-export function ChatCreationState({ progress, stopping }: { progress?: ReviewProgress; stopping: boolean }): JSX.Element {
-  const [startedAt] = useState(Date.now);
-  const [seconds, setSeconds] = useState(0);
-  useEffect(() => {
-    const timer = window.setInterval(() => setSeconds(Math.floor((Date.now() - startedAt) / 1000)), 1000);
-    return () => window.clearInterval(timer);
-  }, [startedAt]);
-  const message = stopping ? "Stopping preparation…" : progress?.message ?? "Creating your chat…";
-  return <AppLoadingState title={stopping ? "Stopping" : "Starting chat"}
-    description={<>{message}<span aria-hidden="true"> · {seconds}s</span></>} />;
+/** What a chat being made says while New chat waits for it: its own run's
+ *  latest step (copying a project for a cloud run, say), never another run's. */
+export function chatCreationStatus(progressLog: readonly ReviewProgress[], runId: string | undefined, stopping: boolean): string {
+  if (stopping) return "Stopping preparation…";
+  const latest = runId ? [...progressLog].reverse().find((item) => item.runId === runId) : undefined;
+  return latest?.message ?? "Creating your chat…";
 }
+
+/** The status line over New chat's composer while the chat is being made,
+ *  where an open chat shows its run's progress; a quick start shows none. */
+export const ChatCreationStatusLine = ({ text }: { text: string }): JSX.Element => (
+  <Delayed>
+    <div className="chat-composer-status new-chat-creation-status" role="status" data-testid="new-chat-creation-status">
+      <Spinner size={14} />
+      <span>{text}</span>
+    </div>
+  </Delayed>
+);

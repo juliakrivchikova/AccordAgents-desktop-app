@@ -1,6 +1,6 @@
 import { useState } from "react";
 import type React from "react";
-import { Sparkles, X } from "lucide-react";
+import { SparkleIcon, XIcon } from "@phosphor-icons/react";
 
 import { Input } from "@/components/ui/input";
 import {
@@ -209,7 +209,7 @@ export function ChatParticipantDraftRow(props: {
             aria-label="Draw an avatar"
             onClick={() => setStudioOpen(true)}
           >
-            <Sparkles size={16} aria-hidden />
+            <SparkleIcon size={16} aria-hidden />
             <span>Create</span>
           </button>
           {customAvatars.map((custom) => {
@@ -261,7 +261,7 @@ export function ChatParticipantDraftRow(props: {
       {props.removable && (
         <IconButton
           size="xs"
-          icon={X}
+          icon={XIcon}
           label="Remove member"
           tooltip="Remove member"
           onClick={props.onRemove}

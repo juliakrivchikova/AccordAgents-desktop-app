@@ -2556,8 +2556,15 @@ export interface GitRepoInfo {
   isRepo: boolean;
   currentBranch?: string;
   branches: string[];
+  /** The folder's own branches (no remotes): the ones it can switch to. */
+  localBranches?: string[];
   statusLines: string[];
   error?: string;
+}
+
+export interface GitSwitchBranchRequest {
+  repoPath: string;
+  branch: string;
 }
 
 export interface GitDiffRequest {
@@ -3734,6 +3741,9 @@ export interface AppBridge {
   onTerminalHostState(callback: (event: TerminalHostStateEvent) => void): () => void;
   selectRepoDirectory(): Promise<string | undefined>;
   inspectRepo(repoPath: string): Promise<GitRepoInfo>;
+  /** Switches a folder to one of its own branches (`git switch`); rejects
+   *  with git's words when it refuses. Returns the folder as it is after. */
+  switchGitBranch(request: GitSwitchBranchRequest): Promise<GitRepoInfo>;
   getDiff(request: GitDiffRequest): Promise<GitDiffResult>;
   searchRepoFiles(request: RepoFileSearchRequest): Promise<RepoFileSearchResult[]>;
   searchUserSkills(request: UserSkillSearchRequest): Promise<UserSkillSearchResult>;

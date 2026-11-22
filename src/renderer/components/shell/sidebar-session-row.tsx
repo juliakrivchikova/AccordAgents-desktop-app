@@ -1,4 +1,4 @@
-import { Archive, ArchiveRestore, Loader2, Pin, PinOff, Trash2 } from "lucide-react";
+import { ArchiveIcon, BoxArrowUpIcon, PushPinIcon, PushPinSlashIcon, TrashIcon } from "@phosphor-icons/react";
 
 import {
   ContextMenu,
@@ -8,6 +8,8 @@ import {
 } from "@/components/ui/context-menu";
 import { cn } from "@/lib/utils";
 import type { ConversationSummary } from "../../../shared/types";
+import { Spinner } from "@/components/ui/spinner";
+import { formatCompactRelativeTime } from "../../app/compact-relative-time";
 
 interface SidebarSessionRowProps {
   summary: ConversationSummary;
@@ -21,6 +23,8 @@ interface SidebarSessionRowProps {
   /** Where the row is listed, for tests and styles (one chat can be listed
    *  under Pinned, Recents and its project at once). */
   section?: "pinned" | "recent" | "project" | "archived";
+  /** Listed under a project: starts under the project's name. */
+  indented?: boolean;
   onSelect: (id: string) => void;
   onArchive?: (id: string) => void;
   onUnarchive?: (id: string) => void;
@@ -38,6 +42,7 @@ export function sidebarSessionMark(state: { working: boolean; waitingChoice: boo
   if (state.unread) return "unread";
   return "none";
 }
+
 export const SidebarSessionRow = ({
   summary,
   selected,
@@ -46,6 +51,7 @@ export const SidebarSessionRow = ({
   working,
   unread,
   section,
+  indented = false,
   onSelect,
   onArchive,
   onUnarchive,
@@ -55,7 +61,10 @@ export const SidebarSessionRow = ({
   const relativeTime = formatCompactRelativeTime(summary.updatedAt);
   const archived = summary.archived === true;
   const pinned = summary.pinned === true;
-  const mark = pending ? "working" : sidebarSessionMark({ working, waitingChoice: summary.waitingChoice === true, unread });
+  // A chat being opened shows as selected at once and gets no spinner: one
+  // for half a second pushed the title aside on every click (the User,
+  // 2026-11-22). The spinner is for work only.
+  const mark = sidebarSessionMark({ working, waitingChoice: summary.waitingChoice === true, unread });
   return (
     <ContextMenu>
       <ContextMenuTrigger asChild>
@@ -72,51 +81,60 @@ export const SidebarSessionRow = ({
           data-conversation-id={summary.id}
           data-testid="project-session"
           aria-busy={pending || working ? "true" : undefined}
+          aria-current={selected ? "page" : undefined}
           className={cn(
-            "sidebar-history-item group flex w-full min-w-0 max-w-full flex-col gap-0.5 overflow-hidden rounded-md px-2 py-1.5 text-left text-sm",
-            "border border-transparent transition-colors hover:bg-[var(--app-surface-hover)]",
-            selected && "is-selected text-[var(--app-text-strong)]",
-            pending && "is-loading",
-            "focus-visible:outline-none focus-visible:shadow-[var(--focus-ring)]"
+            "group flex h-7 w-full min-w-0 items-center gap-2 rounded-ui-8 px-2 text-left text-ui-13 text-ui-text",
+            "transition-colors duration-120 ease-ui-out hover:bg-ui-row-hover",
+            "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ui-focus-ring",
+            indented && "pl-7",
+            selected && "bg-ui-row-active text-ui-select-fg hover:bg-ui-row-active"
           )}
         >
-          <span className="flex w-full min-w-0 items-center gap-1.5 text-[13px] leading-tight">
-            {mark === "working" && <Loader2 className="size-3 shrink-0 animate-spin" aria-hidden />}
-            <span className="min-w-0 flex-1 truncate">{summary.title}</span>
-            {mark === "waiting" && (
-              <span
-                className="size-2 shrink-0 rounded-full bg-[var(--app-warning)]"
-                data-testid="session-waiting-mark"
-                aria-label="Waiting for your answer"
-                title="Waiting for your answer"
-              />
-            )}
-            {mark === "unread" && <span className="size-2 shrink-0 rounded-full bg-[var(--app-accent)]" aria-label="New activity" title="New activity" />}
-            {relativeTime && <span className="shrink-0 text-[11px] text-muted-foreground">{relativeTime}</span>}
-          </span>
+          <span className="min-w-0 flex-1 truncate">{summary.title}</span>
+          {/* Every mark sits after the title, so none moves it. */}
+          {mark === "working" && <Spinner size={12} className="shrink-0" />}
+          {mark === "waiting" && (
+            <span
+              className="size-1.5 shrink-0 rounded-full bg-ui-warning"
+              data-testid="session-waiting-mark"
+              aria-label="Waiting for your answer"
+              title="Waiting for your answer"
+            />
+          )}
+          {mark === "unread" && <span className="size-1.5 shrink-0 rounded-full bg-ui-primary" aria-label="New activity" title="New activity" />}
+          {relativeTime && (
+            <span
+              className={cn(
+                "hidden shrink-0 text-ui-11 tabular-nums group-hover:inline group-focus-visible:inline",
+                "text-ui-text-3"
+              )}
+            >
+              {relativeTime}
+            </span>
+          )}
         </button>
       </ContextMenuTrigger>
       <ContextMenuContent>
         {!archived && onSetPinned && (
           <ContextMenuItem onSelect={() => onSetPinned(summary.id, !pinned)} data-testid="session-pin-toggle">
-            {pinned ? <PinOff aria-hidden /> : <Pin aria-hidden />}
+            {pinned ? <PushPinSlashIcon aria-hidden /> : <PushPinIcon aria-hidden />}
             {pinned ? "Unpin" : "Pin"}
           </ContextMenuItem>
         )}
         {archived ? (
           <>
             <ContextMenuItem onSelect={() => onUnarchive?.(summary.id)}>
-              <ArchiveRestore aria-hidden />
+              <BoxArrowUpIcon aria-hidden />
               Unarchive
             </ContextMenuItem>
             <ContextMenuItem variant="destructive" disabled={running} onSelect={() => onDelete?.(summary)}>
-              <Trash2 aria-hidden />
+              <TrashIcon aria-hidden />
               Delete permanently
             </ContextMenuItem>
           </>
         ) : (
           <ContextMenuItem disabled={running} onSelect={() => onArchive?.(summary.id)}>
-            <Archive aria-hidden />
+            <ArchiveIcon aria-hidden />
             Archive
           </ContextMenuItem>
         )}
@@ -124,35 +142,3 @@ export const SidebarSessionRow = ({
     </ContextMenu>
   );
 };
-
-function formatCompactRelativeTime(value: string): string {
-  const timestamp = Date.parse(value);
-  if (!Number.isFinite(timestamp)) {
-    return "";
-  }
-  const diffSeconds = Math.max(0, Math.floor((Date.now() - timestamp) / 1000));
-  if (diffSeconds < 60) {
-    return "now";
-  }
-  const diffMinutes = Math.floor(diffSeconds / 60);
-  if (diffMinutes < 60) {
-    return `${diffMinutes}m`;
-  }
-  const diffHours = Math.floor(diffMinutes / 60);
-  if (diffHours < 24) {
-    return `${diffHours}h`;
-  }
-  const diffDays = Math.floor(diffHours / 24);
-  if (diffDays < 14) {
-    return `${diffDays}d`;
-  }
-  const diffWeeks = Math.floor(diffDays / 7);
-  if (diffWeeks < 8) {
-    return `${diffWeeks}w`;
-  }
-  const diffMonths = Math.floor(diffDays / 30);
-  if (diffMonths < 12) {
-    return `${Math.max(1, diffMonths)}mo`;
-  }
-  return `${Math.max(1, Math.floor(diffDays / 365))}y`;
-}

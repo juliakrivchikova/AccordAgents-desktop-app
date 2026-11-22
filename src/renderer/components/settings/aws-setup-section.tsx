@@ -1,11 +1,12 @@
 import { Fragment, useEffect, useRef, useState } from "react";
-import { Check, X } from "lucide-react";
+import { CheckIcon, XIcon } from "@phosphor-icons/react";
 import type { CloudRunWorkerCheck, CloudRunWorkerDoctorReport, CloudRunWorkerSetupProgress } from "../../../shared/types";
 import { AwsWaiting } from "./aws-dialog";
 import { Row } from "./aws-row";
 import { AwsSignInDialog, type AwsSignInRequest } from "./aws-sign-in-dialog";
 import { publishAwsAttention } from "./use-aws-attention";
 import { cleanError } from "./aws-shared";
+import { Delayed } from "@/components/ui/delayed";
 
 type Fix = "sign-in" | "install" | "fix";
 interface SetupItem { key: string; label: string; ok: boolean; required: boolean; detail: string; fix?: Fix; provider?: "codex-cli" | "claude-code" }
@@ -131,7 +132,8 @@ export function AwsSetupSection(props: { running: boolean; instanceId?: string; 
   useEffect(() => { publishAwsAttention("setup", props.running && !props.settingUp && required > 0); }, [props.running, props.settingUp, required]);
   if (!props.running) return null;
   const ordered = [...failing, ...items.filter((item) => item.ok)];
-  const meta = checking || setupRunning ? <AwsWaiting>{setupRunning ? progress?.message ?? "Setting up…" : "Checking…"}</AwsWaiting>
+  const meta = setupRunning ? <AwsWaiting>{progress?.message ?? "Setting up…"}</AwsWaiting>
+    : checking ? <Delayed><AwsWaiting>Checking…</AwsWaiting></Delayed>
     : report ? required ? `${required} of ${items.length} need attention` : failing.length ? `Ready · ${failing.length} optional` : `All ${items.length} ready` : undefined;
   return (
     <section className="gen-section" data-testid="aws-setup">
@@ -149,7 +151,7 @@ export function AwsSetupSection(props: { running: boolean; instanceId?: string; 
               <Fragment key={item.key}>
                 {index || error ? <div className="gen-card-divider" /> : null}
                 <Row testId={`aws-setup-${item.key}`}
-                  title={<><span className={`gen-aws-mark ${item.ok ? "is-ok" : item.required ? "is-fail" : "is-warn"}`} role="img" aria-label={item.ok ? "Ready" : "Needs attention"}>{item.ok ? <Check size={14} aria-hidden /> : <X size={14} aria-hidden />}</span>{item.label}</>}
+                  title={<><span className={`gen-aws-mark ${item.ok ? "is-ok" : item.required ? "is-fail" : "is-warn"}`} role="img" aria-label={item.ok ? "Ready" : "Needs attention"}>{item.ok ? <CheckIcon size={14} aria-hidden /> : <XIcon size={14} aria-hidden />}</span>{item.label}</>}
                   desc={item.ok || !item.required ? item.detail : undefined}
                   error={!item.ok && item.required ? item.detail : undefined}
                   action={item.fix ? {

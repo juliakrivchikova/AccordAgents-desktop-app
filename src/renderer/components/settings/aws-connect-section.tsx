@@ -1,10 +1,12 @@
 import { useEffect, useState } from "react";
-import { Loader2 } from "lucide-react";
+import { Switch } from "@/components/ui/switch";
 import { Button } from "@/components/ui/button";
 import { AwsCommandBox, AwsDialog } from "./aws-dialog";
 import { ADMIN_COMMAND_TEXT, AwsPasteField } from "./aws-shared";
 import { AwsSetupProgressLine, type AwsSetupView } from "./aws-setup-progress";
 import type { AwsWorkerControl } from "./use-aws-worker-control";
+import { Spinner } from "@/components/ui/spinner";
+import { Delayed } from "@/components/ui/delayed";
 
 /**
  * No instance yet: one switch, the way automatic stop is turned on. Turning
@@ -46,11 +48,9 @@ export function AwsConnectSection(props: { control: AwsWorkerControl; setupView:
             {failed && !open ? <div className="gen-row-error" role="alert">Connecting failed: {failed}</div> : null}
             <AwsSetupProgressLine view={props.setupView} />
           </div>
-          <label className="toggle">
-            <input type="checkbox" aria-label="AWS instance" data-testid="aws-instance-switch" checked={open || starting}
-              disabled={starting} onChange={(event) => setOpen(event.target.checked)} />
-            <span />
-          </label>
+          <Switch aria-label="AWS instance" data-testid="aws-instance-switch" checked={open || starting}
+            disabled={starting} onChange={(event) => setOpen(event.target.checked)}
+          />
         </div>
       </div>
       <AwsDialog
@@ -66,7 +66,7 @@ export function AwsConnectSection(props: { control: AwsWorkerControl; setupView:
           <Button type="button" variant="outline" size="sm" disabled={starting} onClick={() => setOpen(false)}>Cancel</Button>
           <Button type="button" size="sm" data-testid="aws-worker-connect-start" disabled={starting || !c.canStart}
             onClick={() => void c.start(undefined, spec, "setup")}>
-            {starting ? <Loader2 size={14} className="gen-aws-spinner" aria-hidden /> : null}
+            {starting ? <Delayed><Spinner size={14} /></Delayed> : null}
             {starting ? "Starting…" : props.hasCredentials ? "Create and start" : "Connect and start"}
           </Button>
         </>}

@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type { CSSProperties } from "react";
-import { ArrowDown } from "lucide-react";
+import { ArrowDownIcon } from "@phosphor-icons/react";
 
 import type {
   ChatAppToolApprovalRequest,
@@ -62,6 +62,8 @@ import type { ChatPanelMessageContext } from "./chat-sessions-right-panel";
 import { ChatSessionsLinksContext, ChatSessionsNamesContext, useStableMap, useStableSessionsViewNames } from "./chat-sessions-links";
 import { mainComposerTargetIds, sessionsComposerProps } from "./chat-sessions-composer";
 import { ChatViewRightPanels } from "./chat-view-right-panels";
+import { ComposerRepoLead, useRepoInfo } from "./composer-context";
+import { FOLDER_BUSY_REASON } from "../../../shared/newChat";
 
 export type { ChatMessageFocusRequest } from "./chat-conversation-types";
 
@@ -122,6 +124,11 @@ export function ChatConversationView(props: ChatConversationViewProps): JSX.Elem
     liveRunIds: activeRunSummary.runIds
   });
   const sessionsMainMessages = sessions?.mainMessages;
+  // The branch is this computer's checkout: not shown for a main session that
+  // runs on a machine, whose copy it is not.
+  const mainSession = sessions ? participants.find((participant) => participant.id === sessions.mainSessionId) : undefined;
+  const mainSessionLocal = Boolean(sessions) && !mainSession?.homeMachineId && !mainSession?.cloudRun;
+  const [repo, setRepo] = useRepoInfo(mainSessionLocal ? props.conversation.repoPath : undefined);
   const topLevelMessages = useMemo(
     () => sessionsMainMessages ?? chatTopLevelMessages(props.conversation),
     [props.conversation.messages, sessionsMainMessages]
@@ -461,7 +468,7 @@ export function ChatConversationView(props: ChatConversationViewProps): JSX.Elem
               panelLaunchId={panel?.kind === "accord" ? panel.launchId : undefined}
             >
               {!viewport.isStuckToBottom && topLevelMessages.length > 0 && (
-                <IconButton className="chat-jump-to-latest" floating label="Jump to latest" icon={ArrowDown} onClick={viewport.scrollToChatBottom} />
+                <IconButton className="chat-jump-to-latest" floating label="Jump to latest" icon={ArrowDownIcon} onClick={viewport.scrollToChatBottom} />
               )}
             </ChatAccordDockSlot>
             <ChatComposer
@@ -494,6 +501,8 @@ export function ChatConversationView(props: ChatConversationViewProps): JSX.Elem
               {...sessionsComposerProps(sessions?.mainSessionId, props.renderMemberChip,
                 { runIds: activeRunSummary.runIdsByParticipantId.get(sessions?.mainSessionId ?? "") ?? [], onStopRun: props.onStopRun })}
               status={props.isRunning && !hasPendingParticipantMessage && latestComposerProgress ? <RunStatusLine progress={latestComposerProgress} /> : undefined}
+              contextLead={sessions ? <ComposerRepoLead repoPath={props.conversation.repoPath} repo={repo} onRepoChange={setRepo}
+                lockedReason={props.isRunning ? FOLDER_BUSY_REASON : undefined} /> : undefined}
               testId="chat-main-composer"
               takesFocusRequests
               renderParticipantAvatar={renderComposerMemberMark}

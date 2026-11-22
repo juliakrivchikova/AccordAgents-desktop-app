@@ -1,5 +1,5 @@
 import { createContext, useContext } from "react";
-import { BadgeCheck, FileBox, FileText } from "lucide-react";
+import { SealCheckIcon, FilesIcon, FileTextIcon } from "@phosphor-icons/react";
 import { ARTIFACT_USER_MEMBER, type ChatMessage } from "../../../shared/types";
 import { ARTIFACT_NOTE_MESSAGE_SOURCE, artifactSummaryStatusLabel } from "../../../shared/artifacts";
 import { artifactNoteActorLabel, artifactNoteVerb, parseArtifactNoteCard, type ArtifactNoteCard } from "../../../shared/artifactNoteCard";
@@ -9,6 +9,7 @@ import { ArtifactsContext } from "../artifacts/artifacts-context";
 import { ChatMessageReactionList } from "./chat-message-reactions";
 import { ChatMessageWhen } from "./chat-streaming";
 import { useSessionsViewLabel } from "./chat-sessions-links";
+import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 
 /** The card for a message that is an artifact note; anything else keeps the message row. */
 export function artifactNoteCardForMessage(message: Pick<ChatMessage, "role" | "content" | "metadata">): ArtifactNoteCard | undefined {
@@ -26,12 +27,23 @@ function versionTagOf(card: ArtifactNoteCard): string | undefined {
   return card.action === "published" || card.action === "revised" ? card.details.find((detail) => /^v\d+$/.test(detail)) : undefined;
 }
 
+/** What the card's delayed tooltip says: the artifact as it is now, and who
+ *  has given a draft or a signature so far. */
+function artifactNoteHint(name: string, status: string | undefined, progress: ArtifactNoteProgress | undefined,
+  nameOf: (label: string) => string): string[] {
+  const lines = [status ? `Open “${name}”: ${status}` : `Open “${name}”`];
+  if (progress) {
+    const given = progress.done.map((actor) => nameOf(artifactNoteActorLabel(actor))).filter(Boolean);
+    const noun = progress.kind === "drafts" ? "Drafts" : "Signed";
+    lines.push(`${noun} ${progress.done.length} of ${progress.total}${given.length ? `: ${given.join(", ")}` : ""}`);
+  }
+  return lines;
+}
+
 function ArtifactNoteMarks(props: { progress: ArtifactNoteProgress }): JSX.Element {
   const { progress } = props;
-  const Icon = progress.kind === "drafts" ? FileText : BadgeCheck;
-  const noun = progress.kind === "drafts" ? "Draft" : "Signature";
+  const Icon = progress.kind === "drafts" ? FileTextIcon : SealCheckIcon;
   const slots = Array.from({ length: progress.total }, (_, index) => progress.done[index]);
-  const nameOf = useSessionsViewLabel();
   const summary = progress.kind === "drafts"
     ? `Drafts ${progress.done.length} of ${progress.total}`
     : `Signed ${progress.done.length} of ${progress.total}`;
@@ -40,14 +52,9 @@ function ArtifactNoteMarks(props: { progress: ArtifactNoteProgress }): JSX.Eleme
       {slots.map((actor, index) => {
         const given = actor !== undefined;
         const state = given ? (progress.complete ? "is-complete" : "is-given") : "";
-        const who = given && actor ? nameOf(artifactNoteActorLabel(actor)) || undefined : undefined;
         return (
-          <span
-            className={`chat-artifact-note-mark ${state}`}
-            title={given ? `${noun}${who ? ` · ${who}` : ""}` : `${noun} · waiting`}
-            key={index}
-          >
-            <Icon size={16} strokeWidth={2} aria-hidden />
+          <span className={`chat-artifact-note-mark ${state}`} key={index}>
+            <Icon size={16} aria-hidden />
           </span>
         );
       })}
@@ -74,7 +81,9 @@ export function ChatArtifactNoteCard(props: {
   const versionTag = versionTagOf(card);
   // The sessions view names a member by its task and the main session by
   // nothing: "Revised v3" then.
-  const actorName = useSessionsViewLabel()(artifactNoteActorLabel(card.actor));
+  const nameOf = useSessionsViewLabel();
+  const actorName = nameOf(artifactNoteActorLabel(card.actor));
+  const hint = artifactNoteHint(name, summary ? artifactSummaryStatusLabel(summary) : undefined, progress, nameOf);
   const verb = artifactNoteVerb(card.action);
   const details = versionTag ? card.details.filter((detail) => detail !== versionTag) : card.details;
   const reactions = CHAT_REACTION_EMOJIS
@@ -82,30 +91,34 @@ export function ChatArtifactNoteCard(props: {
     .filter((entry) => entry.reactors.length > 0);
   return (
     <article data-message-id={message.id} className="chat-artifact-note">
-      <button
-        type="button"
-        className="chat-artifact-note-card"
-        title={summary ? `Open artifact "${name}" · ${artifactSummaryStatusLabel(summary)}` : `Open artifact "${name}"`}
-        onClick={() => artifacts?.openArtifact(card.artifactId)}
-      >
-        <span className="chat-artifact-note-icon" aria-hidden="true">
-          <FileBox size={20} strokeWidth={2} />
-        </span>
-        <span className="chat-artifact-note-text">
-          <span className="chat-artifact-note-title">
-            {actorName ? <><span className={actorClass}>{actorName}</span> {verb}</> : `${verb.charAt(0).toUpperCase()}${verb.slice(1)}`}
-            {versionTag && <span className="chat-artifact-note-version">{versionTag}</span>}
-            {details.map((detail) => <span key={detail}>{` · ${detail}`}</span>)}
-          </span>
-          <span className="chat-artifact-note-meta">
-            {name}
-            {" · "}
-            <ChatMessageWhen createdAt={message.createdAt} />
-          </span>
-          {card.note && <span className="chat-artifact-note-body">{card.note}</span>}
-        </span>
-        {progress && <ArtifactNoteMarks progress={progress} />}
-      </button>
+      <Tooltip>
+        <TooltipTrigger asChild>
+          <button
+            type="button"
+            className="chat-artifact-note-card"
+            onClick={() => artifacts?.openArtifact(card.artifactId)}
+          >
+            <span className="chat-artifact-note-icon" aria-hidden="true">
+              <FilesIcon size={16} />
+            </span>
+            <span className="chat-artifact-note-text">
+              <span className="chat-artifact-note-title">
+                {actorName ? <><span className={actorClass}>{actorName}</span> {verb}</> : `${verb.charAt(0).toUpperCase()}${verb.slice(1)}`}
+                {versionTag && <span className="chat-artifact-note-version">{versionTag}</span>}
+                {details.map((detail) => <span key={detail}>{` · ${detail}`}</span>)}
+              </span>
+              <span className="chat-artifact-note-meta">
+                {name}
+                {" · "}
+                <ChatMessageWhen createdAt={message.createdAt} />
+              </span>
+              {card.note && <span className="chat-artifact-note-body">{card.note}</span>}
+            </span>
+            {progress && <ArtifactNoteMarks progress={progress} />}
+          </button>
+        </TooltipTrigger>
+        <TooltipContent side="top" align="start">{hint.map((line) => <div key={line}>{line}</div>)}</TooltipContent>
+      </Tooltip>
       <ChatMessageReactionList reactions={reactions} onToggleReaction={(emoji) => props.onToggleReaction(message.id, emoji)} />
     </article>
   );

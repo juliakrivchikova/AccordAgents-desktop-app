@@ -32,7 +32,7 @@ import { ChatAccessMenu } from "./chat-access-controls";
 import { ChatMemberActionItems, memberSettingsActions } from "./chat-member-model-access";
 import { ChatMemberComposerControls } from "./chat-model-access-picker";
 import { ChatTitleMenuContent, type ChatViewHeaderState } from "./chat-view-switch";
-import { Terminal } from "lucide-react";
+import { TerminalIcon } from "@phosphor-icons/react";
 import { DREW, MAIN, PARTICIPANTS, chatMessage, disclosure, member, sessionsConversation } from "./chat-sessions-fixtures.test";
 
 const HANDLES = /(^|[^A-Za-z0-9_@./-])@(main|drew|gera|taylor)\b/i;
@@ -259,7 +259,7 @@ test("a failed reply keeps what the member wrote; a used card keeps its command;
   partial.unmount();
 
   const line = (preview: string, appPreview?: boolean) => render(true, (
-    <ChatUsedApprovalLine approval={approval(MAIN, { toolName: "codex_auto_review_approval", status: "approved" })} kind="Codex" icon={Terminal}
+    <ChatUsedApprovalLine approval={approval(MAIN, { toolName: "codex_auto_review_approval", status: "approved" })} kind="Codex" icon={TerminalIcon}
       preview={preview} ended="Allowed" appPreview={appPreview} />
   ));
   const command = line("Run git log @main..HEAD");

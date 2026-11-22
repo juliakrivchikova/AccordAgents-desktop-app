@@ -9,13 +9,14 @@ import type {
   PluginCatalogItem,
   StartReviewResult
 } from "../shared/types";
-import { ArrowLeft, ArrowRight, FileBox, RefreshCw, SquareTerminal, XCircle } from "lucide-react";
+import { ArrowLeftIcon, ArrowRightIcon, FilesIcon, ArrowsClockwiseIcon, IconContext, TerminalWindowIcon, XCircleIcon } from "@phosphor-icons/react";
 import { Button } from "@/components/ui/button";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { Toaster } from "@/components/ui/sonner";
 import { ModeToggle } from "./components/mode-toggle";
 import { ThemeProvider } from "./components/theme-provider";
 import { AppLoadingState } from "./components/loading-states";
+import { LoadingBar } from "@/components/ui/loading-bar";
 import { AppShell, Sidebar, SidebarToggleButton, TopBar } from "./components/shell";
 import { ActivityConversationTitle, ActivityView } from "./components/activity/activity-view";
 import { SettingsView } from "./components/settings/settings-view";
@@ -63,6 +64,7 @@ import { UrgentAlertActionsContext } from "./components/chat/urgent-alert-contex
 import { restartingMembers } from "../shared/memberRestart";
 import { TerminalPanel } from "./components/terminal/terminal-panel";
 import { useTerminalPanel } from "./components/terminal/use-terminal-panel";
+import { chatCreationStatus } from "./components/chat/chat-creation-state";
 import "./styles/app.css";
 function App(): JSX.Element {
   const state = useAppState();
@@ -256,9 +258,6 @@ function App(): JSX.Element {
     }
   };
 
-  const openingConversationDescription = view.openingConversation
-    ? `${view.openingConversation.kind === "chat" ? "Chat" : view.openingConversation.kind} · ${view.openingConversation.title}`
-    : "Opening the selected conversation from history.";
   const isNewChatScreen = !state.initializing && !view.hasResultContext;
   const topBarTitle = view.activeChatConversation
     ? (
@@ -270,9 +269,7 @@ function App(): JSX.Element {
     )
     : view.hasResultContext
       ? state.conversation?.title ?? view.openingConversation?.title ?? "Chat"
-      : isNewChatScreen
-        ? undefined
-        : "New chat";
+      : "New chat";
   const topBarLeading = state.railView === "chats" && state.sidebarCollapsed ? (
     <SidebarToggleButton expanded={false} onToggle={expandSidebar} />
   ) : undefined;
@@ -281,7 +278,7 @@ function App(): JSX.Element {
       <ModeToggle />
       <IconButton
         label="Refresh"
-        icon={RefreshCw}
+        icon={ArrowsClockwiseIcon}
         onClick={() => void (async () => {
           await conversationActions.refreshAll();
           if (state.railView === "activity") {
@@ -306,7 +303,7 @@ function App(): JSX.Element {
   const terminalToggle = (
     <IconButton
       label="Terminal"
-      icon={SquareTerminal}
+      icon={TerminalWindowIcon}
       data-testid="terminal-toggle"
       pressed={terminal.open}
       onClick={terminal.toggle}
@@ -360,7 +357,7 @@ function App(): JSX.Element {
       {terminalToggle}
       {state.busy && (
         <Button variant="outline" size="sm" onClick={() => void conversationActions.cancelReview()}>
-          <XCircle aria-hidden />
+          <XCircleIcon aria-hidden />
           Stop
         </Button>
       )}
@@ -368,7 +365,7 @@ function App(): JSX.Element {
         <>
           <IconButton
             label="Artifacts"
-            icon={FileBox}
+            icon={FilesIcon}
             data-artifacts-trigger="true"
             pressed={artifacts.panelOpen && !artifacts.fileTarget}
             // While a file is shown, the button switches the panel to artifacts.
@@ -401,7 +398,7 @@ function App(): JSX.Element {
     <TopBar
       className="pr-4 border-[var(--app-border-subtle)]"
       title={<ActivityConversationTitle title={view.activeChatConversation.title} />}
-      actions={<IconButton label="Open in chat" icon={ArrowRight} onClick={() => openActivityItemInChat(activityPreviewItem)} />}
+      actions={<IconButton label="Open in chat" icon={ArrowRightIcon} onClick={() => openActivityItemInChat(activityPreviewItem)} />}
     />
   ) : undefined;
   const chatTopBar = <TopBar leading={topBarLeading} title={topBarTitle} actions={topBarActions} className={isNewChatScreen ? "new-chat-topbar" : undefined} />;
@@ -414,7 +411,6 @@ function App(): JSX.Element {
       reviewDecisionActions={reviewDecisionActions}
       reviewPlanActions={reviewPlanActions}
       settingsActions={settingsActions}
-      openingConversationDescription={openingConversationDescription}
       accordDisabledReason={accordDisabledReason}
       onOpenAccord={() => setAccordDialogOpen(true)}
       renderMemberSettings={sessionsMember.actions}
@@ -435,7 +431,9 @@ function App(): JSX.Element {
       sidebarHidden={state.railView === "activity"}
       sidebarWidth={state.sidebarWidth}
       onSidebarWidthChange={state.setSidebarWidth}
-      minWorkspaceWidth={view.hasResultContext ? CHAT_SPLIT_WORKSPACE_MIN_WIDTH : undefined}
+      // New chat keeps the chat's workspace width, so its composer stays put
+      // when the chat opens.
+      minWorkspaceWidth={view.hasResultContext || isNewChatScreen ? CHAT_SPLIT_WORKSPACE_MIN_WIDTH : undefined}
       className={isNewChatScreen ? "is-new-chat-screen" : undefined}
       sidebar={
         state.railView === "settings" ? (
@@ -571,7 +569,7 @@ function App(): JSX.Element {
           leading={(
             <IconButton
               label="Back to chats"
-              icon={ArrowLeft}
+              icon={ArrowLeftIcon}
               data-testid="activity-back-to-chats"
               onClick={() => {
                 navigation.leaveActivity();
@@ -586,8 +584,8 @@ function App(): JSX.Element {
           error={state.activityError}
           detailError={state.activityFocusError}
           onDismissDetailError={() => state.setActivityFocusError(undefined)}
-          detail={<div className="content-area result-layout activity-conversation-content">
-            {conversationPanel ?? <AppLoadingState title="Loading chat" description={openingConversationDescription} />}
+          detail={<div className="content-area result-layout activity-conversation-content relative">
+            {conversationPanel ?? <LoadingBar label="Loading chat" />}
           </div>}
           onSelect={(item) => {
             if (isCodexActivityApprovalItem(item)) {
@@ -645,6 +643,12 @@ function App(): JSX.Element {
                 prefillPrompt={newChatPrefill?.prompt}
                 prefillRequestKey={newChatPrefill?.key}
                 busy={state.busy}
+                onOpenChat={navigation.openChat}
+                onRepoInfoChange={state.setRepoInfo}
+                onStopStart={() => void conversationActions.cancelReview()}
+                creationStatus={state.busy && state.startingChatRef.current
+                  ? chatCreationStatus(state.progressLog, state.currentRunId, Boolean(state.chatCreationRef.current?.signal.aborted))
+                  : undefined}
                 renderParticipantAvatar={renderNewChatMemberMark}
                 participantRoleLabel={(participant) => chatRoleLabel(state.settings.chatRoleConfigs, participant)}
                 onPromptChange={state.setQuestion}
@@ -684,13 +688,18 @@ function App(): JSX.Element {
 
 startRendererCrashReporting();
 
+// Every icon in the app: Phosphor regular at 16px unless its owner sizes it.
+const ICON_DEFAULTS = { size: 16, weight: "regular" } as const;
+
 createRoot(document.getElementById("root") as HTMLElement).render(
   <React.StrictMode>
     <ThemeProvider>
-      <TooltipProvider>
-        <App />
-        <Toaster richColors position="bottom-right" />
-      </TooltipProvider>
+      <IconContext.Provider value={ICON_DEFAULTS}>
+        <TooltipProvider>
+          <App />
+          <Toaster richColors position="bottom-right" />
+        </TooltipProvider>
+      </IconContext.Provider>
     </ThemeProvider>
   </React.StrictMode>
 );

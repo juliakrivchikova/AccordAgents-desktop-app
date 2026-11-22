@@ -1,5 +1,7 @@
 import { useEffect, useRef, useState } from "react";
-import { ClipboardList, Eye, Lock, PenLine, ShieldCheck, ShieldOff, SlidersHorizontal, type LucideIcon } from "lucide-react";
+import { createPortal } from "react-dom";
+import { ClipboardTextIcon, EyeIcon, LockSimpleIcon, PencilLineIcon, ShieldCheckIcon, ShieldSlashIcon, SlidersHorizontalIcon } from "@phosphor-icons/react";
+import type { Icon as PhosphorIcon } from "@phosphor-icons/react";
 
 import { effectiveChatAgentPermissionsForProvider, normalizeChatAgentMode, normalizeChatAgentPermissions } from "../../../shared/agentPermissions";
 import {
@@ -16,6 +18,8 @@ import { memberAsItRunsNow } from "../../../shared/forkToNewChat";
 import type { ChatParticipant } from "../../../shared/types";
 import type { ChatModelAccessPatch, ChatModelAccessValue } from "./chat-model-access-picker";
 import { ComposerMenu, ComposerMenuItem, ComposerMenuNote, ComposerMenuSection } from "./composer-menu";
+import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
+import { useComposerFooterSlot } from "./composer-context";
 
 // The permission mode control under a sessions-view composer and Codex's
 // Plan mode beside it (src/shared/chatAccessModes.ts): each CLI's own modes,
@@ -61,7 +65,7 @@ export function iconTriggerProps(iconOnly: boolean): { bare: boolean; triggerCla
 
 /** A control's value as an icon in a narrow composer; its name stays for
  *  screen readers (the control's tooltip and menu say it too). */
-export function ComposerControlIcon(props: { icon: LucideIcon; label: string }): JSX.Element {
+export function ComposerControlIcon(props: { icon: PhosphorIcon; label: string }): JSX.Element {
   const Icon = props.icon;
   return (
     <span className="chat-composer-control-icon">
@@ -74,13 +78,13 @@ export function ComposerControlIcon(props: { icon: LucideIcon; label: string }):
 /** A mode's icon, as T3 Code draws its permission modes: a lock for asking
  *  before changes, a pen for edits without asking, a list for planning, a
  *  checked shield for the CLI deciding, a crossed one for Full Access. */
-export function accessIcon(option: ChatAccessOption | undefined): LucideIcon {
-  if (!option) return SlidersHorizontal;
-  if (option.agentMode === "full-access") return ShieldOff;
-  if (option.agentMode === "auto") return ShieldCheck;
-  if (option.agentMode === "plan") return ClipboardList;
-  if (option.id === "read-only") return Eye;
-  return option.workspaceWrite ? PenLine : Lock;
+export function accessIcon(option: ChatAccessOption | undefined): PhosphorIcon {
+  if (!option) return SlidersHorizontalIcon;
+  if (option.agentMode === "full-access") return ShieldSlashIcon;
+  if (option.agentMode === "auto") return ShieldCheckIcon;
+  if (option.agentMode === "plan") return ClipboardTextIcon;
+  if (option.id === "read-only") return EyeIcon;
+  return option.workspaceWrite ? PencilLineIcon : LockSimpleIcon;
 }
 
 /** A CLI's permission modes under its own title, each with the vendor's
@@ -167,6 +171,9 @@ export function ChatCodexPlanToggle(props: {
   iconOnly?: boolean;
 }): JSX.Element | null {
   const { value } = props;
+  // In a composer with a footer it stands beside Send as a switch, with its
+  // full name (the User's chosen layout, 2026-11-22).
+  const footer = useComposerFooterSlot();
   const plan = chatAccessModeSet("codex-cli").plan;
   if (!plan || !selectedChatAccessOption(value.kind, value.agentMode, value.permissions)) return null;
   const on = codexPlanModeOn(value.kind, value.agentMode, value.permissions);
@@ -174,13 +181,25 @@ export function ChatCodexPlanToggle(props: {
   // On where the program cannot run it, it can be turned off; the reason
   // stays in its tooltip (its turns are refused until then).
   const title = props.disabled ? `${plan.label}. ${TURN_RUNNING_NOTE}` : props.modesReason ? `${plan.label}. ${props.modesReason}` : plan.label;
-  return (
-    <button type="button" className={`chat-model-chip chat-composer-toggle${on ? " is-on" : ""}${props.iconOnly ? " is-icon" : ""}`}
-      data-testid={`${props.testId}-plan`} aria-pressed={on} title={title} aria-label={title} disabled={props.disabled || Boolean(blocked)}
-      onClick={() => props.onChange(withCodexPlanMode(value.agentMode, value.permissions, !on))}>
-      {props.iconOnly ? <ComposerControlIcon icon={ClipboardList} label={plan.label} /> : <span className="chat-composer-control-text">{plan.label}</span>}
-    </button>
+  const iconOnly = props.iconOnly && !footer;
+  // The tooltip hangs on a wrapper: a disabled button takes no hover, and its
+  // reason is what the tooltip is for.
+  const toggle = (
+    <Tooltip>
+      <TooltipTrigger asChild>
+        <span className="inline-flex">
+          <button type="button" className={`chat-model-chip chat-composer-toggle${on ? " is-on" : ""}${iconOnly ? " is-icon" : ""}${footer ? " is-footer" : ""}`}
+            data-testid={`${props.testId}-plan`} aria-pressed={on} aria-label={title} disabled={props.disabled || Boolean(blocked)}
+            onClick={() => props.onChange(withCodexPlanMode(value.agentMode, value.permissions, !on))}>
+            {footer && <span className="chat-composer-toggle-track" aria-hidden="true" />}
+            {iconOnly ? <ComposerControlIcon icon={ClipboardTextIcon} label={plan.label} /> : <span className="chat-composer-control-text">{plan.label}</span>}
+          </button>
+        </span>
+      </TooltipTrigger>
+      <TooltipContent side="top">{title}</TooltipContent>
+    </Tooltip>
   );
+  return footer ? createPortal(toggle, footer) : toggle;
 }
 
 /** Said in a menu while its member's turn runs: a CLI's settings apply to
