@@ -116,9 +116,40 @@ chat without a main session is always `classic`; its switch is disabled.
     split as Claude's desktop app splits it: the CLI's default first, the
     newest model of each family, the rest under "More models" (opened in
     place; open when the chosen model is there; `latestAndOlderModels`).
+    The model control names the model that runs: for a member without a
+    model of its own, the one the User's own CLI config starts the CLI on
+    where it runs (Codex's `config.toml` `model`, the model Claude Code
+    says it applies, `agy models`' first), never the one the CLI's list
+    marks default (the chip read "GPT-6-Luna", model/list's default, while
+    turns ran her config's gpt-5.6-luna, 2026-11-22). The main process
+    marks that model `recommended` in the CLI's list
+    (`withCliStartModel`); a member on a machine is named by that
+    machine's own config (its hello's `cliStartDefaults`). With no effort
+    chosen and no model of its own, the effort control names the effort her
+    config sets ("Low"; its menu's Default row says it under "Default").
     The effort a model lacks reads as Default; nothing is saved until a
     choice is made; Default sends the explicit reset; only the chosen
-    setting is sent. Its own turn running, the controls wait (disabled). The
+    setting is sent. Codex's Default collaboration mode said on a turn
+    carries the member's effort, else her config's, else the thread's
+    (`codexCollaborationMode`): a null there resets Codex to the model's
+    own effort (seen 2026-11-22: turns went at no effort while her terminal
+    ran `low`).
+    In a narrow composer (the main column or the side panel at the smallest
+    window, both panels open) the controls turn into icons one by one, as
+    T3 Code's composer footer does: where it runs, Codex's Plan mode, the
+    mode (a lock for asking before changes, a pen for edits without asking,
+    a list for planning, a checked shield for the CLI deciding, a crossed
+    one for Full Access, an eye for Read Only), the effort (a gauge); then
+    the model loses its glyph and last its name shortens, never under six
+    letters (`useComposerDensity`, measured before paint on every width
+    change). An icon's value is its tooltip, its accessible name and its
+    menu; no control is ever a one-letter stub. Checked 2026-11-22 in the
+    app with both panels open: at 1280×820 "Sonnet 5.5 · Medium · Manual"
+    in both composers and "GPT-5.6-Luna · Low" with the mode and Plan mode
+    as icons; at 1080×720 "Sonnet 5.5" with the effort and mode as icons
+    in the main composer, "Sonnet 5.5 · Medium" and the mode's icon in the
+    member's, and "GPT-5.6-Luna" without its glyph and three icons in a
+    Codex main composer; every control inside its row, Send beside it. Its own turn running, the controls wait (disabled). The
     access is the CLI's own mode, run as the CLI runs it
     (`src/shared/chatAccessModes.ts`, the permissions' `cliApprovals`: what
     is not granted the CLI asks about instead of the app taking it away;
@@ -158,8 +189,43 @@ chat without a main session is always `classic`; its switch is disabled.
       refused (agy 1.5.14, 2026-11-21: Default refuses edits and commands,
       Accept-edits mode refuses commands); the menu says so under the list
       ("Antigravity cannot ask for approval here, …").
-    A main session starts in its CLI's built-in default: Manual, Ask for
-    approval, agy's Default. Stored choices keep working: a member saved
+    A new main session starts in the mode its CLI starts in with the
+    User's own config on the device that runs it (the User, 2026-11-22:
+    "a new session must start in the mode, model and effort its CLI would
+    start in with her config"; `CliStartDefaults`,
+    `src/shared/cliStartDefaults.ts`, `startChatAccessOption`), read from
+    the CLI itself with its model list: Codex's `config/read` (the preset
+    its `/permissions` marks current: sandbox, approval policy and reviewer,
+    `guardian_subagent` being `auto_review`; her config starts it in
+    Approve for me), Claude Code's `initialize` answer
+    (`current_permission_mode`, from `permissions.defaultMode`) and its
+    `get_settings` answer (`applied.model`, `applied.effort`), agy's
+    settings.json `agentMode` (none saved: Auto mode, as agy 1.5.14 starts
+    `-p` runs too; `""`: Default). A machine reads its own and says them in
+    its hello (`cliStartDefaults`, re-sent when a read changes them); the
+    phone gets this computer's with each provider
+    (`NewChatProviderOffer.start`) and each machine's
+    (`HubNewChatOptions.cliStart`). The mode follows where it runs until
+    one is chosen; a mode chosen stays. When the config names a
+    combination the CLI's own picker has no entry for (Codex's "Custom
+    permissions", Claude Code's Bypass Permissions or Don't Ask), it cannot
+    be read, or a machine's program predates it, the CLI's built-in default
+    applies: Manual, Ask for approval, agy's Default
+    (`defaultChatAccessOption`). A config in the project folder (Claude
+    Code's `.claude/settings.json`, Codex's project `.codex/config.toml`) is
+    not read for this (docs/parity-requirements.md, known divergences).
+    Starting in Full Access from her own config asks nothing, as Codex does
+    not; choosing it in the menu asks Codex's own question first, in place
+    of the list (`FULL_ACCESS_CONFIRMATION`, Codex 0.155.1's `/permissions`
+    in a terminal, 2026-11-22): "Enable full access?" "When Codex runs with
+    full access, it can edit any file on your computer and run commands
+    with network, without your approval. Exercise caution when enabling
+    full access. This significantly increases the risk of data loss, leaks,
+    or unexpected behavior." with "Yes, continue anyway" ("Apply full
+    access for this session") and "Cancel" ("Go back without enabling full
+    access"), which goes back to the list; the phone's sheet asks the same.
+    Codex 0.155.1 asks it even with `notice.hide_full_access_warning` set.
+    Stored choices keep working: a member saved
     with Claude Code's old Default is Manual (same mode), a phone sending
     the old id `default` gets Manual, and a Codex member saved in the old
     Plan entry (Plan as a permission) is Read Only with Plan mode on. Codex's
@@ -565,6 +631,58 @@ Verified in the installed CLIs, the way the User sees them:
   edits, prompt for commands. 'auto': auto-approve edits and safe commands,
   prompt on irreversible actions. 'plan': research and plan without making
   changes"). Her config starts it in auto.
+
+## Start defaults, Full Access and Plan members: evidence (2026-11-22)
+
+- Codex 0.155.1 `codex app-server`: `model/list` marks `gpt-6-luna`
+  (GPT-6-Luna) `isDefault`; `config/read` on her config answers
+  `model: gpt-5.6-luna`, `model_reasoning_effort: low`,
+  `approvals_reviewer: auto_review`, no approval policy or sandbox; her
+  terminal (`codex`, update check off) shows "gpt-5.6-luna low" and its
+  `/permissions` marks "2. Approve for me (current)". `config/read` takes
+  a `cwd` for project layers; a `profile = …` key in config.toml is
+  refused ("legacy `profile` config is no longer supported; use
+  `--profile`"), so a profile applies only with `--profile`, which neither
+  her plain `codex` nor the app passes. A turn's `turn_context` (its
+  rollout) shows `model: gpt-5.6-luna`, `approvals_reviewer: auto_review`
+  and, with a collaboration mode that carries `reasoning_effort: null`, no
+  effort at all; with her config's `low` sent, `low`, as her terminal's
+  turns show.
+- Codex's terminal, `/permissions` → Full Access, shows "Enable full
+  access?", the body above, "1. Yes, continue anyway  Apply full access for
+  this session", "2. Cancel  Go back without enabling full access", "Press
+  enter to confirm or esc to go back"; with `-c
+  notice.hide_full_access_warning=true` it asks the same.
+- Claude Code 2.1.330 in stream-json: `initialize` answers
+  `current_permission_mode` (`acceptEdits` with `permissions.defaultMode:
+  acceptEdits` in the settings it reads); `get_settings` answers
+  `applied: { model: "claude-sonnet-5-5", effort: … }` for `model:
+  "sonnet"` or `ANTHROPIC_MODEL=sonnet`, while `initialize`'s "Default
+  (recommended)" row still resolves to Opus 5.5.
+- agy 1.5.14's changelog: "Changed the default `Agent Mode` from Default to
+  Auto: sessions with no saved mode, including headless `-p` runs, now
+  start in Auto wherever Auto mode is available and in Default elsewhere
+  … choose Default for `Agent Mode` in `/config`, which saves
+  `"agentMode": ""` to `settings.json`." Auto mode is available on Linux
+  and macOS.
+- Subagents of a session in Plan, both CLIs' own: Claude Code's docs
+  (code.claude.com/docs/en/sub-agents): "When the main conversation is in
+  `plan` mode, the subagent stays in plan mode whichever `permissionMode`
+  you set, unless it runs as an agent team teammate." Seen with `claude -p
+  --model sonnet --permission-mode plan`: the Agent tool is offered, its
+  general-purpose subagent's Write is refused "Cannot write to …/sub.txt
+  while in plan mode" (`decision_reason_type: "mode"`), and a custom agent
+  with `permissionMode: acceptEdits` is refused the same. Codex 0.155.1:
+  `multi_agent` is on by default and `spawn_agent` is offered in Plan
+  mode; the spawned child's rollout runs `collaboration_mode.mode:
+  "default"` with the parent's sandbox and approvals ("Subagents inherit
+  the parent turn's current sandbox and approval settings", its docs) and
+  wrote a file while the parent was in Plan. So a member the main session
+  makes runs as its main session's CLI runs a subagent: under a Claude
+  Code (or agy) main session in Plan it is held to Plan whatever it asks
+  for (`memberAsItRunsNow`, Plan ranks lowest); under a Codex main session
+  with Plan mode on it runs Codex's Default with the main session's preset,
+  Plan mode not handed down. Both checked in `chatAccessModes.test.ts`.
 
 ## Contract (src/shared)
 
