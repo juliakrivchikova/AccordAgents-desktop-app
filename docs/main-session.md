@@ -326,7 +326,13 @@ switch is disabled.
     member the main session adds and a new chat's main session always run
     in their CLI's own mode (`inCliOwnMode`: the mode they were running in,
     their other rights kept; the User, 2026-11-22: "нахера там вообще этот
-    кастом?"). Settings from the classic controls are no
+    кастом?"). A chat switched to the sessions view moves its members with
+    rights from the classic view into the CLI mode each was running in, for
+    good (back in the classic view they stay in it); a switch made on the
+    phone is written by the computer when it reaches it
+    (`membersInCliOwnMode`, `convertMembersForSessionsView`; the User,
+    2026-11-22: what was refused silently, the CLI now asks about). Settings
+    from the classic controls are no
     mode: the mode control says "Custom", its menu says so, and a classic
     toggle (Read Files, Edit Files, Run Shell, Access Web) ends a mode
     chosen in its menu and Codex's Plan mode with it
