@@ -601,6 +601,17 @@ export class ServerChatLink {
     return { ...status, ready: this.ready };
   }
 
+  /** Waits until nothing this device queued is left unsent, at most
+   *  `timeoutMs`; resolves with how many are left (undefined: no link). */
+  async waitUntilSent(timeoutMs: number): Promise<number | undefined> {
+    const deadline = Date.now() + timeoutMs;
+    for (;;) {
+      const queued = (await this.status().catch(() => undefined))?.queued;
+      if (queued === undefined || queued === 0 || Date.now() >= deadline) return queued;
+      await new Promise((resolve) => setTimeout(resolve, 100));
+    }
+  }
+
   async failures(): Promise<ReturnType<ReturnType<StorageService["hubClientOps"]>["failures"]>> {
     return this.options.storage.hubClientOps().failures();
   }

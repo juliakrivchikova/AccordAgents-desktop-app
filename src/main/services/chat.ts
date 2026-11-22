@@ -386,6 +386,19 @@ type ProgressCallback = (progress: ReviewProgress) => void;
 /** When a machine member's addition is looked at again while its User answer
  *  cannot be read here yet. */
 const MEMBER_ADDITION_RETRY_DELAYS_MS = [5_000, 30_000, 120_000];
+/** A member's reply whose run is gone before it ended (a restart, a quit). */
+const INTERRUPTED_REPLY_TEXT = "Interrupted before completion.";
+/** Set once this device repaired the replies an older build left running on
+ *  the server (repairRepliesLeftRunning). */
+export const REPLIES_REPAIRED_KEY = "chat.replies-left-running.repaired";
+
+/** Ends a member's pending bubble whose run is gone as interrupted, marked
+ *  so the run's own result, if it does come, may still replace it. */
+function markInterruptedForRecovery(message: ChatMessage): void {
+  message.status = "error";
+  if (!message.content) message.content = INTERRUPTED_REPLY_TEXT;
+  message.metadata = { ...message.metadata, staleRunRecovery: { runId: message.metadata?.runId, at: new Date().toISOString() } };
+}
 /** How long the phone's New chat offer keeps a provider's model list before
  *  reading it again (in the background), and how soon a failed read is tried
  *  again. */
@@ -1227,8 +1240,9 @@ export class ChatService {
   /** While no link stands after one did: where saves still queue what they
    *  change for the server, sent once a link starts again. */
   private parkedServerQueue?: ChatServerQueue;
-  /** The app quits (main.ts, before-quit): as a machine drains, no new turn
-   *  starts here, so what the quit stops is all the server has to be told. */
+  /** The app quits (main.ts, before-quit): as a machine drains, no turn the
+   *  server asks starts here and no requester is resumed (both wait for the
+   *  next start). */
   private quitting = false;
   /** Each chat's timer for its next waiting choice to expire. */
   private readonly choiceExpiryTimers = new Map<string, { atMs: number; timer: NodeJS.Timeout }>();
@@ -24042,19 +24056,7 @@ export class ChatService {
         ) {
           continue;
         }
-        message.status = "error";
-        if (!message.content) {
-          message.content = "Interrupted before completion.";
-        }
-        // Mark the sweep so a late completed result can repair this exact
-        // placeholder, and so we never replace an unrelated error message.
-        message.metadata = {
-          ...message.metadata,
-          staleRunRecovery: {
-            runId: message.metadata?.runId,
-            at: new Date().toISOString()
-          }
-        };
+        markInterruptedForRecovery(message);
         sweptMessages.push(message);
         pendingSwept = true;
       }
@@ -25995,9 +25997,7 @@ export class ChatService {
   async resumeServerTurns(): Promise<void> {
     const link = this.serverLink;
     if (!link) return;
-    await this.repairRepliesLeftRunning(link).catch((error) => {
-      void this.debugLogs.write("chat.server.replies-repair-error", { message: error instanceof Error ? error.message : String(error) });
-    });
+    this.repairRepliesLeftRunningOnce(link);
     const { requested, claimed } = await link.waitingTurns();
     for (const turn of claimed) {
       await this.closeOrphanedServerTurn(turn).catch((error) => {
@@ -26007,53 +26007,74 @@ export class ChatService {
     for (const turn of requested) await this.startServerTurn(turn).catch(() => undefined);
   }
 
-  private static readonly REPLIES_REPAIRED_KEY = "chat.replies-left-running.repaired";
+  /** The one-time repair below while it runs (a reconnect may ask again). */
+  private repliesRepair?: Promise<void>;
 
   /** Once on this device (2026-11-22): a member's reply that ended here
    *  while the app quit, after its link to the server had stopped, was saved
    *  here only, and the server kept it running for good (the phone showed it
    *  with its time growing and Stop). Its end as this device holds it goes
    *  now; a reply removed here goes from the server too. Read from the
-   *  operations this device still keeps (a week), so older ones stay. */
+   *  operations this device still keeps (a week), so older ones stay. Runs
+   *  in the background: nothing waits for it. */
+  private repairRepliesLeftRunningOnce(link: ChatServerLink): void {
+    if (this.repliesRepair) return;
+    this.repliesRepair = this.repairRepliesLeftRunning(link).catch((error) => {
+      void this.debugLogs.write("chat.server.replies-repair-error", { message: error instanceof Error ? error.message : String(error) });
+    }).finally(() => { this.repliesRepair = undefined; });
+  }
+
   private async repairRepliesLeftRunning(link: ChatServerLink): Promise<void> {
     const hub = this.storage.hub();
-    if (await hub.clientState(ChatService.REPLIES_REPAIRED_KEY)) return;
+    if (await hub.clientState(REPLIES_REPAIRED_KEY)) return;
     const left = await this.storage.hubClientOps().repliesLeftRunning();
     const byChat = new Map<string, string[]>();
     for (const row of left) byChat.set(row.conversationId, [...(byChat.get(row.conversationId) ?? []), row.messageId]);
     let sent = 0;
+    let skipped = 0;
     for (const [conversationId, messageIds] of byChat) {
-      const conversation = await this.storage.getConversation(conversationId).catch(() => undefined);
-      if (!conversation || conversation.kind !== "chat") continue;
-      const removed = new Set(this.normalizedRemovedChatMessageIds(conversation.metadata.removedChatMessageIds));
-      const ops: HubOp[] = [];
-      for (const messageId of messageIds) {
-        const message = conversation.messages.find((item) => item.id === messageId);
-        if (!message) {
-          if (removed.has(messageId)) ops.push({ opId: newOpId(), kind: "message.remove", conversationId, messageId });
-          continue;
-        }
-        // Still running here, or not this device's to write: left as it is.
-        if (message.status === "pending" || !this.mayWriteOnServer(conversation, message)) continue;
-        ops.push({ opId: newOpId(), kind: "message.update", conversationId, message: messageForServer(message) });
+      if (this.deletedConversationIds.has(conversationId)) continue;
+      const conversation = await this.storage.getConversation(conversationId).catch(() => null);
+      if (conversation === null) {
+        skipped += 1;
+        continue;
       }
-      if (!ops.length) continue;
-      await link.enqueue(ops);
-      sent += ops.length;
+      if (!conversation || conversation.kind !== "chat") continue;
+      // Through the chat's own queue: a save meanwhile is not overtaken.
+      await this.withChatMutation(conversation, async () => {
+        const removed = new Set(this.normalizedRemovedChatMessageIds(conversation.metadata.removedChatMessageIds));
+        const ops: HubOp[] = [];
+        for (const messageId of messageIds) {
+          const message = conversation.messages.find((item) => item.id === messageId);
+          if (!message) {
+            if (removed.has(messageId)) ops.push({ opId: newOpId(), kind: "message.remove", conversationId, messageId });
+            continue;
+          }
+          // Still running here, or not this device's to write: left as it is.
+          if (message.status === "pending" || !this.mayWriteOnServer(conversation, message)) continue;
+          ops.push({ opId: newOpId(), kind: "message.update", conversationId, message: messageForServer(message) });
+        }
+        if (!ops.length) return;
+        await link.enqueue(ops);
+        sent += ops.length;
+      });
     }
-    await hub.setClientState(ChatService.REPLIES_REPAIRED_KEY, new Date().toISOString());
-    void this.debugLogs.write("chat.server.replies-repaired", { found: left.length, sent });
+    // A chat that could not be read now is looked at again next time.
+    if (!skipped) await hub.setClientState(REPLIES_REPAIRED_KEY, new Date().toISOString());
+    void this.debugLogs.write("chat.server.replies-repaired", { found: left.length, sent, skippedChats: skipped });
   }
 
-  /** The app quits (main.ts, before-quit), as a machine drains: no turn
-   *  starts here from now on (a server's ask waits there, a requester is
-   *  resumed at the next start). */
+  /** The app quits (main.ts, before-quit), as a machine drains: no turn the
+   *  server asks starts here from now on (it waits there), and no requester
+   *  is resumed (its recovery does it at the next start). */
   beginQuit(): void {
     this.quitting = true;
   }
 
   /** Resolves once no member's turn runs here (each saved how it ended, so
-   *  its end is queued for the server), or after `timeoutMs`. */
+   *  its end is queued for the server), or after `timeoutMs`. A requester
+   *  still collecting answers is not waited for (liveRunIds counts it): it
+   *  is resumed at the next start. */
   async waitForRunsToEnd(timeoutMs: number): Promise<boolean> {
     const deadline = Date.now() + timeoutMs;
     while (this.chatRunMeta.size > 0 || this.activeRunIds.size > 0) {
@@ -26064,12 +26085,13 @@ export class ChatService {
     return true;
   }
 
-  /** Quitting, once the members' processes are closed: a turn that has not
-   *  ended by itself ends now as the next start would close it
-   *  (closeOrphanedServerTurn), its bubble and its turn on the server in one
-   *  save, so the server hears it before the link closes. Its own end comes
-   *  seconds later (a closed process is told apart from a missing CLI), past
-   *  the quit's time. Returns how many turns it ended. */
+  /** Quitting, while the members' processes close: a turn of a member here
+   *  that has not ended by itself ends now as the next start would close it
+   *  (its bubble swept as recoverStaleChatRun does, its turn on the server
+   *  finished as interrupted), in one save per chat, so the server hears it
+   *  before the link closes. The run's own end comes seconds later (a closed
+   *  process is told apart from a missing CLI); a reply that does end after
+   *  all still replaces the swept bubble. Returns how many turns it ended. */
   async endTurnsForQuit(): Promise<number> {
     const byChat = new Map<string, Array<{ runId: string; participantId: string }>>();
     for (const [runId, meta] of this.chatRunMeta) {
@@ -26082,14 +26104,14 @@ export class ChatService {
       await this.withChatMutation(conversation, async () => {
         let changed = false;
         for (const run of runs) {
-          // A member on a machine goes on there: its turn is not this quit's.
           const participant = this.chatParticipants(conversation).find((item) => item.id === run.participantId);
+          // A member on a machine goes on there: its turn is not this quit's
+          // (nor one removed meanwhile, whose turn the next start closes).
           if (!participant || !this.runsHere(participant)) continue;
           for (const message of conversation.messages) {
             if (message.role !== "participant" || message.participantId !== run.participantId || message.metadata?.runId !== run.runId ||
                 message.status !== "pending" || message.metadata?.serverPlaceholder) continue;
-            message.status = "error";
-            if (!message.content) message.content = "Interrupted before completion.";
+            markInterruptedForRecovery(message);
             changed = true;
           }
           this.finishServerTurn(run.runId, "interrupted");
@@ -26102,6 +26124,7 @@ export class ChatService {
       });
       await this.waitForQueuedSave(conversationId);
     }
+    await this.settleChatSaves();
     return ended;
   }
 
@@ -26160,7 +26183,7 @@ export class ChatService {
             markStopUnconfirmed(message, handle, `${this.machineRuntime ? "The machine" : "This computer"} restarted before confirming the stop.`);
           } else if (message.status === "pending") {
             message.status = "error";
-            if (!message.content) message.content = "Interrupted before completion.";
+            if (!message.content) message.content = INTERRUPTED_REPLY_TEXT;
           }
           changed = true;
         }

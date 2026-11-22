@@ -653,12 +653,7 @@ export async function startMachine(args: MachineArgs): Promise<() => Promise<voi
     // the server while the link still stands.
     await host.shutdown(() => cliAgentRunner.shutdownWarmAgents());
     await linking;
-    const deadline = Date.now() + 5_000;
-    for (;;) {
-      const status = await serverChatLink.status().catch(() => undefined);
-      if (!status || status.queued === 0 || Date.now() > deadline) break;
-      await new Promise((resolve) => setTimeout(resolve, 100));
-    }
+    await serverChatLink.waitUntilSent(5_000);
     // An unreachable server gets what is left at the next start.
     await serverChatLink.stop();
     machineSettings.stop();
