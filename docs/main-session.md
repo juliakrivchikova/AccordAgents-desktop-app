@@ -85,10 +85,13 @@ chat without a main session is always `classic`; its switch is disabled.
     member when it is added (`ChatParticipant.taskTitle`: it names the
     member however much of the chat a device has loaded, on the desktop,
     the phone, her server's alerts and Activity; a machine cannot change
-    it, Fork to new chat does not carry it); for a member without one (made
-    before, or added otherwise) the newest titled task among the loaded
+    it, Fork to new chat does not carry it; members made before get it once
+    when the desktop opens the chat, from its whole stored history: their
+    delegation's title, else their first task's first line,
+    `backfillSessionsTaskTitles`, `metadata.sessionsTaskTitlesBackfilled`);
+    for a member without one the newest titled task among the loaded
     messages, else its first task's first sentence cut at a word to 40
-    characters; a later task without a title of its own ("Two additions to
+    characters, else "Agent", never its handle; a later task without a title of its own ("Two additions to
     your task …") never renames it, while its state follows its latest task
     (`titleTaskByMember`, `sessionsTaskTitle`, `sessionsMemberTitle`; tasks
     travel to the phone saying whether the main session gave their title,

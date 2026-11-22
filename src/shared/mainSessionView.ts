@@ -161,18 +161,23 @@ export function sessionsTaskTitle(item: Pick<ChatParticipantRequestItem, "prompt
   return shortenAtWord(plain, SESSIONS_TASK_TITLE_MAX_CHARS);
 }
 
+/** What the sessions view calls a member with no task to be named by. */
+export const SESSIONS_UNTITLED_MEMBER = "Agent";
+
 /** A member's title in the sessions view (as in T3 Code): the title its
  *  delegation gave it, kept with the member (ChatParticipant.taskTitle),
  *  else the title of the task it is named by among the loaded messages
  *  (titleTaskByMember: the newest titled one, else its first;
- *  sessionsTaskTitle); its handle without "@" only while it has none. */
+ *  sessionsTaskTitle); "Agent" while it has none, never its handle. */
 export function sessionsMemberTitle(
   member: { handle?: string; taskTitle?: unknown } | undefined,
   task?: Pick<ChatParticipantRequestItem, "prompt" | "targetHandle"> & { title?: unknown }
 ): string {
   const kept = typeof member?.taskTitle === "string" ? member.taskTitle.replace(/\s+/g, " ").trim() : "";
   if (kept) return shortenAtWord(kept, SESSIONS_TASK_GIVEN_TITLE_MAX_CHARS);
-  return (task ? sessionsTaskTitle(task) : "") || (member?.handle ?? task?.targetHandle ?? "").trim().replace(/^@/, "") || "Session";
+  // Never a handle (the User: the sessions view shows none): a member with
+  // no task to be named by is "Agent".
+  return (task ? sessionsTaskTitle(task) : "") || SESSIONS_UNTITLED_MEMBER;
 }
 
 /** The line under a member's title: its provider, model and role (the role

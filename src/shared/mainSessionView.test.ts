@@ -283,7 +283,7 @@ test("a stopped task's row says Stopped, muted", () => {
 
 test("members are named by their task, not their handle", () => {
   assert.equal(sessionsMemberTitle({ handle: "drew" }, { prompt: "## Fix the login\n\nmore", targetHandle: "drew" }), "Fix the login");
-  assert.equal(sessionsMemberTitle({ handle: "@drew" }), "drew");
+  assert.equal(sessionsMemberTitle({ handle: "@drew" }), "Agent", "never a handle: a member with no task is Agent");
   assert.equal(sessionsMemberDetail({ provider: "Claude Code", model: "opus", roleLabel: "Member", roleConfigId: "generic-participant" }), "Claude Code · opus");
   assert.equal(sessionsMemberDetail({ provider: "Codex CLI", roleLabel: "Reviewer", roleConfigId: "reviewer" }), "Codex CLI · Reviewer");
   assert.equal(sessionsWaitingText(["Fix the login", "Check logout"]), "Waiting on 2 tasks: Fix the login, Check logout");
@@ -309,7 +309,7 @@ test("a task is named by its short title: the main session's, else its first sen
   assert.ok(long.length <= 40);
   assert.equal(sessionsTaskTitle({ prompt: "## Fix the **login** button\nwith the new tokens" }), "Fix the login button", "markdown left out");
   assert.equal(sessionsTaskTitle({ prompt: "" }), "");
-  assert.equal(sessionsMemberTitle({ handle: "@drew" }, { prompt: "", targetHandle: "drew" }), "drew", "a task without text leaves the handle");
+  assert.equal(sessionsMemberTitle({ handle: "@drew" }, { prompt: "", targetHandle: "drew" }), "Agent", "a task without text: Agent, never the handle");
   // One word longer than the room is cut inside it.
   assert.equal(shortenAtWord("x".repeat(60), 40), `${"x".repeat(39)}…`);
   assert.equal(shortenAtWord("Short enough", 40), "Short enough");

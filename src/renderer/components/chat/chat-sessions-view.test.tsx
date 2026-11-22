@@ -132,7 +132,8 @@ test("rows of the main timeline: no avatar, author or thread controls; the User'
 
   const choice = renderRow(byId.get("taylor-choice")!, sessions, opened);
   assert.equal(choice.findAll((node) => node.props?.["data-testid"] === "chat-sessions-member-choice").length, 1);
-  assert.match(textOf(choice), /taylor asks/);
+  assert.match(textOf(choice), /Agent asks/, "a member with no task to be named by is Agent");
+  assert.doesNotMatch(textOf(choice), /taylor/, "never its handle in the sessions view");
   assert.doesNotMatch(textOf(choice), /@taylor/, "no handle in the sessions view");
   assert.match(textOf(choice), /Which database\?/);
 });

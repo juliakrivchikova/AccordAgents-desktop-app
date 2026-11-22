@@ -7,6 +7,7 @@ import type {
   ChatForkSeenReply,
   ChatMessage,
   ChatParticipant,
+  ChatParticipantRequestBatch,
   ChatRunningMessageTarget,
   Conversation,
   ConversationMessagePage,
@@ -625,6 +626,28 @@ export class StorageService {
     if (titled) return newest;
     const delegation = await read(` and instr(payload_json, '"delegation"') > 0`, 1);
     return [...delegation.filter((message) => !newest.some((known) => known.id === message.id)), ...newest];
+  }
+
+  /** A chat's member requests, oldest first, each only its batch (not the
+   *  rest of its message): the whole history's tasks, read once to give the
+   *  members made before titles were kept with them theirs. */
+  async chatRequestBatches(conversationId: string): Promise<ChatParticipantRequestBatch[]> {
+    await this.init();
+    const rows = await this.queryJson<{ requestHex: string | null }>(
+      `select hex(json_extract(payload_json, '$.metadata.participantRequest')) as requestHex from conversation_messages
+       where conversation_id = ${sqlString(conversationId)}
+         and instr(payload_json, '"participantRequest"') > 0
+       order by sequence asc;`
+    );
+    return rows.flatMap((row) => {
+      if (!row.requestHex) return [];
+      try {
+        const batch = parseHexJson<ChatParticipantRequestBatch>(row.requestHex, `request batches ${conversationId}`);
+        return batch && typeof batch === "object" && Array.isArray(batch.items) ? [batch] : [];
+      } catch {
+        return [];
+      }
+    });
   }
 
   /** A chat's member session records (this device's own), without its

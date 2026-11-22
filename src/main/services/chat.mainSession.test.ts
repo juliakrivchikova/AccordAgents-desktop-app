@@ -18,6 +18,7 @@ import type {
   ChatMessage,
   ChatParticipant,
   ChatParticipantRequestBatch,
+  ChatParticipantRequestItem,
   ChatParticipantSession,
   ChatProviderKind,
   ChatRoleConfig,
@@ -150,6 +151,11 @@ function testService(options: {
     },
     async saveConversation(conversation: Conversation): Promise<void> {
       this.current = clone(conversation);
+    },
+    async chatRequestBatches(id: string) {
+      return this.current.id === id
+        ? (this.current.messages ?? []).flatMap((message: ChatMessage) => message.metadata?.participantRequest ? [clone(message.metadata.participantRequest)] : [])
+        : [];
     },
     conversationTombstones() {
       return { isDeleted: async () => false, mark: async () => undefined, pendingCopies: async () => [] };
@@ -1327,3 +1333,42 @@ test("a member the main session made proposes a scheduled task on the normal car
   assert.equal(pending.requesterParticipantId, childId);
   assert.deepEqual(calls, ["attach"]);
 });
+
+test("members made before their task's title was kept with them get it once from the whole history: their delegation's, else their first task's line, never a handle", async () => {
+  const main = mainSession();
+  const drew = member("drew-id", "drew", { delegatedByParticipantId: main.id });
+  const gera = member("gera-id", "gera");
+  const sam = member("sam-id", "sam");
+  const kept = member("kept-id", "kept", { taskTitle: "Already named" });
+  const at = (minute: number): string => `2026-11-22T10:${String(minute).padStart(2, "0")}:00.000Z`;
+  const request = (id: string, minute: number, items: Array<Partial<ChatParticipantRequestItem> & { targetParticipantId: string; prompt: string }>, delegation = false): ChatMessage => ({
+    id, role: "participant", participantId: main.id, content: `request ${id}`, createdAt: at(minute), status: "done",
+    metadata: { participantRequest: {
+      id: `batch-${id}`, requesterParticipantId: main.id, requesterHandle: "main", source: "mcp", resumeRequester: true, status: "completed", depth: 1,
+      createdAt: at(minute), updatedAt: at(minute), ...(delegation ? { delegation: { start: "clean" as const } } : {}),
+      items: items.map((item) => ({ targetHandle: "x", status: "answered" as const, createdAt: at(minute), updatedAt: at(minute), ...item }))
+    } }
+  } as ChatMessage);
+  const conversation = mainSessionChat([main, drew, gera, sam, kept]);
+  conversation.messages = [
+    request("d-drew", 1, [{ targetParticipantId: drew.id, prompt: "Implement new chats in General.", title: "Новые чаты в General" }], true),
+    request("g-1", 2, [{ targetParticipantId: gera.id, prompt: "Check the release feed. Then report the counts." }]),
+    request("f-drew", 3, [{ targetParticipantId: drew.id, prompt: 'Two additions to your task "Новые чаты в General": the phone too.' }]),
+    request("g-2", 4, [{ targetParticipantId: gera.id, prompt: "Create your own independent proposal for the title." }]),
+    request("k-1", 5, [{ targetParticipantId: kept.id, prompt: "Something else entirely." }])
+  ];
+  const { service, storage } = testService({ conversation });
+
+  await service.backfillSessionsTaskTitles(storage.current);
+  const titles = Object.fromEntries(participantsOf(storage.current).map((participant) => [participant.handle, participant.taskTitle]));
+  assert.deepEqual(titles, { main: undefined, drew: "Новые чаты в General", gera: "Check the release feed", sam: undefined, kept: "Already named" },
+    "drew by its delegation, gera by its first task's line, sam (no task) keeps none and is shown as Agent, kept untouched");
+  assert.equal(storage.current.metadata.sessionsTaskTitlesBackfilled, true, "done once");
+
+  // Once done, it does nothing again, even for a member that lost its title.
+  storage.current.metadata.participants = participantsOf(storage.current).map((participant) =>
+    participant.id === gera.id ? { ...participant, taskTitle: undefined } : participant);
+  await service.backfillSessionsTaskTitles(storage.current);
+  assert.equal(participantsOf(storage.current).find((participant) => participant.id === gera.id)?.taskTitle, undefined);
+});
+
