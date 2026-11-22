@@ -6655,7 +6655,7 @@ export class CliAgentRunner {
           if (notSwitched.replaceable && !replaced) {
             // Nothing runs in it: a process started in the member's mode
             // takes the message instead, as the CLI started again in it.
-            this.warmAgents.delete(key);
+            if (this.warmAgents.get(key) === claudeEntry) this.warmAgents.delete(key);
             await this.closeWarmAgent(claudeEntry, "mode-not-switched");
             const again = await this.acquireClaudeMemberProcess(participant, repoPath, kind, this.withClaudePermissionMode(options, wanted), warm, signal,
               "starting it again in its mode", options.onOutput);
@@ -6663,7 +6663,7 @@ export class CliAgentRunner {
             return admit(again.entry, again.fresh, true);
           }
           if (claudeEntry.unusable) {
-            this.warmAgents.delete(key);
+            if (this.warmAgents.get(key) === claudeEntry) this.warmAgents.delete(key);
             await this.closeWarmAgent(claudeEntry, "unusable");
           } else {
             this.scheduleWarmIdleTimerIfLive(claudeEntry, warm.idleTimeoutMs);
@@ -8561,9 +8561,6 @@ export class CliAgentRunner {
     return Array.from(this.warmAgents.values()).some((entry) => entry.scopeKey === scopeKey && !entry.closed && entry.isReplyIdle?.() === false);
   }
 
-  /** One of the CLI's own control requests, sent to the member's live Claude
-   *  Code process: the one answering now, else any still open. Undefined when
-   *  the member has no live Claude Code process on this device. */
   /** Whether the member's live Claude Code process ran in auto mode (the CLI
    *  said so itself): the account has Claude Code's auto mode. */
   memberClaudeAutoModeAvailable(conversationId: string, participantId: string): boolean {
@@ -8583,6 +8580,9 @@ export class CliAgentRunner {
     return mode && isClaudePermissionMode(mode) ? mode : undefined;
   }
 
+  /** One of the CLI's own control requests, sent to the member's live Claude
+   *  Code process: the one answering now, else any still open. Undefined when
+   *  the member has no live Claude Code process on this device. */
   async memberClaudeControl(
     conversationId: string,
     participantId: string,
@@ -9750,14 +9750,11 @@ export class CliAgentRunner {
           if (rule.action === "deny") {
             disallowedTools.push(toolRule);
           } else if (rule.action === "allow") {
-            // Claude Code's own modes: not a CLI rule. Claude Code 2.1.330
-            // matches a Bash(...) rule inside the Bash tool's own check, so a
-            // matching command would run in its Plan mode too (its plan-mode
-            // refusal only covers checks that pass through), and the process
-            // may be switched into Plan mid-reply. The command is asked and
-            // the app answers it from the rule outside Plan
-            // (ChatService.storedShellRuleAllows).
-            if (!asksForUngranted) allowedTools.push(toolRule);
+            // In Claude Code's own modes a CLI rule too, the same in every
+            // mode: Claude Code applies it as a rule in her own settings
+            // (its parsing, deny > ask > allow, what its Auto strips, and
+            // how its Plan mode treats an allowed command).
+            allowedTools.push(toolRule);
           } else {
             askTools.push(toolRule);
           }
@@ -9774,9 +9771,6 @@ export class CliAgentRunner {
       disallowedTools.push("Bash");
     }
     for (const toolRule of providerNativeAllowedTools) {
-      // A command rule is the shell's (above); edits and every other tool
-      // stay CLI rules, which Claude Code's Plan mode refuses before them.
-      if (asksForUngranted && this.isClaudeBashCommandRule(toolRule)) continue;
       allowedTools.push(toolRule);
       const toolName = this.claudeToolNameFromAllowedTool(toolRule);
       if (toolName) {
@@ -9831,11 +9825,6 @@ export class CliAgentRunner {
     }
     const parenIndex = trimmed.indexOf("(");
     return parenIndex > 0 ? trimmed.slice(0, parenIndex) : trimmed;
-  }
-
-  /** A provider-native allow rule for particular commands (`Bash(...)`). */
-  private isClaudeBashCommandRule(toolRule: string): boolean {
-    return /^Bash\s*\(/.test(toolRule.trim());
   }
 
   private claudeBashPermissionRule(rule: ChatShellPermissionRule): string {

@@ -169,6 +169,10 @@ test("an approved addition adds the member the User saw: its name, role, place, 
   assert.equal(add({ ...added, permissions: { workspaceWrite: true } }), false, "a right it was not given");
   assert.equal(add({ ...added, permissions: { requestParticipants: "allow" } }), false, "leave to ask it was not given");
   assert.equal(add({ ...added, permissions: { repoRead: false } }), true, "less is fine");
+  // In its CLI's own mode (a chat with a main session adds every member so):
+  // it asks about what it was not given, not a right beyond it.
+  assert.equal(add({ ...added, permissions: { requestParticipants: "ask", cliApprovals: true } }), true, "in its CLI's own mode");
+  assert.equal(add({ ...added, permissions: { requestParticipants: "ask", cliApprovals: true, workspaceWrite: true } }), false, "and nothing more");
   assert.equal(add(added, [approved("p-desk", "app_participants_request_change", request)]), false, "approved for a member elsewhere");
   assert.equal(add(added, [approved("p-box", "app_participants_request_change", request, { approve: false })]), false, "denied");
   // As she edited it before approving.
@@ -728,6 +732,22 @@ test("a member the main session made asks others no more freely than the main se
   // One the User added herself keeps its own leave.
   const own = { ...child, delegatedByParticipantId: undefined };
   assert.equal(machineMayAsk(mainSessionChatWith([deskR, lowered, own], [message]), "machine-1", message, "p-desk", [], hashOf("")), true);
+});
+
+test("only the member's latest answered plan card gives its mode: an older Yes cannot raise a mode after a later answer", () => {
+  const planned = { ...mainOnMachine, agentMode: "plan", permissions: { ...mainOnMachine.permissions, workspaceWrite: false, cliApprovals: true } };
+  const chat = mainSessionChatWith([deskR, planned]);
+  const acceptEdits = { ...planned, agentMode: "default", permissions: { ...planned.permissions, workspaceWrite: true } };
+  const card = (answer: Record<string, unknown>, answeredAt: string) => ({ ...approved("p-main", "app_tool_permission",
+    { kind: "toolPermission", agentMode: "plan", toolName: "ExitPlanMode", planApproval: { plan: "# Plan" } }, answer), answeredAt });
+  const oldYes = card({ approve: true, planDecision: { optionId: "yes-accept-edits-keep-context" } }, "2026-11-22T10:00:00.000Z");
+  const laterNo = card({ approve: false, planDecision: { optionId: "no" } }, "2026-11-22T10:05:00.000Z");
+  const laterYes = card({ approve: true, planDecision: { optionId: "yes-default-keep-context" } }, "2026-11-22T10:05:00.000Z");
+  const write = (approvals: HubCard[], used: string[] = []) => members(scopeMachineConversationUpdate(chat, { metadata: { participants: [deskR, acceptEdits] } }, "machine-1",
+    { rules: mainRules, approvals: approvals.map((item) => keptApproval(item)!), used: new Set(used) })).get("p-main");
+  assert.equal(write([oldYes])?.agentMode, "default", "her latest answer: Accept edits");
+  assert.equal(write([oldYes, laterNo])?.agentMode, "plan", "a later No, keep planning: the older Yes gives nothing");
+  assert.equal(write([oldYes, laterYes], [approvalGrantKey(laterYes.answerOpId!)])?.agentMode, "plan", "a later Yes already used: the older one gives nothing either");
 });
 
 test("a plan she approved lets the machine's member follow its CLI into the mode she picked, once; nothing more", () => {

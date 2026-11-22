@@ -4904,16 +4904,6 @@ export class ChatService {
         const policy = prepared.request.agentMode === "auto" || prepared.request.planApproval
           ? undefined
           : this.toolPermissionPolicyFor(conversation, requester, prepared.request.toolName, prepared.toolInput);
-        // Claude Code's own modes: a command a stored shell rule allows is not
-        // a CLI rule there (Plan would not refuse it), so it is asked and
-        // answered here, outside Plan, as the rule did in the CLI.
-        if (!policy && !prepared.request.planApproval && this.storedShellRuleAllows(conversation, requester, agentMode, prepared.request.toolName, prepared.toolInput)) {
-          return {
-            prepared,
-            route: "policy",
-            decision: { approve: true, scope: "once", source: "policy" }
-          };
-        }
         if (policy) {
           return {
             prepared,
@@ -17344,37 +17334,6 @@ export class ChatService {
    *  rule kept from before answers were scoped, as its card said), else the
    *  scoped rules that together cover it (every command of it by a prefix,
    *  its domain, its folder; src/shared/toolPermissionScope.ts). */
-  /**
-   * A Claude Code member in its CLI's own mode asks about a command a stored
-   * shell rule allows (its allow rules are not CLI rules there: cliAgents
-   * claudeToolConfig): allowed, outside Plan, when the whole input is one
-   * plain command the rule covers (`exact`: that command; `prefix`: it, or it
-   * followed by arguments) and no deny rule covers it. A command joined with
-   * others, redirected or substituted is asked, never matched in part.
-   */
-  private storedShellRuleAllows(conversation: Conversation, requester: ChatParticipant, agentMode: ChatAgentMode, toolName: string, toolInput: unknown): boolean {
-    if (toolName !== "Bash" || requester.kind !== "claude-code" || agentMode === "plan") return false;
-    const permissions = normalizeChatAgentPermissions(this.participantForRun(conversation, requester).permissions);
-    if (permissions.cliApprovals !== true) return false;
-    const raw = toolInput && typeof toolInput === "object" ? (toolInput as { command?: unknown }).command : undefined;
-    const command = typeof raw === "string" ? raw.trim() : "";
-    if (!command || /[;&|<>`\n\r]|\$\(/.test(command)) return false;
-    const covers = (rule: Pick<ChatShellPermissionRule, "match" | "pattern">): boolean => {
-      const pattern = rule.pattern.trim();
-      return Boolean(pattern) && (command === pattern || (rule.match === "prefix" && command.startsWith(`${pattern} `)));
-    };
-    if (permissions.shell.rules.some((rule) => rule.action === "deny" && covers(rule))) return false;
-    const nativeRules = (permissions.providerNative?.["claude-code"]?.allowedTools ?? []).flatMap((toolRule): Array<Pick<ChatShellPermissionRule, "match" | "pattern">> => {
-      const match = /^Bash\s*\((.*)\)$/.exec(toolRule.trim());
-      if (!match) return [];
-      const inner = match[1].trim();
-      return inner.endsWith(":*") ? [{ match: "prefix", pattern: inner.slice(0, -2) }] : [{ match: "exact", pattern: inner }];
-    });
-    // Shell rules count with the shell on, as the CLI was given them; a
-    // provider-native rule always was.
-    return (permissions.shell.enabled && permissions.shell.rules.some((rule) => rule.action === "allow" && covers(rule))) || nativeRules.some(covers);
-  }
-
   private toolPermissionPolicyFor(
     conversation: Conversation,
     participant: ChatParticipant,
@@ -25682,6 +25641,10 @@ export class ChatService {
         };
         conversation.updatedAt = new Date().toISOString();
         await this.saveConversation(conversation);
+        // The app tool grant of its live process leaves the old mode too, for
+        // the rest of the turn (its permission cards go by the mode).
+        const updated = this.chatParticipants(conversation).find((participant) => participant.id === participantId);
+        if (updated) this.grantLiveMemberMode(conversation, updated);
         return "saved" as const;
       });
       if (typeof outcome === "object") {

@@ -409,7 +409,8 @@ function keepAntigravityMode(next: ChatParticipant, current: ChatParticipant): C
 /** Claude Code's plan approvals she answered Yes on this member's cards:
  *  the CLI then moves the member into the mode she picked itself, and the
  *  app's mode follows it (the User, 2026-11-22). Each lets that mode be
- *  written once. */
+ *  written once, and only the member's latest answered plan card counts
+ *  (latestPlanAnswersOnly): an older one cannot raise a mode she lowered. */
 function planModeGrants(approved: Approved[], member: ChatParticipant): Array<{ key: string; agentMode: ChatAgentMode; workspaceWrite?: boolean }> {
   return approved.flatMap((item) => {
     if (item.card.participantId !== member.id || item.approval.toolName !== APP_TOOL_PERMISSION_TOOL || !isClaudePlanApprovalRequest(item.approval.request)) return [];
@@ -417,6 +418,23 @@ function planModeGrants(approved: Approved[], member: ChatParticipant): Array<{ 
     const option = claudePlanApprovalOption(item.approval.request.planApproval, typeof decision?.optionId === "string" ? decision.optionId : undefined);
     return option?.mode ? [{ key: item.key, ...claudePlanModeSettings(option.mode) }] : [];
   });
+}
+
+/** Approvals with only each member's latest answered plan card among its
+ *  plan approvals: the latest of all she answered (a "No, keep planning",
+ *  one already used, any), so an older Yes never gives its mode again. */
+function latestPlanAnswersOnly(approved: Approved[], approvals: HubUserApproval[] | undefined): Approved[] {
+  const isPlan = (approval: ChatAppToolApproval | undefined): boolean =>
+    Boolean(approval && approval.toolName === APP_TOOL_PERMISSION_TOOL && isClaudePlanApprovalRequest(approval.request));
+  const latest = new Map<string, { at: string; answerOpId: string }>();
+  for (const card of approvals ?? []) {
+    if (card.superseded || !card.answerOpId || !card.participantId) continue;
+    if (!isPlan((card.card as { approval?: ChatAppToolApproval } | undefined)?.approval)) continue;
+    const at = card.answeredAt ?? card.raisedAt;
+    const seen = latest.get(card.participantId);
+    if (!seen || at > seen.at) latest.set(card.participantId, { at, answerOpId: card.answerOpId });
+  }
+  return approved.filter((item) => !isPlan(item.approval) || latest.get(item.card.participantId ?? "")?.answerOpId === item.card.answerOpId);
 }
 
 function keepGrantedRights(next: ChatParticipant, current: ChatParticipant, approved: Approved[], noted: Set<string>): ChatParticipant {
@@ -642,7 +660,14 @@ function isApprovedMember(member: ChatParticipant, approved: ApprovedMember, rul
   // A mode that skips asking (Auto, Codex's Full Access) only as far as she approved.
   const memberMode = normalizeChatAgentMode(member.agentMode);
   if ((memberMode === "auto" || memberMode === "full-access") && !chatAgentModeWithin(memberMode, approved.agentMode)) return false;
-  if (!permissionsWithin(normalizeChatAgentPermissions(member.permissions), approved.permissions)) return false;
+  // Added in its CLI's own mode (a chat with a main session: ChatService
+  // inCliOwnModeInMainSessionChat), it asks about what it was not granted
+  // instead of being refused it: not a right beyond what she approved.
+  const { cliApprovals: _ownMode, codexPlanMode: _plan, ...rights } = normalizeChatAgentPermissions(member.permissions);
+  const memberRights = normalizeChatAgentPermissions(member.permissions).cliApprovals && !normalizeChatAgentPermissions(approved.permissions).cliApprovals
+    ? rights as ChatAgentPermissions
+    : normalizeChatAgentPermissions(member.permissions);
+  if (!permissionsWithin(memberRights, approved.permissions)) return false;
   // Managing members as its role gives it now, never beyond what she saw.
   const actual = Math.max(rank(manageRight(rules?.roles[member.roleConfigId], member.permissions).effective),
     rank(manageRight(approved.role, member.permissions).effective));
@@ -805,7 +830,7 @@ export function scopeMachineConversationUpdate(conversation: Conversation, updat
   const changes: MemberChanges = {
     // As the server has it: a raise in this same write does not count.
     mainSession: mainSessionId ? beforeById.get(mainSessionId) : undefined,
-    machineMembers: ownBefore, policies: beforePolicies, approved: approvedRequests(context.approvals, used), rules: context.rules,
+    machineMembers: ownBefore, policies: beforePolicies, approved: latestPlanAnswersOnly(approvedRequests(context.approvals, used), context.approvals), rules: context.rules,
     claimed: new Set(), noted: new Set()
   };
   let members = before;

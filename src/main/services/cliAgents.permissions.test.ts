@@ -7504,22 +7504,17 @@ test("Claude Code's own modes launch one and the same process: Manual, Accept ed
     assert.equal(other.mode, mode, name);
     assert.deepEqual(other.rest, manual.rest, `${name}: the same launch as Manual but for --permission-mode`);
   }
-  // The Manual surface: present and asked unless granted; deny stops and ask
-  // rules applied; provider-native (but command rules), the app tools Auto
-  // pre-authorizes, Skill and subagent tools allowed.
+  // The Manual surface: present and asked unless granted; the stored shell
+  // rules and provider-native rules are Claude Code's own rules in every
+  // mode (as in her own Claude settings: its parsing, deny > ask > allow,
+  // its Auto's stripping, its Plan mode); the app tools Auto pre-authorizes,
+  // Skill and subagent tools allowed.
   const allowed = claudeAllowedToolsFromArgs(manual.rest);
-  for (const tool of ["mcp__github__get_issue", "mcp__accord_agents__app_chat_send_message", "Skill", "Agent", "Task"]) {
+  for (const tool of ["Bash(git status:*)", "Bash(make:*)", "mcp__github__get_issue", "mcp__accord_agents__app_chat_send_message", "Skill", "Agent", "Task"]) {
     assert.ok(allowed.includes(tool), `${tool} allowed`);
   }
   for (const tool of ["Edit", "Write", "WebFetch", "WebSearch", "Bash"]) {
     assert.equal(allowed.includes(tool), false, `${tool} asked, not pre-approved`);
-  }
-  // Claude Code 2.1.330 matches a Bash(...) allow rule inside the Bash tool's
-  // own check, before its Plan mode could refuse the command, and the process
-  // may be switched into Plan: command rules are not CLI rules here (the app
-  // answers them outside Plan, ChatService.storedShellRuleAllows).
-  for (const tool of ["Bash(git status:*)", "Bash(make:*)"]) {
-    assert.equal(allowed.includes(tool), false, `${tool} is not a CLI rule in the CLI's own modes`);
   }
   // App tools Auto leaves to the CLI (an export writes into the project) are
   // asked in every mode; the permission prompt tool is never a model tool.

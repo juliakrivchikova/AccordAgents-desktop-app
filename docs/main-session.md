@@ -182,7 +182,19 @@ switch is disabled.
       `--permission-prompt-tool`, deny rules stay hard stops), Accept edits
       ("Automatically accept all file edits"), Plan ("Create a plan before
       making changes"), Auto ("Claude handles permission decisions",
-      Claude's classifier).
+      Claude's classifier). The member's process is the same in all four
+      (only `--permission-mode` differs), so its stored rules are Claude
+      Code's own rules in every mode, as if they were in her own Claude
+      settings: shell allow rules and provider-native allow rules in
+      `--allowedTools`, ask rules in `--settings permissions.ask`, deny rules
+      in `--disallowedTools`; Claude Code applies its parsing, deny > ask >
+      allow, what its Auto strips from allow rules, and its Plan mode. In
+      Plan a command a stored allow rule covers is treated as Claude Code
+      treats a settings allow rule in plan mode (2.1.330 matches a
+      `Bash(...)` rule inside the Bash tool's own check, ahead of its
+      plan-mode ask; edits stay refused in Plan whatever the rules say). The
+      app answers none of them itself. Of the app's own tools only those
+      its Auto pre-authorizes are allowed; the rest are asked by card.
     - Codex 0.155.1 (its `/permissions` picker): Ask for approval ("Codex
       can read and edit files in the current workspace, and run commands.
       Approval is required to access the internet or edit other files.";

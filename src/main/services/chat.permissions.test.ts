@@ -2047,25 +2047,18 @@ test("Claude Code's own modes: after a turn that ran in Accept edits by a once-o
   assert.equal(process.mode, "default", "back in Manual for what it does on its own afterwards");
 });
 
-test("Claude Code's own modes: a command a stored shell rule allows is answered by the app outside Plan, never in part, and asked in Plan", async () => {
-  const drew = ownModeClaude({ shell: { enabled: true, rules: [{ action: "allow", match: "prefix", pattern: "git status" }, { action: "deny", match: "prefix", pattern: "git status --danger" }] } });
+test("Claude Code's own modes: a command the CLI asks about is never answered by the app from a stored shell rule (its rules are the CLI's own)", async () => {
+  const drew = ownModeClaude({ shell: { enabled: true, rules: [{ action: "allow", match: "prefix", pattern: "git status" }] } });
   const conversation = chatConversation([drew]);
   const { service, storage } = testService({ conversation });
-  const actor = (agentMode: string) => ({
+  const pending = service.requestToolPermissionFromTool({
     conversationId: conversation.id, participantId: drew.id, roleConfigId: drew.roleConfigId, roleConfigVersion: 0,
-    capabilities: ["permissions.request" as const], runId: "run-shell", triggerMessageId: "user-message", agentMode
-  });
-  const ask = (agentMode: string, command: string, id: string) =>
-    service.requestToolPermissionFromTool(actor(agentMode) as never, { tool_name: "Bash", input: { command }, tool_use_id: id });
-  assert.equal((await ask("default", "git status --short", "t1")).behavior, "allow", "the rule's command, in Manual");
-  assert.equal((await ask("auto", "git status", "t2")).behavior, "allow", "and in Auto");
-  for (const [agentMode, command, id] of [["plan", "git status", "t3"], ["default", "git status && rm -rf /", "t4"], ["default", "git status --danger now", "t5"], ["default", "git statusx", "t6"]]) {
-    const pending = ask(agentMode, command, id);
-    await waitFor(() => ((storage.current.metadata.pendingAppToolApprovals ?? []) as ChatAppToolApproval[]).some((approval) => approval.status === "pending"));
-    const card = ((storage.current.metadata.pendingAppToolApprovals ?? []) as ChatAppToolApproval[]).find((approval) => approval.status === "pending")!;
-    await service.respondToAppToolApproval({ conversationId: conversation.id, approvalId: card.id, approve: false });
-    assert.equal((await pending).behavior, "deny", `${command} in ${agentMode}: asked`);
-  }
+    capabilities: ["permissions.request" as const], runId: "run-shell", triggerMessageId: "user-message", agentMode: "default"
+  } as never, { tool_name: "Bash", input: { command: "git status --short" }, tool_use_id: "t1" });
+  await waitFor(() => ((storage.current.metadata.pendingAppToolApprovals ?? []) as ChatAppToolApproval[]).some((approval) => approval.status === "pending"));
+  const card = ((storage.current.metadata.pendingAppToolApprovals ?? []) as ChatAppToolApproval[]).find((approval) => approval.status === "pending")!;
+  await service.respondToAppToolApproval({ conversationId: conversation.id, approvalId: card.id, approve: false });
+  assert.equal((await pending).behavior, "deny", "a card, not an answer from the rule");
 });
 
 test("Claude Code's own modes: the app tool policy given once for the CLI session does not depend on the mode", () => {
