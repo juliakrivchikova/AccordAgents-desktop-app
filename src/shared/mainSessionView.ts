@@ -7,6 +7,8 @@ import { isPendingReply, isWaitingChoice } from "./chatActiveRuns";
 import { stripChatControlBlocks } from "./chatControlBlocks";
 import type { ChatParticipantRosterStatus } from "./chatParticipantStatus";
 import { sessionsViewLane, type SessionsViewIndex } from "./mainSession";
+import { isChatMessageHiddenFromTimeline } from "./chatTimelineVisibility";
+import { remoteRunStreamingStartedAt } from "./remoteRunStreaming";
 import { APP_CONNECTOR_SIGN_IN_TOOL, APP_PARTICIPANTS_REQUEST_CHANGE_TOOL, APP_TOOL_PERMISSION_TOOL } from "./appMcpToolContracts";
 import type { ChatAppToolApproval, ChatMessage, ChatParticipant, ChatParticipantRequestBatch, ChatParticipantRequestItem } from "./types";
 
@@ -99,9 +101,11 @@ export interface SessionsMemberActivity {
 /** A member's turns run one after another: the reply in progress is the
  *  first started of its pending ones, never one waiting behind it (as
  *  runningMessageForParticipant picks it), and it runs from when its own
- *  turn began, not from when it was queued. */
-export function sessionsMemberActivity(messages: readonly ChatMessage[]): SessionsMemberActivity {
-  const runningReply = runningRepliesByMember(messages);
+ *  turn began, not from when it was queued. `liveRunIds`: the runs the
+ *  computer holds live (activeRunIdsForConversation); a reply of another
+ *  run is over, whatever its copy says. */
+export function sessionsMemberActivity(messages: readonly ChatMessage[], liveRunIds?: ReadonlySet<string>): SessionsMemberActivity {
+  const runningReply = runningRepliesByMember(messages, undefined, liveRunIds);
   const finishedAt = new Map<string, string>();
   for (let index = messages.length - 1; index >= 0; index -= 1) {
     const message = messages[index]!;
@@ -115,12 +119,28 @@ export function sessionsMemberActivity(messages: readonly ChatMessage[]): Sessio
 
 /** Each member's reply in progress (sessionsMemberActivity's rule), by
  *  member; `participantId`: only that member's. */
-function runningRepliesByMember(messages: readonly ChatMessage[], participantId?: string): Map<string, ChatMessage> {
+function runningRepliesByMember(
+  messages: readonly ChatMessage[],
+  participantId?: string,
+  liveRunIds?: ReadonlySet<string>
+): Map<string, ChatMessage> {
   const running = new Map<string, ChatMessage>();
+  // The runs each member finished, read from replies later in the chat.
+  const finishedLater = new Map<string, Set<string>>();
   for (let index = messages.length - 1; index >= 0; index -= 1) {
     const message = messages[index]!;
-    if (!isPendingReply(message) || !message.participantId || (participantId !== undefined && message.participantId !== participantId)) continue;
+    if (message.role !== "participant" || !message.participantId || (participantId !== undefined && message.participantId !== participantId)) continue;
+    const runId = typeof message.metadata?.runId === "string" ? message.metadata.runId.trim() : "";
+    if (!isPendingReply(message)) {
+      if (message.status === "done" && runId) finishedLater.set(message.participantId, (finishedLater.get(message.participantId) ?? new Set<string>()).add(runId));
+      continue;
+    }
     if (message.metadata?.queuedBehind || message.metadata?.turnQueued) continue;
+    if (liveRunIds && (!runId || !liveRunIds.has(runId))) continue;
+    if (isChatMessageHiddenFromTimeline(message)) continue;
+    // A reply still marked running is over once its member finished a later
+    // turn (the phone's Activity reads it so), whatever this copy missed.
+    if ([...(finishedLater.get(message.participantId) ?? [])].some((finished) => finished !== runId)) continue;
     const current = running.get(message.participantId);
     // Read newest first: a reply earlier in the chat started no later.
     if (!current || startedNoLater(message, current)) running.set(message.participantId, message);
@@ -129,10 +149,11 @@ function runningRepliesByMember(messages: readonly ChatMessage[], participantId?
 }
 
 /** When a reply's own turn began: once it waited behind its member's turn
- *  before it, not when it was made. */
+ *  before it, not when it was made; on a machine, when its run there began
+ *  (as its bubble counts it, remoteRunStreamingStartedAt). */
 export function sessionsReplyStartedAt(message: Pick<ChatMessage, "createdAt" | "metadata">): string {
   const started = message.metadata?.turnStartedAt;
-  return typeof started === "string" && started ? started : message.createdAt;
+  return remoteRunStreamingStartedAt(typeof started === "string" && started ? started : message.createdAt, message.metadata?.remoteRunStatus);
 }
 
 /** An unknown start time cannot claim to be first; on a tie the one earlier
@@ -554,7 +575,8 @@ export function sessionsMembersWaitingForUser(
  *  time while it waits. */
 export function sessionsMembersWaitingSince(
   messages: readonly ChatMessage[],
-  approvals?: readonly Partial<Pick<ChatAppToolApproval, "status" | "requesterParticipantId" | "toolName" | "resumeContext" | "createdAt">>[]
+  approvals?: readonly Partial<Pick<ChatAppToolApproval, "status" | "requesterParticipantId" | "toolName" | "resumeContext" | "createdAt">>[],
+  liveRunIds?: ReadonlySet<string>
 ): Map<string, string> {
   const waiting = new Map<string, string>();
   const note = (participantId: string, at: string | undefined): void => {
@@ -565,7 +587,7 @@ export function sessionsMembersWaitingSince(
   // When each member's turn in progress started: a card from before it is
   // one the member went on from (the main session answered it, a new task).
   const turnStartedAt = new Map<string, string>();
-  for (const [participantId, message] of runningRepliesByMember(messages)) turnStartedAt.set(participantId, sessionsReplyStartedAt(message));
+  for (const [participantId, message] of runningRepliesByMember(messages, undefined, liveRunIds)) turnStartedAt.set(participantId, sessionsReplyStartedAt(message));
   for (const message of messages) {
     if (message.role !== "participant" || !message.participantId || !(isWaitingChoice(message) || isWaitingMentionApproval(message))) continue;
     const started = turnStartedAt.get(message.participantId);

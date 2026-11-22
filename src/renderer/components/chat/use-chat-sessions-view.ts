@@ -106,6 +106,9 @@ export function useChatSessionsView(input: {
   view: ChatViewMode;
   participants: ChatParticipant[];
   participantStatusById: ReadonlyMap<string, ChatParticipantRosterStatus>;
+  /** The runs this computer holds live (activeRunSummaryForConversation):
+   *  a member's reply of any other run is not the one it works on now. */
+  liveRunIds?: readonly string[];
 }): ChatSessionsView | undefined {
   const { conversation, view, participants, participantStatusById } = input;
   const mainId = view === "sessions" ? mainSessionParticipantId(conversation.metadata) : undefined;
@@ -129,7 +132,6 @@ export function useChatSessionsView(input: {
       messagesById: new Map(messages.map((message) => [message.id, message])),
       tasksByMember: latestTaskByMember(messages),
       titleTasksByMember: titleTaskByMember(messages),
-      activity: sessionsMemberActivity(messages),
       requestMessages: messages.filter((message) => message.metadata?.participantRequest)
     };
   }, [conversation.messages, mainId]);
@@ -137,9 +139,19 @@ export function useChatSessionsView(input: {
   // Its own memo: the chat's metadata is a new object on every update, and
   // only this reads the approvals.
   const approvals = conversation.metadata.pendingAppToolApprovals;
+  // By value: the summary is new on every update of the chat's metadata.
+  const liveRunKey = input.liveRunIds?.join("\u0000");
+  const liveRunIds = useMemo(
+    () => (liveRunKey === undefined ? undefined : new Set(liveRunKey ? liveRunKey.split("\u0000") : [])),
+    [liveRunKey]
+  );
+  const activity = useMemo(
+    () => (mainId ? sessionsMemberActivity(conversation.messages, liveRunIds) : undefined),
+    [conversation.messages, liveRunIds, mainId]
+  );
   const waitingSince = useMemo(
-    () => (mainId ? sessionsMembersWaitingSince(conversation.messages, Array.isArray(approvals) ? approvals as ChatAppToolApproval[] : undefined) : NO_WAITING),
-    [approvals, conversation.messages, mainId]
+    () => (mainId ? sessionsMembersWaitingSince(conversation.messages, Array.isArray(approvals) ? approvals as ChatAppToolApproval[] : undefined, liveRunIds) : NO_WAITING),
+    [approvals, conversation.messages, liveRunIds, mainId]
   );
   const waitingForUser = useMemo(() => new Set(waitingSince.keys()), [waitingSince]);
 
@@ -149,7 +161,7 @@ export function useChatSessionsView(input: {
   );
 
   return useMemo(() => {
-    if (!mainId || !placement) return undefined;
+    if (!mainId || !placement || !activity) return undefined;
     const byId = new Map(participants.map((participant) => [participant.id, participant]));
     const formerById = new Map(former.map((member) => [member.id, member]));
     const memberTitle = (participantId: string): string => {
@@ -166,7 +178,7 @@ export function useChatSessionsView(input: {
     const taskEntriesByMessageId = new Map<string, readonly SessionsTaskEntry[]>();
     for (const message of placement.requestMessages) {
       const batch = message.metadata!.participantRequest!;
-      const entries = sessionsTaskEntries(message, batch, participantStatusById, placement.activity, placement.messagesById, appText, wordsText, waitingForUser);
+      const entries = sessionsTaskEntries(message, batch, participantStatusById, activity, placement.messagesById, appText, wordsText, waitingForUser);
       taskEntriesByMessageId.set(message.id, cached(message.id, entriesSignature(entries), () => entries));
     }
     const workByReplyId = new Map<string, readonly SessionsTaskEntry[]>();
@@ -175,7 +187,7 @@ export function useChatSessionsView(input: {
       workByReplyId.set(replyId, cached(`reply:${replyId}`, entriesSignature(entries), () => entries));
     }
     const index = placement.index;
-    const memberRows = sessionsMemberRows(participants, mainId, participantStatusById, placement.tasksByMember, placement.activity.finishedAt, waitingForUser);
+    const memberRows = sessionsMemberRows(participants, mainId, participantStatusById, placement.tasksByMember, activity.finishedAt, waitingForUser);
     return {
       mainSessionId: mainId,
       index,
@@ -185,7 +197,7 @@ export function useChatSessionsView(input: {
       tasksByMember: placement.tasksByMember,
       waitingForUser,
       waitingSince,
-      activity: placement.activity,
+      activity,
       taskEntriesByMessageId,
       workByReplyId,
       memberRows,
@@ -199,5 +211,5 @@ export function useChatSessionsView(input: {
       laneOf: (message: ChatMessage) => sessionsViewLane(message, index),
       hidesApproval: (approval: ChatAppToolApproval) => isMainSessionDelegationRosterCard(approval, mainId)
     };
-  }, [former, mainId, participantStatusById, participants, placement, waitingForUser, waitingSince]);
+  }, [activity, former, mainId, participantStatusById, participants, placement, waitingForUser, waitingSince]);
 }

@@ -118,7 +118,8 @@ export function ChatConversationView(props: ChatConversationViewProps): JSX.Elem
     conversation: props.conversation,
     view: viewMode.view,
     participants,
-    participantStatusById: participantStatusById
+    participantStatusById: participantStatusById,
+    liveRunIds: activeRunSummary.runIds
   });
   const sessionsMainMessages = sessions?.mainMessages;
   const topLevelMessages = useMemo(

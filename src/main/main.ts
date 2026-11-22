@@ -1865,8 +1865,10 @@ function createWindow(): void {
   });
   window.webContents.on("will-prevent-unload", () => {
     debugLogService.writeNow("app-window.unload-prevented", { windowId });
-    // The page keeps itself open: a quit under way does not happen.
-    if (quitCleanupStarted) quitWasCancelled("a window kept its page");
+    // The page keeps itself open as the quit closes the windows: the quit
+    // does not happen. While its steps run nothing of the quit closes a
+    // window, so a page kept then is another close's (Cmd+W), not the quit's.
+    if (quitCleanupFinished) quitWasCancelled("a window kept its page");
   });
   window.webContents.on("destroyed", () => {
     if (mainWindow === window) {
@@ -3853,16 +3855,11 @@ let quitCancelTimer: NodeJS.Timeout | undefined;
 function quitWasCancelled(reason: string): void {
   if (quitCancelTimer) clearTimeout(quitCancelTimer);
   quitCancelTimer = undefined;
-  if (!quitCleanupStarted) return;
-  debugLogService.writeNow("app-quit.cancelled", { reason, cleanupFinished: quitCleanupFinished });
-  // A quit still running its steps is cancelled once they end (below).
-  if (!quitCleanupFinished) {
-    quitCancelledWhileCleaning = true;
-    return;
-  }
+  // Only a quit that ran its steps and closes the windows can be cancelled.
+  if (!quitCleanupStarted || !quitCleanupFinished) return;
+  debugLogService.writeNow("app-quit.cancelled", { reason });
   quitCleanupStarted = false;
   quitCleanupFinished = false;
-  quitCancelledWhileCleaning = false;
   // The window's close ran before its page kept itself open, and let go of
   // it as the main window: it is that again, so it gets the chat's updates.
   if ((!mainWindow || mainWindow.isDestroyed()) && mainWindowLetGoByQuit && !mainWindowLetGoByQuit.isDestroyed()) {
@@ -3884,11 +3881,11 @@ function quitWasCancelled(reason: string): void {
     };
     // As the app starts: its local API before the scripts that call it.
     await appMcpService.start().catch(failed("app tools"));
+    if (quitCleanupStarted) return;
     void scriptService.start().catch(failed("scripts"));
     void serverChatLink.start().catch(failed("server link"));
   });
 }
-let quitCancelledWhileCleaning = false;
 /** The quit's steps, until they end (they may outlast QUIT_CLEANUP_MS). */
 let quitCleanupRun: Promise<void> | undefined;
 /** The main window a quit's close let go of, until the quit happens. */
@@ -3932,10 +3929,6 @@ app.on("before-quit", (event) => {
   void Promise.race([cleanup, timeout]).finally(() => {
     debugLogService.writeNow("app-quit.cleanup-finished", { ms: Date.now() - cleanupStartedAt, timedOut: !cleanupDone });
     quitCleanupFinished = true;
-    if (quitCancelledWhileCleaning) {
-      quitWasCancelled("cancelled while its steps ran");
-      return;
-    }
     // Quit again only after Electron's own quit call has returned. A quit
     // from the Quit menu (Cmd+Q), the Dock or a signal starts in native code,
     // so this promise can settle while that call is still emitting
