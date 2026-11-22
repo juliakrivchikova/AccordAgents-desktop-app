@@ -27398,8 +27398,18 @@ export class ChatService {
   endQuit(): void {
     // The quit's steps have ended (main.ts waits for them): every member's
     // process it closed belongs to a turn still running now.
-    if (this.quitting) for (const runId of [...this.chatRunMeta.keys(), ...this.activeRunIds]) this.runsClosedByQuit.add(runId);
+    const wasQuitting = this.quitting;
+    if (wasQuitting) for (const runId of [...this.chatRunMeta.keys(), ...this.activeRunIds]) this.runsClosedByQuit.add(runId);
     this.quitting = false;
+    // The quit stopped the app tools' server, which starts again on another
+    // address with no tokens: a member's kept connection points at the old
+    // one. A Claude process launched with it found no app tools, and its
+    // session was then started anew (2026-11-22 QA). Each member gets a new
+    // connection on its next turn. (No quit: a live process keeps its own.)
+    if (wasQuitting) {
+      this.appMcpTokens.clear();
+      this.appMcpConnections.clear();
+    }
     const skipped = [...this.resumesSkippedWhileQuitting];
     this.resumesSkippedWhileQuitting.clear();
     for (const [requestMessageId, resume] of skipped) {

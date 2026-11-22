@@ -17027,6 +17027,19 @@ test("a turn the quit closed that ends after the quit was cancelled is still sto
   assert.equal((service as any).endsByQuit("a-later-run"), false);
 });
 
+test("a cancelled quit drops the members' app tool connections, so the next turn gets one on the restarted server", () => {
+  const participant = chatParticipant("claude-code");
+  const conversation = chatConversation([participant]);
+  const { service } = testService({ conversation });
+  const key = `${conversation.id}:${participant.id}`;
+  (service as any).appMcpTokens.set(key, "token-before-quit");
+  (service as any).appMcpConnections.set(key, { url: "http://127.0.0.1:1111/mcp", token: "token-before-quit" });
+  service.beginQuit();
+  service.endQuit();
+  assert.equal((service as any).appMcpTokens.has(key), false);
+  assert.equal((service as any).appMcpConnections.has(key), false);
+});
+
 test("a requester a quit kept from resuming is resumed once the quit turns out not to happen", async () => {
   const participant = chatParticipant("claude-code");
   const conversation = chatConversation([participant]);
