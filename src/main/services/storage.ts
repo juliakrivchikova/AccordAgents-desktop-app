@@ -596,25 +596,35 @@ export class StorageService {
   /** The chat's newest messages that give a member a task (a request item
    *  naming it as its target; not the requests it sent itself), read without
    *  the rest of the chat: how the sessions view titles that member
-   *  (sessionsMemberTitle). */
+   *  (sessionsMemberTitle, titleTaskByMember). When none of them titles it,
+   *  the newest delegation that names it is read as well, so a member with
+   *  many follow-ups keeps the title its delegation gave it. */
   async memberTaskMessages(conversationId: string, participantId: string, limit = 5): Promise<ChatMessage[]> {
     await this.init();
     const target = `${JSON.stringify("targetParticipantId")}:${JSON.stringify(participantId)}`;
-    const rows = await this.queryJson<{ payloadJson: string }>(
-      `select payload_json as payloadJson from conversation_messages
-       where conversation_id = ${sqlString(conversationId)}
-         and instr(payload_json, '"participantRequest"') > 0
-         and instr(payload_json, ${sqlString(target)}) > 0
-       order by sequence desc limit ${Math.max(1, Math.floor(limit))};`
-    );
-    return rows.flatMap((row) => {
-      try {
-        const message = JSON.parse(row.payloadJson) as ChatMessage;
-        return message && typeof message === "object" ? [message] : [];
-      } catch {
-        return [];
-      }
-    }).reverse();
+    const read = async (extra: string, count: number): Promise<ChatMessage[]> => {
+      const rows = await this.queryJson<{ payloadJson: string }>(
+        `select payload_json as payloadJson from conversation_messages
+         where conversation_id = ${sqlString(conversationId)}
+           and instr(payload_json, '"participantRequest"') > 0
+           and instr(payload_json, ${sqlString(target)}) > 0${extra}
+         order by sequence desc limit ${Math.max(1, Math.floor(count))};`
+      );
+      return rows.flatMap((row) => {
+        try {
+          const message = JSON.parse(row.payloadJson) as ChatMessage;
+          return message && typeof message === "object" ? [message] : [];
+        } catch {
+          return [];
+        }
+      }).reverse();
+    };
+    const newest = await read("", limit);
+    const titled = newest.some((message) => (message.metadata?.participantRequest?.items ?? [])
+      .some((item) => item.targetParticipantId === participantId && typeof item.title === "string" && item.title.trim()));
+    if (titled) return newest;
+    const delegation = await read(` and instr(payload_json, '"delegation"') > 0`, 1);
+    return [...delegation.filter((message) => !newest.some((known) => known.id === message.id)), ...newest];
   }
 
   /** A chat's member session records (this device's own), without its
