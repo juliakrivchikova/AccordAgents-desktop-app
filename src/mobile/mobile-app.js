@@ -12583,6 +12583,9 @@
     const messagesById = new Map(messages.map(function (message) { return [message.id, message]; }));
     const activity = shared.sessionsMemberActivity(messages);
     const tasksByMember = shared.latestTaskByMember(messages);
+    // The task each member is named by: its delegation's, else its first; a
+    // follow-up never renames it (shared titleTaskByMember, as the computer).
+    const titleTasksByMember = typeof shared.titleTaskByMember === "function" ? shared.titleTaskByMember(messages) : tasksByMember;
     const memberRows = shared.sessionsMemberRows(members, mainId, statusById, tasksByMember, activity.finishedAt);
     const formerMembers = shared.sessionsFormerMembers(messages, members, mainId);
     const openCardIds = new Set(shared.openMemberCardMessages(messages, index).map(function (message) { return message.id; }));
@@ -12598,7 +12601,7 @@
     const state = {
       conversationId: conversationId, chat: chat, mainId: mainId, mainMember: mainMember, mainHandle: mainMember ? mainMember.handle : "main",
       rows: rows, messages: messages, index: index, members: members, formerMembers: formerMembers,
-      statusById: statusById, runsByMember: runsByMember, tasksByMember: tasksByMember, memberRows: memberRows, waitingIds: waitingIds,
+      statusById: statusById, runsByMember: runsByMember, tasksByMember: tasksByMember, titleTasksByMember: titleTasksByMember, memberRows: memberRows, waitingIds: waitingIds,
       activity: activity, messagesById: messagesById, replies: replies, openCardIds: openCardIds,
       mainIds: new Set(mainMessages.map(function (message) { return message.id; })), placement: placement,
       runningCount: members.filter(function (member) {
@@ -12618,15 +12621,16 @@
     return state;
   }
 
-  /** A member as the sessions view names it (T3 Code's way): its current or
-   *  latest task's short title (shared sessionsTaskTitle); no handle. */
+  /** A member as the sessions view names it (T3 Code's way): the short
+   *  title of the task it is named by (shared titleTaskByMember: its
+   *  delegation's, else its first); no handle. */
   function sessionsMemberTitleOf(state, memberOrId) {
     const shared = sessionsRules();
     const id = typeof memberOrId === "string" ? memberOrId : memberOrId && memberOrId.id;
     const member = typeof memberOrId === "string"
       ? state.members.find(function (item) { return item.id === id; }) || state.formerMembers.find(function (item) { return item.id === id; })
       : memberOrId;
-    const task = id ? state.tasksByMember.get(id) : undefined;
+    const task = id ? (state.titleTasksByMember || state.tasksByMember).get(id) : undefined;
     return shared.sessionsMemberTitle(member, task ? task.item : undefined);
   }
 

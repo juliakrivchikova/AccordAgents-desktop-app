@@ -25,6 +25,7 @@ import {
   sessionsMemberTitle,
   sessionsTaskEntries,
   sessionsWaitingText,
+  titleTaskByMember,
   type SessionsMemberActivity,
   type SessionsMemberRow,
   type SessionsMemberTask,
@@ -72,7 +73,8 @@ export interface ChatSessionsView {
   waitingOn: ChatParticipant[];
   waitingText: string;
   waitingRunIds: string[];
-  /** A member's (or former member's) title: its latest task's short title. */
+  /** A member's (or former member's) title: the short title of the task
+   *  it is named by (titleTaskByMember: its delegation's, else its first). */
   memberTitle: (participantId: string) => string;
   isFormerMember: (participantId: string) => boolean;
   laneOf: (message: ChatMessage) => SessionsViewLane;
@@ -129,6 +131,7 @@ export function useChatSessionsView(input: {
       openCardMessageIds,
       messagesById: new Map(messages.map((message) => [message.id, message])),
       tasksByMember: latestTaskByMember(messages),
+      titleTasksByMember: titleTaskByMember(messages),
       activity: sessionsMemberActivity(messages),
       waitingIds: membersMainSessionWaitsOn(messages, index),
       mainStreaming: messages.some((message) => isPendingReply(message) && message.participantId === mainId),
@@ -146,7 +149,7 @@ export function useChatSessionsView(input: {
     const byId = new Map(participants.map((participant) => [participant.id, participant]));
     const formerById = new Map(former.map((member) => [member.id, member]));
     const memberTitle = (participantId: string): string => {
-      const task = placement.tasksByMember.get(participantId)?.item;
+      const task = placement.titleTasksByMember.get(participantId)?.item;
       return sessionsMemberTitle(byId.get(participantId) ?? formerById.get(participantId), task);
     };
     const names = sessionsViewNames(

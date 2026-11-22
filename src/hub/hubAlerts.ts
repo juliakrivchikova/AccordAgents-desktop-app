@@ -40,7 +40,7 @@ import {
   type TelegramUpdate
 } from "./alertChannels";
 import { chatViewFor, isChatViewMode } from "../shared/mainSession";
-import { latestTaskByMember, sessionsMemberTitle } from "../shared/mainSessionView";
+import { sessionsMemberTitle, titleTaskByMember } from "../shared/mainSessionView";
 import { homeDeviceId, type HubOps } from "./hubOps";
 import { scopeCovers } from "./hubPhoneState";
 
@@ -408,7 +408,7 @@ export class HubAlerts {
     if (chatViewFor(metadata) !== "sessions") return undefined;
     if (participant.id === metadata.mainSessionParticipantId) return "";
     const messages = await this.options.storage.memberTaskMessages(conversationId, participant.id);
-    return sessionsMemberTitle(participant, latestTaskByMember(messages).get(participant.id)?.item);
+    return sessionsMemberTitle(participant, titleTaskByMember(messages).get(participant.id)?.item);
   }
 
   /** The User closes the card in the app: an alert still waiting counts as

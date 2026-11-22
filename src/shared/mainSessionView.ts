@@ -158,9 +158,10 @@ export function sessionsTaskTitle(item: Pick<ChatParticipantRequestItem, "prompt
   return shortenAtWord(plain, SESSIONS_TASK_TITLE_MAX_CHARS);
 }
 
-/** A member's title in the sessions view (as in T3 Code): its current or
- *  latest task's title (sessionsTaskTitle); its handle without "@" only
- *  while it has none. */
+/** A member's title in the sessions view (as in T3 Code): the title of the
+ *  task it is named by (titleTaskByMember: the one its delegation gave it,
+ *  else its first; sessionsTaskTitle); its handle without "@" only while it
+ *  has none. */
 export function sessionsMemberTitle(
   member: { handle?: string } | undefined,
   task?: Pick<ChatParticipantRequestItem, "prompt" | "targetHandle"> & { title?: unknown }
@@ -226,9 +227,7 @@ export function sessionsTaskEntries(
     const memberId = item.targetParticipantId;
     const status = sessionsTaskStatus(item, statusById.get(memberId), activity.finishedAt.get(memberId));
     const running = activity.runningSince.get(memberId);
-    const reply = item.replyMessageId ? messagesById.get(item.replyMessageId) : undefined;
-    const worked = typeof reply?.metadata?.workedMs === "number" && Number.isFinite(reply.metadata.workedMs) ? reply.metadata.workedMs : undefined;
-    const elapsed = item.updatedAt ? Date.parse(item.updatedAt) - Date.parse(item.createdAt) : NaN;
+    const durationMs = sessionsTaskDurationMs(item, messagesById);
     const replyLine = status === "done" ? sessionsTaskReplyLine(item, messagesById) : undefined;
     const line = status === "done" ? (replyLine ? wordsText(replyLine) : replyLine)
       : status === "failed" ? appText(firstTextLine(item.error)) || undefined
@@ -239,11 +238,24 @@ export function sessionsTaskEntries(
       title: sessionsMemberTitle(undefined, item),
       status,
       ...(status === "running" ? { since: running && running >= item.createdAt ? running : item.createdAt } : {}),
-      ...(status !== "running" && status !== "waiting" && (worked ?? elapsed) >= 0 ? { durationMs: worked ?? elapsed } : {}),
+      ...(status !== "running" && status !== "waiting" && durationMs !== undefined ? { durationMs } : {}),
       ...(line ? { line } : {}),
       ...(status === "stopped" ? { lineMuted: true as const } : {})
     };
   });
+}
+
+/** How long a task took, once it ended: the time its reply worked, else from
+ *  when it was given to its last change; none when neither reads. */
+export function sessionsTaskDurationMs(
+  item: Pick<ChatParticipantRequestItem, "replyMessageId" | "createdAt" | "updatedAt">,
+  messagesById: ReadonlyMap<string, ChatMessage>
+): number | undefined {
+  const reply = item.replyMessageId ? messagesById.get(item.replyMessageId) : undefined;
+  const worked = typeof reply?.metadata?.workedMs === "number" && Number.isFinite(reply.metadata.workedMs) ? reply.metadata.workedMs : undefined;
+  const elapsed = item.updatedAt ? Date.parse(item.updatedAt) - Date.parse(item.createdAt) : NaN;
+  const duration = worked ?? elapsed;
+  return Number.isFinite(duration) && duration >= 0 ? duration : undefined;
 }
 
 /** When the member's work on a task started: its reply in progress (the turn
@@ -290,6 +302,31 @@ export function latestTaskByMember(messages: readonly ChatMessage[]): Map<string
     }
   }
   return tasks;
+}
+
+/** The task each member is named by (sessionsMemberTitle), as T3 Code
+ *  titles a thread once: the newest task the main session titled (the
+ *  delegation that made the member, app_chat_delegate_task), else its first
+ *  task. A later task without a title of its own ("Two additions to your
+ *  task …") never renames the member; its state still follows its latest
+ *  task (latestTaskByMember). */
+export function titleTaskByMember(messages: readonly ChatMessage[]): Map<string, SessionsMemberTask> {
+  const titled = new Map<string, SessionsMemberTask>();
+  const first = new Map<string, SessionsMemberTask>();
+  for (const message of messages) {
+    const batch = message.metadata?.participantRequest;
+    if (!batch) continue;
+    for (const item of batch.items) {
+      const task = { messageId: message.id, batch, item };
+      const earliest = first.get(item.targetParticipantId);
+      if (!earliest || item.createdAt < earliest.item.createdAt) first.set(item.targetParticipantId, task);
+      if (typeof item.title !== "string" || !item.title.trim()) continue;
+      const newest = titled.get(item.targetParticipantId);
+      if (!newest || newest.item.createdAt <= item.createdAt) titled.set(item.targetParticipantId, task);
+    }
+  }
+  for (const [participantId, task] of titled) first.set(participantId, task);
+  return first;
 }
 
 /** A member's message asking the User whether to bring in the members it

@@ -34,7 +34,8 @@ import {
   sessionsTaskTitle,
   shortenAtWord,
   sessionsMentionPieces,
-  sessionsWaitingText
+  sessionsWaitingText,
+  titleTaskByMember
 } from "./mainSessionView";
 import type { ChatMessage, ChatParticipant, ChatParticipantRequestBatch, ChatParticipantRequestItem } from "./types";
 
@@ -312,6 +313,28 @@ test("a task is named by its short title: the main session's, else its first sen
   assert.equal(shortenAtWord("Short enough", 40), "Short enough");
   // A given title is kept to 80 characters.
   assert.ok(sessionsTaskTitle({ prompt: "x", title: "word ".repeat(40) }).length <= 80);
+});
+
+test("a member keeps the title its delegation gave it: a later task without one does not rename it", () => {
+  const delegated = { ...item("p-drew", "answered", 3), prompt: "Implement new chats in General.", title: "Новые чаты в General" };
+  const followUp = { ...item("p-drew", "running", 20), prompt: 'Two additions to your task "Новые чаты в General": also the phone.' };
+  const messages = [
+    message("delegate", "participant", 3, { participantId: "p-main", metadata: { participantRequest: batch("d1", "p-main", [delegated], { delegation: { start: "clean" } }) } }),
+    message("follow-up", "participant", 20, { participantId: "p-main", metadata: { participantRequest: batch("f1", "p-main", [followUp]) } })
+  ];
+  const drew = participants[1]!;
+  assert.equal(sessionsMemberTitle(drew, titleTaskByMember(messages).get("p-drew")?.item), "Новые чаты в General", "named by its delegation");
+  assert.equal(latestTaskByMember(messages).get("p-drew")?.item.status, "running", "its state still follows its latest task");
+  // A newer titled task (another delegation-style title) does rename it.
+  const retitled = [...messages, message("again", "participant", 30, { participantId: "p-main", metadata: { participantRequest: batch("d2", "p-main", [{ ...item("p-drew", "running", 30), title: "Ход как в Claude Code" }]) } })];
+  assert.equal(sessionsMemberTitle(drew, titleTaskByMember(retitled).get("p-drew")?.item), "Ход как в Claude Code");
+  // Never titled: its first task names it, not the newest one.
+  const untitled = [
+    message("first", "participant", 3, { participantId: "p-main", metadata: { participantRequest: batch("u1", "p-main", [{ ...item("p-gera", "answered", 3), prompt: "Check the release feed." }]) } }),
+    message("second", "participant", 9, { participantId: "p-main", metadata: { participantRequest: batch("u2", "p-main", [{ ...item("p-gera", "running", 9), prompt: "One more thing about it." }]) } })
+  ];
+  assert.equal(sessionsMemberTitle(participants[2]!, titleTaskByMember(untitled).get("p-gera")?.item), "Check the release feed");
+  assert.equal(titleTaskByMember([]).size, 0);
 });
 
 test("a task entry carries its title, its state, its time and one line of its result", () => {

@@ -28,7 +28,7 @@ import {
   sortChatActivityItems
 } from "../../shared/chatActivity";
 import { clearChatRunMetadata, clearParticipantCompactions, readParticipantCompactions } from "../../shared/chatRunState";
-import { latestTaskByMember, sessionsTaskTitle } from "../../shared/mainSessionView";
+import { sessionsTaskTitle, titleTaskByMember } from "../../shared/mainSessionView";
 import { normalizeInferredParticipantRequestThreads as normalizeInferredParticipantRequestThreadMetadata } from "../../shared/chatParticipantRequestThreads";
 import { normalizeConversationSummaryChatParticipants } from "../../shared/conversationSummary";
 import { sanitizeConversationWarnings } from "../../shared/warnings";
@@ -2644,7 +2644,7 @@ export class StorageService {
       }
     }
     for (const conversation of sessionsChats) {
-      const tasks = latestTaskByMember(messagesByChat.get(conversation.id) ?? []);
+      const tasks = titleTaskByMember(messagesByChat.get(conversation.id) ?? []);
       const titles = new Map<string, string>();
       for (const [participantId, task] of tasks) titles.set(participantId, sessionsTaskTitle(task.item) || "");
       for (const [participantId, title] of titles) if (!title) titles.delete(participantId);

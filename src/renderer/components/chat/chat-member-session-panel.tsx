@@ -1,5 +1,5 @@
 import { memo, useLayoutEffect, useMemo, useRef, useState, type ComponentProps, type ReactNode } from "react";
-import { ArrowLeft, ChevronDown, ChevronRight, X } from "lucide-react";
+import { ArrowLeft, ChevronDown, ChevronRight, Square, X } from "lucide-react";
 
 import { SESSIONS_REMOVED_MEMBER_DETAIL, firstTextLine, type SessionsWorkStatus } from "../../../shared/mainSessionView";
 import type { AppSettings, ChatImageInput, ChatMessage, ChatParticipant, ChatSkillMention, RepoFileMention } from "../../../shared/types";
@@ -45,7 +45,7 @@ export function ChatMemberSessionPanel(props: {
   member: ChatSessionMember;
   /** Its task's title and the line under it (provider, model, role). */
   title: string;
-  detail: string;
+  detail: ReactNode;
   readOnly: boolean;
   focus?: { messageId: string; nonce: number };
   mainSessionId: string;
@@ -136,7 +136,7 @@ export function ChatMemberSessionPanel(props: {
         <div className="thread-panel-actions">
           {props.settings}
           {!props.readOnly && props.onStopRuns && props.runIds.length > 0 && (
-            <IconButton tone="danger" icon={X} label={`Stop ${props.title}`} tooltip="Stop" data-testid="chat-member-session-stop" onClick={() => props.onStopRuns?.(props.runIds)} />
+            <IconButton tone="danger" icon={Square} iconClassName="chat-agent-stop-icon" label={`Stop ${props.title}`} tooltip="Stop" data-testid="chat-member-session-stop" onClick={() => props.onStopRuns?.(props.runIds)} />
           )}
           <IconButton icon={X} label="Close" tooltip="Close" onClick={props.onClose} />
         </div>

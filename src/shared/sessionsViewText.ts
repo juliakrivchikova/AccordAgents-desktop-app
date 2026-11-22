@@ -12,7 +12,7 @@
 // is never passed through here.
 
 import { chatViewFor, mainSessionParticipantId, sessionsFormerMembers } from "./mainSession";
-import { latestTaskByMember, sessionsMemberTitle, sessionsMentionPieces } from "./mainSessionView";
+import { sessionsMemberTitle, sessionsMentionPieces, titleTaskByMember } from "./mainSessionView";
 import type { ChatMessage, ChatParticipant, ChatViewMode, ConversationMetadata } from "./types";
 
 /** How the sessions view names a chat's members. */
@@ -65,7 +65,7 @@ export function sessionsViewNamesOf(
   const participants = (Array.isArray(chat.metadata?.participants) ? chat.metadata.participants : [])
     .filter((item): item is ChatParticipant => Boolean(item) && typeof item === "object" && typeof (item as ChatParticipant).id === "string");
   const messages = chat.messages ?? [];
-  const tasks = latestTaskByMember(messages);
+  const tasks = titleTaskByMember(messages);
   const titles: Array<[string, string]> = [];
   const titleOf = (member: { id: string; handle?: string }): string => {
     const task = tasks.get(member.id)?.item;
