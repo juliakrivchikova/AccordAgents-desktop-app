@@ -1847,6 +1847,8 @@ function createWindow(): void {
     }
     debugLogService.writeNow("app-window.close", { windowId, forUpdate: quittingForUpdate, quitting: quitCleanupStarted });
     if (mainWindow === window) {
+      // Kept for a quit whose window then keeps its page (quitWasCancelled).
+      if (quitCleanupStarted) mainWindowLetGoByQuit = window;
       mainWindow = undefined;
     }
   });
@@ -3861,6 +3863,12 @@ function quitWasCancelled(reason: string): void {
   quitCleanupStarted = false;
   quitCleanupFinished = false;
   quitCancelledWhileCleaning = false;
+  // The window's close ran before its page kept itself open, and let go of
+  // it as the main window: it is that again, so it gets the chat's updates.
+  if ((!mainWindow || mainWindow.isDestroyed()) && mainWindowLetGoByQuit && !mainWindowLetGoByQuit.isDestroyed()) {
+    mainWindow = mainWindowLetGoByQuit;
+  }
+  mainWindowLetGoByQuit = undefined;
   // The next quit asks about the terminal's commands again.
   quitConfirmation.revoke();
   chatService.endQuit();
@@ -3875,6 +3883,8 @@ function quitWasCancelled(reason: string): void {
   });
 }
 let quitCancelledWhileCleaning = false;
+/** The main window a quit's close let go of, until the quit happens. */
+let mainWindowLetGoByQuit: BrowserWindow | undefined;
 
 app.on("before-quit", (event) => {
   debugLogService.writeNow("app-quit.before-quit", {
