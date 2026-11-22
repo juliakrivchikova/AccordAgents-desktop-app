@@ -2618,24 +2618,29 @@ export class StorageService {
       Boolean(conversation.metadata?.mainSessionParticipantId) && (conversation.metadata?.chatView ?? "sessions") === "sessions");
     const result = new Map<string, Map<string, string>>();
     if (sessionsChats.length === 0) return result;
-    const rows = await this.queryJson<{ conversationId: string; payloadHex: string }>(
-      `select conversationId, hex(payloadJson) as payloadHex from (
-         select conversation_id as conversationId, payload_json as payloadJson,
+    // Only the request of each message is read, not its whole payload.
+    const rows = await this.queryJson<{ conversationId: string; requestHex: string | null }>(
+      `select conversationId, hex(requestJson) as requestHex from (
+         select conversation_id as conversationId, json_extract(payload_json, '$.metadata.participantRequest') as requestJson,
            row_number() over (partition by conversation_id order by sequence desc) as rank
          from conversation_messages
          where conversation_id in ${sqlStringList(sessionsChats.map((conversation) => conversation.id))}
            and instr(payload_json, '"participantRequest"') > 0
-       ) where rank <= 40;`
-    ).catch(() => []);
+       ) where rank <= 40 and requestJson is not null;`
+    ).catch((error: unknown) => {
+      console.warn(`[StorageService] Activity task titles could not be read: ${error instanceof Error ? error.message : String(error)}`);
+      return [];
+    });
     const messagesByChat = new Map<string, ChatMessage[]>();
     for (const row of rows) {
+      if (!row.requestHex) continue;
       try {
-        const message = parseHexJson<ChatMessage>(row.payloadHex, `activity task ${row.conversationId}`);
+        const participantRequest = parseHexJson<NonNullable<NonNullable<ChatMessage["metadata"]>["participantRequest"]>>(row.requestHex, `activity task ${row.conversationId}`);
         const list = messagesByChat.get(row.conversationId) ?? [];
-        list.push(message);
+        list.push({ id: participantRequest.id, role: "participant", content: "", createdAt: participantRequest.createdAt, status: "done", metadata: { participantRequest } } as ChatMessage);
         messagesByChat.set(row.conversationId, list);
       } catch {
-        // A message that does not read names nobody.
+        // A request that does not read names nobody.
       }
     }
     for (const conversation of sessionsChats) {
