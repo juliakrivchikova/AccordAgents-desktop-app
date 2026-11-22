@@ -2723,8 +2723,12 @@ export class CliAgentRunner {
   ): Promise<ParticipantRunResult> {
     // Antigravity print mode takes no pictures: they are named after the
     // prompt for the app's attachment tools.
-    const { images, ...rest } = options;
+    const { images, ...withoutImages } = options;
     const promptWithImages = this.promptWithImageFallback(prompt, images);
+    // A resume miss starts it again from the fallback prompt: named there too.
+    const rest: CliAgentRunOptions = withoutImages.resumeFallbackPrompt === undefined
+      ? withoutImages
+      : { ...withoutImages, resumeFallbackPrompt: this.promptWithImageFallback(withoutImages.resumeFallbackPrompt, images) };
     if (rest.nativeGoal) {
       return this.runGeminiNativeGoal(participant, promptWithImages, repoPath, kind, signal, this.withoutWarm(rest));
     }

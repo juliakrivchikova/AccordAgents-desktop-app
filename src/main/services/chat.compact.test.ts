@@ -994,6 +994,44 @@ test("the machine takes a compaction turn asked of its member, runs it under the
   }
 });
 
+test("a /compact with no handle written to a member, asked of it on the server (the phone), compacts it as the desktop does; with a picture it is a message", async () => {
+  const tempRoot = await mkdtemp(path.join(tmpdir(), "accordagents-chat-compact-bare-"));
+  try {
+    const participant = chatParticipant({ homeMachineId: "box" });
+    const conversation = chatConversation([participant], [chatSession(participant, "session-on-box")]);
+    conversation.messages.push({ ...acceptedMessage("bare"), content: "/compact keep the API notes", metadata: { ...acceptedMessage("bare").metadata, deliveryTargets: [participant.id] } });
+    conversation.messages.push({ ...acceptedMessage("pictured"), content: "/compact", metadata: { ...acceptedMessage("pictured").metadata, deliveryTargets: [participant.id],
+      imageAttachments: [{ id: "img", filename: "a.png", mimeType: "image/png", sizeBytes: 10, width: 1, height: 1, storageKey: "attachments/img.png", createdAt: NOW }] } });
+    const compacted: unknown[] = [];
+    const ran: string[] = [];
+    const { service } = testService({
+      conversation,
+      compactSession: async (runParticipant, _repoPath, _diffMode, _kind, _signal, options) => {
+        compacted.push(options.compactInstructions);
+        return { participant: runParticipant, ok: true, sessionId: "session-on-box" };
+      },
+      run: async (runParticipant, prompt) => {
+        ran.push(prompt);
+        return { participant: runParticipant, ok: true, content: "Seen.", durationMs: 1 };
+      }
+    });
+    (service as any).ensureHistoryFiles = async () => tempRoot;
+    service.setHostMachineId("box");
+    const link = fakeServerLink("machine-device");
+    service.setServerLink(link);
+    await service.startServerTurn({ runId: "turn-bare", conversationId: conversation.id, messageId: "bare", participantId: participant.id, state: "requested" });
+    await waitFor(() => link.ops.filter((op) => op.kind === "turn.finish").length === 1);
+    assert.deepEqual(compacted, ["keep the API notes"]);
+    assert.deepEqual(ran, [], "her text did not go to the CLI");
+    await service.startServerTurn({ runId: "turn-pictured", conversationId: conversation.id, messageId: "pictured", participantId: participant.id, state: "requested" });
+    await waitFor(() => link.ops.filter((op) => op.kind === "turn.finish").length === 2);
+    assert.equal(compacted.length, 1);
+    assert.equal(ran.length, 1);
+  } finally {
+    await rm(tempRoot, { recursive: true, force: true });
+  }
+});
+
 test("a member on a machine asking to compact itself asks it on the server, and its machine then takes it like any compaction", async () => {
   const tempRoot = await mkdtemp(path.join(tmpdir(), "accordagents-chat-compact-self-"));
   try {
@@ -1192,7 +1230,9 @@ test("a compaction gives Codex its app tools as a Codex turn does, gives Gemini 
     const conversation = chatConversation([codex, gemini, fallback], [
       chatSession(codex, "codex-session"),
       chatSession(gemini, "gemini-session"),
-      { ...chatSession(fallback, "fallback-session"), roleRuntime: "prompt-fallback" as const }
+      // At the current config version: one at an older version tries the
+      // CLI's own mechanism again (refreshExistingSessionForParticipant).
+      { ...chatSession(fallback, "fallback-session"), roleRuntime: "prompt-fallback" as const, runtimeConfigVersion: 23 }
     ]);
     const issued: Array<Record<string, unknown>> = [];
     const appMcp = {
