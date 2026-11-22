@@ -123,7 +123,9 @@ test("a member's choice closes as soon as the User writes to that member instead
   const told = h.prompts.at(-1) ?? "";
   assert.ok(told.includes("Your earlier choice card was closed without an answer"), "the turn on her message is told the card closed");
   assert.ok(told.includes("- Store"), "by its title");
-  assert.ok(told.indexOf("closed without an answer") > told.indexOf("let's do something else first"), "after the message that closed it");
+  // A short note before her message, which comes as she typed it.
+  assert.ok(told.indexOf("closed without an answer") < told.indexOf("let's do something else first"), "a note before the message that closed it");
+  assert.ok(told.endsWith("@taylor let's do something else first"), told);
   await until(() => Boolean(h.choiceOf(asking.id)?.expiredAt));
   const choice = h.choiceOf(asking.id);
   assert.equal(choice?.status, "cancelled", "closed as a cancelled card is, on every surface");
@@ -243,7 +245,7 @@ test("answering another of the member's cards goes on with it: the older card ex
   await until(() => Boolean(h.choiceOf(older.id)?.expiredAt));
   assert.equal(h.choiceOf(older.id)?.status, "cancelled", "the older card expired with the turn the answer started");
   const told = h.prompts.at(-1) ?? "";
-  assert.ok(told.includes("Your earlier choice card was closed without an answer: User went on with the triggering message"), "that turn is told the older card closed");
+  assert.ok(told.includes("Your earlier choice card was closed without an answer: User went on with her message below"), "that turn is told the older card closed");
   assert.ok(told.includes("- Store") && !told.includes("- Format"), "the older card, not the one she answered");
 });
 

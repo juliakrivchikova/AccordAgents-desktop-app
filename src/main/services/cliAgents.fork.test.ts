@@ -30,17 +30,29 @@ function claudeArgs(options: Record<string, unknown>, newSessionId?: string): st
   ) as string[];
 }
 
-test("claude: a fork resumes the source with --fork-session under its own new session id, without --agent", () => {
+test("claude: a fork resumes the source with --fork-session under its own new session id, with its own instructions appended", () => {
   const args = claudeArgs({ forkFromSessionId: "parent-session" }, "child-session");
   const resume = args.indexOf("--resume");
   assert.ok(resume >= 0, args.join(" "));
   assert.equal(args[resume + 1], "parent-session");
   assert.equal(args.includes("--fork-session"), true);
   assert.equal(args[args.indexOf("--session-id") + 1], "child-session", "the copy gets the id the app persists");
-  // Claude Code keeps the source's agent in a resumed session; --agent is
-  // not applied there, so it is not sent.
+  // The member's own instructions go with every launch (Claude Code keeps the
+  // source's recorded system prompt in the copy until it compacts, then
+  // renders it from these); a main-thread agent is never used.
+  assert.equal(args[args.indexOf("--append-system-prompt") + 1], "You are @child.");
   assert.equal(args.includes("--agents"), false);
   assert.equal(args.includes("--agent"), false);
+});
+
+test("claude: a resumed session gets its instructions on every launch, so a relaunch never loses them", () => {
+  const args = claudeArgs({ sessionId: "child-session" });
+  assert.equal(args[args.indexOf("--resume") + 1], "child-session");
+  assert.equal(args[args.indexOf("--append-system-prompt") + 1], "You are @child.");
+  assert.equal(args.includes("--agent"), false);
+  // Launch logs never carry the instructions.
+  const redacted = (new CliAgentRunner() as any).redactedClaudeArgs(args) as string[];
+  assert.equal(redacted[redacted.indexOf("--append-system-prompt") + 1], "<redacted>");
 });
 
 test("claude: once the fork has its own id it resumes that id, never the source", () => {
@@ -344,7 +356,8 @@ test("claude: a clean member starts its own session with its role", () => {
   assert.equal(args.includes("--resume"), false);
   assert.equal(args.includes("--fork-session"), false);
   assert.equal(args[args.indexOf("--session-id") + 1], "fresh-session");
-  assert.equal(args[args.indexOf("--agent") + 1], "accordagents-child");
+  assert.equal(args[args.indexOf("--append-system-prompt") + 1], "You are @child.");
+  assert.equal(args.includes("--agent"), false);
 });
 
 test("codex: fork params carry the member's own settings, as a resume does", () => {

@@ -414,6 +414,24 @@ export function forkCopyNotMade(result: Pick<ParticipantRunResult, "error" | "fo
   return isForkSourceMissingError(result.error) || result.forkCopyFailed === true;
 }
 
+/** A picture sent with the message, given to the CLI as its own image input. */
+export interface CliAgentImageInput {
+  mimeType: string;
+  /** The bytes, base64 (Claude Code's stream-json image block). */
+  dataBase64: string;
+  /** The file on this device (Codex app-server `localImage`). */
+  path: string;
+}
+
+/** The pictures of the message a turn answers. A transport with image input
+ *  (Claude Code's stream-json, Codex's app-server) gets them as images;
+ *  any other gets `fallbackText` after the prompt, naming them for the
+ *  app's attachment tools. */
+export interface CliAgentTurnImages {
+  items: CliAgentImageInput[];
+  fallbackText: string;
+}
+
 export interface CliAgentRunOptions {
   persistSession?: boolean;
   sessionId?: string;
@@ -442,6 +460,7 @@ export interface CliAgentRunOptions {
   clearCompactPrompt?: boolean;
   extraReadableDirs?: string[];
   resumeFallbackPrompt?: string;
+  images?: CliAgentTurnImages;
   role?: CliAgentRoleOptions;
   appMcp?: CliAgentAppMcpOptions;
   /** Claude: start the CLI with `--chrome` (decided once per run from the
@@ -617,7 +636,9 @@ interface WarmAgentEntry {
     timeoutMs?: number,
     nativeGoal?: NativeGoalRun,
     onCodexServerRequest?: CliAgentCodexServerRequestCallback,
-    claude?: ClaudeWarmRunContext
+    claude?: ClaudeWarmRunContext,
+    /** Codex only: the message's pictures, as `localImage` input. */
+    images?: CliAgentImageInput[]
   ) => Promise<ParticipantRunResult>;
   /** Claude only: no reply is waiting or running and no background task is
    *  live, so closing the process loses nothing. */
@@ -681,6 +702,8 @@ interface ClaudeWarmRunContext {
   onPromptSuggestion?: (suggestion: string) => void;
   allowEmptyContent?: boolean;
   roleRuntime?: ParticipantRunResult["roleRuntime"];
+  /** The message's pictures, as image blocks of the user message. */
+  images?: CliAgentImageInput[];
   /** The reply answers a slash command (`/compact`): it reports no usage of
    *  its own and none is read from the session log (the caller asks the CLI),
    *  and what the CLI printed counts as its text although the result is empty. */
@@ -698,6 +721,8 @@ interface ClaudeWarmReply {
    *  the CLI started itself (a background task finished while it was idle). */
   commandUuid?: string;
   prompt?: string;
+  /** The message's pictures, sent as image blocks with its text. */
+  images?: CliAgentImageInput[];
   /** Written to the CLI's stdin. Only an older CLI that reports no command
    *  lifecycle keeps later messages here until the current one has finished. */
   written: boolean;
@@ -2721,12 +2746,20 @@ export class CliAgentRunner {
     signal?: AbortSignal,
     options: CliAgentRunOptions = {}
   ): Promise<ParticipantRunResult> {
-    if (options.nativeGoal) {
-      return this.runGeminiNativeGoal(participant, prompt, repoPath, kind, signal, this.withoutWarm(options));
+    // Antigravity print mode takes no pictures: they are named after the
+    // prompt for the app's attachment tools.
+    const { images, ...withoutImages } = options;
+    const promptWithImages = this.promptWithImageFallback(prompt, images);
+    // A resume miss starts it again from the fallback prompt: named there too.
+    const rest: CliAgentRunOptions = withoutImages.resumeFallbackPrompt === undefined
+      ? withoutImages
+      : { ...withoutImages, resumeFallbackPrompt: this.promptWithImageFallback(withoutImages.resumeFallbackPrompt, images) };
+    if (rest.nativeGoal) {
+      return this.runGeminiNativeGoal(participant, promptWithImages, repoPath, kind, signal, this.withoutWarm(rest));
     }
     // Antigravity has no warm stdio protocol; print-mode one-shots with
     // `--conversation <id>` resume carry the session across turns.
-    return this.runGeminiOneShot(participant, prompt, repoPath, kind, signal, this.withoutWarm(options));
+    return this.runGeminiOneShot(participant, promptWithImages, repoPath, kind, signal, this.withoutWarm(rest));
   }
 
   private async runGeminiNativeGoal(
@@ -3561,7 +3594,9 @@ export class CliAgentRunner {
           options.onSessionId,
           options.timeoutMs,
           options.nativeGoal,
-          options.onCodexServerRequest
+          options.onCodexServerRequest,
+          undefined,
+          options.images?.items
         );
         return this.withAppMcpClientStatus(result, participant, options);
       } finally {
@@ -3723,7 +3758,9 @@ export class CliAgentRunner {
             options.onSessionId,
             options.timeoutMs,
             options.nativeGoal,
-            options.onCodexServerRequest
+            options.onCodexServerRequest,
+            undefined,
+            options.images?.items
           ),
           participant,
           options
@@ -4813,7 +4850,9 @@ export class CliAgentRunner {
         onSessionId?: CliAgentSessionIdCallback,
         timeoutMsOverride?: number,
         nativeGoal?: NativeGoalRun,
-        onCodexServerRequest?: CliAgentCodexServerRequestCallback
+        onCodexServerRequest?: CliAgentCodexServerRequestCallback,
+        _claude?: ClaudeWarmRunContext,
+        images?: CliAgentImageInput[]
       ): Promise<ParticipantRunResult> => {
         rejectPendingGuardianApprovals(new Error("Codex Guardian approval expired because a new turn started."));
         const timeoutMs = nativeGoal ? 0 : (timeoutMsOverride ?? this.runTimeoutMs);
@@ -4903,13 +4942,7 @@ export class CliAgentRunner {
           const turnParams = {
             threadId: currentThreadId,
             effort: this.codexReasoningEffort(participant.reasoningEffort) ?? null,
-            input: [
-              {
-                type: "text",
-                text: codexTurnPrompt,
-                text_elements: []
-              }
-            ]
+            input: this.codexAppServerTurnInput(codexTurnPrompt, images)
           };
           let turn: CodexAppServerTurnStartResult;
           try {
@@ -6434,7 +6467,8 @@ export class CliAgentRunner {
         args,
         {
           cwd: repoPath,
-          input: options.nativeGoal ? `/goal ${prompt}` : prompt,
+          // A one-shot's text input takes no pictures: they are named after it.
+          input: options.nativeGoal ? `/goal ${this.promptWithImageFallback(prompt, options.images)}` : this.promptWithImageFallback(prompt, options.images),
           timeoutMs: options.timeoutMs ?? this.runTimeoutMs,
           allowNoTimeout: Boolean(options.nativeGoal),
           env: this.agentRunEnv(options),
@@ -6520,6 +6554,7 @@ export class CliAgentRunner {
             persistSession: options.persistSession,
             extraReadableDirs: options.extraReadableDirs,
             resumeFallbackPrompt: options.resumeFallbackPrompt,
+            images: options.images,
             agentMode: options.agentMode,
             permissions: options.permissions,
             appMcp: options.appMcp,
@@ -6537,7 +6572,7 @@ export class CliAgentRunner {
           roleRuntime: "prompt-fallback",
           warnings: [
             ...(fallback.warnings ?? []),
-            `${participant.label}: Claude Code rejected --agent/--agents; used prompt fallback for role instructions.`
+            `${participant.label}: Claude Code rejected --append-system-prompt; used prompt fallback for role instructions.`
           ]
         };
       }
@@ -6548,6 +6583,7 @@ export class CliAgentRunner {
         const restarted = await this.runClaudeOneShot(participant, options.resumeFallbackPrompt ?? prompt, repoPath, kind, signal, {
           persistSession: options.persistSession,
           extraReadableDirs: options.extraReadableDirs,
+          images: options.images,
           role: options.role,
           agentMode: options.agentMode,
           permissions: options.permissions,
@@ -6615,7 +6651,8 @@ export class CliAgentRunner {
             onMessageWritten: warm.onMessageWritten,
             onPromptSuggestion: warm.onPromptSuggestion,
             allowEmptyContent: options.allowEmptyContent,
-            roleRuntime: options.role && !options.sessionId && !options.forkFromSessionId ? "claude-agent" : undefined
+            roleRuntime: options.role && !options.sessionId && !options.forkFromSessionId ? "claude-agent" : undefined,
+            images: options.images?.items
           }),
           participant,
           options
@@ -7000,8 +7037,9 @@ export class CliAgentRunner {
           return;
         }
         reply.written = true;
-        write(this.claudeWarmUserMessage(reply.prompt ?? "", reply.commandUuid));
+        write(this.claudeWarmUserMessage(reply.prompt ?? "", reply.commandUuid, reply.images));
         reply.prompt = undefined;
+        reply.images = undefined;
         try {
           reply.onWritten?.();
         } catch {
@@ -7183,6 +7221,7 @@ export class CliAgentRunner {
           const reply = this.newClaudeWarmReply({
             commandUuid: randomUUID(),
             prompt: turnPrompt,
+            images: claude?.images,
             written: false,
             started: false,
             origin: claude?.origin,
@@ -7315,10 +7354,17 @@ export class CliAgentRunner {
     if (reasoningEffort) {
       args.push("--effort", reasoningEffort);
     }
-    // A resumed or forked session keeps the agent it started with: Claude
-    // Code does not apply --agent to it.
-    if (options.role && !options.sessionId && !options.forkFromSessionId) {
-      args.push("--agents", this.claudeAgentsJson(options.role), "--agent", options.role.name);
+    // The member's instructions go on top of Claude Code's own system prompt
+    // on every launch, as the dedicated CLI's `--append-system-prompt` adds
+    // them. Claude Code 2.1.330 records the system prompt on a conversation's
+    // first request and sends that record on every later request and resume
+    // until the conversation is compacted, when it renders it again from the
+    // launch's text; a fork keeps its source's record. So a resumed or forked
+    // session keeps what it started with, and the caller says what changed.
+    // (A main-thread `--agent` replaced Claude Code's own system prompt, and a
+    // resume without its definition dropped the member's instructions.)
+    if (options.role) {
+      args.push("--append-system-prompt", options.role.instructions);
     }
     args.push(...this.claudeMcpArgs(kind, options));
     args.push(...this.claudePermissionPromptArgs(kind, options));
@@ -8012,16 +8058,43 @@ export class CliAgentRunner {
 
   /** A uuid-stamped message makes the CLI report its queue state under that
    *  id (`command_lifecycle`). */
-  private claudeWarmUserMessage(prompt: string, uuid?: string): Record<string, unknown> {
+  private claudeWarmUserMessage(prompt: string, uuid?: string, images?: CliAgentImageInput[]): Record<string, unknown> {
+    // Pictures go as the image blocks of the message, as a picture pasted
+    // into the dedicated CLI does; a message of pictures alone has no text.
+    const content: Array<Record<string, unknown>> = [
+      ...(prompt || !images?.length ? [{ type: "text", text: prompt }] : []),
+      ...(images ?? []).map((image) => ({
+        type: "image",
+        source: { type: "base64", media_type: image.mimeType, data: image.dataBase64 }
+      }))
+    ];
     return {
       type: "user",
       ...(uuid ? { uuid } : {}),
       message: {
         role: "user",
-        content: [{ type: "text", text: prompt }]
+        content
       },
       parent_tool_use_id: null
     };
+  }
+
+  /** A Codex turn's input: the message's text and its pictures as Codex's
+   *  own image input, as a picture pasted into its terminal goes (Codex
+   *  0.171.0 records each as an input image). A message of pictures alone
+   *  has no text item. */
+  private codexAppServerTurnInput(prompt: string, images?: CliAgentImageInput[]): Array<Record<string, unknown>> {
+    return [
+      ...(prompt || !images?.length ? [{ type: "text", text: prompt, text_elements: [] }] : []),
+      ...(images ?? []).map((image) => ({ type: "localImage", path: image.path }))
+    ];
+  }
+
+  /** A transport with no image input names the message's pictures after its
+   *  text, for the app's attachment tools. */
+  private promptWithImageFallback(prompt: string, images: CliAgentTurnImages | undefined): string {
+    if (!images?.items.length || !images.fallbackText) return prompt;
+    return prompt ? `${prompt}\n\n${images.fallbackText}` : images.fallbackText;
   }
 
   private isClaudeWarmResult(event: unknown): boolean {
@@ -9260,7 +9333,7 @@ export class CliAgentRunner {
   }
 
   private redactedClaudeArgs(args: string[]): string[] {
-    const sensitiveValueFlags = new Set(["--agents", "--mcp-config", "--settings"]);
+    const sensitiveValueFlags = new Set(["--append-system-prompt", "--mcp-config", "--settings"]);
     const redacted: string[] = [];
     for (let index = 0; index < args.length; index += 1) {
       const arg = args[index] ?? "";
@@ -9625,15 +9698,9 @@ export class CliAgentRunner {
     }
 
     if (kind === "chat") {
-      const mode = this.agentModeForRun(kind, options);
-      const readContextAvailable = Boolean(repoPath) || this.normalizedExtraReadableDirs(options.extraReadableDirs).length > 0;
-      return [
-        `You are running for AccordAgents Chat in ${mode} mode.`,
-        readContextAvailable
-          ? "Read-only file inspection, search, and listing are allowed for the selected repository and app-managed history files described in the prompt. Use these only to gather context."
-          : "No repository or app-managed readable directory is available for this run.",
-        prompt
-      ].join("\n\n");
+      // A chat turn is the member's message as it is: what the member may do
+      // is in its developer instructions, said once (ChatService).
+      return prompt;
     }
 
     const hasRepoContext = Boolean(repoPath) && (kind === "code-review" || Boolean(diffMode));
@@ -9681,15 +9748,6 @@ export class CliAgentRunner {
     return JSON.stringify(value);
   }
 
-  private claudeAgentsJson(role: CliAgentRoleOptions): string {
-    return JSON.stringify({
-      [role.name]: {
-        description: role.description,
-        prompt: role.instructions
-      }
-    });
-  }
-
   private isCodexDeveloperInstructionsUnsupported(error: unknown): boolean {
     const message = this.errorText(error).toLowerCase();
     return (
@@ -9701,8 +9759,8 @@ export class CliAgentRunner {
   private isClaudeAgentFlagUnsupported(error: unknown): boolean {
     const message = this.errorText(error).toLowerCase();
     return (
-      /(?:unknown|unrecognized|invalid|unsupported).{0,80}--agents?/.test(message) ||
-      /--agents?.{0,80}(?:unknown|unrecognized|invalid|unsupported)/.test(message)
+      /(?:unknown|unrecognized|invalid|unsupported).{0,80}--append-system-prompt/.test(message) ||
+      /--append-system-prompt.{0,80}(?:unknown|unrecognized|invalid|unsupported)/.test(message)
     );
   }
 

@@ -5,7 +5,7 @@ import test from "node:test";
 import { ChatService } from "./chat";
 import { accordLaunchCardForMessage } from "../../shared/accordLaunchCard";
 import { chatParticipantRequestReplyRootMap } from "../../shared/chatParticipantRequestThreads";
-import { normalizeChatAgentPermissions } from "../../shared/agentPermissions";
+import { defaultChatAgentPermissions, normalizeChatAgentPermissions } from "../../shared/agentPermissions";
 import { applyChatAccessOptionById } from "../../shared/chatAccessModes";
 import { buildGeminiExecInvocation } from "./geminiExec";
 import { DEFAULT_CHAT_PROMPT_CONTEXT } from "../../shared/chatPromptContext";
@@ -494,8 +494,12 @@ test("a delegated fork whose clean start fails too: the main session reads why i
   const notice = `@${String(result.handle).slice(1)} could not start from a copy of @main's session, so this turn started a clean session.`;
   const failed = storage.current.messages.find((message: ChatMessage) => message.participantId === childId && message.status === "error");
   assert.ok(failed?.content.includes(notice), failed?.content);
-  const pointers = (storage.current.metadata.promptContextPointers ?? {}) as Record<string, unknown>;
-  assert.equal(pointers[childId], undefined, "its chat context starts over");
+  const pointers = (storage.current.metadata.promptContextPointers ?? {}) as Record<string, { timeline?: unknown; threads?: unknown; forgottenAt?: string }>;
+  // Its chat context starts over: no pointer, only the marker that keeps an
+  // older copy of the chat from bringing its pointers back.
+  assert.equal(pointers[childId]?.timeline, undefined, "its chat context starts over");
+  assert.equal(pointers[childId]?.threads, undefined);
+  assert.ok(pointers[childId]?.forgottenAt);
   // Its next turn: a new session's first, given the chat from its start.
   overloaded = false;
   const asked = await service.requestParticipantsFromTool(mainActor(undefined, { triggerMessageId: "trigger-next" }), { requests: [{ target: String(result.handle), prompt: "Try again." }] });
@@ -540,7 +544,7 @@ test("a fork the CLI starts clean (its source is gone) is still told who it is, 
   const fallback = String(runs.find((run) => run.participant.id === result.participantId)!.options.resumeFallbackPrompt);
   assert.match(fallback, /^You were to start from a copy of @main's session, but it could not be copied/);
   assert.match(fallback, /You are @refactor, role: Generic Member\. You are not the main session\./);
-  assert.match(fallback, /Do only the task in the triggering message/);
+  assert.match(fallback, /Do only the task in the request below/);
   assert.match(fallback, /Answer directly\./, "its role's instructions");
   assert.match(fallback, /Continue the refactor\./, "and its task");
 
@@ -1048,14 +1052,15 @@ test("members of a main-session chat ask the main session, not User, and do not 
   assert.equal(internals.mainSessionHandleForMember(conversation, worker), "main");
   assert.equal(internals.mainSessionHandleForMember(conversation, main), undefined);
 
-  const workerInstructions = internals.nativeRoleInstructions(worker, sessionRecord(worker, "s", GENERIC_ROLE), "main") as string;
+  const access = { agentMode: "default", permissions: defaultChatAgentPermissions() };
+  const workerInstructions = internals.sessionInstructions(conversation, worker, sessionRecord(worker, "s", GENERIC_ROLE), access, "/tmp/accordagents-history") as string;
   assert.match(workerInstructions, /ask @main with `app_chat_request_participants` instead of asking User/);
   assert.match(workerInstructions, /Do not write a `User choice:` block unless @main asked you to put a question to User\./);
   assert.match(workerInstructions, /Do not start an Accord; when one is needed, ask @main\./);
   assert.match(workerInstructions, /"target": "main"/);
   assert.doesNotMatch(workerInstructions, /Ask User directly/);
 
-  const mainInstructions = internals.nativeRoleInstructions(main, sessionRecord(main, "s"), undefined) as string;
+  const mainInstructions = internals.sessionInstructions(conversation, main, sessionRecord(main, "s"), access, "/tmp/accordagents-history") as string;
   assert.match(mainInstructions, /Ask User directly when goals/);
   assert.match(mainInstructions, /- When User must pick one option/);
   assert.doesNotMatch(mainInstructions, /ask @main/);

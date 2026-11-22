@@ -2523,8 +2523,8 @@ test("claude launch diagnostics redact MCP tokens, inline settings, and role ins
     "{\"headers\":{\"Authorization\":\"Bearer secret-token\"}}",
     "--settings",
     "{\"permissions\":{\"ask\":[\"Bash(secret-path)\"]}}",
-    "--agents",
-    "{\"role\":{\"prompt\":\"private instructions\"}}",
+    "--append-system-prompt",
+    "private instructions",
     "--add-dir",
     "/repo/history"
   ];
@@ -6630,46 +6630,13 @@ test("claude compact without a member session has nothing to compact", async () 
   assert.equal(result.error, "@claude has no chat session to compact.");
 });
 
-test("codexPrompt chat envelope passes the inner prompt through and does not duplicate permission text", () => {
+test("a Codex chat turn is the member's message as it is: no per-turn envelope, whatever the mode", () => {
   const runner = makeRunner() as any;
-  const innerPrompt = "INNER_PROMPT_MARKER";
-  const wrapped = runner.codexPrompt(innerPrompt, "/repo", undefined, "chat", chatOptions({
-    agentMode: "default",
-    workspaceWrite: false,
-    webAccess: false,
-    canRequestPermissions: true
-  }));
-
-  assert.match(wrapped, /You are running for AccordAgents Chat in default mode/);
-  assert.match(wrapped, /Read-only file inspection/);
-  assert.ok(wrapped.includes(innerPrompt));
-  assert.doesNotMatch(wrapped, /Shell commands are blocked for this turn/);
-  assert.doesNotMatch(wrapped, /Workspace file edits are blocked for this turn/);
-  assert.doesNotMatch(wrapped, /Web access is blocked for this turn/);
-  assert.doesNotMatch(wrapped, /app_permissions_request_change/);
-});
-
-test("codexPrompt chat envelope reflects plan agent mode in its header", () => {
-  const runner = makeRunner() as any;
-  const wrapped = runner.codexPrompt("INNER", "/repo", undefined, "chat", chatOptions({
-    agentMode: "plan",
-    workspaceWrite: true,
-    webAccess: false,
-    canRequestPermissions: true
-  }));
-
-  assert.match(wrapped, /You are running for AccordAgents Chat in plan mode/);
-});
-
-test("codexPrompt chat envelope marks runs without readable context", () => {
-  const runner = makeRunner() as any;
-  const wrapped = runner.codexPrompt("INNER", undefined, undefined, "chat", chatOptions({
-    agentMode: "default",
-    workspaceWrite: false,
-    canRequestPermissions: false
-  }));
-
-  assert.match(wrapped, /No repository or app-managed readable directory is available/);
+  for (const agentMode of ["default", "plan", "auto"] as const) {
+    const prompt = runner.codexPrompt("Fix the flaky test.", "/repo", undefined, "chat", chatOptions({ agentMode, workspaceWrite: false, canRequestPermissions: true }));
+    assert.equal(prompt, "Fix the flaky test.");
+  }
+  assert.equal(runner.codexPrompt("Hi.", undefined, undefined, "chat", chatOptions({ agentMode: "default", workspaceWrite: false, canRequestPermissions: false })), "Hi.");
 });
 
 test("commandErrorText surfaces structured result errors", () => {

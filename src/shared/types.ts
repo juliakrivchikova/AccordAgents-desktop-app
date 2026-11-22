@@ -1099,7 +1099,7 @@ export interface ChatParticipantSession {
   forkFrom?: ChatSessionForkSource;
   /** The member whose session this one was forked from. Kept after the fork
    *  has its own id: both CLIs keep the source's system and developer
-   *  instructions in a fork, so each turn reminds the member who it is. */
+   *  instructions in a fork, so its first turn tells the member who it is. */
   forkedFromParticipantId?: string;
   executionSessionId?: string;
   roleConfigId: string;
@@ -1127,6 +1127,11 @@ export interface ChatParticipantSession {
   /** Device-local: it moved here with this session, and its next turn tells
    *  it so (memberMovedNote); cleared once a turn of it succeeded. */
   movedHere?: { from: string; to: string; at: string };
+  /** A hash of the member's access (repository, mode, permissions) as its
+   *  CLI session was last told it, in its instructions or a note: the CLI
+   *  keeps the instructions a session started with, so a turn whose access
+   *  differs says the change once. Absent for a session told nothing yet. */
+  instructionsAccessHash?: string;
   updatedAt: string;
 }
 
@@ -1981,6 +1986,9 @@ export interface ChatPromptContextPointerEntry {
    *  read (pendingReplyPostsForPromptContext), when newer than the message
    *  above: its next turn reads only posts made after it. */
   postsReadThrough?: string;
+  /** When this device wrote the pointer: a member's context that started
+   *  over (forgottenAt) keeps only pointers written after it. */
+  committedAt?: string;
 }
 
 export type ChatPromptContextPointerScope =
@@ -1995,6 +2003,10 @@ export interface ChatPromptContextPointerAdvance {
 export interface ChatPromptContextParticipantPointers {
   timeline?: ChatPromptContextPointerEntry;
   threads?: Record<string, ChatPromptContextPointerEntry>;
+  /** The member's chat context started over at this time (its session
+   *  started clean): a pointer to a message from before it, held by a copy
+   *  of the chat read earlier, is not taken back when copies are merged. */
+  forgottenAt?: string;
 }
 
 export type ChatPromptContextPointers = Record<string, ChatPromptContextParticipantPointers>;
