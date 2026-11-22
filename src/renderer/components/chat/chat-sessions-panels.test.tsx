@@ -91,7 +91,12 @@ test("the side panel lists every session but the main session as T3 Code does: g
     assert.equal(drewRow.findAll((node) => node.props?.["data-provider-kind"] === "claude-code").length, 1, "its provider's glyph");
     assert.equal(drewRow.findAll((node) => typeof node.props?.className === "string" && node.props.className === "chat-agent-dot is-running").length, 1, "a dot for its state");
     assert.equal(drewRow.findAll(byTestId("chat-agent-time")).length, 1, "how long it runs");
-    assert.match(textOf(memberRows()[1]!), /Waiting for you/, "a session that waits for the User says so instead of a time");
+    // No state in words in a row (the User, 2026-11-22): the dot says it, the card and the accessible name in words.
+    const taylorRow = memberRows()[1]!;
+    assert.doesNotMatch(textOf(taylorRow), /Waiting for you|Running|Done|Failed|Stopped/, "no state words in a row");
+    assert.equal(taylorRow.findAll((node) => typeof node.props?.className === "string" && node.props.className === "chat-agent-dot is-waiting").length, 1, "its dot says it waits");
+    assert.match(String(taylorRow.find((node) => node.type === "button" && node.props.className === "chat-agent-row-main").props["aria-label"]), /Waiting for you/, "said to a screen reader");
+    assert.doesNotMatch(textOf(drewRow), /Running/, "a running row says so only by its dot");
     assert.equal(memberRows()[1]!.findAll(byTestId("chat-members-row-stop")).length, 0, "nothing to stop for a session that runs nothing");
     assert.equal(root.findAll(byTestId("chat-members-stop-all")).length, 0, "no Stop all");
     assert.doesNotMatch(textOf(root), /Stop all/);

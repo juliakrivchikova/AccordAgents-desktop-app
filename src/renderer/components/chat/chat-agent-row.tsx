@@ -55,16 +55,15 @@ export interface ChatAgentRowData {
  *  effort (and a role that is not the ordinary member's). */
 export type ChatAgentDetail = (model: MemberModelSummary) => string;
 
-/** The muted words at a row's end: the model and how long it ran, or its
- *  state when that is what matters (waiting for the User, failed, stopped). */
+/** The muted words at a row's end: the model and how long it runs or ran,
+ *  never its state (the User, 2026-11-22): the dot on its glyph says that,
+ *  and its hover card and accessible name say it in words. */
 function RowMeta(props: { row: ChatAgentRowData; model?: string }): JSX.Element {
   const { row } = props;
-  if (row.status === "waiting" || row.status === "failed" || row.status === "stopped") {
-    return <span className={`chat-agent-meta chat-agent-state is-${row.status}`}>{SESSIONS_WORK_STATUS_LABELS[row.status]}</span>;
-  }
+  const ended = row.status === "done" || row.status === "failed" || row.status === "stopped";
   const time = row.status === "running" && row.since
     ? <LiveElapsed since={row.since} compact />
-    : row.status === "done" && row.durationMs !== undefined ? formatCompactDuration(row.durationMs) : undefined;
+    : ended && row.durationMs !== undefined ? formatCompactDuration(row.durationMs) : undefined;
   return (
     <span className="chat-agent-meta">
       {props.model && <span className="chat-agent-model">{props.model}</span>}
@@ -103,8 +102,9 @@ export function ChatAgentCard(props: { row: ChatAgentRowData; detail: string; ba
 }
 
 /** One session in the side panel, as T3 Code lists its agents: the
- *  provider's glyph with a dot for its state, its task's title on one line,
- *  the model and how long it ran at the end. Hovering shows Stop where the
+ *  provider's glyph with a dot for its state (its only mark of it in the
+ *  row: a colour per state, pulsing while it runs), its task's title on one
+ *  line, the model and how long it ran at the end. Hovering shows Stop where the
  *  time was (only while it runs) and, to its left, a card with the CLI,
  *  model and effort, the state and time and what it does now. A click opens
  *  its whole session in the panel. */

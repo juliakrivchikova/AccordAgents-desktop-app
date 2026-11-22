@@ -409,7 +409,7 @@ chat without a main session is always `classic`; its switch is disabled.
     (just "Agents" while none runs), the sessions the main session
     delegated, never the main session itself (its settings are its
     composer's controls), one 32px line each: the provider's bare glyph
-    with a dot for its state (Running: the accent, pulsing; Waiting for
+    with a dot for its state, its only mark of it in the row (no state words there, the User, 2026-11-22; Running: the accent, a soft ring pulsing from it, still for reduced motion; Waiting for
     you: amber; Done: green; Failed: red; Stopped: a grey square; none
     while idle; Waiting for you also while its run is live when the User
     holds its turn: its CLI's tool permission, a connector sign-in, a Codex
@@ -420,9 +420,9 @@ chat without a main session is always `classic`; its switch is disabled.
     say the same, and the phone reads it from its permission cards'
     `requesterParticipantId` and `holdsTurn`), the title on one line, and
     muted at the end the model's
-    name and how long it runs ("8m", T3 Code's compact time) or took, or
-    instead its state when that is what matters ("Waiting for you",
-    "Failed", "Stopped"). Hovering a row that runs shows a quiet square
+    name and how long it runs ("8m", T3 Code's compact time) or took (none
+    while it waits for the User); its state in words is in its hover card
+    and its accessible name. Hovering a row that runs shows a quiet square
     Stop in the time's place; there is no Stop all. Hovering a row shows,
     to its left, T3 Code's card: the title, CLI · model · effort (and a
     non-generic role), the state · full time · "N background tasks", then

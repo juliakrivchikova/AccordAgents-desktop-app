@@ -52,7 +52,7 @@ export function ChatMembersPanel(props: ChatMembersPanelProps): JSX.Element {
     const runIds = props.runIdsByParticipantId.get(participant.id) ?? [];
     const running = props.activity.runningSince.get(participant.id);
     const since = status === "running" ? running ?? row.task?.item.createdAt : undefined;
-    const durationMs = status === "done" ? props.taskDurationMs?.(row) : undefined;
+    const durationMs = status === "done" || status === "failed" || status === "stopped" ? props.taskDurationMs?.(row) : undefined;
     const step = status === "running" ? props.currentStep?.(participant.id) : undefined;
     const result = status === "done" || status === "failed" ? props.taskResult?.(participant.id) : undefined;
     return (
