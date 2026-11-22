@@ -1998,6 +1998,52 @@ test("Claude Code's own modes: a mode change keeps the member's live process, is
   assert.ok(debugEvents.some((entry) => entry.event === "chat.member-mode.apply-failed"));
 });
 
+test("Claude Code's own modes: a lowered mode that its live process does not take is never written back up; a reply it is writing is stopped", async () => {
+  let release: (() => void) | undefined;
+  const drew = { ...chatParticipant("claude-code", { repoRead: true }), agentMode: "auto" as const,
+    permissions: { ...normalizeChatAgentPermissions({ ...defaultChatAgentPermissions(), repoRead: true }), cliApprovals: true as const } };
+  const conversation = chatConversation([drew]);
+  const { service, storage, tempRoot, debugEvents } = testService({
+    conversation,
+    run: async (runParticipant, _prompt, _repoPath, _diffMode, _kind, signal) => {
+      // The reply runs until it is stopped (or released).
+      await new Promise<void>((resolve) => {
+        release = resolve;
+        signal?.addEventListener("abort", () => resolve(), { once: true });
+      });
+      return { participant: runParticipant, ok: !signal?.aborted, content: signal?.aborted ? "" : "ok", durationMs: 1, sessionId: "session-drew", ...(signal?.aborted ? { error: "Stopped." } : {}) };
+    }
+  });
+  (service as any).ensureHistoryFiles = async () => tempRoot;
+  const process = liveClaudeProcess(service);
+  process.mode = "auto";
+  const own = { ...drew.permissions };
+  await service.sendMessage({ conversationId: conversation.id, runId: "run-1", content: "@drew go on" });
+  await waitFor(() => release !== undefined && storage.current.messages.some((message: ChatMessage) => message.participantId === drew.id && message.status === "pending"));
+
+  // She lowers Auto to Manual; the switch times out and the process stays in Auto.
+  process.refuse = "Claude Code did not answer within 15 seconds";
+  await service.updateParticipantRuntime({ conversationId: conversation.id, participantId: drew.id, agentMode: "default", permissions: own });
+  const line = "Claude Code did not switch @drew to Manual: Claude Code did not answer within 15 seconds. Its reply was stopped so it does not go on in Auto; its next message switches it to Manual first.";
+  await waitFor(() => (storage.current.metadata.warnings ?? []).includes(line));
+  await waitFor(() => !storage.current.messages.some((message: ChatMessage) => message.participantId === drew.id && message.status === "pending"));
+  const member = (storage.current.metadata.participants as ChatParticipant[])[0];
+  assert.equal(member.agentMode, "default", "her Manual stays the member's mode, never Auto again");
+  assert.equal(normalizeChatAgentPermissions(member.permissions).workspaceWrite, false);
+  await flushMicrotasks();
+  assert.equal((storage.current.metadata.participants as ChatParticipant[])[0].agentMode, "default", "nothing writes it back later");
+  assert.equal(debugEvents.filter((entry) => entry.event === "chat.member-mode.followed-cli").length, 0, "the CLI's wider mode is not followed");
+
+  // The CLI answers with a wider mode than the one asked, while idle: kept
+  // hers too, nothing to stop.
+  process.refuse = undefined;
+  process.mode = "default";
+  process.answer = "acceptEdits";
+  await service.updateParticipantRuntime({ conversationId: conversation.id, participantId: drew.id, agentMode: "plan", permissions: own });
+  await waitFor(() => (storage.current.metadata.warnings ?? []).includes("Claude Code switched @drew to Accept edits instead of Plan. Its next message switches it to Plan first."));
+  assert.equal((storage.current.metadata.participants as ChatParticipant[])[0].agentMode, "plan");
+});
+
 function fakeAppMcp() {
   const grants: any[] = [];
   return {

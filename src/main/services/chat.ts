@@ -281,7 +281,7 @@ import {
 } from "../../shared/chatDeliveryPolicy";
 import { isDeviceEventBlobReference, type DeviceEventBlobReference } from "../../shared/deviceEventBlobs";
 import { CHAT_PROMPT_SUGGESTION_LOCAL_SOURCE, ChatPromptSuggestionStore, type ChatMemberPromptSuggestion } from "./chatPromptSuggestions";
-import { CLAUDE_PERMISSION_MODE_LABELS, CLAUDE_PERMISSION_MODE_TIMEOUT_MS, CliAgentRunner, claudeCodePermissionMode, isClaudePermissionMode, COMPACTION_CANCELLED_BEFORE_START, forkCopyNotMade, isForkSourceMissingError, type ClaudePermissionMode, type CliAgentBackgroundTask, type CliAgentCodexServerRequest, type CliAgentCompactResult, type CliAgentImageInput, type CliAgentOutputEvent, type CliAgentReplyOrigin, type CliAgentReplyStart, type CliAgentRoleOptions, type CliAgentRunOptions, type CliAgentSelfResumedTurn, type CliAgentTurnImages } from "./cliAgents";
+import { CLAUDE_PERMISSION_MODE_LABELS, CLAUDE_PERMISSION_MODE_TIMEOUT_MS, CliAgentRunner, claudeCodePermissionMode, claudePermissionModeRank, isClaudePermissionMode, COMPACTION_CANCELLED_BEFORE_START, forkCopyNotMade, isForkSourceMissingError, type ClaudePermissionMode, type CliAgentBackgroundTask, type CliAgentCodexServerRequest, type CliAgentCompactResult, type CliAgentImageInput, type CliAgentOutputEvent, type CliAgentReplyOrigin, type CliAgentReplyStart, type CliAgentRoleOptions, type CliAgentRunOptions, type CliAgentSelfResumedTurn, type CliAgentTurnImages } from "./cliAgents";
 import { cloudRunWorkerTargetFromSettings, normalizeCloudRunWorkerSettings } from "./cloudRunWorkers";
 import { emitCodexLiveOutput } from "./codexExec";
 import {
@@ -26234,12 +26234,39 @@ export class ChatService {
     // She picked yet another mode meanwhile: that one is being set now.
     if (this.savedClaudeMemberModes.get(key) !== mode) return;
     const name = `@${member.handle}`;
+    const label = CLAUDE_PERMISSION_MODE_LABELS[mode];
     const runs = actual && actual !== mode ? CLAUDE_PERMISSION_MODE_LABELS[actual] : undefined;
-    this.postMemberModeNotice(conversation.id, reason !== undefined
-      ? `Claude Code did not switch ${name} to ${CLAUDE_PERMISSION_MODE_LABELS[mode]}: ${reason}.${runs ? ` ${name} stays in ${runs}.` : ""}`
-      : `Claude Code switched ${name} to ${runs ?? "another mode"} instead of ${CLAUDE_PERMISSION_MODE_LABELS[mode]}.`);
-    // The member's mode is what its CLI runs: its menu shows that mode.
+    const said = reason !== undefined
+      ? `Claude Code did not switch ${name} to ${label}: ${reason}.`
+      : `Claude Code switched ${name} to ${runs ?? "another mode"} instead of ${label}.`;
+    if (actual && actual !== mode && claudePermissionModeRank(actual) > claudePermissionModeRank(mode)) {
+      // Its process stays in a wider mode than hers: her mode stays the
+      // member's (never written back up), its next message switches the
+      // process first or is refused (cliAgents alignClaudePermissionMode),
+      // and a reply it is writing now is stopped rather than go on wider.
+      const stopped = await this.stopClaudeMemberReplies(conversation.id, member.id);
+      this.postMemberModeNotice(conversation.id, `${said} ${stopped ? `Its reply was stopped so it does not go on in ${runs}; its` : "Its"} next message switches it to ${label} first.`);
+      return;
+    }
+    this.postMemberModeNotice(conversation.id, `${said}${reason !== undefined && runs ? ` ${name} stays in ${runs}.` : ""}`);
+    // The CLI runs a narrower mode than hers (its account has no auto mode,
+    // say): the member's mode is what its CLI runs, its menu shows it.
     if (actual && actual !== mode) this.followClaudeCliMode(conversation.id, member.id, actual);
+  }
+
+  /** Stops the member's replies running on this device, as its Stop does;
+   *  whether one was running. */
+  private async stopClaudeMemberReplies(conversationId: string, participantId: string): Promise<boolean> {
+    const conversation = await this.storage.getConversation(conversationId).catch(() => undefined);
+    const runIds = new Set<string>();
+    for (const message of conversation?.messages ?? []) {
+      const runId = message.metadata?.runId;
+      if (message.role === "participant" && message.participantId === participantId && message.status === "pending" && typeof runId === "string" && this.chatRunControllers.has(runId)) {
+        runIds.add(runId);
+      }
+    }
+    for (const runId of runIds) this.cancelRun(runId);
+    return runIds.size > 0;
   }
 
   /** What became of a member's mode, said in the chat: a line every device
