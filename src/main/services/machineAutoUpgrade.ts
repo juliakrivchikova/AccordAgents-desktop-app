@@ -52,6 +52,12 @@ export interface MachineAutoUpgradeOptions {
    *  enforces both. */
   powerRetryMs?: number;
   powerMaxAttempts?: number;
+  /** The program her server runs (its health), undefined when it cannot be
+   *  asked now. A machine is never given a runtime newer than her server's:
+   *  an older server would undo what the newer runtime writes (a mode a plan
+   *  approval raised, a member added in its CLI's own mode). Not given: no
+   *  wait (a desktop without a server). */
+  serverVersion?: () => Promise<string | undefined>;
   /** Holds the machine's turns for the duration; returns the release. */
   holdTurns?: (machineId: string, reason: string) => () => void;
   /** Progress for Settings → Machines; the installer's own snapshots are
@@ -178,6 +184,20 @@ export class MachineAutoUpgradeService {
     }
     const name = (await this.options.machineName(id)) ?? id;
     const purpose = upgrade ? `updating its runtime to ${this.options.desktopVersion}` : "setting up its automatic stop after three idle hours";
+    // Both install this desktop's runtime: never ahead of her server.
+    if (this.options.serverVersion) {
+      const server = await this.options.serverVersion().catch(() => undefined);
+      if (server === undefined || compareVersions(this.options.desktopVersion, server) > 0) {
+        if (!this.waiting.has(id)) {
+          this.waiting.add(id);
+          this.log("machines.auto-upgrade.waiting-server", { machineId: id, running, desktop: this.options.desktopVersion, server: server ?? null });
+          this.options.onProgress(this.notice(id, "preflight", server === undefined
+            ? `Waiting for your server to answer before ${purpose}.`
+            : `Waiting for your server to update to ${this.options.desktopVersion} before ${purpose}.`));
+        }
+        return;
+      }
+    }
     const payload = this.options.payloadReady();
     if (!payload.ok) {
       if (!this.noticed.has(id)) {

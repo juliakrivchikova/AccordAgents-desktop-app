@@ -86,6 +86,25 @@ test("a connected, idle machine on an older runtime is upgraded with its turns h
   assert.equal(h.upgrades.length, 1, "one automatic attempt per machine per desktop version");
 });
 
+test("a machine is never given a runtime newer than her server's: it waits until her server runs this version", async () => {
+  let server: string | undefined = "1.10.4-beta.10";
+  const h = harness({ serverVersion: async () => server });
+  await h.service.evaluate();
+  assert.equal(h.upgrades.length, 0, "her server still runs the older program");
+  assert.equal(h.service.hasWaiting(), true, "re-checked until it updates");
+  assert.match(h.progress[0].message, /Waiting for your server to update to 1\.10\.4-beta\.11 before updating its runtime/);
+  await h.service.evaluate();
+  assert.equal(h.progress.length, 1, "said once");
+  // Her server cannot be asked: still waiting.
+  server = undefined;
+  await h.service.evaluate();
+  assert.equal(h.upgrades.length, 0);
+  server = "1.10.4-beta.11";
+  await h.service.evaluate("m1");
+  assert.equal(h.upgrades.length, 1, "updated once her server runs this version");
+  assert.equal(h.service.hasWaiting(), false);
+});
+
 test("a busy machine is told to wait once and is upgraded when it becomes idle", async () => {
   let running = true;
   const h = harness({ activity: () => activity({ activeRunIds: running ? ["run-1"] : [] }) });
