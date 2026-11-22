@@ -2092,18 +2092,19 @@ test("Claude Code's own modes: the app tool grant issued as the CLI takes a mess
   assert.equal(normalizeChatAgentPermissions(grant.runPermissions).workspaceWrite, true, "Auto's rights");
 });
 
-test("Claude Code's own modes: after a turn that ran in Accept edits by a once-only grant, the member's live process goes back to its own mode", async () => {
+test("Claude Code's own modes: a once-only grant of file edits lets that run's next file edit through once, and is no mode of the shared live process", async () => {
   const drew = ownModeClaude();
   const approval = permissionApproval(drew, { kind: "portable", permissions: ["workspaceWrite"] }, { status: "approved", approvalScope: "once" });
   const conversation = chatConversation([drew], { pendingAppToolApprovals: [approval] });
   let process!: ReturnType<typeof liveClaudeProcess>;
   const runs: any[] = [];
-  const { service, tempRoot } = testService({
+  let finish: (() => void) | undefined;
+  const { service, storage, tempRoot } = testService({
     conversation,
     run: async (runParticipant, _prompt, _repoPath, _diffMode, _kind, _signal, options) => {
       runs.push(options);
-      // The runner switched the process before the message (alignment).
       process.mode = options.warm.permissionMode?.() ?? "default";
+      await new Promise<void>((resolve) => { finish = resolve; });
       return { participant: runParticipant, ok: true, content: "ok", durationMs: 1, sessionId: "session-drew" };
     }
   });
@@ -2111,9 +2112,34 @@ test("Claude Code's own modes: after a turn that ran in Accept edits by a once-o
   process = liveClaudeProcess(service);
   await service.sendMessage({ conversationId: conversation.id, runId: "run-once", content: "@drew edit it" });
   await waitFor(() => runs.length === 1);
-  assert.equal(runs[0].warm.permissionMode(), "acceptEdits", "the once-only grant: Accept edits for this turn");
-  await waitFor(() => process.sent.some((request) => request.mode === "default"));
-  assert.equal(process.mode, "default", "back in Manual for what it does on its own afterwards");
+  assert.equal(runs[0].warm.permissionMode(), "default", "its live process stays in Manual: overlapping turns share it");
+  assert.equal(normalizeChatAgentPermissions(runs[0].permissions).workspaceWrite, false, "the CLI is not started wider either");
+  // The member's run (its own id, as the app tool token names it).
+  const granted = [...((service as any).claudeOnceEditGrants as Map<string, string[]>).keys()];
+  assert.equal(granted.length, 1, "this run holds the grant");
+  const onceRun = granted[0]!;
+  const actor = (runId: string) => ({
+    conversationId: conversation.id, participantId: drew.id, roleConfigId: drew.roleConfigId, roleConfigVersion: 0,
+    capabilities: ["permissions.request" as const], runId, triggerMessageId: "user-message", agentMode: "default"
+  }) as never;
+  const pendingCards = () => ((storage.current.metadata.pendingAppToolApprovals ?? []) as ChatAppToolApproval[]).filter((item) => item.status === "pending");
+  // Another run of the member (a turn that overlaps) gets nothing of it.
+  const other = service.requestToolPermissionFromTool(actor("run-other"), { tool_name: "Edit", input: { file_path: "/repo/a.ts", old_string: "a", new_string: "b" }, tool_use_id: "t0" });
+  await waitFor(() => pendingCards().length === 1);
+  // This run's next file edit goes through, once.
+  const first = await service.requestToolPermissionFromTool(actor(onceRun), { tool_name: "Write", input: { file_path: "/repo/b.ts", content: "x" }, tool_use_id: "t1" });
+  assert.equal(first.behavior, "allow");
+  // A command is not a file edit; the next edit asks again.
+  const second = service.requestToolPermissionFromTool(actor(onceRun), { tool_name: "Edit", input: { file_path: "/repo/c.ts", old_string: "a", new_string: "b" }, tool_use_id: "t2" });
+  await waitFor(() => pendingCards().length === 2);
+  for (const card of pendingCards()) await service.respondToAppToolApproval({ conversationId: conversation.id, approvalId: card.id, approve: false });
+  assert.equal((await other).behavior, "deny");
+  assert.equal((await second).behavior, "deny");
+  finish?.();
+  await waitFor(() => storage.current.messages.some((message: ChatMessage) => message.participantId === drew.id && message.status === "done"));
+  assert.ok(!process.sent.some((request) => request.mode === "acceptEdits"), "never switched to Accept edits");
+  const used = ((storage.current.metadata.pendingAppToolApprovals ?? []) as ChatAppToolApproval[]).find((item) => item.id === approval.id);
+  assert.ok(used?.consumedAt, "the grant is used up with its turn");
 });
 
 test("Claude Code's own modes: a command the CLI asks about is never answered by the app from a stored shell rule (its rules are the CLI's own)", async () => {

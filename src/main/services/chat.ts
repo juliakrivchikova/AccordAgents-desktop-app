@@ -639,6 +639,9 @@ interface CompactChatCommand {
 }
 
 const HANDLE_PATTERN = /^[A-Za-z0-9_-]{1,32}$/;
+/** Claude Code's tools that edit files (a once-only grant of file edits
+ *  answers one of them; ChatService.takeClaudeOnceEdit). */
+const CLAUDE_FILE_EDIT_TOOLS: ReadonlySet<string> = new Set(["Edit", "Write", "MultiEdit", "NotebookEdit"]);
 /** 23: the session's instructions carry everything said once (how messages
  *  arrive, handle rules, Claude's execution model, access) and Claude Code
  *  gets them as its appended system prompt on every launch; a session made
@@ -1372,6 +1375,9 @@ export class ChatService {
   private readonly inFlightPromptContext = new Map<string, InFlightPromptContext[]>();
   /** Once-only permission approvals applied by a turn still running, by run. */
   private readonly oneTimeApprovalClaims = new Map<string, string>();
+  /** Claude Code's own modes: runs holding a once-only grant of file edits
+   *  not used yet (by run id: the grant's approvals). */
+  private readonly claudeOnceEditGrants = new Map<string, string[]>();
   /** Per member: settles when the latest dispatched Claude Code message has
    *  been written to its CLI, so messages reach the CLI in the order sent. */
   private readonly claudeMessageWriteOrder = new Map<string, Promise<void>>();
@@ -5045,6 +5051,15 @@ export class ChatService {
           };
         }
 
+        // A once-only grant of file edits for this run: its next file edit,
+        // once (Claude Code's own modes; claudeOnceEditGrants).
+        if (!prepared.request.planApproval && this.takeClaudeOnceEdit(actor.runId, requester, prepared.request.toolName)) {
+          return {
+            prepared,
+            route: "policy",
+            decision: { approve: true, scope: "once", source: "policy" }
+          };
+        }
         // Claude Code asks about its plan every time: no rule answers it.
         const policy = prepared.request.agentMode === "auto" || prepared.request.planApproval
           ? undefined
@@ -11171,9 +11186,17 @@ export class ChatService {
     }
     session.participantPermissions = normalizeChatAgentPermissions(permissions);
     // Claude Code's own modes: the mode the member is in as this turn read it,
-    // and the mode this turn runs (its once-only grants on top).
+    // and the mode this turn runs. A once-only grant of file edits ("Allow
+    // once") is no mode of the session, which overlapping turns of the member
+    // share (its live process): it lets this run's next file edit through,
+    // once, when Claude Code asks for it, as "Yes, allow once" does in the CLI
+    // (claudeOnceEditGrants, requestToolPermissionFromTool).
     const claudeModeRead = this.claudeMemberMode(conversation, participant);
-    const claudeModeForTurn = claudeModeRead ? claudeCodePermissionMode(agentMode, permissions) : undefined;
+    const ownModeBase = claudeModeRead ? normalizeChatAgentPermissions(this.participantForRun(conversation, participant).permissions) : undefined;
+    const onceEditGrant = Boolean(ownModeBase && !ownModeBase.workspaceWrite && permissions.workspaceWrite);
+    if (onceEditGrant) this.claudeOnceEditGrants.set(runId, appliedOneTimePermissionApprovalIds.slice());
+    const cliPermissions: ChatAgentPermissions = onceEditGrant ? { ...permissions, workspaceWrite: false } : permissions;
+    const claudeModeForTurn = claudeModeRead ? claudeCodePermissionMode(agentMode, cliPermissions) : undefined;
     // Nothing saved this chat since the app started: what this turn read is
     // the saved mode a later change is told apart from.
     if (claudeModeRead && !this.savedClaudeMemberModes.has(`${conversation.id}:${participant.id}`)) {
@@ -11509,7 +11532,7 @@ export class ChatService {
         settingsEnv: agentEnvironment.settingsEnv,
         agentEnvKey: agentEnvironment.version,
         agentMode,
-        permissions,
+        permissions: cliPermissions,
         nativeGoal,
         onOutput: progressSink.emit,
         onSessionId: persistSessionId,
@@ -11802,6 +11825,7 @@ export class ChatService {
         void this.restoreClaudeMemberMode(conversation.id, participant.id, claudeModeRead);
       }
       this.releaseInFlightPromptContext(runId);
+      this.claudeOnceEditGrants.delete(runId);
       for (const [approvalId, claimRunId] of this.oneTimeApprovalClaims) {
         if (claimRunId === runId) {
           this.oneTimeApprovalClaims.delete(approvalId);
@@ -26287,6 +26311,17 @@ export class ChatService {
         message: error instanceof Error ? error.message : String(error)
       }).catch(() => undefined);
     });
+  }
+
+  /** Takes a run's once-only grant of file edits for one file edit Claude
+   *  Code asks about (Edit, Write, MultiEdit, NotebookEdit): true once, then
+   *  that run asks again. */
+  private takeClaudeOnceEdit(runId: string | undefined, requester: ChatParticipant, toolName: string): boolean {
+    if (!runId || requester.kind !== "claude-code" || !CLAUDE_FILE_EDIT_TOOLS.has(toolName)) return false;
+    if (!this.claudeOnceEditGrants.has(runId)) return false;
+    this.claudeOnceEditGrants.delete(runId);
+    void this.debugLogs.write("chat.permissions.once-edit-used", { runId, participantId: requester.id, toolName }).catch(() => undefined);
+    return true;
   }
 
   /** After a turn that ran in another mode by a once-only grant: the member's
