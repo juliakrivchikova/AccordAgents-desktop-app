@@ -248,13 +248,16 @@ export interface NewChatProviderOffer {
   hostVendor?: CliProviderHostVendor;
   label: string;
   defaultModelLabel: string;
+  /** The id of the model its CLI runs on by default, which the list leaves
+   *  out: the phone names a member set to it by defaultModelLabel. */
+  defaultModelId?: string;
   models: Array<{ id: string; label: string; efforts?: NewChatEffortOption[] }>;
   efforts: NewChatEffortOption[];
   /** What its CLI starts a new session in with the User's own config on this
    *  computer (src/shared/cliStartDefaults.ts): the mode a main session that
    *  runs here starts in, and the effort its chip names until one is
    *  chosen. A computer from before says none. */
-  start?: Pick<CliStartDefaults, "access" | "reasoningEffort">;
+  start?: Pick<CliStartDefaults, "access" | "reasoningEffort" | "modelLabel">;
 }
 
 function shortLabel(text: string): string {
@@ -305,6 +308,7 @@ export function newChatProviderOffer(input: {
     label: shortLabel(input.label),
     // The model its CLI runs on by default (the computer's chip says the same).
     defaultModelLabel: shortLabel(input.vendorDefaultModelLabel ?? (usual ? nameOf(usual) : input.label)),
+    ...(!input.vendorDefaultModelLabel && usual ? { defaultModelId: usual.id } : {}),
     models,
     efforts: usualEfforts.length > 0 ? usualEfforts : efforts,
     ...offeredStart(input.start, Boolean(input.hostVendor))
@@ -316,7 +320,13 @@ export function newChatProviderOffer(input: {
  *  vendor's). */
 function offeredStart(start: CliStartDefaults | undefined, hosted: boolean): Pick<NewChatProviderOffer, "start"> {
   if (!start) return {};
-  const value = { ...(start.access ? { access: start.access } : {}), ...(!hosted && start.reasoningEffort ? { reasoningEffort: start.reasoningEffort } : {}) };
+  // The model her config starts the CLI on, by name: what a member without a
+  // model of its own runs, as the computer's chip names it.
+  const value = {
+    ...(start.access ? { access: start.access } : {}),
+    ...(!hosted && start.reasoningEffort ? { reasoningEffort: start.reasoningEffort } : {}),
+    ...(!hosted && start.modelLabel ? { modelLabel: start.modelLabel } : {})
+  };
   return Object.keys(value).length > 0 ? { start: value } : {};
 }
 

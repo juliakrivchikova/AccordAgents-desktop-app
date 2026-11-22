@@ -2,12 +2,13 @@ import { useState, type ReactNode } from "react";
 import { Bot, ChevronDown, X } from "lucide-react";
 
 import type { DockedAccord } from "../../../shared/accordProgress";
-import { SESSIONS_REMOVED_MEMBER_DETAIL, sessionsRunningCount, type SessionsMemberActivity, type SessionsMemberRow } from "../../../shared/mainSessionView";
+import { SESSIONS_REMOVED_MEMBER_DETAIL, sessionsRunningCount, type SessionsMemberActivity, type SessionsMemberRow, type SessionsMemberTask } from "../../../shared/mainSessionView";
 import type { ChatParticipant } from "../../../shared/types";
 import { IconButton } from "../primitives";
 import { ChatAccordRow } from "./chat-accord-dock";
 import { ChatAgentRow, type ChatAgentDetail } from "./chat-agent-row";
 import { ChatProviderMark, ChatProviderMarkSlot } from "./chat-member-mark";
+import { participantProviderLabel } from "./chat-mention-directory";
 import { useMachineList } from "./use-cli-start-defaults";
 import type { SessionsFormerRow } from "./use-chat-sessions-view";
 
@@ -26,7 +27,9 @@ export interface ChatMembersPanelProps {
    *  effort it runs on (its CLI, model, effort, a non-generic role). */
   memberDetail?: (participant: ChatParticipant) => ChatAgentDetail;
   /** How long a member's latest task took, once it ended. */
-  taskDurationMs?: (row: SessionsMemberRow) => number | undefined;
+  taskDurationMs?: (row: { task?: SessionsMemberTask }) => number | undefined;
+  /** When each member held up by the User began to wait. */
+  waitingSince?: ReadonlyMap<string, string>;
   /** What a running member does now: its newest step. */
   currentStep?: (participantId: string) => string | undefined;
   /** How a member's latest task ended, in one line. */
@@ -52,7 +55,13 @@ export function ChatMembersPanel(props: ChatMembersPanelProps): JSX.Element {
     const runIds = props.runIdsByParticipantId.get(participant.id) ?? [];
     const running = props.activity.runningSince.get(participant.id);
     const since = status === "running" ? running ?? row.task?.item.createdAt : undefined;
-    const durationMs = status === "done" || status === "failed" || status === "stopped" ? props.taskDurationMs?.(row) : undefined;
+    // Every row says how long it works or worked (the User, 2026-11-22):
+    // waiting, from its turn's start to when it began to wait; ended, its task.
+    const waitedAt = status === "waiting" ? props.waitingSince?.get(participant.id) : undefined;
+    const workedBeforeWaiting = running && waitedAt ? Date.parse(waitedAt) - Date.parse(running) : NaN;
+    const durationMs = status === "running" || status === "idle" ? undefined
+      : Number.isFinite(workedBeforeWaiting) && workedBeforeWaiting >= 0 ? workedBeforeWaiting
+        : props.taskDurationMs?.(row);
     const step = status === "running" ? props.currentStep?.(participant.id) : undefined;
     const result = status === "done" || status === "failed" ? props.taskResult?.(participant.id) : undefined;
     return (
@@ -105,11 +114,13 @@ export function ChatMembersPanel(props: ChatMembersPanelProps): JSX.Element {
               key={row.member.id}
               machines={machines}
               fixedDetail={SESSIONS_REMOVED_MEMBER_DETAIL}
+              {...(row.member.kind ? { fixedModel: participantProviderLabel(row.member.kind) } : {})}
               row={{
                 id: row.member.id,
                 status: row.status,
                 mark: row.member.kind ? <ChatProviderMark member={{ kind: row.member.kind }} /> : <ChatProviderMarkSlot />,
                 title: row.title,
+                ...(row.status !== "idle" && props.taskDurationMs?.(row) !== undefined ? { durationMs: props.taskDurationMs(row)! } : {}),
                 onOpen: () => props.onOpenMember(row.member.id)
               }}
             />

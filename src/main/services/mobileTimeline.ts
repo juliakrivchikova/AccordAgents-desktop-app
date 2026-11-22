@@ -89,6 +89,10 @@ export interface MobileChatMember {
   /** The title its delegation gave it (ChatParticipant.taskTitle): its name
    *  in the sessions view, however much of the chat the phone has. */
   taskTitle?: string;
+  /** Its own model by id, and the added provider it runs on: the phone names
+   *  the model from the computer's list as the desktop's row does. */
+  model?: string;
+  hostId?: string;
   /** The member record a machine needs to run a turn. Sent only for members
    *  with a home machine, so the list does not grow for every local member. */
   participant?: ChatParticipant;

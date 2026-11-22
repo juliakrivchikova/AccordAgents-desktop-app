@@ -122,6 +122,9 @@ export async function buildMobileChatList(store: MobileCatalogStore, options: Mo
         roleConfigId: participant.roleConfigId,
         // The title its delegation gave it: the sessions view's name for it.
         ...(typeof participant.taskTitle === "string" && participant.taskTitle.trim() ? { taskTitle: participant.taskTitle } : {}),
+        // Its model and provider, which the phone names from the computer's list.
+        ...(typeof participant.model === "string" && participant.model.trim() ? { model: participant.model } : {}),
+        ...(typeof participant.hostId === "string" && participant.hostId ? { hostId: participant.hostId } : {}),
         kind: participant.kind,
         ...(participant.avatarId ? { avatarId: participant.avatarId } : {}),
         ...(mobileParticipantIsAssistant(participant) ? { isAssistant: true } : {}),

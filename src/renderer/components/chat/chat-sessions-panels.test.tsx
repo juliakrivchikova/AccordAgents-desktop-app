@@ -97,6 +97,7 @@ test("the side panel lists every session but the main session as T3 Code does: g
     assert.equal(taylorRow.findAll((node) => typeof node.props?.className === "string" && node.props.className === "chat-agent-dot is-waiting").length, 1, "its dot says it waits");
     assert.match(String(taylorRow.find((node) => node.type === "button" && node.props.className === "chat-agent-row-main").props["aria-label"]), /Waiting for you/, "said to a screen reader");
     assert.doesNotMatch(textOf(drewRow), /Running/, "a running row says so only by its dot");
+    assert.match(textOf(taylorRow), /Antigravity/, "the model's place on every row (no list: its CLI's name)");
     assert.equal(memberRows()[1]!.findAll(byTestId("chat-members-row-stop")).length, 0, "nothing to stop for a session that runs nothing");
     assert.equal(root.findAll(byTestId("chat-members-stop-all")).length, 0, "no Stop all");
     assert.doesNotMatch(textOf(root), /Stop all/);
@@ -129,6 +130,31 @@ test("the side panel lists every session but the main session as T3 Code does: g
   }
 });
 
+test("every row has the same anatomy: a waiting one says how long it worked before it began to wait, an ended one its task's time", () => {
+  const started = new Date(Date.now() - 5 * 60_000).toISOString();
+  const waited = new Date(Date.now() - 3 * 60_000).toISOString();
+  const rows = {
+    current: [
+      { participant: TAYLOR, status: "waiting" as const },
+      { participant: DREW, status: "stopped" as const, task: { messageId: "m", batch: {} as never, item: {} as never } }
+    ],
+    previous: []
+  };
+  let renderer: ReturnType<typeof create> | undefined;
+  act(() => {
+    renderer = create(
+      <TooltipProvider>
+        <ChatMembersPanel rows={rows} activity={{ runningSince: new Map([[TAYLOR.id, started]]), finishedAt: new Map() }} runIdsByParticipantId={new Map()}
+          memberTitle={(id) => id === TAYLOR.id ? "Ask about the DB" : "Restyle"} waitingSince={new Map([[TAYLOR.id, waited]])}
+          taskDurationMs={() => 245_000} onOpenMember={noop} onClose={noop} />
+      </TooltipProvider>
+    );
+  });
+  const times = renderer!.root.findAll(byTestId("chat-agent-time")).map((node) => textOf(node));
+  assert.deepEqual(times, ["2m", "4m"], "waiting: from its turn's start to when it began to wait; stopped: its task's time");
+  act(() => renderer!.unmount());
+});
+
 test("an agent's hover card names its CLI, model and effort, its state and time, its background work and what it does now", () => {
   const card = (row: Parameters<typeof ChatAgentCard>[0]["row"], backgroundTasks = 0): string => {
     let renderer: ReturnType<typeof create> | undefined;
@@ -142,7 +168,8 @@ test("an agent's hover card names its CLI, model and effort, its state and time,
   assert.match(running, /^Ход как в Claude Code\|Claude Code · Opus 5\.5 · High\|Running · 8m 3\ds · 2 background tasks\|npm run build$/);
   assert.equal(card({ ...base, status: "done", durationMs: 245_000, result: "Done: new chats open in General." }),
     "Ход как в Claude Code|Claude Code · Opus 5.5 · High|Done · 4m 5s|Done: new chats open in General.");
-  assert.equal(card({ ...base, status: "waiting" }), "Ход как в Claude Code|Claude Code · Opus 5.5 · High|Waiting for you", "no time while it waits");
+  assert.equal(card({ ...base, status: "waiting" }), "Ход как в Claude Code|Claude Code · Opus 5.5 · High|Waiting for you", "no time known: none");
+  assert.equal(card({ ...base, status: "waiting", durationMs: 125_000 }), "Ход как в Claude Code|Claude Code · Opus 5.5 · High|Waiting for you · 2m 5s", "how long it worked before");
   assert.equal(card({ ...base, status: "idle" }), "Ход как в Claude Code|Claude Code · Opus 5.5 · High|", "nothing more for one that never had a task");
   assert.equal(formatCompactDuration(5_000), "5s");
   assert.equal(formatCompactDuration(516_000), "8m");

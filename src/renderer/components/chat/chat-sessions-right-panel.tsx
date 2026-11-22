@@ -156,7 +156,7 @@ export function ChatSessionsRightPanel(props: {
     const task = sessions.tasksByMember.get(participantId);
     return task ? sessions.taskEntriesByMessageId.get(task.messageId)?.find((entry) => entry.item.targetParticipantId === participantId)?.line : undefined;
   };
-  const taskDurationMs = (row: SessionsMemberRow): number | undefined =>
+  const taskDurationMs = (row: { task?: SessionsMemberRow["task"] }): number | undefined =>
     row.task ? sessionsTaskDurationMs(row.task.item, sessions.messagesById) : undefined;
   if (panel?.kind === "accord") {
     const latest = props.latestAccord;
@@ -182,6 +182,7 @@ export function ChatSessionsRightPanel(props: {
         memberTitle={sessions.memberTitle}
         memberDetail={memberDetail}
         taskDurationMs={taskDurationMs}
+        waitingSince={sessions.waitingSince}
         currentStep={currentStep}
         taskResult={taskResult}
         onOpenMember={rightPanel.openMember}

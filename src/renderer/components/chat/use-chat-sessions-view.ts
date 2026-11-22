@@ -21,7 +21,7 @@ import {
   sessionsFormerMemberStatus,
   sessionsMemberActivity,
   sessionsMemberRows,
-  sessionsMembersWaitingForUser,
+  sessionsMembersWaitingSince,
   sessionsMemberTitle,
   sessionsRunningCount,
   sessionsTaskEntries,
@@ -64,6 +64,8 @@ export interface ChatSessionsView {
   tasksByMember: ReadonlyMap<string, SessionsMemberTask>;
   /** Members a card waits on the User for: "Waiting for you" while they run. */
   waitingForUser: ReadonlySet<string>;
+  /** When each of them began to wait. */
+  waitingSince: ReadonlyMap<string, string>;
   activity: SessionsMemberActivity;
   /** Each request message's tasks, by the message's id. */
   taskEntriesByMessageId: ReadonlyMap<string, readonly SessionsTaskEntry[]>;
@@ -86,7 +88,7 @@ export interface ChatSessionsView {
 }
 
 const NO_ENTRIES: readonly SessionsTaskEntry[] = [];
-const NO_MEMBERS: ReadonlySet<string> = new Set();
+const NO_WAITING: ReadonlyMap<string, string> = new Map();
 
 /** Keeps each value's identity while its signature is the same, so a row
  *  drawn from it is not drawn again on every update of the chat. */
@@ -146,10 +148,11 @@ export function useChatSessionsView(input: {
   // Its own memo: the chat's metadata is a new object on every update, and
   // only this reads the approvals.
   const approvals = conversation.metadata.pendingAppToolApprovals;
-  const waitingForUser = useMemo(
-    () => (mainId ? sessionsMembersWaitingForUser(conversation.messages, Array.isArray(approvals) ? approvals as ChatAppToolApproval[] : undefined) : NO_MEMBERS),
+  const waitingSince = useMemo(
+    () => (mainId ? sessionsMembersWaitingSince(conversation.messages, Array.isArray(approvals) ? approvals as ChatAppToolApproval[] : undefined) : NO_WAITING),
     [approvals, conversation.messages, mainId]
   );
+  const waitingForUser = useMemo(() => new Set(waitingSince.keys()), [waitingSince]);
 
   const former = useMemo(
     () => (mainId ? sessionsFormerMembers(conversation.messages, participants, mainId) : []),
@@ -198,6 +201,7 @@ export function useChatSessionsView(input: {
       messagesById: placement.messagesById,
       tasksByMember: placement.tasksByMember,
       waitingForUser,
+      waitingSince,
       activity: placement.activity,
       taskEntriesByMessageId,
       workByReplyId,
@@ -215,5 +219,5 @@ export function useChatSessionsView(input: {
       laneOf: (message: ChatMessage) => sessionsViewLane(message, index),
       hidesApproval: (approval: ChatAppToolApproval) => isMainSessionDelegationRosterCard(approval, mainId)
     };
-  }, [activeRunSummary, former, mainId, participantStatusById, participants, placement, waitingForUser]);
+  }, [activeRunSummary, former, mainId, participantStatusById, participants, placement, waitingForUser, waitingSince]);
 }

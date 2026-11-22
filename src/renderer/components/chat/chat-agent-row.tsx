@@ -2,7 +2,7 @@ import { useContext, type ReactNode } from "react";
 import { HoverCard } from "radix-ui";
 import { Square } from "lucide-react";
 
-import { SESSIONS_WORK_STATUS_LABELS, type SessionsWorkStatus } from "../../../shared/mainSessionView";
+import { SESSIONS_WORK_STATUS_LABELS, sessionsCompactDuration, type SessionsWorkStatus } from "../../../shared/mainSessionView";
 import type { MachineListResult } from "../../../shared/machineLink";
 import type { ChatParticipant } from "../../../shared/types";
 import { IconButton } from "../primitives";
@@ -11,19 +11,9 @@ import { useStreamingElapsedSeconds } from "./chat-streaming";
 import { formatWorkedDuration } from "./chat-worked-row";
 import { useMemberModelSummary, type MemberModelSummary } from "./use-member-model-summary";
 
-/** From this many minutes on, hours are whole ("12h"), as T3 Code says them. */
-const WHOLE_HOURS_FROM_MINUTES = 600;
-
-/** A duration as T3 Code's agent row says it: "5s", "8m", "1.5h", "12h". */
-export function formatCompactDuration(ms: number): string {
-  const seconds = Math.max(0, Math.floor(ms / 1000));
-  if (seconds < 60) return `${seconds}s`;
-  const minutes = Math.floor(seconds / 60);
-  if (minutes < 60) return `${minutes}m`;
-  if (minutes >= WHOLE_HOURS_FROM_MINUTES) return `${Math.floor(minutes / 60)}h`;
-  // Tenths of an hour, rounded down: 90 minutes is "1.5h".
-  return `${Math.floor(minutes / 6) / 10}h`;
-}
+/** A duration as T3 Code's agent row says it: "5s", "8m", "1.5h", "12h"
+ *  (shared with the phone). */
+export const formatCompactDuration = sessionsCompactDuration;
 
 /** A running time that counts up every second; compact in a row, full in
  *  its hover card. */
@@ -55,15 +45,15 @@ export interface ChatAgentRowData {
  *  effort (and a role that is not the ordinary member's). */
 export type ChatAgentDetail = (model: MemberModelSummary) => string;
 
-/** The muted words at a row's end: the model and how long it runs or ran,
- *  never its state (the User, 2026-11-22): the dot on its glyph says that,
- *  and its hover card and accessible name say it in words. */
+/** The muted words at a row's end, the same in every state (the User,
+ *  2026-11-22): the model and how long it runs or worked, never its state
+ *  (the dot on its glyph says that; its hover card and accessible name say
+ *  it in words). */
 function RowMeta(props: { row: ChatAgentRowData; model?: string }): JSX.Element {
   const { row } = props;
-  const ended = row.status === "done" || row.status === "failed" || row.status === "stopped";
   const time = row.status === "running" && row.since
     ? <LiveElapsed since={row.since} compact />
-    : ended && row.durationMs !== undefined ? formatCompactDuration(row.durationMs) : undefined;
+    : row.durationMs !== undefined ? formatCompactDuration(row.durationMs) : undefined;
   return (
     <span className="chat-agent-meta">
       {props.model && <span className="chat-agent-model">{props.model}</span>}
@@ -82,7 +72,7 @@ export function ChatAgentCard(props: { row: ChatAgentRowData; detail: string; ba
   const { row } = props;
   const time = row.status === "running" && row.since
     ? <LiveElapsed since={row.since} />
-    : row.durationMs !== undefined && row.status !== "waiting" ? formatWorkedDuration(row.durationMs) : undefined;
+    : row.durationMs !== undefined ? formatWorkedDuration(row.durationMs) : undefined;
   const background = props.backgroundTasks > 0
     ? `${props.backgroundTasks} background ${props.backgroundTasks === 1 ? "task" : "tasks"}`
     : undefined;
@@ -116,10 +106,12 @@ export function ChatAgentRow(props: {
   detail?: ChatAgentDetail;
   /** The line a removed member's card says instead of its model. */
   fixedDetail?: string;
+  /** What a removed member's row names in the model's place: its CLI. */
+  fixedModel?: string;
 }): JSX.Element {
   return props.participant
     ? <MemberAgentRow {...props} participant={props.participant} />
-    : <AgentRowView row={props.row} detail={props.fixedDetail ?? ""} />;
+    : <AgentRowView row={props.row} {...(props.fixedModel ? { model: props.fixedModel } : {})} detail={props.fixedDetail ?? ""} />;
 }
 
 function MemberAgentRow(props: { row: ChatAgentRowData; participant: ChatParticipant; machines: MachineListResult; detail?: ChatAgentDetail }): JSX.Element {

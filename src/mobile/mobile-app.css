@@ -5481,3 +5481,106 @@ button.card-row:focus-visible {
 .sessions-worked-body > .sessions-activity {
   margin-bottom: 4px;
 }
+
+/* The side panel's rows, the computer's anatomy (the User, 2026-11-22): the
+   provider's glyph with a dot for its state (no state words; the running one
+   sends out a soft pulsing ring, still for reduced motion), the task on one
+   line, and its model · how long it works or worked; Stop at the end. */
+.sessions-agent-row {
+  min-height: 48px;
+}
+
+.sessions-agent-glyph {
+  position: relative;
+  display: inline-flex;
+  flex: 0 0 auto;
+}
+
+.sessions-agent-dot {
+  position: absolute;
+  right: -3px;
+  bottom: -3px;
+  width: 10px;
+  height: 10px;
+  border: 2px solid var(--surface);
+  border-radius: 50%;
+  background: var(--mut);
+}
+
+.sessions-agent-dot.is-running {
+  background: var(--acc);
+}
+
+.sessions-agent-dot.is-running::after {
+  position: absolute;
+  inset: -2px;
+  border-radius: 50%;
+  background: var(--acc);
+  content: "";
+  opacity: 0;
+  animation: sessions-agent-pulse 1.8s ease-out infinite;
+}
+
+.sessions-agent-dot.is-waiting {
+  background: var(--warn);
+}
+
+.sessions-agent-dot.is-done {
+  background: var(--ok);
+}
+
+.sessions-agent-dot.is-failed {
+  background: var(--danger);
+}
+
+.sessions-agent-dot.is-stopped {
+  border-radius: 3px;
+}
+
+.sessions-agent-row .members-sheet-task {
+  flex: 1;
+  min-width: 0;
+}
+
+.sessions-agent-meta {
+  display: inline-flex;
+  flex: 0 1 auto;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
+  max-width: 45%;
+  color: var(--mut);
+  font: 400 12.5px var(--sans);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.sessions-agent-model {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.sessions-agent-meta .sessions-elapsed {
+  font: inherit;
+  color: inherit;
+}
+
+@keyframes sessions-agent-pulse {
+  0% {
+    opacity: 0.45;
+    transform: scale(0.8);
+  }
+
+  100% {
+    opacity: 0;
+    transform: scale(2);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .sessions-agent-dot.is-running::after {
+    display: none;
+    animation: none;
+  }
+}

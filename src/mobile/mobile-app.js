@@ -1639,6 +1639,9 @@
       // The title its delegation gave it: its name in the sessions view
       // (shared sessionsMemberTitle), however much of the chat is loaded.
       ...(typeof value.taskTitle === "string" && value.taskTitle.trim() ? { taskTitle: value.taskTitle } : {}),
+      // Its model and provider: the side panel names the model as the desktop.
+      ...(typeof value.model === "string" && value.model.trim() ? { model: value.model.trim() } : {}),
+      ...(typeof value.hostId === "string" && value.hostId ? { hostId: value.hostId } : {}),
       // Where this member actually runs, and what that machine needs to run
       // it. Present only for members that live on a machine.
       homeMachineId: typeof value.homeMachineId === "string" ? value.homeMachineId : undefined,
@@ -10564,7 +10567,7 @@
       }
       // The sessions view's running times count the way the desktop's do.
       for (const node of document.querySelectorAll(".sessions-elapsed")) {
-        const next = formatWorked(node.dataset.startedAt);
+        const next = node.classList.contains("is-compact") ? compactElapsed(node.dataset.startedAt) : formatWorked(node.dataset.startedAt);
         if (node.textContent !== next) node.textContent = next;
       }
     }, 1000);
@@ -12596,11 +12599,14 @@
     // turn of its went past, a permission its turn waits on) waits for her
     // even while its turn runs, as on the computer (shared
     // sessionsMembersWaitingForUser). A server from before marks no card.
-    const waitingForUser = typeof shared.sessionsMembersWaitingForUser === "function" ? shared.sessionsMembersWaitingForUser(messages) : new Set();
+    const waitingSince = typeof shared.sessionsMembersWaitingSince === "function" ? shared.sessionsMembersWaitingSince(messages) : new Map();
     controlCardsFor(conversationId).forEach(function (card) {
       if (!card || card.status !== "pending" || card.holdsTurn !== true || typeof card.requesterParticipantId !== "string") return;
-      if (members.some(function (item) { return item.id === card.requesterParticipantId; })) waitingForUser.add(card.requesterParticipantId);
+      if (!members.some(function (item) { return item.id === card.requesterParticipantId; })) return;
+      const known = waitingSince.get(card.requesterParticipantId);
+      if (known === undefined || (card.createdAt && (!known || card.createdAt < known))) waitingSince.set(card.requesterParticipantId, card.createdAt || "");
     });
+    const waitingForUser = new Set(waitingSince.keys());
     const memberRows = shared.sessionsMemberRows(members, mainId, statusById, tasksByMember, activity.finishedAt, waitingForUser);
     const formerMembers = shared.sessionsFormerMembers(messages, members, mainId);
     const openCardIds = new Set(shared.openMemberCardMessages(messages, index).map(function (message) { return message.id; }));
@@ -12616,7 +12622,7 @@
     const state = {
       conversationId: conversationId, chat: chat, mainId: mainId, mainMember: mainMember, mainHandle: mainMember ? mainMember.handle : "main",
       rows: rows, messages: messages, index: index, members: members, formerMembers: formerMembers,
-      statusById: statusById, runsByMember: runsByMember, tasksByMember: tasksByMember, titleTasksByMember: titleTasksByMember, waitingForUser: waitingForUser, memberRows: memberRows, waitingIds: waitingIds,
+      statusById: statusById, runsByMember: runsByMember, tasksByMember: tasksByMember, titleTasksByMember: titleTasksByMember, waitingForUser: waitingForUser, waitingSince: waitingSince, memberRows: memberRows, waitingIds: waitingIds,
       activity: activity, messagesById: messagesById, replies: replies, openCardIds: openCardIds,
       mainIds: new Set(mainMessages.map(function (message) { return message.id; })), placement: placement,
       // Running, not waiting for the User, as the computer counts them.
@@ -12921,8 +12927,70 @@
     const node = document.createElement("span");
     node.className = "sessions-elapsed" + (className ? " " + className : "");
     node.dataset.startedAt = since;
-    node.textContent = formatWorked(since);
+    node.textContent = node.classList.contains("is-compact") ? compactElapsed(since) : formatWorked(since);
     return node;
+  }
+
+  /** A side panel row's time, T3 Code's short way ("5s", "8m", "1.5h"), by
+   *  the computer's rule (shared sessionsCompactDuration). */
+  function compactDuration(ms) {
+    const shared = sessionsRules();
+    return shared && typeof shared.sessionsCompactDuration === "function" ? shared.sessionsCompactDuration(ms) : formatWorkedMs(ms);
+  }
+
+  function compactElapsed(startedAt) {
+    const started = Date.parse(startedAt || "");
+    return compactDuration(Number.isFinite(started) ? Date.now() - started : 0);
+  }
+
+  // The computer's model lists, as New chat reads them from her server: the
+  // side panel names each member's model from them, as the desktop's row
+  // does. Read again when old; a phone paired for one chat gets none.
+  let sessionsModelOffer;
+  let sessionsModelOfferAt = 0;
+  let sessionsModelOfferLoading = false;
+
+  function loadSessionsModelOffer() {
+    if (sessionsModelOfferLoading) return;
+    if (sessionsModelOffer !== undefined && performance.now() - sessionsModelOfferAt < NEW_CHAT_OFFER_FRESH_MS) return;
+    sessionsModelOfferLoading = true;
+    serverPhoneGet("/v1/phone/new-chat", {}).then(function (answer) {
+      sessionsModelOffer = answer && answer.options ? answer.options : null;
+    }, function () {
+      if (sessionsModelOffer === undefined) sessionsModelOffer = null;
+    }).then(function () {
+      sessionsModelOfferAt = performance.now();
+      sessionsModelOfferLoading = false;
+      lastMembersSheetSignature = "";
+      if (membersSheetOpen) renderMembersSheet(activeChatRecord());
+    });
+  }
+
+  /** A CLI's name where the desktop's row names it (chatCliProviderLabel). */
+  function sessionsCliName(kind) {
+    return kind === "gemini-cli" ? "Antigravity" : memberKindLabel(kind);
+  }
+
+  /** A member's model as the desktop's row names it (memberModelName): by its
+   *  name in its CLI's list; a member without one of its own, the model her
+   *  config starts the CLI on there, else the CLI's default; an id the list
+   *  does not have, as it is; with no list known, its CLI's name. */
+  function sessionsMemberModelName(member) {
+    const kindLabel = sessionsCliName(member && member.kind);
+    const offer = sessionsModelOffer || undefined;
+    const providers = offer ? newChatProviders(offer) : [];
+    const provider = providers.find(function (item) { return item.kind === member.kind && (item.hostId || "") === (member.hostId || ""); });
+    const own = typeof member.model === "string" ? member.model.trim()
+      : member.participant && typeof member.participant.model === "string" ? member.participant.model.trim() : "";
+    if (own) {
+      const listed = provider && Array.isArray(provider.models) ? provider.models.find(function (item) { return item.id === own; }) : undefined;
+      if (listed) return listed.label;
+      if (provider && provider.defaultModelId === own) return provider.defaultModelLabel;
+      return own;
+    }
+    if (!provider) return kindLabel;
+    const start = member.hostId ? undefined : newChatStartDefaults(offer, provider, member.homeMachineId);
+    return (start && start.modelLabel) || provider.defaultModelLabel || kindLabel;
   }
 
   function sessionsStatusElement(status) {
@@ -13989,27 +14057,33 @@
    *  read only). Nothing is said when there are none. */
   function renderSessionsMembersSheet(state, list, title) {
     const shared = sessionsRules();
+    // No Stop all, as on the computer: each session is stopped from its row.
     const stopAll = document.getElementById("members-sheet-stop-all");
+    if (stopAll) stopAll.hidden = true;
     const rows = state.memberRows;
-    const all = rows.current.concat(rows.previous);
-    const ids = all.map(function (row) { return row.participant.id; });
-    const canStopAll = sessionsCanStop(state, ids);
-    const stoppingAll = sessionsStopping(state, ids);
-    if (stopAll) {
-      stopAll.hidden = !(canStopAll || stoppingAll);
-      stopAll.dataset.stopMembers = ids.join(",");
-      stopAll.disabled = !canStopAll;
-      stopAll.textContent = stoppingAll ? "Stopping…" : "Stop all";
-    }
+    loadSessionsModelOffer();
+    // How long a member works or worked (every row says it, as on the
+    // computer): waiting, from its turn's start to when it began to wait;
+    // ended, its task.
+    const workedMs = function (row, since) {
+      const waitedAt = row.status === "waiting" && state.waitingSince ? state.waitingSince.get(row.participant.id) : undefined;
+      const running = shared.memberRunningSince(row.participant.id, state.messages);
+      const beforeWaiting = running && waitedAt ? Date.parse(waitedAt) - Date.parse(running) : NaN;
+      if (Number.isFinite(beforeWaiting) && beforeWaiting >= 0) return beforeWaiting;
+      return row.task && typeof shared.sessionsTaskDurationMs === "function" ? shared.sessionsTaskDurationMs(row.task.item, state.messagesById) : undefined;
+    };
     const describe = function (row) {
       const id = row.participant.id;
+      const since = row.status === "running" ? sessionsMemberSince(state, id) : undefined;
+      const worked = row.status === "running" || row.status === "idle" ? undefined : workedMs(row, since);
       return {
         id: id,
         kind: row.participant.kind || "",
         name: sessionsMemberTitleOf(state, row.participant),
-        detail: [sessionsMemberDetailOf(row.participant), memberLocationLabel(row.participant)].filter(Boolean).join(" · "),
+        model: sessionsMemberModelName(row.participant),
         status: row.status,
-        since: row.status === "running" ? sessionsMemberSince(state, id) : undefined,
+        since: since,
+        workedMs: worked,
         canStop: sessionsCanStop(state, [id]),
         stopping: sessionsStopping(state, [id])
       };
@@ -14018,8 +14092,11 @@
     const previous = rows.previous.map(describe);
     const removed = state.formerMembers.map(function (former) {
       const task = state.tasksByMember.get(former.id);
-      return { id: former.id, kind: formerMemberKind(former), name: sessionsMemberTitleOf(state, former.id), detail: sessionsRemovedMemberDetail(),
-        status: shared.sessionsFormerMemberStatus(task ? task.item : undefined), former: true };
+      const status = shared.sessionsFormerMemberStatus(task ? task.item : undefined);
+      // Its model is not known once it left: its CLI's name in its place.
+      return { id: former.id, kind: formerMemberKind(former), name: sessionsMemberTitleOf(state, former.id), model: sessionsCliName(formerMemberKind(former)),
+        status: status, workedMs: status !== "idle" && task && typeof shared.sessionsTaskDurationMs === "function" ? shared.sessionsTaskDurationMs(task.item, state.messagesById) : undefined,
+        former: true };
     });
     const docked = state.openAccord || undefined;
     const accord = docked ? { launchId: docked.launchId, text: docked.progress.title + " · " + shared.accordProgressStatus(docked.progress) } : undefined;
@@ -14053,28 +14130,55 @@
       item.append(icon, text);
       list.append(item);
     }
+    // One line per session, the computer's anatomy (the User, 2026-11-22):
+    // its provider's glyph with a dot for its state (no state words; the
+    // running one pulses), its task, and its model · how long it works or
+    // worked; Stop at the end while it runs.
+    const statusLabel = function (status) {
+      return shared && shared.SESSIONS_WORK_STATUS_LABELS ? shared.SESSIONS_WORK_STATUS_LABELS[status] || status : status;
+    };
     const rowElement = function (row) {
       const item = document.createElement("div");
-      item.className = "members-sheet-row sessions-member-row is-openable" + (row.former ? " is-former" : "");
+      item.className = "members-sheet-row sessions-member-row sessions-agent-row is-openable" + (row.former ? " is-former" : "");
       item.dataset.memberSession = row.id;
       item.dataset.memberStatus = row.status;
       item.setAttribute("role", "button");
       item.tabIndex = 0;
-      const copy = document.createElement("span");
-      copy.className = "members-sheet-copy";
-      const nameLine = document.createElement("span");
-      nameLine.className = "members-sheet-name-line";
+      item.setAttribute("aria-label", [row.name, row.status === "idle" ? "" : statusLabel(row.status), row.model || ""].filter(Boolean).join(", "));
+      const glyph = document.createElement("span");
+      glyph.className = "sessions-agent-glyph";
+      glyph.append(providerLogoElement(row.kind));
+      if (row.status !== "idle") {
+        const dot = document.createElement("span");
+        dot.className = "sessions-agent-dot is-" + row.status;
+        dot.setAttribute("aria-hidden", "true");
+        glyph.append(dot);
+      }
       const name = document.createElement("strong");
       name.className = "members-sheet-task";
       name.textContent = row.name;
-      nameLine.append(name);
-      if (row.status !== "idle") nameLine.append(sessionsStatusElement(row.status));
-      if (row.since) nameLine.append(sessionsElapsedElement(row.since, "members-sheet-elapsed"));
-      const where = document.createElement("span");
-      where.className = "members-sheet-location";
-      where.textContent = row.detail;
-      copy.append(nameLine, where);
-      item.append(providerLogoElement(row.kind), copy);
+      const meta = document.createElement("span");
+      meta.className = "sessions-agent-meta";
+      if (row.model) {
+        const model = document.createElement("span");
+        model.className = "sessions-agent-model";
+        model.textContent = row.model;
+        meta.append(model);
+      }
+      const time = row.since ? sessionsElapsedElement(row.since, "is-compact")
+        : typeof row.workedMs === "number" ? Object.assign(document.createElement("span"), { className: "sessions-agent-time", textContent: compactDuration(row.workedMs) })
+          : undefined;
+      if (time) {
+        if (row.model) {
+          const sep = document.createElement("span");
+          sep.className = "sessions-agent-sep";
+          sep.setAttribute("aria-hidden", "true");
+          sep.textContent = "·";
+          meta.append(sep);
+        }
+        meta.append(time);
+      }
+      item.append(glyph, name, meta);
       if (!row.former && (row.canStop || row.stopping)) item.append(sessionsStopButton([row.id], row.canStop, row.stopping, "Stop " + row.name, "members-sheet-stop"));
       return item;
     };
@@ -14095,7 +14199,7 @@
       if (open) for (const row of entries) list.append(rowElement(row));
     };
     for (const row of current) list.append(rowElement(row));
-    if (previous.length > 0) group("Previous", "membersPrevious", membersPreviousOpen, previous);
+    if (previous.length > 0) group("Previous agents", "membersPrevious", membersPreviousOpen, previous);
     if (removed.length > 0) group("Removed", "membersRemoved", membersRemovedOpen, removed);
   }
 

@@ -255,6 +255,21 @@ export function sessionsTaskEntries(
   });
 }
 
+/** From this many minutes on, hours are whole ("12h"), as T3 Code says them. */
+const WHOLE_HOURS_FROM_MINUTES = 600;
+
+/** A duration as T3 Code's agent row says it: "5s", "8m", "1.5h", "12h";
+ *  the side panel's rows, desktop and phone. */
+export function sessionsCompactDuration(ms: number): string {
+  const seconds = Math.max(0, Math.floor(ms / 1000));
+  if (seconds < 60) return `${seconds}s`;
+  const minutes = Math.floor(seconds / 60);
+  if (minutes < 60) return `${minutes}m`;
+  if (minutes >= WHOLE_HOURS_FROM_MINUTES) return `${Math.floor(minutes / 60)}h`;
+  // Tenths of an hour, rounded down: 90 minutes is "1.5h".
+  return `${Math.floor(minutes / 6) / 10}h`;
+}
+
 /** How long a task took, once it ended: the time its reply worked, else from
  *  when it was given to its last change; none when neither reads. */
 export function sessionsTaskDurationMs(
@@ -370,9 +385,24 @@ const BLOCKING_APPROVAL_TOOLS: ReadonlySet<string> = new Set([APP_TOOL_PERMISSIO
  *  (Codex's "Needs input"). */
 export function sessionsMembersWaitingForUser(
   messages: readonly ChatMessage[],
-  approvals?: readonly Partial<Pick<ChatAppToolApproval, "status" | "requesterParticipantId" | "toolName" | "resumeContext">>[]
+  approvals?: readonly Partial<Pick<ChatAppToolApproval, "status" | "requesterParticipantId" | "toolName" | "resumeContext" | "createdAt">>[]
 ): Set<string> {
-  const waiting = new Set<string>();
+  return new Set(sessionsMembersWaitingSince(messages, approvals).keys());
+}
+
+/** sessionsMembersWaitingForUser with when each began to wait (its oldest
+ *  card that still holds it up): how long it worked before is its row's
+ *  time while it waits. */
+export function sessionsMembersWaitingSince(
+  messages: readonly ChatMessage[],
+  approvals?: readonly Partial<Pick<ChatAppToolApproval, "status" | "requesterParticipantId" | "toolName" | "resumeContext" | "createdAt">>[]
+): Map<string, string> {
+  const waiting = new Map<string, string>();
+  const note = (participantId: string, at: string | undefined): void => {
+    const known = waiting.get(participantId);
+    const when = typeof at === "string" ? at : "";
+    if (known === undefined || (when && (!known || when < known))) waiting.set(participantId, when);
+  };
   // When each member's turn in progress started: a card from before it is
   // one the member went on from (the main session answered it, a new task).
   const turnStartedAt = new Map<string, string>();
@@ -385,11 +415,11 @@ export function sessionsMembersWaitingForUser(
   for (const message of messages) {
     if (message.role !== "participant" || !message.participantId || !(isWaitingChoice(message) || isWaitingMentionApproval(message))) continue;
     const started = turnStartedAt.get(message.participantId);
-    if (started === undefined || started <= message.createdAt) waiting.add(message.participantId);
+    if (started === undefined || started <= message.createdAt) note(message.participantId, message.createdAt);
   }
   for (const approval of Array.isArray(approvals) ? approvals : []) {
     if (approval?.status === "pending" && typeof approval.requesterParticipantId === "string" && approvalHoldsTurn(approval)) {
-      waiting.add(approval.requesterParticipantId);
+      note(approval.requesterParticipantId, approval.createdAt);
     }
   }
   return waiting;
