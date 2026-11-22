@@ -606,22 +606,10 @@
   align-items: center;
   gap: 4px;
   min-width: 0;
-  /* A long model name (an id not in the CLI's list) never takes the title's room. */
-  max-width: 45%;
   color: var(--app-muted);
   font-size: 11.5px;
   font-variant-numeric: tabular-nums;
   white-space: nowrap;
-}
-
-.chat-agent-model {
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-
-.chat-agent-sep {
-  color: var(--app-muted-subtle);
 }
 
 /* Stop takes the time's place on hover; the time keeps its room. */
@@ -646,9 +634,7 @@
 }
 
 .chat-agent-row.has-stop:hover .chat-agent-time,
-.chat-agent-row.has-stop:focus-within .chat-agent-time,
-.chat-agent-row.has-stop:hover .chat-agent-sep,
-.chat-agent-row.has-stop:focus-within .chat-agent-sep {
+.chat-agent-row.has-stop:focus-within .chat-agent-time {
   visibility: hidden;
 }
 
@@ -685,8 +671,7 @@
     transform: none;
   }
 
-  .chat-agent-row.has-stop .chat-agent-time,
-  .chat-agent-row.has-stop .chat-agent-sep {
+  .chat-agent-row.has-stop .chat-agent-time {
     visibility: visible;
   }
 }

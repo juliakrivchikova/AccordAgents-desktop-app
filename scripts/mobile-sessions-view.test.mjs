@@ -242,12 +242,11 @@ test("the sessions view (T3 Code's way): tasks inside the turn's Worked fold, ch
     accord: document.querySelector(".sessions-accord-row")?.textContent || "",
     rows: [...document.querySelectorAll("#members-sheet-list .sessions-member-row")].map((row) => [row.dataset.memberSession, row.dataset.memberStatus,
       row.querySelector(".members-sheet-task").textContent, row.querySelector(".provider-logo").dataset.providerKind, Boolean(row.querySelector(".sessions-stop"))]),
-    // Every row the computer's anatomy: a dot on its glyph, its model · time, no state words.
+    // Every row the computer's anatomy: a dot on its glyph, its task, its time; no state words, no model.
     anatomy: [...document.querySelectorAll("#members-sheet-list .sessions-member-row")].map((row) => [
       row.querySelector(".sessions-agent-dot")?.className || "",
-      row.querySelector(".sessions-agent-model")?.textContent || "",
       Boolean(row.querySelector(".sessions-agent-meta .sessions-elapsed.is-compact, .sessions-agent-meta .sessions-agent-time")),
-      /Running|Waiting for you|Done|Failed|Stopped/.test(row.innerText)]),
+      /Running|Waiting for you|Done|Failed|Stopped|Claude Code|Antigravity/.test(row.innerText)]),
     groups: [...document.querySelectorAll("#members-sheet-list .members-previous-toggle")].map((node) => node.textContent),
     handles: /@[A-Za-z]/.test(document.getElementById("members-sheet-list").innerText),
     members: /members?/i.test(document.getElementById("members-sheet").innerText),
@@ -262,8 +261,8 @@ test("the sessions view (T3 Code's way): tasks inside the turn's Worked fold, ch
   assert.match(sheet.accord, /^AccordButton colour · Drafts/, "the chat's Accord, by its document");
   assert.deepEqual(sheet.rows, [["p-drew", "running", "Restyle the login button", "claude-code", true], ["p-sam", "running", "Check the server logs for every failed…", "gemini-cli", true]],
     "the members at work, by task, with Stop; the one that ended under Previous agents");
-  assert.deepEqual(sheet.anatomy, [["sessions-agent-dot is-running", "Claude Code", true, false], ["sessions-agent-dot is-running", "Antigravity", true, false]],
-    "a pulsing dot, the model (no list on this server: its CLI's name) and its time, no state words");
+  assert.deepEqual(sheet.anatomy, [["sessions-agent-dot is-running", true, false], ["sessions-agent-dot is-running", true, false]],
+    "a pulsing dot and its time; no state words, no model");
   assert.deepEqual(sheet.groups, ["Previous agents1", "Removed1"]);
   assert.equal(sheet.handles, false, "no handles in the panel");
   // Stop on sam, which has written nothing yet, names its turn.
@@ -593,7 +592,7 @@ test("the phone's side panel names a member by its delegation's title and shows 
   });
   // drew keeps its delegation's title with it (its delegation is not among
   // the messages); taylor's titled delegation and an untitled follow-up are.
-  const drew = { ...DREW, taskTitle: "Restyle the button", model: "haiku" };
+  const drew = { ...DREW, taskTitle: "Restyle the button" };
   await hub.createChat("conv-panel", {
     title: "Side panel", participants: [MAIN, drew, TAYLOR, SAM], createdAt: at(40),
     metadata: { mainSessionParticipantId: MAIN.id, chatView: "sessions" },
@@ -620,12 +619,6 @@ test("the phone's side panel names a member by its delegation's title and shows 
   });
   await hub.raiseApproval("conv-panel", approval("ap-drew", DREW.id, "drew", "app_tool_permission", "Grant @drew Write"));
   await hub.raiseApproval("conv-panel", approval("ap-sam", SAM.id, "sam", "app_scripts_request_change", "Add a scheduled script"));
-  // The computer's model lists, as New chat reads them: the rows name models from them.
-  const efforts = [{ id: "low", label: "Low" }];
-  await hub.publishCatalog({ newChat: { projects: [], mainSession: MAIN, assistant: MAIN, members: [], mainSessionProviders: [
-    { kind: "claude-code", label: "Claude Code", defaultModelLabel: "Opus 5.5", defaultModelId: "opus", models: [{ id: "haiku", label: "Haiku 5.5" }], efforts },
-    { kind: "codex-cli", label: "Codex", defaultModelLabel: "GPT-5.5", defaultModelId: "gpt-5.5", models: [], efforts }
-  ] } });
   app = await attachApp({ port: 9541 });
   await pairPage(app, { hub, siteOrigin: site.origin, query: "qa=1" });
   await openChat(app, "conv-panel");
@@ -641,15 +634,13 @@ test("the phone's side panel names a member by its delegation's title and shows 
     [TAYLOR.id, "running", "Login tests"],
     [SAM.id, "running", "Server logs"]
   ], "titles from the delegations, never a follow-up's words; only the held-up turn waits");
-  // Every row: its model by the computer's list's name, and its time; no state words.
-  await app.waitFor(`[...document.querySelectorAll("#members-sheet-list .sessions-agent-model")].map((node) => node.textContent).join("|") === "Haiku 5.5|GPT-5.5|Antigravity"`,
-    "models named from the computer's list (its own, the CLI's default, a CLI with no list: its name)", 20_000);
+  // Every row: its dot and its time; no state words, no model.
   const meta = await app.evaluate(`[...document.querySelectorAll("#members-sheet-list .sessions-member-row")].map((row) =>
     [row.querySelector(".sessions-agent-dot").className, /^\\d/.test(row.querySelector(".sessions-agent-meta .sessions-elapsed, .sessions-agent-meta .sessions-agent-time")?.textContent || ""),
-      /Running|Waiting for you|Done|Failed|Stopped/.test(row.innerText), row.getAttribute("aria-label")])`);
+      /Running|Waiting for you|Done|Failed|Stopped|Claude Code|Codex|Antigravity/.test(row.innerText), row.getAttribute("aria-label")])`);
   assert.deepEqual(meta, [
-    ["sessions-agent-dot is-waiting", true, false, "Restyle the button, Waiting for you, Haiku 5.5"],
-    ["sessions-agent-dot is-running", true, false, "Login tests, Running, GPT-5.5"],
-    ["sessions-agent-dot is-running", true, false, "Server logs, Running, Antigravity"]
+    ["sessions-agent-dot is-waiting", true, false, "Restyle the button, Waiting for you"],
+    ["sessions-agent-dot is-running", true, false, "Login tests, Running"],
+    ["sessions-agent-dot is-running", true, false, "Server logs, Running"]
   ], "a dot per state, a time on every row (drew: how long it worked before it began to wait), the state in words only for a screen reader");
 });

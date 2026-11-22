@@ -419,16 +419,12 @@ chat without a main session is always `classic`; its switch is disabled.
     a role or a member, does not; its task rows and its session's header
     say the same, and the phone reads it from its permission cards'
     `requesterParticipantId` and `holdsTurn`), the title on one line, and
-    muted at the end the model's
-    name and how long it runs ("8m", T3 Code's compact time) or worked
-    (one waiting for the User: from its turn's start to when it began to
-    wait), the same on every row (the User, 2026-11-22; a removed member,
-    whose model is not known any more, its CLI's name in the model's
-    place); its state in words is in its hover card and its accessible
-    name. The phone's side panel draws the same rows (its model names from
-    the computer's lists New chat reads from her server, `defaultModelId`,
-    and the member's own model, `MobileChatMember.model`), without Stop
-    all. Hovering a row that runs shows a quiet square
+    muted at the end how long it runs ("8m", T3 Code's compact time) or
+    worked (one waiting for the User: from its turn's start to when it
+    began to wait), the same on every row; no model in a row (the User,
+    2026-11-22): its model and effort are in its hover card, its state in
+    words in its hover card and its accessible name. The phone's side panel
+    draws the same rows, without Stop all. Hovering a row that runs shows a quiet square
     Stop in the time's place; there is no Stop all. Hovering a row shows,
     to its left, T3 Code's card: the title, CLI · model · effort (and a
     non-generic role), the state · full time · "N background tasks", then

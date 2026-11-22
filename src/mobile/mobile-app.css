@@ -5485,7 +5485,7 @@ button.card-row:focus-visible {
 /* The side panel's rows, the computer's anatomy (the User, 2026-11-22): the
    provider's glyph with a dot for its state (no state words; the running one
    sends out a soft pulsing ring, still for reduced motion), the task on one
-   line, and its model · how long it works or worked; Stop at the end. */
+   line, and how long it works or worked (no model); Stop at the end. */
 .sessions-agent-row {
   min-height: 48px;
 }
@@ -5548,17 +5548,10 @@ button.card-row:focus-visible {
   align-items: center;
   gap: 4px;
   min-width: 0;
-  max-width: 45%;
   color: var(--mut);
   font: 400 12.5px var(--sans);
   font-variant-numeric: tabular-nums;
   white-space: nowrap;
-}
-
-.sessions-agent-model {
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
 }
 
 .sessions-agent-meta .sessions-elapsed {

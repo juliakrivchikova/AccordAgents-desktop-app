@@ -1639,9 +1639,6 @@
       // The title its delegation gave it: its name in the sessions view
       // (shared sessionsMemberTitle), however much of the chat is loaded.
       ...(typeof value.taskTitle === "string" && value.taskTitle.trim() ? { taskTitle: value.taskTitle } : {}),
-      // Its model and provider: the side panel names the model as the desktop.
-      ...(typeof value.model === "string" && value.model.trim() ? { model: value.model.trim() } : {}),
-      ...(typeof value.hostId === "string" && value.hostId ? { hostId: value.hostId } : {}),
       // Where this member actually runs, and what that machine needs to run
       // it. Present only for members that live on a machine.
       homeMachineId: typeof value.homeMachineId === "string" ? value.homeMachineId : undefined,
@@ -12943,56 +12940,6 @@
     return compactDuration(Number.isFinite(started) ? Date.now() - started : 0);
   }
 
-  // The computer's model lists, as New chat reads them from her server: the
-  // side panel names each member's model from them, as the desktop's row
-  // does. Read again when old; a phone paired for one chat gets none.
-  let sessionsModelOffer;
-  let sessionsModelOfferAt = 0;
-  let sessionsModelOfferLoading = false;
-
-  function loadSessionsModelOffer() {
-    if (sessionsModelOfferLoading) return;
-    if (sessionsModelOffer !== undefined && performance.now() - sessionsModelOfferAt < NEW_CHAT_OFFER_FRESH_MS) return;
-    sessionsModelOfferLoading = true;
-    serverPhoneGet("/v1/phone/new-chat", {}).then(function (answer) {
-      sessionsModelOffer = answer && answer.options ? answer.options : null;
-    }, function () {
-      if (sessionsModelOffer === undefined) sessionsModelOffer = null;
-    }).then(function () {
-      sessionsModelOfferAt = performance.now();
-      sessionsModelOfferLoading = false;
-      lastMembersSheetSignature = "";
-      if (membersSheetOpen) renderMembersSheet(activeChatRecord());
-    });
-  }
-
-  /** A CLI's name where the desktop's row names it (chatCliProviderLabel). */
-  function sessionsCliName(kind) {
-    return kind === "gemini-cli" ? "Antigravity" : memberKindLabel(kind);
-  }
-
-  /** A member's model as the desktop's row names it (memberModelName): by its
-   *  name in its CLI's list; a member without one of its own, the model her
-   *  config starts the CLI on there, else the CLI's default; an id the list
-   *  does not have, as it is; with no list known, its CLI's name. */
-  function sessionsMemberModelName(member) {
-    const kindLabel = sessionsCliName(member && member.kind);
-    const offer = sessionsModelOffer || undefined;
-    const providers = offer ? newChatProviders(offer) : [];
-    const provider = providers.find(function (item) { return item.kind === member.kind && (item.hostId || "") === (member.hostId || ""); });
-    const own = typeof member.model === "string" ? member.model.trim()
-      : member.participant && typeof member.participant.model === "string" ? member.participant.model.trim() : "";
-    if (own) {
-      const listed = provider && Array.isArray(provider.models) ? provider.models.find(function (item) { return item.id === own; }) : undefined;
-      if (listed) return listed.label;
-      if (provider && provider.defaultModelId === own) return provider.defaultModelLabel;
-      return own;
-    }
-    if (!provider) return kindLabel;
-    const start = member.hostId ? undefined : newChatStartDefaults(offer, provider, member.homeMachineId);
-    return (start && start.modelLabel) || provider.defaultModelLabel || kindLabel;
-  }
-
   function sessionsStatusElement(status) {
     const shared = sessionsRules();
     const node = document.createElement("span");
@@ -14061,7 +14008,6 @@
     const stopAll = document.getElementById("members-sheet-stop-all");
     if (stopAll) stopAll.hidden = true;
     const rows = state.memberRows;
-    loadSessionsModelOffer();
     // How long a member works or worked (every row says it, as on the
     // computer): waiting, from its turn's start to when it began to wait;
     // ended, its task.
@@ -14080,7 +14026,6 @@
         id: id,
         kind: row.participant.kind || "",
         name: sessionsMemberTitleOf(state, row.participant),
-        model: sessionsMemberModelName(row.participant),
         status: row.status,
         since: since,
         workedMs: worked,
@@ -14093,8 +14038,7 @@
     const removed = state.formerMembers.map(function (former) {
       const task = state.tasksByMember.get(former.id);
       const status = shared.sessionsFormerMemberStatus(task ? task.item : undefined);
-      // Its model is not known once it left: its CLI's name in its place.
-      return { id: former.id, kind: formerMemberKind(former), name: sessionsMemberTitleOf(state, former.id), model: sessionsCliName(formerMemberKind(former)),
+      return { id: former.id, kind: formerMemberKind(former), name: sessionsMemberTitleOf(state, former.id),
         status: status, workedMs: status !== "idle" && task && typeof shared.sessionsTaskDurationMs === "function" ? shared.sessionsTaskDurationMs(task.item, state.messagesById) : undefined,
         former: true };
     });
@@ -14132,8 +14076,8 @@
     }
     // One line per session, the computer's anatomy (the User, 2026-11-22):
     // its provider's glyph with a dot for its state (no state words; the
-    // running one pulses), its task, and its model · how long it works or
-    // worked; Stop at the end while it runs.
+    // running one pulses), its task, and how long it works or worked; no
+    // model; Stop at the end while it runs.
     const statusLabel = function (status) {
       return shared && shared.SESSIONS_WORK_STATUS_LABELS ? shared.SESSIONS_WORK_STATUS_LABELS[status] || status : status;
     };
@@ -14144,7 +14088,7 @@
       item.dataset.memberStatus = row.status;
       item.setAttribute("role", "button");
       item.tabIndex = 0;
-      item.setAttribute("aria-label", [row.name, row.status === "idle" ? "" : statusLabel(row.status), row.model || ""].filter(Boolean).join(", "));
+      item.setAttribute("aria-label", row.status === "idle" ? row.name : row.name + ", " + statusLabel(row.status));
       const glyph = document.createElement("span");
       glyph.className = "sessions-agent-glyph";
       glyph.append(providerLogoElement(row.kind));
@@ -14159,25 +14103,10 @@
       name.textContent = row.name;
       const meta = document.createElement("span");
       meta.className = "sessions-agent-meta";
-      if (row.model) {
-        const model = document.createElement("span");
-        model.className = "sessions-agent-model";
-        model.textContent = row.model;
-        meta.append(model);
-      }
       const time = row.since ? sessionsElapsedElement(row.since, "is-compact")
         : typeof row.workedMs === "number" ? Object.assign(document.createElement("span"), { className: "sessions-agent-time", textContent: compactDuration(row.workedMs) })
           : undefined;
-      if (time) {
-        if (row.model) {
-          const sep = document.createElement("span");
-          sep.className = "sessions-agent-sep";
-          sep.setAttribute("aria-hidden", "true");
-          sep.textContent = "·";
-          meta.append(sep);
-        }
-        meta.append(time);
-      }
+      if (time) meta.append(time);
       item.append(glyph, name, meta);
       if (!row.former && (row.canStop || row.stopping)) item.append(sessionsStopButton([row.id], row.canStop, row.stopping, "Stop " + row.name, "members-sheet-stop"));
       return item;

@@ -45,21 +45,19 @@ export interface ChatAgentRowData {
  *  effort (and a role that is not the ordinary member's). */
 export type ChatAgentDetail = (model: MemberModelSummary) => string;
 
-/** The muted words at a row's end, the same in every state (the User,
- *  2026-11-22): the model and how long it runs or worked, never its state
- *  (the dot on its glyph says that; its hover card and accessible name say
- *  it in words). */
-function RowMeta(props: { row: ChatAgentRowData; model?: string }): JSX.Element {
+/** A row's end, the same in every state (the User, 2026-11-22): how long it
+ *  runs or worked, muted. Never its state (the dot on its glyph says that;
+ *  its hover card and accessible name say it in words), nor its model and
+ *  effort (its hover card says them). */
+function RowMeta(props: { row: ChatAgentRowData }): JSX.Element {
   const { row } = props;
   const time = row.status === "running" && row.since
     ? <LiveElapsed since={row.since} compact />
     : row.durationMs !== undefined ? formatCompactDuration(row.durationMs) : undefined;
   return (
     <span className="chat-agent-meta">
-      {props.model && <span className="chat-agent-model">{props.model}</span>}
-      {props.model && time !== undefined && <span className="chat-agent-sep" aria-hidden="true">·</span>}
       {time !== undefined && <span className="chat-agent-time" data-testid="chat-agent-time">{time}</span>}
-      {/* Stop's place on hover, so it never covers the model's name. */}
+      {/* Stop's place on hover. */}
       {time === undefined && row.stop && <span className="chat-agent-time" aria-hidden="true" />}
     </span>
   );
@@ -94,10 +92,10 @@ export function ChatAgentCard(props: { row: ChatAgentRowData; detail: string; ba
 /** One session in the side panel, as T3 Code lists its agents: the
  *  provider's glyph with a dot for its state (its only mark of it in the
  *  row: a colour per state, pulsing while it runs), its task's title on one
- *  line, the model and how long it ran at the end. Hovering shows Stop where the
- *  time was (only while it runs) and, to its left, a card with the CLI,
- *  model and effort, the state and time and what it does now. A click opens
- *  its whole session in the panel. */
+ *  line, and how long it runs or worked at the end. Hovering shows Stop
+ *  where the time was (only while it runs) and, to its left, a card with the
+ *  CLI, model and effort, the state and time and what it does now. A click
+ *  opens its whole session in the panel. */
 export function ChatAgentRow(props: {
   row: ChatAgentRowData;
   /** The member it lists; none for one no longer in the chat. */
@@ -106,20 +104,18 @@ export function ChatAgentRow(props: {
   detail?: ChatAgentDetail;
   /** The line a removed member's card says instead of its model. */
   fixedDetail?: string;
-  /** What a removed member's row names in the model's place: its CLI. */
-  fixedModel?: string;
 }): JSX.Element {
   return props.participant
     ? <MemberAgentRow {...props} participant={props.participant} />
-    : <AgentRowView row={props.row} {...(props.fixedModel ? { model: props.fixedModel } : {})} detail={props.fixedDetail ?? ""} />;
+    : <AgentRowView row={props.row} detail={props.fixedDetail ?? ""} />;
 }
 
 function MemberAgentRow(props: { row: ChatAgentRowData; participant: ChatParticipant; machines: MachineListResult; detail?: ChatAgentDetail }): JSX.Element {
   const model = useMemberModelSummary(props.participant, props.machines);
-  return <AgentRowView row={props.row} model={model.model} detail={props.detail?.(model) ?? model.model} />;
+  return <AgentRowView row={props.row} detail={props.detail?.(model) ?? model.model} />;
 }
 
-function AgentRowView(props: { row: ChatAgentRowData; model?: string; detail: string }): JSX.Element {
+function AgentRowView(props: { row: ChatAgentRowData; detail: string }): JSX.Element {
   const { row } = props;
   const backgroundTasks = useContext(ChatBackgroundTasksContext).get(row.id)?.length ?? 0;
   return (
@@ -134,7 +130,7 @@ function AgentRowView(props: { row: ChatAgentRowData; model?: string; detail: st
           <button
             type="button"
             className="chat-agent-row-main"
-            aria-label={[row.title, row.status === "idle" ? "" : SESSIONS_WORK_STATUS_LABELS[row.status], props.model ?? ""].filter(Boolean).join(", ")}
+            aria-label={row.status === "idle" ? row.title : `${row.title}, ${SESSIONS_WORK_STATUS_LABELS[row.status]}`}
             onClick={row.onOpen}
           >
             <span className="chat-agent-glyph">
@@ -142,7 +138,7 @@ function AgentRowView(props: { row: ChatAgentRowData; model?: string; detail: st
               {row.status !== "idle" && <span className={`chat-agent-dot is-${row.status}`} aria-hidden="true" />}
             </span>
             <span className="chat-agent-title">{row.title}</span>
-            <RowMeta row={row} model={props.model} />
+            <RowMeta row={row} />
           </button>
         </HoverCard.Trigger>
         <HoverCard.Portal>

@@ -11,7 +11,7 @@ import { ChatParticipantRosterRow } from "./chat-participant-roster-row";
 import { forkToNewChatReasonFor, machineForkSupportFrom } from "./use-fork-to-new-chat";
 import { ChatMembersPanel } from "./chat-members-panel";
 import { ChatAgentCard, formatCompactDuration } from "./chat-agent-row";
-import { memberEffortLabel } from "./use-member-model-summary";
+import { memberEffortLabel, useMemberModelSummary } from "./use-member-model-summary";
 import { ChatMemberComposerControls, ChatModelMenu, type ChatModelAccessPatch } from "./chat-model-access-picker";
 import { latestAndOlderModels, modelFamily } from "./chat-model-groups";
 import { resetMemberModelCatalogs } from "./chat-member-model-name";
@@ -85,8 +85,14 @@ test("the side panel lists every session but the main session as T3 Code does: g
     assert.equal(textOf(root.find(byTestId("chat-members-agents")).find((node) => node.type === "h3")), "Agents · 1 running");
     const drewRow = memberRows()[0]!;
     assert.equal(textOf(drewRow.find((node) => typeof node.props?.className === "string" && node.props.className === "chat-agent-title")), "Task for drew: fix the drew part", "named by its task");
-    assert.match(textOf(drewRow), /Opus 5\.5/, "the model by its name in the CLI's list");
-    assert.doesNotMatch(textOf(drewRow), /\bopus\b/, "never the raw id");
+    assert.doesNotMatch(textOf(drewRow), /Opus|opus|Claude Code/, "no model in a row (the User, 2026-11-22): its hover card names it");
+    // The name its hover card gives the model: the CLI's list's, never the id.
+    let probe: ReturnType<typeof create> | undefined;
+    const ModelProbe = (): JSX.Element => <span>{useMemberModelSummary(drew, { machines: [], status: [] }).model}</span>;
+    await act(async () => { probe = create(<ModelProbe />); });
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 0)); });
+    assert.equal(textOf(probe!.root.find((node) => node.type === "span")), "Opus 5.5");
+    act(() => probe!.unmount());
     assert.doesNotMatch(textOf(root), /@/, "no handles");
     assert.equal(drewRow.findAll((node) => node.props?.["data-provider-kind"] === "claude-code").length, 1, "its provider's glyph");
     assert.equal(drewRow.findAll((node) => typeof node.props?.className === "string" && node.props.className === "chat-agent-dot is-running").length, 1, "a dot for its state");
@@ -97,7 +103,7 @@ test("the side panel lists every session but the main session as T3 Code does: g
     assert.equal(taylorRow.findAll((node) => typeof node.props?.className === "string" && node.props.className === "chat-agent-dot is-waiting").length, 1, "its dot says it waits");
     assert.match(String(taylorRow.find((node) => node.type === "button" && node.props.className === "chat-agent-row-main").props["aria-label"]), /Waiting for you/, "said to a screen reader");
     assert.doesNotMatch(textOf(drewRow), /Running/, "a running row says so only by its dot");
-    assert.match(textOf(taylorRow), /Antigravity/, "the model's place on every row (no list: its CLI's name)");
+    assert.doesNotMatch(textOf(taylorRow), /Antigravity/, "no model or CLI name in a row");
     assert.equal(memberRows()[1]!.findAll(byTestId("chat-members-row-stop")).length, 0, "nothing to stop for a session that runs nothing");
     assert.equal(root.findAll(byTestId("chat-members-stop-all")).length, 0, "no Stop all");
     assert.doesNotMatch(textOf(root), /Stop all/);

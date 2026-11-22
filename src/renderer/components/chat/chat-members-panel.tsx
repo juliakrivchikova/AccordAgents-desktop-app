@@ -8,7 +8,6 @@ import { IconButton } from "../primitives";
 import { ChatAccordRow } from "./chat-accord-dock";
 import { ChatAgentRow, type ChatAgentDetail } from "./chat-agent-row";
 import { ChatProviderMark, ChatProviderMarkSlot } from "./chat-member-mark";
-import { participantProviderLabel } from "./chat-mention-directory";
 import { useMachineList } from "./use-cli-start-defaults";
 import type { SessionsFormerRow } from "./use-chat-sessions-view";
 
@@ -114,7 +113,6 @@ export function ChatMembersPanel(props: ChatMembersPanelProps): JSX.Element {
               key={row.member.id}
               machines={machines}
               fixedDetail={SESSIONS_REMOVED_MEMBER_DETAIL}
-              {...(row.member.kind ? { fixedModel: participantProviderLabel(row.member.kind) } : {})}
               row={{
                 id: row.member.id,
                 status: row.status,
