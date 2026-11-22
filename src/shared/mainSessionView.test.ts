@@ -7,7 +7,6 @@ import {
   isSessionsHiddenTurnFinishedNote,
   mainTimelineMessages,
   memberSessionMessages,
-  membersMainSessionWaitsOn,
   sessionsFormerMembers,
   sessionsTaskPlacement,
   sessionsViewLane,
@@ -33,8 +32,7 @@ import {
   sessionsTaskStatus,
   sessionsTaskTitle,
   shortenAtWord,
-  sessionsMentionPieces,
-  sessionsWaitingText
+  sessionsMentionPieces
 } from "./mainSessionView";
 import type { ChatMessage, ChatParticipant, ChatParticipantRequestBatch, ChatParticipantRequestItem } from "./types";
 
@@ -85,11 +83,10 @@ test("a member's session holds its task, its replies, its questions with the mai
   assert.deepEqual(memberSessionMessages(messages, "p-gera", index).map((entry) => entry.id), ["tasks", "gera-reply"]);
 });
 
-test("a member's open card stays on the main timeline; the main session waits on its running tasks only", () => {
+test("a member's open card stays on the main timeline", () => {
   const messages = chat();
   const index = buildSessionsViewIndex(messages, "p-main");
   assert.deepEqual(openMemberCardMessages(messages, index).map((entry) => entry.id), ["taylor-choice"]);
-  assert.deepEqual(membersMainSessionWaitsOn(messages, index), ["p-drew"]);
   const answered = messages.map((entry) => entry.id === "taylor-choice"
     ? { ...entry, metadata: { pendingChoice: { ...entry.metadata!.pendingChoice!, status: "selected" as const } } }
     : entry);
@@ -283,7 +280,6 @@ test("members are named by their task, not their handle", () => {
   assert.equal(sessionsMemberTitle({ handle: "@drew" }), "drew");
   assert.equal(sessionsMemberDetail({ provider: "Claude Code", model: "opus", roleLabel: "Member", roleConfigId: "generic-participant" }), "Claude Code · opus");
   assert.equal(sessionsMemberDetail({ provider: "Codex CLI", roleLabel: "Reviewer", roleConfigId: "reviewer" }), "Codex CLI · Reviewer");
-  assert.equal(sessionsWaitingText(["Fix the login", "Check logout"]), "Waiting on 2 tasks: Fix the login, Check logout");
   assert.equal(sessionsDelegationSummary(1), "Delegated 1 task");
   assert.equal(sessionsDelegationSummary(3), "Delegated 3 tasks");
   assert.equal(withoutLeadingMention("@main Reply to me", "main"), "Reply to me");

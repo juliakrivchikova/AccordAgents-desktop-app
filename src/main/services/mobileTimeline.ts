@@ -175,6 +175,9 @@ export interface MobileTimelineEvent {
   accordLaunchByMainSession?: true;
   /** A member's finished turn: how long it worked (its "Worked for …"). */
   workedMs?: number;
+  /** A part of a turn the User's next message joined: no "Worked for" of its
+   *  own, its steps open (ChatMessageMetadata.turnContinues). */
+  turnContinues?: true;
   /** A member's reply: what it posted during its turn, shown inside the
    *  reply above its final text (shared/interimPosts.ts). Their pictures are
    *  among the reply's attachments. */
@@ -270,7 +273,7 @@ export function phoneActivityEvents(conversation: Conversation, now = Date.now()
     // Activity shows the text: no pictures, no task card or addressees, no
     // posts made during the turn (the chat's page carries them), and no
     // Accord launch mark or working time.
-    const { attachments: _attachments, participantRequest: _request, addressees: _addressees, interimPosts: _posts, accordLaunchByMainSession: _launch, workedMs: _worked,
+    const { attachments: _attachments, participantRequest: _request, addressees: _addressees, interimPosts: _posts, accordLaunchByMainSession: _launch, workedMs: _worked, turnContinues: _continues,
       activity: _activity, activityMore: _activityMore, ...event } =
       timelineEventFromMessage(message, message.id, conversation, threadRoots);
     const short = { ...event, content: event.content.slice(0, PHONE_ACTIVITY_CONTENT_CHARS) };
@@ -316,13 +319,20 @@ function messageIsVisibleOnPhone(message: ChatMessage): boolean {
  *  User's to see. A hidden
  *  member message still travels, flagged: it can be the message that ends a
  *  run, and without it the phone's pending row for that run never settles. */
-export function messageIsHiddenOnPhone(conversation: Pick<Conversation, "messages">, message: ChatMessage): boolean {
+export function messageIsHiddenOnPhone(
+  conversation: Pick<Conversation, "messages">,
+  message: ChatMessage,
+  options: { showsSteps?: boolean } = {}
+): boolean {
   // The flag is honoured on its own as well: the shared rule lets an inferred
   // request carrier's hidden-ness depend on its trigger being in the message
   // list, and the phone's projections read pages, so at a page boundary the
   // same carrier would otherwise flip between hidden and shown.
   return message.metadata?.hiddenFromTimeline === true || chatMessageHiddenFromTimeline(conversation, message) ||
-    isEmptyFinishedTurn(message);
+    // A part of a turn her next message joined (ChatMessageMetadata.turnContinues)
+    // shows its steps, open, even with no words, where steps are drawn.
+    (isEmptyFinishedTurn(message) && !(options.showsSteps && message.metadata?.turnContinues === true &&
+      (message.metadata.activityEvents?.length ?? 0) > 0));
 }
 
 /** A member's turn that ended with nothing to show (all it had to say went
@@ -379,16 +389,17 @@ function timelineEventFromMessage(
     ? chatMessageVisualThreadRootId(conversation, message, threadRoots)
     : undefined;
   const attachments = timelineAttachmentsFromMessage(message);
-  const hidden = conversation && message.role === "participant" && messageIsHiddenOnPhone(conversation, message);
+  // A reply's step rows are the sessions view's (docs/main-session.md); a
+  // classic chat's phone shows none, as its desktop does.
+  const showsSteps = Boolean(conversation) && chatViewFor(conversation!.metadata) === "sessions";
+  const hidden = conversation && message.role === "participant" && messageIsHiddenOnPhone(conversation, message, { showsSteps });
   const midTurn = message.role === "participant" && message.status === "done" &&
     message.metadata?.appMessageSource === APP_CHAT_SEND_MESSAGE_TOOL;
   const finishedNote = turnFinishedNoteOf(message);
   const addressees = message.role === "user" ? chatMessageAddressees(message).slice(0, PHONE_ADDRESSEES_MAX) : [];
   const request = message.role === "participant" && !hidden ? mobileTaskBatch(message.metadata?.participantRequest) : undefined;
   const interimPosts = message.role === "participant" && !hidden ? mobileInterimPosts(message) : [];
-  // A reply's step rows are the sessions view's (docs/main-session.md); a
-  // classic chat's phone shows none, as its desktop does.
-  const activity = message.role === "participant" && !hidden && !midTurn && conversation && chatViewFor(conversation.metadata) === "sessions"
+  const activity = message.role === "participant" && !hidden && !midTurn && showsSteps
     ? phoneSessionsActivity(message.metadata?.activityEvents) : undefined;
   const turnTiming = message.role === "participant" && message.status === "pending" ? phoneTurnTiming(message) : {};
   return {
@@ -411,6 +422,7 @@ function timelineEventFromMessage(
     ...(message.role === "participant" && message.metadata?.accordLaunchByMainSession === true ? { accordLaunchByMainSession: true as const } : {}),
     ...(message.role === "participant" && message.status !== "pending" && typeof message.metadata?.workedMs === "number" &&
       Number.isFinite(message.metadata.workedMs) && message.metadata.workedMs >= 0 ? { workedMs: Math.round(message.metadata.workedMs) } : {}),
+    ...(message.role === "participant" && message.status === "done" && message.metadata?.turnContinues === true ? { turnContinues: true as const } : {}),
     // A scheduled script's message is not the User's: the phone has no script
     // author, so it shows as an author named after the script.
     role: message.role === "participant" || message.role === "script" ? "participant" : message.role === "system" ? "system" : "you",

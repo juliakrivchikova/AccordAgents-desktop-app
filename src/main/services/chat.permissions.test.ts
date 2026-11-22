@@ -2887,6 +2887,46 @@ test("a message sent while a Claude member works is queued until its CLI takes i
   assert.equal(storage.current.messages.find((message: ChatMessage) => message.id === first.id)?.status, "done");
 });
 
+test("a Claude reply the next message joined is stored as part of a turn that goes on: no worked time of its own; the last part's covers the turn", async () => {
+  const participant = chatParticipant("claude-code");
+  const conversation = chatConversation([participant]);
+  const runs: any[] = [];
+  let releaseFirst!: () => void;
+  const firstBlocked = new Promise<void>((resolve) => { releaseFirst = resolve; });
+  let releaseSecond!: () => void;
+  const secondBlocked = new Promise<void>((resolve) => { releaseSecond = resolve; });
+  const { service, storage, tempRoot } = testService({
+    conversation,
+    run: async (runParticipant, _prompt, _repoPath, _diffMode, _kind, _signal, runOptions: any) => {
+      runOptions?.warm?.onMessageWritten?.();
+      runs.push(runOptions);
+      if (runs.length === 1) {
+        await firstBlocked;
+        return { participant: runParticipant, ok: true, content: "Checking first.", durationMs: 1, turnContinues: true };
+      }
+      await secondBlocked;
+      return { participant: runParticipant, ok: true, content: "All done.", durationMs: 1 };
+    }
+  });
+  (service as any).ensureHistoryFiles = async () => tempRoot;
+  await service.sendMessage({ conversationId: conversation.id, runId: "part-first", content: `@${participant.handle} first` });
+  await waitFor(() => runs.length === 1);
+  await service.sendMessage({ conversationId: conversation.id, runId: "part-second", content: `@${participant.handle} тест` });
+  await waitFor(() => runs.length === 2);
+  runs[1].warm.onReplyStarted({ joinedReply: runs[0].warm.origin, joinedStepStartedAt: Date.now() });
+  releaseFirst();
+  await waitFor(() => storage.current.messages.some((message: ChatMessage) => message.content === "Checking first." && message.status === "done"));
+  const part = storage.current.messages.find((message: ChatMessage) => message.content === "Checking first.")!;
+  assert.equal(part.metadata?.turnContinues, true);
+  assert.equal(part.metadata?.workedMs, undefined, "no Worked for of its own");
+  releaseSecond();
+  await waitFor(() => storage.current.messages.some((message: ChatMessage) => message.content === "All done." && message.status === "done"));
+  const last = storage.current.messages.find((message: ChatMessage) => message.content === "All done.")!;
+  assert.equal(last.metadata?.turnContinues, undefined);
+  assert.equal(last.metadata?.turnStartedAt, part.createdAt, "the turn's one Worked for counts from the turn's start");
+  assert.equal(typeof last.metadata?.workedMs, "number");
+});
+
 test("Stop on a Claude reply its CLI still holds removes it, and the running reply goes on", async () => {
   const participant = chatParticipant("claude-code");
   const conversation = chatConversation([participant]);
@@ -3081,6 +3121,40 @@ test("a reply the Claude CLI starts on its own after background work becomes a n
   assert.equal(done.content, "The soak passed.");
   assert.ok(done.metadata.activityEvents?.some((event: { label: string }) => /Background task finished: soak/.test(event.label)));
   await waitFor(() => !(storage.current.metadata.activeRunIds ?? []).includes(pending.metadata.runId));
+});
+
+test("a reply the Claude CLI started on its own that her next message joins keeps its steps open with no Worked for of its own", async () => {
+  const participant = chatParticipant("claude-code");
+  const conversation = chatConversation([participant]);
+  let warmOptions: any;
+  const { service, storage, tempRoot } = testService({
+    conversation,
+    run: async (runParticipant, _prompt, _repoPath, _diffMode, _kind, _signal, runOptions: any) => {
+      warmOptions = runOptions.warm;
+      return { participant: runParticipant, ok: true, content: "Started.", durationMs: 1 };
+    }
+  });
+  (service as any).ensureHistoryFiles = async () => tempRoot;
+  await service.sendMessage({ conversationId: conversation.id, runId: "send-self-join", content: `@${participant.handle} start` });
+  await waitFor(() => Boolean(warmOptions) && storage.current.messages.some((message: ChatMessage) => message.content === "Started."));
+  let finish!: (result: unknown) => void;
+  warmOptions.onSelfResumedTurn({
+    origin: warmOptions.origin,
+    attach: (handlers: any) => {
+      handlers.onOutput?.({ kind: "tool", text: "Running tests", activityKind: "command", activityStatus: "started", activityItemId: "tool-1" });
+      return new Promise((resolve) => { finish = resolve; });
+    }
+  });
+  await waitFor(() => storage.current.messages.some((message: ChatMessage) =>
+    message.role === "participant" && message.status === "pending"));
+  const pending = storage.current.messages.find((message: ChatMessage) =>
+    message.role === "participant" && message.status === "pending");
+  finish({ participant, ok: true, content: "", durationMs: 1, turnContinues: true });
+  await waitFor(() => storage.current.messages.some((message: ChatMessage) => message.id === pending.id && message.status === "done"));
+  const done = storage.current.messages.find((message: ChatMessage) => message.id === pending.id);
+  assert.equal(done.metadata.turnContinues, true);
+  assert.equal(done.metadata.workedMs, undefined, "the clock goes on in the part her message joined");
+  assert.ok(done.metadata.activityEvents?.some((event: { label: string }) => event.label === "Running tests"));
 });
 
 test("Stop on a reply the Claude CLI started on its own interrupts it", async () => {

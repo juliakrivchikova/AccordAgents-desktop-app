@@ -354,8 +354,11 @@ chat without a main session is always `classic`; its switch is disabled.
     while it is being written): logo with a state dot, task title, one line
     of result, time; a row opens the member's session at its reply (else
     the task), marked for a moment. A task whose reply is not loaded is one
-    such row of its own. While the main session waits there is a line
-    "Waiting on N members: <tasks> · Stop";
+    such row of its own. There is no "Waiting on …" line with Stop at the
+    end of the main timeline (removed, the User 2026-11-22: each task is
+    already a row of the reply and a member is stopped from its own session;
+    a Stop of several members that moves as the timeline shifts is the
+    likely way a click meant to open a task stopped two members);
   - a reply still being written reads as T3 Code's turn in progress (the
     User, 2026-11-21), on the desktop and the phone, on the main timeline
     and in a member's session: a quiet "Working for 4s" (live) over a
@@ -409,8 +412,8 @@ chat without a main session is always `classic`; its switch is disabled.
     (`sessionsFormerMembers`). With nothing delegated it says nothing. A member opens its **whole session** in the
     same panel (Back to the list) with its … menu in its header and a composer
     that writes to it only; a removed member's session is read-only;
-  - the word "members" is never shown (desktop and phone): "Waiting on N
-    tasks", "Side panel", "Back", "Close";
+  - the word "members" is never shown (desktop and phone): "Side panel",
+    "Back", "Close";
   - no threads UI: every message has one place (`sessionsViewLane`); the
     main session's answer to a member's question is in that member's
     session from its first token (placed by the request it answers);

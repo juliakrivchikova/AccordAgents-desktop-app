@@ -563,6 +563,7 @@
       // heads its delegations.
       Boolean(left.accordLaunchByMainSession) === Boolean(right.accordLaunchByMainSession) &&
       (left.workedMs || 0) === (right.workedMs || 0) &&
+      Boolean(left.turnContinues) === Boolean(right.turnContinues) &&
       // A running reply's steps, and what its Worked for opens to.
       activitySignature(left) === activitySignature(right) &&
       Boolean(left.liveStatus) === Boolean(right.liveStatus);
@@ -729,7 +730,8 @@
             ...(Array.isArray(stored.addressees) && !Array.isArray(entry.addressees) ? { addressees: stored.addressees } : {}),
             ...(stored.participantRequest && !entry.participantRequest ? { participantRequest: stored.participantRequest } : {}),
             ...(stored.accordLaunchByMainSession && !entry.accordLaunchByMainSession ? { accordLaunchByMainSession: true } : {}),
-            ...(typeof stored.workedMs === "number" && typeof entry.workedMs !== "number" ? { workedMs: stored.workedMs } : {}),
+            ...(typeof stored.workedMs === "number" && typeof entry.workedMs !== "number" && !entry.turnContinues ? { workedMs: stored.workedMs } : {}),
+            ...(stored.turnContinues && !entry.turnContinues ? { turnContinues: true } : {}),
             // Nor one without the reply's steps (a live copy from a server
             // before it carried them).
             ...(Array.isArray(stored.activity) && !Array.isArray(entry.activity)
@@ -5758,8 +5760,9 @@
         // A turn that ended with nothing to say travels hidden and empty: it
         // still ends its run below, and no bubble is stored for it.
         const endsRunUnseen = event.hidden === true && (event.status === "done" || event.status === "error");
-        // A reply whose words all went out as posts during its turn shows them.
-        if (!endsRunUnseen && !interimPosts.interimPosts) {
+        // A reply whose words all went out as posts during its turn shows them;
+        // a part of a turn her next message joined shows its steps.
+        if (!endsRunUnseen && !interimPosts.interimPosts && !(event.turnContinues === true && activity.activity)) {
           continue;
         }
       }
@@ -5884,6 +5887,8 @@
         // How long the turn worked: the sessions view's "Worked for …".
         ...(role === "participant" && typeof event.workedMs === "number" && Number.isFinite(event.workedMs) && event.workedMs >= 0
           ? { workedMs: event.workedMs } : {}),
+        // A part of a turn her next message joined: no Worked for, its steps open.
+        ...(role === "participant" && event.turnContinues === true ? { turnContinues: true } : {}),
         ...(settledAt ? { settledAt: settledAt } : {})
       }, openedAt ? { arrivedAt: openedAt } : undefined);
       if (written) {
@@ -8636,7 +8641,7 @@
    *  its session) and nothing is written, its send button stops that run
    *  (T3 Code's and Claude's Stop); with something written it is Send again
    *  and Stop stands beside it, since the CLI interrupts whatever is typed.
-   *  Members are stopped from the Waiting line and the panel too. */
+   *  Members are stopped from the panel and their own sessions. */
   function syncComposerStop(state, memberId) {
     composerStopState = state;
     // Drawn again for the same screen (typing, a run starting or ending):
@@ -9979,6 +9984,7 @@
         ...(Array.isArray(entry.interimPosts) && entry.interimPosts.length ? { interimPosts: entry.interimPosts } : {}),
         ...(entry.accordLaunchByMainSession ? { accordLaunchByMainSession: true } : {}),
         ...(typeof entry.workedMs === "number" ? { workedMs: entry.workedMs } : {}),
+        ...(entry.turnContinues ? { turnContinues: true } : {}),
         ...(Array.isArray(entry.activity) && entry.activity.length ? { activity: entry.activity } : {}),
         ...(entry.activityMore ? { activityMore: entry.activityMore } : {}),
         ...(entry.liveStatus && entry.status === "pending" ? { liveStatus: true } : {}),
@@ -10436,6 +10442,7 @@
       authorLabel: entry.authorLabel,
       authorKind: entry.authorKind,
       worked: sessionsView ? entry.workedMs : undefined,
+      continued: sessionsView && entry.turnContinues ? true : undefined,
       // Its steps (a running reply's rows; what its Worked for opens to, and
       // whether it is open).
       activity: sessionsView && activitySignature(entry)
@@ -11635,8 +11642,8 @@
       renderScaffoldingInto(item);
       return item;
     }
-    // The sessions view's own rows: a task card, the "Waiting on" line, a
-    // member's session head, its task, a member's choice still waiting.
+    // The sessions view's own rows: a task card, a member's session head,
+    // its task, a member's choice still waiting.
     if (entry.presentation === "sessions" && appendSessionsSpecial(item, entry)) {
       return item;
     }
@@ -12574,17 +12581,11 @@
     const openCardIds = new Set(shared.openMemberCardMessages(messages, index).map(function (message) { return message.id; }));
     const mainMessages = shared.mainTimelineMessages(messages, index);
     const placement = shared.sessionsTaskPlacement(mainMessages, index);
-    const mainStreaming = messages.some(function (message) {
-      return message.role === "participant" && message.status === "pending" && message.participantId === mainId;
-    });
-    const waitingIds = mainStreaming ? [] : shared.membersMainSessionWaitsOn(messages, index).filter(function (id) {
-      return members.some(function (member) { return member.id === id; });
-    });
     const mainMember = members.find(function (member) { return member.id === mainId; });
     const state = {
       conversationId: conversationId, chat: chat, mainId: mainId, mainMember: mainMember, mainHandle: mainMember ? mainMember.handle : "main",
       rows: rows, messages: messages, index: index, members: members, formerMembers: formerMembers,
-      statusById: statusById, runsByMember: runsByMember, tasksByMember: tasksByMember, memberRows: memberRows, waitingIds: waitingIds,
+      statusById: statusById, runsByMember: runsByMember, tasksByMember: tasksByMember, memberRows: memberRows,
       activity: activity, messagesById: messagesById, replies: replies, openCardIds: openCardIds,
       mainIds: new Set(mainMessages.map(function (message) { return message.id; })), placement: placement,
       runningCount: members.filter(function (member) {
@@ -12728,8 +12729,8 @@
   /** The rows of the main timeline (shared/mainSession.ts mainTimelineMessages):
    *  the User's messages to the main session, the main session's replies
    *  with the tasks each turn gave inside its "Worked for …", what has no
-   *  member (system lines), the members' choices still waiting for the User
-   *  and the "Waiting on" line at the end. No avatars, threads or handles. */
+   *  member (system lines) and the members' choices still waiting for the
+   *  User. No avatars, threads or handles. */
   function sessionsMainRows(state) {
     const shared = sessionsRules();
     const rows = [];
@@ -12749,11 +12750,16 @@
       }
       if (row.author === "you") base.content = shared.withoutLeadingMention(String(row.content || ""), state.mainHandle);
       const tasks = state.placement.tasksByReplyId.get(message.id);
+      // A part of a turn her next message joined, with nothing in it, is not
+      // drawn (as in the CLI's transcript).
+      if (row.turnContinues && !tasks && !String(row.content || "").trim() && !(Array.isArray(row.activity) && row.activity.length) &&
+        !(Array.isArray(row.interimPosts) && row.interimPosts.length)) return;
       if (tasks && row.author === "agent") {
         const key = row.rowKey || row.id;
         const live = row.status === "Running";
+        const continued = Boolean(row.turnContinues) && !live;
         base.delegations = {
-          key: key, live: live, open: live || openWorkedFolds.has(key),
+          key: key, live: live, continued: continued, open: live || continued || openWorkedFolds.has(key),
           workedMs: typeof row.workedMs === "number" ? row.workedMs : undefined,
           // A finished turn's steps, which its fold opens to with its tasks
           // (while it runs they are under its "Working for …").
@@ -12766,17 +12772,6 @@
       }
       rows.push(base);
     });
-    if (state.waitingIds.length > 0) {
-      const titles = state.waitingIds.map(function (id) { return sessionsMemberTitleOf(state, id); });
-      rows.push({
-        rowKey: "sessions-waiting", id: "sessions-waiting", conversationId: state.conversationId, author: "system", status: "Done", content: "",
-        createdAt: "￿", presentation: "sessions",
-        sessionsWaiting: {
-          text: shared.sessionsWaitingText(titles), memberIds: state.waitingIds,
-          canStop: sessionsCanStop(state, state.waitingIds), stopping: sessionsStopping(state, state.waitingIds)
-        }
-      });
-    }
     return rows;
   }
 
@@ -13026,6 +13021,7 @@
     if (entry.delegations || entry.status !== "Done") return "";
     const steps = activitySignature(entry);
     if (typeof entry.workedMs !== "number" && !steps) return "";
+    if (entry.turnContinues) return "continued:" + steps;
     return "worked:" + (typeof entry.workedMs === "number" ? entry.workedMs : "") +
       (steps ? ":" + steps + (openWorkedFolds.has(entry.rowKey || entry.id) ? ":open" : "") : "");
   }
@@ -13175,6 +13171,18 @@
    *  no tasks: muted text, as the fold of one that did. */
   function sessionsWorkedElement(entry) {
     const steps = Array.isArray(entry.activity) && entry.activity.length > 0;
+    if (entry.presentation === "sessions" && !entry.delegations && entry.status === "Done" && entry.turnContinues) {
+      // A part its turn went on from (her next message joined it): its steps
+      // open, with no "Worked for" of its own, as in the CLI's transcript.
+      if (!steps) return undefined;
+      const open = document.createElement("div");
+      open.className = "sessions-worked is-open is-continued";
+      const body = document.createElement("div");
+      body.className = "sessions-worked-body";
+      body.append(sessionsActivityElement(entry, false));
+      open.append(body);
+      return open;
+    }
     if (entry.presentation !== "sessions" || entry.delegations || entry.status !== "Done" || (typeof entry.workedMs !== "number" && !steps)) return undefined;
     const label = typeof entry.workedMs === "number" ? "Worked for " + formatWorkedMs(entry.workedMs) : "Worked";
     const wrap = document.createElement("div");
@@ -13223,8 +13231,9 @@
       return wrap;
     }
     const wrap = document.createElement("div");
-    wrap.className = "sessions-worked" + (delegations.open ? " is-open" : "") + (delegations.live ? " is-live" : "");
-    if (!delegations.live) {
+    wrap.className = "sessions-worked" + (delegations.open ? " is-open" : "") + (delegations.live ? " is-live" : "") + (delegations.continued ? " is-continued" : "");
+    // A part its turn went on from: open, with no "Worked for" of its own.
+    if (!delegations.live && !delegations.continued) {
       const toggle = document.createElement("button");
       toggle.type = "button";
       toggle.className = "sessions-worked-toggle";
@@ -13266,21 +13275,6 @@
     from.append(providerLogoElement(entry.memberChoice.kind, "is-small"), name, document.createTextNode(" asks"), lineIcon(["m9 18 6-6-6-6"], 14));
     wrap.append(from);
     syncPendingCards(wrap, entry);
-    return wrap;
-  }
-
-  function sessionsWaitingElement(waiting) {
-    const wrap = document.createElement("div");
-    wrap.className = "sessions-waiting";
-    wrap.setAttribute("role", "status");
-    const spinner = document.createElement("span");
-    spinner.className = "timeline-syncing-spinner";
-    spinner.setAttribute("aria-hidden", "true");
-    const text = document.createElement("span");
-    text.className = "sessions-waiting-text";
-    text.textContent = waiting.text;
-    wrap.append(spinner, text);
-    if (waiting.canStop || waiting.stopping) wrap.append(sessionsStopButton(waiting.memberIds, waiting.canStop, waiting.stopping, "Stop the tasks"));
     return wrap;
   }
 
@@ -13341,7 +13335,6 @@
    *  message. */
   function sessionsSpecialSignature(entry) {
     if (entry.delegations) return "delegations:" + JSON.stringify(entry.delegations);
-    if (entry.sessionsWaiting) return "waiting:" + JSON.stringify(entry.sessionsWaiting);
     if (entry.memberHead) return "head:" + JSON.stringify(entry.memberHead);
     if (entry.taskFold) return "fold:" + JSON.stringify(entry.taskFold);
     if (entry.sessionsEmpty) return "empty:" + entry.sessionsEmpty;
@@ -13356,11 +13349,6 @@
     if (entry.delegations && entry.delegations.standalone) {
       item.dataset.sessionsKind = "task";
       item.append(sessionsDelegationsElement(entry.delegations));
-      return true;
-    }
-    if (entry.sessionsWaiting) {
-      item.dataset.sessionsKind = "waiting";
-      item.append(sessionsWaitingElement(entry.sessionsWaiting));
       return true;
     }
     if (entry.memberHead) {

@@ -1,12 +1,11 @@
 import type { ComponentProps } from "react";
-import { ChevronRight, Loader2, X } from "lucide-react";
+import { ChevronRight } from "lucide-react";
 
 import { isWaitingChoice } from "../../../shared/chatActiveRuns";
 import { isMainSessionTaskMessage } from "../../../shared/mainSession";
 import { machineAnswerPendingText } from "../../../shared/machineWaitingText";
 import type { SessionsTaskEntry } from "../../../shared/mainSessionView";
 import type { ChatMessage, ChatParticipant } from "../../../shared/types";
-import { Button } from "@/components/ui/button";
 import { ChatChoiceCard } from "./chat-choice-card";
 import { ChatDelegationRows } from "./chat-delegation-fold";
 import { ChatProviderMark } from "./chat-member-mark";
@@ -103,31 +102,6 @@ export function ChatSessionsChoiceRow(props: {
         onConfirm={(response) => props.onRespondToChoice(message.id, choice.id, response)}
       />
       {choiceAnswered && <div className="chat-queued-badge"><span>{machineAnswerPendingText(choiceAnswered.machineName)}</span></div>}
-    </div>
-  );
-}
-
-/** The line at the end of the main timeline while the main session waits on
- *  its members (and is not answering itself): their tasks, and Stop. */
-export function ChatSessionsWaitingLine(props: {
-  members: readonly ChatParticipant[];
-  text: string;
-  runIds: readonly string[];
-  onStop?: (runIds: readonly string[]) => void;
-}): JSX.Element | null {
-  if (props.members.length === 0) {
-    return null;
-  }
-  return (
-    <div className="chat-sessions-waiting" role="status" data-testid="chat-sessions-waiting" data-waiting-count={props.members.length}>
-      <Loader2 size={14} className="spin" aria-hidden />
-      <span className="chat-sessions-waiting-text">{props.text}</span>
-      {props.onStop && props.runIds.length > 0 && (
-        <Button variant="ghost" size="sm" data-testid="chat-sessions-waiting-stop" onClick={() => props.onStop?.(props.runIds)}>
-          <X size={14} aria-hidden />
-          Stop
-        </Button>
-      )}
     </div>
   );
 }

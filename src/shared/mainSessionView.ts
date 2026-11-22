@@ -1,6 +1,6 @@
 // What the sessions view shows about the main session's tasks and the chat's
 // other members (docs/main-session.md): the status of each task card, its one
-// line of result, the members panel's rows and the "Waiting on" line. Pure
+// line of result and the members panel's rows. Pure
 // rules over the loaded messages, shared so the phone can show the same.
 
 import { isPendingReply, isWaitingChoice } from "./chatActiveRuns";
@@ -173,13 +173,6 @@ export function sessionsMemberTitle(
 export function sessionsMemberDetail(parts: { provider?: string; model?: string; roleLabel?: string; roleConfigId?: string }): string {
   const role = parts.roleConfigId && parts.roleConfigId !== GENERIC_MEMBER_ROLE_ID ? parts.roleLabel : undefined;
   return [parts.provider, parts.model, role].map((part) => part?.trim()).filter(Boolean).join(" · ");
-}
-
-/** The line at the end of the main timeline while the main session waits.
- *  The sessions view never says "members" (the User, 2026-11-21): it waits
- *  on tasks. */
-export function sessionsWaitingText(titles: readonly string[]): string {
-  return `Waiting on ${titles.length} ${titles.length === 1 ? "task" : "tasks"}: ${titles.join(", ")}`;
 }
 
 /** The summary heading the delegations inside a reply's "Worked for …". */

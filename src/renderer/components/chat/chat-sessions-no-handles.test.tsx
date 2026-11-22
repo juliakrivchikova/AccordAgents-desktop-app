@@ -218,7 +218,8 @@ test("a sessions-view chat's cards, failed replies, status line and notes name n
   assert.match(classicReply.text, /@main stopped before it returned a response\./);
   classicReply.unmount();
   const classicQueued = render(false, <ChatMessageItem {...itemProps(appReplies()[3]!)} />);
-  assert.match(classicQueued.text, /Queued — waiting for @drew to finish/);
+  assert.match(classicQueued.text, /Queued/);
+  assert.doesNotMatch(classicQueued.text, /waiting for/, "just \"Queued\", as the CLI says it");
   classicQueued.unmount();
   const classicLaunch = render(false, <ChatAccordLaunchCard card={{ facilitator: "main", members: ["drew"], subject: "Ship?" }} participants={PARTICIPANTS} />);
   assert.match(classicLaunch.text, /@main[\s\S]*@drew/);

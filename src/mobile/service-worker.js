@@ -1,4 +1,4 @@
-const ASSET_VERSION = "2026-11-22-beta3-modes-confirm-style";
+const ASSET_VERSION = "2026-11-22-liveturn-cli-rows-no-waiting-line";
 // Tied to the marker the documented deploy step bumps, so a new shell really
 // replaces the cached one rather than living beside it.
 const CACHE_NAME = `accordagents-mobile-shell-v73-${ASSET_VERSION}`;

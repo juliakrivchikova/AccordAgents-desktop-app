@@ -3,13 +3,12 @@ import test from "node:test";
 import { act, create, type ReactTestInstance } from "react-test-renderer";
 
 import { TooltipProvider } from "@/components/ui/tooltip";
-import { activeRunSummaryForConversation } from "../../../shared/chatActiveRuns";
 import type { ChatMessage, ChatViewMode, Conversation } from "../../../shared/types";
 import { ChatDelegationRows } from "./chat-delegation-fold";
 import { ChatMessageItem } from "./chat-message-item";
 import { ChatSessionsPresentationContext } from "./chat-member-mark";
 import type { ChatParticipantRosterStatus } from "./chat-roster-status";
-import { ChatSessionsTimelineRow, ChatSessionsWaitingLine } from "./chat-sessions-timeline-row";
+import { ChatSessionsTimelineRow } from "./chat-sessions-timeline-row";
 import { ChatSessionsLinksContext, type ChatSessionsLinks } from "./chat-sessions-links";
 import { useChatSessionsView, type ChatSessionsView } from "./use-chat-sessions-view";
 import {
@@ -39,8 +38,7 @@ function sessionsOf(conversation: Conversation, view: ChatViewMode = "sessions")
       conversation,
       view,
       participants: conversation.metadata.participants as typeof PARTICIPANTS,
-      participantStatusById: STATUSES,
-      activeRunSummary: activeRunSummaryForConversation(conversation)
+      participantStatusById: STATUSES
     });
     return null;
   }
@@ -88,8 +86,6 @@ test("the main timeline holds the User and the main session and an open member c
   assert.deepEqual(sessions.mainMessages.map((message) => message.id), ["ask", "main-1", "taylor-choice"],
     "the intro system line stays hidden; the task message is not a card; drew's question, the main session's answer to it, gera's reply and the User's message to drew are not here");
   assert.deepEqual(sessions.workByReplyId.get("main-1")?.map((entry) => [entry.item.targetParticipantId, entry.status]), [[DREW.id, "running"], [GERA.id, "done"]]);
-  assert.deepEqual(sessions.waitingOn.map((participant) => participant.handle), ["drew"]);
-  assert.deepEqual(sessions.waitingRunIds, ["run-drew"]);
   assert.equal(sessions.runningMemberCount, 1);
   assert.deepEqual(sessions.memberRows.current.map((row) => row.participant.handle), ["drew", "taylor"]);
   assert.deepEqual(sessions.memberRows.previous.map((row) => row.participant.handle), ["gera"]);
@@ -236,24 +232,7 @@ test("a member's open mention approval stays on the main timeline as its message
   assert.match(textOf(row), /Do you want to ask @taylor\?/);
 });
 
-test("the waiting line names the tasks the main session waits on, and Stop stops their runs", () => {
-  const sessions = sessionsOf(sessionsConversation())!;
-  assert.equal(sessions.waitingText, "Waiting on 1 task: Task for drew: fix the drew part");
-  const stopped: Array<readonly string[]> = [];
-  let renderer: ReturnType<typeof create> | undefined;
-  act(() => {
-    renderer = create(<ChatSessionsWaitingLine members={[DREW, GERA]} text="Waiting on 2 tasks: Fix A, Fix B" runIds={["run-drew"]} onStop={(runIds) => stopped.push(runIds)} />);
-  });
-  assert.match(textOf(renderer!.root), /Waiting on 2 tasks: Fix A, Fix B/);
-  act(() => renderer!.root.findAll((node) => node.type === "button" && node.props["data-testid"] === "chat-sessions-waiting-stop")[0]!.props.onClick());
-  assert.deepEqual(stopped, [["run-drew"]]);
-  act(() => renderer!.update(<ChatSessionsWaitingLine members={[DREW]} text="Waiting" runIds={[]} onStop={noop} />));
-  assert.equal(renderer!.root.findAll((node) => node.props?.["data-testid"] === "chat-sessions-waiting-stop").length, 0, "nothing to stop without a run");
-  act(() => renderer!.update(<ChatSessionsWaitingLine members={[]} text="" runIds={[]} onStop={noop} />));
-  assert.equal(renderer!.toJSON(), null);
-});
-
-test("a task the main session titled is named by its short title in its row, the Waiting line and the member's title; an untitled one by its first sentence", () => {
+test("a task the main session titled is named by its short title in its row and the member's title; an untitled one by its first sentence", () => {
   const messages = sessionsMessages().map((message) => {
     const batch = message.metadata?.participantRequest;
     if (message.id !== "tasks" || !batch) return message;
@@ -265,7 +244,6 @@ test("a task the main session titled is named by its short title in its row, the
   const sessions = sessionsOf(sessionsConversation({}, messages))!;
   assert.equal(sessions.memberTitle(DREW.id), "Login button");
   assert.equal(sessions.memberTitle(GERA.id), "Назови столицу Италии", "not the whole task");
-  assert.equal(sessions.waitingText, "Waiting on 1 task: Login button");
   assert.deepEqual(sessions.workByReplyId.get("main-1")?.map((entry) => entry.title), ["Login button", "Назови столицу Италии"]);
 });
 

@@ -148,6 +148,19 @@ test("a running reply on the phone: Working for, one row per step, the newest sh
   await app.waitFor(`${row("r0")}.querySelectorAll(".sessions-activity-row").length === 6`, "the earlier reply's fold");
   assert.equal(await app.evaluate(`${row("r0")}.querySelector(".sessions-worked-toggle").textContent`), "Worked for 4s");
 
+  // --- a part of a turn her next message joined: steps open, no Worked for --
+  await hub.updateMessages("conv-work", [{ ...messages()[1], metadata: { sourceMessageId: "u0", turnContinues: true, activityEvents: WORK } }]);
+  await app.waitFor(`${row("r0")}.querySelector(".sessions-worked.is-continued") !== null`, "the earlier reply as a part its turn went on from");
+  const part = await app.evaluate(`(() => { const node = ${row("r0")};
+    return { toggle: node.querySelectorAll(".sessions-worked-toggle").length, rows: node.querySelectorAll(".sessions-activity-row").length,
+      text: node.querySelector(".message-copy > .message-content")?.textContent || "" }; })()`);
+  assert.deepEqual(part, { toggle: 0, rows: 6, text: "The rate is 1.08." }, "its steps open, no Worked for of its own (the turn's is on its last part)");
+
+  // --- such a part with no words of its own: its steps still show ----------
+  await hub.addMessages("conv-work", [{ id: "r0b", role: "participant", participantId: MAIN.id, participantLabel: "@main", content: "", status: "done", createdAt: at(28.5),
+    metadata: { runId: "run-r0b", sourceMessageId: "u0", turnContinues: true, activityEvents: WORK } }]);
+  await app.waitFor(`${row("r0b")}?.querySelector(".sessions-worked.is-continued") !== null`, "a part with steps and no words");
+  assert.equal(await app.evaluate(`${row("r0b")}.querySelectorAll(".sessions-activity-row").length`), 6, "its steps, open");
 });
 
 async function waitForOp(hub, matches, timeoutMs = 15_000) {

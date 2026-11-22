@@ -7648,7 +7648,7 @@ export class CliAgentRunner {
         // CLI's transcript, which shows the message at that point and the rest
         // of the step after it, the reply so far ends here and everything the
         // step produces from now on answers the new message.
-        this.finishClaudeWarmReply(state, previous, this.claudeWarmSegmentText(previous, undefined), undefined, participant, { allowEmpty: true });
+        this.finishClaudeWarmReply(state, previous, this.claudeWarmSegmentText(previous, undefined), undefined, participant, { allowEmpty: true, turnContinues: true });
         void this.writeDebugLog("cli-agent-claude-message-joined-step", { participantId: participant.id });
         // A step the CLI started on its own carries the origin of the work
         // that finished, an older reply: its own start is the step's.
@@ -7889,7 +7889,7 @@ export class CliAgentRunner {
     segment: string,
     event: unknown,
     participant: ParticipantConfig,
-    options: { allowEmpty?: boolean } = {}
+    options: { allowEmpty?: boolean; turnContinues?: boolean } = {}
   ): void {
     this.removeClaudeWarmReply(state, reply);
     const content = segment.trim();
@@ -7913,7 +7913,8 @@ export class CliAgentRunner {
       sessionId,
       roleRuntime: reply.roleRuntime,
       contextUsage,
-      ...(reply.lastAssistantUuid ? { sessionCut: reply.lastAssistantUuid } : {})
+      ...(reply.lastAssistantUuid ? { sessionCut: reply.lastAssistantUuid } : {}),
+      ...(options.turnContinues ? { turnContinues: true } : {})
     };
     for (const raw of reply.resultEvents) {
       result = this.withClaudePermissionDenialWarning(result, raw, participant, "warm");

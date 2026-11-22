@@ -6752,11 +6752,12 @@ test("claude warm: a message that joins the running step says which step it join
   const harness = makeClaudeWarmHarness(runner, { lifecycle: true });
   const { send, state } = harness;
   const starts: unknown[] = [];
-  harness.addReply({ origin: { runId: "run-1", messageId: "reply-1" } });
+  const first = harness.addReply({ origin: { runId: "run-1", messageId: "reply-1" } });
   harness.addReply({ origin: { runId: "run-2", messageId: "reply-2" }, onStarted: (start: unknown) => starts.push(start) });
   send({ type: "command_lifecycle", command_uuid: "cmd-1", state: "started" });
   send({ type: "system", subtype: "init" });
   send({ type: "command_lifecycle", command_uuid: "cmd-2", state: "started" });
+  assert.equal(first.resolved[0]?.turnContinues, true, "the reply the next message joined says its turn goes on");
   assert.equal(starts.length, 1);
   assert.deepEqual((starts[0] as any).joinedReply, { runId: "run-1", messageId: "reply-1" }, "it continues the step reply-1's message started");
   assert.ok(Number.isFinite((starts[0] as any).joinedStepStartedAt), "with when that step began");

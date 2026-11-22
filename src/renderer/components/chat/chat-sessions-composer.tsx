@@ -26,7 +26,7 @@ export function mainComposerTargetIds(sessionsMainId: string | undefined): strin
  * mention (commands and files stay), and it carries the main session's
  * controls (model, effort, permission mode), as Claude's desktop app, Codex
  * and T3 Code have them under their composers. It has no "N active runs" pill (the
- * Waiting line and the side panel name and stop the members); while the main
+ * reply's task rows and the side panel name the members, the panel stops them); while the main
  * session itself runs, its send button stops that run when there is nothing
  * to send. The classic view's composer is as before.
  */

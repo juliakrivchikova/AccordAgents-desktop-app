@@ -11342,11 +11342,18 @@ export class ChatService {
       if (!signal?.aborted && !result.ok && result.error) {
         options.warnings.push(`@${participant.handle}: ${result.error}`);
       }
-      // Worked from its own turn's start: a reply that waited in the queue
-      // does not count the wait (turnStartedAt).
-      const workedMs = Date.parse(now) - Date.parse(pendingMessage.metadata?.turnStartedAt ?? pendingMessage.createdAt);
-      if (Number.isFinite(workedMs) && workedMs >= 0) {
-        pendingMessage.metadata = { ...pendingMessage.metadata, workedMs };
+      if (result.ok && result.turnContinues && !signal?.aborted) {
+        // The turn goes on in the next message's reply (as in the CLI's
+        // transcript): no "Worked for" of its own, its steps stay open.
+        const { workedMs: _workedMs, ...metadata } = pendingMessage.metadata ?? {};
+        pendingMessage.metadata = { ...metadata, turnContinues: true };
+      } else {
+        // Worked from its own turn's start: a reply that waited in the queue
+        // does not count the wait (turnStartedAt).
+        const workedMs = Date.parse(now) - Date.parse(pendingMessage.metadata?.turnStartedAt ?? pendingMessage.createdAt);
+        if (Number.isFinite(workedMs) && workedMs >= 0) {
+          pendingMessage.metadata = { ...pendingMessage.metadata, workedMs };
+        }
       }
       this.recordReplySessionCut(pendingMessage, result);
       const activityEvents = progressSink.activityEvents();
@@ -11669,9 +11676,16 @@ export class ChatService {
           : `@${participant.handle} run failed.`;
         this.markPendingAppToolApprovalsForRunTerminal(conversation, runId, pendingMessage.content);
       }
-      const workedMs = Date.parse(now) - Date.parse(pendingMessage.createdAt);
-      if (Number.isFinite(workedMs) && workedMs >= 0) {
-        pendingMessage.metadata = { ...pendingMessage.metadata, workedMs };
+      if (result.ok && result.turnContinues && !controller.signal.aborted) {
+        // The User's next message joined this step the CLI started itself:
+        // as on the main path, no "Worked for" of its own.
+        const { workedMs: _workedMs, ...metadata } = pendingMessage.metadata ?? {};
+        pendingMessage.metadata = { ...metadata, turnContinues: true };
+      } else {
+        const workedMs = Date.parse(now) - Date.parse(pendingMessage.createdAt);
+        if (Number.isFinite(workedMs) && workedMs >= 0) {
+          pendingMessage.metadata = { ...pendingMessage.metadata, workedMs };
+        }
       }
       this.recordReplySessionCut(pendingMessage, result);
       const pendingChoice = !controller.signal.aborted && result.ok && result.content.trim()

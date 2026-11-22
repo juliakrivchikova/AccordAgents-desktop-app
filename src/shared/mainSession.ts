@@ -247,23 +247,6 @@ export function mainTimelineMessages(messages: readonly ChatMessage[], index: Se
   return messages.filter((message) => sessionsViewLane(message, index).kind === "main" && !isSessionsHiddenTurnFinishedNote(message));
 }
 
-/** The members the main session is waiting on: targets of its requests whose
- *  item is still running. */
-export function membersMainSessionWaitsOn(messages: readonly ChatMessage[], index: SessionsViewIndex): string[] {
-  const waiting: string[] = [];
-  for (const message of messages) {
-    if (!isMainSessionTaskMessage(message, index)) continue;
-    const batch = message.metadata!.participantRequest!;
-    if (batch.resumeRequester === false) continue;
-    for (const item of batch.items) {
-      if ((item.status === "running" || item.status === "pending_approval") && !waiting.includes(item.targetParticipantId)) {
-        waiting.push(item.targetParticipantId);
-      }
-    }
-  }
-  return waiting;
-}
-
 /** Where each of the main session's tasks is shown on the main timeline of
  *  the sessions view: inside the reply of the turn that gave it (its "Worked
  *  for …" fold, or the reply's live activity while it runs), as in T3 Code.

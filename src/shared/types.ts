@@ -1838,6 +1838,12 @@ export interface ChatMessageMetadata {
    *  made: the machine lets the member's held turns go. */
   memberMoveCancelled?: { participantId: string; runId: string };
   workedMs?: number;
+  /** Not the end of its turn: Claude Code handed the User's next message to
+   *  the step this reply was answering, and the turn went on in that
+   *  message's reply. As in the CLI's transcript, it has no "Worked for" of
+   *  its own and its steps stay open; the turn's "Worked for" is on its last
+   *  part (counted from the turn's start, turnStartedAt). */
+  turnContinues?: true;
   /** A member's reply that ended a turn: where its CLI session stood then,
    *  so Fork to new chat copies the session up to it. Written by the device
    *  that ran the turn, when its CLI said (Claude Code's stream, Codex's

@@ -138,10 +138,11 @@ test("the sessions view (T3 Code's way): tasks inside the turn's Worked fold, ch
 
   // --- the main timeline ---------------------------------------------------
   await openChat(app, "conv-main");
-  await app.waitFor(`document.querySelector('#message-list .message-row[data-sessions-kind="waiting"]') !== null && document.querySelector("#accord-dock .accord-strip") !== null`,
-    "the Waiting line and the Accord's line");
-  assert.deepEqual(await app.evaluate(rowsSummary), ["you:u0", "agent:r0", "you:u1", "agent:r1", "agent:launch", "you:u3", "agent:r3", "waiting:sessions-waiting"],
-    "the User and the main session only: no task cards, no member's message, no turn-finished note (the main session's own neither), no Accord document note");
+  await app.waitFor(`document.querySelector('#message-list .message-row[data-thread-root="r3"]') !== null && document.querySelector("#accord-dock .accord-strip") !== null`,
+    "the main timeline and the Accord's line");
+  assert.deepEqual(await app.evaluate(rowsSummary), ["you:u0", "agent:r0", "you:u1", "agent:r1", "agent:launch", "you:u3", "agent:r3"],
+    "the User and the main session only: no task cards, no member's message, no turn-finished note (the main session's own neither), no Accord document note, and no Waiting line (removed, the User 2026-11-22: each task is a row of the reply, a member stops from its session)");
+  assert.equal(await app.evaluate(`document.querySelectorAll("#message-list .sessions-waiting, #message-list .message-row[data-sessions-kind='waiting']").length`), 0);
   // A reply that gave no tasks says how long it worked the same quiet way as the fold: muted text, no pill.
   assert.deepEqual(await app.evaluate(`(() => { const row = document.querySelector('#message-list .message-row[data-thread-root="r3"]');
     const worked = row.querySelector(".sessions-worked");
@@ -200,9 +201,8 @@ test("the sessions view (T3 Code's way): tasks inside the turn's Worked fold, ch
   ]);
   assert.match(fold.rows[0].time, /^\d+m \d+s$/, "a running task counts up");
   assert.equal(fold.rows[1].time, "23m 0s", "an ended task says how long it took");
-  // The Waiting line names the tasks, and stops them.
-  assert.equal(await app.evaluate(`document.querySelector(".sessions-waiting-text").textContent`), "Waiting on 2 tasks: Restyle the login button, Check the server logs for every failed…");
-  assert.equal(await app.evaluate(`document.querySelector(".sessions-waiting .sessions-stop").disabled`), false, "the Waiting line has Stop, though one of them has written nothing yet");
+  // No Stop on the main timeline stops the tasks: a member stops from its session.
+  assert.equal(await app.evaluate(`document.querySelectorAll("#message-list .sessions-stop").length`), 0);
 
   // --- a delegation row opens the member's session at its message ----------
   await app.evaluate(`document.querySelector('#message-list .sessions-delegation[data-open-member="p-taylor"]').click()`);

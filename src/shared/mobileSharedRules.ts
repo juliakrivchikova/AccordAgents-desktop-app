@@ -59,18 +59,17 @@ export {
 } from "./urgentAlerts";
 // The main session and the chat's two views (docs/main-session.md): which
 // view a chat opens in, where each message lives in the sessions view, the
-// task cards, the members list and the "Waiting on" line, by the desktop's
-// own rules.
+// task cards and the members list, by the desktop's own rules.
 export {
   MAIN_SESSION_ROLE_ID, buildSessionsViewIndex, canSwitchChatView, chatViewFor, isChatViewMode, isMainSessionTaskMessage, isSessionsHiddenTurnFinishedNote,
-  mainSessionMemberOf, mainSessionParticipantId, mainTimelineMessages, memberSessionMessages, membersMainSessionWaitsOn, sessionsFormerMembers,
+  mainSessionMemberOf, mainSessionParticipantId, mainTimelineMessages, memberSessionMessages, sessionsFormerMembers,
   sessionsTaskPlacement, sessionsViewLane, withoutLeadingMention
 } from "./mainSession";
 export {
   SESSIONS_REMOVED_MEMBER_DETAIL, SESSIONS_WORK_STATUS_LABELS, firstTextLine, isMainSessionDelegationRosterCard, isMemberWorking, latestTaskByMember, memberRunningSince,
   openMemberCardMessages, sessionsDelegationSummary, sessionsFormerMemberStatus, sessionsMemberActivity, sessionsMemberDetail, sessionsMemberRows,
   sessionsMemberStatus, sessionsMemberTitle, sessionsTaskEntries, sessionsTaskGroupLabel, sessionsTaskReplyLine, sessionsTaskRunningSince,
-  sessionsTaskStatus, sessionsWaitingText
+  sessionsTaskStatus
 } from "./mainSessionView";
 // A member's handle in a message, in code and outside it: which `@handle`
 // is the member's chip and what stays as written, by the desktop's rule.
