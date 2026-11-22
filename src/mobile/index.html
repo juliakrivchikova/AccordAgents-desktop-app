@@ -45,6 +45,20 @@
           <button id="enable-alerts" class="mobile-alerts-banner" type="button" hidden>Enable message alerts</button>
           <div id="chat-list-refresh" class="pull-refresh" aria-hidden="true"><span class="pull-refresh-spinner"></span></div>
           <div id="chat-list" class="mobile-chat-list mscroll" aria-live="polite"></div>
+          <!-- A long press on a chat: what can be done to it from the list. -->
+          <div id="chat-actions-sheet" class="members-sheet chat-actions-sheet" role="dialog" aria-modal="true" aria-labelledby="chat-actions-title" hidden>
+            <div class="members-sheet-backdrop" data-chat-actions-close="1"></div>
+            <div class="members-sheet-panel">
+              <div class="members-sheet-grip" aria-hidden="true"></div>
+              <div class="members-sheet-head">
+                <strong id="chat-actions-title">Chat</strong>
+                <button id="chat-actions-close" class="members-sheet-close" type="button">Cancel</button>
+              </div>
+              <div class="chat-actions-list">
+                <button id="chat-actions-pin" class="chat-actions-row" type="button">Pin</button>
+              </div>
+            </div>
+          </div>
         </section>
         <!-- What members are doing across every chat, from what the server
              already delivered: runs in progress, questions waiting for you,
