@@ -11,7 +11,7 @@ import {
   claudePlanRejectionMessage, claudePlanSetMode, isClaudePlanApprovalRequest, type ClaudePlanApprovalMode
 } from "../../shared/claudePlanApproval";
 import { DEFAULT_CHAT_VIEW, MAIN_SESSION_HANDLE, MAIN_SESSION_ROLE_ID, canSwitchChatView, chatViewFor, isChatViewMode, isMainSessionChat, isMainSessionParticipant, isRoleOfferedForNewMembers, mainSessionMemberOf, mainSessionParticipantId } from "../../shared/mainSession";
-import { SESSIONS_TASK_GIVEN_TITLE_MAX_CHARS, firstTextLine, sessionsTaskTitle, shortenAtWord } from "../../shared/mainSessionView";
+import { SESSIONS_TASK_GIVEN_TITLE_MAX_CHARS, firstTextLine, sessionsMentionSentenceTitle, sessionsTaskTitle, shortenAtWord } from "../../shared/mainSessionView";
 import { createHash, randomUUID } from "node:crypto";
 import { constants as fsConstants, realpathSync } from "node:fs";
 import { copyFile, lstat, mkdir, open, readFile, readdir, realpath, rename, rm, stat, writeFile } from "node:fs/promises";
@@ -16754,6 +16754,7 @@ export class ChatService {
             requests: candidates.map((item) => ({
               target: item.targetHandle,
               prompt: this.inferredParticipantRequestPrompt(participant.handle, item.snippet),
+              title: item.title,
               reason: `Inferred from @${participant.handle}'s chat reply.`
             })),
             timeoutMs: CHAT_PARTICIPANT_REQUEST_WAIT_DEFAULT_MS,
@@ -17886,6 +17887,7 @@ export class ChatService {
         targetHandle: target.handle,
         targetKind: target.kind,
         prompt: request?.prompt ?? "",
+        ...(request?.title ? { title: request.title } : {}),
         reason: request?.reason,
         status: requestStatus,
         createdAt: now,
@@ -21155,11 +21157,11 @@ export class ChatService {
     conversation: Conversation,
     sourceParticipant: ChatParticipant,
     content: string
-  ): Array<{ targetHandle: string; snippet: string }> {
+  ): Array<{ targetHandle: string; snippet: string; title: string }> {
     const participants = this.chatParticipants(conversation)
       .filter((participant) => participant.id !== sourceParticipant.id);
     const cleaned = this.stripInferenceIgnoredText(content);
-    const inferred: Array<{ targetHandle: string; snippet: string }> = [];
+    const inferred: Array<{ targetHandle: string; snippet: string; title: string }> = [];
     for (const participant of participants) {
       const handles = this.mentionHandlesForParticipant(participant);
       const match = handles
@@ -21171,7 +21173,9 @@ export class ChatService {
       const start = Math.max(0, match.index - 120);
       const end = Math.min(cleaned.length, match.index + participant.handle.length + 1200);
       const snippet = cleaned.slice(start, end).replace(/\s+/g, " ").trim();
-      inferred.push({ targetHandle: participant.handle, snippet });
+      // The sessions view names its task by the reply's sentence that
+      // mentions it, without @-names (sessionsMentionSentenceTitle).
+      inferred.push({ targetHandle: participant.handle, snippet, title: sessionsMentionSentenceTitle(cleaned, participant.handle) });
     }
     return inferred;
   }
