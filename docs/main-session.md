@@ -81,12 +81,18 @@ chat without a main session is always `classic`; its switch is disabled.
     `bare`, the phone's `providerLogoElement`; Settings → Local CLI setup and
     the classic New chat keep the tile) and the short title of the task it
     is named by, as T3 Code titles a thread once: the 2–6 word `title` the
-    main session gave the task in `app_chat_delegate_task` (the newest
-    titled task), else its first task's first sentence cut at a word to 40
+    main session gave the task in `app_chat_delegate_task`, kept with the
+    member when it is added (`ChatParticipant.taskTitle`: it names the
+    member however much of the chat a device has loaded, on the desktop,
+    the phone, her server's alerts and Activity; a machine cannot change
+    it, Fork to new chat does not carry it); for a member without one (made
+    before, or added otherwise) the newest titled task among the loaded
+    messages, else its first task's first sentence cut at a word to 40
     characters; a later task without a title of its own ("Two additions to
     your task …") never renames it, while its state follows its latest task
-    (`titleTaskByMember`, `sessionsTaskTitle`, `sessionsMemberTitle`; the
-    same rule on the phone, her server's alerts and Activity), with its
+    (`titleTaskByMember`, `sessionsTaskTitle`, `sessionsMemberTitle`; tasks
+    travel to the phone saying whether the main session gave their title,
+    `MobileTaskItem.titled`), with its
     CLI, its model by its name in the CLI's list ("Opus 5.5", never the id
     "opus"; `useMemberModelSummary`, as its composer chip), its effort and a
     non-generic role in its hover card and its session's header
@@ -405,7 +411,15 @@ chat without a main session is always `classic`; its switch is disabled.
     composer's controls), one 32px line each: the provider's bare glyph
     with a dot for its state (Running: the accent, pulsing; Waiting for
     you: amber; Done: green; Failed: red; Stopped: a grey square; none
-    while idle), the title on one line, and muted at the end the model's
+    while idle; Waiting for you also while its run is live when the User
+    holds its turn: its CLI's tool permission, a connector sign-in, a Codex
+    approval naming its run, or a choice or mention question of its that no
+    newer turn of its went past (`sessionsMembersWaitingForUser`,
+    `approvalHoldsTurn`); a request that returns at once, such as a script,
+    a role or a member, does not; its task rows and its session's header
+    say the same, and the phone reads it from its permission cards'
+    `requesterParticipantId` and `holdsTurn`), the title on one line, and
+    muted at the end the model's
     name and how long it runs ("8m", T3 Code's compact time) or took, or
     instead its state when that is what matters ("Waiting for you",
     "Failed", "Stopped"). Hovering a row that runs shows a quiet square
