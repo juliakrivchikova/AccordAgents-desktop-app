@@ -118,6 +118,9 @@ import {
 } from "./geminiExec";
 import type { ParticipantRunResult } from "./providers";
 import {
+  APP_MCP_SERVER,
+  appToolOutputKept,
+  CLAUDE_TOOLS_WITHOUT_ROW,
   claudeToolActivity,
   codexCommandActivity,
   codexFileChangeActivity,
@@ -5661,7 +5664,7 @@ export class CliAgentRunner {
             ? invocation
             : this.codexAppServerCompletedActivityDetail(
               invocation,
-              this.codexAppServerCompletedActivityOutput(item)
+              this.codexAppServerCompletedActivityOutput(finishedItem)
             );
           this.emitLiveOutput(pending.onOutput, "tool", `${summary.label}\n`, undefined, {
             activityKind: summary.kind,
@@ -5985,7 +5988,14 @@ export class CliAgentRunner {
         return this.stringField(error, "message");
       }
       const result = this.asRecord(item.result);
-      return result ? this.codexAppServerOutputContent(result.content) : undefined;
+      const output = result ? this.codexAppServerOutputContent(result.content) : undefined;
+      // The app's own tools answer with what the app keeps itself (messages,
+      // requests, documents): the step keeps no copy of it, but a refusal
+      // keeps its reason.
+      if (output && this.stringField(item, "server") === APP_MCP_SERVER && !appToolOutputKept(output, result?.isError === true)) {
+        return undefined;
+      }
+      return output;
     }
     return undefined;
   }
@@ -9344,7 +9354,7 @@ export class CliAgentRunner {
         continue;
       }
       const name = this.stringField(blockRecord, "name");
-      if (name) {
+      if (name && !CLAUDE_TOOLS_WITHOUT_ROW.has(name)) {
         const id = this.stringField(blockRecord, "id");
         calls.push({ ...claudeToolActivity(name, this.asRecord(blockRecord.input), toolContext), ...(id ? { id } : {}) });
       }

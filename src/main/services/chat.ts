@@ -11,6 +11,7 @@ import {
   claudePlanRejectionMessage, claudePlanSetMode, isClaudePlanApprovalRequest, type ClaudePlanApprovalMode
 } from "../../shared/claudePlanApproval";
 import { DEFAULT_CHAT_VIEW, MAIN_SESSION_HANDLE, MAIN_SESSION_ROLE_ID, MAIN_SESSION_ROLE_MISSING_MESSAGE, canSwitchChatView, chatViewFor, isChatViewMode, isMainSessionChat, isMainSessionParticipant, isRoleOfferedForNewMembers, mainSessionMemberOf, mainSessionParticipantId } from "../../shared/mainSession";
+import { sessionsRowDetailLine, sessionsRowShowsDetail } from "../../shared/sessionsActivity";
 import { SESSIONS_TASK_GIVEN_TITLE_MAX_CHARS, firstTextLine, sessionsMentionSentenceTitle, sessionsTaskTitle, shortenAtWord } from "../../shared/mainSessionView";
 import { createHash, randomUUID } from "node:crypto";
 import { constants as fsConstants, realpathSync } from "node:fs";
@@ -777,11 +778,14 @@ const CHAT_PROCESSING_TRANSCRIPT_MAX_CHARS = 2_000_000;
 const CHAT_ACTIVITY_EVENT_MAX_COUNT = 500;
 const CHAT_PROGRESS_FLUSH_INTERVAL_MS = 100;
 const CHAT_ACTIVITY_DETAIL_MAX_CHARS = 4_000;
-/** What all of one reply's step details may take together: the reply goes to
- *  the User's server as one message (HUB_OP_MAX_BYTES) next to its processing
- *  transcript, so the oldest steps lose their details first (their rows keep
- *  their words). */
-const CHAT_ACTIVITY_DETAILS_TOTAL_MAX_CHARS = 200_000;
+/** What all of one reply's step details may take together: a dozen of
+ *  Claude's steps' full details (1,800 each at most, cliToolActivity.ts), half
+ *  as many of Codex's (a call and its output, CHAT_ACTIVITY_DETAIL_MAX_CHARS).
+ *  They are saved with the reply, go to the User's server with it, and the
+ *  window gets the whole list on every live update, so the oldest steps lose
+ *  their details first (withinActivityDetailsBudget); every row keeps what it
+ *  shows. */
+const CHAT_ACTIVITY_DETAILS_TOTAL_MAX_CHARS = 24_000;
 /** A row's label is one line; what a CLI hands over as one is kept to this
  *  (the tool rows themselves are shorter: cliToolActivity.ts). */
 const CHAT_ACTIVITY_LABEL_MAX_CHARS = 1_000;
@@ -14970,20 +14974,31 @@ export class ChatService {
     return { events: this.withinActivityDetailsBudget(kept), dropped: events.length - kept.length };
   }
 
-  /** The events with the oldest details dropped until all of them fit
-   *  CHAT_ACTIVITY_DETAILS_TOTAL_MAX_CHARS (the same array when they do). */
+  /** The events cut, oldest first, until their details fit
+   *  CHAT_ACTIVITY_DETAILS_TOTAL_MAX_CHARS (the same array when they do):
+   *  first the details no row shows (its label says what the step did), then
+   *  those a row shows down to the line it shows ("Viewing image" and its
+   *  path, sessionsActivity.ts), and only past that the rest. */
   private withinActivityDetailsBudget(events: ChatAgentActivityEvent[]): ChatAgentActivityEvent[] {
     let total = 0;
     for (const event of events) total += event.detail?.length ?? 0;
     if (total <= CHAT_ACTIVITY_DETAILS_TOTAL_MAX_CHARS) return events;
     const next = [...events];
-    for (let index = 0; index < next.length && total > CHAT_ACTIVITY_DETAILS_TOTAL_MAX_CHARS; index += 1) {
-      const detail = next[index].detail;
-      if (!detail) continue;
-      total -= detail.length;
-      const { detail: _detail, ...rest } = next[index];
-      next[index] = rest;
-    }
+    const cut = (skip: (event: ChatAgentActivityEvent) => boolean, toRowLine: boolean): void => {
+      for (let index = 0; index < next.length && total > CHAT_ACTIVITY_DETAILS_TOTAL_MAX_CHARS; index += 1) {
+        const event = next[index];
+        const detail = event.detail;
+        if (!detail || skip(event)) continue;
+        const kept = toRowLine ? sessionsRowDetailLine(detail) : "";
+        if (kept.length >= detail.length) continue;
+        total -= detail.length - kept.length;
+        const { detail: _detail, ...rest } = event;
+        next[index] = kept ? { ...rest, detail: kept } : rest;
+      }
+    };
+    cut((event) => sessionsRowShowsDetail(event.label), false);
+    cut((event) => !sessionsRowShowsDetail(event.label), true);
+    cut(() => false, false);
     return next;
   }
 

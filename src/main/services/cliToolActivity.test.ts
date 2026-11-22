@@ -2,6 +2,8 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { claudeRunningTitle } from "./claudeRunningTitle";
 import {
+  appToolOutputKept,
+  CLAUDE_TOOLS_WITHOUT_ROW,
   CLI_ACTIVITY_DETAIL_MAX_CHARS,
   CLI_ACTIVITY_LABEL_MAX_CHARS,
   claudeToolActivity,
@@ -68,10 +70,47 @@ test("Claude reads, searches and MCP calls: the CLI's words, paths relative to t
   assert.deepEqual(claudeToolActivity("mcp__claude_ai_Context7__resolve-library-id", { libraryName: "react" }, { mcpServerNames: names }), {
     label: "claude.ai Context7 - resolve-library-id (MCP)",
     kind: "tool",
-    detail: "{\n  \"libraryName\": \"react\"\n}"
+    detail: "{\"libraryName\":\"react\"}"
   });
   assert.equal(claudeToolActivity("mcp__accord_agents__app_chat_get_context", {}).label, "accord_agents - app_chat_get_context (MCP)");
   assert.equal(claudeToolActivity("ToolSearch", { query: "select:x" }).label, "ToolSearch", "a tool the app knows no words for is named as the CLI names it");
+});
+
+test("a step keeps its arguments compact, and none of a body the app keeps itself (size check)", () => {
+  const todos = { todos: [{ content: "Fix the login", status: "pending", activeForm: "Fixing the login" }] };
+  assert.equal(claudeToolActivity("TodoWrite", todos).detail, JSON.stringify(todos), "compact JSON, no indentation");
+  const post = "word ".repeat(400);
+  assert.equal(claudeToolActivity("mcp__accord_agents__app_chat_send_message", { content: post }).detail, undefined,
+    "a message the chat already shows is not kept again with the step");
+  assert.equal(claudeToolActivity("mcp__accord_agents__app_chat_request_participants", { requests: [{ target: "drew", prompt: post }] }).detail, undefined,
+    "nor a request its card keeps");
+  assert.equal(claudeToolActivity("mcp__accord_agents__app_chat_read_messages", { limit: 60 }).detail, '{"limit":60}', "short arguments stay");
+  assert.equal(claudeToolActivity("mcp__other__send", { content: post }).detail?.startsWith('{"content":"word word'), true, "another server's arguments stay");
+  assert.equal(codexMcpActivity("accord_agents", "app_chat_send_message", { content: post }, true).detail, undefined);
+  assert.equal(codexMcpActivity("context7", "query-docs", { query: "react" }, true).detail, '{"query":"react"}');
+  // The edge: 200 characters of arguments stay, 201 do not.
+  const sized = (length: number) => ({ id: "x".repeat(length - '{"id":""}'.length) });
+  assert.equal(JSON.stringify(sized(200)).length, 200);
+  assert.equal(claudeToolActivity("mcp__accord_agents__app_artifact_read", sized(200)).detail, JSON.stringify(sized(200)));
+  assert.equal(claudeToolActivity("mcp__accord_agents__app_artifact_read", sized(201)).detail, undefined);
+  assert.equal(codexMcpActivity("accord_agents", "app_artifact_read", sized(200), false).detail, JSON.stringify(sized(200)));
+  assert.equal(codexMcpActivity("accord_agents", "app_artifact_read", sized(201), false).detail, undefined);
+});
+
+test("a step of the app's own tools keeps a refusal's reason and a short answer, not a body the app keeps", () => {
+  const long = "text ".repeat(300);
+  assert.equal(appToolOutputKept('{"ok":true,"messageId":"m1"}', false), true, "a short answer stays");
+  assert.equal(appToolOutputKept(JSON.stringify({ messages: [{ content: long }] }), false), false, "the messages read do not");
+  assert.equal(appToolOutputKept(JSON.stringify({ ok: false, status: "rejected", error: `Context compaction requests are disabled. ${long}` }), false), true);
+  assert.equal(appToolOutputKept(JSON.stringify({ status: "unsupported", message: long }), false), true);
+  assert.equal(appToolOutputKept(long, true), true, "an MCP error result stays");
+  assert.equal(appToolOutputKept(long, false), false);
+});
+
+test("ExitPlanMode and EnterPlanMode get no row: the CLI draws nothing at the call; the plan card is its dialog", () => {
+  assert.equal(CLAUDE_TOOLS_WITHOUT_ROW.has("ExitPlanMode"), true);
+  assert.equal(CLAUDE_TOOLS_WITHOUT_ROW.has("EnterPlanMode"), true);
+  assert.equal(CLAUDE_TOOLS_WITHOUT_ROW.has("Bash"), false);
 });
 
 test("a row stays one bounded line and its detail is capped, however big the call (size check)", () => {

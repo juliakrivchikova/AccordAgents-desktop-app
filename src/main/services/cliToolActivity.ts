@@ -123,14 +123,57 @@ function stringInput(input: Record<string, unknown> | undefined, key: string): s
   return typeof value === "string" && value.trim() ? value : undefined;
 }
 
-function jsonDetail(value: unknown): string | undefined {
-  if (value === undefined || value === null) return undefined;
-  if (typeof value === "object" && Object.keys(value as Record<string, unknown>).length === 0) return undefined;
+/** The app's own MCP server. What its tools carry and answer (a message, a
+ *  request, a document, a note) the app keeps itself, so a step of it keeps
+ *  short arguments only (an id, a limit), never such a body a second time. */
+export const APP_MCP_SERVER = "accord_agents";
+const APP_TOOL_DETAIL_MAX_CHARS = 200;
+
+const APP_TOOL_REFUSAL_STATUS = /^(error|rejected|denied|unsupported|failed)$/i;
+/** A refusal is never longer than this; a longer answer is not parsed. */
+const APP_TOOL_REFUSAL_MAX_CHARS = 20_000;
+
+/** Whether a step of the app's own tools keeps what the tool answered: a
+ *  refusal (its reason: "ok": false, a status of error, rejected, denied,
+ *  unsupported or failed, or an MCP error result) and a short answer stay;
+ *  a long answer is what the app keeps itself (the messages read, a
+ *  document). */
+export function appToolOutputKept(output: string, isError: boolean): boolean {
+  if (isError || output.length <= APP_TOOL_DETAIL_MAX_CHARS) return true;
+  if (output.length > APP_TOOL_REFUSAL_MAX_CHARS || !output.trimStart().startsWith("{")) return false;
   try {
-    return cliActivityDetail(JSON.stringify(value, null, 2));
+    const parsed = JSON.parse(output) as unknown;
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return false;
+    const { ok, status } = parsed as { ok?: unknown; status?: unknown };
+    return ok === false || (typeof status === "string" && APP_TOOL_REFUSAL_STATUS.test(status));
   } catch {
-    return undefined;
+    return false;
   }
+}
+
+/** Claude Code tools that get no row: the CLI draws nothing when they are
+ *  called. ExitPlanMode is its "Exit plan mode?" dialog, which is the plan
+ *  card here; EnterPlanMode's "Entered plan mode" comes only with its result
+ *  (a row is drawn at the call, so it could say so of a call she declined),
+ *  and the mode chip follows the CLI into plan mode. */
+export const CLAUDE_TOOLS_WITHOUT_ROW: ReadonlySet<string> = new Set(["ExitPlanMode", "EnterPlanMode"]);
+
+/** A call's arguments as compact JSON ("" when there are none or they do
+ *  not serialize). */
+function compactJson(value: unknown): string {
+  if (value === undefined || value === null) return "";
+  try {
+    return JSON.stringify(value) ?? "";
+  } catch {
+    return "";
+  }
+}
+
+/** A call's arguments as its row keeps them: compact JSON. */
+function jsonDetail(value: unknown, server?: string, compact = compactJson(value)): string | undefined {
+  if (!compact || (typeof value === "object" && value !== null && Object.keys(value as Record<string, unknown>).length === 0)) return undefined;
+  if (server === APP_MCP_SERVER && compact.length > APP_TOOL_DETAIL_MAX_CHARS) return undefined;
+  return cliActivityDetail(compact);
 }
 
 /** A Claude Code tool call's row, in the CLI's words for it. */
@@ -201,7 +244,7 @@ export function claudeToolActivity(
       const mcp = mcpToolParts(name);
       if (mcp) {
         const server = context.mcpServerNames?.get(mcp.server) ?? mcp.server;
-        return row(`${server} - ${mcp.tool} (MCP)`, "tool", jsonDetail(input));
+        return row(`${server} - ${mcp.tool} (MCP)`, "tool", jsonDetail(input, mcp.server));
       }
       return row(name, "tool", jsonDetail(input));
     }
@@ -281,13 +324,8 @@ export function codexCommandActivity(
 /** A Codex MCP call's row: "Calling server.tool({…})", then "Called …". */
 export function codexMcpActivity(server: string | undefined, tool: string | undefined, args: unknown, finished: boolean): CliToolActivity {
   const name = [server, tool].filter(Boolean).join(".") || "tool";
-  let compact = "";
-  try {
-    compact = args === undefined || args === null ? "" : JSON.stringify(args);
-  } catch {
-    compact = "";
-  }
-  const detail = jsonDetail(args);
+  const compact = compactJson(args);
+  const detail = jsonDetail(args, server, compact);
   return {
     label: cliActivityLabel(`${finished ? "Called" : "Calling"} ${name}(${compact})`),
     kind: "tool",
