@@ -12,7 +12,7 @@ import { ChatProviderMark } from "./chat-member-mark";
 import { chipModelLabel, memberDefaultModelName, memberModelName, useMemberModelCatalog } from "./chat-member-model-name";
 import { latestAndOlderModels } from "./chat-model-groups";
 import { ComposerMenu, ComposerMenuDisclosure, ComposerMenuItem, ComposerMenuNote, ComposerMenuSection } from "./composer-menu";
-import { ChatAccessControl, ChatCodexPlanToggle, ComposerControlIcon, iconTriggerProps, TURN_RUNNING_NOTE } from "./chat-access-controls";
+import { ChatAccessControl, ChatCodexPlanToggle, ComposerControlIcon, iconTriggerProps, modeChangesWhileTurnRuns, TURN_RUNNING_NOTE } from "./chat-access-controls";
 import { machineIdOf, machineOf, useCliStartDefaults, useMachineList } from "./use-cli-start-defaults";
 import { COMPOSER_DENSITY, useComposerDensity } from "./use-composer-density";
 import { ParticipantRunLocation } from "./participant-run-location";
@@ -164,7 +164,9 @@ export function ChatMemberComposerControls(props: {
           )}
         </ComposerMenu>
       )}
-      <ChatAccessControl value={value} mainSession={props.mainSession} disabled={props.disabled} modesReason={modesReason} onChange={onChange} testId={prefix}
+      {/* The mode while its turn runs, where its CLI takes one then (Shift+Tab
+          in Claude Code, /permissions in Codex); the rest waits. */}
+      <ChatAccessControl value={value} mainSession={props.mainSession} disabled={props.disabled && !modeChangesWhileTurnRuns(value.kind)} modesReason={modesReason} onChange={onChange} testId={prefix}
         iconOnly={density >= COMPOSER_DENSITY.modeIcon} />
       {value.kind === "codex-cli" && (
         <ChatCodexPlanToggle value={value} disabled={props.disabled} modesReason={modesReason} onChange={onChange} testId={prefix} iconOnly={density >= COMPOSER_DENSITY.planIcon} />

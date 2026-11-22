@@ -187,6 +187,19 @@ export function ChatCodexPlanToggle(props: {
  *  its next turn. */
 export const TURN_RUNNING_NOTE = "Its turn is running: change this when it ends.";
 
+/**
+ * Whether a CLI takes a new permission mode while its turn runs, as its own
+ * terminal does (checked 2026-11-22): Claude Code 2.1.330's Shift+Tab switches
+ * it at once, for the rest of that turn (the app sends the CLI's own
+ * `set_permission_mode` to its live process); Codex 0.155.1's `/permissions`
+ * opens and saves while it works (its Plan mode, Shift+Tab, does not change
+ * then: that toggle waits). Antigravity's print mode takes its mode when each
+ * run starts, so its menu waits.
+ */
+export function modeChangesWhileTurnRuns(kind: ChatParticipant["kind"]): boolean {
+  return kind === "claude-code" || kind === "codex-cli";
+}
+
 /** A member's settings with its CLI's mode set to `option`, Codex's Plan
  *  mode kept as it is (a member saved in Plan from before keeps it too). */
 export function applyChatAccessOptionKeepingPlan(value: Pick<ChatModelAccessValue, "kind" | "agentMode" | "permissions">, option: ChatAccessOption): ChatModelAccessPatch {
