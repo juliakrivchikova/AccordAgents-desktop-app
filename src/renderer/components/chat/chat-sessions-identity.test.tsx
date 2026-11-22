@@ -158,7 +158,7 @@ test("the sessions view's composer writes to the main session: no members to men
 test("the sessions view's main composer has no active-runs pill; its button stops the main session while it runs and nothing is typed, and with text typed Stop stands beside Send", () => {
   const stopped: string[] = [];
   const idle = sessionsComposerProps(MAIN.id, undefined, { runIds: [], onStopRun: (runId) => stopped.push(runId) });
-  assert.equal(idle.activeRunCount, 0, "no 'N active runs' pill: the Waiting line and the side panel name the members");
+  assert.equal(idle.activeRunCount, 0, "no 'N active runs' pill: the reply's task rows and the side panel name the members");
   assert.ok("onStopAllRuns" in idle && idle.onStopAllRuns === undefined);
   assert.equal(idle.stop, undefined, "nothing to stop while the main session is idle");
   const busy = sessionsComposerProps(MAIN.id, undefined, { runIds: ["run-main", "run-main-queued"], onStopRun: (runId) => stopped.push(runId) });

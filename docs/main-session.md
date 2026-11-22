@@ -371,17 +371,32 @@ chat without a main session is always `classic`; its switch is disabled.
     while it is being written): logo with a state dot, task title, one line
     of result, time; a row opens the member's session at its reply (else
     the task), marked for a moment. A task whose reply is not loaded is one
-    such row of its own. While the main session waits there is a line
-    "Waiting on N members: <tasks> · Stop";
+    such row of its own. There is no "Waiting on …" line with Stop at the
+    end of the main timeline (removed, the User 2026-11-22: each task is
+    already a row of the reply and a member is stopped from its own session;
+    a Stop of several members that moves as the timeline shifts is the
+    likely way a click meant to open a task stopped two members);
   - a reply still being written reads as T3 Code's turn in progress (the
     User, 2026-11-21), on the desktop and the phone, on the main timeline
     and in a member's session: a quiet "Working for 4s" (live) over a
     hairline, then one muted line per step with an outline icon by its kind
     and what it is about (`sessionsActivityRow`, from the activity events
-    the run already reports): thinking (brain), web search (globe, the
-    query), shell (terminal, the command), file read (file, the path), edit
-    (pencil, the path), any other tool (wrench, its label); the newest one
-    shimmers (still for reduced motion). The member's words and its posts
+    the run already reports): thinking (brain), web search (globe), shell
+    (terminal), file read (file), edit (pencil), any other tool (wrench);
+    the newest one shimmers (still for reduced motion). A step says what
+    the member's own CLI says for it (`cliToolActivity.ts`, 2026-11-22: "Using
+    Bash" told the User nothing): Claude Code's "Running <description in its
+    -ing form, or the command cut to 50 columns>", "Reading src/a.ts",
+    "Searching for TODO", "Update(a.ts)", "<server> - <tool> (MCP)"; Codex's
+    "Running …" then "Ran …", "Read a.ts", "Search TODO", "Edited a.ts (+1
+    -1)", "Called server.tool({…})"; a stored step with only the app's old
+    word shows its detail (the command, the query, the path). A step's
+    label is one line of at most 200 characters, its detail at most 1,800,
+    and one reply's details 200,000 together (the oldest lose theirs first).
+    A message the User sends while a Claude member works is "Queued" (no
+    clock) until its CLI hands it to the running step at the next tool
+    result; from then its reply is the turn's one "Working for", counted
+    from the start of the step it joined, as the CLI's one spinner is. The member's words and its posts
     stay its words, in order between the rows; its turn's tasks follow as
     their rows. No status label, no "Thinking" word, no grouped boxes, no
     Stop or copy on a running reply (the composer stops it, also with
@@ -443,8 +458,8 @@ chat without a main session is always `classic`; its switch is disabled.
     (`sessionsFormerMembers`). With nothing delegated it says nothing. A member opens its **whole session** in the
     same panel (Back to the list) with its … menu in its header and a composer
     that writes to it only; a removed member's session is read-only;
-  - the word "members" is never shown (desktop and phone): "Waiting on N
-    tasks", "Side panel", "Back", "Close";
+  - the word "members" is never shown (desktop and phone): "Side panel",
+    "Back", "Close";
   - no threads UI: every message has one place (`sessionsViewLane`); the
     main session's answer to a member's question is in that member's
     session from its first token (placed by the request it answers);

@@ -8,7 +8,6 @@ import test from "node:test";
 import { act, create, type ReactTestInstance } from "react-test-renderer";
 
 import { TooltipProvider } from "@/components/ui/tooltip";
-import { activeRunSummaryForConversation } from "../../../shared/chatActiveRuns";
 import type { ChatAgentActivityEvent, ChatMessage, Conversation } from "../../../shared/types";
 import { ChatMessageItem } from "./chat-message-item";
 import { ChatSessionsPresentationContext } from "./chat-member-mark";
@@ -17,6 +16,7 @@ import { ChatSessionsTimelineRow } from "./chat-sessions-timeline-row";
 import { newestActivityBlocks, sameActivityRow } from "./chat-sessions-activity";
 import { chatInlineTranscriptParts } from "../../../shared/processingTranscript";
 import { useChatSessionsView, type ChatSessionsView } from "./use-chat-sessions-view";
+import { chatTopLevelMessages } from "./chat-thread-data";
 import { DREW, GERA, MAIN, PARTICIPANTS, TAYLOR, chatMessage, disclosure, sessionsConversation, sessionsMessages } from "./chat-sessions-fixtures.test";
 
 const noop = (): void => undefined;
@@ -34,8 +34,7 @@ function sessionsOf(conversation: Conversation): ChatSessionsView {
       conversation,
       view: "sessions",
       participants: conversation.metadata.participants as typeof PARTICIPANTS,
-      participantStatusById: STATUSES,
-      activeRunSummary: activeRunSummaryForConversation(conversation)
+      participantStatusById: STATUSES
     });
     return null;
   }
@@ -165,6 +164,61 @@ test("a finished reply of the sessions view folds the same rows into its Worked 
   assert.equal(textOf(renderer!.root.find(hasClass("chat-worked"))), "Worked for 4s", "the classic view's pill");
   assert.equal(rowsOf(renderer!.root).length, 0, "no sessions rows in the classic view");
   act(() => renderer!.unmount());
+});
+
+test("a part of a turn the User's next message joined keeps its steps open with no Worked for of its own; with nothing in it, it is not drawn", () => {
+  const sessions = sessionsOf(sessionsConversation());
+  const part = chatMessage("main-part", "participant", 14, {
+    participantId: MAIN.id, content: "Checking the rate first.", metadata: { turnContinues: true, activityEvents: workEvents() }
+  } as Partial<ChatMessage>);
+  const root = renderSessionsRow(part, sessions);
+  assert.equal(root.findAll((node) => node.props?.["data-testid"] === "chat-worked-fold").length, 0, "no Worked for: the turn's one is on its last part");
+  assert.equal(root.findAll((node) => typeof node.type === "string" && node.props["data-testid"] === "chat-turn-continues").length, 1);
+  assert.deepEqual(rowsOf(root), WORK_ROWS.map((row) => [...row, ""]), "its steps stay open, as in the CLI's transcript");
+  assert.match(textOf(root), /Checking the rate first\./);
+  const empty = chatMessage("main-empty", "participant", 15, { participantId: MAIN.id, content: "", metadata: { turnContinues: true } } as Partial<ChatMessage>);
+  let renderer: ReturnType<typeof create> | undefined;
+  act(() => {
+    renderer = create(<TooltipProvider><ChatMessageItem {...itemProps(empty, { presentation: "sessions" })} /></TooltipProvider>);
+  });
+  assert.equal(renderer!.toJSON(), null, "a part with nothing in it is not drawn");
+  act(() => renderer!.unmount());
+  // Nor does it get a row of the timeline (a row around nothing left a gap).
+  const conversation = sessionsConversation({}, [...sessionsMessages(), empty]);
+  assert.equal(sessionsOf(conversation).mainMessages.some((message) => message.id === "main-empty"), false, "no row in the sessions view");
+  assert.equal(chatTopLevelMessages(conversation).some((message) => message.id === "main-empty"), false, "no row in the classic view");
+});
+
+test("the classic view's part of a turn her next message joined shows its steps open, and Show full stream still opens and closes its full stream", () => {
+  const part = chatMessage("main-part", "participant", 14, {
+    participantId: MAIN.id, content: "Checking the rate first.",
+    metadata: { turnContinues: true, activityEvents: workEvents(), processingTranscript: { content: "Let me look at the atlas.\n\nChecking the rate first." } }
+  } as Partial<ChatMessage>);
+  const opened = new Set<string>();
+  const toggles = { ...disclosure(), expandedProcessingTranscriptMessageIds: opened, toggleProcessingTranscript: (id: string) => { opened.has(id) ? opened.delete(id) : opened.add(id); } };
+  const render = (): { root: ReactTestInstance; unmount: () => void } => {
+    let renderer: ReturnType<typeof create> | undefined;
+    act(() => {
+      renderer = create(<TooltipProvider><ChatMessageItem {...itemProps(part, { activityDisclosure: toggles })} /></TooltipProvider>);
+    });
+    return { root: renderer!.root, unmount: () => act(() => renderer!.unmount()) };
+  };
+  const closed = render();
+  assert.equal(closed.root.findAll(hasClass("chat-worked")).length, 0, "no Worked for of its own");
+  assert.equal(closed.root.findAll(hasClass("chat-inline-transcript")).length > 0, true, "its steps and words, open");
+  assert.doesNotMatch(textOf(closed.root), /Let me look at the atlas\./, "the full stream stays closed until asked");
+  const show = closed.root.find((node) => node.props?.label === "Show full stream" && typeof node.props.onClick === "function");
+  assert.equal(show.props.pressed, false);
+  act(() => show.props.onClick());
+  closed.unmount();
+  const open = render();
+  assert.match(textOf(open.root), /Let me look at the atlas\./, "Show full stream opens it");
+  const hide = open.root.find((node) => node.props?.label === "Hide full stream" && typeof node.props.onClick === "function");
+  act(() => hide.props.onClick());
+  open.unmount();
+  const closedAgain = render();
+  assert.doesNotMatch(textOf(closedAgain.root), /Let me look at the atlas\./, "and Hide full stream closes it");
+  closedAgain.unmount();
 });
 
 test("the classic view's running reply is as it was: its status line and its stop control", () => {

@@ -10,6 +10,7 @@ import type {
   ParticipantConfig
 } from "../../shared/types";
 import { effectiveChatAgentPermissionsForProvider, normalizeChatAgentMode, normalizeChatAgentPermissions } from "../../shared/agentPermissions";
+import { codexCommandActivity, codexFileChangeActivity, codexMcpActivity, codexWebSearchActivity, type CliToolActivity } from "./cliToolActivity";
 
 export const CODEX_APP_SERVER_MCP_TOKEN_ENV = "ACCORD_AGENTS_MCP_TOKEN";
 export type CodexLiveOutputKind = "tool" | "text";
@@ -249,7 +250,8 @@ export function emitCodexLiveOutput(
     if (toolSummary) {
       emitLiveOutput(onOutput, "tool", `${toolSummary.label}\n`, undefined, {
         activityKind: toolSummary.kind,
-        activityStatus: "started",
+        activityStatus: toolSummary.failed ? "failed" : toolSummary.finished ? "completed" : "started",
+        ...(toolSummary.detail ? { activityDetail: toolSummary.detail } : {}),
         ...(toolSummary.itemId ? { activityItemId: toolSummary.itemId } : {})
       });
     }
@@ -320,6 +322,7 @@ function emitLiveOutput(
   activity?: {
     activityKind?: ChatAgentActivityKind;
     activityStatus?: ChatAgentActivityEvent["status"];
+    activityDetail?: string;
     activityItemId?: string;
   }
 ): void {
@@ -335,7 +338,9 @@ function cleanLiveOutputText(text: string): string {
   return text.replace(/\u001b\[[0-?]*[ -/]*[@-~]/g, "");
 }
 
-function codexToolSummary(event: unknown): { label: string; kind: ChatAgentActivityKind; itemId?: string } | undefined {
+/** A `codex exec --json` item's row, in the words of Codex's TUI
+ *  (cliToolActivity.ts): what it says while it runs, or once it finished. */
+function codexToolSummary(event: unknown): (CliToolActivity & { itemId?: string; finished?: boolean; failed?: boolean }) | undefined {
   const record = asRecord(event);
   if (!record) {
     return undefined;
@@ -347,38 +352,38 @@ function codexToolSummary(event: unknown): { label: string; kind: ChatAgentActiv
   if (method === "item/autoApprovalReview/completed") {
     return { label: "Auto-review completed", kind: "approval" };
   }
-  const item = asRecord(record.item) ?? record;
-  const itemId = stringField(item, "id") ?? stringField(record, "itemId");
-  const type = `${stringField(record, "type") ?? ""} ${stringField(item, "type") ?? ""}`.toLowerCase();
-  const name = stringField(item, "name") ?? stringField(item, "tool_name");
-  const command = stringField(item, "command") ?? stringField(item, "cmd");
-  if (command && /command|exec|shell|bash/.test(type)) {
-    return { label: "Running command", kind: "command", itemId };
+  const eventType = stringField(record, "type") ?? "";
+  if (eventType !== "item.started" && eventType !== "item.updated" && eventType !== "item.completed") {
+    return undefined;
   }
-  if (name && /tool|function|call/.test(type)) {
-    return { label: toolActivityLabel(name), kind: "tool", itemId };
+  const item = asRecord(record.item);
+  if (!item) {
+    return undefined;
   }
-  if (/read|grep|glob|ls/.test(type) && name) {
-    return { label: toolActivityLabel(name), kind: "tool", itemId };
+  const finished = eventType === "item.completed";
+  const itemId = stringField(item, "id");
+  const status = stringField(item, "status");
+  const failed = status === "failed" || status === "declined";
+  const withId = (activity: CliToolActivity) => ({ ...activity, finished, failed, ...(itemId ? { itemId } : {}) });
+  switch (stringField(item, "type")) {
+    case "command_execution":
+      return withId(codexCommandActivity(stringField(item, "command"), undefined, finished, status));
+    case "mcp_tool_call":
+      return withId(codexMcpActivity(stringField(item, "server"), stringField(item, "tool"), item.arguments, finished));
+    case "web_search":
+      return withId(codexWebSearchActivity(stringField(item, "query"), finished));
+    case "file_change": {
+      const changes = Array.isArray(item.changes)
+        ? item.changes.map((change) => {
+          const entry = asRecord(change) ?? {};
+          return { path: stringField(entry, "path"), kind: stringField(entry, "kind") };
+        })
+        : [];
+      return withId(codexFileChangeActivity(changes, undefined, undefined, finished, status));
+    }
+    default:
+      return undefined;
   }
-  return undefined;
-}
-
-function toolActivityLabel(name: string): string {
-  const normalized = name.toLowerCase();
-  if (normalized === "read") {
-    return "Reading file";
-  }
-  if (normalized === "grep") {
-    return "Searching files";
-  }
-  if (normalized === "glob") {
-    return "Scanning files";
-  }
-  if (normalized === "ls") {
-    return "Listing files";
-  }
-  return `Using ${name}`;
 }
 
 function codexPrompt(

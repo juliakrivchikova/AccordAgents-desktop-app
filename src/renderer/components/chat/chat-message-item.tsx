@@ -1,6 +1,7 @@
 import { CloudProviderAuth } from "../cloud-provider-auth";
 import { memo, useState, type ReactNode } from "react";
 import { messageDelivery } from "../../../shared/messageDelivery";
+import { isEmptyContinuedTurnPart } from "../../../shared/turnContinues";
 import { ChatMessageRefusal } from "./chat-message-refusal";
 import { AlertTriangle, CheckCircle2, ChevronDown, ChevronUp, Copy, FileText, ListChecks, RefreshCw, Reply, Smile, X } from "lucide-react";
 
@@ -47,7 +48,7 @@ import { turnFinishedNoteOf } from "../../../shared/turnFinishedNoteSource";
 import { ChatChoiceCard } from "./chat-choice-card";
 import { chatMessageCards } from "./chat-server-card";
 import { ChatImageAttachmentStrip } from "./chat-image-attachments";
-import { ChatExpandedProcessingTranscript } from "./chat-streaming";
+import { ChatExpandedProcessingTranscript, ChatInlineTranscript } from "./chat-streaming";
 import { ChatInterimPostList, StreamingContentWithInterimPosts, chatReplyPictures } from "./chat-interim-posts";
 import { ChatMessageHoverWhen, ChatMessageMeta } from "./chat-message-meta";
 import { ChatMessageReactionList } from "./chat-message-reactions";
@@ -139,7 +140,7 @@ export const ChatMessageItem = memo(function ChatMessageItem(props: {
     draftOverride?: ChatAppToolApprovalRequest,
     codexDecisionId?: string
   ) => Promise<void>;
-}): JSX.Element {
+}): JSX.Element | null {
   const { message } = props;
   if (typeof window !== "undefined" && typeof window.__accordAgentsChatMessageRenderProbe === "function") {
     window.__accordAgentsChatMessageRenderProbe(message.id, message.role, message.status);
@@ -232,7 +233,8 @@ export const ChatMessageItem = memo(function ChatMessageItem(props: {
     truncated: processingTranscript.truncated,
     omittedActivityEventCount: processingTranscript.omittedActivityEventCount
   }) : undefined;
-  const queuedBehind = isStreaming ? message.metadata?.queuedBehind : undefined;
+  // Queued here (queuedBehind) or, for a member on a machine, by its own word (turnQueued), as on the phone.
+  const queuedBehind = isStreaming ? message.metadata?.queuedBehind ?? (message.metadata?.turnQueued ? { handle: participant?.handle ?? "" } : undefined) : undefined;
   const stopPending = isStreaming ? message.metadata?.stopPending : undefined;
   const workedMs = typeof message.metadata?.workedMs === "number" && Number.isFinite(message.metadata.workedMs) && message.metadata.workedMs >= 0
     ? message.metadata.workedMs
@@ -286,6 +288,11 @@ export const ChatMessageItem = memo(function ChatMessageItem(props: {
   const sessionsFoldActivity = props.presentation === "sessions" && !isStreaming && sessionsReplyHasActivity(activityEvents, sessionsFoldView)
     ? <ChatSessionsFinishedActivity view={sessionsFoldView} activityEvents={activityEvents} />
     : undefined;
+  // A part of a turn the User's next message joined (turnContinues): as in
+  // the CLI's transcript its steps stay open with no "Worked for" of its own,
+  // and a part with nothing in it is not drawn at all.
+  const continued = message.role === "participant" && message.status === "done" && message.metadata?.turnContinues === true;
+  if (isEmptyContinuedTurnPart(message) && !props.sessionsWork?.length) return null;
 
   async function copyMessage(): Promise<void> {
     if (!canCopy) {
@@ -441,8 +448,11 @@ export const ChatMessageItem = memo(function ChatMessageItem(props: {
             authorMark={props.authorMark}
             inThread={props.inThread}
           />
-          {/* One quiet "Worked for …" for every reply of the sessions view. */}
-          {(props.sessionsWork?.length || (sessions && (showWorkedRow || sessionsFoldActivity))) && !isStreaming
+          {/* One quiet "Worked for …" for every reply of the sessions view (a part its turn went on from: its steps, open). */}
+          {sessions && continued ? (sessionsFoldActivity || props.sessionsWork?.length ? (
+            <div className="chat-turn-continues" data-testid="chat-turn-continues">{sessionsFoldActivity}
+              {props.sessionsWork?.length ? <ChatDelegationRows entries={props.sessionsWork} participants={props.participants} onOpenTask={props.onOpenTask} /> : null}</div>) : null)
+          : (props.sessionsWork?.length || (sessions && (showWorkedRow || sessionsFoldActivity))) && !isStreaming
             ? <ChatWorkedFold workedMs={workedMs ?? undefined} entries={props.sessionsWork ?? NO_SESSIONS_WORK} participants={props.participants} onOpenTask={props.onOpenTask}
                 activity={sessionsFoldActivity}
                 stream={hasProcessingTranscript || sessionsFoldActivity ? { open: processingTranscriptOpen, toggle: () => props.activityDisclosure.toggleProcessingTranscript(message.id) } : undefined} />
@@ -483,6 +493,9 @@ export const ChatMessageItem = memo(function ChatMessageItem(props: {
                   />
                 ) : accordLaunch ? (
                   <ChatAccordLaunchCard card={accordLaunch} participants={props.participants} />
+                ) : continued && !sessions && activityEvents.length > 0 ? (
+                  // The classic view's part its turn went on from: its steps and words, open.
+                  <ChatInlineTranscript activityDisclosure={props.activityDisclosure} content={displayContent} activityEvents={activityEvents} />
                 ) : (
                   <MarkdownText
                     content={displayContent}
@@ -508,9 +521,10 @@ export const ChatMessageItem = memo(function ChatMessageItem(props: {
               />
             </div>
           )}
+          {/* "Queued", as the CLI says it of a message it holds (Claude Code: "Queued"). */}
           {queuedBehind && (
             <div className="chat-queued-badge">
-              <span>{appText(`Queued — waiting for @${queuedBehind.handle} to finish`)}</span>
+              <span>Queued</span>
             </div>
           )}
           {isStreaming && message.metadata?.cloudRunPreparation && !stopPending && (

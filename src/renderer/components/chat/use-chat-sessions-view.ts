@@ -1,12 +1,9 @@
 import { useMemo, useRef } from "react";
 
-import type { ActiveChatRunSummary } from "../../../shared/chatActiveRuns";
-import { isPendingReply } from "../../../shared/chatActiveRuns";
 import {
   buildSessionsViewIndex,
   isSessionsHiddenTurnFinishedNote,
   mainSessionParticipantId,
-  membersMainSessionWaitsOn,
   sessionsFormerMembers,
   sessionsTaskPlacement,
   sessionsViewLane,
@@ -25,7 +22,6 @@ import {
   sessionsMemberTitle,
   sessionsRunningCount,
   sessionsTaskEntries,
-  sessionsWaitingText,
   titleTaskByMember,
   type SessionsMemberActivity,
   type SessionsMemberRow,
@@ -74,10 +70,6 @@ export interface ChatSessionsView {
   memberRows: { current: SessionsMemberRow[]; previous: SessionsMemberRow[] };
   formerRows: SessionsFormerRow[];
   runningMemberCount: number;
-  /** "Waiting on N members", while the main session is not answering. */
-  waitingOn: ChatParticipant[];
-  waitingText: string;
-  waitingRunIds: string[];
   /** A member's (or former member's) title: the short title of the task
    *  it is named by (titleTaskByMember: its delegation's, else its first). */
   memberTitle: (participantId: string) => string;
@@ -114,9 +106,8 @@ export function useChatSessionsView(input: {
   view: ChatViewMode;
   participants: ChatParticipant[];
   participantStatusById: ReadonlyMap<string, ChatParticipantRosterStatus>;
-  activeRunSummary: ActiveChatRunSummary;
 }): ChatSessionsView | undefined {
-  const { conversation, view, participants, participantStatusById, activeRunSummary } = input;
+  const { conversation, view, participants, participantStatusById } = input;
   const mainId = view === "sessions" ? mainSessionParticipantId(conversation.metadata) : undefined;
   const cached = useSignatureCache<readonly SessionsTaskEntry[]>();
 
@@ -139,8 +130,6 @@ export function useChatSessionsView(input: {
       tasksByMember: latestTaskByMember(messages),
       titleTasksByMember: titleTaskByMember(messages),
       activity: sessionsMemberActivity(messages),
-      waitingIds: membersMainSessionWaitsOn(messages, index),
-      mainStreaming: messages.some((message) => isPendingReply(message) && message.participantId === mainId),
       requestMessages: messages.filter((message) => message.metadata?.participantRequest)
     };
   }, [conversation.messages, mainId]);
@@ -185,12 +174,6 @@ export function useChatSessionsView(input: {
       const entries = tasks.flatMap((task) => taskEntriesByMessageId.get(task.id) ?? NO_ENTRIES);
       workByReplyId.set(replyId, cached(`reply:${replyId}`, entriesSignature(entries), () => entries));
     }
-    const waitingOn = placement.mainStreaming
-      ? []
-      : placement.waitingIds.flatMap((id) => {
-        const participant = byId.get(id);
-        return participant ? [participant] : [];
-      });
     const index = placement.index;
     const memberRows = sessionsMemberRows(participants, mainId, participantStatusById, placement.tasksByMember, placement.activity.finishedAt, waitingForUser);
     return {
@@ -211,13 +194,10 @@ export function useChatSessionsView(input: {
         return { member, title: memberTitle(member.id), status: sessionsFormerMemberStatus(task?.item), ...(task ? { task } : {}) };
       }),
       runningMemberCount: sessionsRunningCount(memberRows),
-      waitingOn,
-      waitingText: sessionsWaitingText(waitingOn.map((participant) => memberTitle(participant.id))),
-      waitingRunIds: waitingOn.flatMap((participant) => activeRunSummary.runIdsByParticipantId.get(participant.id) ?? []),
       memberTitle,
       isFormerMember: (participantId: string) => formerById.has(participantId),
       laneOf: (message: ChatMessage) => sessionsViewLane(message, index),
       hidesApproval: (approval: ChatAppToolApproval) => isMainSessionDelegationRosterCard(approval, mainId)
     };
-  }, [activeRunSummary, former, mainId, participantStatusById, participants, placement, waitingForUser, waitingSince]);
+  }, [former, mainId, participantStatusById, participants, placement, waitingForUser, waitingSince]);
 }

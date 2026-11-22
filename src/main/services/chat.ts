@@ -276,7 +276,7 @@ import {
 } from "../../shared/chatDeliveryPolicy";
 import { isDeviceEventBlobReference, type DeviceEventBlobReference } from "../../shared/deviceEventBlobs";
 import { CHAT_PROMPT_SUGGESTION_LOCAL_SOURCE, ChatPromptSuggestionStore, type ChatMemberPromptSuggestion } from "./chatPromptSuggestions";
-import { CliAgentRunner, COMPACTION_CANCELLED_BEFORE_START, forkCopyNotMade, isForkSourceMissingError, type CliAgentBackgroundTask, type CliAgentCodexServerRequest, type CliAgentCompactResult, type CliAgentImageInput, type CliAgentOutputEvent, type CliAgentReplyOrigin, type CliAgentRoleOptions, type CliAgentRunOptions, type CliAgentSelfResumedTurn, type CliAgentTurnImages } from "./cliAgents";
+import { CliAgentRunner, COMPACTION_CANCELLED_BEFORE_START, forkCopyNotMade, isForkSourceMissingError, type CliAgentBackgroundTask, type CliAgentCodexServerRequest, type CliAgentCompactResult, type CliAgentImageInput, type CliAgentOutputEvent, type CliAgentReplyOrigin, type CliAgentReplyStart, type CliAgentRoleOptions, type CliAgentRunOptions, type CliAgentSelfResumedTurn, type CliAgentTurnImages } from "./cliAgents";
 import { cloudRunWorkerTargetFromSettings, normalizeCloudRunWorkerSettings } from "./cloudRunWorkers";
 import { emitCodexLiveOutput } from "./codexExec";
 import {
@@ -717,6 +717,14 @@ const CHAT_PROCESSING_TRANSCRIPT_MAX_CHARS = 2_000_000;
 const CHAT_ACTIVITY_EVENT_MAX_COUNT = 500;
 const CHAT_PROGRESS_FLUSH_INTERVAL_MS = 100;
 const CHAT_ACTIVITY_DETAIL_MAX_CHARS = 4_000;
+/** What all of one reply's step details may take together: the reply goes to
+ *  the User's server as one message (HUB_OP_MAX_BYTES) next to its processing
+ *  transcript, so the oldest steps lose their details first (their rows keep
+ *  their words). */
+const CHAT_ACTIVITY_DETAILS_TOTAL_MAX_CHARS = 200_000;
+/** A row's label is one line; what a CLI hands over as one is kept to this
+ *  (the tool rows themselves are shorter: cliToolActivity.ts). */
+const CHAT_ACTIVITY_LABEL_MAX_CHARS = 1_000;
 // A hard transport ceiling, not a truncation point. The send path rejects over-limit content
 // with an explicit error and never shortens it, so the canonical /accord message keeps the
 // exact text participants approve. Sits well under the MCP body cap (1 MB).
@@ -1035,6 +1043,12 @@ interface ParticipantRequestRunResult {
 
 interface ParticipantTurnReservation {
   queued: boolean;
+  /** A shared turn (a Claude Code member's message to its CLI) asked while
+   *  an earlier turn of the member still runs: its CLI holds the message in
+   *  its queue until the running step's next tool result, as the dedicated
+   *  CLI shows it ("Queued"), so its reply is queued until the CLI starts it
+   *  (onReplyStarted). */
+  behindMemberTurn?: boolean;
   wait: () => Promise<void>;
   release: () => void;
 }
@@ -10610,6 +10624,10 @@ export class ChatService {
           }
         }
         const turnReservation = this.reserveParticipantTurn(conversation.id, participant.id, this.participantTurnMode(participant, triggerMessage));
+        // Its CLI holds a message sent while the member works (behindMemberTurn)
+        // where the CLI runs: a member on a machine says so on its own bubble
+        // (turnQueued), which replaces this one; a local mark here would stay.
+        const queuedHere = turnReservation.queued || (serverTurn.kind !== "remote" && Boolean(turnReservation.behindMemberTurn));
         // Pre-create the pending message inside the shared mutation queue, before
         // the per-participant turn queue wait, so the queued/streaming bubble is
         // visible immediately even if a prior same-participant turn is still running.
@@ -10623,8 +10641,8 @@ export class ChatService {
             chatThreadRootId: triggerMessage.metadata?.chatThreadRootId,
             sourceMessageId: triggerMessage.id,
             runId: targetRunId,
-            queuedBehind: turnReservation.queued ? { handle: participant.handle } : undefined,
-            turnQueued: turnReservation.queued ? true : undefined
+            queuedBehind: queuedHere ? { handle: participant.handle } : undefined,
+            turnQueued: queuedHere ? true : undefined
           },
           "pending"
         );
@@ -10910,6 +10928,10 @@ export class ChatService {
       queuedBehindHandle?: string;
       existingPendingMessage?: ChatMessage;
       writeGate?: ClaudeWriteGate;
+      /** Its message waits in the member's CLI behind the running step
+       *  (ParticipantTurnReservation.behindMemberTurn): the reply stays
+       *  queued until the CLI starts it. */
+      queuedInCli?: boolean;
     }
   ): Promise<ChatMessage[]> {
     this.assertOwnsParticipant(participant);
@@ -11070,7 +11092,8 @@ export class ChatService {
           participantRequestDepth: options.participantRequestDepth ?? 0,
           participantRequestBatchId: options.participantRequestBatchId,
           chainRootId: options.chainRootId
-        }
+        },
+        { keepQueued: Boolean(options.queuedInCli) }
       );
     } else {
       pendingMessage = this.message(
@@ -11161,12 +11184,27 @@ export class ChatService {
         this.lastAppMcpGrants.set(memberKey, appMcpGrant);
       }
     };
-    const onReplyStarted = (): void => {
+    const onReplyStarted = (start?: CliAgentReplyStart): void => {
       if (grantAtReplyStart) {
         grantThisRun();
       }
       if (sharedClaudeTurn && preparedPromptContext.pointerAdvance) {
         this.registerInFlightPromptContext(conversation.id, participant.id, preparedPromptContext.pointerAdvance, runId);
+      }
+      if (sharedClaudeTurn) {
+        const started = this.cliStartedReplyStart(conversation, pendingMessage, start);
+        if (started) {
+          // The run's own copy too: its "Worked for …" is counted from it.
+          pendingMessage.metadata = this.withCliStartedReplyStart(pendingMessage.metadata, started);
+          void this.noteCliStartedReply(conversation, pendingMessage.id, started).catch((error: unknown) => {
+            void this.debugLogs.write("chat.cli-started-reply.error", {
+              conversationId: conversation.id,
+              participantId: participant.id,
+              runId,
+              error: error instanceof Error ? error.message : String(error)
+            });
+          });
+        }
       }
     };
     const appMcp = grantAtReplyStart ? existingConnection : this.issueAppMcpConnection(conversation, participant, appMcpGrant);
@@ -11458,6 +11496,12 @@ export class ChatService {
       } else {
         pendingMessage.status = result.ok ? "done" : "error";
       }
+      if (pendingMessage.metadata?.queuedBehind || pendingMessage.metadata?.turnQueued) {
+        // A reply its CLI never started (it failed or stopped while queued)
+        // is not left queued.
+        const { queuedBehind: _queuedBehind, turnQueued: _turnQueued, ...metadata } = pendingMessage.metadata;
+        pendingMessage.metadata = metadata;
+      }
       const notReady = !signal?.aborted && !result.ok && firstTurnHere ? await this.firstTurnProviderProblem(participant) : undefined;
       if (notReady) {
         pendingMessage.content = pendingMessage.content.trim() ? `${notReady}\n\n${pendingMessage.content}` : notReady;
@@ -11473,11 +11517,18 @@ export class ChatService {
       if (!signal?.aborted && !result.ok && result.error) {
         options.warnings.push(`@${participant.handle}: ${result.error}`);
       }
-      // Worked from its own turn's start: a reply that waited in the queue
-      // does not count the wait (turnStartedAt).
-      const workedMs = Date.parse(now) - Date.parse(pendingMessage.metadata?.turnStartedAt ?? pendingMessage.createdAt);
-      if (Number.isFinite(workedMs) && workedMs >= 0) {
-        pendingMessage.metadata = { ...pendingMessage.metadata, workedMs };
+      if (result.ok && result.turnContinues && !signal?.aborted) {
+        // The turn goes on in the next message's reply (as in the CLI's
+        // transcript): no "Worked for" of its own, its steps stay open.
+        const { workedMs: _workedMs, ...metadata } = pendingMessage.metadata ?? {};
+        pendingMessage.metadata = { ...metadata, turnContinues: true };
+      } else {
+        // Worked from its own turn's start: a reply that waited in the queue
+        // does not count the wait (turnStartedAt).
+        const workedMs = Date.parse(now) - Date.parse(pendingMessage.metadata?.turnStartedAt ?? pendingMessage.createdAt);
+        if (Number.isFinite(workedMs) && workedMs >= 0) {
+          pendingMessage.metadata = { ...pendingMessage.metadata, workedMs };
+        }
       }
       this.recordReplySessionCut(pendingMessage, result);
       const activityEvents = progressSink.activityEvents();
@@ -11807,9 +11858,16 @@ export class ChatService {
           : `@${participant.handle} run failed.`;
         this.markPendingAppToolApprovalsForRunTerminal(conversation, runId, pendingMessage.content);
       }
-      const workedMs = Date.parse(now) - Date.parse(pendingMessage.createdAt);
-      if (Number.isFinite(workedMs) && workedMs >= 0) {
-        pendingMessage.metadata = { ...pendingMessage.metadata, workedMs };
+      if (result.ok && result.turnContinues && !controller.signal.aborted) {
+        // The User's next message joined this step the CLI started itself:
+        // as on the main path, no "Worked for" of its own.
+        const { workedMs: _workedMs, ...metadata } = pendingMessage.metadata ?? {};
+        pendingMessage.metadata = { ...metadata, turnContinues: true };
+      } else {
+        const workedMs = Date.parse(now) - Date.parse(pendingMessage.createdAt);
+        if (Number.isFinite(workedMs) && workedMs >= 0) {
+          pendingMessage.metadata = { ...pendingMessage.metadata, workedMs };
+        }
       }
       this.recordReplySessionCut(pendingMessage, result);
       const pendingChoice = !controller.signal.aborted && result.ok && result.content.trim()
@@ -11905,7 +11963,8 @@ export class ChatService {
       participantRequestDepth: number;
       participantRequestBatchId?: string;
       chainRootId?: string;
-    }
+    },
+    queue: { keepQueued: boolean } = { keepQueued: false }
   ): Promise<ChatMessage> {
     let pendingMessage = existingPendingMessage;
     await this.withChatMutation(conversation, async () => {
@@ -11927,12 +11986,14 @@ export class ChatService {
           ? { participantRequestChainRootId: inferenceContext.chainRootId }
           : {})
       };
-      if (metadata.queuedBehind || metadata.turnQueued) {
-        // It waited behind the member's turn before it: its own turn starts now.
-        metadata.turnStartedAt = new Date().toISOString();
+      if (!queue.keepQueued) {
+        if (metadata.queuedBehind || metadata.turnQueued) {
+          // It waited behind the member's turn before it: its own turn starts now.
+          metadata.turnStartedAt = new Date().toISOString();
+        }
+        delete metadata.queuedBehind;
+        delete metadata.turnQueued;
       }
-      delete metadata.queuedBehind;
-      delete metadata.turnQueued;
       pendingMessage.metadata = Object.keys(metadata).length > 0 ? metadata : undefined;
       if (existingIndex >= 0) {
         conversation.messages[existingIndex] = pendingMessage;
@@ -11945,6 +12006,59 @@ export class ChatService {
       this.queueSnapshot(conversation);
     });
     return pendingMessage;
+  }
+
+  /**
+   * A Claude Code member's CLI started a reply's message (see
+   * ParticipantTurnReservation.behindMemberTurn): when its turn starts. One
+   * that was queued starts now; one handed to the step that was running
+   * continues that step's work, so, like the CLI's one spinner, its "Working
+   * for …" (and its "Worked for …") count from that step's start, not from the
+   * User's message: one turn, one clock. Undefined when nothing changes.
+   */
+  private cliStartedReplyStart(conversation: Conversation, reply: ChatMessage, start: CliAgentReplyStart | undefined): { turnStartedAt?: string } | undefined {
+    const joinedId = start?.joinedReply?.messageId;
+    const joined = joinedId ? conversation.messages.find((message) => message.id === joinedId) : undefined;
+    // The joined reply's own start when this copy of the chat has it; its
+    // sending time when it started at once (never queued); else when its CLI
+    // says the step began (that reply's start may be on another copy still).
+    const joinedQueued = Boolean(joined?.metadata?.queuedBehind || joined?.metadata?.turnQueued);
+    const cliStepStart = start?.joinedStepStartedAt !== undefined && Number.isFinite(start.joinedStepStartedAt)
+      ? new Date(start.joinedStepStartedAt).toISOString()
+      : undefined;
+    const stepStartedAt = joined?.metadata?.turnStartedAt ?? (joined && !joinedQueued ? joined.createdAt : undefined) ?? cliStepStart;
+    const wasQueued = Boolean(reply.metadata?.queuedBehind || reply.metadata?.turnQueued);
+    if (stepStartedAt) return { turnStartedAt: stepStartedAt };
+    return wasQueued ? { turnStartedAt: new Date().toISOString() } : undefined;
+  }
+
+  private withCliStartedReplyStart(metadata: ChatMessageMetadata | undefined, started: { turnStartedAt?: string }): ChatMessageMetadata {
+    const next: ChatMessageMetadata = { ...metadata };
+    delete next.queuedBehind;
+    delete next.turnQueued;
+    if (started.turnStartedAt) next.turnStartedAt = started.turnStartedAt;
+    return next;
+  }
+
+  /** The reply's start as its CLI said (cliStartedReplyStart), in the chat. */
+  private async noteCliStartedReply(conversation: Conversation, pendingMessageId: string, started: { turnStartedAt?: string }): Promise<void> {
+    await this.withChatMutation(conversation, async () => {
+      const index = conversation.messages.findIndex((message) => message.id === pendingMessageId);
+      const reply = index >= 0 ? conversation.messages[index] : undefined;
+      if (!reply || reply.role !== "participant") {
+        return;
+      }
+      if (reply.status !== "pending") {
+        // It already ended: only its queue marks go, if any are left.
+        if (!reply.metadata?.queuedBehind && !reply.metadata?.turnQueued) return;
+        const { queuedBehind: _queuedBehind, turnQueued: _turnQueued, ...metadata } = reply.metadata;
+        reply.metadata = metadata;
+      } else {
+        reply.metadata = this.withCliStartedReplyStart(reply.metadata, started);
+      }
+      conversation.updatedAt = new Date().toISOString();
+      this.queueSnapshot(conversation);
+    });
   }
 
   private async finalizeFailedPrecreatedPendingMessage(
@@ -13979,7 +14093,14 @@ export class ChatService {
       return preferred;
     }
     const metadata = this.mergeStoredChatMessageMetadata(stored.metadata, current.metadata);
-    if (metadata) {
+    if (metadata && preferred.status !== "pending") {
+      // A finished reply is never queued, whatever an older stored copy of it
+      // still says (its CLI held it, then it ran and ended before that was
+      // written).
+      delete metadata.queuedBehind;
+      delete metadata.turnQueued;
+    }
+    if (metadata && Object.keys(metadata).length > 0) {
       preferred.metadata = metadata;
     } else {
       delete preferred.metadata;
@@ -14480,13 +14601,25 @@ export class ChatService {
   }
 
   private capChatActivityEvents(events: ChatAgentActivityEvent[]): { events: ChatAgentActivityEvent[]; dropped: number } {
-    if (events.length <= CHAT_ACTIVITY_EVENT_MAX_COUNT) {
-      return { events, dropped: 0 };
+    const kept = events.length <= CHAT_ACTIVITY_EVENT_MAX_COUNT ? events : events.slice(-CHAT_ACTIVITY_EVENT_MAX_COUNT);
+    return { events: this.withinActivityDetailsBudget(kept), dropped: events.length - kept.length };
+  }
+
+  /** The events with the oldest details dropped until all of them fit
+   *  CHAT_ACTIVITY_DETAILS_TOTAL_MAX_CHARS (the same array when they do). */
+  private withinActivityDetailsBudget(events: ChatAgentActivityEvent[]): ChatAgentActivityEvent[] {
+    let total = 0;
+    for (const event of events) total += event.detail?.length ?? 0;
+    if (total <= CHAT_ACTIVITY_DETAILS_TOTAL_MAX_CHARS) return events;
+    const next = [...events];
+    for (let index = 0; index < next.length && total > CHAT_ACTIVITY_DETAILS_TOTAL_MAX_CHARS; index += 1) {
+      const detail = next[index].detail;
+      if (!detail) continue;
+      total -= detail.length;
+      const { detail: _detail, ...rest } = next[index];
+      next[index] = rest;
     }
-    return {
-      events: events.slice(-CHAT_ACTIVITY_EVENT_MAX_COUNT),
-      dropped: events.length - CHAT_ACTIVITY_EVENT_MAX_COUNT
-    };
+    return next;
   }
 
   private isChatAgentActivityKind(value: unknown): value is ChatAgentActivityEvent["kind"] {
@@ -19024,7 +19157,8 @@ export class ChatService {
         try {
           messages = await this.runParticipantTurn(conversation, participant, triggerMessage, runId, turnController.signal, progress, {
             ...options,
-            turnSegmentId
+            turnSegmentId,
+            queuedInCli: Boolean(reservation.behindMemberTurn)
           });
           outcome = turnController.signal.aborted ? "stopped" : "done";
         } catch (error) {
@@ -19720,6 +19854,7 @@ export class ChatService {
       const all = this.chainParticipantTurn(this.participantTurnQueues, key);
       return {
         queued: Boolean(exclusiveTail),
+        behindMemberTurn: all.queued,
         wait: async () => {
           await exclusiveReady;
         },
@@ -27530,28 +27665,34 @@ export class ChatService {
     event: CliAgentOutputEvent,
     options: { createdAt?: string; afterContentLength?: number } = {}
   ): ChatActivityAccumulator {
-    const label = event.text.trim().replace(/\s+/g, " ");
-    if (!label) {
+    const fullLabel = event.text.trim().replace(/\s+/g, " ");
+    if (!fullLabel) {
       return current;
     }
+    const label = fullLabel.length > CHAT_ACTIVITY_LABEL_MAX_CHARS
+      ? `${fullLabel.slice(0, CHAT_ACTIVITY_LABEL_MAX_CHARS - 1).trimEnd()}…`
+      : fullLabel;
     const itemId = event.activityItemId?.trim() || undefined;
     const detail = this.chatActivityDetail(event.activityDetail);
     if (itemId) {
       const existingIndex = current.events.findIndex((activityEvent) => activityEvent.itemId === itemId);
       if (existingIndex >= 0) {
         const existing = current.events[existingIndex];
+        // A step's words can change as it ends, as in its CLI ("Running
+        // npm test", then "Ran npm test").
         const nextEvent: ChatAgentActivityEvent = {
           ...existing,
+          label,
           detail: detail ?? existing.detail,
           status: event.activityStatus ?? existing.status
         };
-        if (nextEvent.detail === existing.detail && nextEvent.status === existing.status && label === current.label) {
+        if (nextEvent.label === existing.label && nextEvent.detail === existing.detail && nextEvent.status === existing.status && label === current.label) {
           return current;
         }
         const events = [...current.events];
         events[existingIndex] = nextEvent;
         return {
-          events,
+          events: this.withinActivityDetailsBudget(events),
           sequence: current.sequence,
           label,
           omittedCount: current.omittedCount

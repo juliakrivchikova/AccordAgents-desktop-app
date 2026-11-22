@@ -386,7 +386,7 @@
   font-variant-numeric: tabular-nums;
 }
 
-/* A member's open choice card and the "Waiting on" line */
+/* A member's open choice card */
 
 .chat-sessions-choice {
   display: grid;
@@ -413,22 +413,6 @@
 .chat-sessions-choice-from:hover {
   background: var(--app-surface-hover);
   color: var(--app-text-strong);
-}
-
-.chat-sessions-waiting {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  margin: 0 var(--app-gutter) 12px;
-  color: var(--app-muted);
-  font-size: 13px;
-}
-
-.chat-sessions-waiting-text {
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
 }
 
 /* The side panel (T3 Code's agents list, the User, 2026-11-22): sections
@@ -916,8 +900,8 @@
 
 /* ---- The sessions view, the Claude desktop way (docs/main-session.md) ---- */
 
-/* One reading column: the main timeline's rows, the waiting line, the Accord
-   line and the composer share one centered width, which re-centers as the
+/* One reading column: the main timeline's rows, the Accord line and the
+   composer share one centered width, which re-centers as the
    side panel opens and closes and narrows with the window. */
 .chat-view.is-sessions-view {
   --chat-reading-width: 768px;
@@ -928,10 +912,6 @@
 .chat-view.is-sessions-view .chat-main > .chat-composer,
 .chat-view.is-sessions-view .chat-main .chat-accord-dock-wrap {
   padding-inline: max(28px, var(--chat-reading-inset));
-}
-
-.chat-view.is-sessions-view .chat-main .chat-sessions-waiting {
-  margin-inline: max(28px, var(--chat-reading-inset));
 }
 
 .chat-view.is-sessions-view .chat-main .virtual-timeline-item > .message.chat-message {
@@ -1048,6 +1028,15 @@
 .chat-worked-fold-toggle.is-static:hover {
   color: var(--app-muted);
   cursor: default;
+}
+
+/* A part of a turn the User's next message joined: its steps and tasks
+   stay open, with no "Worked for" of its own (as in the CLI's transcript). */
+.chat-turn-continues {
+  display: grid;
+  gap: 2px;
+  margin: 0 0 6px;
+  min-width: 0;
 }
 
 .chat-delegations {
@@ -1243,11 +1232,6 @@
 
 .chat-view.is-sessions-view .chat-accord-strip .chat-accord-row-title {
   flex: 0 1 auto;
-}
-
-/* Mid-chat lines without boxes. */
-.chat-view.is-sessions-view .chat-sessions-waiting {
-  font-size: 12.5px;
 }
 
 /* A queued reply's own × in the sessions view: on hover only (always on a

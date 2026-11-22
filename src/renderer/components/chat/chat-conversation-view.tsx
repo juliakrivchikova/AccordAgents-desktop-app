@@ -58,7 +58,6 @@ import { useChatSessionsChrome, useChatSessionsView } from "./use-chat-sessions-
 import { useChatViewMode } from "./use-chat-view-mode";
 import { ChatViewHeaderContext } from "./chat-view-switch";
 import type { ChatPanelMessageContext } from "./chat-sessions-right-panel";
-import { ChatSessionsWaitingLine } from "./chat-sessions-timeline-row";
 import { ChatSessionsLinksContext, ChatSessionsNamesContext, useStableMap, useStableSessionsViewNames } from "./chat-sessions-links";
 import { mainComposerTargetIds, sessionsComposerProps } from "./chat-sessions-composer";
 import { ChatViewRightPanels } from "./chat-view-right-panels";
@@ -119,8 +118,7 @@ export function ChatConversationView(props: ChatConversationViewProps): JSX.Elem
     conversation: props.conversation,
     view: viewMode.view,
     participants,
-    participantStatusById: participantStatusById,
-    activeRunSummary
+    participantStatusById: participantStatusById
   });
   const sessionsMainMessages = sessions?.mainMessages;
   const topLevelMessages = useMemo(
@@ -442,9 +440,6 @@ export function ChatConversationView(props: ChatConversationViewProps): JSX.Elem
               pendingApprovalRows={approvalPlacement.unanchored}
               rows={chatTimelineRows}
               sessions={sessionsChrome.timeline}
-              footer={sessions && (
-                <ChatSessionsWaitingLine members={sessions.waitingOn} text={sessions.waitingText} runIds={sessions.waitingRunIds} onStop={props.onStopRun ? stopRuns : undefined} />
-              )}
               selectedThreadRootId={selectedThreadRoot?.id}
               sessionsByParticipant={sessionsByParticipant}
               settings={props.settings}

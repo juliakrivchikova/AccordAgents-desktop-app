@@ -103,6 +103,16 @@
   margin: 4px 0;
 }
 
+/* A running reply is a grid item of its message: without min-width 0 it
+   took the width of its widest row (a task's full title) and its task rows
+   ran under the side panel, where a click on a row's time or chevron landed
+   in the panel instead (2026-11-22). It keeps to its column; long rows end in
+   an ellipsis, as a finished reply's do. */
+.chat-sessions-running,
+.chat-sessions-running .chat-delegations {
+  min-width: 0;
+}
+
 .chat-sessions-running .chat-delegations {
   margin-top: 4px;
 }

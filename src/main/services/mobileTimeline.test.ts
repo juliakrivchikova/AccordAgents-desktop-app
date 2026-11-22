@@ -303,6 +303,27 @@ test("a member's posts during its turn are marked, and a turn that ends empty st
   assert.equal(events.answer?.hidden, undefined);
 });
 
+test("a part of a turn her next message joined travels with its steps even with no words in the sessions view; elsewhere, or with nothing in it, it travels hidden", () => {
+  const member = { participantId: "taylor", participantLabel: "@taylor" };
+  const steps = [{ id: "a1", sequence: 1, kind: "command" as const, label: "Running npm test", createdAt: "2026-11-22T10:00:01Z" }];
+  const conversation: Conversation = {
+    id: "joined-chat", kind: "chat", title: "Joined", createdAt: "2026-11-22T10:00:00Z", updatedAt: "2026-11-22T10:00:03Z", findings: [], metadata: { mainSessionParticipantId: "taylor", chatView: "sessions", participants: [{ id: "taylor", handle: "taylor", kind: "claude-code", roleConfigId: "main-session" }] },
+    messages: [
+      { id: "steps-only", role: "participant", ...member, content: "", status: "done", createdAt: "2026-11-22T10:00:00Z",
+        metadata: { runId: "run-1", turnContinues: true, activityEvents: steps } },
+      { id: "nothing", role: "participant", ...member, content: "", status: "done", createdAt: "2026-11-22T10:00:02Z",
+        metadata: { runId: "run-2", turnContinues: true } }
+    ]
+  };
+  const events = Object.fromEntries(timelineEventsFromSnapshot(conversation).map((event) => [event.id, event]));
+  assert.equal(events["steps-only"]?.hidden, undefined, "its steps are what it says");
+  assert.equal(events["steps-only"]?.turnContinues, true);
+  assert.ok(events["steps-only"]?.activity?.length);
+  assert.equal(events.nothing?.hidden, true);
+  const classic = Object.fromEntries(timelineEventsFromSnapshot({ ...conversation, metadata: { ...conversation.metadata, chatView: "classic" } }).map((event) => [event.id, event]));
+  assert.equal(classic["steps-only"]?.hidden, true, "a classic chat's phone draws no steps: the part ends its run unseen");
+});
+
 test("a reply's posts during its turn travel inside it to the phone, and a reply whose words all went out as posts still shows", async () => {
   const { phoneActivityEvents } = await import("./mobileTimeline");
   const member = { participantId: "taylor", participantLabel: "@taylor" };

@@ -27,6 +27,11 @@ export interface ParticipantRunResult {
    *  failed before the CLI took the message: no session was made, although
    *  the id it was given may have been reported. */
   sessionNotStarted?: boolean;
+  /** Claude Code handed the User's next message to the step this reply was
+   *  answering: the turn goes on in that message's reply. Like the CLI's
+   *  transcript, this part has no "Worked for" of its own (the turn's one is
+   *  on its last part). */
+  turnContinues?: boolean;
 }
 
 export class ProviderRunner {

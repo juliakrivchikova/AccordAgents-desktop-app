@@ -1,4 +1,4 @@
-import type { ComponentProps, ReactNode, RefObject } from "react";
+import type { ComponentProps, RefObject } from "react";
 import type { VirtualItem, Virtualizer } from "@tanstack/react-virtual";
 
 import type {
@@ -65,8 +65,6 @@ export function ChatConversationTimeline(props: {
   rows: ChatTimelineRow[];
   /** The sessions view: rows without avatars or threads, task cards. */
   sessions?: ChatSessionsTimelineContext;
-  /** Below the last row (the sessions view's "Waiting on" line). */
-  footer?: ReactNode;
   selectedThreadRootId?: string;
   sessionsByParticipant: Map<string, ChatParticipantSession>;
   settings: AppSettings;
@@ -168,7 +166,6 @@ export function ChatConversationTimeline(props: {
           );
         })}
       </div>
-      {props.footer}
       <div className={`chat-app-tool-approval-slot ${props.pendingApprovalRows.length > 0 ? "has-approvals" : ""}`}>
         {props.pendingApprovalRows.length > 0 && (
           <ChatAppToolApprovalList

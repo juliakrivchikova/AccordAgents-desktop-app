@@ -4701,29 +4701,6 @@ button.card-row:focus-visible {
   gap: 2px;
 }
 
-/* "Waiting on N members", at the end of the main timeline. */
-.sessions-waiting {
-  flex: 1;
-  min-width: 0;
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  padding: 8px 12px;
-  border-radius: 12px;
-  background: var(--s2);
-  font: 400 13.5px var(--sans);
-  color: var(--fg);
-}
-
-.sessions-waiting-text {
-  flex: 1;
-  min-width: 0;
-}
-
-.sessions-waiting .timeline-syncing-spinner {
-  flex-shrink: 0;
-}
-
 /* A member's choice that still waits for the User, on the main timeline. */
 .sessions-member-choice {
   flex: 1;
@@ -5371,12 +5348,6 @@ button.card-row:focus-visible {
 }
 
 /* The sessions view keeps the main timeline unboxed: quiet lines, muted. */
-.message-row.is-sessions .sessions-waiting {
-  padding: 4px 0;
-  background: transparent;
-  color: var(--mut);
-}
-
 .sessions-choice-from .provider-logo {
   margin-right: 2px;
 }

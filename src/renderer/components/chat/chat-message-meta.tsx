@@ -57,7 +57,9 @@ export function ChatMessageMeta(props: {
           />
         )
       )}
-      <ChatMessageWhen createdAt={message.createdAt} runningSince={props.isStreaming ? props.streamingStartedAt : undefined} />
+      {/* A queued reply has no clock, as in the CLI ("Queued") and on the
+          phone: the turn's one clock is the running reply's. */}
+      <ChatMessageWhen createdAt={message.createdAt} runningSince={props.isStreaming && !props.queued ? props.streamingStartedAt : undefined} />
       {!props.inThread && message.metadata?.parentMessageId && message.role === "user" && (
         <StatusBadge tone="neutral">reply</StatusBadge>
       )}

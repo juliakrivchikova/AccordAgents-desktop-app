@@ -589,6 +589,30 @@ test("agent progress sink coalesces activity only by item id and caps retained a
   assert.equal(transcript?.omittedActivityEventCount, 8);
 });
 
+test("agent progress sink: a step's words change as it ends, a label stays one bounded line, and one reply's details stay within budget", () => {
+  const service = testService().service as any;
+  const sink = service.createAgentProgressSink("run-1", undefined, chatParticipant("codex-cli"), "message-1");
+  sink.emit({ kind: "tool", text: "Running npm test", activityKind: "command", activityStatus: "started", activityDetail: "npm test", activityItemId: "cmd-1" });
+  sink.emit({ kind: "tool", text: "Ran npm test", activityKind: "command", activityStatus: "completed", activityItemId: "cmd-1" });
+  assert.deepEqual(sink.activityEvents().map((event: ChatAgentActivityEvent) => [event.itemId, event.label, event.detail, event.status]), [
+    ["cmd-1", "Ran npm test", "npm test", "completed"]
+  ]);
+  sink.emit({ kind: "tool", text: `Running ${"y".repeat(1_500)}`, activityKind: "command" });
+  const long = sink.activityEvents().at(-1);
+  assert.equal(long.label.length, 1_000);
+  assert.ok(long.label.endsWith("…"));
+
+  for (let index = 0; index < 150; index += 1) {
+    sink.emit({ kind: "tool", text: `Running step ${index}`, activityKind: "command", activityDetail: `${index}:${"z".repeat(1_795)}`, activityItemId: `step-${index}` });
+  }
+  const events: ChatAgentActivityEvent[] = sink.activityEvents();
+  const totalDetails = events.reduce((sum, event) => sum + (event.detail?.length ?? 0), 0);
+  assert.ok(totalDetails <= 200_000, `all details of one reply stay within the budget (${totalDetails})`);
+  assert.ok(events.find((event) => event.itemId === "step-149")?.detail?.startsWith("149:"), "the newest steps keep their details");
+  assert.equal(events.find((event) => event.itemId === "step-0")?.detail, undefined, "the oldest lose theirs first");
+  assert.equal(events.find((event) => event.itemId === "step-0")?.label, "Running step 0", "and keep their words");
+});
+
 test("agent progress sink keeps in-progress formatted stream for visible runs", async () => {
   const service = testService().service as any;
   const progressItems: Array<{ partialContent?: string; activityEvents?: unknown[] }> = [];
@@ -2718,8 +2742,9 @@ test("a Claude member takes the next message while its previous reply is still r
   assert.equal(prompts.length, 2, "the second message reached the member while the first reply was still running");
   assert.match(prompts[1], /second question beta/);
   assert.doesNotMatch(prompts[1], /first task alpha/, "context the running turn already delivered is not sent again");
-  const queued = storage.current.messages.filter((message: ChatMessage) => message.metadata?.queuedBehind);
-  assert.equal(queued.length, 0, "nothing waits behind the running reply");
+  // Its CLI took it at once (onReplyStarted): once that is in the chat,
+  // nothing waits behind the running reply.
+  await waitFor(() => storage.current.messages.filter((message: ChatMessage) => message.metadata?.queuedBehind || message.metadata?.turnQueued).length === 0);
   releaseFirst();
   await waitFor(() => storage.current.messages.filter((message: ChatMessage) =>
     message.role === "participant" && message.status === "done").length === 2);
@@ -2811,6 +2836,171 @@ test("a Claude member's app tools keep acting for the running reply until the CL
   assert.equal(actorRunId(token), runs[1].warm.origin.runId, "the first reply ending does not take the tools back");
   releaseSecond();
   await waitFor(() => storage.current.messages.some((message: ChatMessage) => message.content === "Second done." && message.status === "done"));
+});
+
+test("a message sent while a Claude member works is queued until its CLI takes it, then counts from the running step's start", async () => {
+  const participant = chatParticipant("claude-code");
+  const conversation = chatConversation([participant]);
+  const runs: any[] = [];
+  let releaseFirst!: () => void;
+  const firstBlocked = new Promise<void>((resolve) => { releaseFirst = resolve; });
+  let releaseSecond!: () => void;
+  const secondBlocked = new Promise<void>((resolve) => { releaseSecond = resolve; });
+  const { service, storage, tempRoot } = testService({
+    conversation,
+    run: async (runParticipant, _prompt, _repoPath, _diffMode, _kind, _signal, runOptions: any) => {
+      runOptions?.warm?.onMessageWritten?.();
+      runs.push(runOptions);
+      if (runs.length === 1) {
+        await firstBlocked;
+        return { participant: runParticipant, ok: true, content: "", durationMs: 1 };
+      }
+      await secondBlocked;
+      return { participant: runParticipant, ok: true, content: "Second done.", durationMs: 1 };
+    }
+  });
+  (service as any).ensureHistoryFiles = async () => tempRoot;
+  await service.sendMessage({ conversationId: conversation.id, runId: "step-first", content: `@${participant.handle} first` });
+  await waitFor(() => runs.length === 1);
+  const first = storage.current.messages.find((message: ChatMessage) => message.role === "participant" && message.status === "pending")!;
+  assert.equal(first.metadata?.turnQueued, undefined, "the first message starts at once");
+  await service.sendMessage({ conversationId: conversation.id, runId: "step-second", content: `@${participant.handle} тест` });
+  await waitFor(() => runs.length === 2);
+  const secondId = runs[1].warm.origin.messageId;
+  const queued = storage.current.messages.find((message: ChatMessage) => message.id === secondId)!;
+  assert.equal(queued.metadata?.turnQueued, true, "the CLI holds the second message: its reply is queued, with no Working of its own");
+  assert.ok(queued.metadata?.queuedBehind);
+
+  // The CLI hands it to the running step at the step's next tool result.
+  runs[1].warm.onReplyStarted({ joinedReply: runs[0].warm.origin });
+  await waitFor(() => storage.current.messages.find((message: ChatMessage) => message.id === secondId)?.metadata?.turnStartedAt !== undefined);
+  const started = storage.current.messages.find((message: ChatMessage) => message.id === secondId)!;
+  assert.equal(started.metadata?.turnQueued, undefined);
+  assert.equal(started.metadata?.queuedBehind, undefined);
+  assert.equal(started.metadata?.turnStartedAt, first.metadata?.turnStartedAt ?? first.createdAt, "one turn, one clock: it counts from the running step's start");
+
+  releaseFirst();
+  releaseSecond();
+  await waitFor(() => storage.current.messages.some((message: ChatMessage) => message.id === secondId && message.status === "done"));
+  const done = storage.current.messages.find((message: ChatMessage) => message.id === secondId)!;
+  assert.equal(done.metadata?.turnStartedAt, first.metadata?.turnStartedAt ?? first.createdAt);
+  assert.ok((done.metadata?.workedMs ?? -1) >= Date.parse(done.createdAt) - Date.parse(first.createdAt), "its worked time covers the whole turn");
+  assert.equal(storage.current.messages.find((message: ChatMessage) => message.id === first.id)?.status, "done");
+});
+
+test("a Claude reply the next message joined is stored as part of a turn that goes on: no worked time of its own; the last part's covers the turn", async () => {
+  const participant = chatParticipant("claude-code");
+  const conversation = chatConversation([participant]);
+  const runs: any[] = [];
+  let releaseFirst!: () => void;
+  const firstBlocked = new Promise<void>((resolve) => { releaseFirst = resolve; });
+  let releaseSecond!: () => void;
+  const secondBlocked = new Promise<void>((resolve) => { releaseSecond = resolve; });
+  const { service, storage, tempRoot } = testService({
+    conversation,
+    run: async (runParticipant, _prompt, _repoPath, _diffMode, _kind, _signal, runOptions: any) => {
+      runOptions?.warm?.onMessageWritten?.();
+      runs.push(runOptions);
+      if (runs.length === 1) {
+        await firstBlocked;
+        return { participant: runParticipant, ok: true, content: "Checking first.", durationMs: 1, turnContinues: true };
+      }
+      await secondBlocked;
+      return { participant: runParticipant, ok: true, content: "All done.", durationMs: 1 };
+    }
+  });
+  (service as any).ensureHistoryFiles = async () => tempRoot;
+  await service.sendMessage({ conversationId: conversation.id, runId: "part-first", content: `@${participant.handle} first` });
+  await waitFor(() => runs.length === 1);
+  await service.sendMessage({ conversationId: conversation.id, runId: "part-second", content: `@${participant.handle} тест` });
+  await waitFor(() => runs.length === 2);
+  runs[1].warm.onReplyStarted({ joinedReply: runs[0].warm.origin, joinedStepStartedAt: Date.now() });
+  releaseFirst();
+  await waitFor(() => storage.current.messages.some((message: ChatMessage) => message.content === "Checking first." && message.status === "done"));
+  const part = storage.current.messages.find((message: ChatMessage) => message.content === "Checking first.")!;
+  assert.equal(part.metadata?.turnContinues, true);
+  assert.equal(part.metadata?.workedMs, undefined, "no Worked for of its own");
+  releaseSecond();
+  await waitFor(() => storage.current.messages.some((message: ChatMessage) => message.content === "All done." && message.status === "done"));
+  const last = storage.current.messages.find((message: ChatMessage) => message.content === "All done.")!;
+  assert.equal(last.metadata?.turnContinues, undefined);
+  assert.equal(last.metadata?.turnStartedAt, part.createdAt, "the turn's one Worked for counts from the turn's start");
+  assert.equal(typeof last.metadata?.workedMs, "number");
+});
+
+test("Stop on a Claude reply its CLI still holds removes it, and the running reply goes on", async () => {
+  const participant = chatParticipant("claude-code");
+  const conversation = chatConversation([participant]);
+  const runs: any[] = [];
+  let releaseFirst!: () => void;
+  const firstBlocked = new Promise<void>((resolve) => { releaseFirst = resolve; });
+  const { service, storage, tempRoot } = testService({
+    conversation,
+    run: async (runParticipant, _prompt, _repoPath, _diffMode, _kind, signal: AbortSignal | undefined, runOptions: any) => {
+      runOptions?.warm?.onMessageWritten?.();
+      runs.push(runOptions);
+      if (runs.length === 1) {
+        await firstBlocked;
+        return { participant: runParticipant, ok: true, content: "First done.", durationMs: 1 };
+      }
+      // The CLI takes it out of its queue when stopped (cancel_async_message).
+      await new Promise<void>((resolve) => signal?.addEventListener("abort", () => resolve(), { once: true }));
+      return { participant: runParticipant, ok: false, content: "", error: "Chat run cancelled.", durationMs: 1 };
+    }
+  });
+  (service as any).ensureHistoryFiles = async () => tempRoot;
+  await service.sendMessage({ conversationId: conversation.id, runId: "hold-first", content: `@${participant.handle} first` });
+  await waitFor(() => runs.length === 1);
+  await service.sendMessage({ conversationId: conversation.id, runId: "hold-second", content: `@${participant.handle} second` });
+  await waitFor(() => runs.length === 2);
+  const secondId = runs[1].warm.origin.messageId;
+  assert.equal(storage.current.messages.find((message: ChatMessage) => message.id === secondId)?.metadata?.turnQueued, true);
+  await service.cancelRun(runs[1].warm.origin.runId);
+  await waitFor(() => {
+    const second = storage.current.messages.find((message: ChatMessage) => message.id === secondId);
+    return !second || (second.status !== "pending" && !second.metadata?.turnQueued && !second.metadata?.queuedBehind);
+  });
+  releaseFirst();
+  await waitFor(() => storage.current.messages.some((message: ChatMessage) => message.content === "First done." && message.status === "done"));
+  assert.equal(storage.current.messages.some((message: ChatMessage) => message.metadata?.turnQueued || message.metadata?.queuedBehind), false, "nothing is left queued");
+});
+
+test("a queued Claude message the CLI starts on its own step (the one before ended) counts from then", async () => {
+  const participant = chatParticipant("claude-code");
+  const conversation = chatConversation([participant]);
+  const runs: any[] = [];
+  let releaseFirst!: () => void;
+  const firstBlocked = new Promise<void>((resolve) => { releaseFirst = resolve; });
+  let releaseSecond!: () => void;
+  const secondBlocked = new Promise<void>((resolve) => { releaseSecond = resolve; });
+  const { service, storage, tempRoot } = testService({
+    conversation,
+    run: async (runParticipant, _prompt, _repoPath, _diffMode, _kind, _signal, runOptions: any) => {
+      runOptions?.warm?.onMessageWritten?.();
+      runs.push(runOptions);
+      if (runs.length === 1) {
+        await firstBlocked;
+        return { participant: runParticipant, ok: true, content: "First done.", durationMs: 1 };
+      }
+      await secondBlocked;
+      return { participant: runParticipant, ok: true, content: "Second done.", durationMs: 1 };
+    }
+  });
+  (service as any).ensureHistoryFiles = async () => tempRoot;
+  await service.sendMessage({ conversationId: conversation.id, runId: "own-first", content: `@${participant.handle} first` });
+  await waitFor(() => runs.length === 1);
+  await service.sendMessage({ conversationId: conversation.id, runId: "own-second", content: `@${participant.handle} second` });
+  await waitFor(() => runs.length === 2);
+  const secondId = runs[1].warm.origin.messageId;
+  releaseFirst();
+  await waitFor(() => storage.current.messages.some((message: ChatMessage) => message.content === "First done." && message.status === "done"));
+  const before = Date.now();
+  runs[1].warm.onReplyStarted();
+  await waitFor(() => storage.current.messages.find((message: ChatMessage) => message.id === secondId)?.metadata?.turnQueued === undefined);
+  const started = storage.current.messages.find((message: ChatMessage) => message.id === secondId)!;
+  assert.ok(Date.parse(started.metadata?.turnStartedAt ?? "") >= before - 5, "its own turn starts when the CLI starts it");
+  releaseSecond();
+  await waitFor(() => storage.current.messages.some((message: ChatMessage) => message.id === secondId && message.status === "done"));
 });
 
 test("only the User's own messages reach a busy Claude member at once; a member request, a resume or a goal waits", () => {
@@ -2932,6 +3122,40 @@ test("a reply the Claude CLI starts on its own after background work becomes a n
   assert.equal(done.content, "The soak passed.");
   assert.ok(done.metadata.activityEvents?.some((event: { label: string }) => /Background task finished: soak/.test(event.label)));
   await waitFor(() => !(storage.current.metadata.activeRunIds ?? []).includes(pending.metadata.runId));
+});
+
+test("a reply the Claude CLI started on its own that her next message joins keeps its steps open with no Worked for of its own", async () => {
+  const participant = chatParticipant("claude-code");
+  const conversation = chatConversation([participant]);
+  let warmOptions: any;
+  const { service, storage, tempRoot } = testService({
+    conversation,
+    run: async (runParticipant, _prompt, _repoPath, _diffMode, _kind, _signal, runOptions: any) => {
+      warmOptions = runOptions.warm;
+      return { participant: runParticipant, ok: true, content: "Started.", durationMs: 1 };
+    }
+  });
+  (service as any).ensureHistoryFiles = async () => tempRoot;
+  await service.sendMessage({ conversationId: conversation.id, runId: "send-self-join", content: `@${participant.handle} start` });
+  await waitFor(() => Boolean(warmOptions) && storage.current.messages.some((message: ChatMessage) => message.content === "Started."));
+  let finish!: (result: unknown) => void;
+  warmOptions.onSelfResumedTurn({
+    origin: warmOptions.origin,
+    attach: (handlers: any) => {
+      handlers.onOutput?.({ kind: "tool", text: "Running tests", activityKind: "command", activityStatus: "started", activityItemId: "tool-1" });
+      return new Promise((resolve) => { finish = resolve; });
+    }
+  });
+  await waitFor(() => storage.current.messages.some((message: ChatMessage) =>
+    message.role === "participant" && message.status === "pending"));
+  const pending = storage.current.messages.find((message: ChatMessage) =>
+    message.role === "participant" && message.status === "pending");
+  finish({ participant, ok: true, content: "", durationMs: 1, turnContinues: true });
+  await waitFor(() => storage.current.messages.some((message: ChatMessage) => message.id === pending.id && message.status === "done"));
+  const done = storage.current.messages.find((message: ChatMessage) => message.id === pending.id);
+  assert.equal(done.metadata.turnContinues, true);
+  assert.equal(done.metadata.workedMs, undefined, "the clock goes on in the part her message joined");
+  assert.ok(done.metadata.activityEvents?.some((event: { label: string }) => event.label === "Running tests"));
 });
 
 test("Stop on a reply the Claude CLI started on its own interrupts it", async () => {
