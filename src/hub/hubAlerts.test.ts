@@ -915,6 +915,17 @@ test("in a chat shown in the sessions view Telegram and the call name a member b
         status: "running", createdAt: now, updatedAt: now }] } }
   } as unknown as ChatMessage;
   assert.equal((await h.call(h.owner, "POST", "/v3/ops", { ops: [{ opId: `op-${randomBytes(4).toString("hex")}`, kind: "message.create", conversationId: "chat-1", message: task }] })).status, 200);
+  // The member then asks the main session several times: its own requests
+  // never hide the task it was given.
+  for (let index = 0; index < 6; index += 1) {
+    const asked = new Date(Date.now() + index + 1).toISOString();
+    const question = {
+      id: `q-${index}`, role: "participant", participantId: member.id, participantLabel: "@taylor", content: `@main question ${index}`, status: "done", createdAt: asked,
+      metadata: { participantRequest: { id: `bq-${index}`, requesterParticipantId: member.id, requesterHandle: "taylor", source: "mcp", resumeRequester: true, status: "running", depth: 1,
+        createdAt: asked, updatedAt: asked, items: [{ targetParticipantId: main.id, targetHandle: "main", prompt: `Question ${index}?`, status: "running", createdAt: asked, updatedAt: asked }] } }
+    } as unknown as ChatMessage;
+    assert.equal((await h.call(h.owner, "POST", "/v3/ops", { ops: [{ opId: `op-${randomBytes(4).toString("hex")}`, kind: "message.create", conversationId: "chat-1", message: question }] })).status, 200);
+  }
   await connectTelegram(h);
 
   const byMember = await raise(h, h.owner, "Production deploy failed.");

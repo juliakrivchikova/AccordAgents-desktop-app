@@ -166,7 +166,7 @@ export function ChatMemberSessionPanel(props: {
               key={message.id}
               {...itemProps}
               presentation="sessions"
-              authorMark={mainSession ? <ChatProviderMark member={mainSession} /> : undefined}
+              authorMark={mainSession ? mainSessionMark(mainSession) : undefined}
               onOpenThread={undefined}
             />
           );
@@ -195,6 +195,20 @@ export function ChatMemberSessionPanel(props: {
       )}
     </section>
   );
+}
+
+/** The main session's logo in a member's session, one element per provider
+ *  (and host), so the memoized rows of its answers are not drawn again on
+ *  every update of the panel. */
+const mainSessionMarks = new Map<string, JSX.Element>();
+function mainSessionMark(member: Pick<ChatParticipant, "kind" | "hostLabel">): JSX.Element {
+  const key = `${member.kind}\u0000${member.hostLabel ?? ""}`;
+  let mark = mainSessionMarks.get(key);
+  if (!mark) {
+    mark = <ChatProviderMark member={{ kind: member.kind, ...(member.hostLabel ? { hostLabel: member.hostLabel } : {}) }} />;
+    mainSessionMarks.set(key, mark);
+  }
+  return mark;
 }
 
 /** The task a request message gives this member, unless the member asked it. */

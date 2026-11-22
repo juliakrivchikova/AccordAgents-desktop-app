@@ -592,16 +592,18 @@ export class StorageService {
     };
   }
 
-  /** The chat's newest messages that give a member a task (its request
-   *  messages), read without the rest of the chat: how the sessions view
-   *  titles that member (sessionsMemberTitle). */
+  /** The chat's newest messages that give a member a task (a request item
+   *  naming it as its target; not the requests it sent itself), read without
+   *  the rest of the chat: how the sessions view titles that member
+   *  (sessionsMemberTitle). */
   async memberTaskMessages(conversationId: string, participantId: string, limit = 5): Promise<ChatMessage[]> {
     await this.init();
+    const target = `${JSON.stringify("targetParticipantId")}:${JSON.stringify(participantId)}`;
     const rows = await this.queryJson<{ payloadJson: string }>(
       `select payload_json as payloadJson from conversation_messages
        where conversation_id = ${sqlString(conversationId)}
          and instr(payload_json, '"participantRequest"') > 0
-         and instr(payload_json, ${sqlString(participantId)}) > 0
+         and instr(payload_json, ${sqlString(target)}) > 0
        order by sequence desc limit ${Math.max(1, Math.floor(limit))};`
     );
     return rows.flatMap((row) => {

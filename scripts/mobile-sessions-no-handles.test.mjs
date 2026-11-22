@@ -141,7 +141,8 @@ test("a sessions-view chat names nobody by handle on the phone (failed replies, 
   // No avatars in the sessions view: its rows show their member's provider logo.
   const marks = await app.evaluate(`[...document.querySelectorAll("#activity-list .act-row[data-card-id]")].map((row) => ({ card: row.dataset.cardId,
     glyph: row.querySelector(".act-avatar-glyph .provider-logo")?.dataset.providerKind ?? "", avatar: Boolean(row.querySelector(".mobile-chat-avatar")) }))`);
-  for (const mark of marks.filter((item) => item.card !== "card-classic")) assert.deepEqual({ glyph: Boolean(mark.glyph), avatar: mark.avatar }, { glyph: true, avatar: false }, mark.card);
+  const kinds = { "card-main": MAIN.kind, "card-cmd": MAIN.kind, "card-drew": DREW.kind };
+  for (const mark of marks.filter((item) => item.card !== "card-classic")) assert.deepEqual({ glyph: mark.glyph, avatar: mark.avatar }, { glyph: kinds[mark.card], avatar: false }, mark.card);
   assert.equal(marks.find((item) => item.card === "card-classic")?.avatar, true, "a classic chat's row keeps its avatar");
   const classicRow = rows.find((row) => row.card === "card-classic");
   assert.ok(classicRow, "the classic chat's card is listed");
