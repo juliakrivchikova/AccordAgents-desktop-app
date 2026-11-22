@@ -2800,6 +2800,14 @@ button.mobile-chat-group-title:active {
   font: 400 14px var(--sans);
 }
 
+/* What a CLI's modes cannot do here (Antigravity cannot ask), under them. */
+.new-chat-access-note {
+  margin: 0;
+  padding: 4px 12px 8px;
+  color: var(--mut);
+  font: 400 12.5px var(--sans);
+}
+
 /* --- New chat ------------------------------------------------------------- */
 
 /* A screen of its own over the chats list and its bottom bar, as the

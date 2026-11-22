@@ -15,6 +15,7 @@ import {
   ClaudeModelListTimeoutError,
   CliAgentRunner,
   CodexAppServerRunError,
+  claudeAppliedSettings,
   parseClaudeInitializeModels,
   parseClaudeModelPickerOutput,
   probeClaudeModelsInFolder,
@@ -22,11 +23,13 @@ import {
   resolveCodexCompactTimeoutMs,
   runClaudeModelListProbe,
   runClaudeModelProbeInPty,
+  withCliStartModel,
   runClaudeModelProbeWithExpect
 } from "./cliAgents";
 import { CommandError, ensureLoginShellEnvPrimed } from "./command";
 import type { CodexServerRequestDelivery } from "./codexApprovals";
 import { buildCodexExecInvocation, CODEX_APP_SERVER_MCP_TOKEN_ENV } from "./codexExec";
+import { isCodexCollaborationModeRefusal } from "./cliAgents";
 import type { ParticipantRunResult } from "./providers";
 import { defaultChatAgentPermissions } from "../../shared/agentPermissions";
 import { APP_TOOL_PERMISSION_WAIT_MS } from "../../shared/appMcpToolContracts";
@@ -674,10 +677,79 @@ test("Claude model list asks the CLI with one initialize request and no prompt, 
   assert.equal(launch?.options.detached, process.platform !== "win32");
   assert.equal(launch?.options.env.CLAUDE_CODE_SKIP_PROMPT_HISTORY, "1");
   assert.equal("CLAUDE_CODE_FORCE_SESSION_PERSISTENCE" in launch!.options.env, false);
-  assert.equal(written.length, 1);
+  // The models first, then the settings it applies (its model, effort).
+  assert.equal(written.length, 2);
   assert.deepEqual(JSON.parse(written[0]).request, { subtype: "initialize" });
+  assert.deepEqual(JSON.parse(written[1]).request, { subtype: "get_settings" });
   await wait(5);
   assert.equal(stdinEnded, true);
+});
+
+test("Claude model list carries the settings Claude Code says it applies, and goes without them when it does not answer", async () => {
+  const child = fakeClaudeChild();
+  child.stdin.on("data", (chunk) => {
+    const request = JSON.parse(String(chunk));
+    const response = request.request.subtype === "initialize"
+      ? { models: CLAUDE_INITIALIZE_MODELS, current_permission_mode: "acceptEdits" }
+      : { effective: { model: "sonnet" }, applied: { model: "claude-sonnet-5-5", effort: "low" } };
+    queueMicrotask(() => child.stdout.write(`${JSON.stringify({ type: "control_response", response: { subtype: "success", request_id: request.request_id, response } })}\n`));
+  });
+  const answer = await runClaudeModelListProbe({ executable: "/tmp/claude-stub", env: {}, cwd: "/tmp", timeoutMs: 1_000, spawnClaude: (() => child) as any });
+  assert.equal(answer.current_permission_mode, "acceptEdits");
+  assert.deepEqual(claudeAppliedSettings(answer.appliedSettings), { model: "claude-sonnet-5-5", effort: "low" });
+
+  // An older Claude Code that never answers get_settings: the model list alone.
+  const older = fakeClaudeChild();
+  older.stdin.on("data", (chunk) => {
+    const request = JSON.parse(String(chunk));
+    if (request.request.subtype !== "initialize") return;
+    queueMicrotask(() => older.stdout.write(`${JSON.stringify({ type: "control_response", response: { subtype: "success", request_id: request.request_id, response: { models: CLAUDE_INITIALIZE_MODELS } } })}\n`));
+  });
+  const alone = await runClaudeModelListProbe({ executable: "/tmp/claude-stub", env: {}, cwd: "/tmp", timeoutMs: 1_000, settingsTimeoutMs: 20, spawnClaude: (() => older) as any });
+  assert.deepEqual(alone.models, CLAUDE_INITIALIZE_MODELS);
+  assert.equal("appliedSettings" in alone, false);
+
+  // One that refuses it, or exits after the list: the list alone too.
+  const refusing = fakeClaudeChild();
+  refusing.stdin.on("data", (chunk) => {
+    const request = JSON.parse(String(chunk));
+    const line = request.request.subtype === "initialize"
+      ? { type: "control_response", response: { subtype: "success", request_id: request.request_id, response: { models: CLAUDE_INITIALIZE_MODELS } } }
+      : { type: "control_response", response: { subtype: "error", request_id: request.request_id, error: "Unknown request" } };
+    queueMicrotask(() => refusing.stdout.write(`${JSON.stringify(line)}\n`));
+  });
+  const refused = await runClaudeModelListProbe({ executable: "/tmp/claude-stub", env: {}, cwd: "/tmp", timeoutMs: 1_000, spawnClaude: (() => refusing) as any });
+  assert.deepEqual(refused.models, CLAUDE_INITIALIZE_MODELS);
+  assert.equal("appliedSettings" in refused, false);
+  const exiting = fakeClaudeChild();
+  exiting.stdin.on("data", (chunk) => {
+    const request = JSON.parse(String(chunk));
+    if (request.request.subtype !== "initialize") return;
+    queueMicrotask(() => {
+      exiting.stdout.write(`${JSON.stringify({ type: "control_response", response: { subtype: "success", request_id: request.request_id, response: { models: CLAUDE_INITIALIZE_MODELS } } })}\n`);
+      setTimeout(() => { exiting.exitCode = 0; exiting.emit("close", 0); }, 5);
+    });
+  });
+  const exited = await runClaudeModelListProbe({ executable: "/tmp/claude-stub", env: {}, cwd: "/tmp", timeoutMs: 1_000, spawnClaude: (() => exiting) as any });
+  assert.deepEqual(exited.models, CLAUDE_INITIALIZE_MODELS);
+});
+
+test("a member without a model runs the one the User's config names: the list marks it, listed or not", () => {
+  // Claude Code: her settings' model "sonnet" applies claude-sonnet-5-5.
+  const sonnet = parseClaudeInitializeModels(CLAUDE_INITIALIZE_MODELS, "claude-sonnet-5-5");
+  assert.deepEqual(sonnet.filter((model) => model.recommended).map((model) => model.id), ["sonnet"]);
+  // Nothing in her settings: the account's default, as before.
+  assert.deepEqual(parseClaudeInitializeModels(CLAUDE_INITIALIZE_MODELS, "claude-opus-5-5").filter((model) => model.recommended).map((model) => model.id), ["opus"]);
+  // A model the list does not have is put first by its id.
+  const custom = parseClaudeInitializeModels(CLAUDE_INITIALIZE_MODELS, "claude-custom-1");
+  assert.deepEqual([custom[0]?.id, custom[0]?.recommended, custom.filter((model) => model.recommended).length], ["claude-custom-1", true, 1]);
+  // Codex: model/list marks GPT-6-Luna default while config.toml runs gpt-5.6-luna.
+  const codex = withCliStartModel([
+    { id: "gpt-6-luna", label: "GPT-6-Luna (gpt-6-luna)", source: "cli", recommended: true },
+    { id: "gpt-5.6-luna", label: "GPT-5.6-Luna (gpt-5.6-luna)", source: "cli", recommended: false }
+  ], "gpt-5.6-luna");
+  assert.deepEqual(codex.map((model) => [model.id, model.recommended]), [["gpt-6-luna", false], ["gpt-5.6-luna", true]]);
+  assert.deepEqual(withCliStartModel(codex, undefined), codex, "no model in her config: the list as the CLI marked it");
 });
 
 test("Claude model list lets the CLI exit by itself, then stops it and its children", async () => {
@@ -2345,7 +2417,7 @@ test("claude warm permits empty result only when explicitly allowed", () => {
 });
 
 function chatOptions(overrides: {
-  agentMode: "default" | "plan" | "auto";
+  agentMode: "default" | "plan" | "auto" | "full-access";
   workspaceWrite: boolean;
   webAccess?: boolean;
   shell?: ReturnType<typeof defaultChatAgentPermissions>["shell"];
@@ -3038,6 +3110,8 @@ readline.createInterface({ input: process.stdin }).on("line", (line) => {
   } else if (message.id === "current-time") {
     if (typeof message.result?.currentTimeAt !== "number") process.exit(62);
     send({ id: initializeId, result: { userAgent: "fake-codex", platformFamily: "unix", platformOsName: "macos", platformArch: "arm64" } });
+  } else if (message.method === "config/read") {
+    send({ id: message.id, error: { code: -32601, message: "method not found" } });
   } else if (message.method === "model/list") {
     modelListId = message.id;
     send({ id: "token-refresh", method: "account/chatgptAuthTokens/refresh", params: { reason: "unauthorized", previousAccountId: null } });
@@ -3055,11 +3129,64 @@ readline.createInterface({ input: process.stdin }).on("line", (line) => {
     const catalog = await runner.listModelCatalog("codex-cli");
     assert.equal(catalog.authoritative, true, catalog.error);
     assert.equal(catalog.models[0]?.id, "gpt-fixture");
+    // A Codex that cannot say its config: the list as it marked it, no start defaults.
+    assert.equal(catalog.startDefaults, undefined);
+    assert.equal(catalog.models[0]?.recommended, true);
   } finally {
     await runner.shutdownWarmAgents();
     process.chdir(originalCwd);
     await rm(fixtureDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
   }
+});
+
+test("Codex model catalog names the model, effort and mode the User's config.toml starts Codex in", async () => {
+  const fixtureDir = await mkdtemp(path.join(tmpdir(), "accord-codex-start-defaults-"));
+  const originalCwd = process.cwd();
+  const codexPath = await writeCodexAppServerFixture(fixtureDir, `#!/usr/bin/env node
+const readline = require("node:readline");
+const send = (value) => process.stdout.write(JSON.stringify(value) + "\\n");
+readline.createInterface({ input: process.stdin }).on("line", (line) => {
+  const message = JSON.parse(line);
+  if (message.method === "initialize") {
+    send({ id: message.id, result: { userAgent: "fake-codex" } });
+  } else if (message.method === "model/list") {
+    send({ id: message.id, result: { data: [
+      { id: "gpt-6-luna", displayName: "GPT-6-Luna", isDefault: true, defaultReasoningEffort: "medium" },
+      { id: "gpt-5.6-luna", displayName: "GPT-5.6-Luna", isDefault: false, defaultReasoningEffort: "medium" }
+    ], nextCursor: null } });
+  } else if (message.method === "config/read") {
+    send({ id: message.id, result: { config: { model: "gpt-5.6-luna", model_reasoning_effort: "low", approvals_reviewer: "auto_review", approval_policy: null, sandbox_mode: null } } });
+  }
+});
+`);
+  process.chdir(fixtureDir);
+  const runner = new CliAgentRunner(undefined, undefined, codexPath);
+  try {
+    const catalog = await runner.listModelCatalog("codex-cli");
+    assert.equal(catalog.authoritative, true, catalog.error);
+    assert.deepEqual(catalog.models.filter((model) => model.recommended).map((model) => model.id), ["gpt-5.6-luna"]);
+    assert.deepEqual(catalog.startDefaults, { access: "auto-review", model: "gpt-5.6-luna", modelLabel: "GPT-5.6-Luna", reasoningEffort: "low" });
+  } finally {
+    await runner.shutdownWarmAgents();
+    process.chdir(originalCwd);
+    await rm(fixtureDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
+  }
+});
+
+test("Claude Code's catalog names the model, effort and mode her settings start it in", async () => {
+  const runner = makeRunner() as any;
+  runner.requestClaudeInitializeAnswer = async () => ({
+    models: CLAUDE_INITIALIZE_MODELS,
+    current_permission_mode: "acceptEdits",
+    appliedSettings: { applied: { model: "claude-sonnet-5-5", effort: "xhigh" } }
+  });
+  const catalog = await runner.listClaudeModelCatalog("2026-11-22T00:00:00.000Z");
+  assert.deepEqual(catalog.models.filter((model: { recommended?: boolean }) => model.recommended).map((model: { id: string }) => model.id), ["sonnet"]);
+  assert.deepEqual(catalog.startDefaults, { access: "acceptEdits", model: "sonnet", modelLabel: "Sonnet 5.5", reasoningEffort: "xhigh" });
+  // Bypass Permissions is not a mode the composer offers: no start mode then.
+  runner.requestClaudeInitializeAnswer = async () => ({ models: CLAUDE_INITIALIZE_MODELS, current_permission_mode: "bypassPermissions" });
+  const bypass = await runner.listClaudeModelCatalog("2026-11-22T00:00:00.000Z");
+  assert.equal(bypass.startDefaults?.access, undefined);
 });
 
 test("every non-interactive Codex exec path explicitly disables approvals", () => {
@@ -7033,7 +7160,7 @@ test("a host admission completing after shutdown cannot start its earlier comman
 // The sessions view's access in each CLI's own terms (src/shared/chatAccessModes.ts):
 // the CLI runs in that mode and asks about what it is not granted, as in its
 // own terminal, each ask an approval card.
-function ownModeOptions(agentMode: "default" | "plan" | "auto", workspaceWrite: boolean, shell?: ReturnType<typeof defaultChatAgentPermissions>["shell"]) {
+function ownModeOptions(agentMode: "default" | "plan" | "auto" | "full-access", workspaceWrite: boolean, shell?: ReturnType<typeof defaultChatAgentPermissions>["shell"]) {
   const options = chatOptions({ agentMode, workspaceWrite, shell, canRequestPermissions: true, appToolNames: ["app_permissions_request_change", "app_tool_permission"] });
   return { ...options, permissions: { ...options.permissions, cliApprovals: true as const } };
 }
@@ -7071,22 +7198,96 @@ test("Claude Code Plan mode and Auto mode are the CLI's own; the classic control
   assert.ok(["Edit", "Bash", "WebFetch"].every((tool) => classic.disallowedTools.includes(tool)), "classic: unchanged");
 });
 
-test("Codex Read only and Default (sessions view) ask through approval cards (on-request); Plan mode and the classic controls never ask", () => {
+test("Codex Ask for approval and Read Only (sessions view) ask the User through approval cards (on-request, reviewer the User); Approve for me lets Codex review; Full Access never asks; the classic controls never ask", () => {
   const runner = makeRunner() as any;
   const participant = { kind: "codex-cli", label: "@codex", model: undefined };
   const readOnly = runner.codexAppServerThreadStartParams(participant, "/repo", "chat", ownModeOptions("default", false));
   assert.equal(readOnly.sandbox, "read-only");
   assert.equal(readOnly.approvalPolicy, "on-request", "Codex's Read Only preset: approval to edit or go online");
-  assert.equal(readOnly.approvalsReviewer, null, "the User answers, not Codex");
+  assert.equal(readOnly.approvalsReviewer, "user", "the User answers, even when her Codex config routes asks to auto-review");
   const workspace = runner.codexAppServerThreadResumeParams("thread-1", participant, "/repo", "chat", ownModeOptions("default", true));
   assert.equal(workspace.sandbox, "workspace-write");
-  assert.equal(workspace.approvalPolicy, "on-request", "Codex's Default preset, on resume too");
+  assert.equal(workspace.approvalPolicy, "on-request", "Codex's Ask for approval preset, on resume too");
+  assert.equal(workspace.approvalsReviewer, "user");
   const auto = runner.codexAppServerThreadStartParams(participant, "/repo", "chat", ownModeOptions("auto", false));
   assert.equal(auto.approvalPolicy, "on-request");
-  assert.equal(auto.approvalsReviewer, "auto_review");
-  const plan = runner.codexAppServerThreadStartParams(participant, "/repo", "chat", ownModeOptions("plan", true));
-  assert.equal(plan.sandbox, "read-only");
-  assert.equal(plan.approvalPolicy, "never");
+  assert.equal(auto.approvalsReviewer, "auto_review", "Approve for me");
+  assert.equal(auto.sandbox, "workspace-write");
+  const full = runner.codexAppServerThreadStartParams(participant, "/repo", "chat", ownModeOptions("full-access", false));
+  assert.equal(full.sandbox, "danger-full-access", "Codex's Full Access preset");
+  assert.equal(full.approvalPolicy, "never");
+  assert.equal(full.approvalsReviewer, null);
+  assert.equal(runner.codexAppServerThreadResumeParams("thread-1", participant, "/repo", "chat", ownModeOptions("full-access", false)).sandbox, "danger-full-access", "on resume too");
+  // A member saved in Plan before Plan was its own toggle: Read Only, asking.
+  const legacyPlan = runner.codexAppServerThreadStartParams(participant, "/repo", "chat", ownModeOptions("plan", true));
+  assert.equal(legacyPlan.sandbox, "read-only");
+  assert.equal(legacyPlan.approvalPolicy, "on-request");
   const classic = runner.codexAppServerThreadStartParams(participant, "/repo", "chat", chatOptions({ agentMode: "default", workspaceWrite: true }));
   assert.equal(classic.approvalPolicy, "never", "classic: unchanged");
+  assert.equal(classic.approvalsReviewer, null, "classic: unchanged");
+  const classicPlan = runner.codexAppServerThreadStartParams(participant, "/repo", "chat", chatOptions({ agentMode: "plan", workspaceWrite: true }));
+  assert.deepEqual([classicPlan.sandbox, classicPlan.approvalPolicy], ["read-only", "never"], "the classic Plan: unchanged");
+});
+
+test("Codex's Plan mode is its collaboration mode, said on every turn (a thread keeps the last one), with the thread's model; off, its Default mode with the member's effort", () => {
+  const runner = makeRunner() as any;
+  const participant = { kind: "codex-cli", label: "@codex", model: undefined, reasoningEffort: "high" };
+  const planned = { ...ownModeOptions("default", true), permissions: { ...ownModeOptions("default", true).permissions, codexPlanMode: true as const } };
+  assert.deepEqual(runner.codexCollaborationMode(participant, "chat", planned, "gpt-6-luna"),
+    { mode: "plan", settings: { model: "gpt-6-luna", reasoning_effort: null, developer_instructions: null } }, "Codex's own effort for Plan mode");
+  assert.equal(runner.codexAppServerThreadStartParams(participant, "/repo", "chat", planned).sandbox, "workspace-write", "the preset stays under Plan mode");
+  assert.deepEqual(runner.codexCollaborationMode(participant, "chat", ownModeOptions("default", true), "gpt-6-luna"),
+    { mode: "default", settings: { model: "gpt-6-luna", reasoning_effort: "high", developer_instructions: null } }, "off: Default, turning a thread's Plan off");
+  // No effort of its own: the thread's, which Codex took from her
+  // config.toml (thread/start's reasoningEffort): her terminal's "low", never
+  // reset by a null to the model's own.
+  const noEffort = { ...participant, reasoningEffort: undefined };
+  assert.equal(runner.codexCollaborationMode(noEffort, "chat", ownModeOptions("default", true), "gpt-5.6-luna", "low").settings.reasoning_effort, "low");
+  assert.equal(runner.codexCollaborationMode(noEffort, "chat", planned, "gpt-5.6-luna", "low").settings.reasoning_effort, null, "Plan mode: Codex's own effort for it");
+  assert.equal(runner.codexCollaborationMode(participant, "chat", ownModeOptions("default", true), "gpt-5.6-luna", "low").settings.reasoning_effort, "high", "the member's own wins");
+  // Her config's effort, as Codex said it with its list, also when the
+  // thread came back from a turn in Plan mode without one.
+  runner.modelCatalogs.set("codex-cli", { catalog: { kind: "codex-cli", models: [], authoritative: true, fetchedAt: "t", startDefaults: { reasoningEffort: "low" } }, expiresAt: Date.now() + 60_000 });
+  assert.equal(runner.codexCollaborationMode(noEffort, "chat", ownModeOptions("default", true), "gpt-5.6-luna", undefined).settings.reasoning_effort, "low");
+  // A model of the member's own, or an added provider: the thread's effort
+  // (Codex's own choice for it), never her config's.
+  assert.equal(runner.codexCollaborationMode({ ...noEffort, model: "gpt-6-luna" }, "chat", ownModeOptions("default", true), "gpt-6-luna", "medium").settings.reasoning_effort, "medium");
+  assert.equal(runner.codexCollaborationMode({ ...noEffort, codexConfigOverrides: ['model_provider="accordagents_host"'] }, "chat", ownModeOptions("default", true), "glm-5.3", undefined).settings.reasoning_effort, null);
+  runner.modelCatalogs.delete("codex-cli");
+  assert.equal(runner.codexCollaborationMode({ ...participant, model: "gpt-5.6-terra" }, "chat", planned, "gpt-6-luna").settings.model, "gpt-5.6-terra", "the member's own model");
+  assert.equal(runner.codexCollaborationMode(participant, "chat", planned, undefined), undefined, "no model known: nothing said");
+  assert.equal(runner.codexCollaborationMode(participant, "chat", ownModeOptions("plan", true), "m").mode, "plan", "a member saved in Plan from before");
+  assert.equal(runner.codexCollaborationMode(participant, "chat", chatOptions({ agentMode: "default", workspaceWrite: true }), "m").mode, "default", "classic: Default");
+  assert.equal(runner.codexCollaborationMode(participant, "code-review", planned, "m"), undefined, "chat turns only");
+});
+
+test("Codex's Full Access is not a Claude Code or Antigravity mode: a Claude member given it launches exactly as in Auto", () => {
+  const runner = makeRunner() as any;
+  const full = ownModeOptions("full-access", false);
+  const auto = ownModeOptions("auto", false);
+  assert.equal(runner.claudeToolConfig("chat", "/repo", [], full).permissionMode, "auto");
+  assert.deepEqual(runner.claudePermissionPromptArgs("chat", full), runner.claudePermissionPromptArgs("chat", auto), "its asks still reach the app's cards");
+  assert.equal(runner.shouldPassClaudeAllowedTools("chat", full), runner.shouldPassClaudeAllowedTools("chat", auto));
+  const config = runner.claudeToolConfig("chat", "/repo", [], full);
+  assert.deepEqual(runner.claudeAutoAllowedAppMcpTools("chat", full, config), runner.claudeAutoAllowedAppMcpTools("chat", auto, runner.claudeToolConfig("chat", "/repo", [], auto)),
+    "its app tools are pre-approved as in Auto");
+});
+
+test("Codex's Full Access runs only as the User's menu sets it (the CLI's own mode); anywhere else no wider than Auto", () => {
+  const runner = makeRunner() as any;
+  const participant = { kind: "codex-cli", label: "@codex", model: undefined };
+  const classic = runner.codexAppServerThreadStartParams(participant, "/repo", "chat", chatOptions({ agentMode: "full-access", workspaceWrite: false }));
+  assert.notEqual(classic.sandbox, "danger-full-access", "never outside the sandbox without her menu's choice");
+  assert.equal(classic.sandbox, "workspace-write");
+  const exec = buildCodexExecInvocation({ participant: participant as any, prompt: "p", outputPath: "/tmp/o", repoPath: "/tmp/r", kind: "chat", options: { agentMode: "full-access", permissions: { ...defaultChatAgentPermissions(), cliApprovals: true } } });
+  assert.equal(exec.args[exec.args.indexOf("--sandbox") + 1], "danger-full-access", "codex exec: Full Access in its own mode");
+  const execClassic = buildCodexExecInvocation({ participant: participant as any, prompt: "p", outputPath: "/tmp/o", repoPath: "/tmp/r", kind: "chat", options: { agentMode: "full-access", permissions: defaultChatAgentPermissions() } });
+  assert.notEqual(execClassic.args[execClassic.args.indexOf("--sandbox") + 1], "danger-full-access", "codex exec: not without it");
+});
+
+test("a Codex that refuses the collaboration mode is told apart from other errors", () => {
+  assert.equal(isCodexCollaborationModeRefusal("Invalid params: unknown field `collaborationMode`"), true);
+  assert.equal(isCodexCollaborationModeRefusal("collaboration_mode is experimental and requires experimentalApi"), true);
+  assert.equal(isCodexCollaborationModeRefusal("turn not found"), false);
+  assert.equal(isCodexCollaborationModeRefusal("invalid model gpt-x"), false);
 });

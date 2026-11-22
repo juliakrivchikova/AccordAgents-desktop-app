@@ -55,10 +55,11 @@ export function ChatMemberSessionPanel(props: {
   messages: readonly ChatMessage[];
   messageProps: (message: ChatMessage) => ChatMessageItemProps;
   appSettings: AppSettings;
-  /** Its settings control (a gear opening its model, effort, mode, rights,
-   *  where it runs, remove). */
+  /** Its … actions menu in the header (Restart, Fork to new chat, Remove
+   *  from chat). */
   settings?: ReactNode;
-  /** Its model chip in the composer (opens the same settings). */
+  /** Its controls under the composer (model, effort, permission mode,
+   *  Codex's Plan mode, where it runs). */
   chip?: ReactNode;
   conversationId: string;
   repoPath?: string;

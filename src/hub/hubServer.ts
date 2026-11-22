@@ -1016,7 +1016,7 @@ function validMemberRules(value: unknown): HubMemberRules {
       handle: entry.handle as string,
       roleConfigId: entry.roleConfigId as string,
       ...(entry.homeMachineId !== undefined ? { homeMachineId: entry.homeMachineId as string } : {}),
-      ...(entry.agentMode === "auto" || entry.agentMode === "plan" || entry.agentMode === "default" ? { agentMode: entry.agentMode } : {}),
+      ...(entry.agentMode === "auto" || entry.agentMode === "plan" || entry.agentMode === "default" || entry.agentMode === "full-access" ? { agentMode: entry.agentMode } : {}),
       ...(entry.permissions !== undefined ? { permissions: entry.permissions as unknown as NonNullable<HubMemberRules["presets"][string]["permissions"]> } : {})
     };
   }

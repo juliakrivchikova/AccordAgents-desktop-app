@@ -1,4 +1,5 @@
 import { cloudRunSelection, type CloudRunPreparationProgress, type CloudRunSelection } from "../../shared/cloudRunPreparation";
+import type { CliStartDefaultsByKind } from "../../shared/cliStartDefaults";
 import {
   forkCutFor, forkedChatTitle, forkedMainSessionPermissions, forkOriginFor, forkToNewChatLocalProviders, forkToNewChatReasonInChat, isForkableSessionKind,
   lastMemberTurnEnd, memberAsItRunsNow, memberHasFinishedReply, type ForkToNewChatMachineSupport, type ForkToNewChatOffer
@@ -255,7 +256,9 @@ import {
   normalizeChatRoleManagementPermission,
   normalizeOptionalChatParticipantRequestPermission,
   chatParticipantRequestPermissionExceeds,
-  resolveChatManageRolesParticipantsPermission
+  resolveChatManageRolesParticipantsPermission,
+  chatAgentModeFromAgent,
+  chatAgentModeForKind
 } from "../../shared/agentPermissions";
 import { normalizeAgentContextUsage } from "../../shared/agentContext";
 import { nativeGoalObjective, parseNativeGoalCommand } from "../../shared/nativeGoalCommand";
@@ -1343,6 +1346,8 @@ export class ChatService {
   /** Desktop side: whether a machine starts a main session from a copy of a
    *  member's session in another chat (Fork to new chat; its last hello). */
   private machineForkToNewChatSupport?: (machineId: string) => ForkToNewChatMachineSupport;
+  private machineCliModesSupport?: (machineId: string) => boolean;
+  private machineCliStartDefaults?: (machineId: string) => CliStartDefaultsByKind | undefined;
   /** Members moving (on the computer) or whose session this machine just
    *  handed over: their turns wait for it (memberMoveGate). */
   private readonly memberMoveGates = new Map<string, { done: Promise<void>; release: () => void }>();
@@ -1600,6 +1605,19 @@ export class ChatService {
   /** Desktop side: see machineForkToNewChatSupport. */
   setMachineForkToNewChatSupport(lookup: ((machineId: string) => ForkToNewChatMachineSupport) | undefined): void {
     this.machineForkToNewChatSupport = lookup;
+  }
+
+  /** What each CLI on a machine starts a new session in with that machine's
+   *  own config (its last hello): the phone's New chat starts a main session
+   *  that runs there in it. */
+  setMachineCliStartDefaults(lookup: ((machineId: string) => CliStartDefaultsByKind | undefined) | undefined): void {
+    this.machineCliStartDefaults = lookup;
+  }
+
+  /** Desktop side: whether a machine runs Codex's Full Access and Plan mode
+   *  (its last hello), for the phone's New chat offer. */
+  setMachineCliModesSupport(lookup: ((machineId: string) => boolean) | undefined): void {
+    this.machineCliModesSupport = lookup;
   }
 
   /** Desktop side: see beforeRemoteTurn and machineProjectReady. */
@@ -2206,8 +2224,21 @@ export class ChatService {
       members,
       ...(unavailable ? { unavailable } : {}),
       ...(assistantNote ? { assistantNote } : {}),
-      ...(fork ? { fork } : {})
+      ...(fork ? { fork } : {}),
+      // This computer runs Codex's Full Access and Plan mode; each machine as
+      // its program says.
+      cliModes: { machines: Object.fromEntries(machines.map((machine) => [machine.id, this.machineCliModesSupport?.(machine.id) === true])) },
+      // What each machine's CLIs start in with its own config (this
+      // computer's are with each provider): a main session the phone starts
+      // there starts in it.
+      ...this.newChatMachineStartDefaults(machines)
     };
+  }
+
+  private newChatMachineStartDefaults(machines: ReadonlyArray<{ id: string }>): Pick<HubNewChatOptions, "cliStart"> {
+    const known = machines.map((machine) => [machine.id, this.machineCliStartDefaults?.(machine.id)] as const)
+      .filter((entry): entry is readonly [string, CliStartDefaultsByKind] => Boolean(entry[1]));
+    return known.length > 0 ? { cliStart: { machines: Object.fromEntries(known) } } : {};
   }
 
   /**
@@ -2239,12 +2270,19 @@ export class ChatService {
     // it last had (none yet: its default model only), and a list that is
     // due is read in the background; one that changed publishes the offer
     // again (onNewChatOffersChanged).
-    return options.map((option) => newChatProviderOffer({
-      ...option,
-      vendorDefaultModelLabel: option.hostVendor ? cliProviderHostDefaultModelLabel({ vendor: option.hostVendor }) : undefined,
-      catalog: this.cachedMainSessionModelCatalog(option, settings),
-      providerEfforts: reasoningEffortOptionsForProvider(option.kind)
-    }));
+    return options.map((option) => {
+      const catalog = this.cachedMainSessionModelCatalog(option, settings);
+      // An added provider runs its CLI with the User's own config too: the
+      // mode that CLI starts in is the one its own list says.
+      const start = option.hostId ? this.cachedMainSessionModelCatalog({ kind: option.kind, label: option.label }, settings)?.startDefaults : catalog?.startDefaults;
+      return newChatProviderOffer({
+        ...option,
+        vendorDefaultModelLabel: option.hostVendor ? cliProviderHostDefaultModelLabel({ vendor: option.hostVendor }) : undefined,
+        catalog,
+        providerEfforts: reasoningEffortOptionsForProvider(option.kind),
+        ...(start ? { start } : {})
+      });
+    });
   }
 
   /** Told when a provider's model list read in the background changed what
@@ -2263,7 +2301,9 @@ export class ChatService {
       ? now - entry.failedAt >= MAIN_SESSION_CATALOG_RETRY_MS
       : now - entry.readAt >= MAIN_SESSION_CATALOG_FRESH_MS;
     if (due && !entry.reading) {
-      const before = JSON.stringify(entry.catalog?.models ?? null);
+      // What the phone is told of it: its models and its start defaults.
+      const offered = (catalog: ProviderModelCatalog | undefined): string => JSON.stringify([catalog?.models ?? null, catalog?.startDefaults ?? null]);
+      const before = offered(entry.catalog);
       entry.reading = this.mainSessionModelCatalog(option, settings)
         .catch(() => undefined)
         .then((catalog) => {
@@ -2274,7 +2314,7 @@ export class ChatService {
           } else {
             entry.failedAt = Date.now();
           }
-          if (JSON.stringify(entry.catalog?.models ?? null) !== before) this.onNewChatOffersChanged?.();
+          if (offered(entry.catalog) !== before) this.onNewChatOffersChanged?.();
         })
         .finally(() => { entry.reading = undefined; });
     }
@@ -2772,7 +2812,7 @@ export class ChatService {
         reasoningEffort: Object.prototype.hasOwnProperty.call(request, "reasoningEffort")
           ? normalizeChatReasoningEffort(request.reasoningEffort, target.kind)
           : target.reasoningEffort,
-        agentMode: normalizeChatAgentMode(request.agentMode ?? target.agentMode),
+        agentMode: chatAgentModeForKind(target.kind, request.agentMode ?? target.agentMode),
         permissions: request.permissions !== undefined
           ? normalizeChatAgentPermissions(request.permissions)
           : target.permissions,
@@ -4596,7 +4636,8 @@ export class ChatService {
 
     const runPermissions = actor.runPermissions ? normalizeChatAgentPermissions(actor.runPermissions) : undefined;
     const prepared = this.preparePermissionChange(requester, this.normalizePermissionChangeRequest(rawRequest), runPermissions);
-    if (normalizeChatAgentMode(requester.agentMode) === "auto" && prepared.request.kind === "shellRules") {
+    const requesterMode = normalizeChatAgentMode(requester.agentMode);
+    if ((requesterMode === "auto" || requesterMode === "full-access") && prepared.request.kind === "shellRules") {
       // In Auto-review the provider's native auto classifier decides each shell command,
       // so an agent shellRules request needs no User approval and stored app rules are
       // not forwarded as a second hard gate.
@@ -5671,7 +5712,9 @@ export class ChatService {
    *  (it may always ask the main session, as far as the main session itself
    *  may ask), and managing members only when named. Clamped afterwards. */
   private delegationRequestedPermissions(given: Record<string, unknown> | undefined, ceiling: ChatAgentPermissions): ChatAgentPermissions {
-    const { manageRolesParticipants: _ownManage, ...inherited } = ceiling;
+    // Codex's Plan mode is the main session's own way of working, not a
+    // right: a member it makes starts without it.
+    const { manageRolesParticipants: _ownManage, codexPlanMode: _plan, ...inherited } = ceiling;
     const merged: Record<string, unknown> = { ...inherited, requestParticipants: "allow" };
     if (given) {
       for (const key of ["repoRead", "workspaceWrite", "webAccess"] as const) {
@@ -12428,10 +12471,10 @@ export class ChatService {
             "Permission MCP tool: `app_permissions_request_change` is available when Chat Assistant needs approval for web access or another explicitly user-requested non-default capability.",
             "Do not use permission requests for repository access, file editing, or shell commands by default. For code or repository tasks, first suggest adding a generic participant; proceed only if User explicitly asks Chat Assistant to handle it and enables the needed participant permissions."
           ]
-        : agentMode === "auto"
+        : agentMode === "auto" || agentMode === "full-access"
         ? [
             "Permission MCP tool: `app_permissions_request_change` is available when this participant needs approval for blocked capabilities.",
-            "In Auto-review mode, repo read, workspace write, web, and shell commands all run under the provider's native auto review. Do not call `app_permissions_request_change` for these, and do not request shellRules; shell decisions are handled by native auto. Portable repo/web/edit requests return already_granted if called anyway. Only genuinely out-of-preset capabilities need a request, for example `{ \"kind\": \"providerNative\", \"provider\": \"claude-code\", \"allowedTools\": [\"mcp__server__tool\"], \"reason\": \"Need this Claude Code tool.\" }` for Claude-native tool grants or `{ \"kind\": \"githubApp\", \"repository_full_name\": \"owner/repo\", \"permissions\": [\"contents:write\", \"pull_requests:write\"], \"reason\": \"Need to push a branch and open a PR.\" }` for GitHub App repository permissions. After a permission MCP call, inspect the status: pending_user_approval means it is awaiting User approval; already_granted means the capability is available."
+            "In Auto-review and Full Access modes, repo read, workspace write, web, and shell commands all run under the provider's native auto review (in Codex's Full Access, without any review or asking). Do not call `app_permissions_request_change` for these, and do not request shellRules; shell decisions are handled by native auto. Portable repo/web/edit requests return already_granted if called anyway. Only genuinely out-of-preset capabilities need a request, for example `{ \"kind\": \"providerNative\", \"provider\": \"claude-code\", \"allowedTools\": [\"mcp__server__tool\"], \"reason\": \"Need this Claude Code tool.\" }` for Claude-native tool grants or `{ \"kind\": \"githubApp\", \"repository_full_name\": \"owner/repo\", \"permissions\": [\"contents:write\", \"pull_requests:write\"], \"reason\": \"Need to push a branch and open a PR.\" }` for GitHub App repository permissions. After a permission MCP call, inspect the status: pending_user_approval means it is awaiting User approval; already_granted means the capability is available."
           ]
         : [
             "Permission MCP tool: `app_permissions_request_change` is available when this participant needs approval for blocked capabilities.",
@@ -14951,7 +14994,8 @@ export class ChatService {
         reasoningEffort: normalizeChatReasoningEffort(item.reasoningEffort, item.kind as ChatProviderKind),
         avatarId: item.avatarId?.trim() || undefined,
         ...this.participantHostFields(item.kind as ChatProviderKind, item.hostId, hosts),
-        agentMode: normalizeChatAgentMode(item.agentMode),
+        // Codex's Full Access is Codex's alone: another CLI stores Auto.
+        agentMode: chatAgentModeForKind(item.kind as ChatProviderKind, item.agentMode),
         permissions: this.normalizeParticipantPermissionsForRole(role, item.permissions, item.permissions === undefined),
         remoteExecution: preservedRemoteExecution(item.remoteExecution),
         homeMachineId: item.homeMachineId || undefined,
@@ -15537,7 +15581,8 @@ export class ChatService {
             reasoningEffort: normalizeChatReasoningEffort(participantRecord.reasoningEffort, kind),
             avatarId: typeof participantRecord.avatarId === "string" ? participantRecord.avatarId.trim() || undefined : undefined,
             hostId: typeof participantRecord.hostId === "string" ? participantRecord.hostId.trim() || undefined : undefined,
-            agentMode: normalizeChatAgentMode(participantRecord.agentMode),
+            // Full Access only by the User's own choice, never by a tool's input.
+            agentMode: chatAgentModeFromAgent(participantRecord.agentMode),
             permissions: normalizeChatAgentPermissions(participantRecord.permissions),
             remoteExecution: preservedRemoteExecution(participantRecord.remoteExecution),
             skipToolchainPreflight: participantRecord.skipToolchainPreflight === true,
@@ -16032,7 +16077,8 @@ export class ChatService {
             reasoningEffort: normalizeChatReasoningEffort(participantRecord.reasoningEffort, kind),
             avatarId: typeof participantRecord.avatarId === "string" ? participantRecord.avatarId.trim() || undefined : undefined,
             hostId: typeof participantRecord.hostId === "string" ? participantRecord.hostId.trim() || undefined : undefined,
-            agentMode: normalizeChatAgentMode(participantRecord.agentMode),
+            // Full Access only by the User's own choice, never by a tool's input.
+            agentMode: chatAgentModeFromAgent(participantRecord.agentMode),
             permissions: permissionsProvided
               ? normalizeChatAgentPermissions(participantRecord.permissions)
               : undefined,
@@ -16063,7 +16109,7 @@ export class ChatService {
       overrides.reasoningEffort = normalizeChatReasoningEffort(record.reasoningEffort);
     }
     if ("agentMode" in record) {
-      overrides.agentMode = normalizeChatAgentMode(record.agentMode);
+      overrides.agentMode = chatAgentModeFromAgent(record.agentMode);
     }
     if ("permissions" in record) {
       overrides.permissions = normalizeChatAgentPermissions(record.permissions);

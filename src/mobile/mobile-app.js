@@ -3699,16 +3699,61 @@
     const effort = chosen && newChatMainChoice.reasoningEffort && efforts.some(function (item) { return item.id === newChatMainChoice.reasoningEffort; }) ? newChatMainChoice.reasoningEffort : undefined;
     // Its CLI's mode in the CLI's own terms, the computer's picker's modes and
     // words (chatAccessModes): the one its CLI starts in until one is chosen.
-    const accessOptions = newChatAccessOptions(provider.kind);
-    const defaultAccess = accessOptions.length > 0 ? newChatDefaultAccess(provider.kind) : undefined;
-    const access = chosen && newChatMainChoice.access && accessOptions.some(function (item) { return item.id === newChatMainChoice.access; })
-      ? newChatMainChoice.access : defaultAccess;
     // Where it runs: one of the machines, once there is one; else this computer.
     const homeMachineId = chosen && newChatMainChoice.homeMachineId && newChatMachineList().some(function (item) { return item.id === newChatMainChoice.homeMachineId; })
       ? newChatMainChoice.homeMachineId : undefined;
-    return { provider: provider, model: model, modelLabel: modelEntry ? modelEntry.label : provider.defaultModelLabel, efforts: efforts,
-      effort: effort, effortLabel: effort ? (efforts.find(function (item) { return item.id === effort; }) || {}).label : undefined,
-      accessOptions: accessOptions, access: access, homeMachineId: homeMachineId };
+    // Codex's Full Access and Plan mode only where they run: a computer that
+    // offers them, and a machine whose program does (the computer's offer).
+    const modes = offer && offer.cliModes;
+    const modesHere = Boolean(modes) && (!homeMachineId || Boolean(modes.machines && modes.machines[homeMachineId]));
+    const accessSet = newChatAccessSet(provider.kind);
+    // What the User's own config starts the CLI in where it runs: this
+    // computer's (with its provider), or the machine's (it reads its own).
+    const start = newChatStartDefaults(offer, provider, homeMachineId);
+    // The modes the computer's picker lists, and one it lists only while it
+    // is the mode (Codex's Read Only) when her config starts the CLI in it.
+    const shared = mobileSharedRules();
+    const startOption = start && start.access && shared && typeof shared.startChatAccessOption === "function" ? shared.startChatAccessOption(provider.kind, start.access) : undefined;
+    const startHidden = startOption && startOption.hidden ? startOption : undefined;
+    const accessOptions = newChatAccessOptions(provider.kind).concat(startHidden ? [startHidden] : [])
+      .filter(function (item) { return modesHere || item.agentMode !== "full-access"; });
+    const defaultAccess = accessOptions.length > 0 ? newChatDefaultAccess(provider.kind, start && start.access, accessOptions) : undefined;
+    // A mode she chose; none: the one her config starts the CLI in there,
+    // which follows where it runs until she chooses one.
+    const accessChosen = chosen && newChatMainChoice.access && accessOptions.some(function (item) { return item.id === newChatMainChoice.access; })
+      ? newChatMainChoice.access : undefined;
+    const access = accessChosen || defaultAccess;
+    // Codex's Plan mode: its own toggle beside the permissions, as on the computer.
+    const planOffered = Boolean(accessSet && accessSet.plan && modesHere);
+    const plan = Boolean(chosen && newChatMainChoice.plan && planOffered);
+    // None chosen: the model and effort her config starts it on there.
+    const startModelLabel = !model && !provider.hostId && homeMachineId && start && start.modelLabel ? start.modelLabel : undefined;
+    const startEffort = !effort && !model && !provider.hostId && start && start.reasoningEffort &&
+      efforts.some(function (item) { return item.id === start.reasoningEffort; }) ? start.reasoningEffort : undefined;
+    const shownEffort = effort || startEffort;
+    return { provider: provider, model: model, modelLabel: modelEntry ? modelEntry.label : startModelLabel || provider.defaultModelLabel, efforts: efforts,
+      effort: effort, effortLabel: shownEffort ? (efforts.find(function (item) { return item.id === shownEffort; }) || {}).label : undefined,
+      startEffortLabel: startEffort ? (efforts.find(function (item) { return item.id === startEffort; }) || {}).label : undefined,
+      accessOptions: accessOptions, access: access, accessChosen: accessChosen, accessSet: accessSet, planOffered: planOffered, plan: plan, homeMachineId: homeMachineId };
+  }
+
+  /** What the User's own config starts a provider's CLI in where the main
+   *  session runs (src/shared/cliStartDefaults.ts): the computer's, said
+   *  with each provider; a machine's, said by its last hello. */
+  function newChatStartDefaults(offer, provider, homeMachineId) {
+    if (homeMachineId) {
+      const machines = offer && offer.cliStart && offer.cliStart.machines;
+      const ofMachine = machines && machines[homeMachineId];
+      return ofMachine && ofMachine[provider.kind] ? ofMachine[provider.kind] : undefined;
+    }
+    return provider && provider.start ? provider.start : undefined;
+  }
+
+  /** A CLI's modes as its own menu titles them (and Codex's Plan mode, and
+   *  what Antigravity cannot do here), one shared table with the computer. */
+  function newChatAccessSet(kind) {
+    const shared = mobileSharedRules();
+    return shared && typeof shared.chatAccessModeSet === "function" ? shared.chatAccessModeSet(kind) : undefined;
   }
 
   /** The modes the computer's picker lists for this CLI (one shared list). */
@@ -3717,10 +3762,16 @@
     return shared && typeof shared.chatAccessOptions === "function" ? shared.chatAccessOptions(kind) : [];
   }
 
-  function newChatDefaultAccess(kind) {
+  /** The mode a new main session starts in: the one the User's config starts
+   *  its CLI in where it runs, when offered; else the CLI's built-in one. */
+  function newChatDefaultAccess(kind, startAccess, offered) {
     const shared = mobileSharedRules();
-    const option = shared && typeof shared.defaultChatAccessOption === "function" ? shared.defaultChatAccessOption(kind) : undefined;
-    return option ? option.id : undefined;
+    const option = shared && typeof shared.startChatAccessOption === "function"
+      ? shared.startChatAccessOption(kind, startAccess)
+      : shared && typeof shared.defaultChatAccessOption === "function" ? shared.defaultChatAccessOption(kind) : undefined;
+    if (option && (!offered || offered.some(function (item) { return item.id === option.id; }))) return option.id;
+    const fallback = shared && typeof shared.defaultChatAccessOption === "function" ? shared.defaultChatAccessOption(kind) : undefined;
+    return fallback ? fallback.id : undefined;
   }
 
   /** The machines the server knows, by name: where a main session can run
@@ -3787,7 +3838,7 @@
     };
     const choose = function (patch) {
       const current = { kind: selection.provider.kind, hostId: selection.provider.hostId, model: selection.model, reasoningEffort: selection.effort,
-        access: selection.access, homeMachineId: selection.homeMachineId };
+        access: selection.accessChosen, plan: selection.plan, homeMachineId: selection.homeMachineId };
       newChatMainChoice = Object.assign(current, patch);
       renderNewChat("");
     };
@@ -3800,7 +3851,7 @@
         // computer drops what was chosen for the one before.
         onClick: function () {
           if (chosen) return;
-          choose({ kind: provider.kind, hostId: provider.hostId, model: undefined, reasoningEffort: undefined, access: undefined, homeMachineId: undefined });
+          choose({ kind: provider.kind, hostId: provider.hostId, model: undefined, reasoningEffort: undefined, access: undefined, plan: undefined, homeMachineId: undefined });
         } }));
     }
     section("Model");
@@ -3811,16 +3862,37 @@
         onClick: function () { choose({ model: model.id }); } }));
     }
     section("Effort");
-    list.append(newChatOptionRow({ label: "Default", chosen: !selection.effort, data: { effort: "" }, onClick: function () { choose({ reasoningEffort: undefined }); } }));
+    list.append(newChatOptionRow({ label: "Default", detail: selection.startEffortLabel, chosen: !selection.effort, data: { effort: "" },
+      onClick: function () { choose({ reasoningEffort: undefined }); } }));
     for (const effort of selection.efforts) {
       list.append(newChatOptionRow({ label: effort.label, chosen: selection.effort === effort.id, data: { effort: effort.id },
         onClick: function () { choose({ reasoningEffort: effort.id }); } }));
     }
     if (selection.accessOptions.length > 0) {
-      section("Access");
+      // Under the CLI's own title ("Permission mode", "Permissions", "Agent Mode").
+      section(selection.accessSet && selection.accessSet.title ? selection.accessSet.title : "Access");
       for (const option of selection.accessOptions) {
         list.append(newChatOptionRow({ label: option.label, detail: option.detail, chosen: selection.access === option.id, data: { access: option.id },
-          onClick: function () { choose({ access: option.id }); } }));
+          onClick: function () {
+            // Codex asks before it switches to Full Access, in its own words.
+            if (option.agentMode === "full-access" && selection.access !== option.id) {
+              renderNewChatFullAccessConfirm(list, function () { choose({ access: option.id }); }, function () { renderNewChatModelOptions(offer); });
+              return;
+            }
+            choose({ access: option.id });
+          } }));
+      }
+      if (selection.accessSet && selection.accessSet.note) {
+        const note = document.createElement("p");
+        note.className = "members-sheet-note new-chat-access-note";
+        note.textContent = selection.accessSet.note;
+        list.append(note);
+      }
+      // Codex's Plan mode, a choice of its own beside the permissions.
+      if (selection.planOffered) {
+        section(selection.accessSet.plan.label);
+        list.append(newChatOptionRow({ label: "Off", chosen: !selection.plan, data: { plan: "off" }, onClick: function () { choose({ plan: false }); } }));
+        list.append(newChatOptionRow({ label: "On", chosen: selection.plan, data: { plan: "on" }, onClick: function () { choose({ plan: true }); } }));
       }
     }
     const machines = newChatMachineList();
@@ -3834,6 +3906,28 @@
           onClick: function () { choose({ homeMachineId: machine.id }); } }));
       }
     }
+  }
+
+  /** Codex's own question before Full Access (Codex 0.155.1's `/permissions`,
+   *  shared with the computer: FULL_ACCESS_CONFIRMATION), in place of the
+   *  choices until it is answered. */
+  function renderNewChatFullAccessConfirm(list, confirm, back) {
+    const shared = mobileSharedRules();
+    const words = shared && shared.FULL_ACCESS_CONFIRMATION;
+    if (!words) {
+      confirm();
+      return;
+    }
+    list.replaceChildren();
+    const title = document.createElement("div");
+    title.className = "members-sheet-section new-chat-confirm-title";
+    title.textContent = words.title;
+    const body = document.createElement("p");
+    body.className = "members-sheet-note new-chat-confirm-body";
+    body.textContent = words.body;
+    list.append(title, body,
+      newChatOptionRow({ label: words.confirm.label, detail: words.confirm.detail, chosen: false, data: { confirm: "yes" }, onClick: confirm }),
+      newChatOptionRow({ label: words.cancel.label, detail: words.cancel.detail, chosen: false, data: { confirm: "cancel" }, onClick: back }));
   }
 
   function newChatMemberName(participant) {
@@ -4117,7 +4211,7 @@
       const selection = sessionsView ? newChatMainSelection(offer) : undefined;
       const lead = selection && typeof shared.newChatMainSessionFor === "function"
         ? shared.newChatMainSessionFor(offeredLead, offer.mainSessionProviders, { kind: selection.provider.kind, hostId: selection.provider.hostId,
-          model: selection.model, reasoningEffort: selection.effort, access: selection.access, homeMachineId: selection.homeMachineId })
+          model: selection.model, reasoningEffort: selection.effort, access: selection.access, plan: selection.plan, homeMachineId: selection.homeMachineId })
         : offeredLead;
       const participants = shared.newChatParticipants({
         assistant: lead, mainSession: lead, members: sessionsView ? [] : offer.members, chosenConfigIds: sessionsView ? [] : Array.from(newChatChosen),

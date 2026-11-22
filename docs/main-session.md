@@ -98,54 +98,185 @@ chat without a main session is always `classic`; its switch is disabled.
   - the main composer always writes to the main session
     (`targetParticipantIds=[main]`, `deliveryTargets=[main]` on the phone),
     offers no members to mention (`/` and `#` stay), and carries the main
-    session's model chip, which opens its settings; a member's composer
-    the same for that member. The settings are a compact picker, T3 Code's
-    (`ChatModelAccessPanel`): the model (the CLI's default first), the
-    effort, the access in the CLI's own terms and, once a machine exists,
-    where it runs (the effort a model lacks reads as Default; nothing is
-    saved until a choice is made; Default sends the explicit reset; only
-    the chosen setting is sent). The access is the CLI's own mode, run as
-    the CLI runs it (`src/shared/chatAccessModes.ts`, the permissions'
-    `cliApprovals`: what is not granted the CLI asks about instead of the
-    app taking it away; the classic controls keep refusing it):
-    - Claude Code (`--permission-mode`): Default reads freely and asks
-      before each edit, command and web use, every ask an approval card
-      (`--permission-prompt-tool`; deny rules stay hard stops); Accept
-      edits edits without asking and asks before commands and web; Plan
-      mode reads and plans; Auto mode is Claude's classifier.
-    - Codex (its 0.155 presets): Read only (read-only sandbox) and Default
-      (workspace-write), both asking (approval policy `on-request`, every
-      ask an approval card) to go further; Auto-review, where Codex reviews
-      its own asks; Plan mode, the read-only sandbox that never asks.
-    - Antigravity (`agy --mode`; its Default is `agentMode: ""`, which
-      `--mode` does not take): print mode cannot ask, so what a mode would
-      ask about is refused (agy 1.5.14, 2026-11-21): Default reads and
-      refuses edits and commands, Accept edits edits in the workspace and
-      refuses commands, Auto mode edits and runs safe commands where the
-      account has it (elsewhere agy says so and stays in Default), Plan
-      mode reads and plans. No agy mode is called Read only.
-    A main session starts in its CLI's own default: Claude Code's Default,
-    Codex's Default, agy's Default. Settings from the classic controls are
-    no mode: the picker marks none and says so, and a classic toggle (Read
-    Files, Edit Files, Run Shell, Access Web) ends a mode chosen in the
-    picker (`withClassicChatPermissions`), so what it turns off is refused,
-    not asked about. A member held to a main session without the CLI's own
-    mode loses its own mode too; an Antigravity member then runs Default with
-    no edits (`--sandbox`), never with its confirmations skipped
-    (`clampChatAgentAccess`). Its … menu has Restart
-    (picks up changed connectors, idle only, naming background work it
-    stops; not Antigravity) and, for a member, Remove from chat. Its
-    provider stays the one it was made with. No name, status,
-    member rights or auto-watch: the main session's chat behaviour is fixed
-    (it creates and asks members, request and manage are allowed as its role
-    gives them, and it is told when its tasks end). A member other than the
-    main session is removed from the picker's … menu; the gear in its
-    session's header opens the same picker. The chip names the member's own model, else
-    the one its CLI runs on by default (the CLI's model list: Claude Code's
-    initialize answer, Codex's model/list, `agy models`; an added
-    provider's vendor default), else the CLI ("Claude Code"), with the
-    effort after it (`memberDefaultModelName`; desktop only, the phone has
-    no chip). The main composer has no "N active runs" pill (the Waiting
+    session's settings as separate quiet controls; a member's composer the
+    same for that member. They are laid out as Claude's desktop app
+    ("Opus 5.5 · Extra · Auto"), Codex and T3 Code lay theirs out (the User,
+    2026-11-21: "please make a normal UI, look at how Claude Code, Codex and
+    T3 do it"): one control each for the model (with the provider's glyph),
+    the effort, the permission mode, Codex's Plan mode (a toggle beside the
+    permissions) and, once a machine exists, where it runs ("Local", the
+    machine's name, "Cloud run"); each opens its own small menu
+    (`ChatMemberComposerControls`, `composer-menu.tsx`): a muted title (the
+    vendor's: "Permission mode", "Permissions", "Agent Mode", "Model",
+    "Effort"), each choice's name with the vendor's description wrapped
+    under it and a check on the chosen one. A menu is laid over the window,
+    never inside the composer or the side panel: above its control when
+    there is more room there, never taller than that room nor wider than
+    the window less 8px, pushed inside its edges. A long model list is
+    split as Claude's desktop app splits it: the CLI's default first, the
+    newest model of each family, the rest under "More models" (opened in
+    place; open when the chosen model is there; `latestAndOlderModels`).
+    The model control names the model that runs: for a member without a
+    model of its own, the one the User's own CLI config starts the CLI on
+    where it runs (Codex's `config.toml` `model`, the model Claude Code
+    says it applies, `agy models`' first), never the one the CLI's list
+    marks default (the chip read "GPT-6-Luna", model/list's default, while
+    turns ran her config's gpt-5.6-luna, 2026-11-22). The main process
+    marks that model `recommended` in the CLI's list
+    (`withCliStartModel`); a member on a machine is named by that
+    machine's own config (its hello's `cliStartDefaults`). With no effort
+    chosen and no model of its own, the effort control names the effort her
+    config sets ("Low"; its menu's Default row says it under "Default").
+    The effort a model lacks reads as Default; nothing is saved until a
+    choice is made; Default sends the explicit reset; only the chosen
+    setting is sent. Codex's Default collaboration mode said on a turn
+    carries the member's effort, else her config's, else the thread's
+    (`codexCollaborationMode`): a null there resets Codex to the model's
+    own effort (seen 2026-11-22: turns went at no effort while her terminal
+    ran `low`).
+    In a narrow composer (the main column or the side panel at the smallest
+    window, both panels open) the controls turn into icons one by one, as
+    T3 Code's composer footer does: where it runs, Codex's Plan mode, the
+    mode (a lock for asking before changes, a pen for edits without asking,
+    a list for planning, a checked shield for the CLI deciding, a crossed
+    one for Full Access, an eye for Read Only), the effort (a gauge); then
+    the model loses its glyph and last its name shortens, never under six
+    letters (`useComposerDensity`, measured before paint on every width
+    change). An icon's value is its tooltip, its accessible name and its
+    menu; no control is ever a one-letter stub. Checked 2026-11-22 in the
+    app with both panels open: at 1280×820 "Sonnet 5.5 · Medium · Manual"
+    in both composers and "GPT-5.6-Luna · Low" with the mode and Plan mode
+    as icons; at 1080×720 "Sonnet 5.5" with the effort and mode as icons
+    in the main composer, "Sonnet 5.5 · Medium" and the mode's icon in the
+    member's, and "GPT-5.6-Luna" without its glyph and three icons in a
+    Codex main composer; every control inside its row, Send beside it. Its own turn running, the controls wait (disabled). The
+    access is the CLI's own mode, run as the CLI runs it
+    (`src/shared/chatAccessModes.ts`, the permissions' `cliApprovals`: what
+    is not granted the CLI asks about instead of the app taking it away;
+    the classic controls keep refusing it). Each table is the set the CLI
+    offers by default, in its own order, in the vendor's words (verified
+    2026-11-22, evidence below):
+    - Claude Code 2.1.330 (`--permission-mode`): Manual ("Always ask before
+      making changes"; `--permission-mode default`, which 2.1.330 still
+      takes beside `manual`; every ask an approval card through
+      `--permission-prompt-tool`, deny rules stay hard stops), Accept edits
+      ("Automatically accept all file edits"), Plan ("Create a plan before
+      making changes"), Auto ("Claude handles permission decisions",
+      Claude's classifier).
+    - Codex 0.155.1 (its `/permissions` picker): Ask for approval ("Codex
+      can read and edit files in the current workspace, and run commands.
+      Approval is required to access the internet or edit other files.";
+      workspace-write, `on-request`, reviewer the User), Approve for me
+      ("Only ask for actions detected as potentially unsafe."; reviewer
+      `auto_review`), Full Access ("Codex can edit files outside this
+      workspace and access the internet without asking for approval.
+      Exercise caution when using."; `danger-full-access`, `never`). Plan
+      mode is Codex's collaboration mode on top of any of them: the app
+      says the collaboration mode on every turn (`turn/start`
+      `collaborationMode`, plan or default, with the thread's model; a
+      thread keeps the last one it was given), Plan with Codex's own effort
+      for it, Default with the member's. Read Only is still one of Codex's
+      presets but not in its picker: it shows only while a member is in it.
+      Ask for approval and Read Only name the User as reviewer explicitly,
+      so `approvals_reviewer` in the User's own Codex config does not turn
+      the mode her menu shows into another one.
+    - Antigravity 1.5.14 (`agy --mode`; its Default is `agentMode: ""`,
+      which `--mode` does not take): Default ("Standard behavior."),
+      Accept-edits mode ("Auto-approve file edits, prompt for commands."),
+      Auto mode ("Auto-approve edits and safe commands, prompt on
+      irreversible actions."), Plan mode ("Research and plan without making
+      changes."). Print mode cannot ask, so what a mode would ask about is
+      refused (agy 1.5.14, 2026-11-21: Default refuses edits and commands,
+      Accept-edits mode refuses commands); the menu says so under the list
+      ("Antigravity cannot ask for approval here, …").
+    A new main session starts in the mode its CLI starts in with the
+    User's own config on the device that runs it (the User, 2026-11-22:
+    "a new session must start in the mode, model and effort its CLI would
+    start in with her config"; `CliStartDefaults`,
+    `src/shared/cliStartDefaults.ts`, `startChatAccessOption`), read from
+    the CLI itself with its model list: Codex's `config/read` (the preset
+    its `/permissions` marks current: sandbox, approval policy and reviewer,
+    `guardian_subagent` being `auto_review`; her config starts it in
+    Approve for me), Claude Code's `initialize` answer
+    (`current_permission_mode`, from `permissions.defaultMode`) and its
+    `get_settings` answer (`applied.model`, `applied.effort`), agy's
+    settings.json `agentMode` (`""`: Default; none saved: agy starts in Auto
+    only where the account has Auto mode, which the app cannot read, so
+    Default). A machine reads its own and says them in its hello
+    (`cliStartDefaults`, re-sent when a read changes them; a hello without
+    them keeps what the machine said before); the
+    phone gets this computer's with each provider
+    (`NewChatProviderOffer.start`) and each machine's
+    (`HubNewChatOptions.cliStart`). The mode follows where it runs until
+    one is chosen; a mode chosen stays. The chat is made in the mode the
+    screen showed (`newChatMainSessionStartAccess`), never one read again at
+    send. A changed config file (Codex's config.toml, Claude Code's
+    settings.json, agy's settings.json) is read again the next time a
+    composer shows these (`cliConfigStamp`). When the config names a
+    combination the CLI's own picker has no entry for (Codex's "Custom
+    permissions", Claude Code's Bypass Permissions or Don't Ask), it cannot
+    be read, or a machine's program predates it, the CLI's built-in default
+    applies: Manual, Ask for approval, agy's Default
+    (`defaultChatAccessOption`). A config in the project folder (Claude
+    Code's `.claude/settings.json`, Codex's project `.codex/config.toml`) is
+    not read for this (docs/parity-requirements.md, known divergences).
+    Starting in Full Access from her own config asks nothing, as Codex does
+    not; choosing it in the menu asks Codex's own question first, in place
+    of the list (`FULL_ACCESS_CONFIRMATION`, Codex 0.155.1's `/permissions`
+    in a terminal, 2026-11-22): "Enable full access?" "When Codex runs with
+    full access, it can edit any file on your computer and run commands
+    with network, without your approval. Exercise caution when enabling
+    full access. This significantly increases the risk of data loss, leaks,
+    or unexpected behavior." with "Yes, continue anyway" ("Apply full
+    access for this session") and "Cancel" ("Go back without enabling full
+    access"), which goes back to the list; the phone's sheet asks the same.
+    Codex 0.155.1 asks it even with `notice.hide_full_access_warning` set.
+    Stored choices keep working: a member saved
+    with Claude Code's old Default is Manual (same mode), a phone sending
+    the old id `default` gets Manual, and a Codex member saved in the old
+    Plan entry (Plan as a permission) is Read Only with Plan mode on. Codex's
+    Full Access is Codex's alone: a member on another CLI handed it (a Codex
+    main session's mode for a member it makes) runs Auto
+    (`chatAgentModeForKind`), and only the User chooses it: a mode a member
+    or a machine names (a tool's input, a member it adds) is Auto at most
+    (`chatAgentModeFromAgent`); her server adds a member in Full Access
+    without a card only for a main session in it, which hands its mode to
+    the members it makes; and it runs only in the CLI's own mode
+    (`cliApprovals`), else as Auto. Codex's Plan mode exists only in the
+    CLI's own mode (normalising drops it otherwise), stays as it is when a
+    preset is chosen (a member saved in Plan from before too), is not handed
+    to a member the main session makes, and fails a turn rather than running
+    without it on a Codex that refuses the collaboration mode (Default then
+    goes without it). A machine runs both only when its program says so in
+    its hello (`cliModesSupported`): on an older one Full Access and turning
+    Plan mode on are disabled with "<machine> runs an older program:
+    Settings → Machines → Upgrade runtime." (`codexModesUnavailableReason`),
+    and the phone's New chat offers them only from a computer that runs them
+    and for a machine whose program does (`HubNewChatOptions.cliModes`). Settings from the classic controls are no
+    mode: the mode control says "Custom", its menu says so, and a classic
+    toggle (Read Files, Edit Files, Run Shell, Access Web) ends a mode
+    chosen in its menu and Codex's Plan mode with it
+    (`withClassicChatPermissions`), so what it turns off is refused, not
+    asked about. A member the main session made is held to the main
+    session's mode: a mode above it is shown disabled with "Not above the
+    main session's mode (<its mode>)." (`accessHeldReason`, by the same
+    rule its turns run by, `memberAsItRunsNow`), never granted. A member held
+    to a main session without the CLI's own mode loses its own mode too; an
+    Antigravity member then runs Default with no edits (`--sandbox`), never
+    with its confirmations skipped (`clampChatAgentAccess`). Its … actions
+    (Restart: picks up changed connectors, idle only, naming background
+    work it stops, not Antigravity; Fork to new chat; and, for a member,
+    Remove from chat) are in the … menu of its session's header; the main
+    session's (Restart, Fork to new chat) are in the chat title's menu under
+    "Main session". Its provider stays the one it was made with. No name,
+    status, member rights or auto-watch: the main session's chat behaviour
+    is fixed (it creates and asks members, request and manage are allowed
+    as its role gives them, and it is told when its tasks end). The model
+    control names the member's own model, else the one its CLI runs on by
+    default (the CLI's model list: Claude Code's initialize answer, Codex's
+    model/list, `agy models`; an added provider's vendor default), else the
+    CLI ("Claude Code") (`memberModelName`; desktop only, the phone has
+    no controls in a chat). The main composer has no "N active runs" pill (the Waiting
     line and the side panel name and stop the members); while the main
     session itself runs and nothing is typed, its send button is Stop for
     the main session's run, as in T3 Code and Claude; with something typed
@@ -198,11 +329,11 @@ chat without a main session is always `classic`; its switch is disabled.
     only its close button, as Claude desktop's right panel (the User,
     2026-11-21); it lists the chat's latest Accord and the sessions the main
     session delegated (provider, task, status, elapsed time, Stop) with Stop
-    all, never the main session itself (its settings are its composer chip);
+    all, never the main session itself (its settings are its composer's controls);
     while one runs or waits for the User the ended ones are under
     "Previous"; those no longer in the chat are under "Removed"
     (`sessionsFormerMembers`). With nothing delegated it says nothing. A member opens its **whole session** in the
-    same panel (Back to the list) with its settings (gear) and a composer
+    same panel (Back to the list) with its … menu in its header and a composer
     that writes to it only; a removed member's session is read-only;
   - the word "members" is never shown (desktop and phone): "Waiting on N
     tasks", "Side panel", "Back", "Close";
@@ -254,13 +385,13 @@ A new chat opens in the view Settings → General names (`newChatViewFor`).
 
 - **Sessions view** (the User, 2026-11-21: "как в T3, выбираешь просто
   провайдера и модель"): no members picker, no avatars, handles or
-  "members" on the screen. The composer's chip at its bottom right shows
-  the main session's provider glyph, model and effort ("✳ Opus 5.5 High")
-  and opens the compact picker with the provider choosable: every ready CLI
-  and every added provider whose CLI is ready and which has its key
-  (`mainSessionProviderOptions`). The default provider is Settings →
+  "members" on the screen. Its composer has the main composer's controls
+  (model with the provider's glyph, effort, permission mode, Codex's Plan
+  mode, where it runs once a machine exists); the model's menu lists the
+  providers first: every ready CLI and every added provider whose CLI is
+  ready and which has its key (`mainSessionProviderOptions`). The default provider is Settings →
   General's "Main session provider" (`resolveMainSessionProvider`); the
-  chip's choice is for that one chat and never changes the setting, and
+  controls' choice is for that one chat and never changes the setting, and
   is forgotten when the User leaves New chat without sending. What was set
   for one provider (model, effort, access, where it runs) is dropped when
   another is in effect, also between visits. A chosen or shown provider
@@ -272,10 +403,12 @@ A new chat opens in the view Settings → General names (`newChatViewFor`).
 - **The phone** gets the same from the New chat offer
   (`HubNewChatOptions.mainSessionProviders`: each provider with its
   default model's name, its models, at most 24, and efforts;
-  `newChatProviderOffer`), shows the same chip and sheet (with the same
-  Access, and Runs on where a machine exists), and makes the chat with the
-  offered main session on the chosen provider, model, effort and access
-  (`newChatMainSessionFor`). An offer from a computer from before has no
+  `newChatProviderOffer`), shows a chip and sheet with the same choices
+  (the permission modes under the CLI's own title, with the same names and
+  descriptions from the one shared table, Codex's Plan mode as a toggle
+  row, Antigravity's note, and Runs on where a machine exists), and makes
+  the chat with the offered main session on the chosen provider, model,
+  effort, mode and Plan mode (`newChatMainSessionFor`). An offer from a computer from before has no
   list: the chip shows the offered main session's CLI. The offer never
   waits for a model list: each provider goes with the list it last had,
   read again in the background (a good one after 10 minutes, a failed one
@@ -295,9 +428,9 @@ member of a chat from before with its Assistant) can be copied into a new
 chat as that chat's main session, with everything it knew
 (`src/shared/forkToNewChat.ts`).
 
-- Offered as "Fork to new chat" in a member's … menu in the sessions view
-  (its settings from its session's gear, and the main session's composer
-  chip) and as a fork button on its card in the classic roster. Disabled,
+- Offered as "Fork to new chat" in the sessions view in a member's … menu
+  (its session's header) and, for the main session, in the chat title's
+  menu, and as a fork button on its card in the classic roster. Disabled,
   with the reason, for Antigravity (no fork), a member that never ran (no
   session), one waiting for a machine, one on an added provider Settings no
   longer has (its copy would run on another provider), one on a machine
@@ -485,6 +618,100 @@ chat as that chat's main session, with everything it knew
   The flag is new with this feature (no released runtime carries it), and
   the program that sends it also cuts the copy, so no machine forks without
   the cut.
+
+## The CLIs' modes: evidence (2026-11-22)
+
+Verified in the installed CLIs, the way the User sees them:
+
+- Claude Code 2.1.330: `claude --help` lists `--permission-mode` choices
+  acceptEdits, auto, bypassPermissions, manual, dontAsk, plan; the binary's
+  mode table titles them Manual, Plan, Accept edits, Bypass Permissions,
+  Don't Ask, Auto, maps `manual` to its internal `default`, and its
+  Shift+Tab cycle goes Manual → Accept edits → Plan → (Bypass, only when
+  started with `--allow-dangerously-skip-permissions`) → (Auto, where the
+  account has it) → Manual; Don't Ask is not in the cycle. `claude -p
+  --permission-mode default` and `… manual` both run (Sonnet). The Claude
+  desktop app (6.28899.6) lists Code sessions' modes as Manual ("Always ask
+  before making changes"), Accept edits ("Automatically accept all file
+  edits"), Plan ("Create a plan before making changes"), Auto ("Claude
+  handles permission decisions"), and Don't ask / Bypass permissions only
+  when switched on; its chats (her screenshot) word Manual and Auto
+  differently ("Claude asks before using new tools or opening new sites.",
+  "Claude runs on its own and pauses to ask if anything looks unsafe."). Its
+  model menu shows the newest of each family first and the rest under
+  "More models".
+- Codex 0.155.1, its TUI in a pseudo-terminal: `/permissions` ("Update Model
+  Permissions") lists 1. Ask for approval, 2. Approve for me, 3. Full Access,
+  with the descriptions above, with or without `-s read-only` (Read Only
+  stays in its binary's presets). `/plan` "switch to Plan mode"; Shift+Tab
+  toggles "Plan mode (shift+tab to cycle)" and back ("Model changed to …
+  medium for Plan mode"). Through `codex app-server`: `turn/start`
+  `collaborationMode` plan produced a plan and no file, kept the thread's
+  developer instructions, and stayed on for the next turn until Default
+  was sent; `sandbox: danger-full-access`, `approvalPolicy: never` wrote a
+  file outside the workspace without asking. The User's own config
+  (`approvals_reviewer = "guardian_subagent"`) marks Approve for me current
+  in her terminal.
+- Antigravity 1.5.14, its TUI: Shift+Tab cycles Auto mode ("Auto mode:
+  edits & safe commands auto-approved") → Plan mode ("Plan mode: research &
+  plan only") → Default (no line) → Accept-edits mode ("Accept-edits mode:
+  file edits auto-approved") → Auto mode; `/config` → Agent Mode describes
+  them ("'default': standard behavior. 'accept-edits': auto-approve file
+  edits, prompt for commands. 'auto': auto-approve edits and safe commands,
+  prompt on irreversible actions. 'plan': research and plan without making
+  changes"). Her config starts it in auto.
+
+## Start defaults, Full Access and Plan members: evidence (2026-11-22)
+
+- Codex 0.155.1 `codex app-server`: `model/list` marks `gpt-6-luna`
+  (GPT-6-Luna) `isDefault`; `config/read` on her config answers
+  `model: gpt-5.6-luna`, `model_reasoning_effort: low`,
+  `approvals_reviewer: auto_review`, no approval policy or sandbox; her
+  terminal (`codex`, update check off) shows "gpt-5.6-luna low" and its
+  `/permissions` marks "2. Approve for me (current)". `config/read` takes
+  a `cwd` for project layers; a `profile = …` key in config.toml is
+  refused ("legacy `profile` config is no longer supported; use
+  `--profile`"), so a profile applies only with `--profile`, which neither
+  her plain `codex` nor the app passes. A turn's `turn_context` (its
+  rollout) shows `model: gpt-5.6-luna`, `approvals_reviewer: auto_review`
+  and, with a collaboration mode that carries `reasoning_effort: null`, no
+  effort at all; with her config's `low` sent, `low`, as her terminal's
+  turns show.
+- Codex's terminal, `/permissions` → Full Access, shows "Enable full
+  access?", the body above, "1. Yes, continue anyway  Apply full access for
+  this session", "2. Cancel  Go back without enabling full access", "Press
+  enter to confirm or esc to go back"; with `-c
+  notice.hide_full_access_warning=true` it asks the same.
+- Claude Code 2.1.330 in stream-json: `initialize` answers
+  `current_permission_mode` (`acceptEdits` with `permissions.defaultMode:
+  acceptEdits` in the settings it reads); `get_settings` answers
+  `applied: { model: "claude-sonnet-5-5", effort: … }` for `model:
+  "sonnet"` or `ANTHROPIC_MODEL=sonnet`, while `initialize`'s "Default
+  (recommended)" row still resolves to Opus 5.5.
+- agy 1.5.14's changelog: "Changed the default `Agent Mode` from Default to
+  Auto: sessions with no saved mode, including headless `-p` runs, now
+  start in Auto wherever Auto mode is available and in Default elsewhere
+  … choose Default for `Agent Mode` in `/config`, which saves
+  `"agentMode": ""` to `settings.json`." Auto mode is available on Linux
+  and macOS.
+- Subagents of a session in Plan, both CLIs' own: Claude Code's docs
+  (code.claude.com/docs/en/sub-agents): "When the main conversation is in
+  `plan` mode, the subagent stays in plan mode whichever `permissionMode`
+  you set, unless it runs as an agent team teammate." Seen with `claude -p
+  --model sonnet --permission-mode plan`: the Agent tool is offered, its
+  general-purpose subagent's Write is refused "Cannot write to …/sub.txt
+  while in plan mode" (`decision_reason_type: "mode"`), and a custom agent
+  with `permissionMode: acceptEdits` is refused the same. Codex 0.155.1:
+  `multi_agent` is on by default and `spawn_agent` is offered in Plan
+  mode; the spawned child's rollout runs `collaboration_mode.mode:
+  "default"` with the parent's sandbox and approvals ("Subagents inherit
+  the parent turn's current sandbox and approval settings", its docs) and
+  wrote a file while the parent was in Plan. So a member the main session
+  makes runs as its main session's CLI runs a subagent: under a Claude
+  Code (or agy) main session in Plan it is held to Plan whatever it asks
+  for (`memberAsItRunsNow`, Plan ranks lowest); under a Codex main session
+  with Plan mode on it runs Codex's Default with the main session's preset,
+  Plan mode not handed down. Both checked in `chatAccessModes.test.ts`.
 
 ## Contract (src/shared)
 

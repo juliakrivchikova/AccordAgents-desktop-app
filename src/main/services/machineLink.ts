@@ -13,6 +13,7 @@
  * settings on the server, sealed for that machine alone.
  */
 
+import { normalizeCliStartDefaultsByKind, type CliStartDefaultsByKind } from "../../shared/cliStartDefaults";
 import type { MachineMemberRestartSupport } from "../../shared/memberRestart";
 import type { MachineSessionMoveSupport, MachineSessionMoveTarget } from "../../shared/memberSessionMove";
 import { forkToNewChatSupportFromHello, type ForkToNewChatMachineSupport } from "../../shared/forkToNewChat";
@@ -429,6 +430,18 @@ export class MachineLinkService {
    *  desktop. */
   forkToNewChatSupport(machineId: string): ForkToNewChatMachineSupport {
     return forkToNewChatSupportFromHello((this.connections.get(machineId)?.record ?? this.enrolled.get(machineId))?.lastHello);
+  }
+
+  /** Whether a machine runs Codex's Full Access and Plan mode as the menus
+   *  set them, by the last hello it sent this desktop. */
+  cliModesSupport(machineId: string): boolean {
+    return (this.connections.get(machineId)?.record ?? this.enrolled.get(machineId))?.lastHello?.cliModesSupported === true;
+  }
+
+  /** What each CLI on a machine starts a new session in with that machine's
+   *  own config, by the last hello it sent this desktop. */
+  cliStartDefaults(machineId: string): CliStartDefaultsByKind | undefined {
+    return normalizeCliStartDefaultsByKind((this.connections.get(machineId)?.record ?? this.enrolled.get(machineId))?.lastHello?.cliStartDefaults);
   }
 
   /** Ask a machine to do something with its scheduled scripts and wait for
@@ -917,11 +930,14 @@ export class MachineLinkService {
       connection.helloRequestTimer = undefined;
     }
     const { type: _type, ...rest } = hello;
+    // A runtime that just started greets before its CLIs have said what they
+    // start in: what it said before stays until it says it again.
+    const previousStart = connection.record.lastHello?.cliStartDefaults;
     connection.record = {
       ...connection.record,
       deviceId: hello.deviceId,
       lastSeenAt: this.now().toISOString(),
-      lastHello: rest
+      lastHello: rest.cliStartDefaults || !previousStart || rest.cliModesSupported !== true ? rest : { ...rest, cliStartDefaults: previousStart }
     };
     await this.persistRecord(connection, true);
     if (this.options.desktopDeviceId === connection.pairing.issuer.originId) {

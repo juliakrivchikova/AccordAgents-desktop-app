@@ -9,7 +9,7 @@ import type {
   PluginCatalogItem,
   StartReviewResult
 } from "../shared/types";
-import { ArrowLeft, ArrowRight, FileBox, RefreshCw, Settings2, SquareTerminal, XCircle } from "lucide-react";
+import { ArrowLeft, ArrowRight, FileBox, RefreshCw, SquareTerminal, XCircle } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { Toaster } from "@/components/ui/sonner";
@@ -30,13 +30,11 @@ import { NewChatScreen } from "./components/chat/new-chat-screen";
 import { ChatSearchModal } from "./components/search/chat-search-modal";
 import { ChatTopBarTitle } from "./components/chat/chat-top-bar-title";
 import { ChatClassicOnly, ChatViewHeaderControls } from "./components/chat/chat-view-switch";
-import { memberModelChip } from "./components/chat/chat-sessions-composer";
 import { sessionsViewNamesOf } from "../shared/sessionsViewText";
-import { ChatMemberModelAccess } from "./components/chat/chat-member-model-access";
+import { sessionsMemberSettings } from "./app/sessions-member-settings";
 import { forkToNewChatReasonFor, useMachineForkSupport } from "./components/chat/use-fork-to-new-chat";
-import { memberSessionMoves } from "../shared/memberSessionMove";
 import { renderNewChatMemberMark } from "./components/chat/chat-member-mark";
-import { chatViewFor, mainSessionParticipantId } from "../shared/mainSession";
+import { chatViewFor } from "../shared/mainSession";
 import { chatRoleLabel } from "./components/chat/chat-conversation-data";
 import { defaultChatParticipantDraft } from "./components/chat/chat-participant-drafts";
 import type { DraftPluginMention } from "./components/chat/chat-composer-draft-utils";
@@ -321,8 +319,8 @@ function App(): JSX.Element {
     ? forkToNewChatReasonFor(participant, view.activeChatConversation, state.agents, state.settings, machineForkSupport)
     : "Open its chat first.";
   // The chat's members and their settings: the roster in the classic view's
-  // header; in the sessions view one member's settings, from its session or
-  // its model chip in a composer.
+  // header (the sessions view has a member's controls under its composer and
+  // its … actions instead: sessionsMemberSettings).
   const rosterMenu = (memberId?: string, trigger?: React.ReactNode): JSX.Element | null => view.activeChatConversation ? (
     <ChatParticipantMenu
       participants={view.activeChatParticipants}
@@ -352,34 +350,9 @@ function App(): JSX.Element {
       trigger={trigger}
     />
   ) : null;
-  // The sessions view's settings of one member (the main session's from its
-  // composer chip, a member's from its chip or its session's gear): the
-  // compact picker, not the classic roster (the User, 2026-11-21).
-  const sessionsMemberSettings = (memberId: string, trigger?: React.ReactNode): JSX.Element | null => {
-    const participant = view.activeChatParticipants.find((candidate) => candidate.id === memberId);
-    if (!view.activeChatConversation || !participant) return null;
-    const status = view.participantStatusById.get(memberId);
-    const hasRun = view.participantHasRunById.get(memberId) === true;
-    const isMain = mainSessionParticipantId(view.activeChatConversation.metadata) === memberId;
-    return (
-      <ChatMemberModelAccess
-        participant={participant}
-        trigger={trigger ?? <IconButton label="Settings" icon={Settings2} tooltip="Settings" data-testid="chat-member-settings-trigger" />}
-        working={status === "running" || status === "compacting"}
-        status={status}
-        runLocationLocked={hasRun && !memberSessionMoves(participant)}
-        runLocationMoves={hasRun && memberSessionMoves(participant)}
-        onUpdate={(participantId, patch) => chatActions.updateChatParticipantRuntime(participantId, patch)}
-        onRestart={(participantId, stopBackgroundTasks) => chatActions.restartChatParticipant(participantId, stopBackgroundTasks)}
-        onStopRestart={(runId) => void window.consensus.cancelReview(runId)}
-        restartStatus={restartingMembers(state.progressLog).get(memberId)}
-        onRemove={isMain ? undefined : () => void chatActions.removeChatParticipant(memberId)}
-        removeDisabledReason={view.busyParticipantIds.has(memberId) ? "busy" : undefined}
-        onForkToNewChat={() => forkToNewChat(memberId)}
-        forkToNewChatDisabledReason={forkToNewChatReason(participant)}
-      />
-    );
-  };
+  // The sessions view's settings of one member: controls under its composer,
+  // its … actions in its session's header, the main session's in the title's menu.
+  const sessionsMember = sessionsMemberSettings({ view, progressLog: state.progressLog, chatActions, forkToNewChat, forkToNewChatReason });
   const topBarActions = isNewChatScreen ? terminalToggle : (
     <>
       {/* The open chat's view switch and members button (its chat view provides them). */}
@@ -444,8 +417,9 @@ function App(): JSX.Element {
       openingConversationDescription={openingConversationDescription}
       accordDisabledReason={accordDisabledReason}
       onOpenAccord={() => setAccordDialogOpen(true)}
-      renderMemberSettings={(participantId) => sessionsMemberSettings(participantId)}
-      renderMemberChip={(participantId) => sessionsMemberSettings(participantId, memberModelChip(view.activeChatParticipants, participantId))}
+      renderMemberSettings={sessionsMember.actions}
+      renderMemberChip={sessionsMember.controls}
+      mainSessionActions={sessionsMember.mainSessionActions}
       topBar={chatUsesInlineTopBar ? chatTopBar : activityTopBar}
       artifacts={artifacts}
     />
@@ -662,6 +636,7 @@ function App(): JSX.Element {
                 onMainSessionProviderChange={state.setNewChatMainSessionProvider}
                 mainSessionOverrideFor={state.newChatMainSessionOverrideFor}
                 onMainSessionOverrideForChange={state.setNewChatMainSessionOverrideFor}
+                onMainSessionStartAccessChange={state.setNewChatMainSessionStartAccess}
                 settings={state.settings}
                 summaries={state.summaries}
                 agents={state.agents}

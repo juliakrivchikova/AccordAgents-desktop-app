@@ -58,12 +58,31 @@ export function cloneChatAgentPermissions(permissions: ChatAgentPermissions): Ch
       rules: normalizeChatShellPermissionRules(permissions.shell.rules)
     },
     ...(providerNative ? { providerNative } : {}),
-    ...(permissions.cliApprovals === true ? { cliApprovals: true as const } : {})
+    ...(permissions.cliApprovals === true ? { cliApprovals: true as const } : {}),
+    // Codex's Plan mode lives only in the CLI's own mode.
+    ...(permissions.cliApprovals === true && permissions.codexPlanMode === true ? { codexPlanMode: true as const } : {})
   };
 }
 
 export function normalizeChatAgentMode(value: unknown): ChatAgentMode {
-  return value === "plan" || value === "auto" || value === "default" ? value : DEFAULT_CHAT_AGENT_MODE;
+  return value === "plan" || value === "auto" || value === "default" || value === "full-access" ? value : DEFAULT_CHAT_AGENT_MODE;
+}
+
+/** The mode a member really runs in on its CLI: Codex's Full Access is
+ *  Codex's alone (no other CLI offers it without extra flags), so a member
+ *  on another CLI asked for it (a Codex main session's mode handed to a
+ *  member it makes) runs Auto, the broadest mode that CLI offers. */
+export function chatAgentModeForKind(kind: ChatProviderKind | undefined, mode: ChatAgentMode | undefined): ChatAgentMode {
+  const normalized = normalizeChatAgentMode(mode);
+  return normalized === "full-access" && kind !== "codex-cli" ? "auto" : normalized;
+}
+
+/** A mode a member or a machine names (a tool's input, a member it adds or
+ *  changes): never Codex's Full Access, which only the User chooses (her
+ *  menus); Auto at most. */
+export function chatAgentModeFromAgent(value: unknown): ChatAgentMode {
+  const mode = normalizeChatAgentMode(value);
+  return mode === "full-access" ? "auto" : mode;
 }
 
 export function normalizeChatAgentPermissions(value: unknown): ChatAgentPermissions {
@@ -87,7 +106,9 @@ export function normalizeChatAgentPermissions(value: unknown): ChatAgentPermissi
       rules: normalizeChatShellPermissionRules(shell.rules)
     },
     ...(providerNative ? { providerNative } : {}),
-    ...(record.cliApprovals === true ? { cliApprovals: true as const } : {})
+    ...(record.cliApprovals === true ? { cliApprovals: true as const } : {}),
+    // Codex's Plan mode lives only in the CLI's own mode.
+    ...(record.cliApprovals === true && record.codexPlanMode === true ? { codexPlanMode: true as const } : {})
   };
 }
 
@@ -113,7 +134,7 @@ export function effectiveChatAgentPermissionsForProvider(
   permissions: ChatAgentPermissions
 ): ChatAgentPermissions {
   const normalized = normalizeChatAgentPermissions(permissions);
-  if (mode !== "auto") {
+  if (mode !== "auto" && mode !== "full-access") {
     return effectiveChatAgentPermissions(mode, normalized);
   }
   // Auto-review enables command execution for both providers. Codex runs commands in
@@ -122,6 +143,8 @@ export function effectiveChatAgentPermissionsForProvider(
   // session tool surface.
   // Stored app rules remain part of the saved configuration but are not forwarded as
   // hard provider policy in Auto; the provider's native classifier owns each decision.
+  // Codex's Full Access gives the same rights without any review: its
+  // danger-full-access sandbox, never asking.
   const shell = {
     ...normalized.shell,
     enabled: true
@@ -183,9 +206,10 @@ export function resolveChatManageRolesParticipantsPermission(
   };
 }
 
-const CHAT_AGENT_MODE_RANK: Record<ChatAgentMode, number> = { plan: 0, default: 1, auto: 2 };
+const CHAT_AGENT_MODE_RANK: Record<ChatAgentMode, number> = { plan: 0, default: 1, auto: 2, "full-access": 3 };
 
-/** A member's mode never above its ceiling's: plan < default < auto. */
+/** A member's mode never above its ceiling's: plan < default < auto <
+ *  full-access. */
 export function clampChatAgentMode(requested: ChatAgentMode | undefined, ceiling: ChatAgentMode | undefined): ChatAgentMode {
   const wanted = normalizeChatAgentMode(requested);
   const limit = normalizeChatAgentMode(ceiling);
@@ -257,7 +281,9 @@ export function clampChatAgentPermissions(
     ...(allowedTools.length > 0 ? { providerNative: { "claude-code": { allowedTools } } } : {}),
     // Asking the User before what is not granted is a right of its own: only
     // when the ceiling may ask too.
-    ...(wanted.cliApprovals && limit.cliApprovals ? { cliApprovals: true as const } : {})
+    ...(wanted.cliApprovals && limit.cliApprovals ? { cliApprovals: true as const } : {}),
+    // Codex's Plan mode only holds it back: kept with its own mode.
+    ...(wanted.codexPlanMode && wanted.cliApprovals && limit.cliApprovals ? { codexPlanMode: true as const } : {})
   };
 }
 
@@ -279,7 +305,8 @@ export function clampChatAgentAccess(
   requested: { agentMode?: ChatAgentMode; permissions: ChatAgentPermissions },
   ceiling: { agentMode?: ChatAgentMode; permissions: ChatAgentPermissions }
 ): { agentMode: ChatAgentMode; permissions: ChatAgentPermissions } {
-  const agentMode = clampChatAgentMode(requested.agentMode, ceiling.agentMode);
+  // Full Access is Codex's alone: on another CLI, Auto (never above it).
+  const agentMode = chatAgentModeForKind(kind, clampChatAgentMode(requested.agentMode, ceiling.agentMode));
   const permissions = clampChatAgentPermissions(requested.permissions, ceiling.permissions);
   if (kind !== "gemini-cli") {
     return { agentMode, permissions };

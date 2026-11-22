@@ -1,4 +1,5 @@
 import type { CreateTerminalRequest, TerminalHostStateEvent, TerminalListResult, TerminalSummary } from "./terminal";
+import type { CliStartDefaults } from "./cliStartDefaults";
 import type { ChatScriptChangeRequest } from "./scripts";
 import type { ChatParticipantRosterStatus } from "./chatParticipantStatus";
 import type { DeviceEventBlobReference } from "./deviceEventBlobs";
@@ -910,7 +911,10 @@ export interface AgentContextUsage {
   model?: string;
 }
 
-export type ChatAgentMode = "default" | "plan" | "auto";
+/** A member's mode. "full-access" is Codex's Full Access preset (its
+ *  danger-full-access sandbox that never asks); only Codex has it, a member
+ *  on another CLI runs Auto instead (chatAgentModeForKind). */
+export type ChatAgentMode = "default" | "plan" | "auto" | "full-access";
 
 export type ChatReasoningEffort = "none" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max" | "ultra";
 
@@ -951,6 +955,13 @@ export interface ChatAgentPermissions {
    * controls), the app refuses what is not granted.
    */
   cliApprovals?: true;
+  /**
+   * Codex's Plan mode (its collaboration mode, `/plan` or Shift+Tab in its
+   * terminal) on top of its permissions preset; read only with
+   * `cliApprovals`, and only for Codex: Claude Code's and Antigravity's Plan
+   * is one of their permission modes (`agentMode: "plan"`).
+   */
+  codexPlanMode?: true;
 }
 
 export interface ChatParticipant {
@@ -2343,10 +2354,15 @@ export interface ProviderModel {
 
 export interface ProviderModelCatalog {
   kind: ProviderKind;
+  /** A CLI's list: `recommended` marks the model it runs when none is
+   *  chosen, the one the User's own config names (else the CLI's default). */
   models: ProviderModel[];
   authoritative: boolean;
   fetchedAt: string;
   error?: string;
+  /** What the CLI starts a new session in with the User's own config on this
+   *  device (src/shared/cliStartDefaults.ts); none when it could not say. */
+  startDefaults?: CliStartDefaults;
 }
 
 export interface ParticipantConfig {

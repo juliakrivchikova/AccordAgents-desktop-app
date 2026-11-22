@@ -45,6 +45,7 @@
  */
 
 import {
+  chatAgentModeForKind,
   chatAgentModeWithin,
   chatAgentPermissionsWithin,
   chatParticipantRequestPermissionExceeds,
@@ -311,7 +312,7 @@ function withDelegator(member: ChatParticipant, delegatorId: string | undefined)
   return delegatorId === undefined ? rest : { ...rest, delegatedByParticipantId: delegatorId };
 }
 
-const MODE_RANK: Record<ChatAgentMode, number> = { plan: 0, default: 1, auto: 2 };
+const MODE_RANK: Record<ChatAgentMode, number> = { plan: 0, default: 1, auto: 2, "full-access": 3 };
 
 function shellRuleKey(rule: { action: string; match: string; pattern: string }): string {
   return `${rule.action}\0${rule.match}\0${rule.pattern}`;
@@ -399,7 +400,7 @@ function keepAntigravityMode(next: ChatParticipant, current: ChatParticipant): C
   if (current.kind !== "gemini-cli" || next.kind !== "gemini-cli") return next;
   const had = normalizeChatAgentPermissions(current.permissions);
   const wanted = normalizeChatAgentPermissions(next.permissions);
-  if (!had.cliApprovals || wanted.cliApprovals || (!wanted.workspaceWrite && normalizeChatAgentMode(next.agentMode) !== "auto")) return next;
+  if (!had.cliApprovals || wanted.cliApprovals || (!wanted.workspaceWrite && chatAgentModeForKind("gemini-cli", next.agentMode) !== "auto")) return next;
   return { ...next, permissions: { ...permissionsOf(next), cliApprovals: true } as unknown as ChatParticipant["permissions"] };
 }
 
@@ -610,7 +611,9 @@ function isApprovedMember(member: ChatParticipant, approved: ApprovedMember, rul
   // same request makes (a role her published rules do not know yet).
   if (approved.newRole ? !rules || Boolean(rules.roles[member.roleConfigId]) : approved.roleConfigId === undefined || member.roleConfigId !== approved.roleConfigId) return false;
   if ((member.homeMachineId || undefined) !== approved.homeMachineId) return false;
-  if (normalizeChatAgentMode(member.agentMode) === "auto" && approved.agentMode !== "auto") return false;
+  // A mode that skips asking (Auto, Codex's Full Access) only as far as she approved.
+  const memberMode = normalizeChatAgentMode(member.agentMode);
+  if ((memberMode === "auto" || memberMode === "full-access") && !chatAgentModeWithin(memberMode, approved.agentMode)) return false;
   if (!permissionsWithin(normalizeChatAgentPermissions(member.permissions), approved.permissions)) return false;
   // Managing members as its role gives it now, never beyond what she saw.
   const actual = Math.max(rank(manageRight(rules?.roles[member.roleConfigId], member.permissions).effective),
@@ -646,8 +649,13 @@ function additionAllowed(member: ChatParticipant, changes: MemberChanges): ChatP
   const escalates = manageRight(role, member.permissions).exceedsRoleDefault ||
     (preset !== undefined && chatParticipantRequestPermissionExceeds(manageRight(role, member.permissions).effective, manageRight(role, preset.permissions).effective));
   if (!escalates) {
+    // Codex's Full Access only by the User's choice: without a main session
+    // whose own mode it is (the app hands a main session's mode to the
+    // members it makes), a member in it is added only on her card.
     const adders = changes.machineMembers.filter((requester) => managesWithoutCard(requester, rules, changes.policies, mainSession) &&
-      (!mainSession || (withinMember(member, requester, rules) && withinMember(member, mainSession, rules))));
+      (!mainSession
+        ? normalizeChatAgentMode(member.agentMode) !== "full-access"
+        : withinMember(member, requester, rules) && withinMember(member, mainSession, rules)));
     // The member the machine names as the one that added it, when it is one.
     const named = adders.find((requester) => requester.id === member.delegatedByParticipantId);
     if (named ?? adders[0]) return named ?? adders[0];
