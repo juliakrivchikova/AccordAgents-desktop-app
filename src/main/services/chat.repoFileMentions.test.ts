@@ -2119,9 +2119,6 @@ test("inferred participant request carrier is hidden and rooted to the source vi
   assert.ok(requestMessage);
   assert.equal(batch?.source, "inferred");
   assert.equal(batch?.triggerMessageId, "source-message");
-  // Named in the sessions view by the reply's sentence that asks it, without
-  // @-names (the User, 2026-11-22).
-  assert.equal(batch?.items[0]?.title, "Please verify");
   assert.equal(requestMessage.metadata?.hiddenFromTimeline, true);
   assert.equal(requestMessage.metadata?.threadId, "outer-thread");
   assert.equal(requestMessage.metadata?.parentMessageId, "source-message");

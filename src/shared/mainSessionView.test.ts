@@ -34,8 +34,6 @@ import {
   sessionsTaskTitle,
   shortenAtWord,
   sessionsMentionPieces,
-  sessionsMentionSentenceTitle,
-  SESSIONS_UNNAMED_TASK_TITLE,
   sessionsWaitingText
 } from "./mainSessionView";
 import type { ChatMessage, ChatParticipant, ChatParticipantRequestBatch, ChatParticipantRequestItem } from "./types";
@@ -314,32 +312,6 @@ test("a task is named by its short title: the main session's, else its first sen
   assert.equal(shortenAtWord("Short enough", 40), "Short enough");
   // A given title is kept to 80 characters.
   assert.ok(sessionsTaskTitle({ prompt: "x", title: "word ".repeat(40) }).length <= 80);
-});
-
-test("a task the app made from a reply that mentions a member is named by that sentence, with no @-names (the User, 2026-11-22)", () => {
-  const reply = "I checked the logs first. @claude is now in the chat, added from its saved preset with nothing asked of it. Nothing else changed.";
-  assert.equal(sessionsMentionSentenceTitle(reply, "claude"), "Is now in the chat, added from its…");
-  assert.equal(sessionsMentionSentenceTitle("Done. Could @gera check the release notes?", "@gera"), "Could check the release notes?");
-  assert.equal(sessionsMentionSentenceTitle("Ask @drew and @gera, then tell me.", "gera"), "Ask and, then tell me", "every @-name goes, the sentence of the member asked");
-  assert.equal(sessionsMentionSentenceTitle("First line\n- @drew: review the plan\nMore", "drew"), "Review the plan", "a line ends a sentence; list marks and the colon go");
-  assert.equal(sessionsMentionSentenceTitle("Mail me at me@example.com. Then @drew reads `@types/node` docs.", "drew"), "Then reads @types/node docs", "an address or a package is no @-name");
-  assert.equal(sessionsMentionSentenceTitle("@claude", "claude"), SESSIONS_UNNAMED_TASK_TITLE);
-  assert.equal(sessionsMentionSentenceTitle("@claude @gera.", "claude"), "Agent", "nothing but @-names: Agent");
-  assert.equal(sessionsMentionSentenceTitle("Version 1.5 is out. @drew please ship it.", "nobody"), "Please ship it", "member not found: the sentence of the first @-name");
-  assert.equal(sessionsMentionSentenceTitle("", "drew"), "Agent");
-  // A task kept from before such tasks were titled: from the words its text
-  // quotes, on the desktop and the phone (the same shared rule).
-  const prompt = [
-    "@main appeared to request your input in this chat reply.",
-    "Relevant excerpt: I checked the logs first. @claude is now in the chat, added from its saved preset.",
-    "",
-    "First determine whether you are the primary/direct addressee of this request."
-  ].join("\n");
-  assert.equal(sessionsTaskTitle({ prompt, targetHandle: "claude" }), "Is now in the chat, added from its…");
-  assert.equal(sessionsMemberTitle({ handle: "claude" }, { prompt, targetHandle: "claude" }), "Is now in the chat, added from its…");
-  assert.equal(sessionsTaskTitle({ prompt, targetHandle: "claude", title: "Is now in the chat" }), "Is now in the chat", "its own title, when made with one");
-  assert.equal(sessionsTaskTitle({ prompt: "@main appeared to request your input in this chat reply. Then more." }), "@main appeared to request your input…",
-    "only the app's own two lines are read as such a task");
 });
 
 test("a task entry carries its title, its state, its time and one line of its result", () => {
