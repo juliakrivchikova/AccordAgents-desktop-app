@@ -1322,6 +1322,8 @@ export class ChatService {
    *  server asks starts here and no requester is resumed (both wait for the
    *  next start). */
   private quitting = false;
+  /** Requesters a quit kept from resuming: resumed if it does not happen. */
+  private readonly resumesSkippedWhileQuitting = new Map<string, { conversationId: string; options: { groupCheck?: boolean } }>();
   /** Each chat's timer for its next waiting choice to expire. */
   private readonly choiceExpiryTimers = new Map<string, { atMs: number; timer: NodeJS.Timeout }>();
   /** The clock choices expire by (tests move it). */
@@ -19094,8 +19096,10 @@ export class ChatService {
     options: { groupCheck?: boolean } = {}
   ): Promise<void> {
     const resumeProgress = progress ?? this.onReviewProgress;
-    // Quitting: the requester is resumed at the next start (its recovery).
+    // Quitting: the requester is resumed at the next start (its recovery),
+    // or once the quit turns out not to happen (endQuit).
     if (this.quitting) {
+      this.resumesSkippedWhileQuitting.set(requestMessageId, { conversationId, options });
       void this.logParticipantRequestAutoResumeSkipped(conversationId, requestMessageId, "quitting");
       return;
     }
@@ -27057,6 +27061,17 @@ export class ChatService {
    *  start and requesters resume again. */
   endQuit(): void {
     this.quitting = false;
+    const skipped = [...this.resumesSkippedWhileQuitting];
+    this.resumesSkippedWhileQuitting.clear();
+    for (const [requestMessageId, resume] of skipped) {
+      void this.autoResumeParticipantRequest(resume.conversationId, requestMessageId, this.onReviewProgress, resume.options).catch((error) => {
+        void this.debugLogs.write("chat.participant-request.auto-resume.error", {
+          conversationId: resume.conversationId,
+          requestMessageId,
+          message: error instanceof Error ? error.message : String(error)
+        });
+      });
+    }
   }
 
   /** Resolves once no member's turn runs here (each saved how it ended, so

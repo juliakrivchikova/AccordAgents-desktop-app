@@ -504,4 +504,9 @@ test("a member's running reply is the one it works on, not one queued behind it,
   assert.equal(activity.runningSince.get("p-drew"), at(12), "since its own turn began, not since it was made");
   assert.equal(activity.runningReply.get("p-ana")?.id, "first", "turns run one after another: the first started");
   assert.equal(activity.runningSince.get("p-ana"), at(20));
+  // Every place that says since when a member works reads the same reply.
+  assert.equal(memberRunningSince("p-drew", messages), at(12));
+  assert.equal(sessionsTaskRunningSince({ targetParticipantId: "p-drew", createdAt: at(9) }, messages), at(12));
+  assert.equal(sessionsTaskRunningSince({ targetParticipantId: "p-drew", createdAt: at(14) }, messages), at(14),
+    "a task given after the turn in progress waits behind it: since it was given");
 });

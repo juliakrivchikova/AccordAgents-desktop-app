@@ -16845,3 +16845,20 @@ test("what a member wrote before the User's quit stays in its reply, stopped", a
   assert.equal(reply.status, "error");
   assert.equal(reply.metadata?.terminalReason, "user-stopped");
 });
+
+test("a requester a quit kept from resuming is resumed once the quit turns out not to happen", async () => {
+  const participant = chatParticipant("claude-code");
+  const conversation = chatConversation([participant]);
+  const { service } = testService({ conversation });
+  service.beginQuit();
+  await (service as any).autoResumeParticipantRequest(conversation.id, "request-1", undefined, { groupCheck: true });
+  const resumed: unknown[][] = [];
+  (service as any).autoResumeParticipantRequest = async (...args: unknown[]) => { resumed.push(args); };
+  service.endQuit();
+  assert.equal(resumed.length, 1);
+  assert.equal(resumed[0][0], conversation.id);
+  assert.equal(resumed[0][1], "request-1");
+  assert.deepEqual(resumed[0][3], { groupCheck: true });
+  service.endQuit();
+  assert.equal(resumed.length, 1, "once");
+});

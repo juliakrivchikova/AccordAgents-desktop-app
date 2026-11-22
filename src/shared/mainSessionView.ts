@@ -101,26 +101,38 @@ export interface SessionsMemberActivity {
  *  runningMessageForParticipant picks it), and it runs from when its own
  *  turn began, not from when it was queued. */
 export function sessionsMemberActivity(messages: readonly ChatMessage[]): SessionsMemberActivity {
-  const runningReply = new Map<string, ChatMessage>();
+  const runningReply = runningRepliesByMember(messages);
   const finishedAt = new Map<string, string>();
   for (let index = messages.length - 1; index >= 0; index -= 1) {
     const message = messages[index]!;
-    if (message.role !== "participant" || !message.participantId) continue;
-    if (!isPendingReply(message)) {
-      if (!finishedAt.has(message.participantId)) finishedAt.set(message.participantId, message.createdAt);
-      continue;
-    }
-    if (message.metadata?.queuedBehind || message.metadata?.turnQueued) continue;
-    const current = runningReply.get(message.participantId);
-    // Read newest first: a reply earlier in the chat started no later.
-    if (!current || startedNoLater(message, current)) runningReply.set(message.participantId, message);
+    if (message.role !== "participant" || !message.participantId || isPendingReply(message)) continue;
+    if (!finishedAt.has(message.participantId)) finishedAt.set(message.participantId, message.createdAt);
   }
   const runningSince = new Map<string, string>();
-  for (const [participantId, message] of runningReply) {
-    const started = message.metadata?.turnStartedAt;
-    runningSince.set(participantId, typeof started === "string" && started ? started : message.createdAt);
-  }
+  for (const [participantId, message] of runningReply) runningSince.set(participantId, sessionsReplyStartedAt(message));
   return { runningSince, finishedAt, runningReply };
+}
+
+/** Each member's reply in progress (sessionsMemberActivity's rule), by
+ *  member; `participantId`: only that member's. */
+function runningRepliesByMember(messages: readonly ChatMessage[], participantId?: string): Map<string, ChatMessage> {
+  const running = new Map<string, ChatMessage>();
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    const message = messages[index]!;
+    if (!isPendingReply(message) || !message.participantId || (participantId !== undefined && message.participantId !== participantId)) continue;
+    if (message.metadata?.queuedBehind || message.metadata?.turnQueued) continue;
+    const current = running.get(message.participantId);
+    // Read newest first: a reply earlier in the chat started no later.
+    if (!current || startedNoLater(message, current)) running.set(message.participantId, message);
+  }
+  return running;
+}
+
+/** When a reply's own turn began: once it waited behind its member's turn
+ *  before it, not when it was made. */
+export function sessionsReplyStartedAt(message: Pick<ChatMessage, "createdAt" | "metadata">): string {
+  const started = message.metadata?.turnStartedAt;
+  return typeof started === "string" && started ? started : message.createdAt;
 }
 
 /** An unknown start time cannot claim to be first; on a tie the one earlier
@@ -438,22 +450,17 @@ export function sessionsTaskRunningSince(
   item: Pick<ChatParticipantRequestItem, "targetParticipantId" | "createdAt">,
   messages: readonly ChatMessage[]
 ): string {
-  for (let index = messages.length - 1; index >= 0; index -= 1) {
-    const message = messages[index]!;
-    if (isPendingReply(message) && message.participantId === item.targetParticipantId && message.createdAt >= item.createdAt) {
-      return message.createdAt;
-    }
-  }
-  return item.createdAt;
+  // The reply it works on now (never one queued behind it), if made for
+  // this task; one from before is an earlier turn the task waits behind.
+  const running = runningRepliesByMember(messages, item.targetParticipantId).get(item.targetParticipantId);
+  return running && running.createdAt >= item.createdAt ? sessionsReplyStartedAt(running) : item.createdAt;
 }
 
-/** A member's reply in progress, if it is answering now. */
+/** When a member's reply in progress began, if it is answering now
+ *  (sessionsMemberActivity's rule). */
 export function memberRunningSince(participantId: string, messages: readonly ChatMessage[]): string | undefined {
-  for (let index = messages.length - 1; index >= 0; index -= 1) {
-    const message = messages[index]!;
-    if (isPendingReply(message) && message.participantId === participantId) return message.createdAt;
-  }
-  return undefined;
+  const running = runningRepliesByMember(messages, participantId).get(participantId);
+  return running ? sessionsReplyStartedAt(running) : undefined;
 }
 
 export interface SessionsMemberTask {
@@ -558,12 +565,7 @@ export function sessionsMembersWaitingSince(
   // When each member's turn in progress started: a card from before it is
   // one the member went on from (the main session answered it, a new task).
   const turnStartedAt = new Map<string, string>();
-  for (let index = messages.length - 1; index >= 0; index -= 1) {
-    const message = messages[index]!;
-    if (message.participantId && !turnStartedAt.has(message.participantId) && isPendingReply(message)) {
-      turnStartedAt.set(message.participantId, message.createdAt);
-    }
-  }
+  for (const [participantId, message] of runningRepliesByMember(messages)) turnStartedAt.set(participantId, sessionsReplyStartedAt(message));
   for (const message of messages) {
     if (message.role !== "participant" || !message.participantId || !(isWaitingChoice(message) || isWaitingMentionApproval(message))) continue;
     const started = turnStartedAt.get(message.participantId);

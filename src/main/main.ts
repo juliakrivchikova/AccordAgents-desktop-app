@@ -3871,18 +3871,26 @@ function quitWasCancelled(reason: string): void {
   mainWindowLetGoByQuit = undefined;
   // The next quit asks about the terminal's commands again.
   quitConfirmation.revoke();
-  chatService.endQuit();
-  void appMcpService.start().catch((error: unknown) => {
-    void debugLogService.write("app-quit.cancelled.restart-error", { part: "app tools", message: error instanceof Error ? error.message : String(error) });
-  });
-  void scriptService.start().catch((error: unknown) => {
-    void debugLogService.write("app-quit.cancelled.restart-error", { part: "scripts", message: error instanceof Error ? error.message : String(error) });
-  });
-  void serverChatLink.start().catch((error: unknown) => {
-    void debugLogService.write("app-quit.cancelled.restart-error", { part: "server link", message: error instanceof Error ? error.message : String(error) });
+  // Once the quit's own steps have really ended (they may outlast its time
+  // limit): started earlier, their stops would close what starts here.
+  const cleaned = quitCleanupRun ?? Promise.resolve();
+  quitCleanupRun = undefined;
+  void cleaned.then(async () => {
+    // A quit begun again meanwhile owns what runs now.
+    if (quitCleanupStarted) return;
+    chatService.endQuit();
+    const failed = (part: string) => (error: unknown) => {
+      void debugLogService.write("app-quit.cancelled.restart-error", { part, message: error instanceof Error ? error.message : String(error) });
+    };
+    // As the app starts: its local API before the scripts that call it.
+    await appMcpService.start().catch(failed("app tools"));
+    void scriptService.start().catch(failed("scripts"));
+    void serverChatLink.start().catch(failed("server link"));
   });
 }
 let quitCancelledWhileCleaning = false;
+/** The quit's steps, until they end (they may outlast QUIT_CLEANUP_MS). */
+let quitCleanupRun: Promise<void> | undefined;
 /** The main window a quit's close let go of, until the quit happens. */
 let mainWindowLetGoByQuit: BrowserWindow | undefined;
 
@@ -3919,6 +3927,7 @@ app.on("before-quit", (event) => {
     stopMembersThenServerLink(),
     scriptService.stop().then(() => appMcpService.stop())
   ]).then(() => { cleanupDone = true; });
+  quitCleanupRun = cleanup;
   const timeout = new Promise<void>((resolve) => setTimeout(resolve, QUIT_CLEANUP_MS));
   void Promise.race([cleanup, timeout]).finally(() => {
     debugLogService.writeNow("app-quit.cleanup-finished", { ms: Date.now() - cleanupStartedAt, timedOut: !cleanupDone });
@@ -3940,7 +3949,13 @@ app.on("before-quit", (event) => {
       // Nothing says a quit was cancelled; one that has not reached
       // will-quit by then was.
       if (quitCancelTimer) clearTimeout(quitCancelTimer);
-      quitCancelTimer = setTimeout(() => quitWasCancelled("no will-quit"), QUIT_CANCEL_DETECT_MS);
+      quitCancelTimer = setTimeout(() => {
+        // Only with a window still open: one whose windows are gone is still
+        // quitting, however slowly, and must not start anything again.
+        const open = BrowserWindow.getAllWindows().some((window) => !window.isDestroyed());
+        if (open) quitWasCancelled("no will-quit");
+        else debugLogService.writeNow("app-quit.slow", { afterMs: QUIT_CANCEL_DETECT_MS });
+      }, QUIT_CANCEL_DETECT_MS);
       quitCancelTimer.unref?.();
     });
   });

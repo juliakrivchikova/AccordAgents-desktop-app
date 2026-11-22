@@ -8319,7 +8319,11 @@
       titles.push([member.handle, title]);
       if (member.mentionHandle && member.mentionHandle !== member.handle) titles.push([member.mentionHandle, title]);
     });
-    return shared.sessionsViewNames(main ? main.mentionHandle || main.handle : undefined, titles);
+    const names = shared.sessionsViewNames(main ? main.mentionHandle || main.handle : undefined, titles);
+    // A member no longer in the chat, by the title it had when the chat was
+    // last open here.
+    if (state || !titled) return names;
+    return { ...names, titleOf: function (handle) { return names.titleOf(handle) || titled.titleOf(handle); } };
   }
 
   /** A card's words as the chat's view shows them: a permission card's are
