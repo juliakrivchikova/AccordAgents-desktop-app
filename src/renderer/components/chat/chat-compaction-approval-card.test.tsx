@@ -134,6 +134,12 @@ test("Compact allows once, Compact with the box allows for this chat, Not now de
   const clicked = card(false);
   key({}, clicked);
   assert.deepEqual(enter.answers, []);
+  // Focused by a click on its text: Chromium reports the ring once a key is
+  // pressed, so the click itself is what keeps Enter from compacting.
+  act(() => { section.props.onPointerDown(); });
+  key({});
+  assert.deepEqual(enter.answers, []);
+  act(() => { section.props.onBlur({ currentTarget: { contains: () => false }, relatedTarget: null }); });
   key({});
   assert.deepEqual(enter.answers, [["approval-compact", true, "once"]]);
   act(() => enter.renderer.unmount());

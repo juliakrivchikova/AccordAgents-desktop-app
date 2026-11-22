@@ -1,4 +1,4 @@
-import { useState, type KeyboardEvent } from "react";
+import { useRef, useState, type FocusEvent, type KeyboardEvent } from "react";
 import { CornerDownLeft, Minimize2 } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
@@ -59,6 +59,10 @@ export function ChatCompactionApprovalCard(props: {
     ? avatarForChatParticipant(requester, requesterLabel)
     : avatarForParticipant(requesterLabel, approval.requesterParticipantId);
   const queuedDecision = approval.machineDecisionPending;
+  // Focused by a click on its text (a pointer press on it since it last had
+  // focus): Enter is not Compact then. Chromium shows :focus-visible as soon
+  // as a key is pressed, so the ring alone cannot tell.
+  const pointerFocused = useRef(false);
 
   if (queuedDecision) {
     // As every card says it while a machine confirms (chat-app-tool-approval-card).
@@ -98,9 +102,12 @@ export function ChatCompactionApprovalCard(props: {
     // which focuses it without a ring.
     if (event.key !== "Enter" || event.repeat || event.shiftKey || event.metaKey || event.ctrlKey || event.altKey) return;
     const card = event.currentTarget;
-    if (event.target !== card || !card.matches(":focus-visible, .approval-focused")) return;
+    if (event.target !== card || pointerFocused.current || !card.matches(":focus-visible, .approval-focused")) return;
     event.preventDefault();
     compact();
+  };
+  const onBlur = (event: FocusEvent<HTMLElement>): void => {
+    if (!event.currentTarget.contains(event.relatedTarget as Node | null)) pointerFocused.current = false;
   };
 
   return (
@@ -110,6 +117,8 @@ export function ChatCompactionApprovalCard(props: {
       data-app-tool-approval-id={approval.id}
       tabIndex={-1}
       onKeyDown={onKeyDown}
+      onPointerDown={() => { pointerFocused.current = true; }}
+      onBlur={onBlur}
     >
       {/* Under its member's own message the message names it already. */}
       {requesterName && !props.embedded && (
