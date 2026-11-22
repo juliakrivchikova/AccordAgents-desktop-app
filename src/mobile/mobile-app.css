@@ -5483,8 +5483,8 @@ button.card-row:focus-visible {
 }
 
 /* The side panel's rows, the computer's anatomy (the User, 2026-11-22): the
-   provider's glyph with a dot while it runs (a soft pulsing ring, still for
-   reduced motion) or waits for the User, none once it ended; the task on one
+   provider's glyph with a dot while it runs (fading in and out, the desktop's
+   pulse; still for reduced motion) or waits for the User, none once it ended; the task on one
    line, and how long it works or worked (no model); Stop at the end. */
 .sessions-agent-row {
   min-height: 48px;
@@ -5509,16 +5509,7 @@ button.card-row:focus-visible {
 
 .sessions-agent-dot.is-running {
   background: var(--acc);
-}
-
-.sessions-agent-dot.is-running::after {
-  position: absolute;
-  inset: -2px;
-  border-radius: 50%;
-  background: var(--acc);
-  content: "";
-  opacity: 0;
-  animation: sessions-agent-pulse 1.8s ease-out infinite;
+  animation: chat-rt-pulse 1.4s ease-in-out infinite;
 }
 
 .sessions-agent-dot.is-waiting {
@@ -5547,21 +5538,21 @@ button.card-row:focus-visible {
   color: inherit;
 }
 
-@keyframes sessions-agent-pulse {
-  0% {
-    opacity: 0.45;
-    transform: scale(0.8);
+/* The desktop's running pulse (chat-rt-pulse, chat-conversation.css), the
+   same keyframes: the dot fades in and out. */
+@keyframes chat-rt-pulse {
+  0%,
+  100% {
+    opacity: 1;
   }
 
-  100% {
-    opacity: 0;
-    transform: scale(2);
+  50% {
+    opacity: 0.35;
   }
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .sessions-agent-dot.is-running::after {
-    display: none;
+  .sessions-agent-dot.is-running {
     animation: none;
   }
 }

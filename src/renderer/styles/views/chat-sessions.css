@@ -543,32 +543,11 @@
   border-color: var(--app-surface-hover);
 }
 
-/* Running: the accent, and a soft ring that swells from it and fades, again
-   and again (still for reduced motion). */
+/* Running: the accent, the dot fading in and out with the app's own pulse
+   (chat-rt-pulse, as a running task's status dot; still for reduced motion). */
 .chat-agent-dot.is-running {
   background: var(--app-accent);
-}
-
-.chat-agent-dot.is-running::after {
-  position: absolute;
-  inset: -2px;
-  border-radius: 50%;
-  background: var(--app-accent);
-  content: "";
-  opacity: 0;
-  animation: chat-agent-pulse 1.8s ease-out infinite;
-}
-
-@keyframes chat-agent-pulse {
-  0% {
-    opacity: 0.45;
-    transform: scale(0.8);
-  }
-
-  100% {
-    opacity: 0;
-    transform: scale(2);
-  }
+  animation: chat-rt-pulse 1.4s ease-in-out infinite;
 }
 
 .chat-agent-dot.is-waiting {
@@ -770,8 +749,7 @@
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .chat-agent-dot.is-running::after {
-    display: none;
+  .chat-agent-dot.is-running {
     animation: none;
   }
 }
