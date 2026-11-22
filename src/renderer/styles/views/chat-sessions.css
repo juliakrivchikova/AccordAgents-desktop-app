@@ -583,6 +583,8 @@
   align-items: center;
   gap: 4px;
   min-width: 0;
+  /* A long model name (an id not in the CLI's list) never takes the title's room. */
+  max-width: 45%;
   color: var(--app-muted);
   font-size: 11.5px;
   font-variant-numeric: tabular-nums;
@@ -590,6 +592,7 @@
 }
 
 .chat-agent-model {
+  min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
 }
@@ -599,7 +602,7 @@
 }
 
 .chat-agent-meta.is-waiting {
-  color: var(--app-warning);
+  color: var(--app-status-warning-text);
   font-weight: 500;
 }
 
@@ -647,22 +650,28 @@
   fill: currentColor;
 }
 
+/* Without hover (a touch screen): Stop stands after the row's words, always
+   there, and the time and state stay. */
 @media (hover: none) {
   .chat-agent-stop.aa-icon-button {
+    position: static;
+    flex: 0 0 auto;
+    margin-right: 4px;
     opacity: 1;
     pointer-events: auto;
+    transform: none;
   }
 
   .chat-agent-row.has-stop .chat-agent-time,
   .chat-agent-row.has-stop .chat-agent-sep,
   .chat-agent-row.has-stop .chat-agent-state {
-    visibility: hidden;
+    visibility: visible;
   }
 }
 
 /* The hover card, to the row's left (T3 Code's subagent card). */
 .chat-agent-card {
-  z-index: 60;
+  z-index: var(--z-popover);
   display: grid;
   gap: 2px;
   width: 280px;
@@ -694,7 +703,7 @@
 }
 
 .chat-agent-card-status.is-waiting {
-  color: var(--app-warning);
+  color: var(--app-status-warning-text);
   font-weight: 500;
 }
 

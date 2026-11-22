@@ -298,13 +298,21 @@ function keepRole(next: ChatParticipant, current: ChatParticipant): ChatParticip
   // taken from another member would speak for that one.
   const named = next.handle === current.handle ? next : { ...next, handle: current.handle };
   const roled = named.roleConfigId === current.roleConfigId ? named : { ...named, roleConfigId: current.roleConfigId };
-  const kept = roled.delegatedByParticipantId === current.delegatedByParticipantId ? roled : withDelegator(roled, current.delegatedByParticipantId);
+  const delegated = roled.delegatedByParticipantId === current.delegatedByParticipantId ? roled : withDelegator(roled, current.delegatedByParticipantId);
+  // Nor the title it is named by in the sessions view: a title taken from
+  // another member would speak for that one, as a name would.
+  const kept = delegated.taskTitle === current.taskTitle ? delegated : withTaskTitle(delegated, current.taskTitle);
   const had = permissionsOf(current).manageRolesParticipants;
   if (permissionsOf(next).manageRolesParticipants === had) return kept;
   const permissions = { ...permissionsOf(next) };
   if (had === undefined) delete permissions.manageRolesParticipants;
   else permissions.manageRolesParticipants = had;
   return { ...kept, permissions: permissions as unknown as ChatParticipant["permissions"] };
+}
+
+function withTaskTitle(member: ChatParticipant, taskTitle: string | undefined): ChatParticipant {
+  const { taskTitle: _title, ...rest } = member;
+  return taskTitle === undefined ? rest : { ...rest, taskTitle };
 }
 
 function withDelegator(member: ChatParticipant, delegatorId: string | undefined): ChatParticipant {

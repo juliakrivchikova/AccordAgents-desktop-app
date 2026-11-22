@@ -34,6 +34,7 @@ import {
   sessionsTaskTitle,
   shortenAtWord,
   sessionsMentionPieces,
+  approvalHoldsTurn,
   sessionsMembersWaitingForUser,
   sessionsWaitingText,
   titleTaskByMember
@@ -338,21 +339,40 @@ test("a member keeps the title its delegation gave it: a later task without one 
   assert.equal(titleTaskByMember([]).size, 0);
 });
 
-test("a member blocked on the User's approval or choice waits for her even while its run is live", () => {
+test("a member held up by the User waits for her even while its run is live; a request that does not hold its turn, or a card its newer turn went past, does not", () => {
   const messages = chat();
   const approvals = [
-    { id: "a1", status: "pending", requesterParticipantId: "p-drew", toolName: "Write" },
-    { id: "a2", status: "approved", requesterParticipantId: "p-gera", toolName: "Write" },
-    null
+    { status: "pending" as const, requesterParticipantId: "p-drew", toolName: "app_tool_permission" },
+    { status: "pending" as const, requesterParticipantId: "p-gera", toolName: "app_scripts_request_change" },
+    { status: "pending" as const, requesterParticipantId: "p-gera", toolName: "codex_auto_review_approval", resumeContext: { runId: "r1", triggerMessageId: "t1" } },
+    { status: "approved" as const, requesterParticipantId: "p-taylor", toolName: "app_tool_permission" }
   ];
   const waiting = sessionsMembersWaitingForUser(messages, approvals);
-  assert.deepEqual([...waiting].sort(), ["p-drew", "p-taylor"], "drew's approval and taylor's open choice; gera's approval is answered");
-  assert.equal(sessionsMemberStatus("running", undefined, undefined, true), "waiting", "a live run blocked on her reads Waiting for you");
+  assert.deepEqual([...waiting].sort(), ["p-drew", "p-gera", "p-taylor"],
+    "drew's tool permission, gera's Codex approval (it names its run) and taylor's open choice");
+  assert.deepEqual([...sessionsMembersWaitingForUser(messages, [approvals[1]!])].sort(), ["p-taylor"], "a script request returns at once: gera works on");
+  assert.equal(approvalHoldsTurn({ toolName: "app_connector_sign_in" }), true);
+  assert.equal(approvalHoldsTurn({ toolName: "app_permissions_request_change" }), false);
+  // taylor's choice is answered by a newer turn of its own: it went on.
+  const later = [...messages, message("taylor-turn", "participant", 12, { participantId: "p-taylor", status: "pending", content: "" })];
+  assert.equal(sessionsMembersWaitingForUser(later).has("p-taylor"), false, "a card from before its turn in progress");
+  assert.equal(sessionsMemberStatus("running", undefined, undefined, true), "waiting", "a live run held up by her reads Waiting for you");
   assert.equal(sessionsMemberStatus("running", undefined, undefined, false), "running");
   const statuses = new Map([["p-drew", "running" as const], ["p-gera", "idle" as const], ["p-taylor", "running" as const]]);
-  const rows = sessionsMemberRows(participants, "p-main", statuses, latestTaskByMember(messages), undefined, waiting);
+  const rows = sessionsMemberRows(participants, "p-main", statuses, latestTaskByMember(messages), undefined, sessionsMembersWaitingForUser(messages, [approvals[0]!]));
   assert.deepEqual(rows.current.map((row) => [row.participant.id, row.status]), [["p-drew", "waiting"], ["p-taylor", "waiting"]]);
+  // Its running task reads the same in the main session's reply.
+  const entry = sessionsTaskEntries(messages[3]!, messages[3]!.metadata!.participantRequest!, statuses, sessionsMemberActivity(messages), new Map(), undefined, undefined, new Set(["p-drew"]));
+  assert.equal(entry.find((item) => item.item.targetParticipantId === "p-drew")?.status, "waiting");
   assert.equal(sessionsMembersWaitingForUser([], undefined).size, 0);
+});
+
+test("a member is named by the title kept with it before any task read on this device", () => {
+  const followUp = { ...item("p-drew", "running", 20), prompt: 'Two additions to your task "Новые чаты в General": the phone too.' };
+  const kept = { ...participants[1]!, taskTitle: "  Новые чаты\n в General " };
+  assert.equal(sessionsMemberTitle(kept, followUp), "Новые чаты в General", "the delegation is not among the loaded messages");
+  assert.equal(sessionsMemberTitle(kept), "Новые чаты в General");
+  assert.equal(sessionsMemberTitle({ ...kept, taskTitle: "" }, followUp), 'Two additions to your task "Новые чаты…', "none kept: the loaded task names it");
 });
 
 test("a task entry carries its title, its state, its time and one line of its result", () => {

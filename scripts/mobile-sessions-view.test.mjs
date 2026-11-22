@@ -569,3 +569,62 @@ async function waitForOp(hub, matches, timeoutMs = 15_000) {
   }
   throw new Error("the phone did not send the operation");
 }
+
+test("the phone's side panel names a member by its delegation's title and shows one its permission holds up as Waiting for you, out of the running count", { timeout: 180_000 }, async (t) => {
+  const hub = await startMobileHub();
+  const site = await serveMobileShell({ port: 8391, hubOrigins: [hub.base] });
+  const profile = await tempProfile("aa-mobile-side-panel-");
+  const chrome = launchChrome({ port: 9541, profile, url: `${site.origin}/` });
+  let app;
+  t.after(async () => {
+    app?.close();
+    chrome.kill("SIGKILL");
+    await site.close();
+    await hub.close();
+    await rm(profile, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
+  });
+  // drew keeps its delegation's title with it (its delegation is not among
+  // the messages); taylor's titled delegation and an untitled follow-up are.
+  const drew = { ...DREW, taskTitle: "Restyle the button" };
+  await hub.createChat("conv-panel", {
+    title: "Side panel", participants: [MAIN, drew, TAYLOR, SAM], createdAt: at(40),
+    metadata: { mainSessionParticipantId: MAIN.id, chatView: "sessions" },
+    messages: [
+      { id: "pu1", role: "user", content: "Go", status: "done", createdAt: at(30), metadata: { deliveryTargets: [MAIN.id] } },
+      request("pd-taylor", "pu1", 29, [item(TAYLOR.id, "taylor", "Run the login tests and report.", "answered", 29, { title: "Login tests", doneAt: 20 })]),
+      request("pf-drew", "pu1", 10, [item(DREW.id, "drew", "Two additions to your task \"Restyle the button\": the phone too.", "running", 10)]),
+      request("pf-taylor", "pu1", 9, [item(TAYLOR.id, "taylor", "Two additions to your task \"Login tests\": add the logout test.", "running", 9)]),
+      request("pd-sam", "pu1", 8, [item(SAM.id, "sam", "Read the logs.", "running", 8, { title: "Server logs" })]),
+      { id: "pdrew-run", role: "participant", participantId: DREW.id, participantLabel: "@drew", content: "", status: "pending", createdAt: at(5),
+        metadata: { runId: "run-pdrew", sourceMessageId: "pf-drew" } },
+      { id: "ptaylor-run", role: "participant", participantId: TAYLOR.id, participantLabel: "@taylor", content: "Adding it", status: "pending", createdAt: at(4),
+        metadata: { runId: "run-ptaylor", sourceMessageId: "pf-taylor" } },
+      { id: "psam-run", role: "participant", participantId: SAM.id, participantLabel: "@sam", content: "Reading", status: "pending", createdAt: at(3),
+        metadata: { runId: "run-psam", sourceMessageId: "pd-sam" } }
+    ]
+  });
+  // drew's turn waits on its CLI's permission prompt; sam's script request
+  // does not hold its turn.
+  const now = new Date().toISOString();
+  const approval = (id, participantId, handle, toolName, summary) => ({
+    id, conversationId: "conv-panel", requesterParticipantId: participantId, requesterHandle: handle, requesterRoleConfigId: "software-engineer",
+    toolName, capability: "permissions.request", status: "pending", request: { toolName: "Write", input: { file_path: "/tmp/x" } }, summary, createdAt: now, updatedAt: now
+  });
+  await hub.raiseApproval("conv-panel", approval("ap-drew", DREW.id, "drew", "app_tool_permission", "Grant @drew Write"));
+  await hub.raiseApproval("conv-panel", approval("ap-sam", SAM.id, "sam", "app_scripts_request_change", "Add a scheduled script"));
+  app = await attachApp({ port: 9541 });
+  await pairPage(app, { hub, siteOrigin: site.origin, query: "qa=1" });
+  await openChat(app, "conv-panel");
+  await app.waitFor(`${visible("#chat-members-button")}`, "the panel's icon");
+  await app.waitFor(`document.getElementById("chat-members-button").getAttribute("aria-label") === "Side panel (2 running)"`,
+    "taylor and sam run; drew waits for the User", 20_000);
+  await app.evaluate(`document.getElementById("chat-members-button").click()`);
+  await app.waitFor(`${visible("#members-sheet")} && document.querySelectorAll("#members-sheet-list .sessions-member-row").length >= 3`, "the panel");
+  const rows = await app.evaluate(`[...document.querySelectorAll("#members-sheet-list .sessions-member-row")].map((row) =>
+    [row.dataset.memberSession, row.dataset.memberStatus, row.querySelector(".members-sheet-task").textContent])`);
+  assert.deepEqual(rows, [
+    [DREW.id, "waiting", "Restyle the button"],
+    [TAYLOR.id, "running", "Login tests"],
+    [SAM.id, "running", "Server logs"]
+  ], "titles from the delegations, never a follow-up's words; only the held-up turn waits");
+});

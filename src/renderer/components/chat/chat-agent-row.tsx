@@ -11,13 +11,17 @@ import { useStreamingElapsedSeconds } from "./chat-streaming";
 import { formatWorkedDuration } from "./chat-worked-row";
 import { useMemberModelSummary, type MemberModelSummary } from "./use-member-model-summary";
 
+/** From this many minutes on, hours are whole ("12h"), as T3 Code says them. */
+const WHOLE_HOURS_FROM_MINUTES = 600;
+
 /** A duration as T3 Code's agent row says it: "5s", "8m", "1.5h", "12h". */
 export function formatCompactDuration(ms: number): string {
   const seconds = Math.max(0, Math.floor(ms / 1000));
   if (seconds < 60) return `${seconds}s`;
   const minutes = Math.floor(seconds / 60);
   if (minutes < 60) return `${minutes}m`;
-  if (minutes >= 600) return `${Math.floor(minutes / 60)}h`;
+  if (minutes >= WHOLE_HOURS_FROM_MINUTES) return `${Math.floor(minutes / 60)}h`;
+  // Tenths of an hour, rounded down: 90 minutes is "1.5h".
   return `${Math.floor(minutes / 6) / 10}h`;
 }
 
@@ -66,6 +70,8 @@ function RowMeta(props: { row: ChatAgentRowData; model?: string }): JSX.Element 
       {props.model && <span className="chat-agent-model">{props.model}</span>}
       {props.model && time !== undefined && <span className="chat-agent-sep" aria-hidden="true">·</span>}
       {time !== undefined && <span className="chat-agent-time" data-testid="chat-agent-time">{time}</span>}
+      {/* Stop's place on hover, so it never covers the model's name. */}
+      {time === undefined && row.stop && <span className="chat-agent-time" aria-hidden="true" />}
     </span>
   );
 }
@@ -136,7 +142,7 @@ function AgentRowView(props: { row: ChatAgentRowData; model?: string; detail: st
           <button
             type="button"
             className="chat-agent-row-main"
-            aria-label={row.status === "idle" ? row.title : `${row.title}, ${SESSIONS_WORK_STATUS_LABELS[row.status]}`}
+            aria-label={[row.title, row.status === "idle" ? "" : SESSIONS_WORK_STATUS_LABELS[row.status], props.model ?? ""].filter(Boolean).join(", ")}
             onClick={row.onOpen}
           >
             <span className="chat-agent-glyph">

@@ -158,7 +158,6 @@ test("the members panel lists the chat's latest Accord first, as a row that open
       activity={{ runningSince: new Map(), finishedAt: new Map() }}
       runIdsByParticipantId={new Map()}
       memberTitle={() => ""}
-     
       onOpenMember={noop}
       onClose={noop}
     />

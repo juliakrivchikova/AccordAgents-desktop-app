@@ -120,6 +120,8 @@ export async function buildMobileChatList(store: MobileCatalogStore, options: Mo
         roleLabel: options.roleLabels.get(participant.roleConfigId) ?? participant.roleConfigId,
         // What the phone resolves a draft's member with, as the desktop does.
         roleConfigId: participant.roleConfigId,
+        // The title its delegation gave it: the sessions view's name for it.
+        ...(typeof participant.taskTitle === "string" && participant.taskTitle.trim() ? { taskTitle: participant.taskTitle } : {}),
         kind: participant.kind,
         ...(participant.avatarId ? { avatarId: participant.avatarId } : {}),
         ...(mobileParticipantIsAssistant(participant) ? { isAssistant: true } : {}),

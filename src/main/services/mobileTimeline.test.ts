@@ -643,3 +643,23 @@ test("a reply that waited in the queue works, on the phone too, from when its ow
   assert.equal(event?.queued, undefined);
   assert.equal(event?.startedAt, turnStartedAt, "not the time it was queued");
 });
+
+test("a task travels to the phone saying whether the main session gave its title, so a follow-up never renames the member there", () => {
+  const at = (minute: number): string => `2026-11-22T10:${String(minute).padStart(2, "0")}:00.000Z`;
+  const item = (minute: number, extra: Record<string, unknown>) => ({ targetParticipantId: "p-drew", targetHandle: "drew", status: "answered", createdAt: at(minute), updatedAt: at(minute), ...extra });
+  const request = (id: string, minute: number, items: unknown[]) => ({
+    id, role: "participant", participantId: "p-main", content: `@drew task ${id}`, createdAt: at(minute), status: "done",
+    metadata: { participantRequest: { id: `b-${id}`, requesterParticipantId: "p-main", requesterHandle: "main", source: "mcp", resumeRequester: true, status: "completed", depth: 1, createdAt: at(minute), updatedAt: at(minute), items } }
+  });
+  const conversation = {
+    id: "titles-chat", kind: "chat", title: "Titles", createdAt: at(0), updatedAt: at(9), findings: [], metadata: {},
+    messages: [
+      request("delegate", 1, [item(1, { prompt: "Implement new chats in General.", title: "Новые чаты в General" })]),
+      request("follow-up", 9, [item(9, { prompt: 'Two additions to your task "Новые чаты в General": the phone too.' })])
+    ]
+  } as unknown as Conversation;
+  const events = timelineEventsFromSnapshot(conversation) as unknown as Array<{ id: string; participantRequest?: { items: Array<{ title: string; titled: boolean }> } }>;
+  const items = (id: string) => events.find((event) => event.id === id)?.participantRequest?.items ?? [];
+  assert.deepEqual(items("delegate").map((entry) => [entry.title, entry.titled]), [["Новые чаты в General", true]]);
+  assert.deepEqual(items("follow-up").map((entry) => [entry.titled]), [[false]], "a title made from its text is not the main session's");
+});

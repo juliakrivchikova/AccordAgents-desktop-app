@@ -86,6 +86,9 @@ export interface MobileChatMember {
   cloudRun?: boolean;
   /** The member's role, which the phone resolves a draft's administrator by. */
   roleConfigId?: string;
+  /** The title its delegation gave it (ChatParticipant.taskTitle): its name
+   *  in the sessions view, however much of the chat the phone has. */
+  taskTitle?: string;
   /** The member record a machine needs to run a turn. Sent only for members
    *  with a home machine, so the list does not grow for every local member. */
   participant?: ChatParticipant;
@@ -218,6 +221,11 @@ export interface MobileTaskItem {
    *  the main session's, else made from the whole task as the desktop makes
    *  it. */
   title: string;
+  /** The main session gave the title (app_chat_delegate_task), rather than it
+   *  being made from the task's text: only such a title names the member
+   *  (shared titleTaskByMember), so a follow-up never renames it. A server
+   *  from before says nothing. */
+  titled: boolean;
   status: ChatParticipantRequestStatus;
   createdAt: string;
   /** When its status last changed: how long an ended task took. */
@@ -483,6 +491,7 @@ export function mobileTaskBatch(batch: ChatParticipantRequestBatch | undefined):
       targetHandle: typeof item.targetHandle === "string" ? item.targetHandle : "",
       prompt: firstTextLine(typeof item.prompt === "string" ? item.prompt : "", PHONE_TASK_LINE_CHARS),
       title: sessionsTaskTitle(item),
+      titled: typeof item.title === "string" && item.title.trim().length > 0,
       status: item.status,
       createdAt: typeof item.createdAt === "string" ? item.createdAt : batch.createdAt,
       ...(typeof item.updatedAt === "string" && item.updatedAt ? { updatedAt: item.updatedAt } : {}),

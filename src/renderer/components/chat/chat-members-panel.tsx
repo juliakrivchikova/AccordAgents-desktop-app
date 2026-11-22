@@ -2,7 +2,7 @@ import { useState, type ReactNode } from "react";
 import { Bot, ChevronDown, X } from "lucide-react";
 
 import type { DockedAccord } from "../../../shared/accordProgress";
-import { SESSIONS_REMOVED_MEMBER_DETAIL, type SessionsMemberActivity, type SessionsMemberRow } from "../../../shared/mainSessionView";
+import { SESSIONS_REMOVED_MEMBER_DETAIL, sessionsRunningCount, type SessionsMemberActivity, type SessionsMemberRow } from "../../../shared/mainSessionView";
 import type { ChatParticipant } from "../../../shared/types";
 import { IconButton } from "../primitives";
 import { ChatAccordRow } from "./chat-accord-dock";
@@ -46,7 +46,7 @@ export interface ChatMembersPanelProps {
 export function ChatMembersPanel(props: ChatMembersPanelProps): JSX.Element {
   const machines = useMachineList();
   const former = props.formerRows ?? [];
-  const runningCount = props.rows.current.filter((row) => row.status === "running").length;
+  const runningCount = sessionsRunningCount(props.rows);
   const renderRow = (row: SessionsMemberRow): JSX.Element => {
     const { participant, status } = row;
     const runIds = props.runIdsByParticipantId.get(participant.id) ?? [];

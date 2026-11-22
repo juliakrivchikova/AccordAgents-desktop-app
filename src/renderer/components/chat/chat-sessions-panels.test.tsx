@@ -11,6 +11,7 @@ import { ChatParticipantRosterRow } from "./chat-participant-roster-row";
 import { forkToNewChatReasonFor, machineForkSupportFrom } from "./use-fork-to-new-chat";
 import { ChatMembersPanel } from "./chat-members-panel";
 import { ChatAgentCard, formatCompactDuration } from "./chat-agent-row";
+import { memberEffortLabel } from "./use-member-model-summary";
 import { ChatMemberComposerControls, ChatModelMenu, type ChatModelAccessPatch } from "./chat-model-access-picker";
 import { latestAndOlderModels, modelFamily } from "./chat-model-groups";
 import { resetMemberModelCatalogs } from "./chat-member-model-name";
@@ -142,6 +143,29 @@ test("an agent's hover card names its CLI, model and effort, its state and time,
   assert.equal(formatCompactDuration(516_000), "8m");
   assert.equal(formatCompactDuration(90 * 60_000), "1.5h");
   assert.equal(formatCompactDuration(12 * 3_600_000), "12h");
+  // The edges between the units.
+  assert.equal(formatCompactDuration(59_999), "59s");
+  assert.equal(formatCompactDuration(60_000), "1m");
+  assert.equal(formatCompactDuration(3_599_999), "59m");
+  assert.equal(formatCompactDuration(3_600_000), "1h");
+  assert.equal(formatCompactDuration(599 * 60_000), "9.9h");
+  assert.equal(formatCompactDuration(600 * 60_000), "10h");
+  assert.equal(formatCompactDuration(-1), "0s");
+});
+
+test("a row's effort is the composer chip's: its own when its model has it, else her config's for the model her config starts", () => {
+  const efforts = [{ id: "low", label: "Low" }, { id: "high", label: "High" }, { id: "max", label: "Max" }];
+  const catalog = { models: [
+    { id: "opus", label: "Opus 5.5", recommended: true, source: "cli", supportedReasoningEfforts: efforts },
+    { id: "haiku", label: "Haiku 5.5", source: "cli", supportedReasoningEfforts: [{ id: "low", label: "Low" }] }
+  ] } as unknown as Parameters<typeof memberEffortLabel>[1];
+  const claude = { kind: "claude-code" as const };
+  assert.equal(memberEffortLabel({ ...claude, reasoningEffort: "high" }, catalog, undefined), "High", "its own");
+  assert.equal(memberEffortLabel({ ...claude, model: "haiku", reasoningEffort: "high" }, catalog, undefined), undefined, "its model has no High");
+  assert.equal(memberEffortLabel(claude, catalog, { reasoningEffort: "max" } as never), "Max", "her config's, for the default model");
+  assert.equal(memberEffortLabel(claude, catalog, { model: "haiku", reasoningEffort: "max" } as never), undefined, "her config starts Haiku, which has no Max");
+  assert.equal(memberEffortLabel({ ...claude, model: "opus" }, catalog, { reasoningEffort: "max" } as never), undefined, "a model of its own: her config's effort is not its");
+  assert.equal(memberEffortLabel({ ...claude, hostId: "host-1" }, catalog, { reasoningEffort: "max" } as never), undefined, "an added provider: not her CLI's config");
 });
 
 test("with nobody running or waiting, the members panel lists every member as it is, no folded Previous", () => {

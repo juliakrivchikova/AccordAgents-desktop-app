@@ -1636,6 +1636,9 @@
       // member every message without an addressee goes to) and a draft's
       // administrator. Dropping it sent a message to nobody.
       ...(typeof value.roleConfigId === "string" && value.roleConfigId ? { roleConfigId: value.roleConfigId } : {}),
+      // The title its delegation gave it: its name in the sessions view
+      // (shared sessionsMemberTitle), however much of the chat is loaded.
+      ...(typeof value.taskTitle === "string" && value.taskTitle.trim() ? { taskTitle: value.taskTitle } : {}),
       // Where this member actually runs, and what that machine needs to run
       // it. Present only for members that live on a machine.
       homeMachineId: typeof value.homeMachineId === "string" ? value.homeMachineId : undefined,
@@ -5704,8 +5707,11 @@
         targetParticipantId: item.targetParticipantId,
         targetHandle: text(item.targetHandle),
         prompt: text(item.prompt),
-        // Its short title, as the desktop names the member by it.
-        ...(typeof item.title === "string" && item.title ? { title: item.title } : {}),
+        // Its short title when the main session gave it: only that title
+        // names the member, as on the desktop (shared titleTaskByMember); a
+        // follow-up's is made again from its text. A server from before
+        // does not say which, so its title is kept.
+        ...(typeof item.title === "string" && item.title && item.titled !== false ? { title: item.title } : {}),
         status: item.status,
         createdAt: text(item.createdAt),
         ...(typeof item.updatedAt === "string" && item.updatedAt ? { updatedAt: item.updatedAt } : {}),
@@ -12586,15 +12592,14 @@
     // The task each member is named by: its delegation's, else its first; a
     // follow-up never renames it (shared titleTaskByMember, as the computer).
     const titleTasksByMember = typeof shared.titleTaskByMember === "function" ? shared.titleTaskByMember(messages) : tasksByMember;
-    // A member a card waits on the User for (its choice or mention question,
-    // a permission it asked) waits for her even while its turn runs, as on
-    // the computer (shared sessionsMembersWaitingForUser); a permission card
-    // names its member by handle.
+    // A member held up by the User (its choice or mention question no newer
+    // turn of its went past, a permission its turn waits on) waits for her
+    // even while its turn runs, as on the computer (shared
+    // sessionsMembersWaitingForUser). A server from before marks no card.
     const waitingForUser = typeof shared.sessionsMembersWaitingForUser === "function" ? shared.sessionsMembersWaitingForUser(messages) : new Set();
     controlCardsFor(conversationId).forEach(function (card) {
-      if (!card || card.status !== "pending" || card.kind !== "permission" || typeof card.requesterLabel !== "string") return;
-      const member = members.find(function (item) { return item.handle && "@" + String(item.handle).replace(/^@/, "") === card.requesterLabel; });
-      if (member) waitingForUser.add(member.id);
+      if (!card || card.status !== "pending" || card.holdsTurn !== true || typeof card.requesterParticipantId !== "string") return;
+      if (members.some(function (item) { return item.id === card.requesterParticipantId; })) waitingForUser.add(card.requesterParticipantId);
     });
     const memberRows = shared.sessionsMemberRows(members, mainId, statusById, tasksByMember, activity.finishedAt, waitingForUser);
     const formerMembers = shared.sessionsFormerMembers(messages, members, mainId);
@@ -12611,11 +12616,12 @@
     const state = {
       conversationId: conversationId, chat: chat, mainId: mainId, mainMember: mainMember, mainHandle: mainMember ? mainMember.handle : "main",
       rows: rows, messages: messages, index: index, members: members, formerMembers: formerMembers,
-      statusById: statusById, runsByMember: runsByMember, tasksByMember: tasksByMember, titleTasksByMember: titleTasksByMember, memberRows: memberRows, waitingIds: waitingIds,
+      statusById: statusById, runsByMember: runsByMember, tasksByMember: tasksByMember, titleTasksByMember: titleTasksByMember, waitingForUser: waitingForUser, memberRows: memberRows, waitingIds: waitingIds,
       activity: activity, messagesById: messagesById, replies: replies, openCardIds: openCardIds,
       mainIds: new Set(mainMessages.map(function (message) { return message.id; })), placement: placement,
       // Running, not waiting for the User, as the computer counts them.
-      runningCount: memberRows.current.filter(function (row) { return row.status === "running"; }).length,
+      runningCount: typeof shared.sessionsRunningCount === "function" ? shared.sessionsRunningCount(memberRows)
+        : memberRows.current.filter(function (row) { return row.status === "running"; }).length,
       knownMember: function (id) {
         return id !== mainId && (members.some(function (member) { return member.id === id; }) || formerMembers.some(function (member) { return member.id === id; }));
       }
@@ -12735,7 +12741,7 @@
     const names = state.viewNames;
     const appText = function (text) { return names ? shared.sessionsViewText(text, names) : text; };
     const wordsText = function (text) { return names && typeof shared.sessionsMentionText === "function" ? shared.sessionsMentionText(text, names) : text; };
-    return shared.sessionsTaskEntries(message, batch, state.statusById, state.activity, state.messagesById, appText, wordsText).map(function (entry) {
+    return shared.sessionsTaskEntries(message, batch, state.statusById, state.activity, state.messagesById, appText, wordsText, state.waitingForUser).map(function (entry) {
       const member = state.members.find(function (candidate) { return candidate.id === entry.item.targetParticipantId; });
       return {
         participantId: entry.item.targetParticipantId,
@@ -12817,7 +12823,8 @@
     const ids = new Set(shared.memberSessionMessages(state.messages, participantId, state.index).map(function (message) { return message.id; }));
     const task = state.tasksByMember.get(participantId);
     const status = member.former ? shared.sessionsFormerMemberStatus(task ? task.item : undefined)
-      : shared.sessionsMemberStatus(state.statusById.get(participantId), task ? task.item : undefined, state.activity.finishedAt.get(participantId));
+      : shared.sessionsMemberStatus(state.statusById.get(participantId), task ? task.item : undefined, state.activity.finishedAt.get(participantId),
+        Boolean(state.waitingForUser && state.waitingForUser.has(participantId)));
     const rows = [{
       rowKey: "member-session-head\u0000" + participantId, id: "member-session-head", conversationId: state.conversationId, author: "system",
       status: "Done", content: "", createdAt: "", presentation: "sessions",

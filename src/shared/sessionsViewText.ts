@@ -67,9 +67,11 @@ export function sessionsViewNamesOf(
   const messages = chat.messages ?? [];
   const tasks = titleTaskByMember(messages);
   const titles: Array<[string, string]> = [];
-  const titleOf = (member: { id: string; handle?: string }): string => {
+  const titleOf = (member: { id: string; handle?: string; taskTitle?: unknown }): string => {
     const task = tasks.get(member.id)?.item;
-    return task ? sessionsMemberTitle(member, task) : knownTitles?.get(member.id) ?? sessionsMemberTitle(member, undefined);
+    // The title kept with the member names it before any task read here.
+    const kept = typeof member.taskTitle === "string" && member.taskTitle.trim().length > 0;
+    return task || kept ? sessionsMemberTitle(member, task) : knownTitles?.get(member.id) ?? sessionsMemberTitle(member, undefined);
   };
   for (const member of sessionsFormerMembers(messages, participants, mainId)) {
     if (member.handle) titles.push([member.handle, titleOf(member)]);

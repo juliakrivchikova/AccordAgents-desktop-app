@@ -723,4 +723,13 @@ test("memberTaskMessages reads a member's delegation when its newest tasks are u
   });
   assert.deepEqual((await titled.memberTaskMessages("chat", "p-drew")).map((message) => message.id), ["d9", "f10"]);
   assert.equal(titledAsked.length, 1);
+
+  // An untitled delegation already among the newest: listed once.
+  const untitledAsked: string[] = [];
+  const untitled = fakeStorage(async (sql) => {
+    untitledAsked.push(sql);
+    return sql.includes(`'"delegation"'`) ? [request("d5", 5, undefined, true)] : [request("f6", 6), request("d5", 5, undefined, true)];
+  });
+  assert.deepEqual((await untitled.memberTaskMessages("chat", "p-drew")).map((message) => message.id), ["d5", "f6"]);
+  assert.equal(untitledAsked.length, 2);
 });

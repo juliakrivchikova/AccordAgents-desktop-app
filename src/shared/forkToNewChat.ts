@@ -469,7 +469,7 @@ export function forkedMainSessionFor(input: {
   const {
     avatarId: _avatar, model: _model, reasoningEffort: _effort, hostId: _hostId, hostLabel: _hostLabel, hostVendor: _hostVendor,
     homeMachineId: _home, cloudRun: _cloud, sessionHandoff: _handoff, forkOrigin: _origin, delegatedByParticipantId: _delegated,
-    participantConfigId: _config, ...lead
+    participantConfigId: _config, taskTitle: _taskTitle, ...lead
   } = mainSession;
   return {
     ...lead,

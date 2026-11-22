@@ -23,6 +23,7 @@ import {
   sessionsMemberRows,
   sessionsMembersWaitingForUser,
   sessionsMemberTitle,
+  sessionsRunningCount,
   sessionsTaskEntries,
   sessionsWaitingText,
   titleTaskByMember,
@@ -85,6 +86,7 @@ export interface ChatSessionsView {
 }
 
 const NO_ENTRIES: readonly SessionsTaskEntry[] = [];
+const NO_MEMBERS: ReadonlySet<string> = new Set();
 
 /** Keeps each value's identity while its signature is the same, so a row
  *  drawn from it is not drawn again on every update of the chat. */
@@ -134,13 +136,20 @@ export function useChatSessionsView(input: {
       messagesById: new Map(messages.map((message) => [message.id, message])),
       tasksByMember: latestTaskByMember(messages),
       titleTasksByMember: titleTaskByMember(messages),
-      waitingForUser: sessionsMembersWaitingForUser(messages, conversation.metadata.pendingAppToolApprovals),
       activity: sessionsMemberActivity(messages),
       waitingIds: membersMainSessionWaitsOn(messages, index),
       mainStreaming: messages.some((message) => isPendingReply(message) && message.participantId === mainId),
       requestMessages: messages.filter((message) => message.metadata?.participantRequest)
     };
-  }, [conversation.messages, conversation.metadata.pendingAppToolApprovals, mainId]);
+  }, [conversation.messages, mainId]);
+
+  // Its own memo: the chat's metadata is a new object on every update, and
+  // only this reads the approvals.
+  const approvals = conversation.metadata.pendingAppToolApprovals;
+  const waitingForUser = useMemo(
+    () => (mainId ? sessionsMembersWaitingForUser(conversation.messages, Array.isArray(approvals) ? approvals as ChatAppToolApproval[] : undefined) : NO_MEMBERS),
+    [approvals, conversation.messages, mainId]
+  );
 
   const former = useMemo(
     () => (mainId ? sessionsFormerMembers(conversation.messages, participants, mainId) : []),
@@ -165,7 +174,7 @@ export function useChatSessionsView(input: {
     const taskEntriesByMessageId = new Map<string, readonly SessionsTaskEntry[]>();
     for (const message of placement.requestMessages) {
       const batch = message.metadata!.participantRequest!;
-      const entries = sessionsTaskEntries(message, batch, participantStatusById, placement.activity, placement.messagesById, appText, wordsText);
+      const entries = sessionsTaskEntries(message, batch, participantStatusById, placement.activity, placement.messagesById, appText, wordsText, waitingForUser);
       taskEntriesByMessageId.set(message.id, cached(message.id, entriesSignature(entries), () => entries));
     }
     const workByReplyId = new Map<string, readonly SessionsTaskEntry[]>();
@@ -180,7 +189,7 @@ export function useChatSessionsView(input: {
         return participant ? [participant] : [];
       });
     const index = placement.index;
-    const memberRows = sessionsMemberRows(participants, mainId, participantStatusById, placement.tasksByMember, placement.activity.finishedAt, placement.waitingForUser);
+    const memberRows = sessionsMemberRows(participants, mainId, participantStatusById, placement.tasksByMember, placement.activity.finishedAt, waitingForUser);
     return {
       mainSessionId: mainId,
       index,
@@ -188,7 +197,7 @@ export function useChatSessionsView(input: {
       openCardMessageIds: placement.openCardMessageIds,
       messagesById: placement.messagesById,
       tasksByMember: placement.tasksByMember,
-      waitingForUser: placement.waitingForUser,
+      waitingForUser,
       activity: placement.activity,
       taskEntriesByMessageId,
       workByReplyId,
@@ -197,8 +206,7 @@ export function useChatSessionsView(input: {
         const task = placement.tasksByMember.get(member.id);
         return { member, title: memberTitle(member.id), status: sessionsFormerMemberStatus(task?.item), ...(task ? { task } : {}) };
       }),
-      // Running, not waiting for the User: as the panel's "Agents · N running".
-      runningMemberCount: memberRows.current.filter((row) => row.status === "running").length,
+      runningMemberCount: sessionsRunningCount(memberRows),
       waitingOn,
       waitingText: sessionsWaitingText(waitingOn.map((participant) => memberTitle(participant.id))),
       waitingRunIds: waitingOn.flatMap((participant) => activeRunSummary.runIdsByParticipantId.get(participant.id) ?? []),
@@ -207,5 +215,5 @@ export function useChatSessionsView(input: {
       laneOf: (message: ChatMessage) => sessionsViewLane(message, index),
       hidesApproval: (approval: ChatAppToolApproval) => isMainSessionDelegationRosterCard(approval, mainId)
     };
-  }, [activeRunSummary, former, mainId, participantStatusById, participants, placement]);
+  }, [activeRunSummary, former, mainId, participantStatusById, participants, placement, waitingForUser]);
 }

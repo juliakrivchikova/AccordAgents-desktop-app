@@ -1003,6 +1003,12 @@ export interface ChatParticipant {
    *  at each turn (docs/main-session.md). Absent for members the User added
    *  or approved herself. Set once, when the member is added. */
   delegatedByParticipantId?: string;
+  /** The short title the main session gave the task it made this member for
+   *  (app_chat_delegate_task): its name in the sessions view
+   *  (sessionsMemberTitle), kept with the member so it names it however much
+   *  of the chat is loaded, on every device. Set once, when the member is
+   *  added; a later task never renames it. */
+  taskTitle?: string;
   /** The main session of a chat made by Fork to new chat (src/shared/
    *  forkToNewChat.ts): the member of another chat whose CLI session it
    *  starts from. Written once, by the computer, when the chat is made; the

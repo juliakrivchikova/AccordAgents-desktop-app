@@ -21,15 +21,22 @@ export interface MemberModelSummary {
 }
 
 /** The effort a member runs at, by its name in the list of its model's
- *  efforts (the CLI's own list when the model has none): its own, else for
- *  a member without a model of its own the one her config sets. */
+ *  efforts (the CLI's own list when the model has none), as its composer's
+ *  chip picks it: its own, else for a member without a model of its own the
+ *  one her config sets; the model without one of its own is the one her
+ *  config starts the CLI on where the list has it, else the list's default. */
 export function memberEffortLabel(
   member: ModelSummaryMember,
   catalog: ProviderModelCatalog | undefined,
   start: CliStartDefaults | undefined
 ): string | undefined {
   const model = savedModelId(member.kind, member.model);
-  const listed = catalog?.models.find((item) => model ? item.id === model : item.recommended && item.source !== "configured");
+  const usable = (item: { source?: string; hidden?: boolean }): boolean => item.source !== "configured" && !item.hidden;
+  const startModel = member.hostId ? undefined : start?.model;
+  const listed = model
+    ? catalog?.models.find((item) => item.id === model)
+    : (startModel ? catalog?.models.find((item) => item.id === startModel && usable(item)) : undefined) ??
+      catalog?.models.find((item) => item.recommended && usable(item));
   const efforts: readonly ProviderReasoningEffortOption[] = listed?.supportedReasoningEfforts?.length
     ? listed.supportedReasoningEfforts
     : reasoningEffortOptionsForProvider(member.kind);

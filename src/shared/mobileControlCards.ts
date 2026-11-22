@@ -20,6 +20,7 @@ import { connectorSignInHost, isConnectorSignInRequest } from "./connectorSignIn
 import type { HubCard } from "./hubOps";
 import { approvalInstallsScriptCode } from "./scripts";
 import { choiceOutcome } from "./usedCards";
+import { approvalHoldsTurn } from "./mainSessionView";
 
 export type MobileControlCardKind = "permission" | "choice";
 
@@ -31,6 +32,11 @@ export interface MobileControlCard {
   /** What is being asked, in the words the desktop uses. */
   summary: string;
   requesterLabel?: string;
+  /** The member that asked, by id (a permission it asked). */
+  requesterParticipantId?: string;
+  /** Its member's turn stops until the User answers (shared
+   *  approvalHoldsTurn): the side panel shows it waiting for her. */
+  holdsTurn?: true;
   /** The machine whose member raised it, when it is not this one. */
   machineName?: string;
   options: ChatChoiceOption[];
@@ -107,6 +113,18 @@ export function approvalHasCard(approval: ChatAppToolApproval): boolean {
  *  it has happened (approvalHasCard); an answered approval has no record the
  *  phone keeps. */
 export function controlCardFromApproval(conversationId: string, approval: ChatAppToolApproval): MobileControlCard {
+  const card = approvalCardBody(conversationId, approval);
+  // Which member asks, by id, and whether its turn waits for the answer: the
+  // phone's side panel shows that member as waiting for the User, by the
+  // desktop's rule (shared sessionsMembersWaitingForUser).
+  return {
+    ...card,
+    ...(typeof approval.requesterParticipantId === "string" && approval.requesterParticipantId ? { requesterParticipantId: approval.requesterParticipantId } : {}),
+    ...(approvalHoldsTurn(approval) ? { holdsTurn: true as const } : {})
+  };
+}
+
+function approvalCardBody(conversationId: string, approval: ChatAppToolApproval): MobileControlCard {
   const removal = removalRequest(approval);
   if (removal) {
     // The desktop's removal card, word for word: who asks, who leaves, what

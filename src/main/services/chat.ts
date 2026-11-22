@@ -5566,12 +5566,13 @@ export class ChatService {
         reason: input.reason,
         operations: [{ type: "add_new_participant_to_chat", saveAsPreset: false, participant: memberInput }]
       };
-      const [child] = this.markAddedWithoutCard(conversation, this.applyPreparedRosterChange(conversation, {
+      const [marked] = this.markAddedWithoutCard(conversation, this.applyPreparedRosterChange(conversation, {
         request: { reason: input.reason, operations: [{ type: "add", participant: memberInput }] },
         participants: [validated],
         summary,
         managementEscalation: false
       }), callerNow.id);
+      const child = this.withTaskTitle(conversation, marked, input.title);
       const approval = this.newAppToolApproval(conversation, callerNow, APP_PARTICIPANTS_REQUEST_CHANGE_TOOL, "participants.manage", request, summary, "auto-applied");
       approval.approvalScope = "chat";
       approval.appliedParticipantIds = [child.id];
@@ -5892,6 +5893,20 @@ export class ChatService {
     });
     conversation.metadata = { ...conversation.metadata, participants };
     return added.map((participant) => marked.get(participant.id) ?? participant);
+  }
+
+  /** The member made for a task keeps that task's title (ChatParticipant
+   *  taskTitle): the sessions view names it by it however much of the chat
+   *  a device has loaded. The member as the chat has it now. */
+  private withTaskTitle(conversation: Conversation, member: ChatParticipant, title: string | undefined): ChatParticipant {
+    const taskTitle = title?.replace(/\s+/g, " ").trim();
+    if (!taskTitle) return member;
+    const next = { ...member, taskTitle };
+    conversation.metadata = {
+      ...conversation.metadata,
+      participants: this.chatParticipants(conversation).map((participant) => participant.id === member.id ? next : participant)
+    };
+    return next;
   }
 
   /** What a member added without a card in a chat with a main session may

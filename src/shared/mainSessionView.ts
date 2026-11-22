@@ -7,7 +7,7 @@ import { isPendingReply, isWaitingChoice } from "./chatActiveRuns";
 import { stripChatControlBlocks } from "./chatControlBlocks";
 import type { ChatParticipantRosterStatus } from "./chatParticipantStatus";
 import { sessionsViewLane, type SessionsViewIndex } from "./mainSession";
-import { APP_PARTICIPANTS_REQUEST_CHANGE_TOOL } from "./appMcpToolContracts";
+import { APP_CONNECTOR_SIGN_IN_TOOL, APP_PARTICIPANTS_REQUEST_CHANGE_TOOL, APP_TOOL_PERMISSION_TOOL } from "./appMcpToolContracts";
 import type { ChatAppToolApproval, ChatMessage, ChatParticipant, ChatParticipantRequestBatch, ChatParticipantRequestItem } from "./types";
 
 /** The ordinary member's role: the sessions view names no role for it. */
@@ -161,14 +161,17 @@ export function sessionsTaskTitle(item: Pick<ChatParticipantRequestItem, "prompt
   return shortenAtWord(plain, SESSIONS_TASK_TITLE_MAX_CHARS);
 }
 
-/** A member's title in the sessions view (as in T3 Code): the title of the
- *  task it is named by (titleTaskByMember: the one its delegation gave it,
- *  else its first; sessionsTaskTitle); its handle without "@" only while it
- *  has none. */
+/** A member's title in the sessions view (as in T3 Code): the title its
+ *  delegation gave it, kept with the member (ChatParticipant.taskTitle),
+ *  else the title of the task it is named by among the loaded messages
+ *  (titleTaskByMember: the newest titled one, else its first;
+ *  sessionsTaskTitle); its handle without "@" only while it has none. */
 export function sessionsMemberTitle(
-  member: { handle?: string } | undefined,
+  member: { handle?: string; taskTitle?: unknown } | undefined,
   task?: Pick<ChatParticipantRequestItem, "prompt" | "targetHandle"> & { title?: unknown }
 ): string {
+  const kept = typeof member?.taskTitle === "string" ? member.taskTitle.replace(/\s+/g, " ").trim() : "";
+  if (kept) return shortenAtWord(kept, SESSIONS_TASK_GIVEN_TITLE_MAX_CHARS);
   return (task ? sessionsTaskTitle(task) : "") || (member?.handle ?? task?.targetHandle ?? "").trim().replace(/^@/, "") || "Session";
 }
 
@@ -224,11 +227,15 @@ export function sessionsTaskEntries(
   appText: (text: string) => string = (text) => text,
   /** The view's reading of a member's own words (its reply's line), by its
    *  mention rule (sessionsMentionText). */
-  wordsText: (text: string) => string = (text) => text
+  wordsText: (text: string) => string = (text) => text,
+  /** Members held up by the User (sessionsMembersWaitingForUser): a task
+   *  of theirs that runs waits for her, as their row in the side panel. */
+  waitingForUser?: ReadonlySet<string>
 ): SessionsTaskEntry[] {
   return batch.items.map((item) => {
     const memberId = item.targetParticipantId;
-    const status = sessionsTaskStatus(item, statusById.get(memberId), activity.finishedAt.get(memberId));
+    const taskStatus = sessionsTaskStatus(item, statusById.get(memberId), activity.finishedAt.get(memberId));
+    const status = taskStatus === "running" && waitingForUser?.has(memberId) ? "waiting" : taskStatus;
     const running = activity.runningSince.get(memberId);
     const durationMs = sessionsTaskDurationMs(item, messagesById);
     const replyLine = status === "done" ? sessionsTaskReplyLine(item, messagesById) : undefined;
@@ -348,23 +355,50 @@ export function openMemberCardMessages(messages: readonly ChatMessage[], index: 
     (isWaitingChoice(message) || isWaitingMentionApproval(message)) && sessionsViewLane(message, index).kind === "member");
 }
 
-/** Members a card waits on the User for: an open choice or mention question
- *  of theirs, or a request of theirs she has to approve (a tool, a command,
- *  a change of the chat; `approvals`: the chat's pendingAppToolApprovals).
- *  Blocked on her answer, such a member is "Waiting for you", not running,
- *  even while its run is live (Codex's "Needs input"). */
-export function sessionsMembersWaitingForUser(messages: readonly ChatMessage[], approvals?: unknown): Set<string> {
+/** Requests whose member's turn stops until the User answers: its CLI's
+ *  permission prompt for a tool, and a connector sign-in. A Codex approval
+ *  says so by naming the run it holds (resumeContext). Every other request a
+ *  member makes (a script, a role, a member, a permission for later) returns
+ *  at once and its member works on. */
+const BLOCKING_APPROVAL_TOOLS: ReadonlySet<string> = new Set([APP_TOOL_PERMISSION_TOOL, APP_CONNECTOR_SIGN_IN_TOOL]);
+
+/** Members held up by the User: a request of theirs that stops their turn
+ *  until she answers (BLOCKING_APPROVAL_TOOLS, or one that names its run;
+ *  `approvals`: the chat's pendingAppToolApprovals), or an open choice or
+ *  mention question of theirs no newer turn of theirs has gone past. Such a
+ *  member is "Waiting for you", not running, even while its run is live
+ *  (Codex's "Needs input"). */
+export function sessionsMembersWaitingForUser(
+  messages: readonly ChatMessage[],
+  approvals?: readonly Partial<Pick<ChatAppToolApproval, "status" | "requesterParticipantId" | "toolName" | "resumeContext">>[]
+): Set<string> {
   const waiting = new Set<string>();
-  for (const message of messages) {
-    if (message.role === "participant" && message.participantId && (isWaitingChoice(message) || isWaitingMentionApproval(message))) {
-      waiting.add(message.participantId);
+  // When each member's turn in progress started: a card from before it is
+  // one the member went on from (the main session answered it, a new task).
+  const turnStartedAt = new Map<string, string>();
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    const message = messages[index]!;
+    if (message.participantId && !turnStartedAt.has(message.participantId) && isPendingReply(message)) {
+      turnStartedAt.set(message.participantId, message.createdAt);
     }
   }
-  for (const item of Array.isArray(approvals) ? approvals : []) {
-    const approval = item as Partial<Pick<ChatAppToolApproval, "status" | "requesterParticipantId">> | null;
-    if (approval?.status === "pending" && typeof approval.requesterParticipantId === "string") waiting.add(approval.requesterParticipantId);
+  for (const message of messages) {
+    if (message.role !== "participant" || !message.participantId || !(isWaitingChoice(message) || isWaitingMentionApproval(message))) continue;
+    const started = turnStartedAt.get(message.participantId);
+    if (started === undefined || started <= message.createdAt) waiting.add(message.participantId);
+  }
+  for (const approval of Array.isArray(approvals) ? approvals : []) {
+    if (approval?.status === "pending" && typeof approval.requesterParticipantId === "string" && approvalHoldsTurn(approval)) {
+      waiting.add(approval.requesterParticipantId);
+    }
   }
   return waiting;
+}
+
+/** Whether a member's request stops its turn until the User answers
+ *  (BLOCKING_APPROVAL_TOOLS, or a request that names the run it holds). */
+export function approvalHoldsTurn(approval: Partial<Pick<ChatAppToolApproval, "toolName" | "resumeContext">>): boolean {
+  return BLOCKING_APPROVAL_TOOLS.has(approval.toolName ?? "") || typeof approval.resumeContext?.runId === "string";
 }
 
 export interface SessionsMemberRow {
@@ -399,6 +433,12 @@ export function sessionsMemberRows(
   const finished = (row: SessionsMemberRow): boolean =>
     Boolean(row.task) && (row.status === "done" || row.status === "failed" || row.status === "stopped");
   return { current: rows.filter((row) => !finished(row)), previous: rows.filter(finished) };
+}
+
+/** How many of the listed members run (not waiting for the User): the side
+ *  panel's "Agents · N running" and the count on its icon, desktop and phone. */
+export function sessionsRunningCount(rows: { current: readonly Pick<SessionsMemberRow, "status">[] }): number {
+  return rows.current.filter((row) => row.status === "running").length;
 }
 
 /** "N tasks · K running" for a task card that gave several tasks. */
