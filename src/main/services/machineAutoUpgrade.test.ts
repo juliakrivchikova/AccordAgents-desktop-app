@@ -105,6 +105,34 @@ test("a machine is never given a runtime newer than her server's: it waits until
   assert.equal(h.service.hasWaiting(), false);
 });
 
+test("her server catching up while the machine is busy: the machine's own wait is said; a development server build is not waited on", async () => {
+  let server = "1.10.4-beta.10";
+  let busy = true;
+  const h = harness({ serverVersion: async () => server, activity: () => activity({ activeRunIds: busy ? ["run-1"] : [] }) });
+  await h.service.evaluate();
+  assert.match(h.progress.at(-1)!.message, /Waiting for your server to update/);
+  server = "1.10.4-beta.11";
+  await h.service.evaluate();
+  assert.match(h.progress.at(-1)!.message, /Waiting for Cloud run to finish its current work/, "now it waits for the machine, and says so");
+  busy = false;
+  await h.service.evaluate("m1");
+  assert.equal(h.upgrades.length, 1);
+  const dev = harness({ serverVersion: async () => "dev" });
+  await dev.service.evaluate();
+  assert.equal(dev.upgrades.length, 1, "a development build of the server reports no version to wait for");
+});
+
+test("a stop key for the runtime version the machine already runs is not held back by an older server", async () => {
+  const h = harness({
+    serverVersion: async () => "1.10.4-beta.9",
+    records: [record({ installedVersion: "1.10.4-beta.11" })],
+    activity: () => activity({ appVersion: "1.10.4-beta.11" }),
+    powerDue: async () => "key-1"
+  });
+  await h.service.evaluate();
+  assert.equal(h.upgrades.length, 1, "the stop key is handed over: no newer runtime goes with it");
+});
+
 test("a busy machine is told to wait once and is upgraded when it becomes idle", async () => {
   let running = true;
   const h = harness({ activity: () => activity({ activeRunIds: running ? ["run-1"] : [] }) });

@@ -56,7 +56,7 @@ export interface MachineAutoUpgradeOptions {
    *  asked now. A machine is never given a runtime newer than her server's:
    *  an older server would undo what the newer runtime writes (a mode a plan
    *  approval raised, a member added in its CLI's own mode). Not given: no
-   *  wait (a desktop without a server). */
+   *  wait (tests). */
   serverVersion?: () => Promise<string | undefined>;
   /** Holds the machine's turns for the duration; returns the release. */
   holdTurns?: (machineId: string, reason: string) => () => void;
@@ -78,6 +78,8 @@ export class MachineAutoUpgradeService {
   private readonly inFlight = new Set<string>();
   /** Machines told to wait for idle, so the notice is shown once. */
   private readonly waiting = new Set<string>();
+  /** Of those, the ones waiting for her server's program to catch up. */
+  private readonly waitingForServer = new Set<string>();
   /** Machines told why nothing can be attempted, so the notice is shown once. */
   private readonly noticed = new Set<string>();
   /** Machines the User asked to try again: an update of this version that
@@ -127,7 +129,7 @@ export class MachineAutoUpgradeService {
     const all = await this.options.listInstalls();
     // A machine removed while it waited must not keep the re-check alive.
     const known = new Set(all.map((record) => record.machineId));
-    for (const id of [...this.waiting]) if (!known.has(id)) this.waiting.delete(id);
+    for (const id of [...this.waiting]) if (!known.has(id)) { this.waiting.delete(id); this.waitingForServer.delete(id); }
     for (const record of all.filter((record) => !machineId || record.machineId === machineId)) {
       await this.evaluateRecord(record);
     }
@@ -184,12 +186,17 @@ export class MachineAutoUpgradeService {
     }
     const name = (await this.options.machineName(id)) ?? id;
     const purpose = upgrade ? `updating its runtime to ${this.options.desktopVersion}` : "setting up its automatic stop after three idle hours";
-    // Both install this desktop's runtime: never ahead of her server.
-    if (this.options.serverVersion) {
+    // A newer runtime than the machine runs (an update, or a stop key given
+    // with one) is never ahead of her server's program; a stop key given
+    // with the version the machine runs already adds no gap and goes on.
+    if (this.options.serverVersion && versionOrder > 0) {
       const server = await this.options.serverVersion().catch(() => undefined);
-      if (server === undefined || compareVersions(this.options.desktopVersion, server) > 0) {
-        if (!this.waiting.has(id)) {
+      // A server built without a version (a development build) is not waited on.
+      const comparable = server === undefined || /^\d+\.\d+\.\d+/.test(server);
+      if (comparable && (server === undefined || compareVersions(this.options.desktopVersion, server) > 0)) {
+        if (!this.waitingForServer.has(id)) {
           this.waiting.add(id);
+          this.waitingForServer.add(id);
           this.log("machines.auto-upgrade.waiting-server", { machineId: id, running, desktop: this.options.desktopVersion, server: server ?? null });
           this.options.onProgress(this.notice(id, "preflight", server === undefined
             ? `Waiting for your server to answer before ${purpose}.`
@@ -198,6 +205,8 @@ export class MachineAutoUpgradeService {
         return;
       }
     }
+    // Her server caught up: what the machine waits for now is said anew.
+    if (this.waitingForServer.delete(id)) this.waiting.delete(id);
     const payload = this.options.payloadReady();
     if (!payload.ok) {
       if (!this.noticed.has(id)) {

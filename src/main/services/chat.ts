@@ -5063,15 +5063,6 @@ export class ChatService {
           };
         }
 
-        // A once-only grant of file edits for this run: its next file edit,
-        // once (Claude Code's own modes; claudeOnceEditGrants).
-        if (!prepared.request.planApproval && this.takeClaudeOnceEdit(actor.runId, requester, prepared.request.toolName)) {
-          return {
-            prepared,
-            route: "policy",
-            decision: { approve: true, scope: "once", source: "policy" }
-          };
-        }
         // Claude Code asks about its plan every time: no rule answers it.
         const policy = prepared.request.agentMode === "auto" || prepared.request.planApproval
           ? undefined
@@ -5081,6 +5072,15 @@ export class ChatService {
             prepared,
             route: "policy",
             decision: { approve: true, scope: "chat", source: "policy" }
+          };
+        }
+        // A once-only grant of file edits for this run: its next file edit
+        // no rule answered, once (Claude Code's own modes; claudeOnceEditGrants).
+        if (!prepared.request.planApproval && this.takeClaudeOnceEdit(actor.runId, requester, prepared.request.toolName)) {
+          return {
+            prepared,
+            route: "policy",
+            decision: { approve: true, scope: "once", source: "policy" }
           };
         }
 
@@ -8711,13 +8711,14 @@ export class ChatService {
       const plan = isClaudePlanApprovalRequest(approval.request) ? approval.request.planApproval : undefined;
       if (plan) {
         // Claude Code's plan approval takes one of the rows it offered, as
-        // the CLI's own dialog does; an answer without one (an older phone's
-        // Allow) is refused and the card is asked again.
-        const option = claudePlanApprovalOption(plan, request.planDecision?.optionId);
-        if (!request.planDecision) {
-          // An older phone app answers Allow or Deny, which this card has not.
+        // the CLI's own dialog does. A Deny without one (Activity's Cancel,
+        // an older phone's Deny) is "No, keep planning" with nothing typed,
+        // as Esc declines it in the CLI; an Allow without one (an older
+        // phone's) is refused, the card asked again.
+        if (!request.planDecision && request.approve) {
           throw new Error(CLAUDE_PLAN_ANSWER_NEEDS_UPDATE);
         }
+        const option = claudePlanApprovalOption(plan, request.planDecision?.optionId ?? CLAUDE_PLAN_KEEP_PLANNING_ID);
         if (!option || request.approve !== Boolean(option.mode)) {
           throw new Error("This answer is not one this card takes.");
         }
@@ -11210,7 +11211,6 @@ export class ChatService {
     const claudeModeRead = this.claudeMemberMode(conversation, participant);
     const ownModeBase = claudeModeRead ? normalizeChatAgentPermissions(this.participantForRun(conversation, participant).permissions) : undefined;
     const onceEditGrant = Boolean(ownModeBase && !ownModeBase.workspaceWrite && permissions.workspaceWrite);
-    if (onceEditGrant) this.claudeOnceEditGrants.set(runId, appliedOneTimePermissionApprovalIds.slice());
     const cliPermissions: ChatAgentPermissions = onceEditGrant ? { ...permissions, workspaceWrite: false } : permissions;
     const claudeModeForTurn = claudeModeRead ? claudeCodePermissionMode(agentMode, cliPermissions) : undefined;
     // Nothing saved this chat since the app started: what this turn read is
@@ -11383,7 +11383,7 @@ export class ChatService {
       runId,
       turnSegmentId: options.turnSegmentId,
       agentMode,
-      runPermissions: effectiveChatAgentPermissionsForProvider(participant.kind, agentMode, permissions),
+      runPermissions: effectiveChatAgentPermissionsForProvider(participant.kind, agentMode, cliPermissions),
       participantRequestDepth: options.participantRequestDepth ?? 0,
       participantRequestBatchId: options.participantRequestBatchId,
       chainRootId: options.chainRootId,
@@ -11410,7 +11410,7 @@ export class ChatService {
     const grantNow = (): ChatAppMcpTokenGrant => {
       const mode = claudeModeNow?.();
       if (!mode || mode === claudeModeForTurn) return appMcpGrant;
-      const access = applyChatAccessOptionById("claude-code", mode, permissions);
+      const access = applyChatAccessOptionById("claude-code", mode, cliPermissions);
       return { ...appMcpGrant, agentMode: access.agentMode, runPermissions: effectiveChatAgentPermissionsForProvider(participant.kind, access.agentMode, access.permissions) };
     };
     const existingConnection = this.appMcpTokens.has(memberKey) ? this.appMcpConnections.get(memberKey) : undefined;
@@ -11470,6 +11470,8 @@ export class ChatService {
     };
     let executionLease: ChatExecutionLeaseMetadata | undefined;
     try {
+      // Held from here, inside the try its finally ends.
+      if (onceEditGrant) this.claudeOnceEditGrants.set(runId, appliedOneTimePermissionApprovalIds.slice());
       progressSink.beginAttempt();
       // A member whose home is a machine never reaches here: it is dispatched to
       // that machine before its turn is prepared. What can still arrive is a
@@ -12090,6 +12092,9 @@ export class ChatService {
           messageId: pendingMessage.id
         }
       });
+      // Its CLI may still run a wider mode than the member's: switched first,
+      // else the reply is stopped.
+      if (await this.alignSelfStartedClaudeReply(conversation, participant)) controller.abort();
       progressSink.beginAttempt();
       const result = await turn.attach({
         signal: controller.signal,
@@ -26256,6 +26261,8 @@ export class ChatService {
     const runsNow = (): ClaudePermissionMode | undefined => runner.memberClaudePermissionMode?.call(this.cliRunner, conversation.id, member.id);
     let reason: string | undefined;
     let actual: ClaudePermissionMode | undefined;
+    // A mode the CLI reports that is none of its four: taken as wider.
+    let unknownMode: string | undefined;
     try {
       const answer = await runner.memberClaudeControl.call(this.cliRunner, conversation.id, member.id, { subtype: "set_permission_mode", mode }, CLAUDE_PERMISSION_MODE_TIMEOUT_MS);
       if (!answer) return;
@@ -26265,7 +26272,8 @@ export class ChatService {
         await this.debugLogs.write("chat.member-mode.applied", audit);
         return;
       }
-      actual = isClaudePermissionMode(reported) ? reported : runsNow();
+      if (isClaudePermissionMode(reported)) actual = reported;
+      else unknownMode = reported;
     } catch (error) {
       reason = (error instanceof Error ? error.message : String(error)).replace(/[.\s]+$/, "");
       actual = runsNow();
@@ -26275,16 +26283,19 @@ export class ChatService {
     if (this.savedClaudeMemberModes.get(key) !== mode) return;
     const name = `@${member.handle}`;
     const label = CLAUDE_PERMISSION_MODE_LABELS[mode];
-    const runs = actual && actual !== mode ? CLAUDE_PERMISSION_MODE_LABELS[actual] : undefined;
+    const runs = actual && actual !== mode ? CLAUDE_PERMISSION_MODE_LABELS[actual] : unknownMode;
     const said = reason !== undefined
       ? `Claude Code did not switch ${name} to ${label}: ${reason}.`
       : `Claude Code switched ${name} to ${runs ?? "another mode"} instead of ${label}.`;
-    if (actual && actual !== mode && claudePermissionModeRank(actual) > claudePermissionModeRank(mode)) {
+    if (unknownMode !== undefined || (actual && actual !== mode && claudePermissionModeRank(actual) > claudePermissionModeRank(mode))) {
       // Its process stays in a wider mode than hers: her mode stays the
-      // member's (never written back up), its next message switches the
-      // process first or is refused (cliAgents alignClaudePermissionMode),
-      // and a reply it is writing now is stopped rather than go on wider.
-      const stopped = await this.stopClaudeMemberReplies(conversation.id, member.id);
+      // member's (never written back up) and its app tools go by it now; its
+      // next message switches the process first or is refused (cliAgents
+      // alignClaudePermissionMode), a reply it starts on its own is aligned
+      // first or stopped (alignSelfStartedClaudeReply), and a reply it is
+      // writing now is stopped rather than go on wider.
+      this.grantLiveMemberMode(conversation, member);
+      const stopped = this.stopClaudeMemberReplies(conversation, member.id);
       this.postMemberModeNotice(conversation.id, `${said} ${stopped ? `Its reply was stopped so it does not go on in ${runs}; its` : "Its"} next message switches it to ${label} first.`);
       return;
     }
@@ -26294,19 +26305,46 @@ export class ChatService {
     if (actual && actual !== mode) this.followClaudeCliMode(conversation.id, member.id, actual);
   }
 
-  /** Stops the member's replies running on this device, as its Stop does;
-   *  whether one was running. */
-  private async stopClaudeMemberReplies(conversationId: string, participantId: string): Promise<boolean> {
-    const conversation = await this.storage.getConversation(conversationId).catch(() => undefined);
-    const runIds = new Set<string>();
-    for (const message of conversation?.messages ?? []) {
-      const runId = message.metadata?.runId;
-      if (message.role === "participant" && message.participantId === participantId && message.status === "pending" && typeof runId === "string" && this.chatRunControllers.has(runId)) {
-        runIds.add(runId);
-      }
+  /** Stops the member's replies its CLI is writing on this device, as its
+   *  Stop does; whether one was. A turn still waiting in the app goes in
+   *  later and switches the process first (alignClaudePermissionMode). */
+  private stopClaudeMemberReplies(conversation: Conversation, participantId: string): boolean {
+    const pendingById = new Map(conversation.messages.map((message) => [message.id, message]));
+    const runIds: string[] = [];
+    for (const [runId, meta] of this.chatRunMeta) {
+      if (meta.conversationId !== conversation.id || meta.participantId !== participantId || !this.chatRunControllers.has(runId)) continue;
+      const pending = meta.pendingMessageId ? pendingById.get(meta.pendingMessageId) : undefined;
+      if (pending?.metadata?.turnQueued || pending?.metadata?.queuedBehind) continue;
+      runIds.push(runId);
     }
     for (const runId of runIds) this.cancelRun(runId);
-    return runIds.size > 0;
+    return runIds.length > 0;
+  }
+
+  /** A reply the member's CLI started on its own (a background task ended):
+   *  its process runs a wider mode than the member's (a lowered mode it did
+   *  not take) is switched first; true when it could not be (the reply is
+   *  then stopped). */
+  private async alignSelfStartedClaudeReply(conversation: Conversation, participant: ChatParticipant): Promise<boolean> {
+    const runner = this.cliRunner as Partial<Pick<CliAgentRunner, "memberClaudeControl" | "memberClaudePermissionMode">>;
+    const own = this.claudeMemberMode(conversation, participant);
+    const runs = runner.memberClaudePermissionMode?.call(this.cliRunner, conversation.id, participant.id);
+    if (!own || !runs || !runner.memberClaudeControl || claudePermissionModeRank(runs) <= claudePermissionModeRank(own)) return false;
+    const audit = { conversationId: conversation.id, participantId: participant.id, from: runs, to: own };
+    try {
+      const answer = await runner.memberClaudeControl.call(this.cliRunner, conversation.id, participant.id, { subtype: "set_permission_mode", mode: own }, CLAUDE_PERMISSION_MODE_TIMEOUT_MS);
+      if (answer && (typeof answer.mode !== "string" || answer.mode === own)) {
+        this.grantLiveMemberMode(conversation, participant);
+        await this.debugLogs.write("chat.member-mode.self-started-aligned", audit);
+        return false;
+      }
+    } catch {
+      // Said below.
+    }
+    await this.debugLogs.write("chat.member-mode.self-started-stopped", audit).catch(() => undefined);
+    this.postMemberModeNotice(conversation.id,
+      `@${participant.handle} started a reply on its own in ${CLAUDE_PERMISSION_MODE_LABELS[runs]}, and Claude Code did not switch it to ${CLAUDE_PERMISSION_MODE_LABELS[own]}: the reply was stopped.`);
+    return true;
   }
 
   /** What became of a member's mode, said in the chat: a line every device
