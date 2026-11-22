@@ -575,19 +575,6 @@
   background: var(--app-warning);
 }
 
-.chat-agent-dot.is-done {
-  background: var(--app-success);
-}
-
-.chat-agent-dot.is-failed {
-  background: var(--app-danger);
-}
-
-.chat-agent-dot.is-stopped {
-  border-radius: 3px;
-  background: var(--app-muted-subtle);
-}
-
 .chat-agent-title {
   flex: 1;
   min-width: 0;

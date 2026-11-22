@@ -118,6 +118,10 @@ test("the side panel lists every session but the main session as T3 Code does: g
     assert.equal(textOf(previous), "Previous agents1", "folded, with its count");
     act(() => previous.findAll((node) => node.type === "button")[0]!.props.onClick());
     assert.deepEqual(memberRows().map((row) => row.props["data-participant-id"]), [DREW.id, TAYLOR.id, GERA.id]);
+    const geraRow = memberRows()[2]!;
+    assert.equal(geraRow.props["data-member-status"], "done");
+    assert.equal(geraRow.findAll((node) => typeof node.props?.className === "string" && node.props.className.startsWith("chat-agent-dot")).length, 0,
+      "an ended session has no dot: its state no longer matters (its card still says it)");
     assert.equal(textOf(root.find(byTestId("chat-members-previous")).find((node) => node.type === "button" && node.props.className === "chat-agents-group-toggle")), "Previous agents", "the count goes once it is open");
 
     const removed = root.find(byTestId("chat-members-removed"));

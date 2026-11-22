@@ -409,9 +409,12 @@ chat without a main session is always `classic`; its switch is disabled.
     (just "Agents" while none runs), the sessions the main session
     delegated, never the main session itself (its settings are its
     composer's controls), one 32px line each: the provider's bare glyph
-    with a dot for its state, its only mark of it in the row (no state words there, the User, 2026-11-22; Running: the accent, a soft ring pulsing from it, still for reduced motion; Waiting for
-    you: amber; Done: green; Failed: red; Stopped: a grey square; none
-    while idle; Waiting for you also while its run is live when the User
+    with a dot only while its state matters, its only mark of it in the row
+    (no state words there; the User, 2026-11-22): Running, the accent with
+    a soft ring pulsing from it (still for reduced motion); Waiting for
+    you, amber; a session that ended (done, failed, stopped) or never
+    worked has no dot, in Previous agents and anywhere else, its hover
+    card says it (only the states `SessionsWorkStatus` has; Waiting for you also while its run is live when the User
     holds its turn: its CLI's tool permission, a connector sign-in, a Codex
     approval naming its run, or a choice or mention question of its that no
     newer turn of its went past (`sessionsMembersWaitingForUser`,

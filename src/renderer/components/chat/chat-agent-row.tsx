@@ -22,6 +22,13 @@ function LiveElapsed(props: { since: string; compact?: boolean }): JSX.Element {
   return <>{props.compact ? formatCompactDuration(ms) : formatWorkedDuration(ms)}</>;
 }
 
+/** The states a row's dot shows (the User, 2026-11-22): it runs (pulsing)
+ *  or waits for her answer. A session that ended or never worked has no dot:
+ *  its state no longer matters, its hover card still says it. */
+function stateMatters(status: SessionsWorkStatus): boolean {
+  return status === "running" || status === "waiting";
+}
+
 /** What a row knows of the session it lists. */
 export interface ChatAgentRowData {
   id: string;
@@ -90,8 +97,8 @@ export function ChatAgentCard(props: { row: ChatAgentRowData; detail: string; ba
 }
 
 /** One session in the side panel, as T3 Code lists its agents: the
- *  provider's glyph with a dot for its state (its only mark of it in the
- *  row: a colour per state, pulsing while it runs), its task's title on one
+ *  provider's glyph with a dot while it runs (pulsing) or waits for the User
+ *  (its only mark of it in the row; none once it ended), its task's title on one
  *  line, and how long it runs or worked at the end. Hovering shows Stop
  *  where the time was (only while it runs) and, to its left, a card with the
  *  CLI, model and effort, the state and time and what it does now. A click
@@ -135,7 +142,7 @@ function AgentRowView(props: { row: ChatAgentRowData; detail: string }): JSX.Ele
           >
             <span className="chat-agent-glyph">
               {row.mark}
-              {row.status !== "idle" && <span className={`chat-agent-dot is-${row.status}`} aria-hidden="true" />}
+              {stateMatters(row.status) && <span className={`chat-agent-dot is-${row.status}`} aria-hidden="true" />}
             </span>
             <span className="chat-agent-title">{row.title}</span>
             <RowMeta row={row} />

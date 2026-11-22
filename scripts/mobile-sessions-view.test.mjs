@@ -273,6 +273,7 @@ test("the sessions view (T3 Code's way): tasks inside the turn's Worked fold, ch
   await app.evaluate(`document.querySelector('#members-sheet-list [data-members-removed]').click()`);
   await app.waitFor(`document.querySelector('#members-sheet-list .sessions-member-row.is-former[data-member-session="${OLGA_ID}"]') !== null`, "Removed opened");
   assert.equal(await app.evaluate(`document.querySelector('#members-sheet-list .is-former .members-sheet-task').textContent`), "Summarise the old report");
+  assert.equal(await app.evaluate(`document.querySelector('#members-sheet-list .is-former .sessions-agent-dot')`), null, "an ended session has no dot");
   await app.evaluate(`document.querySelector('#members-sheet-list .is-former').click()`);
   await app.waitFor(`${title} === "Summarise the old report" && document.querySelector('#message-list .message-row[data-thread-root="olga-reply"]') !== null`, "the removed member's session");
   const former = await app.evaluate(`({ composer: getComputedStyle(document.getElementById("composer-form")).display, stop: document.querySelectorAll("#message-list .sessions-stop").length,

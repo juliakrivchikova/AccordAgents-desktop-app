@@ -5483,8 +5483,8 @@ button.card-row:focus-visible {
 }
 
 /* The side panel's rows, the computer's anatomy (the User, 2026-11-22): the
-   provider's glyph with a dot for its state (no state words; the running one
-   sends out a soft pulsing ring, still for reduced motion), the task on one
+   provider's glyph with a dot while it runs (a soft pulsing ring, still for
+   reduced motion) or waits for the User, none once it ended; the task on one
    line, and how long it works or worked (no model); Stop at the end. */
 .sessions-agent-row {
   min-height: 48px;
@@ -5523,18 +5523,6 @@ button.card-row:focus-visible {
 
 .sessions-agent-dot.is-waiting {
   background: var(--warn);
-}
-
-.sessions-agent-dot.is-done {
-  background: var(--ok);
-}
-
-.sessions-agent-dot.is-failed {
-  background: var(--danger);
-}
-
-.sessions-agent-dot.is-stopped {
-  border-radius: 3px;
 }
 
 .sessions-agent-row .members-sheet-task {

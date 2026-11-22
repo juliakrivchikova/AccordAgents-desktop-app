@@ -14075,9 +14075,9 @@
       list.append(item);
     }
     // One line per session, the computer's anatomy (the User, 2026-11-22):
-    // its provider's glyph with a dot for its state (no state words; the
-    // running one pulses), its task, and how long it works or worked; no
-    // model; Stop at the end while it runs.
+    // its provider's glyph with a dot while it runs (pulsing) or waits for
+    // the User, no state words, its task, and how long it works or worked;
+    // no model; Stop at the end while it runs.
     const statusLabel = function (status) {
       return shared && shared.SESSIONS_WORK_STATUS_LABELS ? shared.SESSIONS_WORK_STATUS_LABELS[status] || status : status;
     };
@@ -14092,7 +14092,9 @@
       const glyph = document.createElement("span");
       glyph.className = "sessions-agent-glyph";
       glyph.append(providerLogoElement(row.kind));
-      if (row.status !== "idle") {
+      // A dot only while its state matters, as on the computer: it runs
+      // (pulsing) or waits for the User; none once it ended.
+      if (row.status === "running" || row.status === "waiting") {
         const dot = document.createElement("span");
         dot.className = "sessions-agent-dot is-" + row.status;
         dot.setAttribute("aria-hidden", "true");
