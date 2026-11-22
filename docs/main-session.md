@@ -106,12 +106,14 @@ switch is disabled.
     at a word to 40 characters (`sessionsTaskTitle`, `sessionsMemberTitle`;
     the phone gets it with the task). A task the app makes because a reply
     mentioned the member (an inferred request) is titled by the reply's
-    first sentence that mentions it, with no @-names, "Agent" when no words
-    remain (`sessionsMentionSentenceTitle`, the User, 2026-11-22); one made
-    before such tasks were titled is read the same way from the reply's
-    words its text quotes. The phone never receives inferred tasks (their
-    carrier is hidden), so there such a member is named by its handle
-    without "@" — an open divergence. With provider, model and a non-generic role
+    first sentence that mentions it, its words as written (inline code as
+    its text) with no @-names and nothing they leave empty, "Agent" when no
+    words remain (`sessionsMentionSentenceTitle`, the User, 2026-11-22). One
+    made before such tasks were titled is read from the reply's words its
+    text quotes, which may start inside a sentence, so its title can differ
+    a little. The phone never receives inferred tasks (their carrier is
+    hidden), so there such a member is named by its latest task the phone
+    has, else by its handle without "@" — an open divergence. With provider, model and a non-generic role
     under it (`sessionsMemberDetail`); in a message, in prose and in code
     alike, only an exact `@handle` of a member or a former member (at most
     32 characters, not part of a longer word, an e-mail address, a path or

@@ -2098,6 +2098,22 @@ test("requestParticipantsFromTool roots running recipient replies under the requ
   assert.equal(targetReply?.metadata?.chatThreadRootId, requestMessage.id);
 });
 
+test("an inferred task is titled by the reply's sentence that asks the member, inline code kept and no @-names", async () => {
+  const requester = chatParticipant();
+  const target = chatParticipant({ repoRead: true }, { id: "participant-2", handle: "taylor" });
+  const other = chatParticipant({ repoRead: true }, { id: "participant-3", handle: "drew" });
+  const conversation = chatConversation([requester, target, other], "/repo");
+  const source = participantMessage(requester, "source-message",
+    "I fixed `chat.ts`. Thanks...@taylor can you run `npm test` on `src/app.ts`?\n```\n@taylor ignored in code\n```");
+  const { service } = testService({ conversations: [conversation] });
+
+  await (service as any).appendParticipantTurnMessages(conversation, requester, [source]);
+
+  const batch = conversation.messages.find((message) => message.metadata?.participantRequest)?.metadata?.participantRequest;
+  const titles = Object.fromEntries((batch?.items ?? []).map((item) => [item.targetHandle, item.title]));
+  assert.equal(titles.taylor, "Thanks... can you run npm test on…");
+});
+
 test("inferred participant request carrier is hidden and rooted to the source visual root", async () => {
   const requester = chatParticipant();
   const target = chatParticipant({ repoRead: true }, { id: "participant-2", handle: "taylor" });
@@ -2121,7 +2137,7 @@ test("inferred participant request carrier is hidden and rooted to the source vi
   assert.equal(batch?.triggerMessageId, "source-message");
   // Named in the sessions view by the reply's sentence that asks it, without
   // @-names (the User, 2026-11-22).
-  assert.equal(batch?.items[0]?.title, "Please verify");
+  assert.equal(batch?.items[0]?.title, "please verify");
   assert.equal(requestMessage.metadata?.hiddenFromTimeline, true);
   assert.equal(requestMessage.metadata?.threadId, "outer-thread");
   assert.equal(requestMessage.metadata?.parentMessageId, "source-message");
