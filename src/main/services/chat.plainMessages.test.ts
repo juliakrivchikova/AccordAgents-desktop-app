@@ -351,16 +351,25 @@ test("pictures of the message go to the CLI as images; a transport without image
   try {
     const attachment = (id: string) => ({ id, filename: `${id}.png`, mimeType: "image/png" as const, sizeBytes: 68, width: 1, height: 1, storageKey: `attachments/${id}.png`, createdAt: NOW });
     const message: ChatMessage = { id: "u", role: "user", content: "What is on these?", createdAt: NOW, status: "done", metadata: { imageAttachments: [attachment("img-ok"), attachment("img-gone")] } };
-    const result = await internals.turnImagesForCli(conversation.id, message);
+    const result = await internals.turnImagesForCli(conversation.id, message, "claude-code");
     assert.deepEqual(result.images.items, [{ mimeType: "image/png", dataBase64: PNG_1X1, path: stored }]);
     assert.match(result.images.fallbackText, /^Attached pictures:\n- img-ok\.png \(image\/png, 1x1, attachment ID img-ok\)$/);
-    assert.match(result.unavailableNote, /^A picture attached to this message could not be loaded:\n- img-gone\.png \(attachment ID img-gone\): AttachmentMissing/);
+    assert.match(result.unavailableNote, /^A picture attached to this message did not come with it:\n- img-gone\.png \(attachment ID img-gone\): AttachmentMissing/);
+
+    // Over Claude's image limit: read with the tool, never sent (its API would refuse the whole message); Codex reads its own file.
+    const big = { ...attachment("img-ok"), sizeBytes: 6 * 1024 * 1024 };
+    const bigMessage: ChatMessage = { ...message, metadata: { imageAttachments: [big] } };
+    const forClaude = await internals.turnImagesForCli(conversation.id, bigMessage, "claude-code");
+    assert.equal(forClaude.images, undefined);
+    assert.match(forClaude.unavailableNote, /img-ok\.png \(attachment ID img-ok\): too large to attach directly \(6\.0 MB\); look at it with `app_chat_read_attachment`/);
+    const forCodex = await internals.turnImagesForCli(conversation.id, bigMessage, "codex-cli");
+    assert.equal(forCodex.images.items.length, 1);
 
     // The message text carries no "open it with a tool" hint for its own pictures.
     const parts = internals.buildPromptParts(conversation, main, currentSession(main, "s"), message, "/tmp/ws", false, {
       includeRoleInstructions: false, agentMode: "default", permissions: main.permissions, imageCount: 1, unavailableImagesNote: result.unavailableNote
     });
-    assert.ok(parts.prompt.startsWith("What is on these?\n\nA picture attached to this message could not be loaded:"));
+    assert.ok(parts.prompt.startsWith("What is on these?\n\nA picture attached to this message did not come with it:"));
     assert.doesNotMatch(parts.prompt, /app_chat_read_attachment/);
     assert.equal(parts.sections.images, 1);
   } finally {
@@ -402,4 +411,24 @@ test("an Antigravity member (no instruction mechanism of its own) gets its instr
   assert.ok(first.prompt.endsWith("\n\nHello."));
   await waitFor(() => (storage.current.metadata.participantSessions as ChatParticipantSession[] | undefined)?.some((session) => session.sessionId === "agy-conversation") === true);
   assert.equal((await send(service, storage, runs, "Next.")).prompt, "Next.");
+});
+
+test("/compact written to one member compacts it through the app, as `@handle /compact` does; her text does not reach its CLI as a command", async () => {
+  const main = mainSession();
+  const worker = member("worker-id", "worker");
+  const { service, storage, runs } = testService(chat([main, worker], { participantSessions: [currentSession(main, "main-cli")] }));
+  const compactions: Array<Record<string, unknown>> = [];
+  (service as any).compactParticipant = async (request: Record<string, unknown>) => {
+    compactions.push(request);
+    return { conversation: storage.current, warnings: [] };
+  };
+  await service.sendMessage({ conversationId: storage.current.id, runId: "compact-run", content: "/compact keep the API notes", targetParticipantIds: [main.id] });
+  assert.deepEqual(compactions.map((request) => [request.participantId, request.instructions, request.triggeredBy]), [[main.id, "keep the API notes", "user"]]);
+  assert.equal(runs.length, 0, "nothing goes to the CLI as a message");
+
+  // To several members it is not a command of the app: it goes as typed.
+  await service.sendMessage({ conversationId: storage.current.id, runId: "compact-run-2", content: "/compact", targetParticipantIds: [main.id, worker.id] });
+  assert.equal(compactions.length, 1);
+  await waitFor(() => runs.length >= 1);
+  assert.equal(runs.find((run) => run.participant.id === main.id)?.prompt, "/compact");
 });

@@ -602,6 +602,10 @@ const HANDLE_PATTERN = /^[A-Za-z0-9_-]{1,32}$/;
  *  gets them as its appended system prompt on every launch; a session made
  *  before is given them once in its next message. */
 const CHAT_ROLE_RUNTIME_CONFIG_VERSION = 23;
+/** The largest picture sent to Claude Code as an image block: its API
+ *  refuses an image over 5 MB of base64 (about 3.75 MB of bytes) and the
+ *  message with it. */
+const CLAUDE_INLINE_IMAGE_MAX_BYTES = Math.floor(5 * 1024 * 1024 * 3 / 4);
 /** Goes with a resume that brings the replies of the members it asked. */
 const CONTINUATION_HANDLE_NOTE = "When you name these members in your reply, write their names without the @ (or in backticks): an @handle asks that member to run again.";
 /** How members keep their long-term memory (shared/memory.ts), decided by the
@@ -10885,7 +10889,7 @@ export class ChatService {
       ? `Your access: ${this.participantDynamicHeader(conversation, participant, session, access)}`
       : isResumingSession ? this.accessChangedNote(conversation, participant, session, access) : undefined;
     // The message's pictures, as the CLI's own image input.
-    const turnImages = await this.turnImagesForCli(conversation.id, promptTriggerMessage);
+    const turnImages = await this.turnImagesForCli(conversation.id, promptTriggerMessage, participant.kind);
     const imageOptions = { unavailableImagesNote: turnImages.unavailableNote, imageCount: turnImages.images?.items.length ?? 0 };
     const primary = this.buildPromptParts(promptConversation, participant, session, promptTriggerMessage, workspacePath, Boolean(options.continuation), {
       includeRoleInstructions: primaryIncludeRoleInstructions,
@@ -22026,7 +22030,8 @@ export class ChatService {
    */
   private async turnImagesForCli(
     conversationId: string,
-    message: ChatMessage
+    message: ChatMessage,
+    providerKind: ChatProviderKind
   ): Promise<{ images?: CliAgentTurnImages; unavailableNote?: string }> {
     const attachments = this.imageAttachments(message);
     if (attachments.length === 0) {
@@ -22036,6 +22041,12 @@ export class ChatService {
     const loaded: ChatImageAttachment[] = [];
     const unavailable: string[] = [];
     for (const attachment of attachments) {
+      // Claude's API refuses an image block over its size limit, and the
+      // whole message with it: such a picture is read with the tool instead.
+      if (providerKind === "claude-code" && attachment.sizeBytes > CLAUDE_INLINE_IMAGE_MAX_BYTES) {
+        unavailable.push(`- ${attachment.filename} (attachment ID ${attachment.id}): too large to attach directly (${this.formatBytes(attachment.sizeBytes)}); look at it with \`${APP_CHAT_READ_ATTACHMENT_TOOL}\``);
+        continue;
+      }
       try {
         const dataBase64 = await this.readAttachmentBase64(conversationId, attachment);
         items.push({ mimeType: attachment.mimeType, dataBase64, path: await this.localImageFile(conversationId, attachment, dataBase64) });
@@ -22056,7 +22067,7 @@ export class ChatService {
             }
           }
         : {}),
-      ...(unavailable.length > 0 ? { unavailableNote: ["A picture attached to this message could not be loaded:", ...unavailable].join("\n") } : {})
+      ...(unavailable.length > 0 ? { unavailableNote: ["A picture attached to this message did not come with it:", ...unavailable].join("\n") } : {})
     };
   }
 
