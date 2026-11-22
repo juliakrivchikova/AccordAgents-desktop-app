@@ -1,5 +1,6 @@
 import type {
   ChatAppToolApprovalRequest,
+  ChatClaudePlanDecision,
   ChatAppToolApprovalScope,
   ChatImageInput,
   ChatParticipant,
@@ -90,7 +91,8 @@ export interface ChatActions {
     approve: boolean,
     scope?: ChatAppToolApprovalScope,
     draftOverride?: ChatAppToolApprovalRequest,
-    codexDecisionId?: string
+    codexDecisionId?: string,
+    planDecision?: ChatClaudePlanDecision
   ) => Promise<void>;
 }
 
@@ -839,11 +841,11 @@ export function useChatActions(state: AppState, conversationActions: Conversatio
     }
   }
 
-  async function respondToChatAppToolApproval(approvalId: string, approve: boolean, scope?: ChatAppToolApprovalScope, draftOverride?: ChatAppToolApprovalRequest, codexDecisionId?: string): Promise<void> {
+  async function respondToChatAppToolApproval(approvalId: string, approve: boolean, scope?: ChatAppToolApprovalScope, draftOverride?: ChatAppToolApprovalRequest, codexDecisionId?: string, planDecision?: ChatClaudePlanDecision): Promise<void> {
     if (!state.conversation || state.conversation.kind !== "chat") return;
     state.setError(undefined);
     try {
-      const saved = await window.consensus.respondToChatAppToolApproval({ conversationId: state.conversation.id, approvalId, approve, scope, draftOverride, codexDecisionId });
+      const saved = await window.consensus.respondToChatAppToolApproval({ conversationId: state.conversation.id, approvalId, approve, scope, draftOverride, codexDecisionId, planDecision });
       const [nextSettings] = await Promise.all([window.consensus.getSettings(), conversationActions.refreshConversations()]);
       state.setSettings(nextSettings);
       if (saved) updateIfStillOpen(saved);

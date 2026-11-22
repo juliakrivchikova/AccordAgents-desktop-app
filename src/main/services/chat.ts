@@ -6,6 +6,10 @@ import {
 } from "../../shared/forkToNewChat";
 import { applyChatAccessOptionById, cliModesTurnRefusal, inCliOwnMode, membersInCliOwnMode, type CliModesMachineSupport } from "../../shared/chatAccessModes";
 import { newChatMainSessionStart } from "../../shared/newChatDefaults";
+import {
+  CLAUDE_EXIT_PLAN_MODE_TOOL, CLAUDE_PLAN_APPROVAL_TITLE, CLAUDE_PLAN_KEEP_PLANNING_ID, claudePlanApprovalFromToolInput, claudePlanApprovalOption,
+  claudePlanRejectionMessage, claudePlanSetMode, isClaudePlanApprovalRequest, type ClaudePlanApprovalMode
+} from "../../shared/claudePlanApproval";
 import { DEFAULT_CHAT_VIEW, MAIN_SESSION_HANDLE, MAIN_SESSION_ROLE_ID, canSwitchChatView, chatViewFor, isChatViewMode, isMainSessionChat, isMainSessionParticipant, isRoleOfferedForNewMembers, mainSessionMemberOf, mainSessionParticipantId } from "../../shared/mainSession";
 import { SESSIONS_TASK_GIVEN_TITLE_MAX_CHARS, firstTextLine, sessionsTaskTitle, shortenAtWord } from "../../shared/mainSessionView";
 import { createHash, randomUUID } from "node:crypto";
@@ -913,11 +917,16 @@ interface PreparedParticipantRequest {
   timeoutMs: number;
 }
 
+/** The longest "No, keep planning" answer kept and sent to the CLI. */
+const CLAUDE_PLAN_FEEDBACK_MAX_CHARS = 50_000;
+
 interface ToolPermissionDecision {
   approve: boolean;
   scope?: ChatAppToolApprovalScope;
   reason?: string;
   source: "user" | "policy" | "timeout" | "abort";
+  /** Claude Code's plan approval: the mode the CLI moves to on her Yes. */
+  planMode?: ClaudePlanApprovalMode;
 }
 
 type ToolPermissionRequestRoute = "created" | "policy" | "pending-replay" | "terminal-replay";
@@ -1257,6 +1266,10 @@ export class ChatService {
    *  runs here is in as its chat was last saved on this device, by
    *  `conversationId:participantId` (noteSavedClaudeMemberModes). */
   private readonly savedClaudeMemberModes = new Map<string, ClaudePermissionMode>();
+  /** A mode Claude Code moved a member to itself (a plan she approved), by
+   *  `conversationId:participantId`, until the member's saved mode follows
+   *  it (followClaudeCliMode): a save from before does not switch it back. */
+  private readonly cliMovedClaudeModes = new Map<string, ClaudePermissionMode>();
   /** The connection (url, token) each member's CLI was given, reused by a
    *  Claude Code turn that must not retarget the token before its message
    *  reaches the step (see runParticipantTurn). */
@@ -4848,6 +4861,7 @@ export class ChatService {
           ? normalizeChatAgentMode(actor.agentMode)
           : normalizeChatAgentMode(requester.agentMode);
         const prepared = this.prepareToolPermissionRequest(rawRequest, agentMode, this.chatWorkingDirectory(conversation));
+        this.withClaudePlanApproval(prepared, conversation, requester);
         const existing = this.toolPermissionApprovalForOccurrence(
           conversation,
           requester.id,
@@ -4864,7 +4878,8 @@ export class ChatService {
           };
         }
 
-        const policy = prepared.request.agentMode === "auto"
+        // Claude Code asks about its plan every time: no rule answers it.
+        const policy = prepared.request.agentMode === "auto" || prepared.request.planApproval
           ? undefined
           : this.toolPermissionPolicyFor(conversation, requester, prepared.request.toolName, prepared.toolInput);
         if (policy) {
@@ -4894,7 +4909,7 @@ export class ChatService {
         this.upsertAppToolApproval(conversation, approval);
         conversation.messages.push(this.message(
           "system",
-          `Tool approval needed for @${requester.handle}: ${prepared.summary}.`,
+          `Tool approval needed for @${requester.handle}: ${prepared.summary}${/[.?!]$/.test(prepared.summary) ? "" : "."}`,
           undefined,
           { threadId: "system" }
         ));
@@ -4926,10 +4941,7 @@ export class ChatService {
 
     if (outcome.decision?.approve) {
       this.logToolPermissionResolution(actor, outcome, outcome.decision);
-      return {
-        behavior: "allow",
-        updatedInput: outcome.prepared.toolInput
-      };
+      return this.toolPermissionAllowed(outcome.prepared.toolInput, outcome.decision);
     }
     if (outcome.decision) {
       this.logToolPermissionResolution(actor, outcome, outcome.decision);
@@ -4980,10 +4992,34 @@ export class ChatService {
       };
     }
     this.logToolPermissionResolution(actor, outcome, decision);
+    return this.toolPermissionAllowed(outcome.prepared.toolInput, decision);
+  }
+
+  /** The permission prompt tool's allow: on a plan she approved, with the
+   *  mode the CLI moves to, as its own dialog applies it (`setMode` for the
+   *  session). */
+  private toolPermissionAllowed(toolInput: unknown, decision: ToolPermissionDecision): Record<string, unknown> {
     return {
       behavior: "allow",
-      updatedInput: outcome.prepared.toolInput
+      updatedInput: toolInput,
+      ...(decision.planMode ? { updatedPermissions: claudePlanSetMode(decision.planMode) } : {})
     };
+  }
+
+  /** Claude Code's ExitPlanMode, from a member in its CLI's own mode: the
+   *  CLI's own plan approval ("Ready to code?", claudePlanApproval.ts), in
+   *  place of a tool permission card. The plan is kept on the card only
+   *  until she answers it. */
+  private withClaudePlanApproval(prepared: PreparedToolPermission, conversation: Conversation, requester: ChatParticipant): void {
+    if (prepared.request.toolName !== CLAUDE_EXIT_PLAN_MODE_TOOL || requester.kind !== "claude-code" ||
+      normalizeChatAgentPermissions(requester.permissions).cliApprovals !== true) {
+      return;
+    }
+    const runner = this.cliRunner as Partial<Pick<CliAgentRunner, "memberClaudeAutoModeAvailable">>;
+    const autoModeAvailable = runner.memberClaudeAutoModeAvailable?.call(this.cliRunner, conversation.id, requester.id) === true;
+    const { toolInput: _preview, chatScope: _scope, ...request } = prepared.request;
+    prepared.request = { ...request, planApproval: claudePlanApprovalFromToolInput(prepared.toolInput, autoModeAvailable) };
+    prepared.summary = CLAUDE_PLAN_APPROVAL_TITLE;
   }
 
   /** A member asks the User to sign in to (or reconnect) an MCP server its
@@ -8418,7 +8454,33 @@ export class ChatService {
         expired = true;
         return;
       }
-      if (!request.approve) {
+      const plan = isClaudePlanApprovalRequest(approval.request) ? approval.request.planApproval : undefined;
+      if (plan) {
+        // Claude Code's plan approval takes one of the rows it offered, as
+        // the CLI's own dialog does; an answer without one (an older phone's
+        // Allow) is refused and the card is asked again.
+        const option = claudePlanApprovalOption(plan, request.planDecision?.optionId);
+        if (!option || request.approve !== Boolean(option.mode)) {
+          throw new Error("This answer is not one this card takes.");
+        }
+        await execution?.beforeApply(approval);
+        const feedback = option.mode ? undefined : request.planDecision?.feedback?.trim().slice(0, CLAUDE_PLAN_FEEDBACK_MAX_CHARS) || undefined;
+        // The plan stays in the CLI's session: the answered card keeps only
+        // what she picked, so answered plans do not pile up in the chat.
+        const { plan: _plan, ...asked } = plan;
+        decidedApproval = {
+          ...approval,
+          request: { ...approval.request, planApproval: asked },
+          status: option.mode ? "approved" : "denied",
+          ...(option.mode ? { approvalScope: "once" as const } : {}),
+          planDecision: { optionId: option.id, ...(feedback ? { feedback } : {}) },
+          updatedAt: now
+        };
+        decision = option.mode
+          ? { approve: true, scope: "once", source: "user", planMode: option.mode }
+          : { approve: false, source: "user", reason: claudePlanRejectionMessage(feedback) };
+        conversation.messages.push(this.message("system", `@${approval.requesterHandle}: ${option.label}.`, undefined, { threadId: "system" }));
+      } else if (!request.approve) {
         await execution?.beforeApply(approval);
         decidedApproval = {
           ...approval,
@@ -11178,6 +11240,11 @@ export class ChatService {
                 const saved = this.savedClaudeMemberModes.get(memberKey);
                 return saved !== undefined && saved !== claudeModeRead ? saved : claudeModeForTurn;
               }
+            : undefined,
+          // A mode the CLI moved to itself (a plan she approved): the
+          // member's mode follows it.
+          onCliPermissionMode: claudeModeForTurn
+            ? (mode) => this.followClaudeCliMode(conversation.id, participant.id, mode)
             : undefined
         }
       });
@@ -17391,18 +17458,21 @@ export class ChatService {
   }
 
   private toolPermissionDecisionForApproval(approval: ChatAppToolApproval): ToolPermissionDecision | undefined {
+    const plan = isClaudePlanApprovalRequest(approval.request) ? approval.request.planApproval : undefined;
     if (approval.status === "approved" || approval.status === "auto-applied") {
+      const planMode = plan ? claudePlanApprovalOption(plan, approval.planDecision?.optionId)?.mode : undefined;
       return {
         approve: true,
         scope: approval.approvalScope,
-        source: approval.status === "auto-applied" ? "policy" : "user"
+        source: approval.status === "auto-applied" ? "policy" : "user",
+        ...(planMode ? { planMode } : {})
       };
     }
     if (approval.status === "denied" || approval.status === "cancelled" || approval.status === "expired") {
       return {
         approve: false,
         source: "user",
-        reason: approval.error ?? "User denied this tool request."
+        reason: approval.error ?? (plan && approval.status === "denied" ? claudePlanRejectionMessage(approval.planDecision?.feedback) : "User denied this tool request.")
       };
     }
     return undefined;
@@ -25388,6 +25458,7 @@ export class ChatService {
       await pending.catch(() => undefined);
     }
     this.withoutGoneServerPlaceholders(conversation);
+    this.withoutAnsweredPlans(conversation);
     const grants = this.pendingRequestPermissionGrants(conversation);
     const built = this.buildSnapshot(conversation);
     // Rows are remembered before the save so a snapshot queued while this one
@@ -25397,6 +25468,24 @@ export class ChatService {
     await this.persistConversationSnapshot(built.snapshot, built.rows, options);
     this.settleRequestPermissionGrants(conversation, grants);
     this.onConversationSnapshot?.(built.snapshot, built.update);
+  }
+
+  /** A plan approval no longer asking (answered, expired, closed with its
+   *  turn) keeps only what it asked and what she picked: the plan itself
+   *  stays in the CLI's session, so plans do not pile up in the chat. */
+  private withoutAnsweredPlans(conversation: Conversation): void {
+    const approvals = conversation.metadata?.pendingAppToolApprovals;
+    const answered = (approval: ChatAppToolApproval): boolean => approval.status !== "pending" &&
+      isClaudePlanApprovalRequest(approval.request) && approval.request.planApproval.plan !== undefined;
+    if (!Array.isArray(approvals) || !approvals.some(answered)) return;
+    conversation.metadata = {
+      ...conversation.metadata,
+      pendingAppToolApprovals: approvals.map((approval) => {
+        if (!answered(approval) || !isClaudePlanApprovalRequest(approval.request)) return approval;
+        const { plan: _plan, ...asked } = approval.request.planApproval;
+        return { ...approval, request: { ...approval.request, planApproval: asked } };
+      })
+    };
   }
 
   private persistConversationSnapshot(
@@ -25430,6 +25519,12 @@ export class ChatService {
         if (!mode) continue;
         const key = `${prefix}${member.id}`;
         kept.add(key);
+        // The CLI moved this member's mode itself and the save that follows
+        // it has not landed: a save still carrying the old mode does not
+        // switch the process back (followClaudeCliMode).
+        const moved = this.cliMovedClaudeModes.get(key);
+        if (moved !== undefined && moved !== mode) continue;
+        if (moved !== undefined) this.cliMovedClaudeModes.delete(key);
         const before = this.savedClaudeMemberModes.get(key);
         this.savedClaudeMemberModes.set(key, mode);
         if (before !== undefined && before !== mode) void this.applyClaudeMemberMode(conversation, member, before, mode);
@@ -25440,6 +25535,66 @@ export class ChatService {
     } catch (error) {
       void this.debugLogs.write("chat.member-mode.note-failed", {
         conversationId: conversation.id,
+        message: error instanceof Error ? error.message : String(error)
+      }).catch(() => undefined);
+    }
+  }
+
+  /**
+   * Claude Code moved a member's mode itself: a plan the User approved moves
+   * it to the mode she picked, as the CLI's own dialog does. The member's
+   * mode follows the CLI (the User, 2026-11-22): saved as its mode, so its
+   * next message runs in it, without being switched back to Plan, and every
+   * device shows it. The process is in it already: from now on a message
+   * goes in without switching it, and a save from before the switch does
+   * not switch it back.
+   */
+  private followClaudeCliMode(conversationId: string, participantId: string, mode: ClaudePermissionMode): void {
+    const key = `${conversationId}:${participantId}`;
+    const before = this.savedClaudeMemberModes.get(key);
+    if (before === mode) return;
+    this.savedClaudeMemberModes.set(key, mode);
+    this.cliMovedClaudeModes.set(key, mode);
+    void this.saveClaudeCliMode(conversationId, participantId, before, mode).finally(() => {
+      if (this.cliMovedClaudeModes.get(key) === mode) this.cliMovedClaudeModes.delete(key);
+    });
+  }
+
+  /** The member's saved mode becomes the mode the CLI moved to (its file-edit
+   *  right telling Manual from Accept edits, every other right kept), through
+   *  the member settings' own save. A mode she picked meanwhile wins: the
+   *  process is switched to hers instead. */
+  private async saveClaudeCliMode(conversationId: string, participantId: string, before: ClaudePermissionMode | undefined, mode: ClaudePermissionMode): Promise<void> {
+    const audit = { conversationId, participantId, from: before ?? null, to: mode };
+    try {
+      const conversation = { id: conversationId, kind: "chat", messages: [], metadata: {} } as unknown as Conversation;
+      const outcome = await this.withSavedChat(conversation, async () => {
+        const member = this.chatParticipants(conversation).find((participant) => participant.id === participantId);
+        // As it runs (a member the main session made is held to its mode).
+        const saved = member ? this.claudeMemberMode(conversation, member) : undefined;
+        if (!member || !saved) return "gone" as const;
+        if (saved === mode) return "same" as const;
+        if (before !== undefined && saved !== before) return { changed: member, to: saved };
+        const next = applyChatAccessOptionById("claude-code", mode, member.permissions);
+        conversation.metadata = {
+          ...conversation.metadata,
+          participants: this.chatParticipants(conversation).map((participant) =>
+            participant.id === participantId ? { ...participant, agentMode: next.agentMode, permissions: next.permissions } : participant)
+        };
+        conversation.updatedAt = new Date().toISOString();
+        await this.saveConversation(conversation);
+        return "saved" as const;
+      });
+      if (typeof outcome === "object") {
+        // She picked another mode meanwhile: hers is the member's mode.
+        this.cliMovedClaudeModes.delete(`${conversationId}:${participantId}`);
+        this.savedClaudeMemberModes.set(`${conversationId}:${participantId}`, outcome.to);
+        void this.applyClaudeMemberMode(conversation, outcome.changed, mode, outcome.to);
+      }
+      await this.debugLogs.write("chat.member-mode.followed-cli", { ...audit, outcome: typeof outcome === "object" ? "user-changed" : outcome });
+    } catch (error) {
+      await this.debugLogs.write("chat.member-mode.follow-cli-failed", {
+        ...audit,
         message: error instanceof Error ? error.message : String(error)
       }).catch(() => undefined);
     }
@@ -27252,11 +27407,16 @@ export class ChatService {
     const approval = this.chatAppToolApprovals(conversation).find((item) => item.id === request.approvalId);
     if (!approval) throw new Error("App tool approval request was not found.");
     if (approval.status !== "pending" || approval.machineDecisionPending) throw new Error("App tool approval request has already been answered.");
+    // Claude Code's plan approval: Activity's Deny is the CLI's "No, keep
+    // planning" without words.
+    const planDecision = request.planDecision ??
+      (!request.approve && isClaudePlanApprovalRequest(approval.request) ? { optionId: CLAUDE_PLAN_KEEP_PLANNING_ID } : undefined);
     const answer: HubApprovalCardAnswer = {
       approve: request.approve,
       ...(request.scope === "once" || request.scope === "chat" ? { scope: request.scope } : {}),
       ...(request.codexDecisionId ? { codexDecisionId: request.codexDecisionId } : {}),
-      ...(request.draftOverride ? { draftOverride: request.draftOverride } : {})
+      ...(request.draftOverride ? { draftOverride: request.draftOverride } : {}),
+      ...(planDecision ? { planDecision: { optionId: planDecision.optionId, ...(planDecision.feedback ? { feedback: planDecision.feedback } : {}) } } : {})
     };
     await this.answerServerCard({ conversationId: conversation.id, cardId: approval.id, answer: answer as unknown as Record<string, unknown>,
       raisedHere: this.cardRaisedHere(conversation, approval.id) });

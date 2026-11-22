@@ -4,7 +4,7 @@ import test from "node:test";
 import type { HubCard } from "../shared/hubOps";
 import type { HubMemberRules } from "../shared/hubProtocol";
 import type { ChatMessage, Conversation } from "../shared/types";
-import { approvalGrantKey, machineMayAsk, scopeMachineConversationUpdate } from "./hubMachineScope";
+import { approvalGrantKey, keptApproval, machineMayAsk, scopeMachineConversationUpdate } from "./hubMachineScope";
 
 const hashOf = (content: string) => createHash("sha256").update(content).digest("hex");
 
@@ -728,4 +728,52 @@ test("a member the main session made asks others no more freely than the main se
   // One the User added herself keeps its own leave.
   const own = { ...child, delegatedByParticipantId: undefined };
   assert.equal(machineMayAsk(mainSessionChatWith([deskR, lowered, own], [message]), "machine-1", message, "p-desk", [], hashOf("")), true);
+});
+
+test("a plan she approved lets the machine's member follow its CLI into the mode she picked, once; nothing more", () => {
+  // Claude Code in its own Plan mode on the machine (the sessions view).
+  const planned = { ...mainOnMachine, agentMode: "plan", permissions: { ...mainOnMachine.permissions, workspaceWrite: false, cliApprovals: true } };
+  const chat = mainSessionChatWith([deskR, planned]);
+  const acceptEdits = { ...planned, agentMode: "default", permissions: { ...planned.permissions, workspaceWrite: true } };
+  const plan = (optionId: string, planApproval: Record<string, unknown> = {}) => approved("p-main", "app_tool_permission",
+    { kind: "toolPermission", agentMode: "plan", toolName: "ExitPlanMode", planApproval: { plan: "# Plan", ...planApproval } }, { approve: true, planDecision: { optionId } });
+
+  // Without her Yes the write is held back: Plan stays, and so does Manual's file-edit right.
+  let scoped = scopeMachineConversationUpdate(chat, { metadata: { participants: [deskR, acceptEdits] } }, "machine-1", { rules: mainRules });
+  assert.equal(members(scoped).get("p-main")?.agentMode, "plan");
+  assert.equal((members(scoped).get("p-main")?.permissions as Record<string, unknown>).workspaceWrite, false);
+
+  // "Yes, auto-accept edits": Accept edits, noted so it gives it once.
+  const yes = plan("yes-accept-edits-keep-context");
+  scoped = scopeMachineConversationUpdate(chat, { metadata: { participants: [deskR, acceptEdits] } }, "machine-1", { rules: mainRules, approvals: [keptApproval(yes)!] });
+  assert.equal(members(scoped).get("p-main")?.agentMode, "default");
+  assert.equal((members(scoped).get("p-main")?.permissions as Record<string, unknown>).workspaceWrite, true);
+  assert.ok(scoped.used.includes(approvalGrantKey(yes.answerOpId!)));
+  scoped = scopeMachineConversationUpdate(chat, { metadata: { participants: [deskR, acceptEdits] } }, "machine-1",
+    { rules: mainRules, approvals: [keptApproval(yes)!], used: new Set([approvalGrantKey(yes.answerOpId!)]) });
+  assert.equal(members(scoped).get("p-main")?.agentMode, "plan", "used: nothing more");
+
+  // "Yes, manually approve edits" gives Manual, not its file-edit right; nor Auto.
+  const manual = plan("yes-default-keep-context");
+  scoped = scopeMachineConversationUpdate(chat, { metadata: { participants: [deskR, acceptEdits] } }, "machine-1", { rules: mainRules, approvals: [keptApproval(manual)!] });
+  assert.equal(members(scoped).get("p-main")?.agentMode, "default");
+  assert.equal((members(scoped).get("p-main")?.permissions as Record<string, unknown>).workspaceWrite, false);
+  scoped = scopeMachineConversationUpdate(chat, { metadata: { participants: [deskR, { ...planned, agentMode: "auto" }] } }, "machine-1", { rules: mainRules, approvals: [keptApproval(manual)!] });
+  assert.equal(members(scoped).get("p-main")?.agentMode, "plan");
+
+  // Auto only where the card offered it; a row it did not offer gives nothing.
+  scoped = scopeMachineConversationUpdate(chat, { metadata: { participants: [deskR, { ...planned, agentMode: "auto" }] } }, "machine-1",
+    { rules: mainRules, approvals: [keptApproval(plan("yes-resume-auto-mode", { autoModeAvailable: true }))!] });
+  assert.equal(members(scoped).get("p-main")?.agentMode, "auto");
+  scoped = scopeMachineConversationUpdate(chat, { metadata: { participants: [deskR, { ...planned, agentMode: "auto" }] } }, "machine-1",
+    { rules: mainRules, approvals: [keptApproval(plan("yes-resume-auto-mode"))!] });
+  assert.equal(members(scoped).get("p-main")?.agentMode, "plan");
+
+  // "No, keep planning" gives nothing; what is kept of a Yes holds no plan.
+  const no = approved("p-main", "app_tool_permission", { kind: "toolPermission", toolName: "ExitPlanMode", planApproval: { plan: "x" } },
+    { approve: false, planDecision: { optionId: "no", feedback: "smaller" } });
+  scoped = scopeMachineConversationUpdate(chat, { metadata: { participants: [deskR, acceptEdits] } }, "machine-1", { rules: mainRules, approvals: [keptApproval(no)!] });
+  assert.equal(members(scoped).get("p-main")?.agentMode, "plan");
+  const slim = keptApproval(yes)!;
+  assert.deepEqual((slim.card as { approval: { request: unknown } }).approval.request, { kind: "toolPermission", toolName: "ExitPlanMode", planApproval: {} });
 });

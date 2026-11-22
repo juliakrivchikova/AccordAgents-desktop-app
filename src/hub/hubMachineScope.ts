@@ -64,8 +64,10 @@ import {
   APP_CHAT_REQUEST_PARTICIPANTS_TOOL,
   APP_PARTICIPANTS_REQUEST_CHANGE_TOOL,
   APP_PERMISSIONS_REQUEST_CHANGE_TOOL,
-  APP_ROSTER_REQUEST_CHANGE_TOOL
+  APP_ROSTER_REQUEST_CHANGE_TOOL,
+  APP_TOOL_PERMISSION_TOOL
 } from "../shared/appMcpToolContracts";
+import { claudePlanApprovalOption, claudePlanModeSettings, isClaudePlanApprovalRequest } from "../shared/claudePlanApproval";
 import type { HubCard, HubUserApproval } from "../shared/hubOps";
 import { mainSessionParticipantId } from "../shared/mainSession";
 import type { HubMemberRules } from "../shared/hubProtocol";
@@ -404,18 +406,44 @@ function keepAntigravityMode(next: ChatParticipant, current: ChatParticipant): C
   return { ...next, permissions: { ...permissionsOf(next), cliApprovals: true } as unknown as ChatParticipant["permissions"] };
 }
 
+/** Claude Code's plan approvals she answered Yes on this member's cards:
+ *  the CLI then moves the member into the mode she picked itself, and the
+ *  app's mode follows it (the User, 2026-11-22). Each lets that mode be
+ *  written once. */
+function planModeGrants(approved: Approved[], member: ChatParticipant): Array<{ key: string; agentMode: ChatAgentMode; workspaceWrite?: boolean }> {
+  return approved.flatMap((item) => {
+    if (item.card.participantId !== member.id || item.approval.toolName !== APP_TOOL_PERMISSION_TOOL || !isClaudePlanApprovalRequest(item.approval.request)) return [];
+    const decision = (item.card.answer as { planDecision?: { optionId?: unknown } } | undefined)?.planDecision;
+    const option = claudePlanApprovalOption(item.approval.request.planApproval, typeof decision?.optionId === "string" ? decision.optionId : undefined);
+    return option?.mode ? [{ key: item.key, ...claudePlanModeSettings(option.mode) }] : [];
+  });
+}
+
 function keepGrantedRights(next: ChatParticipant, current: ChatParticipant, approved: Approved[], noted: Set<string>): ChatParticipant {
   let kept = next;
-  if (MODE_RANK[normalizeChatAgentMode(next.agentMode)] > MODE_RANK[normalizeChatAgentMode(current.agentMode)]) {
+  const had = normalizeChatAgentPermissions(current.permissions);
+  const wanted = normalizeChatAgentPermissions(next.permissions);
+  const wantedMode = normalizeChatAgentMode(next.agentMode);
+  const raisesMode = MODE_RANK[wantedMode] > MODE_RANK[normalizeChatAgentMode(current.agentMode)];
+  const raisesEdits = wanted.workspaceWrite && !had.workspaceWrite;
+  // A plan she approved: the mode she picked (Accept edits with its
+  // file-edit right), the one that covers this write best.
+  const plans = raisesMode || raisesEdits ? planModeGrants(approved, current) : [];
+  const covers = (grant: { agentMode: ChatAgentMode; workspaceWrite?: boolean }): boolean =>
+    (!raisesMode || MODE_RANK[grant.agentMode] >= MODE_RANK[wantedMode]) && (!raisesEdits || grant.workspaceWrite === true);
+  const plan = plans.find(covers) ?? plans.find((grant) => raisesMode && MODE_RANK[grant.agentMode] >= MODE_RANK[wantedMode]);
+  const planMode = Boolean(plan && raisesMode && MODE_RANK[plan.agentMode] >= MODE_RANK[wantedMode]);
+  const planEdits = Boolean(plan && raisesEdits && plan.workspaceWrite === true);
+  if (plan && (planMode || planEdits)) noted.add(plan.key);
+  if (raisesMode && !planMode) {
     const { agentMode: _mode, ...rest } = kept;
     kept = current.agentMode === undefined ? rest : { ...rest, agentMode: current.agentMode };
   }
-  const had = normalizeChatAgentPermissions(current.permissions);
-  const wanted = normalizeChatAgentPermissions(next.permissions);
-  if (!rightsBeyond(wanted, had)) return kept;
+  const base = planEdits ? { ...had, workspaceWrite: true } : had;
+  if (!rightsBeyond(wanted, base)) return kept;
   const grants = approved.filter((item) => item.scope === "chat" && item.approval.toolName === APP_PERMISSIONS_REQUEST_CHANGE_TOOL &&
     item.card.participantId === current.id);
-  let ceiling = had;
+  let ceiling = base;
   for (const grant of grants) {
     const raised = withGrant(ceiling, grant.request);
     // Noted only when this write takes something it gives.
@@ -954,6 +982,18 @@ export function keptApproval(card: HubCard): HubCard | undefined {
   const approval = (card.card as { approval?: ChatAppToolApproval } | undefined)?.approval;
   if (!approval || typeof approval !== "object") return undefined;
   if (approval.toolName === APP_CHAT_REQUEST_PARTICIPANTS_TOOL || memberChangeTool(approval.toolName)) return card;
+  // A plan she approved: which rows it offered and the one she picked, so
+  // the machine may write the mode the CLI then moved to, once (the plan
+  // itself is not needed).
+  if (approval.toolName === APP_TOOL_PERMISSION_TOOL && isClaudePlanApprovalRequest(approval.request)) {
+    const { plan: _plan, ...asked } = approval.request.planApproval;
+    const { draftOverride: _override, ...planAnswer } = (card.answer ?? {}) as Record<string, unknown>;
+    return {
+      ...card,
+      answer: planAnswer,
+      card: { approval: { ...approval, request: { kind: "toolPermission", toolName: approval.request.toolName, planApproval: asked } } }
+    };
+  }
   if ((card.answer as { scope?: unknown } | undefined)?.scope !== "chat") return undefined;
   // A right she granted for the chat: what it grants, so the machine may
   // write it into its member's rights once (keepRights).

@@ -522,6 +522,11 @@ export interface CliAgentWarmOptions {
    *  after this run read its settings wins over the run's). Without it, the
    *  run's own mode. */
   permissionMode?: () => ClaudePermissionMode | undefined;
+  /** Claude, a member in its CLI's own mode: a permission mode the CLI moved
+   *  to itself (a plan the User approved moves it to the mode she picked),
+   *  as its `system/status` says; never a mode the app asked for. Given to
+   *  the process at its start. */
+  onCliPermissionMode?: (mode: ClaudePermissionMode) => void;
 }
 
 /** A background task the CLI reports as live, with the reply that started it. */
@@ -650,6 +655,9 @@ interface WarmAgentEntry {
    *  knows: `--permission-mode` at its start, then each `set_permission_mode`
    *  it accepted and each mode the CLI reported itself (its `system` events). */
   permissionMode?: () => string | undefined;
+  /** Claude only: the process ran in Claude Code's auto mode (the CLI said
+   *  so itself), so the account has it. */
+  autoModeSeen?: () => boolean;
   /** Claude only: the CLI's figures for the last compaction it ran. */
   lastCompactBoundary?: () => ClaudeCompactBoundary | undefined;
   queue: Promise<void>;
@@ -801,6 +809,13 @@ interface ClaudeWarmProcessState {
   lastCompactBoundary?: ClaudeCompactBoundary;
   /** The session's permission mode (WarmAgentEntry.permissionMode). */
   permissionMode?: string;
+  /** Modes the app asked for with `set_permission_mode` and has no answer
+   *  to yet: the CLI reporting one of them is the app's switch, not its own. */
+  requestedPermissionModes: Map<string, number>;
+  /** The CLI reported auto mode (WarmAgentEntry.autoModeSeen). */
+  autoModeSeen: boolean;
+  /** CliAgentWarmOptions.onCliPermissionMode, from the process's start. */
+  onCliPermissionMode?: (mode: ClaudePermissionMode) => void;
 }
 
 interface ClaudeCompactBoundary {
@@ -956,6 +971,10 @@ interface CodexAppServerTurnStartResult {
 }
 
 export type ClaudePermissionMode = "default" | "plan" | "acceptEdits" | "auto";
+
+function isClaudePermissionMode(value: string): value is ClaudePermissionMode {
+  return value === "default" || value === "plan" || value === "acceptEdits" || value === "auto";
+}
 
 /** Each mode as Claude Code names it (src/shared/chatAccessModes.ts). */
 const CLAUDE_PERMISSION_MODE_LABELS: Record<ClaudePermissionMode, string> = {
@@ -6941,7 +6960,10 @@ export class CliAgentRunner {
       lastTaskEventAt: 0,
       selfResumeExpectedUntil: 0,
       controlWaiters: new Map(),
-      permissionMode: toolConfig.permissionMode
+      permissionMode: toolConfig.permissionMode,
+      requestedPermissionModes: new Map(),
+      autoModeSeen: false,
+      onCliPermissionMode: options.warm?.onCliPermissionMode
     };
     const capturedBackgroundProcesses = new Map<string, CapturedPosixProcess>();
     /** Each waiter settles once its condition holds (or the process is gone). */
@@ -7206,33 +7228,47 @@ export class CliAgentRunner {
       control: async (request: Record<string, unknown>, timeoutMs: number, signal?: AbortSignal) => {
         if (closed || child.exitCode !== null || child.killed) throw new Error("The member's Claude Code process has ended.");
         if (signal?.aborted) throw new Error(CLAUDE_WARM_CANCELLED_MESSAGE);
-        const response = await new Promise<Record<string, unknown> | undefined>((resolve) => {
-          const requestId = this.sendClaudeWarmControl(hooks, request);
-          const timer = setTimeout(() => finish(undefined), timeoutMs);
-          timer.unref();
-          const onAbort = (): void => finish(undefined);
-          const finish = (value: Record<string, unknown> | undefined): void => {
-            clearTimeout(timer);
-            signal?.removeEventListener("abort", onAbort);
-            state.controlWaiters.delete(requestId);
-            resolve(value);
-          };
-          state.controlWaiters.set(requestId, finish);
-          signal?.addEventListener("abort", onAbort, { once: true });
-        });
-        if (signal?.aborted) throw new Error(CLAUDE_WARM_CANCELLED_MESSAGE);
-        if (!response) throw new Error(`Claude Code did not answer ${String(request.subtype)} in time.`);
-        if (this.stringField(response, "subtype") !== "success") {
-          throw new Error(this.stringField(response, "error") || `Claude Code refused ${String(request.subtype)}.`);
+        // A mode asked for here is the app's switch until the CLI answers:
+        // its `system/status` for it is not a switch the CLI made itself.
+        const requestedMode = request.subtype === "set_permission_mode" && typeof request.mode === "string" ? request.mode : undefined;
+        if (requestedMode) state.requestedPermissionModes.set(requestedMode, (state.requestedPermissionModes.get(requestedMode) ?? 0) + 1);
+        try {
+          const response = await new Promise<Record<string, unknown> | undefined>((resolve) => {
+            const requestId = this.sendClaudeWarmControl(hooks, request);
+            const timer = setTimeout(() => finish(undefined), timeoutMs);
+            timer.unref();
+            const onAbort = (): void => finish(undefined);
+            const finish = (value: Record<string, unknown> | undefined): void => {
+              clearTimeout(timer);
+              signal?.removeEventListener("abort", onAbort);
+              state.controlWaiters.delete(requestId);
+              resolve(value);
+            };
+            state.controlWaiters.set(requestId, finish);
+            signal?.addEventListener("abort", onAbort, { once: true });
+          });
+          if (signal?.aborted) throw new Error(CLAUDE_WARM_CANCELLED_MESSAGE);
+          if (!response) throw new Error(`Claude Code did not answer ${String(request.subtype)} in time.`);
+          if (this.stringField(response, "subtype") !== "success") {
+            throw new Error(this.stringField(response, "error") || `Claude Code refused ${String(request.subtype)}.`);
+          }
+          const answer = this.asRecord(response.response) ?? {};
+          if (requestedMode) {
+            // Claude Code 2.1.330 answers with the mode it switched to.
+            state.permissionMode = this.stringField(answer, "mode") ?? requestedMode;
+            if (state.permissionMode === "auto") state.autoModeSeen = true;
+          }
+          return answer;
+        } finally {
+          if (requestedMode) {
+            const left = (state.requestedPermissionModes.get(requestedMode) ?? 1) - 1;
+            if (left > 0) state.requestedPermissionModes.set(requestedMode, left);
+            else state.requestedPermissionModes.delete(requestedMode);
+          }
         }
-        const answer = this.asRecord(response.response) ?? {};
-        if (request.subtype === "set_permission_mode" && typeof request.mode === "string") {
-          // Claude Code 2.1.330 answers with the mode it switched to.
-          state.permissionMode = this.stringField(answer, "mode") ?? request.mode;
-        }
-        return answer;
       },
       permissionMode: () => state.permissionMode,
+      autoModeSeen: () => state.autoModeSeen,
       lastCompactBoundary: () => state.lastCompactBoundary,
       run: (
         turnPrompt: string,
@@ -7444,7 +7480,21 @@ export class CliAgentRunner {
     // including a switch it made itself (a plan the User approved).
     const reportedMode = type === "system" && !record.parent_tool_use_id ? this.stringField(record, "permissionMode") : undefined;
     if (reportedMode) {
+      const previous = state.permissionMode;
       state.permissionMode = reportedMode;
+      if (reportedMode === "auto") state.autoModeSeen = true;
+      // A switch the CLI made itself (a plan the User approved): the member's
+      // mode follows it. Not its start (`system/init`), and not a switch the
+      // app asked for.
+      if (subtype === "status" && previous !== undefined && previous !== reportedMode &&
+        !state.requestedPermissionModes.has(reportedMode) && isClaudePermissionMode(reportedMode)) {
+        void this.writeDebugLog("cli.claude.permission-mode-moved", { participantId: participant.id, from: previous, to: reportedMode });
+        try {
+          state.onCliPermissionMode?.(reportedMode);
+        } catch {
+          // The member's mode is the app's to follow; the process goes on.
+        }
+      }
     }
     if (type === "command_lifecycle") {
       this.handleClaudeCommandLifecycle(record, state, participant, hooks);
@@ -8441,6 +8491,14 @@ export class CliAgentRunner {
   /** One of the CLI's own control requests, sent to the member's live Claude
    *  Code process: the one answering now, else any still open. Undefined when
    *  the member has no live Claude Code process on this device. */
+  /** Whether the member's live Claude Code process ran in auto mode (the CLI
+   *  said so itself): the account has Claude Code's auto mode. */
+  memberClaudeAutoModeAvailable(conversationId: string, participantId: string): boolean {
+    const scopeKey = this.warmAgentScopeKey({ conversationId, participantId, contextKey: "", idleTimeoutMs: 0 });
+    return Array.from(this.warmAgents.values())
+      .some((entry) => entry.scopeKey === scopeKey && !entry.closed && entry.autoModeSeen?.() === true);
+  }
+
   async memberClaudeControl(
     conversationId: string,
     participantId: string,

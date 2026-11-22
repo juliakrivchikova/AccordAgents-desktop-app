@@ -13,6 +13,7 @@ import type {
   AgentRunProgress,
   ChatAppToolApproval,
   ChatAppToolApprovalRequest,
+  ChatClaudePlanDecision,
   ChatAppToolApprovalScope,
   ChatParticipant,
   ChatParticipantConfig,
@@ -137,7 +138,8 @@ export const ChatMessageItem = memo(function ChatMessageItem(props: {
     approve: boolean,
     scope?: ChatAppToolApprovalScope,
     draftOverride?: ChatAppToolApprovalRequest,
-    codexDecisionId?: string
+    codexDecisionId?: string,
+    planDecision?: ChatClaudePlanDecision
   ) => Promise<void>;
 }): JSX.Element {
   const { message } = props;

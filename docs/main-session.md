@@ -856,6 +856,57 @@ Verified in the installed CLIs, the way the User sees them:
   with Plan mode on it runs Codex's Default with the main session's preset,
   Plan mode not handed down. Both checked in `chatAccessModes.test.ts`.
 
+## Claude Code's plan approval (2026-11-22)
+
+A Claude Code member in its CLI's own Plan mode that finishes its plan calls
+ExitPlanMode, which reaches the app's permission prompt tool. The User decided
+(2026-11-22) that it is answered on the CLI's own dialog, on the desktop and
+the phone alike, and that the member's mode then follows the CLI.
+
+- The card (`src/shared/claudePlanApproval.ts`) is Claude Code 2.1.330's
+  dialog, read from its binary: "Ready to code?", "Here is Claude's plan:",
+  the plan, "Claude has written up a plan and is ready to execute. Would you
+  like to proceed?", then its rows: "Yes, auto-accept edits"
+  (`yes-accept-edits-keep-context`, mode `acceptEdits`), or "Yes, and use
+  auto mode" (`yes-resume-auto-mode`, `auto`) in its place where the account
+  has auto mode; "Yes, manually approve edits" (`yes-default-keep-context`,
+  `default`); "No, keep planning" (`no`) with its field "Tell Claude what to
+  change". A plan over 200,000 characters is not shown ("(the plan is too
+  large to be shown in full, so it can only be declined)") and only "No, keep
+  planning" is offered; an empty one shows "No plan found. Please write your
+  plan to the plan file first.". The app knows auto mode is on the account
+  only once the member's live CLI reported auto mode itself; until then it
+  offers "Yes, auto-accept edits" (an open divergence,
+  docs/parity-requirements.md).
+- A Yes answers the permission prompt tool with `{ behavior: "allow",
+  updatedInput, updatedPermissions: [{ type: "setMode", mode, destination:
+  "session" }] }`, as the CLI's own dialog applies it. "No, keep planning"
+  denies with her words in the CLI's rejection ("The user doesn't want to
+  proceed with this tool use. … To tell you how to proceed, the user
+  said:" and her words; with nothing typed, its rejection that stops and
+  waits for her). An answer that is not one of the card's rows (an older
+  phone's Allow) is refused and the card asks again. No rule answers it, not
+  even one "for this chat".
+- Verified in the app with Claude Code 2.1.330 (Sonnet, an isolated
+  instance): ExitPlanMode's input carries `plan` and `planFilePath`; after
+  "Yes, auto-accept edits" the CLI said `system/status` `permissionMode:
+  acceptEdits` 22 ms after the answer, wrote the file without a card, and the
+  next message ran in Accept edits; after "Yes, manually approve edits" it
+  said `default` and the next Write asked on a card; "No, keep planning" with
+  words brought a revised plan that followed them.
+- The member's mode follows the CLI: a `system/status` mode the app did not
+  ask for (not its start, not a `set_permission_mode` waiting for its answer)
+  is saved as the member's mode through the member settings' save
+  (`applyChatAccessOptionById`, its other rights kept), so every device shows
+  it and its next message runs in it; the process is not switched back to
+  Plan by the turn-start alignment, and a save from before the switch does
+  not switch it back. A mode the User picked meanwhile wins. On a cloud
+  machine her server lets the machine write that mode once for the plan she
+  approved (`hubMachineScope.ts`, `planModeGrants`).
+- An answered card keeps only what it offered and the row she picked: the
+  plan stays in the CLI's session, so answered plans do not pile up in the
+  chat.
+
 ## Contract (src/shared)
 
 - `MAIN_SESSION_ROLE_ID = "main-session"`, handle base `main`.

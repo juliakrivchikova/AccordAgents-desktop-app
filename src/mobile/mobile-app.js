@@ -7604,6 +7604,17 @@
    *  identifiers the provider needs back; a choice says what was picked or
    *  written, or that it was cancelled. */
   function answerForCard(card, answer) {
+    if (card.kind === "permission" && card.plan) {
+      // Claude Code's plan approval: the row picked, by the CLI's own value,
+      // and her words for "No, keep planning" (claudePlanApproval.ts).
+      const keepPlanning = answer.optionId === card.plan.feedbackOptionId;
+      const words = keepPlanning && typeof answer.feedback === "string" ? answer.feedback.trim() : "";
+      return {
+        cardId: card.id,
+        cardKind: "permission",
+        answer: { approve: !keepPlanning, planDecision: { optionId: answer.optionId, ...(words ? { feedback: words } : {}) } }
+      };
+    }
     if (card.kind === "permission") {
       const approve = answer.optionId === "allow";
       return {
@@ -7924,7 +7935,8 @@
     return JSON.stringify([card.id, card.kind, card.status, card.waiting === true, card.outcome || "", card.title, card.summary, cardRequesterLabel(card),
       card.machineName, card.options, card.recommendedOptionId, card.allowsCustomAnswer, card.allowsCancel,
       isCardLocked(card.id) || controlCardAnswering.has(card.id), controlCardErrors.get(card.id) || "",
-      cardSentText(card.id), cardOutcome(card.id) || "", card.signInUrl || ""]);
+      cardSentText(card.id), cardOutcome(card.id) || "", card.signInUrl || "",
+      card.plan ? [card.plan.text.length, card.plan.isPlan, card.plan.feedbackOptionId] : 0]);
   }
 
   // What was picked on a choice and not sent yet, by card. Outside the card:
@@ -8346,6 +8358,11 @@
       appendCardState(wrap, card);
       return wrap;
     }
+    if (card.plan) {
+      planCardBody(wrap, card, sent);
+      appendCardState(wrap, card);
+      return wrap;
+    }
     const options = document.createElement("div");
     options.className = "control-card-options";
     for (const option of Array.isArray(card.options) ? card.options : []) {
@@ -8375,6 +8392,86 @@
     wrap.append(options);
     appendCardState(wrap, card);
     return wrap;
+  }
+
+  // Words typed for "No, keep planning" and not sent yet, by card: kept when
+  // the card is drawn again (in the chat and on Activity alike).
+  const planFeedbackDrafts = new Map();
+
+  /**
+   * Claude Code's plan approval, as the CLI shows it ("Ready to code?" is the
+   * card's title): "Here is Claude's plan:", the plan, the CLI's question,
+   * then its rows. A Yes answers at once, as a permission's options do; "No,
+   * keep planning" sends what is typed in its field ("Tell Claude what to
+   * change"), the field taken by the finger.
+   */
+  function planCardBody(wrap, card, sent) {
+    const plan = card.plan;
+    const intro = document.createElement("p");
+    intro.className = "control-card-summary";
+    intro.textContent = plan.intro;
+    const body = document.createElement("div");
+    body.className = "control-card-plan";
+    if (plan.isPlan) {
+      const content = document.createElement("div");
+      content.className = "message-content markdown-text";
+      renderMessageContent(content, plan.text);
+      body.append(content);
+    } else {
+      body.textContent = plan.text;
+    }
+    const question = document.createElement("p");
+    question.className = "control-card-summary";
+    question.textContent = plan.question;
+    wrap.append(intro, body, question);
+
+    const options = document.createElement("div");
+    options.className = "control-card-options";
+    const feedbackOption = (Array.isArray(card.options) ? card.options : []).find(function (option) { return option.id === plan.feedbackOptionId; });
+    for (const option of Array.isArray(card.options) ? card.options : []) {
+      if (option === feedbackOption) continue;
+      const button = document.createElement("button");
+      button.type = "button";
+      button.className = "control-card-option";
+      button.dataset.optionId = option.id;
+      button.textContent = option.label || option.id;
+      button.disabled = sent;
+      button.addEventListener("click", function () {
+        blurWithin(wrap);
+        void answerControlCard(card, { optionId: option.id });
+      });
+      options.append(button);
+    }
+    wrap.append(options);
+    if (!feedbackOption) return;
+    const panel = document.createElement("label");
+    panel.className = "control-card-text control-card-plan-feedback";
+    const field = document.createElement("textarea");
+    field.rows = 2;
+    field.placeholder = plan.feedbackPlaceholder;
+    field.setAttribute("aria-label", feedbackOption.label);
+    field.value = planFeedbackDrafts.get(card.id) || "";
+    field.disabled = sent;
+    field.addEventListener("focus", applyDockKeepingReader);
+    field.addEventListener("blur", applyDockAfterTap);
+    field.addEventListener("input", function () { planFeedbackDrafts.set(card.id, field.value); });
+    panel.append(field);
+    const keep = document.createElement("div");
+    keep.className = "control-card-options";
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "control-card-option";
+    button.dataset.optionId = feedbackOption.id;
+    button.textContent = feedbackOption.label || feedbackOption.id;
+    button.disabled = sent;
+    button.addEventListener("click", function () {
+      blurWithin(wrap);
+      void answerControlCard(card, { optionId: feedbackOption.id, feedback: field.value }).then(function () {
+        if (isCardLocked(card.id)) planFeedbackDrafts.delete(card.id);
+      });
+    });
+    keep.append(button);
+    wrap.append(panel, keep);
   }
 
   /** What a card says under its options. An answer on its way only fades the
@@ -9223,8 +9320,9 @@
     col.className = "act-col";
     col.append(activityRowMain(row, [activityTime(row.at), dot]));
     const sent = isCardLocked(card.id) || controlCardAnswering.has(card.id);
-    if (row.kind === "choice") {
-      // A choice is read and answered in full, so the row opens it.
+    if (row.kind === "choice" || card.plan) {
+      // A choice is read and answered in full, so the row opens it; so is a
+      // plan, read before it is approved, as in Claude Code.
       const chevron = document.createElement("span");
       chevron.className = "act-chevron";
       chevron.append(lineIcon(["m9 18 6-6-6-6"], 20));

@@ -4610,6 +4610,88 @@ input.on("line", (line) => {
   }
 });
 
+test("Claude Code's own modes: a mode the CLI moves to itself (an approved plan) is reported to the member's chat; the app's own switches and the CLI's start are not", { timeout: 15_000 }, async () => {
+  if (process.platform === "win32") {
+    return;
+  }
+  const fixtureDir = await mkdtemp(path.join(tmpdir(), "accord-claude-plan-mode-"));
+  const claudePath = path.join(fixtureDir, "claude-fixture");
+  // Claude Code 2.1.330 on stream-json: set_permission_mode answers with the
+  // mode and a system/status carrying it; a plan the User approved with "Yes,
+  // auto-accept edits" (setMode acceptEdits) moves the session itself and
+  // says so on system/status.
+  await writeFile(claudePath, `#!/usr/bin/env node
+const readline = require("node:readline");
+const argv = process.argv.slice(2);
+let mode = argv[argv.indexOf("--permission-mode") + 1];
+const send = (value) => process.stdout.write(JSON.stringify(value) + "\\n");
+const input = readline.createInterface({ input: process.stdin });
+input.on("close", () => process.exit(0));
+input.on("line", (line) => {
+  const message = JSON.parse(line);
+  if (message.type === "control_request") {
+    if (message.request.subtype === "set_permission_mode") mode = message.request.mode;
+    // The status first, then the answer: the app's own switch either way.
+    send({ type: "system", subtype: "status", status: null, permissionMode: mode });
+    send({ type: "control_response", response: { subtype: "success", request_id: message.request_id, response: { mode } } });
+    return;
+  }
+  const uuid = message.uuid;
+  send({ type: "command_lifecycle", command_uuid: uuid, state: "started" });
+  send({ type: "system", subtype: "init", session_id: "plan-session", permissionMode: mode });
+  if (/approve the plan/.test(message.message.content[0].text)) {
+    mode = "acceptEdits";
+    send({ type: "system", subtype: "status", status: null, permissionMode: mode });
+  }
+  send({ type: "assistant", message: { role: "assistant", content: [{ type: "text", text: "In " + mode + "." }] } });
+  send({ type: "result", subtype: "success", result: "In " + mode + "." });
+  send({ type: "command_lifecycle", command_uuid: uuid, state: "completed" });
+});
+`, "utf8");
+  await chmod(claudePath, 0o755);
+
+  const runner = makeRunner() as any;
+  runner.nativeProcessDbPath = path.join(fixtureDir, "native-processes.sqlite3");
+  runner.providerExecutableForRun = async () => claudePath;
+  const participant = { id: "claude-plan", kind: "claude-code", label: "@claude" };
+  const moved: string[] = [];
+  const warm = {
+    conversationId: "conversation-plan",
+    participantId: participant.id,
+    contextKey: "context-plan",
+    idleTimeoutMs: 60_000,
+    onCliPermissionMode: (mode: string) => moved.push(mode)
+  };
+  const own = (agentMode: "default" | "plan" | "auto", workspaceWrite: boolean) => ({
+    agentMode,
+    permissions: { ...defaultChatAgentPermissions(), workspaceWrite, cliApprovals: true as const }
+  });
+  try {
+    const first = await runner.run(participant, "plan it", fixtureDir, undefined, "chat", undefined, { ...own("plan", false), warm });
+    assert.equal(first.content, "In plan.");
+    assert.deepEqual(moved, [], "its start is not a switch");
+    assert.equal(runner.memberClaudeAutoModeAvailable(warm.conversationId, participant.id), false, "auto mode not known yet");
+
+    const approved = await runner.run(participant, "approve the plan", fixtureDir, undefined, "chat", undefined, { ...own("plan", false), warm });
+    assert.equal(approved.content, "In acceptEdits.");
+    assert.deepEqual(moved, ["acceptEdits"], "the CLI's own switch reaches the chat");
+
+    // The app's switches (the User's menu, a turn's alignment) are not the CLI's.
+    assert.deepEqual(await runner.memberClaudeControl(warm.conversationId, participant.id, { subtype: "set_permission_mode", mode: "default" }, 5_000), { mode: "default" });
+    const aligned = await runner.run(participant, "go", fixtureDir, undefined, "chat", undefined, { ...own("plan", false), warm });
+    assert.equal(aligned.content, "In plan.");
+    assert.deepEqual(moved, ["acceptEdits"], "nothing more");
+
+    // The CLI ran in auto mode itself: the account has it.
+    assert.deepEqual(await runner.memberClaudeControl(warm.conversationId, participant.id, { subtype: "set_permission_mode", mode: "auto" }, 5_000), { mode: "auto" });
+    assert.equal(runner.memberClaudeAutoModeAvailable(warm.conversationId, participant.id), true);
+    assert.deepEqual(moved, ["acceptEdits"]);
+  } finally {
+    await runner.shutdownWarmAgents();
+    await rm(fixtureDir, { recursive: true, force: true });
+  }
+});
+
 /** A Claude Code 2.1.280 stand-in for compaction: keeps its conversation in
  *  memory (what its next reply's context counts), compacts it on `/compact`
  *  with the boundary the real CLI emits, and answers `get_context_usage` as

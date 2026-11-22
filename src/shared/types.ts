@@ -1377,6 +1377,31 @@ export interface ChatToolPermissionRequest {
    *  again" (src/shared/toolPermissionScope.ts): set when the card is
    *  raised. A scoped tool's card without one offers no "for this chat". */
   chatScope?: ChatToolPermissionScope;
+  /** Claude Code's ExitPlanMode: its own plan approval ("Ready to code?",
+   *  src/shared/claudePlanApproval.ts) instead of a tool permission card. */
+  planApproval?: ChatClaudePlanApproval;
+}
+
+/** What Claude Code's plan approval shows and offers. Only a pending card
+ *  holds the plan: it is dropped once the User answered. */
+export interface ChatClaudePlanApproval {
+  /** The plan as Claude wrote it (empty: the CLI's "No plan found"). */
+  plan?: string;
+  planFilePath?: string;
+  /** The account has Claude Code's auto mode, as far as the app knows it
+   *  (the member's CLI ran in auto): "Yes, and use auto mode" in place of
+   *  "Yes, auto-accept edits", as the CLI offers. */
+  autoModeAvailable?: boolean;
+  /** Too large to show (over the CLI's 200,000 characters): only "No, keep
+   *  planning" is offered, as in the CLI. */
+  withheld?: boolean;
+}
+
+/** The User's pick on Claude Code's plan approval: the CLI's own value for
+ *  the row, and her words for "No, keep planning". */
+export interface ChatClaudePlanDecision {
+  optionId: string;
+  feedback?: string;
 }
 
 /** A member asks the User to sign in to (or reconnect) an MCP server its task
@@ -1693,6 +1718,8 @@ export interface ChatAppToolApproval {
   /** Answers its device could not apply (the last few), by the operation
    *  each was sent under: the card is asked again and says why. */
   cardRefusals?: ChatCardRefusal[];
+  /** Claude Code's plan approval, answered: the row she picked. */
+  planDecision?: ChatClaudePlanDecision;
 }
 
 export interface ChatAppToolApprovalPolicy {
@@ -2353,6 +2380,8 @@ export interface RespondToChatAppToolApprovalRequest {
   scope?: ChatAppToolApprovalScope;
   draftOverride?: ChatAppToolApprovalRequest;
   codexDecisionId?: string;
+  /** Claude Code's plan approval: the row she picked and her words. */
+  planDecision?: ChatClaudePlanDecision;
 }
 
 export interface ProviderSettingsUpdate {

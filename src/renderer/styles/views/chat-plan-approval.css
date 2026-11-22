@@ -1,0 +1,27 @@
+/* Claude Code's plan approval (chat-claude-plan-approval-card.tsx): the CLI's
+   "Ready to code?" dialog, the plan between its words, laid out as a
+   permission card is. */
+
+.chat-plan-approval-card .chat-plan-approval-plan {
+  max-height: 420px;
+  overflow: auto;
+  padding: 10px 12px;
+  border: 1px solid var(--app-border);
+  border-radius: 10px;
+  background: var(--app-surface-subtle);
+  overflow-wrap: anywhere;
+}
+
+.chat-plan-approval-card .chat-plan-approval-plan .markdown-text {
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.chat-plan-approval-card .chat-plan-approval-question,
+.chat-plan-approval-card .chat-plan-approval-intro {
+  color: var(--app-text-secondary);
+}
+
+.chat-plan-approval-card .chat-plan-approval-feedback {
+  font-size: 13px;
+}

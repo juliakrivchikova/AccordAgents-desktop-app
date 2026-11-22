@@ -106,7 +106,8 @@ export class MachineApprovalExecutor {
         conversationId, approvalId, approve: answer.approve,
         ...(answer.scope ? { scope: answer.scope } : {}),
         ...(answer.draftOverride ? { draftOverride: answer.draftOverride } : {}),
-        ...(answer.codexDecisionId ? { codexDecisionId: answer.codexDecisionId } : {})
+        ...(answer.codexDecisionId ? { codexDecisionId: answer.codexDecisionId } : {}),
+        ...(answer.planDecision ? { planDecision: answer.planDecision } : {})
       }, (progress) => this.options.progress?.(progress, conversationId), {
         awaitNativeDelivery: true,
         beforeApply: async (approval) => {

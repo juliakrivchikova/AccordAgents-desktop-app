@@ -6,6 +6,7 @@ import type {
   ChatAppToolApproval,
   ChatAppToolApprovalRequest,
   ChatAppToolApprovalScope,
+  ChatClaudePlanDecision,
   ChatParticipant,
   ChatParticipantChangeRequest,
   ChatParticipantConfig,
@@ -30,22 +31,26 @@ import { ChatAppToolRoleChangeOperation } from "./chat-app-tool-role-operation";
 import { ChatAppToolParticipantChangeOperation } from "./chat-app-tool-participant-operation";
 import { ChatCodexApprovalOperation } from "./chat-codex-approval-operation";
 import { ChatScriptApprovalCard } from "./chat-script-approval-card";
-import { chatConnectorSignInRequest, chatParticipantRemovalRequest, chatScriptChangeRequest, chatToolPermissionAllowsChatScope } from "./chat-app-tool-data";
+import { chatClaudePlanApprovalRequest, chatConnectorSignInRequest, chatParticipantRemovalRequest, chatScriptChangeRequest, chatToolPermissionAllowsChatScope } from "./chat-app-tool-data";
+import { ChatClaudePlanApprovalCard } from "./chat-claude-plan-approval-card";
 import { ChatConnectorSignInCard } from "./chat-connector-sign-in-card";
 import { useSessionsViewLabel, useSessionsViewText } from "./chat-sessions-links";
 import { chatToolPermissionScopeSummary } from "../../../shared/toolPermissionScope";
 import { ChatAppToolMemberRemovalOperation, ChatAppToolMemberRemovalResult, memberRemovalOptions, memberRemovalQuestion } from "./chat-app-tool-member-removal";
 
-/** Scheduled-script proposals and connector sign-ins have their own cards;
- *  every other approval uses the generic one. */
+/** Scheduled-script proposals, connector sign-ins and Claude Code's plan
+ *  approvals have their own cards; every other approval uses the generic one. */
 export function ChatAppToolApprovalCard(props: Parameters<typeof GenericChatAppToolApprovalCard>[0]): JSX.Element {
   const request = chatScriptChangeRequest(props.approval);
   const signIn = chatConnectorSignInRequest(props.approval);
+  const plan = chatClaudePlanApprovalRequest(props.approval);
   return request
     ? <ChatScriptApprovalCard {...props} request={request} />
     : signIn
       ? <ChatConnectorSignInCard {...props} request={signIn} />
-      : <GenericChatAppToolApprovalCard {...props} />;
+      : plan
+        ? <ChatClaudePlanApprovalCard {...props} request={plan} />
+        : <GenericChatAppToolApprovalCard {...props} />;
 }
 
 function GenericChatAppToolApprovalCard(props: {
@@ -61,7 +66,8 @@ function GenericChatAppToolApprovalCard(props: {
     approve: boolean,
     scope?: ChatAppToolApprovalScope,
     draftOverride?: ChatAppToolApprovalRequest,
-    codexDecisionId?: string
+    codexDecisionId?: string,
+    planDecision?: ChatClaudePlanDecision
   ) => Promise<void>;
 }): JSX.Element {
   const requester = props.participants.find((participant) => participant.id === props.approval.requesterParticipantId);

@@ -2001,6 +2001,150 @@ test("Claude Code's own modes on a machine: a mode changed on another device is 
   assert.deepEqual(machineProcess.sent, [{ subtype: "set_permission_mode", mode: "plan" }]);
 });
 
+/** A Claude Code member in its CLI's own Plan mode (the sessions view). */
+function planMember() {
+  return {
+    ...chatParticipant("claude-code", { repoRead: true }),
+    agentMode: "plan" as const,
+    permissions: { ...normalizeChatAgentPermissions({ ...defaultChatAgentPermissions(), repoRead: true }), cliApprovals: true as const }
+  };
+}
+
+test("Claude Code's plan approval: ExitPlanMode raises the CLI's own card; a Yes carries its setMode back, No sends her words", async () => {
+  const drew = planMember();
+  const conversation = chatConversation([drew]);
+  const { service, storage } = testService({ conversation });
+  const actor = { ...toolPermissionActor(drew, conversation), agentMode: "plan" as const };
+  const plan = "# Plan\n\n1. Write hello.txt with hi.";
+  const input = { plan, planFilePath: "/home/user/.claude/plans/plan.md" };
+
+  const first = service.requestToolPermissionFromTool(actor, { tool_name: "ExitPlanMode", input, tool_use_id: "toolu_plan_1" });
+  const card = await pendingToolPermission(storage, "ExitPlanMode");
+  assert.equal(card.summary, "Ready to code?");
+  assert.deepEqual(card.request, {
+    kind: "toolPermission",
+    agentMode: "plan",
+    nativeOccurrenceId: "toolu_plan_1",
+    toolName: "ExitPlanMode",
+    planApproval: { plan, planFilePath: "/home/user/.claude/plans/plan.md" }
+  }, "the plan, not a tool input preview; no \"for this chat\"");
+
+  // An answer that is not one of its rows (an older phone's Allow, auto
+  // mode the card did not offer) is refused; the card still asks.
+  await assert.rejects(service.respondToAppToolApproval({ conversationId: conversation.id, approvalId: card.id, approve: true }), /This answer is not one this card takes\./);
+  await assert.rejects(service.respondToAppToolApproval({ conversationId: conversation.id, approvalId: card.id, approve: true,
+    planDecision: { optionId: "yes-resume-auto-mode" } }), /This answer is not one this card takes\./);
+  await service.respondToAppToolApproval({ conversationId: conversation.id, approvalId: card.id, approve: true,
+    planDecision: { optionId: "yes-accept-edits-keep-context" } });
+  assert.deepEqual(await first, {
+    behavior: "allow",
+    updatedInput: input,
+    updatedPermissions: [{ type: "setMode", mode: "acceptEdits", destination: "session" }]
+  });
+  const answered = ((storage.current.metadata.pendingAppToolApprovals ?? []) as ChatAppToolApproval[]).find((item) => item.id === card.id)!;
+  assert.equal(answered.status, "approved");
+  assert.deepEqual(answered.planDecision, { optionId: "yes-accept-edits-keep-context" });
+  assert.deepEqual((answered.request as { planApproval?: unknown }).planApproval, { planFilePath: "/home/user/.claude/plans/plan.md" }, "the answered card keeps no plan");
+  assert.ok(storage.current.messages.some((message: ChatMessage) => message.content === "@drew: Yes, auto-accept edits."));
+
+  // Manual: setMode default.
+  const manual = service.requestToolPermissionFromTool({ ...actor, runId: "run-43" }, { tool_name: "ExitPlanMode", input, tool_use_id: "toolu_plan_2" });
+  const manualCard = await pendingToolPermission(storage, "ExitPlanMode");
+  await service.respondToAppToolApproval({ conversationId: conversation.id, approvalId: manualCard.id, approve: true, planDecision: { optionId: "yes-default-keep-context" } });
+  assert.deepEqual((await manual).updatedPermissions, [{ type: "setMode", mode: "default", destination: "session" }]);
+
+  // No, keep planning: her words, as the CLI's rejection with feedback.
+  const keep = service.requestToolPermissionFromTool({ ...actor, runId: "run-44" }, { tool_name: "ExitPlanMode", input, tool_use_id: "toolu_plan_3" });
+  const keepCard = await pendingToolPermission(storage, "ExitPlanMode");
+  await service.respondToAppToolApproval({ conversationId: conversation.id, approvalId: keepCard.id, approve: false,
+    planDecision: { optionId: "no", feedback: "  Use a fixture instead.  " } });
+  assert.deepEqual(await keep, {
+    behavior: "deny",
+    message: "The user doesn't want to proceed with this tool use. The tool use was rejected (eg. if it was a file edit, the new_string was NOT written to the file). To tell you how to proceed, the user said:\nUse a fixture instead."
+  });
+
+  // A plan approval is never answered by a rule, even one "for this chat".
+  (storage.current.metadata as any).appToolApprovalPolicies = [{ id: "p1", participantId: drew.id, roleConfigId: drew.roleConfigId, toolName: APP_TOOL_PERMISSION_TOOL,
+    capability: "permissions.request", targetToolName: "ExitPlanMode", scope: "chat", createdAt: "", updatedAt: "" }];
+  const asked = service.requestToolPermissionFromTool({ ...actor, runId: "run-45" }, { tool_name: "ExitPlanMode", input: { plan: "" }, tool_use_id: "toolu_plan_4" });
+  const askedCard = await pendingToolPermission(storage, "ExitPlanMode");
+  assert.deepEqual((askedCard.request as { planApproval?: unknown }).planApproval, { plan: "" });
+  // A Deny without a row (an older phone's) is refused too; "No, keep
+  // planning" with nothing typed is the CLI's rejection that waits for her.
+  await assert.rejects(service.respondToAppToolApproval({ conversationId: conversation.id, approvalId: askedCard.id, approve: false }), /This answer is not one this card takes\./);
+  await service.respondToAppToolApproval({ conversationId: conversation.id, approvalId: askedCard.id, approve: false, planDecision: { optionId: "no" } });
+  assert.deepEqual(await asked, {
+    behavior: "deny",
+    message: "The user doesn't want to proceed with this tool use. The tool use was rejected (eg. if it was a file edit, the new_string was NOT written to the file). STOP what you are doing and wait for the user to tell you how to proceed."
+  });
+});
+
+test("Claude Code's plan approval offers auto mode once the member's CLI ran in it, and a classic member's ExitPlanMode stays a tool card", async () => {
+  const drew = planMember();
+  const conversation = chatConversation([drew]);
+  const { service, storage } = testService({ conversation });
+  (service as any).cliRunner.memberClaudeAutoModeAvailable = () => true;
+  const pending = service.requestToolPermissionFromTool({ ...toolPermissionActor(drew, conversation), agentMode: "plan" as const }, {
+    tool_name: "ExitPlanMode", input: { plan: "Do it." }, tool_use_id: "toolu_auto"
+  });
+  const card = await pendingToolPermission(storage, "ExitPlanMode");
+  assert.deepEqual((card.request as { planApproval?: unknown }).planApproval, { plan: "Do it.", autoModeAvailable: true });
+  await assert.rejects(service.respondToAppToolApproval({ conversationId: conversation.id, approvalId: card.id, approve: true,
+    planDecision: { optionId: "yes-accept-edits-keep-context" } }), /This answer is not one this card takes\./, "the CLI offers auto mode in its place");
+  await service.respondToAppToolApproval({ conversationId: conversation.id, approvalId: card.id, approve: true, planDecision: { optionId: "yes-resume-auto-mode" } });
+  assert.deepEqual((await pending).updatedPermissions, [{ type: "setMode", mode: "auto", destination: "session" }]);
+
+  const classic = chatParticipant("claude-code", { repoRead: true });
+  const classicChat = chatConversation([classic]);
+  const other = testService({ conversation: classicChat });
+  void other.service.requestToolPermissionFromTool(toolPermissionActor(classic, classicChat), { tool_name: "ExitPlanMode", input: { plan: "x" } });
+  const toolCard = await pendingToolPermission(other.storage, "ExitPlanMode");
+  assert.equal((toolCard.request as { planApproval?: unknown }).planApproval, undefined);
+});
+
+test("Claude Code's plan approval: after a Yes the member's mode follows the CLI and is not switched back to Plan", async () => {
+  const runs: Array<{ options: any }> = [];
+  const drew = planMember();
+  const conversation = chatConversation([drew]);
+  const { service, storage, tempRoot, debugEvents } = testService({
+    conversation,
+    run: async (runParticipant, _prompt, _repoPath, _diffMode, _kind, _signal, options) => {
+      runs.push({ options });
+      return { participant: runParticipant, ok: true, content: "ok", durationMs: 1, sessionId: "session-drew" };
+    }
+  });
+  (service as any).ensureHistoryFiles = async () => tempRoot;
+  const process = liveClaudeProcess(service);
+  await service.sendMessage({ conversationId: conversation.id, runId: "run-1", content: "@drew plan it" });
+  await waitFor(() => runs.length === 1);
+  const warm = runs[0].options.warm;
+  assert.equal(warm.permissionMode(), "plan");
+  assert.equal(typeof warm.onCliPermissionMode, "function");
+
+  // The CLI moved itself on her "Yes, auto-accept edits".
+  warm.onCliPermissionMode("acceptEdits");
+  assert.equal(warm.permissionMode(), "acceptEdits", "a message sent before the save lands goes in as it is");
+  await waitFor(() => debugEvents.some((entry) => entry.event === "chat.member-mode.followed-cli"));
+  const member = (storage.current.metadata.participants as ChatParticipant[])[0];
+  assert.equal(member.agentMode, "default");
+  assert.equal(member.permissions?.workspaceWrite, true);
+  assert.equal(member.permissions?.cliApprovals, true);
+  assert.equal(member.permissions?.repoRead, true, "every other right kept");
+  assert.equal(selectedChatAccessOption("claude-code", member.agentMode, member.permissions)?.id, "acceptEdits", "the chip says Accept edits");
+  await flushMicrotasks();
+  assert.deepEqual(process.sent, [], "the process is not switched (back) for it");
+
+  await service.sendMessage({ conversationId: conversation.id, runId: "run-2", content: "@drew go" });
+  await waitFor(() => runs.length === 2);
+  assert.equal(runs[1].options.warm.permissionMode(), "acceptEdits", "the next message runs in it, not in Plan");
+  assert.equal(runs[1].options.warm.contextKey, warm.contextKey, "the same live process");
+
+  // Her own change afterwards is set in the process as before.
+  await service.updateParticipantRuntime({ conversationId: conversation.id, participantId: drew.id, agentMode: "plan" });
+  await waitFor(() => process.sent.length === 1);
+  assert.deepEqual(process.sent, [{ subtype: "set_permission_mode", mode: "plan" }]);
+});
+
 test("chat native /goal preserves the posted message while enabling the provider-native run", async () => {
   const runs: Array<{ prompt: string; options: any }> = [];
   const participant = chatParticipant("codex-cli");
