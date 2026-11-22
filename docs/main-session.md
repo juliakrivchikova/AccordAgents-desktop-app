@@ -104,16 +104,17 @@ switch is disabled.
     T3 Code titles a thread: the 2–6 word `title` the main session gives
     the task in `app_chat_delegate_task`, else the task's first sentence cut
     at a word to 40 characters (`sessionsTaskTitle`, `sessionsMemberTitle`;
-    the phone gets it with the task). A task the app makes because a reply
-    mentioned the member (an inferred request) is titled by the reply's
-    first sentence that mentions it, its words as written (inline code as
-    its text) with no @-names and nothing they leave empty, "Agent" when no
-    words remain (`sessionsMentionSentenceTitle`, the User, 2026-11-22). One
-    made before such tasks were titled is read from the reply's words its
-    text quotes, which may start inside a sentence, so its title can differ
-    a little. The phone never receives inferred tasks (their carrier is
-    hidden), so there such a member is named by its latest task the phone
-    has, else by its handle without "@" — an open divergence. With provider, model and a non-generic role
+    the phone gets it with the task). The sessions view makes no task from
+    a mention in a reply (see the rule above); one made in the classic view
+    or before that rule (an inferred request) is titled by the reply's
+    first sentence that mentions the member, its words as written (inline
+    code as its text) with no @-names and nothing they leave empty, "Agent"
+    when no words remain (`sessionsMentionSentenceTitle`, the User,
+    2026-11-22). One made before such tasks were titled is read from the
+    reply's words its text quotes, which may start inside a sentence, so
+    its title can differ a little. The phone never receives such tasks
+    (their carrier is hidden), so for a member whose latest task is one of
+    them it shows its latest task it has, else its handle without "@". With provider, model and a non-generic role
     under it (`sessionsMemberDetail`); in a message, in prose and in code
     alike, only an exact `@handle` of a member or a former member (at most
     32 characters, not part of a longer word, an e-mail address, a path or
