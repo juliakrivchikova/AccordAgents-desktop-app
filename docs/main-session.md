@@ -469,6 +469,11 @@ name no main session.
   access?" first. Codex's Plan mode stays a New chat toggle.
 - **Runs on**: This Mac (This computer elsewhere) or one of her machines
   (Settings → Machines' list); a machine no longer set up is this computer.
+  The computer's New chat sets it as its Runs on control sets that machine
+  when chosen there (`newChatDesktopStart`): a machine on her AWS instance
+  as Cloud run on that instance (its first turn makes it ready and copies
+  the project), another machine as its own; the phone puts the main session
+  on the machine, as its Runs on does.
 - **Compact without asking**, a switch, on by default: the main session's
   right to compact its context without a card (`requestCompaction` `allow`;
   off: `ask`).

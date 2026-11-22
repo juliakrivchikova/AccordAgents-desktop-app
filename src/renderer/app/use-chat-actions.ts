@@ -26,7 +26,7 @@ import {
   validateChatParticipantDrafts,
   validateChatStartupDrafts
 } from "../components/chat/chat-participant-drafts";
-import { NEW_CHAT_MAIN_SESSION_PARTICIPANT_ID, newChatMainSessionParticipantDraft, newChatMainSessionPlace } from "../components/chat/chat-main-session-draft";
+import { NEW_CHAT_MAIN_SESSION_PARTICIPANT_ID, newChatDesktopStart, newChatMainSessionParticipantDraft, newChatMainSessionPlace } from "../components/chat/chat-main-session-draft";
 import { newChatMainSessionStart } from "../../shared/newChatDefaults";
 import { cliStartDefaultsFor, startAccessKey } from "../components/chat/use-cli-start-defaults";
 import { newChatViewFor } from "../../shared/mainSession";
@@ -240,10 +240,12 @@ export function useChatActions(state: AppState, conversationActions: Conversatio
     // How Settings → General → New chats starts it on this provider (a
     // machine no longer set up: this computer), under what was chosen on
     // the screen.
-    const machineIds = sessionsView
-      ? await Promise.resolve(window.consensus.listMachines?.()).then((list) => list?.machines.map((machine) => machine.id), () => undefined)
+    const machines = sessionsView
+      ? await Promise.resolve(window.consensus.listMachines?.()).then((list) => list?.machines, () => undefined)
       : undefined;
-    const newChatStart = sessionsView ? newChatMainSessionStart(state.settings.newChatDefaults, mainProvider, machineIds ?? []) : undefined;
+    const newChatStart = sessionsView
+      ? newChatDesktopStart(newChatMainSessionStart(state.settings.newChatDefaults, mainProvider, machines?.map((machine) => machine.id)), mainProvider.kind, machines ?? [])
+      : undefined;
     const place = { kind: mainProvider.kind, ...newChatMainSessionPlace(mainSessionRuntimeOverride, newChatStart) };
     const shownStart = state.newChatMainSessionStartAccess;
     const startAccess = !sessionsView

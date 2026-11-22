@@ -45,6 +45,7 @@ import {
   isNewChatMainSessionOption,
   NEW_CHAT_MAIN_SESSION_PARTICIPANT_ID,
   newChatMainSessionParticipantConfig,
+  newChatDesktopStart,
   newChatMainSessionParticipantDraft,
   newChatMainSessionPlace
 } from "./chat-main-session-draft";
@@ -234,12 +235,18 @@ export function NewChatScreen(props: {
   const machineList = useMachineList();
   // How Settings → General → New chats starts it on this provider: the
   // controls start from it (a machine no longer set up: this computer).
-  const machineIdsKey = machineList.machines.map((machine) => machine.id).join("\u0000");
+  const machinesKey = machineList.machines.map((machine) => `${machine.id}\u0001${machine.awsInstanceId ?? ""}`).join("\u0000");
   const newChatStart = useMemo(
-    () => mainKind
-      ? newChatMainSessionStart(props.settings.newChatDefaults, { kind: mainKind, hostId: mainHostId }, machineIdsKey ? machineIdsKey.split("\u0000") : [])
-      : undefined,
-    [mainHostId, mainKind, machineIdsKey, props.settings.newChatDefaults]
+    () => {
+      if (!mainKind) return undefined;
+      const machines = machinesKey ? machinesKey.split("\u0000").map((entry) => {
+        const [id, awsInstanceId] = entry.split("\u0001");
+        return { id: id!, ...(awsInstanceId ? { awsInstanceId } : {}) };
+      }) : [];
+      const start = newChatMainSessionStart(props.settings.newChatDefaults, { kind: mainKind, hostId: mainHostId }, machines.map((machine) => machine.id));
+      return newChatDesktopStart(start, mainKind, machines);
+    },
+    [mainHostId, mainKind, machinesKey, props.settings.newChatDefaults]
   );
   // The mode the User's own config starts its CLI in where the main session
   // runs (this computer, or the machine chosen for it): it starts there.

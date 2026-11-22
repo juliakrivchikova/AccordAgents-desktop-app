@@ -364,6 +364,12 @@ test("a new chat starts as Settings → General → New chats says, and what was
   // Its machine is no longer set up: this computer.
   (globalThis as any).window.consensus.listMachines = async () => ({ machines: [], status: [] });
   assert.equal((await startWith({}))?.homeMachineId, undefined);
+
+  // A machine on her AWS instance: Cloud run on that instance, as New chat's
+  // Runs on sets it (its first turn makes it ready and copies the project).
+  (globalThis as any).window.consensus.listMachines = async () => ({ machines: [{ id: "m-1", name: "Cloud", awsInstanceId: "i-1" }], status: [] });
+  const cloud = await startWith({});
+  assert.deepEqual([cloud?.homeMachineId, cloud?.cloudRun], [undefined, { instanceId: "i-1" }]);
 });
 
 test("a sessions-view New chat whose chip provider stopped being ready refuses the send and says so, instead of starting on another CLI", async () => {

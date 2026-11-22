@@ -3,6 +3,8 @@ import type { ChatParticipantConfig, ChatProviderKind } from "../../../shared/ty
 import { newChatMemberPermissions } from "../../../shared/agentPermissions";
 import { applyChatAccessOption, startChatAccessOption } from "../../../shared/chatAccessModes";
 import type { NewChatMainSessionStart } from "../../../shared/newChatDefaults";
+import type { CloudRunSelection } from "../../../shared/cloudRunPreparation";
+import type { MachineRecord } from "../../../shared/machineLink";
 import { isChatAssistantParticipant } from "../conversation/conversation-display";
 import {
   type ChatParticipantDraft,
@@ -28,9 +30,9 @@ export function newChatMainSessionParticipantConfig(
    *  main session runs (CliStartDefaults.access); none: the CLI's built-in. */
   startAccess?: string,
   /** How Settings → General → New chats starts it on this provider
-   *  (newChatMainSessionStart): its model, effort, mode (over the one her
-   *  config starts the CLI in), machine and compaction right. */
-  start?: NewChatMainSessionStart
+   *  (newChatDesktopStart): its model, effort, mode (over the one her
+   *  config starts the CLI in), where it runs and compaction right. */
+  start?: NewChatDesktopStart
 ): ChatParticipantConfig {
   const permissions = {
     ...newChatMemberPermissions(hasProject),
@@ -52,6 +54,7 @@ export function newChatMainSessionParticipantConfig(
     ...(start?.model ? { model: start.model } : {}),
     ...(start?.reasoningEffort ? { reasoningEffort: start.reasoningEffort } : {}),
     ...(start?.homeMachineId ? { homeMachineId: start.homeMachineId } : {}),
+    ...(start?.cloudRun ? { cloudRun: start.cloudRun } : {}),
     // The rights an ordinary member starts with in this chat (reading its
     // project when it has one), asking members without a card as its role
     // does; the app makes the same one (ChatService.ensureMainSessionParticipant).
@@ -74,7 +77,7 @@ export function newChatMainSessionParticipantDraft(
   hostId?: string,
   sessionsView = false,
   startAccess?: string,
-  start?: NewChatMainSessionStart
+  start?: NewChatDesktopStart
 ): ChatParticipantDraft {
   const draft = chatParticipantConfigToDraftWithRuntimeOverrides(
     newChatMainSessionParticipantConfig(kind, hasProject, hostId, sessionsView, startAccess, start),
@@ -95,14 +98,34 @@ export function isNewChatMainSessionOption(participant: Pick<ChatParticipantConf
     isChatAssistantParticipant(participant);
 }
 
+/** How Settings → General → New chats starts a new chat on this computer's
+ *  New chat: its machine set as New chat's Runs on control sets that machine
+ *  when it is chosen there (ParticipantRunLocation): a machine on an AWS
+ *  instance as Cloud run on that instance, whose first turn makes it ready
+ *  and copies the chat's project there; any other machine as its own. */
+export type NewChatDesktopStart = Omit<NewChatMainSessionStart, "homeMachineId"> & { homeMachineId?: string; cloudRun?: CloudRunSelection };
+
+export function newChatDesktopStart(
+  start: NewChatMainSessionStart | undefined,
+  kind: ChatProviderKind,
+  machines: ReadonlyArray<Pick<MachineRecord, "id" | "awsInstanceId">>
+): NewChatDesktopStart | undefined {
+  if (!start?.homeMachineId) return start;
+  const instanceId = machines.find((machine) => machine.id === start.homeMachineId)?.awsInstanceId;
+  // Cloud run is Claude Code's and Codex's (the control offers it to them only).
+  if (!instanceId || (kind !== "claude-code" && kind !== "codex-cli")) return start;
+  const { homeMachineId: _machine, ...rest } = start;
+  return { ...rest, cloudRun: { instanceId } };
+}
+
 /** Where the New chat screen's main session runs: what its controls chose
- *  (Local included), else the machine Settings → General → New chats names. */
+ *  (Local included), else where Settings → General → New chats puts it. */
 export function newChatMainSessionPlace(
   runtimeOverride: ChatParticipantRuntimeOverride | undefined,
-  start: Pick<NewChatMainSessionStart, "homeMachineId"> | undefined
+  start: Pick<NewChatDesktopStart, "homeMachineId" | "cloudRun"> | undefined
 ): Pick<ChatParticipantRuntimeOverride, "homeMachineId" | "cloudRun"> {
   const chose = Boolean(runtimeOverride) && ("homeMachineId" in runtimeOverride! || "cloudRun" in runtimeOverride!);
   return chose
     ? { homeMachineId: runtimeOverride!.homeMachineId, cloudRun: runtimeOverride!.cloudRun }
-    : { homeMachineId: start?.homeMachineId, cloudRun: undefined };
+    : { homeMachineId: start?.homeMachineId, cloudRun: start?.cloudRun };
 }
