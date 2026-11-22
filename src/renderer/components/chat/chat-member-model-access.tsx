@@ -1,4 +1,4 @@
-import { useCallback, useContext } from "react";
+import { useCallback, useContext, useEffect, useMemo, useRef, useState } from "react";
 import { MoreHorizontal } from "lucide-react";
 
 import { canRestartParticipant, memberProcessRestartable } from "../../../shared/chatParticipantStatus";
@@ -33,12 +33,35 @@ export function ChatMemberComposerSettings(props: {
   onUpdate: (participantId: string, patch: ChatMemberRuntimePatch) => unknown;
 }): JSX.Element {
   const { participant, onUpdate } = props;
-  // Only what was chosen is sent: a second quick choice never sends the
-  // first one back as it stood before it was saved.
-  const change = useCallback((patch: ChatModelAccessPatch) => onUpdate(participant.id, patch), [onUpdate, participant.id]);
+  // Choices not saved yet are shown at once, and a second quick choice is
+  // made on top of them: the permission mode and Codex's Plan mode each send
+  // the member's whole mode, so one made from the member as it stood before
+  // the first was saved would send that first choice back (a mode lowered
+  // from Full Access, then Plan clicked, would return to Full Access).
+  const [pending, setPending] = useState<{ memberId: string; patch: ChatModelAccessPatch }>();
+  const latest = useRef(0);
+  useEffect(() => {
+    latest.current += 1;
+    setPending(undefined);
+  }, [participant.id]);
+  const value = useMemo(
+    () => (pending && pending.memberId === participant.id ? { ...participant, ...pending.patch } : participant),
+    [participant, pending]
+  );
+  // Only what was chosen is sent; once the last choice is saved (or failed)
+  // the member as stored is shown again.
+  const change = useCallback(async (patch: ChatModelAccessPatch) => {
+    const choice = ++latest.current;
+    setPending((current) => ({ memberId: participant.id, patch: { ...(current?.memberId === participant.id ? current.patch : {}), ...patch } }));
+    try {
+      return await onUpdate(participant.id, patch);
+    } finally {
+      if (latest.current === choice) setPending(undefined);
+    }
+  }, [onUpdate, participant.id]);
   return (
     <ChatMemberComposerControls
-      value={participant}
+      value={value}
       onChange={change}
       disabled={props.working}
       runsOn={{ locked: props.runLocationLocked, moves: props.runLocationMoves }}
@@ -97,9 +120,9 @@ export function ChatMemberActionsMenu(props: {
 
 /** The … actions as menu items, each with its muted line (what it does, or
  *  why not). */
-export function ChatMemberActionItems(props: { actions: readonly ChatModelAccessAction[]; label?: string }): JSX.Element {
+export function ChatMemberActionItems(props: { actions: readonly ChatModelAccessAction[] }): JSX.Element {
   return (
-    <ComposerMenuSection label={props.label}>
+    <ComposerMenuSection>
       {props.actions.map((action) => (
         <ComposerMenuItem key={action.label} role="menuitem" testId="chat-member-action" label={action.label} detail={action.detail}
           disabled={action.disabled} tone={action.tone} onSelect={action.onSelect} />

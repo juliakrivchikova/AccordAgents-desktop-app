@@ -17,7 +17,7 @@ import { ClipboardList, Eye, Lock, PenLine, ShieldCheck, ShieldOff, SlidersHoriz
 import { accessHeldReason, accessIcon, applyChatAccessOptionKeepingPlan, ChatAccessMenu, ComposerControlIcon } from "./chat-access-controls";
 import { newChatMainSessionParticipantConfig } from "./chat-main-session-draft";
 import { COMPOSER_DENSITY, useComposerDensity } from "./use-composer-density";
-import { ChatMemberActionsMenu } from "./chat-member-model-access";
+import { ChatMemberActionsMenu, ChatMemberComposerSettings, type ChatMemberRuntimePatch } from "./chat-member-model-access";
 import { resetMemberModelCatalogs } from "./chat-member-model-name";
 import { ChatTitleMenuContent, type ChatViewHeaderState } from "./chat-view-switch";
 
@@ -239,6 +239,62 @@ test("choosing Codex's Full Access asks first in Codex's words; only Yes switche
     assert.equal(patches.length, 2);
   } finally {
     view.done();
+  }
+});
+
+test("a second quick choice is made on top of the first one not saved yet: Full Access lowered, then Plan clicked, never returns to Full Access", async () => {
+  const host = window as unknown as { consensus?: unknown };
+  const previous = host.consensus;
+  resetMemberModelCatalogs();
+  host.consensus = { listProviderModels: async () => undefined, listMachines: async () => ({ machines: [], status: [] }) };
+  const full = { ...CODEX, agentMode: "full-access" as ChatAgentMode, permissions: { ...CODEX.permissions, workspaceWrite: true, cliApprovals: true as const } };
+  assert.equal(selectedChatAccessOption("codex-cli", full.agentMode, full.permissions)?.label, "Full Access");
+  const saves: Array<{ patch: ChatMemberRuntimePatch; resolve: (ok: boolean) => void }> = [];
+  const onUpdate = (_id: string, patch: ChatMemberRuntimePatch) => new Promise<boolean>((resolve) => { saves.push({ patch, resolve }); });
+  const element = (member: ChatParticipant) => (
+    <TooltipProvider><ChatMemberComposerSettings participant={member} working={false} runLocationLocked={false} runLocationMoves={false} onUpdate={onUpdate} /></TooltipProvider>
+  );
+  let renderer: ReturnType<typeof create> | undefined;
+  try {
+    await act(async () => {
+      renderer = create(element(full));
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+    const root = renderer!.root;
+    await act(async () => { root.find(byTestId("chat-member-controls-mode")).props.onClick(); });
+    await act(async () => { root.findAll(byTestId("chat-access-option")).find((row) => row.props["data-value"] === "workspace-write")!.props.onClick(); });
+    assert.equal(saves.length, 1);
+    assert.equal(selectedChatAccessOption("codex-cli", saves[0]!.patch.agentMode, saves[0]!.patch.permissions)?.label, "Ask for approval");
+    // Shown at once, before it is saved.
+    assert.match(root.find(byTestId("chat-member-controls-mode")).props.title, /Ask for approval/);
+    // Plan clicked while the first choice is still being saved.
+    await act(async () => { root.find(byTestId("chat-member-controls-plan")).props.onClick(); });
+    assert.equal(saves.length, 2);
+    const second = saves[1]!.patch;
+    assert.equal(selectedChatAccessOption("codex-cli", second.agentMode, second.permissions)?.label, "Ask for approval", "made on top of the first choice, not Full Access");
+    assert.equal(codexPlanModeOn("codex-cli", second.agentMode, second.permissions), true);
+    // Both saved: the member as stored is shown again.
+    const stored = { ...full, agentMode: second.agentMode!, permissions: second.permissions! };
+    await act(async () => {
+      saves[0]!.resolve(true);
+      renderer!.update(element(stored));
+      saves[1]!.resolve(true);
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+    assert.match(root.find(byTestId("chat-member-controls-mode")).props.title, /Ask for approval/);
+    assert.equal(root.find(byTestId("chat-member-controls-plan")).props["aria-pressed"], true);
+    // A save that fails shows the member as stored.
+    await act(async () => { root.find(byTestId("chat-member-controls-mode")).props.onClick(); });
+    await act(async () => { root.findAll(byTestId("chat-access-option")).find((row) => row.props["data-value"] === "auto-review")!.props.onClick(); });
+    assert.match(root.find(byTestId("chat-member-controls-mode")).props.title, /Approve for me/);
+    await act(async () => {
+      saves[2]!.resolve(false);
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+    assert.match(root.find(byTestId("chat-member-controls-mode")).props.title, /Ask for approval/, "the failed choice is not left on screen");
+  } finally {
+    if (renderer) act(() => renderer!.unmount());
+    host.consensus = previous;
   }
 });
 

@@ -6,7 +6,7 @@ import { TooltipProvider } from "@/components/ui/tooltip";
 import { buildSessionsViewIndex, memberSessionMessages } from "../../../shared/mainSession";
 import { latestTaskByMember, sessionsMemberActivity, sessionsMemberRows, sessionsMemberTitle } from "../../../shared/mainSessionView";
 import type { AppSettings, ChatMessage, Conversation } from "../../../shared/types";
-import { FORK_TO_NEW_CHAT_LABEL, FORK_TO_NEW_CHAT_SESSIONS_DETAIL } from "../../../shared/forkToNewChat";
+import { FORK_TO_NEW_CHAT_DETAIL, FORK_TO_NEW_CHAT_LABEL, FORK_TO_NEW_CHAT_SESSIONS_DETAIL } from "../../../shared/forkToNewChat";
 import { ChatParticipantRosterRow } from "./chat-participant-roster-row";
 import { forkToNewChatReasonFor, machineForkSupportFrom } from "./use-fork-to-new-chat";
 import { ChatMembersPanel } from "./chat-members-panel";
@@ -622,7 +622,7 @@ test("a member's settings send only what was chosen, so a second quick choice ne
 
 // --- Fork to new chat (src/shared/forkToNewChat.ts) ------------------------------
 
-test("Fork to new chat sits in a member's … menu (the main session's chip too), disabled with its reason when it cannot be made", () => {
+test("Fork to new chat sits in a member's … menu (the main session's in the chat title's menu), disabled with its reason when it cannot be made", () => {
   const forked: string[] = [];
   let closed = 0;
   const base = { participant: { id: DREW.id, kind: DREW.kind }, backgroundTaskCount: 0, status: "idle" as const, onRestart: noop,
@@ -635,7 +635,7 @@ test("Fork to new chat sits in a member's … menu (the main session's chip too)
   fork.onSelect();
   assert.deepEqual(forked, [DREW.id]);
   assert.equal(closed, 1, "the settings close: the new chat opens");
-  // The main session's chip: no Remove, still Fork.
+  // The main session's actions (the chat title's menu): no Remove, still Fork.
   assert.deepEqual(memberSettingsActions({ ...base, participant: { id: MAIN.id, kind: MAIN.kind } }).map((action) => action.label), ["Restart", FORK_TO_NEW_CHAT_LABEL]);
   // Antigravity: nothing to restart, and the fork disabled with why.
   const agy = memberSettingsActions({ ...base, participant: { id: TAYLOR.id, kind: TAYLOR.kind }, forkToNewChatDisabledReason: "Antigravity has no session fork." });
@@ -664,6 +664,8 @@ test("the classic roster card has Fork to new chat next to Restart, disabled wit
   const button = () => renderer!.root.find((node) => node.type === "button" && node.props["data-testid"] === "chat-participant-fork");
   assert.match(String(button().props["aria-label"]), /^Fork to new chat: /);
   assert.equal(button().props.disabled, false);
+  assert.ok(renderer!.root.findAll((node) => typeof node.props?.children === "string" && node.props.children === `Fork to new chat. ${FORK_TO_NEW_CHAT_DETAIL}.`).length > 0,
+    "the classic view keeps its own words for what it makes");
   act(() => button().props.onClick(click));
   assert.deepEqual(forked, [DREW.id]);
   act(() => renderer!.update(card("It has not run yet, so it has no session to copy.")));
