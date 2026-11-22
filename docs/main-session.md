@@ -35,6 +35,18 @@ verbatim there). Modelled on T3 Code (`~/reference/t3code`,
   Approvals of members' commands still reach the User on the main timeline.
 - **Only the main session can start an Accord** (`app_chat_start_accord`); a
   member that needs one asks the main session. The User still can, as today.
+- **In the sessions view an @handle in a member's reply starts nobody**
+  (the User, 2026-11-22), as a mention in text wakes nobody in Claude Code:
+  no turn, no task row, whoever wrote it (the main session included) and
+  wherever it runs (`ChatService.createImplicitParticipantRequestApproval`,
+  the same code on this computer and on a cloud machine). Its posts
+  (`app_chat_send_message`) are the same; a main session's "@x /accord"
+  starts no Accord. Members are asked with `app_chat_request_participants`
+  or `app_chat_delegate_task`, an Accord with `app_chat_start_accord`, and
+  members' replies go back to the main session; the User's own @mentions
+  still address members. The member prompt says so instead of "an @handle is
+  a request". The classic view of the same chat keeps reading such a mention
+  as a request, as before.
 - **The Chat Assistant and the Workflow Manager role are not in new chats.**
   Chats made before stay exactly as they are (with their Assistant).
 

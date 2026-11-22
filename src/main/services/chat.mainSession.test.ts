@@ -1197,11 +1197,11 @@ test("only the main session starts an Accord through the tool", async () => {
   assert.equal(storage.current.messages.length, 1);
 });
 
-test("in a main-session chat another member's '@x /accord' reply starts nothing; the main session's still does", async () => {
+test("in a main-session chat shown the classic way another member's '@x /accord' reply starts nothing; the main session's still does", async () => {
   const main = mainSession("codex-cli", { model: undefined });
   const worker = member("worker-id", "worker", { permissions: permissions({ requestParticipants: "allow" }) });
   const other = member("other-id", "other");
-  const conversation = mainSessionChat([main, worker, other]);
+  const conversation = mainSessionChat([main, worker, other], { chatView: "classic" });
   const { service } = testService({ conversation });
   (service as any).startDeferredParticipantRequestRunners = () => undefined;
 
@@ -1225,10 +1225,53 @@ test("in a main-session chat another member's '@x /accord' reply starts nothing;
   assert.equal(normalizeChatAgentPermissions(participantsOf(conversation).find((item) => item.id === other.id)!.permissions).requestParticipants, "allow");
 });
 
-test("the main session's inferred '@x /accord' gives its facilitator no more leave than its own", async () => {
+test("in the sessions view an @handle in a member's reply or post starts nobody; the classic view still asks (the User, 2026-11-22)", async () => {
+  const main = mainSession("codex-cli", { model: undefined });
+  const worker = member("worker-id", "worker", { permissions: permissions({ requestParticipants: "allow" }) });
+  const other = member("other-id", "other");
+  const reply = (id: string, from: ChatParticipant, content: string, extra: Record<string, unknown> = {}): ChatMessage => ({
+    id, role: "participant", participantId: from.id, participantLabel: `@${from.handle}`, content, createdAt: NOW, status: "done",
+    metadata: { threadId: "user-message", runId: `${id}-run`, ...extra }
+  });
+  const requests = (conversation: Conversation) => conversation.messages.filter((message) => message.metadata?.participantRequest);
+
+  for (const chatView of [undefined, "sessions"] as const) {
+    const conversation = mainSessionChat([main, worker, other], chatView ? { chatView } : {});
+    const { service } = testService({ conversation });
+    (service as any).startDeferredParticipantRequestRunners = () => undefined;
+    const messages = [
+      reply("main-reply", main, "@worker please check the logs."),
+      reply("worker-reply", worker, "Done. @other can you confirm the numbers?"),
+      reply("worker-post", worker, "@main the build is green.", { appMessageSource: "app_chat_send_message" }),
+      reply("main-accord", main, "@other /accord on the rollout plan.")
+    ];
+    for (const message of messages) {
+      conversation.messages.push(message);
+      const from = message.participantId === main.id ? main : worker;
+      const started = await (service as any).createImplicitParticipantRequestApproval(conversation, from, [message]);
+      assert.deepEqual(started, [], `${chatView ?? "default view"}: ${message.id} starts nobody`);
+    }
+    assert.equal(requests(conversation).length, 0, "no task row, no turn");
+    assert.equal(normalizeChatAgentPermissions(participantsOf(conversation).find((item) => item.id === other.id)!.permissions).requestParticipants, "ask",
+      "no Accord leave either");
+    assert.match((service as any).mentionTriggerPromptSection(conversation), /starts nobody/);
+  }
+
+  const classic = mainSessionChat([main, worker, other], { chatView: "classic" });
+  const { service } = testService({ conversation: classic });
+  (service as any).startDeferredParticipantRequestRunners = () => undefined;
+  const fromMain = reply("main-reply", main, "@worker please check the logs.");
+  classic.messages.push(fromMain);
+  await (service as any).createImplicitParticipantRequestApproval(classic, main, [fromMain]);
+  assert.equal(requests(classic).length, 1, "the classic view still reads it as a request");
+  assert.equal(requests(classic)[0]!.metadata?.participantRequest?.source, "inferred");
+  assert.match((service as any).mentionTriggerPromptSection(classic), /is a request for that participant to run/);
+});
+
+test("the main session's inferred '@x /accord' gives its facilitator no more leave than its own (the classic view)", async () => {
   const main = mainSession("codex-cli", { model: undefined, permissions: permissions({ requestParticipants: "ask" }) });
   const other = member("other-id", "other", { permissions: permissions({ requestParticipants: "deny" }) });
-  const conversation = mainSessionChat([main, other]);
+  const conversation = mainSessionChat([main, other], { chatView: "classic" });
   const { service } = testService({ conversation });
   (service as any).startDeferredParticipantRequestRunners = () => undefined;
   const fromMain: ChatMessage = {

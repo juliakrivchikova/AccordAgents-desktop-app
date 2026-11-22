@@ -12247,6 +12247,14 @@ export class ChatService {
     if (this.chatParticipants(conversation).length <= 1) {
       return "";
     }
+    // The sessions view: a handle in a message starts nobody (see
+    // createImplicitParticipantRequestApproval).
+    if (chatViewFor(conversation.metadata) === "sessions") {
+      return [
+        "Writing another participant's handle:",
+        "- In this chat an @handle in your message starts nobody; it only names the member. To ask a member, use `app_chat_request_participants`."
+      ].join("\n");
+    }
     return [
       "Writing another participant's handle:",
       "- An @handle in your message is a request for that participant to run, not a reference to them.",
@@ -16657,6 +16665,22 @@ export class ChatService {
         !isMainSessionParticipant(conversation.metadata, participant.id)) {
         this.addConversationWarning(conversation, `@${participant.handle} cannot start an Accord in this chat; only the main session starts one.`);
         void this.debugLogs.write("chat.accord.inferred-refused", {
+          conversationId: conversation.id,
+          messageId: sourceMessage.id,
+          requesterParticipantId: participant.id,
+          targets: inferred.map((item) => item.targetHandle)
+        });
+        continue;
+      }
+      // In the sessions view an @handle in a member's reply or post starts
+      // nobody, as a mention in text wakes nobody in Claude Code (the User,
+      // 2026-11-22): members' replies go back to the main session, and a
+      // member is asked with app_chat_request_participants or
+      // app_chat_delegate_task (an Accord with app_chat_start_accord). The
+      // classic view keeps reading such a mention as a request. Every device
+      // that runs a member (this computer, a cloud machine) decides it here.
+      if (chatViewFor(conversation.metadata) === "sessions") {
+        void this.debugLogs.write("chat.participant-request.inferred-skipped-sessions-view", {
           conversationId: conversation.id,
           messageId: sourceMessage.id,
           requesterParticipantId: participant.id,
