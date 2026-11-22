@@ -26082,8 +26082,12 @@ export class ChatService {
       await this.withChatMutation(conversation, async () => {
         let changed = false;
         for (const run of runs) {
+          // A member on a machine goes on there: its turn is not this quit's.
+          const participant = this.chatParticipants(conversation).find((item) => item.id === run.participantId);
+          if (!participant || !this.runsHere(participant)) continue;
           for (const message of conversation.messages) {
-            if (message.role !== "participant" || message.participantId !== run.participantId || message.metadata?.runId !== run.runId || message.status !== "pending") continue;
+            if (message.role !== "participant" || message.participantId !== run.participantId || message.metadata?.runId !== run.runId ||
+                message.status !== "pending" || message.metadata?.serverPlaceholder) continue;
             message.status = "error";
             if (!message.content) message.content = "Interrupted before completion.";
             changed = true;

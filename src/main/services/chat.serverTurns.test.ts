@@ -437,5 +437,22 @@ test("quitting ends the turns it stops on the server while the link stands, and 
   await new Promise((resolve) => setTimeout(resolve, 500));
   assert.equal(h.turns.length, 1, "nothing new starts while the app quits");
   assert.equal(asked.turns.find((turn) => turn.runId === hubTurnRunId("phone-quit", desk.id))?.state, "requested");
+  // The held turn ends before the test's database goes.
   h.release();
+  assert.equal(await h.chat.waitForRunsToEnd(10_000), true);
+});
+
+test("quitting the computer leaves a member on a machine running there", async (t) => {
+  const h = await setup(t);
+  const onMachine: ChatParticipant = { ...desk, id: "22222222-2222-4222-8222-222222222222", handle: "cloudy", homeMachineId: "machine-1" } as ChatParticipant;
+  const at = new Date().toISOString();
+  const chat = localChat("chat-m", [{ id: "m-reply", role: "participant", participantId: onMachine.id, participantLabel: "@cloudy", content: "", createdAt: at, status: "pending",
+    metadata: { runId: "run-on-machine" } } as ChatMessage]);
+  chat.metadata = { ...chat.metadata, participants: [desk, onMachine] } as Conversation["metadata"];
+  await save(h.chat, chat);
+  // The computer follows that member's turn as a run of its own.
+  (h.chat as unknown as { chatRunMeta: Map<string, unknown> }).chatRunMeta.set("run-on-machine", { conversationId: "chat-m", participantId: onMachine.id, participantHandle: "cloudy" });
+  h.chat.beginQuit();
+  assert.equal(await h.chat.endTurnsForQuit(), 0);
+  assert.equal((await h.storage.getConversation("chat-m"))?.messages.find((message) => message.id === "m-reply")?.status, "pending");
 });
