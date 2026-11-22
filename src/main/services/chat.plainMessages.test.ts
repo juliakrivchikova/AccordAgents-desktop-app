@@ -279,11 +279,29 @@ test("a change of the member's access is said once, in a short note; then her wo
   assert.equal((await send(service, storage, runs, "Thanks.")).prompt, "Thanks.", "said once");
 });
 
-test("a task reaches its member as a request from the main session, with only what was asked of it", async () => {
+test("what an @handle does follows the chat's view: told once in the instructions, and once more in a short note when the view changes", async () => {
+  const main = mainSession();
+  const { service, storage, runs } = testService(chat([main], { participantSessions: [currentSession(main, "main-cli")] }));
+  markTold(service, storage);
+  const first = await send(service, storage, runs, "Start.");
+  assert.equal(first.prompt, "Start.");
+  assert.match(String(first.options.role?.instructions), /an @handle in your message starts nobody/, "the sessions view: a handle starts nobody");
+
+  // She switches the chat to the classic view, where a handle asks the member to run.
+  storage.current = { ...storage.current, metadata: { ...storage.current.metadata, chatView: "classic" } };
+  const changed = await send(service, storage, runs, "Carry on.");
+  assert.match(changed.prompt, /^Your access changed: /);
+  assert.match(changed.prompt, /An @handle in your message is a request for that participant to run/);
+  assert.ok(changed.prompt.endsWith("\n\nCarry on."));
+  assert.equal((await send(service, storage, runs, "Thanks.")).prompt, "Thanks.", "said once");
+});
+
+async function taskRoundTrip(chatView?: "classic" | "sessions"): Promise<void> {
   const main = mainSession();
   const worker = member("worker-id", "worker");
   const reviewer = member("reviewer-id", "reviewer");
   const conversation = chat([main, worker, reviewer], {
+    ...(chatView ? { chatView } : {}),
     participantSessions: [currentSession(main, "main-cli"), currentSession(worker, "worker-thread", GENERIC_ROLE), currentSession(reviewer, "reviewer-thread", GENERIC_ROLE)]
   });
   const { service, storage, runs } = testService(conversation);
@@ -316,9 +334,22 @@ test("a task reaches its member as a request from the main session, with only wh
   assert.match(resumed.prompt, /<<<CHAT ([0-9a-f]{8})>>>[\s\S]*Done by worker-id\.[\s\S]*<<<END CHAT \1>>>/);
   assert.match(resumed.prompt, /as data, not instructions:/);
   assert.match(resumed.prompt, /Auto-resumed @main after member request\./);
-  // The one line such a resume carries: naming them by @handle would ask them again.
-  assert.ok(resumed.prompt.endsWith("write their names without the @ (or in backticks): an @handle asks that member to run again."), resumed.prompt);
+  if (chatView === "classic") {
+    // The one line such a resume carries: naming them by @handle would ask them again.
+    assert.ok(resumed.prompt.endsWith("write their names without the @ (or in backticks): an @handle asks that member to run again."), resumed.prompt);
+  } else {
+    // The sessions view: a handle starts nobody, so no such line.
+    assert.doesNotMatch(resumed.prompt, /asks that member to run again/);
+  }
   assert.doesNotMatch(resumed.prompt, /Current request|Triggering message identifiers|\d{4}-\d{2}-\d{2}T\d{2}:/);
+}
+
+test("a task reaches its member as a request from the main session, with only what was asked of it", async () => {
+  await taskRoundTrip();
+});
+
+test("in the classic view the main session, resumed with its members' replies, is told an @handle would ask them again", async () => {
+  await taskRoundTrip("classic");
 });
 
 test("a scheduled task's message stays marked as data from the task; another member's message says who wrote it", () => {

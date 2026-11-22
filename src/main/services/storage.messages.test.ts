@@ -732,4 +732,20 @@ test("memberTaskMessages reads a member's delegation when its newest tasks are u
   });
   assert.deepEqual((await untitled.memberTaskMessages("chat", "p-drew")).map((message) => message.id), ["d5", "f6"]);
   assert.equal(untitledAsked.length, 2);
+
+  // A task the app inferred from a reply's mention has the app's title, not
+  // the main session's: the delegation is still read.
+  const inferred = (id: string, sequence: number): { sequence: number; payloadJson: string } => {
+    const row = request(id, sequence, "Could check the release notes?");
+    const message = JSON.parse(row.payloadJson);
+    message.metadata.participantRequest.source = "inferred";
+    return { sequence, payloadJson: JSON.stringify(message) };
+  };
+  const inferredAsked: string[] = [];
+  const withInferred = fakeStorage(async (sql) => {
+    inferredAsked.push(sql);
+    return sql.includes(`'"delegation"'`) ? [request("d1", 1, "Новые чаты в General", true)] : [request("f10", 10), inferred("i9", 9)];
+  });
+  assert.deepEqual((await withInferred.memberTaskMessages("chat", "p-drew")).map((message) => message.id), ["d1", "i9", "f10"]);
+  assert.equal(inferredAsked.length, 2);
 });

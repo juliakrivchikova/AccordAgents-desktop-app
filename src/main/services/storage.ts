@@ -621,8 +621,11 @@ export class StorageService {
       }).reverse();
     };
     const newest = await read("", limit);
-    const titled = newest.some((message) => (message.metadata?.participantRequest?.items ?? [])
-      .some((item) => item.targetParticipantId === participantId && typeof item.title === "string" && item.title.trim()));
+    // The main session's title only: an inferred request's is the app's
+    // (titleTaskByMember).
+    const titled = newest.some((message) => message.metadata?.participantRequest?.source !== "inferred" &&
+      (message.metadata?.participantRequest?.items ?? [])
+        .some((item) => item.targetParticipantId === participantId && typeof item.title === "string" && item.title.trim()));
     if (titled) return newest;
     const delegation = await read(` and instr(payload_json, '"delegation"') > 0`, 1);
     return [...delegation.filter((message) => !newest.some((known) => known.id === message.id)), ...newest];

@@ -508,7 +508,8 @@ export function mobileTaskBatch(batch: ChatParticipantRequestBatch | undefined):
       targetHandle: typeof item.targetHandle === "string" ? item.targetHandle : "",
       prompt: firstTextLine(typeof item.prompt === "string" ? item.prompt : "", PHONE_TASK_LINE_CHARS),
       title: sessionsTaskTitle(item),
-      titled: typeof item.title === "string" && item.title.trim().length > 0,
+      // The main session's title only: an inferred request's is the app's.
+      titled: batch.source !== "inferred" && typeof item.title === "string" && item.title.trim().length > 0,
       status: item.status,
       createdAt: typeof item.createdAt === "string" ? item.createdAt : batch.createdAt,
       ...(typeof item.updatedAt === "string" && item.updatedAt ? { updatedAt: item.updatedAt } : {}),

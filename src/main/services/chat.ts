@@ -12456,8 +12456,9 @@ export class ChatService {
     // name them by handle when it sums them up, and each @handle asks that
     // member to run again (seen in QA on 2026-11-22: four rounds of "Noted").
     // The rule is in its instructions; this one line goes with these
-    // resumes only.
-    const continuationNote = continuation ? CONTINUATION_HANDLE_NOTE : "";
+    // resumes only. In the sessions view a handle starts nobody
+    // (handleWritingLines), so there is nothing to warn about.
+    const continuationNote = continuation && chatViewFor(conversation.metadata) !== "sessions" ? CONTINUATION_HANDLE_NOTE : "";
 
     // Notes first, then the message itself, then what annotates it.
     const orderedBlocks = [
