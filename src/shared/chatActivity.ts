@@ -1,5 +1,5 @@
 import { activeRunSummaryForConversation } from "./chatActiveRuns";
-import { sessionsViewLabel, sessionsViewNamesOf, sessionsViewSummaryText, sessionsViewText } from "./sessionsViewText";
+import { sessionsMentionText, sessionsViewLabel, sessionsViewNamesOf, sessionsViewSummaryText, sessionsViewText } from "./sessionsViewText";
 import type {
   ChatActivityItem,
   ChatActivityParticipantSummary,
@@ -24,6 +24,10 @@ export interface BuildChatActivityItemsOptions {
   now?: string | Date;
   lastViewedAt?: string;
   recentWindowDays?: number;
+  /**
+   * The sessions view's task titles of members whose task message is not loaded, by member id.
+   */
+  knownTitles?: ReadonlyMap<string, string>;
   /**
    * Applied before rows collapse, so a cleared update is not counted by the row that replaces it.
    * Filtering after the collapse cannot fix that: the rows it would drop are already gone.
@@ -76,7 +80,7 @@ export function buildChatActivityItems(
 
   // A chat shown in the sessions view names nobody by handle in its rows
   // (shared/sessionsViewText.ts): the app's words are worded for it here.
-  const names = sessionsViewNamesOf(conversation);
+  const names = sessionsViewNamesOf(conversation, undefined, options.knownTitles);
   const appText = (text: string): string => sessionsViewText(text, names);
   const summaryText = (text: string): string => sessionsViewSummaryText(text, names);
   const participants = sessionsViewParticipants(participantSummaries(conversation), names);
@@ -160,11 +164,16 @@ export function buildChatActivityItems(
     });
   }
 
-  // A member no longer in the chat is named from its messages: by its task too.
+  // A member no longer in the chat is named from its messages: by its task
+  // too; a member's words in a preview are read by the view's mention rule.
   const named = names
-    ? items.map((item) => item.participant && item.participant.displayName === undefined
-      ? { ...item, participant: { ...item.participant, displayName: sessionsViewLabel(item.participant.handle, names) } }
-      : item)
+    ? items.map((item) => {
+      const preview = sessionsMentionText(item.preview, names);
+      const participant = item.participant && item.participant.displayName === undefined
+        ? { ...item.participant, displayName: sessionsViewLabel(item.participant.handle, names) }
+        : item.participant;
+      return preview === item.preview && participant === item.participant ? item : { ...item, preview, ...(participant ? { participant } : {}) };
+    })
     : items;
   const retained = options.preferences ? applyChatActivityItemPreferences(named, options.preferences) : named;
   return sortChatActivityItems(dedupeChatActivityItems(retained));
@@ -842,4 +851,18 @@ function timeValue(value: string | Date | undefined): number {
 function normalizePositiveNumber(value: unknown, fallback: number): number {
   const number = typeof value === "number" ? value : Number(value);
   return Number.isFinite(number) && number > 0 ? Math.floor(number) : fallback;
+}
+
+/** The task titles the rows already show for a chat's members, by member id:
+ *  a later build from a partial window of the chat (an update's newest
+ *  messages) keeps naming a member by its task, not its handle. */
+export function knownSessionsTitles(items: readonly ChatActivityItem[], conversationId: string): Map<string, string> {
+  const titles = new Map<string, string>();
+  for (const item of items) {
+    const participant = item.participant;
+    if (item.conversationId !== conversationId || !participant?.displayName) continue;
+    if (participant.displayName.toLowerCase() === participant.handle.replace(/^@+/, "").toLowerCase()) continue;
+    if (!titles.has(participant.id)) titles.set(participant.id, participant.displayName);
+  }
+  return titles;
 }

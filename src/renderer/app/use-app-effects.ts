@@ -2,6 +2,7 @@ import { useEffect, useRef } from "react";
 import type { AgentDetectionRequest } from "../../shared/types";
 import {
   buildChatActivityItemsForConversationUpdate,
+  knownSessionsTitles,
   mergeChatActivityItems,
   preservedRecentChatActivityItems
 } from "../../shared/chatActivity";
@@ -195,16 +196,19 @@ export function useAppEffects(
         // there, unread state clears only through the explicit "Mark read" action.
         const timelineVisible = conversationTimelineVisibleNow(state);
         const viewedLive = isActive && matchesCurrentSnapshot && timelineVisible;
-        const activityItems = activityItemsWithStoredPreferences(
-          state,
-          buildChatActivityItemsForConversationUpdate(updated, {
-            lastViewedAt: state.lastViewedAtRef.current[update.id],
-            treatAsViewed: viewedLive,
-            preferences: state.activityItemPreferencesRef.current
-          })
-        );
         const knownMessageIds = new Set(updated.messages.map((message) => message.id));
         state.setActivityItems((activityCurrent) => {
+          // A delta carries the newest window only: members whose task is
+          // older keep the task title the rows already show (sessions view).
+          const activityItems = activityItemsWithStoredPreferences(
+            state,
+            buildChatActivityItemsForConversationUpdate(updated, {
+              lastViewedAt: state.lastViewedAtRef.current[update.id],
+              treatAsViewed: viewedLive,
+              preferences: state.activityItemPreferencesRef.current,
+              knownTitles: knownSessionsTitles(activityCurrent, update.id)
+            })
+          );
           const preservedReadItems = preservedRecentChatActivityItems(activityCurrent, update.id, {
             archived,
             treatAsRead: isActive && timelineVisible

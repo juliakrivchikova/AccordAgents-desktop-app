@@ -12,7 +12,7 @@
 // is never passed through here.
 
 import { chatViewFor, mainSessionParticipantId, sessionsFormerMembers } from "./mainSession";
-import { latestTaskByMember, sessionsMemberTitle } from "./mainSessionView";
+import { latestTaskByMember, sessionsMemberTitle, sessionsMentionPieces } from "./mainSessionView";
 import type { ChatMessage, ChatParticipant, ChatViewMode, ConversationMetadata } from "./types";
 
 /** How the sessions view names a chat's members. */
@@ -52,7 +52,13 @@ type ChatLike = {
 /** A chat's names in the sessions view, from its members and loaded
  *  messages (the same titles as the side panel); undefined when the chat is
  *  shown in the classic view. */
-export function sessionsViewNamesOf(chat: ChatLike | undefined, fallbackView?: ChatViewMode): SessionsViewNames | undefined {
+export function sessionsViewNamesOf(
+  chat: ChatLike | undefined,
+  fallbackView?: ChatViewMode,
+  /** A member's task title read elsewhere (its task message is not among
+   *  the loaded ones), by its id. */
+  knownTitles?: ReadonlyMap<string, string>
+): SessionsViewNames | undefined {
   if (!chat || chatViewFor(chat.metadata, fallbackView) !== "sessions") return undefined;
   const mainId = mainSessionParticipantId(chat.metadata);
   if (!mainId) return undefined;
@@ -61,12 +67,16 @@ export function sessionsViewNamesOf(chat: ChatLike | undefined, fallbackView?: C
   const messages = chat.messages ?? [];
   const tasks = latestTaskByMember(messages);
   const titles: Array<[string, string]> = [];
+  const titleOf = (member: { id: string; handle?: string }): string => {
+    const task = tasks.get(member.id)?.item;
+    return task ? sessionsMemberTitle(member, task) : knownTitles?.get(member.id) ?? sessionsMemberTitle(member, undefined);
+  };
   for (const member of sessionsFormerMembers(messages, participants, mainId)) {
-    if (member.handle) titles.push([member.handle, sessionsMemberTitle(member, tasks.get(member.id)?.item)]);
+    if (member.handle) titles.push([member.handle, titleOf(member)]);
   }
   for (const participant of participants) {
     if (participant.id !== mainId && typeof participant.handle === "string") {
-      titles.push([participant.handle, sessionsMemberTitle(participant, tasks.get(participant.id)?.item)]);
+      titles.push([participant.handle, titleOf(participant)]);
     }
   }
   return sessionsViewNames(participants.find((participant) => participant.id === mainId)?.handle, titles);
@@ -208,4 +218,18 @@ const TOOL_REQUEST_SUMMARY = /^(?:Use [^\s:]+(?::|$)|Codex )/;
 export function sessionsViewSummaryText(summary: string, names: SessionsViewNames | undefined): string {
   if (typeof summary !== "string" || TOOL_REQUEST_SUMMARY.test(summary)) return summary;
   return sessionsViewText(summary, names);
+}
+
+/**
+ * A member's own words shown as one plain line (a task's first line, a
+ * reply's line in a task row, an Activity preview), read by the sessions
+ * view's mention rule as its messages are (sessionsMentionPieces): a member's
+ * exact `@handle` is its task's title, the main session's is a plain word,
+ * everything else stays as written. Without names, as written.
+ */
+export function sessionsMentionText(text: string, names: SessionsViewNames | undefined): string {
+  if (!names || typeof text !== "string" || !text.includes("@")) return text;
+  return sessionsMentionPieces(text, (handle) => names.titleOf(handle) !== undefined, (handle) => handle === names.mainHandle)
+    .map((piece) => (piece.handle !== undefined ? names.titleOf(piece.handle) ?? piece.handle : piece.text))
+    .join("");
 }

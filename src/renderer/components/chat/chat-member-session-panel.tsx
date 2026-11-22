@@ -8,6 +8,8 @@ import { TimelineLoadMoreRow } from "../conversation/timeline-primitives";
 import { IconButton } from "../primitives";
 import { ChatComposer } from "./chat-composer";
 import { ChatProviderMark, renderComposerMemberMark } from "./chat-member-mark";
+import { useSessionsViewNames } from "./chat-sessions-links";
+import { sessionsMentionText } from "../../../shared/sessionsViewText";
 import { ChatMessageItem } from "./chat-message-item";
 import { ChatElapsed, ChatWorkStatusLabel } from "./chat-task-card";
 
@@ -225,7 +227,9 @@ export const ChatMemberTaskFold = memo(function ChatMemberTaskFold(props: { mess
   // The main session is named by nothing in the sessions view: its task is
   // the task.
   const label = props.fromMain ? "Task" : "Task from another session";
-  const preview = useMemo(() => firstTextLine(props.prompt), [props.prompt]);
+  // The task is the main session's words: read by the view's mention rule.
+  const names = useSessionsViewNames();
+  const preview = useMemo(() => sessionsMentionText(firstTextLine(props.prompt), names), [props.prompt, names]);
   return (
     <div className={`chat-member-task ${open ? "is-open" : ""}`} data-message-id={props.message.id} data-testid="chat-member-task">
       <button type="button" className="chat-member-task-toggle" aria-expanded={open} onClick={() => setOpen((current) => !current)}>

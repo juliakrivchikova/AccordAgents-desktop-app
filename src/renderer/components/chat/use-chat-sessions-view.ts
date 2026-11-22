@@ -31,7 +31,7 @@ import {
   type SessionsTaskEntry,
   type SessionsWorkStatus
 } from "../../../shared/mainSessionView";
-import { sessionsViewNames, sessionsViewText } from "../../../shared/sessionsViewText";
+import { sessionsMentionText, sessionsViewNames, sessionsViewText } from "../../../shared/sessionsViewText";
 import type { ChatAppToolApproval, ChatMessage, ChatParticipant, ChatViewMode, Conversation } from "../../../shared/types";
 import type { ChatParticipantRosterStatus } from "./chat-roster-status";
 import { isChatMessageHiddenInChat } from "./chat-thread-data";
@@ -155,10 +155,11 @@ export function useChatSessionsView(input: {
         ...participants.filter((participant) => participant.id !== mainId).map((participant) => [participant.handle, memberTitle(participant.id)] as const)]
     );
     const appText = (text: string): string => sessionsViewText(text, names);
+    const wordsText = (text: string): string => sessionsMentionText(text, names);
     const taskEntriesByMessageId = new Map<string, readonly SessionsTaskEntry[]>();
     for (const message of placement.requestMessages) {
       const batch = message.metadata!.participantRequest!;
-      const entries = sessionsTaskEntries(message, batch, participantStatusById, placement.activity, placement.messagesById, appText);
+      const entries = sessionsTaskEntries(message, batch, participantStatusById, placement.activity, placement.messagesById, appText, wordsText);
       taskEntriesByMessageId.set(message.id, cached(message.id, entriesSignature(entries), () => entries));
     }
     const workByReplyId = new Map<string, readonly SessionsTaskEntry[]>();

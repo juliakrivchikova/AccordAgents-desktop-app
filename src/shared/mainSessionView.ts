@@ -217,7 +217,10 @@ export function sessionsTaskEntries(
   messagesById: ReadonlyMap<string, ChatMessage>,
   /** The sessions view's words for what the app wrote (why a task failed),
    *  without handles (sessionsViewText). */
-  appText: (text: string) => string = (text) => text
+  appText: (text: string) => string = (text) => text,
+  /** The view's reading of a member's own words (its reply's line), by its
+   *  mention rule (sessionsMentionText). */
+  wordsText: (text: string) => string = (text) => text
 ): SessionsTaskEntry[] {
   return batch.items.map((item) => {
     const memberId = item.targetParticipantId;
@@ -226,7 +229,8 @@ export function sessionsTaskEntries(
     const reply = item.replyMessageId ? messagesById.get(item.replyMessageId) : undefined;
     const worked = typeof reply?.metadata?.workedMs === "number" && Number.isFinite(reply.metadata.workedMs) ? reply.metadata.workedMs : undefined;
     const elapsed = item.updatedAt ? Date.parse(item.updatedAt) - Date.parse(item.createdAt) : NaN;
-    const line = status === "done" ? sessionsTaskReplyLine(item, messagesById)
+    const replyLine = status === "done" ? sessionsTaskReplyLine(item, messagesById) : undefined;
+    const line = status === "done" ? (replyLine ? wordsText(replyLine) : replyLine)
       : status === "failed" ? appText(firstTextLine(item.error)) || undefined
         : status === "stopped" ? SESSIONS_WORK_STATUS_LABELS.stopped : undefined;
     return {

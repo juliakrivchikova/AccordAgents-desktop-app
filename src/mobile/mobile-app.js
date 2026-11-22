@@ -6629,7 +6629,10 @@
     if (!who || /^(you|system)$/i.test(who)) return text;
     const shared = sessionsRules();
     const names = sessionsViewNamesFor(chat.id);
-    return names && shared && typeof shared.sessionsViewReplyText === "function" ? shared.sessionsViewReplyText(text, who, names) : text;
+    if (!names || !shared || typeof shared.sessionsViewReplyText !== "function") return text;
+    // The app's line without handles; a member's words by the mention rule.
+    const worded = shared.sessionsViewReplyText(text, who, names);
+    return typeof shared.sessionsMentionText === "function" ? shared.sessionsMentionText(worded, names) : worded;
   }
 
   /** The chat list's subtitle is the desktop's 84-character cut of the last
@@ -8126,6 +8129,15 @@
     return summary ? sessionsViewSummaryTextFor(card.conversationId, text) : sessionsViewTextFor(card.conversationId, text);
   }
 
+  /** A member's own words in one plain line (an Activity preview, the chat
+   *  list's subtitle), by the sessions view's mention rule. */
+  function sessionsMentionTextFor(conversationId, text) {
+    if (typeof text !== "string" || text.indexOf("@") < 0) return text;
+    const shared = sessionsRules();
+    const names = sessionsViewNamesFor(conversationId);
+    return names && typeof shared.sessionsMentionText === "function" ? shared.sessionsMentionText(text, names) : text;
+  }
+
   function sessionsViewSummaryTextFor(conversationId, text) {
     if (typeof text !== "string" || text.indexOf("@") < 0) return text;
     const shared = sessionsRules();
@@ -8851,7 +8863,7 @@
     for (const node of stamp) top.append(node);
     const preview = document.createElement("span");
     preview.className = "act-preview" + (row.kind === "permission" ? " act-preview-full" : "");
-    preview.textContent = (row.kind === "permission" ? sessionsViewSummaryTextFor(row.conversationId, row.preview) : row.preview) || (row.kind === "run" ? "Thinking…" : "");
+    preview.textContent = (row.kind === "permission" ? sessionsViewSummaryTextFor(row.conversationId, row.preview) : sessionsMentionTextFor(row.conversationId, row.preview)) || (row.kind === "run" ? "Thinking…" : "");
     main.append(top, preview);
     return main;
   }
@@ -12580,7 +12592,8 @@
     if (!batch) return [];
     const names = state.viewNames;
     const appText = function (text) { return names ? shared.sessionsViewText(text, names) : text; };
-    return shared.sessionsTaskEntries(message, batch, state.statusById, state.activity, state.messagesById, appText).map(function (entry) {
+    const wordsText = function (text) { return names && typeof shared.sessionsMentionText === "function" ? shared.sessionsMentionText(text, names) : text; };
+    return shared.sessionsTaskEntries(message, batch, state.statusById, state.activity, state.messagesById, appText, wordsText).map(function (entry) {
       const member = state.members.find(function (candidate) { return candidate.id === entry.item.targetParticipantId; });
       return {
         participantId: entry.item.targetParticipantId,
@@ -12691,7 +12704,9 @@
         const key = drawn.rowKey || drawn.id;
         rows.push({ ...base, taskFold: {
           label: batch.requesterParticipantId === state.mainId ? "Task" : "Task from " + sessionsMemberTitleOf(state, batch.requesterParticipantId),
-          preview: shared.firstTextLine(given.prompt),
+          // The main session's words, by the view's mention rule.
+          preview: state.viewNames && typeof shared.sessionsMentionText === "function"
+            ? shared.sessionsMentionText(shared.firstTextLine(given.prompt), state.viewNames) : shared.firstTextLine(given.prompt),
           open: openTaskFolds.has(key)
         } });
         return;

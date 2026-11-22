@@ -28,6 +28,7 @@ import {
   sortChatActivityItems
 } from "../../shared/chatActivity";
 import { clearChatRunMetadata, clearParticipantCompactions, readParticipantCompactions } from "../../shared/chatRunState";
+import { latestTaskByMember, sessionsTaskTitle } from "../../shared/mainSessionView";
 import { normalizeInferredParticipantRequestThreads as normalizeInferredParticipantRequestThreadMetadata } from "../../shared/chatParticipantRequestThreads";
 import { normalizeConversationSummaryChatParticipants } from "../../shared/conversationSummary";
 import { sanitizeConversationWarnings } from "../../shared/warnings";
@@ -942,11 +943,13 @@ export class StorageService {
       ...(request.clearedRecentThroughByGroup ? { clearedRecentThroughByGroup: request.clearedRecentThroughByGroup } : {}),
       ...(request.clearedRecentThroughBefore ? { clearedRecentThroughBefore: request.clearedRecentThroughBefore } : {})
     };
+    const knownTitles = await this.activitySessionsTitles([...conversationsById.values()]);
     const items = [...conversationsById.values()].flatMap((conversation) =>
       buildChatActivityItems(conversation, {
         recentWindowDays,
         lastViewedAt: request.lastViewedAtByConversationId?.[conversation.id],
-        preferences
+        preferences,
+        ...(knownTitles.has(conversation.id) ? { knownTitles: knownTitles.get(conversation.id) } : {})
       })
     );
     return {
@@ -2604,6 +2607,45 @@ export class StorageService {
   private async queryConversationIds(whereSql: string): Promise<string[]> {
     const rows = await this.queryJson<{ id: string }>(`select id from conversations where ${whereSql};`);
     return rows.flatMap((row) => typeof row.id === "string" && row.id.trim() ? [row.id] : []);
+  }
+
+  /** The task titles of the members of chats shown in the sessions view, by
+   *  chat and member: Activity names a member by its task there, and the
+   *  rows it reads hold only recent messages. Each chat's newest 40 task
+   *  messages (request messages) are read, nothing else. */
+  private async activitySessionsTitles(conversations: Conversation[]): Promise<Map<string, Map<string, string>>> {
+    const sessionsChats = conversations.filter((conversation) =>
+      Boolean(conversation.metadata?.mainSessionParticipantId) && (conversation.metadata?.chatView ?? "sessions") === "sessions");
+    const result = new Map<string, Map<string, string>>();
+    if (sessionsChats.length === 0) return result;
+    const rows = await this.queryJson<{ conversationId: string; payloadHex: string }>(
+      `select conversationId, hex(payloadJson) as payloadHex from (
+         select conversation_id as conversationId, payload_json as payloadJson,
+           row_number() over (partition by conversation_id order by sequence desc) as rank
+         from conversation_messages
+         where conversation_id in ${sqlStringList(sessionsChats.map((conversation) => conversation.id))}
+           and instr(payload_json, '"participantRequest"') > 0
+       ) where rank <= 40;`
+    ).catch(() => []);
+    const messagesByChat = new Map<string, ChatMessage[]>();
+    for (const row of rows) {
+      try {
+        const message = parseHexJson<ChatMessage>(row.payloadHex, `activity task ${row.conversationId}`);
+        const list = messagesByChat.get(row.conversationId) ?? [];
+        list.push(message);
+        messagesByChat.set(row.conversationId, list);
+      } catch {
+        // A message that does not read names nobody.
+      }
+    }
+    for (const conversation of sessionsChats) {
+      const tasks = latestTaskByMember(messagesByChat.get(conversation.id) ?? []);
+      const titles = new Map<string, string>();
+      for (const [participantId, task] of tasks) titles.set(participantId, sessionsTaskTitle(task.item) || "");
+      for (const [participantId, title] of titles) if (!title) titles.delete(participantId);
+      if (titles.size > 0) result.set(conversation.id, titles);
+    }
+    return result;
   }
 
   private async activityMessageRows(

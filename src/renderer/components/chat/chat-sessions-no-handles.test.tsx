@@ -25,6 +25,7 @@ import { chatDisplayContent } from "./chat-display-content";
 import { ChatUsedApprovalLine } from "./chat-used-card-row";
 import { ChatSearchResults } from "../search/chat-search-results";
 import { ActivityRow } from "../activity/activity-view";
+import { ChatMemberTaskFold } from "./chat-member-session-panel";
 import { Terminal } from "lucide-react";
 import { DREW, MAIN, PARTICIPANTS, chatMessage, disclosure, sessionsConversation } from "./chat-sessions-fixtures.test";
 
@@ -308,4 +309,16 @@ test("search results, Activity rows and add-member cards of a sessions-view chat
   const classicCard = render(false, cardElement(addition));
   assert.match(classicCard.text, /Member handle/, "classic: the handle field as before");
   classicCard.unmount();
+});
+
+test("a member's session: its task from the main session is \"Task\" and its first line reads the main session as a plain word, no handle or label", () => {
+  const task = chatMessage("t", "participant", 1, { participantId: MAIN.id });
+  const fold = render(true, <ChatMemberTaskFold message={task} prompt="First, ask @main which colour to use, then tell @drew." fromMain />);
+  assert.match(fold.text, /^Task/);
+  assert.match(fold.text, /First, ask main which colour to use, then tell Fix the logout\./);
+  assert.doesNotMatch(fold.text, /@main|@drew|main session/i);
+  fold.unmount();
+  const classic = render(false, <ChatMemberTaskFold message={task} prompt="First, ask @main which colour to use." fromMain />);
+  assert.match(classic.text, /@main/, "outside the sessions view the words stay as written");
+  classic.unmount();
 });

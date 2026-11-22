@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import { cliFailureNoticeText } from "./warnings";
-import { sessionsViewLabel, sessionsViewNames, sessionsViewNamesOf, sessionsViewReplyText, sessionsViewSummaryText, sessionsViewText } from "./sessionsViewText";
+import { sessionsMentionText, sessionsViewLabel, sessionsViewNames, sessionsViewNamesOf, sessionsViewReplyText, sessionsViewSummaryText, sessionsViewText } from "./sessionsViewText";
 import type { ChatMessage, ChatParticipant } from "./types";
 
 const NAMES = sessionsViewNames("main", [["drew", "Fix the logout"], ["gone", "Check the docs"]]);
@@ -207,4 +207,10 @@ test("the main session in a list of names is left out of it; a title naming some
   assert.equal(sessionsViewText("\uE000 stray \uE001mark\uE002: @drew stopped by user.", NAMES), " stray mark: “Fix the logout” stopped by user.");
   assert.equal(sessionsViewLabel(undefined, NAMES), "");
   assert.equal(sessionsViewLabel(42 as unknown as string, NAMES), "");
+});
+
+test("a member's own words in one plain line are read by the view's mention rule: a member by its task, the main session as a plain word", () => {
+  assert.equal(sessionsMentionText("First, ask @main which colour; then tell @drew and @nobody.", NAMES), "First, ask main which colour; then tell Fix the logout and @nobody.");
+  assert.equal(sessionsMentionText("mail a@drew.dev about @types/node", NAMES), "mail a@drew.dev about @types/node");
+  assert.equal(sessionsMentionText("ask @main", undefined), "ask @main", "classic: as written");
 });
