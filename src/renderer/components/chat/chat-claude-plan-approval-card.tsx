@@ -1,5 +1,5 @@
 import { useState, type KeyboardEvent } from "react";
-import { ArrowDown, ArrowUp, ClipboardList, CornerDownLeft } from "lucide-react";
+import { ArrowDownIcon, ArrowUpIcon, ArrowElbowDownLeftIcon, ClipboardTextIcon } from "@phosphor-icons/react";
 
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
@@ -90,7 +90,7 @@ export function ChatClaudePlanApprovalCard(props: {
   }
 
   if (approval.status !== "pending") {
-    return <ChatUsedApprovalLine approval={approval} kind="Plan approval" icon={ClipboardList} preview={CLAUDE_PLAN_APPROVAL_TITLE} {...planApprovalEnding(approval, request)} />;
+    return <ChatUsedApprovalLine approval={approval} kind="Plan approval" icon={ClipboardTextIcon} preview={CLAUDE_PLAN_APPROVAL_TITLE} {...planApprovalEnding(approval, request)} />;
   }
 
   function submit(): void {
@@ -152,8 +152,8 @@ export function ChatClaudePlanApprovalCard(props: {
                 </span>
                 {index === selectedIndex && (
                   <span className="chat-approval-option-keys" aria-hidden>
-                    <ArrowUp size={16} />
-                    <ArrowDown size={16} />
+                    <ArrowUpIcon size={16} />
+                    <ArrowDownIcon size={16} />
                   </span>
                 )}
               </button>
@@ -179,7 +179,7 @@ export function ChatClaudePlanApprovalCard(props: {
           <div className="chat-approval-footer">
             <Button variant="default" size="sm" className="chat-approval-submit" disabled={props.submitting} onClick={submit}>
               <span>Submit</span>
-              <CornerDownLeft size={14} aria-hidden />
+              <ArrowElbowDownLeftIcon size={14} aria-hidden />
             </Button>
           </div>
         </div>
