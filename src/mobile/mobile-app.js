@@ -14110,7 +14110,8 @@
           : undefined;
       if (time) meta.append(time);
       item.append(glyph, name, meta);
-      if (!row.former && (row.canStop || row.stopping)) item.append(sessionsStopButton([row.id], row.canStop, row.stopping, "Stop " + row.name, "members-sheet-stop"));
+      // Stop only while it runs, as on the computer.
+      if (!row.former && (row.status === "running" || row.stopping) && (row.canStop || row.stopping)) item.append(sessionsStopButton([row.id], row.canStop, row.stopping, "Stop " + row.name, "members-sheet-stop"));
       return item;
     };
     const group = function (label, dataName, open, entries) {

@@ -644,4 +644,6 @@ test("the phone's side panel names a member by its delegation's title and shows 
     ["sessions-agent-dot is-running", true, false, "Login tests, Running"],
     ["sessions-agent-dot is-running", true, false, "Server logs, Running"]
   ], "a dot per state, a time on every row (drew: how long it worked before it began to wait), the state in words only for a screen reader");
+  assert.deepEqual(await app.evaluate(`[...document.querySelectorAll("#members-sheet-list .sessions-member-row")].map((row) => Boolean(row.querySelector(".sessions-stop")))`),
+    [false, true, true], "Stop only while it runs: not on drew, which waits for the User though its turn is live");
 });

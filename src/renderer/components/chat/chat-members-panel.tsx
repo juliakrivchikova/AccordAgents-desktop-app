@@ -78,7 +78,9 @@ export function ChatMembersPanel(props: ChatMembersPanelProps): JSX.Element {
           ...(durationMs !== undefined ? { durationMs } : {}),
           ...(step ? { step } : {}),
           ...(result ? { result } : {}),
-          ...(props.onStopRuns && runIds.length > 0 ? { stop: () => props.onStopRuns?.(runIds) } : {}),
+          // Stop only while it runs (the User, 2026-11-22): one waiting for
+          // her answer is stopped from its session, or by her answer.
+          ...(props.onStopRuns && status === "running" && runIds.length > 0 ? { stop: () => props.onStopRuns?.(runIds) } : {}),
           onOpen: () => props.onOpenMember(participant.id)
         }}
       />

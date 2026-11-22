@@ -429,7 +429,8 @@ chat without a main session is always `classic`; its switch is disabled.
     2026-11-22): its model and effort are in its hover card, its state in
     words in its hover card and its accessible name. The phone's side panel
     draws the same rows, without Stop all. Hovering a row that runs shows a quiet square
-    Stop in the time's place; there is no Stop all. Hovering a row shows,
+    Stop in the time's place (only while it runs: one waiting for her is
+    stopped from its session or answered); there is no Stop all. Hovering a row shows,
     to its left, T3 Code's card: the title, CLI · model · effort (and a
     non-generic role), the state · full time · "N background tasks", then
     what it does now (its newest step) or how its task ended (its reply's

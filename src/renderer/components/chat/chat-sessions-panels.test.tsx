@@ -154,7 +154,8 @@ test("every row has the same anatomy: a waiting one says how long it worked befo
   act(() => {
     renderer = create(
       <TooltipProvider>
-        <ChatMembersPanel rows={rows} activity={{ runningSince: new Map([[TAYLOR.id, started]]), finishedAt: new Map() }} runIdsByParticipantId={new Map()}
+        <ChatMembersPanel rows={rows} activity={{ runningSince: new Map([[TAYLOR.id, started]]), finishedAt: new Map() }} runIdsByParticipantId={new Map([[TAYLOR.id, ["run-taylor"]]])}
+          onStopRuns={noop}
           memberTitle={(id) => id === TAYLOR.id ? "Ask about the DB" : "Restyle"} waitingSince={new Map([[TAYLOR.id, waited]])}
           taskDurationMs={() => 245_000} onOpenMember={noop} onClose={noop} />
       </TooltipProvider>
@@ -162,6 +163,7 @@ test("every row has the same anatomy: a waiting one says how long it worked befo
   });
   const times = renderer!.root.findAll(byTestId("chat-agent-time")).map((node) => textOf(node));
   assert.deepEqual(times, ["2m", "4m"], "waiting: from its turn's start to when it began to wait; stopped: its task's time");
+  assert.equal(renderer!.root.findAll(byTestId("chat-members-row-stop")).length, 0, "Stop only while it runs: not on one waiting for the User, though its run is live");
   act(() => renderer!.unmount());
 });
 
