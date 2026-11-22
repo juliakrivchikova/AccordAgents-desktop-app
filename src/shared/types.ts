@@ -1498,6 +1498,9 @@ export interface ChatParticipantRequestBatch {
   createdAt: string;
   updatedAt: string;
   triggerMessageId?: string;
+  /** The requester's turn that asked (its turnSegmentId): its own messages
+   *  of that turn are not "going on" when a restart weighs resuming it. */
+  requesterTurnSegmentId?: string;
   completedInToolCall?: boolean;
   autoResumeMessageId?: string;
   /** The main session's task to a member it made for it
