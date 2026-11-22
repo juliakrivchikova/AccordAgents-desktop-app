@@ -5481,3 +5481,65 @@ button.card-row:focus-visible {
 .sessions-worked-body > .sessions-activity {
   margin-bottom: 4px;
 }
+
+/* --- A compaction card, laid out as the desktop's (the User, 2026-11-22) ---
+   The context meter and what the summary keeps under its sentence, then
+   "Don't ask again in this chat", Not now and Compact. */
+.control-card-meter {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-top: 10px;
+}
+
+.control-card-meter-bar {
+  flex: 0 1 160px;
+  height: 6px;
+  overflow: hidden;
+  border-radius: 99px;
+  background: var(--bd);
+}
+
+.control-card-meter-bar span {
+  display: block;
+  height: 100%;
+  border-radius: 99px;
+  background: var(--warn);
+}
+
+.control-card-meter-label,
+.control-card-keeps {
+  color: var(--mut);
+  font-size: 12.5px;
+  line-height: 18px;
+}
+
+.control-card-keeps {
+  margin-top: 8px;
+  overflow-wrap: anywhere;
+}
+
+.control-card-keeps b {
+  color: var(--fg);
+  font-weight: 500;
+}
+
+.control-card-box {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-height: 44px;
+  margin-top: 6px;
+  font-size: 14px;
+}
+
+.control-card-box input {
+  width: 20px;
+  height: 20px;
+  margin: 0;
+  accent-color: var(--acc);
+}
+
+.control-card-boxed .control-card-actions {
+  margin-top: 4px;
+}

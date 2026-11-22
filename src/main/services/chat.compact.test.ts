@@ -204,7 +204,7 @@ test("compactParticipant refreshes stored context usage from the session after c
         usedTokens: 900,
         contextWindowTokens: 1000,
         percentage: 90,
-        source: "codex-cli",
+        source: "claude-code",
         updatedAt: NOW
       }
     };
@@ -221,7 +221,7 @@ test("compactParticipant refreshes stored context usage from the session after c
           usedTokens: 120,
           contextWindowTokens: 1000,
           percentage: 12,
-          source: "codex-cli",
+          source: "claude-code",
           updatedAt: NOW
         };
       }
@@ -434,7 +434,7 @@ test("compactParticipant clears running state when compact fails", async () => {
         usedTokens: 900,
         contextWindowTokens: 1000,
         percentage: 90,
-        source: "codex-cli",
+        source: "claude-code",
         updatedAt: NOW
       }
     };
@@ -452,7 +452,7 @@ test("compactParticipant clears running state when compact fails", async () => {
           usedTokens: 120,
           contextWindowTokens: 1000,
           percentage: 12,
-          source: "codex-cli",
+          source: "claude-code",
           updatedAt: "2026-01-01T00:01:00.000Z"
         };
       }
@@ -526,7 +526,7 @@ test("compactParticipant does not overwrite newer context usage after compact fa
         usedTokens: 300,
         contextWindowTokens: 1000,
         percentage: 30,
-        source: "codex-cli",
+        source: "claude-code",
         updatedAt: "2026-01-01T00:02:00.000Z"
       }
     };
@@ -541,7 +541,7 @@ test("compactParticipant does not overwrite newer context usage after compact fa
         usedTokens: 120,
         contextWindowTokens: 1000,
         percentage: 12,
-        source: "codex-cli",
+        source: "claude-code",
         updatedAt: "2026-01-01T00:01:00.000Z"
       })
     });

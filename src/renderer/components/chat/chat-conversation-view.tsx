@@ -86,6 +86,7 @@ export function ChatConversationView(props: ChatConversationViewProps): JSX.Elem
             approval.toolName === "app_participants_request_change" ||
             approval.toolName === "app_scripts_request_change" ||
             approval.toolName === "app_connector_sign_in" ||
+            approval.toolName === "app_chat_request_compaction" ||
             approval.toolName === "codex_auto_review_approval"
           )
       ),

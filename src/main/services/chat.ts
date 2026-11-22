@@ -5985,6 +5985,10 @@ export class ChatService {
     }
     const request = this.normalizeSelfCompactionRequest(rawRequest);
     const summary = `Compact @${requester.handle} context`;
+    // The card's meter: the member's context indicator as it stands now
+    // (its figure from its last finished turn), the same on every device.
+    const contextPercentage = this.agentContextUsageByParticipant(conversation)[requester.id]?.percentage;
+    const cardRequest: ChatSelfCompactionRequest = contextPercentage === undefined ? request : { ...request, contextPercentage };
     // Checked and recorded on the chat as saved now, through the queue.
     let compactingRequester = requester;
     const decided = await this.withChatMutation(conversation, async (): Promise<Record<string, unknown> | undefined> => {
@@ -6009,7 +6013,7 @@ export class ChatService {
           requesterNow,
           APP_CHAT_REQUEST_COMPACTION_TOOL,
           "compaction.request",
-          request,
+          cardRequest,
           summary,
           "pending"
         );
@@ -21242,7 +21246,8 @@ export class ChatService {
     }
     const request = value as Partial<ChatSelfCompactionRequest>;
     return request.type === "self_compaction" &&
-      (request.instructions === undefined || typeof request.instructions === "string");
+      (request.instructions === undefined || typeof request.instructions === "string") &&
+      (request.contextPercentage === undefined || typeof request.contextPercentage === "number");
   }
 
   private selfCompactionRequestGuard(

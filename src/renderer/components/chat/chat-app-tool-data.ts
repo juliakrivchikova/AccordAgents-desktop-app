@@ -15,6 +15,7 @@ import type {
   ChatToolPermissionRequest,
   Conversation
 } from "../../../shared/types";
+import { compactionCardPercentage } from "../../../shared/compactionCard";
 import { isChatScriptChangeRequest, type ChatScriptChangeRequest } from "../../../shared/scripts";
 import { isConnectorSignInRequest } from "../../../shared/connectorSignIn";
 import { chatToolPermissionIsScoped, normalizeChatToolPermissionScope } from "../../../shared/toolPermissionScope";
@@ -112,11 +113,13 @@ export function chatSelfCompactionRequest(approval: ChatAppToolApproval): ChatSe
     return undefined;
   }
   const request = approval.request as Partial<ChatSelfCompactionRequest>;
+  const contextPercentage = compactionCardPercentage(request.contextPercentage);
   return request.type === "self_compaction" &&
     (request.instructions === undefined || typeof request.instructions === "string")
     ? {
         type: "self_compaction",
-        instructions: request.instructions?.trim() || undefined
+        instructions: request.instructions?.trim() || undefined,
+        ...(contextPercentage !== undefined ? { contextPercentage } : {})
       }
     : undefined;
 }
