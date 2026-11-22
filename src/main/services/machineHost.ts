@@ -28,6 +28,8 @@ import {
   type MachineScriptsRequestBody
 } from "../../shared/machineLink";
 import type { MobilePairingPackage } from "../../shared/mobilePairing";
+import type { CliStartDefaultsByKind } from "../../shared/cliStartDefaults";
+import { CliStartDefaultsFeed } from "./cliStartDefaultsFeed";
 import type { MachineProgressFrame } from "../../shared/machineProgress";
 import type { AgentHealth, ChatBackgroundTasksEvent, ReviewProgress } from "../../shared/types";
 import type { NativeRuntimeIdentity } from "../../shared/nativeCommands";
@@ -65,6 +67,9 @@ export interface MachineHostOptions {
    *  assumed when it cannot be read): the feed is not read then. */
   hostStopSeen?: () => boolean;
   detectProviders?: () => Promise<AgentHealth[]>;
+  /** What each CLI here starts a new session in with this machine's own
+   *  config (src/shared/cliStartDefaults.ts), said in the hello. */
+  readCliStartDefaults?: () => Promise<CliStartDefaultsByKind | undefined>;
   /** Commits idle accounting once a member's run here has ended. */
   onNativeActivitySettled?: () => Promise<void>;
   idleStopWarning?: () => string | undefined;
@@ -169,6 +174,9 @@ export class MachineHostService {
   private readonly roomProgress = new Map<string, MachineProgressSender<void>>();
   private readonly serverProgress = new Map<string, MachineProgressSender<void>>();
   private scriptsChangedTimer?: ReturnType<typeof setTimeout>;
+  /** The CLIs' start defaults said in the hello (a read that changes them
+   *  greets again). */
+  private readonly startDefaults?: CliStartDefaultsFeed;
   /** Script operations run one at a time, in order, off the inbound chain. */
   private scriptsQueue: Promise<void> = Promise.resolve();
   private readonly approvalExecutor: MachineApprovalExecutor;
@@ -181,6 +189,7 @@ export class MachineHostService {
     private readonly options: MachineHostOptions
   ) {
     this.now = options.now ?? (() => new Date());
+    if (options.readCliStartDefaults) this.startDefaults = new CliStartDefaultsFeed(options.readCliStartDefaults);
     const sequence = this.nextInstanceSequence();
     this.instanceSequence = sequence.sequence;
     if (sequence.error) void this.debugLogs.write("machine-host.instance.unavailable", { message: sequence.error });
@@ -606,6 +615,16 @@ export class MachineHostService {
       providers = [];
     }
     const unsent = await this.options.unsentServerWrites?.().catch(() => undefined);
+    // The CLIs' start defaults as last read; reading them again (they take a
+    // few seconds) greets once more when they changed.
+    const startDefaults = this.startDefaults?.take(() => {
+      if (this.closed) return;
+      void this.sendHello().catch((error) => {
+        void this.debugLogs.write("machine-host.hello.error", { message: errorMessage(error) });
+      });
+    }, (error) => {
+      void this.debugLogs.write("machine-host.cli-start-defaults.error", { message: errorMessage(error) });
+    });
     await this.send({
       type: "machine.hello",
       deviceId: this.options.deviceId,
@@ -627,6 +646,7 @@ export class MachineHostService {
       sessionMoveSupported: true,
       forkToNewChatSupported: true,
       cliModesSupported: true,
+      ...(startDefaults ? { cliStartDefaults: startDefaults } : {}),
       ...(this.options.scripts ? {
         scriptsSupported: true,
         keepAwake: this.options.scripts.keepsHostAwake(),

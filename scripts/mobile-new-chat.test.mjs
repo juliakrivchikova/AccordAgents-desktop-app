@@ -595,3 +595,95 @@ test("on the phone's New chat the main session runs where a machine is chosen, h
   assert.deepEqual([main.roleConfigId, main.homeMachineId, main.permissions.cliApprovals, main.permissions.workspaceWrite, chat.repoPath],
     ["main-session", "m-box", true, true, "/Users/u/api"], "the main session on the machine, in Codex's Default");
 });
+
+test("the phone's New chat starts the main session in the mode, model and effort her own CLI config starts it in where it runs, and asks Codex's question before Full Access", { timeout: 120_000 }, async (t) => {
+  const { createDeviceIdentity } = require("../dist/main/main/services/deviceIdentity.js");
+  const box = createDeviceIdentity(new Date().toISOString());
+  const hub = await startMobileHub({ rosterDevices: [
+    { deviceId: box.originId, publicKeyDerBase64: box.publicKeyDerBase64, role: "machine", name: "Cloud box", machineId: "m-box" }
+  ] });
+  const site = await serveMobileShell({ port: 8348, hubOrigins: [hub.base] });
+  const profile = await tempProfile("aa-mobile-new-chat-start-");
+  const chrome = launchChrome({ port: 9488, profile, url: `${site.origin}/`, width: 402, height: 874 });
+  let app;
+  t.after(async () => {
+    app?.close();
+    chrome.kill("SIGKILL");
+    await site.close();
+    await hub.close();
+    await rm(profile, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
+  });
+  await hub.createChat("conv-old", { title: "Old", participants: [member("drew")] });
+  const mainSession = { id: "main-session", handle: "main", roleConfigId: "main-session", kind: "codex-cli", agentMode: "default",
+    permissions: { repoRead: true, workspaceWrite: false, webAccess: false, requestParticipants: "allow", requestCompaction: "ask", manageRolesParticipants: "allow", shell: { enabled: false, rules: [] } } };
+  const efforts = [{ id: "low", label: "Low" }, { id: "high", label: "High" }];
+  const newChat = {
+    projects: [{ path: "/Users/u/api", label: "api" }], defaultProject: "/Users/u/api", mainSession, assistant: mainSession,
+    members: [{ configId: "c-boxy", uses: 0, participant: member("boxy", { id: "t-boxy", participantConfigId: "c-boxy", kind: "codex-cli" }), machineId: "m-box", projects: ["/Users/u/api"] }],
+    // Her Codex config here: Approve for me, gpt-5.6-luna at Low (the
+    // computer read it: config/read).
+    mainSessionProviders: [{ kind: "codex-cli", label: "Codex", defaultModelLabel: "GPT-5.6-Luna", models: [{ id: "gpt-6-luna", label: "GPT-6-Luna" }], efforts,
+      start: { access: "auto-review", reasoningEffort: "low" } }],
+    cliModes: { machines: { "m-box": true } },
+    // The machine's own Codex config: Read Only, on GPT-5.5.
+    cliStart: { machines: { "m-box": { "codex-cli": { access: "read-only", model: "gpt-5.5", modelLabel: "GPT-5.5" } } } }
+  };
+  const published = await hub.call("PUT", "/v1/catalog", { catalog: { version: 1, publishedAt: new Date().toISOString(), roles: { "main-session": "Main session" }, prompts: [], skills: [], avatars: {}, newChat } });
+  assert.equal(published.ok, true);
+  app = await attachApp({ port: 9488 });
+  await pairPage(app, { hub, siteOrigin: site.origin, query: "qa=1" });
+  await app.waitFor(`!document.getElementById("new-chat-button").hidden`, "the New chat button");
+  await app.evaluate(`document.getElementById("new-chat-button").click()`);
+  await app.waitFor(`!document.getElementById("new-chat-model-button").hidden && !document.getElementById("new-chat-model-button").disabled`, "the model chip");
+  assert.equal(await app.evaluate(`document.getElementById("new-chat-model-label").textContent`), "GPT-5.6-LunaLow", "the model and effort her config starts Codex on");
+  await app.evaluate(`document.getElementById("new-chat-model-button").click()`);
+  await app.waitFor(`!document.getElementById("new-chat-model-sheet").hidden`, "the chip's sheet");
+  const chosenAccess = () => app.evaluate(`[...document.querySelectorAll('#new-chat-model-options [data-access]')].filter((row) => row.getAttribute("aria-pressed") === "true").map((row) => row.dataset.access)`);
+  assert.deepEqual(await chosenAccess(), ["auto-review"], "the mode her config starts Codex in: Approve for me");
+  assert.equal(await app.evaluate(`document.querySelector('#new-chat-model-options [data-effort=""]').textContent`), "DefaultLow", "Default runs at Low");
+
+  // On the machine, nothing chosen yet: the machine's own config's mode
+  // and model (it reads its own); back here, this computer's again.
+  await app.evaluate(`document.querySelector('#new-chat-model-options [data-runs-on="m-box"]').click()`);
+  await app.waitFor(`document.querySelector('#new-chat-model-options [data-runs-on="m-box"]').getAttribute("aria-pressed") === "true"`, "the machine chosen");
+  assert.deepEqual(await chosenAccess(), ["read-only"], "the machine's config starts its Codex in Read Only");
+  assert.equal(await app.evaluate(`document.getElementById("new-chat-model-label").textContent`), "GPT-5.5", "the model the machine's own config runs");
+  await app.evaluate(`document.querySelector('#new-chat-model-options [data-runs-on=""]').click()`);
+  await app.waitFor(`document.querySelector('#new-chat-model-options [data-runs-on=""]').getAttribute("aria-pressed") === "true"`, "this computer again");
+  assert.deepEqual(await chosenAccess(), ["auto-review"], "this computer's config again");
+
+  // Full Access: Codex's own question in place of the list; Cancel goes back.
+  await app.evaluate(`document.querySelector('#new-chat-model-options [data-access="full-access"]').click()`);
+  await app.waitFor(`Boolean(document.querySelector('#new-chat-model-options .new-chat-confirm-title'))`, "Codex's question");
+  const confirm = await app.evaluate(`({ title: document.querySelector('#new-chat-model-options .new-chat-confirm-title').textContent,
+    body: document.querySelector('#new-chat-model-options .new-chat-confirm-body').textContent,
+    rows: [...document.querySelectorAll('#new-chat-model-options [data-confirm]')].map((row) => row.textContent),
+    list: document.querySelectorAll('#new-chat-model-options [data-access]').length })`);
+  assert.deepEqual(confirm, {
+    title: "Enable full access?",
+    body: "When Codex runs with full access, it can edit any file on your computer and run commands with network, without your approval. Exercise caution when enabling full access. This significantly increases the risk of data loss, leaks, or unexpected behavior.",
+    rows: ["Yes, continue anywayApply full access for this session", "CancelGo back without enabling full access"],
+    list: 0
+  });
+  await app.evaluate(`document.querySelector('#new-chat-model-options [data-confirm="cancel"]').click()`);
+  await app.waitFor(`document.querySelectorAll('#new-chat-model-options [data-access]').length > 0`, "back to the list");
+  assert.deepEqual(await chosenAccess(), ["auto-review"], "Cancel switched nothing");
+  await app.evaluate(`document.querySelector('#new-chat-model-options [data-access="full-access"]').click()`);
+  await app.waitFor(`Boolean(document.querySelector('#new-chat-model-options [data-confirm="yes"]'))`, "asked again");
+  await app.evaluate(`document.querySelector('#new-chat-model-options [data-confirm="yes"]').click()`);
+  await app.waitFor(`document.querySelector('#new-chat-model-options [data-access="full-access"]')?.getAttribute("aria-pressed") === "true"`, "Full Access chosen");
+  await app.evaluate(`document.querySelector('#new-chat-model-sheet [data-new-chat-picker-close]').click()`);
+  await app.evaluate(`(() => { const input = document.getElementById("new-chat-input"); input.value = "Check the api"; input.dispatchEvent(new Event("input", { bubbles: true })); })()`);
+  await app.evaluate(`document.getElementById("new-chat-start").click()`);
+  let created;
+  for (let attempt = 0; attempt < 100 && !created; attempt += 1) {
+    created = (await hub.storage.listConversations()).find((summary) => /Check the api/.test(summary.title));
+    if (!created) await new Promise((resolve) => setTimeout(resolve, 100));
+  }
+  assert.ok(created, "the chat is on the server");
+  const chat = await hub.storage.getConversation(created.id);
+  const [main] = chat.metadata.participants;
+  const { selectedChatAccessOption } = require("../dist/main/shared/chatAccessModes.js");
+  assert.deepEqual([main.homeMachineId, main.agentMode, main.permissions.cliApprovals, main.model], [undefined, "full-access", true, undefined]);
+  assert.equal(selectedChatAccessOption(main.kind, main.agentMode, main.permissions)?.label, "Full Access", "confirmed, it is made in Full Access");
+});

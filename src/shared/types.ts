@@ -1,4 +1,5 @@
 import type { CreateTerminalRequest, TerminalHostStateEvent, TerminalListResult, TerminalSummary } from "./terminal";
+import type { CliStartDefaults } from "./cliStartDefaults";
 import type { ChatScriptChangeRequest } from "./scripts";
 import type { ChatParticipantRosterStatus } from "./chatParticipantStatus";
 import type { DeviceEventBlobReference } from "./deviceEventBlobs";
@@ -2353,10 +2354,15 @@ export interface ProviderModel {
 
 export interface ProviderModelCatalog {
   kind: ProviderKind;
+  /** A CLI's list: `recommended` marks the model it runs when none is
+   *  chosen, the one the User's own config names (else the CLI's default). */
   models: ProviderModel[];
   authoritative: boolean;
   fetchedAt: string;
   error?: string;
+  /** What the CLI starts a new session in with the User's own config on this
+   *  device (src/shared/cliStartDefaults.ts); none when it could not say. */
+  startDefaults?: CliStartDefaults;
 }
 
 export interface ParticipantConfig {

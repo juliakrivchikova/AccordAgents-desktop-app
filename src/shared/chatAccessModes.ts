@@ -106,6 +106,20 @@ const ANTIGRAVITY_ACCESS: ChatAccessModeSet = {
   note: "Antigravity cannot ask for approval here, so what a mode would prompt for is refused."
 };
 
+/**
+ * What Codex asks before it switches to Full Access, in its own words: its
+ * `/permissions` picker, Codex 0.155.1 in a terminal (2026-11-22), shows
+ * this in place of the list, and only "Yes, continue anyway" switches;
+ * "Cancel" (or Esc) goes back without it. Starting in Full Access from her
+ * own config asks nothing, as Codex does not.
+ */
+export const FULL_ACCESS_CONFIRMATION = {
+  title: "Enable full access?",
+  body: "When Codex runs with full access, it can edit any file on your computer and run commands with network, without your approval. Exercise caution when enabling full access. This significantly increases the risk of data loss, leaks, or unexpected behavior.",
+  confirm: { label: "Yes, continue anyway", detail: "Apply full access for this session" },
+  cancel: { label: "Cancel", detail: "Go back without enabling full access" }
+} as const;
+
 /** Why a member cannot be given Codex's Full Access or Plan mode where it
  *  runs: a machine whose program is from before they existed (its last
  *  hello says nothing of them) would run Full Access as Ask for approval and
@@ -147,14 +161,25 @@ export function currentChatAccessId(kind: ChatProviderKind, id: string | undefin
   return id ? RENAMED_ACCESS_IDS[kind]?.[id] ?? id : undefined;
 }
 
-/** The mode a main session starts in, the one its CLI starts in without
- *  settings of the User's: Claude Code's Manual, Codex's Ask for approval
- *  (the preset its picker marks current for a folder it trusts) and agy's
- *  Default. */
+/** The mode a CLI starts in without settings of the User's: Claude Code's
+ *  Manual, Codex's Ask for approval (the preset its picker marks current for
+ *  a folder it trusts) and agy's Default. A new main session starts in the
+ *  one her own config starts the CLI in (startChatAccessOption); this one
+ *  only when that cannot be read. */
 export function defaultChatAccessOption(kind: ChatProviderKind): ChatAccessOption {
   const options = chatAccessOptions(kind);
   const id = kind === "codex-cli" ? "workspace-write" : kind === "claude-code" ? "manual" : "default";
   return options.find((option) => option.id === id) ?? options[0]!;
+}
+
+/** The mode a new main session starts in: the one the User's own config
+ *  starts its CLI in on the device that runs it (`access`, CliStartDefaults,
+ *  src/shared/cliStartDefaults.ts) when the composer offers it, else the
+ *  CLI's built-in default. */
+export function startChatAccessOption(kind: ChatProviderKind, access: string | undefined): ChatAccessOption {
+  const id = currentChatAccessId(kind, access);
+  return chatAccessModeSet(kind).options.find((option) => option.id === id && (!option.hidden || option.id === "read-only")) ??
+    defaultChatAccessOption(kind);
 }
 
 /** Whether Codex's Plan mode is on for a member in its own mode (a member
@@ -244,18 +269,21 @@ export function withCodexPlanMode(
 }
 
 /** A member's settings with its CLI's mode set by its id (an id from before
- *  a rename taken as the mode it is now); the CLI's default mode for an id it
- *  does not have. `plan`: Codex's Plan mode on (the phone's toggle); Codex's
+ *  a rename taken as the mode it is now); the mode the CLI starts in for an
+ *  id it does not have. `plan`: Codex's Plan mode on (the phone's toggle); Codex's
  *  old "plan" id is Read Only with it on. */
 export function applyChatAccessOptionById(
   kind: ChatProviderKind,
   id: string | undefined,
   permissions: ChatAgentPermissions | undefined,
-  plan?: boolean
+  plan?: boolean,
+  /** The mode the User's own config starts the CLI in where it runs (the
+   *  fallback for an id it does not have): startChatAccessOption. */
+  startAccess?: string
 ): { agentMode: ChatAgentMode; permissions: ChatAgentPermissions } {
   const legacyCodexPlan = kind === "codex-cli" && id === "plan";
   const wanted = legacyCodexPlan ? "read-only" : currentChatAccessId(kind, id);
-  const option = chatAccessModeSet(kind).options.find((candidate) => candidate.id === wanted) ?? defaultChatAccessOption(kind);
+  const option = chatAccessModeSet(kind).options.find((candidate) => candidate.id === wanted) ?? startChatAccessOption(kind, startAccess);
   const applied = applyChatAccessOption(option, permissions);
   if (kind !== "codex-cli") {
     const { codexPlanMode: _plan, ...rest } = applied.permissions;

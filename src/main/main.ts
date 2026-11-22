@@ -3429,6 +3429,7 @@ void app.whenReady().then(async () => {
     chatService.setMachineSessionMove((target) => machineLink.sessionMoveTarget(target));
     chatService.setMachineForkToNewChatSupport((machineId) => machineLink.forkToNewChatSupport(machineId));
     chatService.setMachineCliModesSupport((machineId) => machineLink.cliModesSupport(machineId));
+    chatService.setMachineCliStartDefaults((machineId) => machineLink.cliStartDefaults(machineId));
     // The machines are read before the link to the server starts, so their
     // keys are on the server's roster before anything is written for them;
     // a passing failure to read is tried again first.

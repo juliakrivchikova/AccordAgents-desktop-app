@@ -1,17 +1,20 @@
-import { useEffect, useMemo, useState } from "react";
+import { useMemo, useRef, useState } from "react";
+import { Cloud, Gauge, Laptop, Server } from "lucide-react";
 
 import { normalizeChatReasoningEffort, reasoningEffortOptionsForProvider } from "../../../shared/reasoningEffort";
 import { savedModelId } from "../../../shared/geminiModels";
 import { mainSessionProviderKey, type MainSessionProviderOption } from "../../../shared/mainSessionProviders";
 import type { CloudRunSelection } from "../../../shared/cloudRunPreparation";
-import type { MachineListResult, MachineRecord } from "../../../shared/machineLink";
+import type { MachineRecord } from "../../../shared/machineLink";
 import type { ChatParticipant, ProviderModel, ProviderModelCatalog, ProviderReasoningEffortOption } from "../../../shared/types";
-import { codexModesUnavailableReason } from "../../../shared/chatAccessModes";
+import { codexModesUnavailableReason, codexPlanModeOn, selectedChatAccessOption } from "../../../shared/chatAccessModes";
 import { ChatProviderMark } from "./chat-member-mark";
 import { chipModelLabel, memberDefaultModelName, memberModelName, useMemberModelCatalog } from "./chat-member-model-name";
 import { latestAndOlderModels } from "./chat-model-groups";
 import { ComposerMenu, ComposerMenuDisclosure, ComposerMenuItem, ComposerMenuNote, ComposerMenuSection } from "./composer-menu";
-import { ChatAccessControl, ChatCodexPlanToggle, TURN_RUNNING_NOTE } from "./chat-access-controls";
+import { ChatAccessControl, ChatCodexPlanToggle, ComposerControlIcon, TURN_RUNNING_NOTE } from "./chat-access-controls";
+import { machineOf, useCliStartDefaults, useMachineList } from "./use-cli-start-defaults";
+import { useComposerDensity } from "./use-composer-density";
 import { ParticipantRunLocation } from "./participant-run-location";
 
 /** What the composer's controls show and change of a member: its provider
@@ -60,32 +63,49 @@ export function ChatMemberComposerControls(props: {
   const { value, onChange } = props;
   const prefix = props.testId ?? "chat-model";
   const { catalog, loading } = useMemberModelCatalog(value);
+  const machineList = useMachineList();
+  const machines = machineList.machines;
+  // What the User's own config starts its CLI in where it runs (a machine
+  // reads its own): the model a member without one of its own runs, and
+  // the effort its config sets.
+  const start = useCliStartDefaults({ kind: value.kind, homeMachineId: value.homeMachineId, cloudRun: value.cloudRun }, machineList);
+  const startModel = value.hostId ? undefined : start?.model;
   const model = savedModelId(value.kind, value.model);
-  const defaultModel = useMemo(() => recommendedModel(catalog), [catalog]);
-  const models = useMemo(() => explicitModels(catalog), [catalog]);
-  const defaultLabel = memberDefaultModelName(value, catalog);
-  const efforts = useMemo(() => effortOptions(value.kind, catalog, model), [catalog, model, value.kind]);
+  const defaultModel = useMemo(() => defaultModelOf(catalog, startModel), [catalog, startModel]);
+  const models = useMemo(() => explicitModels(catalog, defaultModel), [catalog, defaultModel]);
+  const defaultLabel = memberDefaultModelName(value, catalog, start);
+  const efforts = useMemo(() => effortOptions(value.kind, catalog, model ?? defaultModel?.id), [catalog, defaultModel, model, value.kind]);
   // An effort the chosen model does not have reads as the CLI's own here;
   // nothing is saved until the User picks one.
   const savedEffort = normalizeChatReasoningEffort(value.reasoningEffort, value.kind);
   const effort = shownEffort(savedEffort, efforts);
-  const machineList = useMachines();
-  const machines = machineList.machines;
+  // None chosen: the effort her config sets, for the model it starts on.
+  const configEffort = !effort && !model && !value.hostId ? shownEffort(start?.reasoningEffort, efforts) : undefined;
+  const effortLabel = effort ? labelOf(efforts, effort) : configEffort ? labelOf(efforts, configEffort) : "Default";
   const showRunsOn = Boolean(props.runsOn) && (machines.length > 0 || Boolean(value.homeMachineId || value.cloudRun));
   // Full Access and Plan mode on a machine whose program is from before them.
   const modesReason = codexModesUnavailableReason(value, machineOf(machineList, value.homeMachineId));
   // A model chosen without the saved effort: that choice clears it too, so
   // its CLI is never given an effort the model does not have.
   const withEffortFor = (modelId: string | undefined): ChatModelAccessPatch => {
-    const next = effortOptions(value.kind, catalog, modelId);
+    const next = effortOptions(value.kind, catalog, modelId ?? defaultModel?.id);
     return savedEffort && !next.some((option) => option.id === savedEffort)
       ? { model: modelId ?? "", reasoningEffort: "" as ChatModelAccessPatch["reasoningEffort"] }
       : { model: modelId ?? "" };
   };
-  const modelName = memberModelName({ ...value, model }, catalog);
+  const modelName = memberModelName({ ...value, model }, catalog, start);
+  const access = selectedChatAccessOption(value.kind, value.agentMode, value.permissions);
+  const runsOn = runsOnLabel(value, machines);
+  // In a narrow composer the controls turn into icons one by one (where it
+  // runs, Plan mode, the mode, the effort), then the model loses its glyph
+  // and last its name shortens: never a one-letter stub.
+  const rowRef = useRef<HTMLDivElement>(null);
+  const density = useComposerDensity(rowRef, [modelName, effortLabel, access?.id ?? "custom", value.kind, showRunsOn ? runsOn : "",
+    codexPlanModeOn(value.kind, value.agentMode, value.permissions) ? "plan" : ""].join("\u0000"));
+  const effortIcon = density >= 4;
 
   return (
-    <div className="chat-composer-controls" data-testid={prefix} aria-disabled={props.disabled || undefined}>
+    <div ref={rowRef} className="chat-composer-controls" data-testid={prefix} data-density={density} aria-disabled={props.disabled || undefined}>
       <ComposerMenu
         testId={`${prefix}-model`}
         title={`Model: ${modelName}`}
@@ -93,8 +113,8 @@ export function ChatMemberComposerControls(props: {
         align="end"
         label={(
           <span className="chat-model-chip-label">
-            <ChatProviderMark member={value} className="is-mini" />
-            <span className="chat-composer-control-text">{modelName}</span>
+            {density < 5 && <ChatProviderMark member={value} className="is-mini" />}
+            <span className={density >= 6 ? "chat-composer-control-text is-model is-shortened" : "chat-composer-control-text is-model"}>{modelName}</span>
           </span>
         )}
       >
@@ -119,15 +139,20 @@ export function ChatMemberComposerControls(props: {
       {efforts.length > 0 && (
         <ComposerMenu
           testId={`${prefix}-effort`}
-          title={`Effort: ${effort ? labelOf(efforts, effort) : "Default"}`}
+          title={`Effort: ${effortLabel}`}
           width={240}
           align="end"
-          label={<span className={effort ? "chat-composer-control-text" : "chat-composer-control-text is-muted"}>{effort ? labelOf(efforts, effort) : "Default"}</span>}
+          bare={effortIcon}
+          triggerClassName={effortIcon ? "chat-model-chip composer-menu-trigger is-icon" : undefined}
+          label={effortIcon
+            ? <ComposerControlIcon icon={Gauge} label={effortLabel} />
+            : <span className={effort || configEffort ? "chat-composer-control-text" : "chat-composer-control-text is-muted"}>{effortLabel}</span>}
         >
           {(close) => (
             <ChatEffortMenu
               efforts={efforts}
               effort={effort}
+              defaultDetail={configEffort ? labelOf(efforts, configEffort) : undefined}
               disabled={props.disabled}
               onSelect={(id) => {
                 close();
@@ -137,17 +162,22 @@ export function ChatMemberComposerControls(props: {
           )}
         </ComposerMenu>
       )}
-      <ChatAccessControl value={value} mainSession={props.mainSession} disabled={props.disabled} modesReason={modesReason} onChange={onChange} testId={prefix} />
+      <ChatAccessControl value={value} mainSession={props.mainSession} disabled={props.disabled} modesReason={modesReason} onChange={onChange} testId={prefix}
+        iconOnly={density >= 3} />
       {value.kind === "codex-cli" && (
-        <ChatCodexPlanToggle value={value} disabled={props.disabled} modesReason={modesReason} onChange={onChange} testId={prefix} />
+        <ChatCodexPlanToggle value={value} disabled={props.disabled} modesReason={modesReason} onChange={onChange} testId={prefix} iconOnly={density >= 2} />
       )}
       {showRunsOn && (
         <ComposerMenu
           testId={`${prefix}-runs-on`}
-          title={`Runs on: ${runsOnLabel(value, machines)}`}
+          title={`Runs on: ${runsOn}`}
           width={300}
           align="end"
-          label={<span className="chat-composer-control-text">{runsOnLabel(value, machines)}</span>}
+          bare={density >= 1}
+          triggerClassName={density >= 1 ? "chat-model-chip composer-menu-trigger is-icon" : undefined}
+          label={density >= 1
+            ? <ComposerControlIcon icon={value.cloudRun ? Cloud : value.homeMachineId ? Server : Laptop} label={runsOn} />
+            : <span className="chat-composer-control-text">{runsOn}</span>}
         >
           {() => (
             <ComposerMenuSection label="Runs on">
@@ -221,13 +251,16 @@ export function ChatModelMenu(props: {
 export function ChatEffortMenu(props: {
   efforts: readonly ProviderReasoningEffortOption[];
   effort: string | undefined;
+  /** The effort Default runs at, when the User's config sets one. */
+  defaultDetail?: string;
   disabled?: boolean;
   onSelect: (id: ProviderReasoningEffortOption["id"] | undefined) => void;
 }): JSX.Element {
   return (
     <ComposerMenuSection label="Effort">
       {props.disabled && <ComposerMenuNote>{TURN_RUNNING_NOTE}</ComposerMenuNote>}
-      <ComposerMenuItem testId="chat-effort-option" value="" selected={!props.effort} disabled={props.disabled} label="Default" onSelect={() => props.onSelect(undefined)} />
+      <ComposerMenuItem testId="chat-effort-option" value="" selected={!props.effort} disabled={props.disabled} label="Default" detail={props.defaultDetail}
+        onSelect={() => props.onSelect(undefined)} />
       {props.efforts.map((option) => (
         <ComposerMenuItem key={option.id} testId="chat-effort-option" value={option.id} selected={props.effort === option.id} disabled={props.disabled}
           label={option.label} detail={option.description} onSelect={() => props.onSelect(option.id)} />
@@ -238,14 +271,6 @@ export function ChatEffortMenu(props: {
 
 function labelOf(efforts: readonly ProviderReasoningEffortOption[], id: string): string {
   return efforts.find((option) => option.id === id)?.label ?? id;
-}
-
-/** A machine by its id, with its last hello (connected or not). */
-function machineOf(list: MachineListResult, machineId: string | undefined): { name?: string; lastHello?: MachineRecord["lastHello"] } | undefined {
-  if (!machineId) return undefined;
-  const record = list.machines.find((machine) => machine.id === machineId);
-  const status = list.status.find((item) => item.machineId === machineId);
-  return record || status ? { name: record?.name ?? status?.name, lastHello: status?.lastHello ?? record?.lastHello } : undefined;
 }
 
 function runsOnLabel(value: ChatModelAccessValue, machines: readonly MachineRecord[]): string {
@@ -260,51 +285,24 @@ export function shownEffort<T extends string>(effort: T | undefined, efforts: Re
   return effort && efforts.some((option) => option.id === effort) ? effort : undefined;
 }
 
-/** The model the CLI runs on by default (the default row names it). */
-function recommendedModel(catalog: ProviderModelCatalog | undefined): ProviderModel | undefined {
-  return catalog?.models.find((model) => model.recommended && model.source !== "configured" && !model.hidden);
+/** The model the CLI runs when none is chosen (the default row names it):
+ *  the one the User's config starts it on where it runs, when this list has
+ *  it, else the one the list marks (her config's on this computer). */
+function defaultModelOf(catalog: ProviderModelCatalog | undefined, startModel: string | undefined): ProviderModel | undefined {
+  const usable = (model: ProviderModel): boolean => model.source !== "configured" && !model.hidden;
+  return (startModel ? catalog?.models.find((model) => model.id === startModel && usable(model)) : undefined) ??
+    catalog?.models.find((model) => model.recommended && usable(model));
 }
 
 /** The models offered besides the default row: the CLI's list without the
- *  one it runs on by default (the default row names it) and hidden ones. */
-function explicitModels(catalog: ProviderModelCatalog | undefined): ProviderModel[] {
-  return (catalog?.models ?? []).filter((model) => !model.hidden && !(model.recommended && model.source !== "configured"));
+ *  one it runs by default (the default row names it) and hidden ones. */
+function explicitModels(catalog: ProviderModelCatalog | undefined, defaultModel: ProviderModel | undefined): ProviderModel[] {
+  return (catalog?.models ?? []).filter((model) => !model.hidden && model !== defaultModel && !(model.recommended && model.source !== "configured" && !defaultModel));
 }
 
-/** The efforts of the chosen model (of the CLI's default one while none is
- *  chosen), else the CLI's own list. */
+/** The efforts of the chosen model (of the one it runs by default while none
+ *  is chosen), else the CLI's own list. */
 function effortOptions(kind: ChatParticipant["kind"], catalog: ProviderModelCatalog | undefined, model: string | undefined): ProviderReasoningEffortOption[] {
   const listed = catalog?.models.find((item) => model ? item.id === model : item.recommended && item.source !== "configured");
   return listed?.supportedReasoningEfforts?.length ? listed.supportedReasoningEfforts : reasoningEffortOptionsForProvider(kind);
-}
-
-const NO_MACHINES: MachineListResult = { machines: [], status: [] };
-
-/** The machines set up (cloud machines, other computers) and their last
- *  hellos: only then does a composer offer where a member runs, and a
- *  machine's program says what it can run. Kept as it was when an update
- *  changes nothing the controls read. */
-function useMachines(): MachineListResult {
-  const [machines, setMachines] = useState<MachineListResult>(NO_MACHINES);
-  useEffect(() => {
-    const bridge = typeof window === "undefined" ? undefined : window.consensus;
-    if (!bridge?.listMachines) return;
-    let alive = true;
-    const take = (answer: Partial<MachineListResult> | undefined): void => {
-      const result: MachineListResult = { machines: answer?.machines ?? [], status: answer?.status ?? [] };
-      setMachines((current) => machinesKey(current) === machinesKey(result) ? current : result);
-    };
-    void bridge.listMachines().then((result) => { if (alive) take(result); }).catch(() => undefined);
-    const off = bridge.onMachinesUpdated?.((result) => take(result));
-    return () => { alive = false; off?.(); };
-  }, []);
-  return machines;
-}
-
-function machinesKey(list: MachineListResult): string {
-  const supports = (hello: MachineRecord["lastHello"] | undefined): string => (hello?.cliModesSupported === true ? "1" : "0");
-  return [
-    ...list.machines.map((machine) => `${machine.id}:${machine.name}:${supports(machine.lastHello)}`),
-    ...list.status.map((item) => `${item.machineId}:${item.name}:${supports(item.lastHello)}`)
-  ].join("|");
 }

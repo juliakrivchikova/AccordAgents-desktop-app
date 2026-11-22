@@ -4,39 +4,49 @@
    laid over the window. Tiny muted section titles, each choice's name with
    the vendor's description wrapped under it, a check on the chosen one. */
 
-/* One quiet row: in a narrow composer every control shortens (its text cut
-   with an ellipsis, the model's first), never wraps into a column nor paints
-   outside its chip. */
+/* One quiet row that never wraps. In a narrow composer the controls turn
+   into icons one by one (use-composer-density.ts: where it runs, Plan mode,
+   the mode, the effort), the model loses its glyph, and only then does the
+   model's name shorten, never below a few letters: no one-letter stubs. The
+   row's own box shrinks with the composer and hides what still does not
+   fit, so Send and the panel's edge stay in view. */
 .chat-composer-controls {
   display: inline-flex;
   align-items: center;
   flex-wrap: nowrap;
-  justify-content: flex-end;
+  justify-content: flex-start;
   gap: 2px;
   min-width: 0;
   flex: 0 1 auto;
+  overflow: hidden;
+  /* Room for a control's focus ring inside the clipped box. */
+  margin: -3px;
+  padding: 3px;
 }
 
 .chat-composer-controls > .chat-model-chip {
+  flex: 0 0 auto;
+}
+
+.chat-composer-controls[data-density="6"] > [data-testid$="-model"] {
   flex: 0 1 auto;
   min-width: 0;
   overflow: hidden;
 }
 
-/* The model keeps its name longest; the effort shortens first, then the
-   mode, the Plan toggle and where it runs. */
-.chat-composer-controls > [data-testid$="-model"] {
-  flex-shrink: 1;
+.chat-composer-control-text.is-model.is-shortened {
+  min-width: 6ch;
 }
 
-.chat-composer-controls > [data-testid$="-effort"] {
-  flex-shrink: 8;
+.chat-model-chip.is-icon {
+  gap: 0;
+  padding: 0 7px;
 }
 
-.chat-composer-controls > [data-testid$="-mode"],
-.chat-composer-controls > [data-testid$="-plan"],
-.chat-composer-controls > [data-testid$="-runs-on"] {
-  flex-shrink: 4;
+.chat-composer-control-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
 }
 
 .composer-menu-trigger .chat-model-chip-label {
@@ -242,12 +252,22 @@
   line-height: 1.35;
 }
 
+/* A question in place of a menu's list (Codex's "Enable full access?"):
+   its title reads as the question, not as a muted section name. */
+.composer-menu-confirm .composer-menu-label {
+  color: var(--app-text-strong);
+  font-size: 13px;
+  font-weight: 600;
+}
+
 .composer-menu-field {
   padding: 0 8px 2px;
 }
 
-/* The New chat composer's controls. */
+/* The New chat composer's controls: shrink with its row so they fit. */
 .new-chat-model-picker {
+  display: flex;
+  justify-content: flex-end;
   min-width: 0;
 }
 

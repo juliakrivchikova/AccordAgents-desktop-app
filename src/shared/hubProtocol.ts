@@ -8,6 +8,7 @@
  * only devices on its roster, which the desktop that set it up keeps.
  */
 
+import type { CliStartDefaultsByKind } from "./cliStartDefaults";
 import type { ChatAgentMode, ChatAgentPermissions, ChatForkSeenReply, ChatParticipant, ChatParticipantRequestPermission, ChatProviderKind, ChatSkillMention, ChatViewMode } from "./types";
 import type { NewChatMemberOption, NewChatProviderOffer } from "./newChat";
 import type { ForkToNewChatOffer } from "./forkToNewChat";
@@ -331,6 +332,10 @@ export interface HubNewChatOptions {
    *  by a computer that runs them, with whether each machine's program does.
    *  A computer from before sets none: the phone does not offer them. */
   cliModes?: { machines: Record<string, boolean> };
+  /** What each machine's CLIs start a new session in with that machine's own
+   *  config (src/shared/cliStartDefaults.ts), by its last hello; this
+   *  computer's are with each provider (NewChatProviderOffer.start). */
+  cliStart?: { machines: Record<string, CliStartDefaultsByKind> };
 }
 
 /** What GET /v1/phone/new-chat?forkOf=<chat>&participantId=<member> adds to

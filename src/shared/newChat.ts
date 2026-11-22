@@ -1,4 +1,5 @@
 import { normalizeAutoChatTitle, normalizeManualChatTitle } from "./chatTitles";
+import type { CliStartDefaults } from "./cliStartDefaults";
 import { applyChatAccessOptionById } from "./chatAccessModes";
 import { DEFAULT_CHAT_VIEW, MAIN_SESSION_ROLE_ID, isChatViewMode, mainSessionMemberOf } from "./mainSession";
 import type {
@@ -249,6 +250,11 @@ export interface NewChatProviderOffer {
   defaultModelLabel: string;
   models: Array<{ id: string; label: string; efforts?: NewChatEffortOption[] }>;
   efforts: NewChatEffortOption[];
+  /** What its CLI starts a new session in with the User's own config on this
+   *  computer (src/shared/cliStartDefaults.ts): the mode a main session that
+   *  runs here starts in, and the effort its chip names until one is
+   *  chosen. A computer from before says none. */
+  start?: Pick<CliStartDefaults, "access" | "reasoningEffort">;
 }
 
 function shortLabel(text: string): string {
@@ -272,6 +278,8 @@ export function newChatProviderOffer(input: {
   vendorDefaultModelLabel?: string;
   catalog?: ProviderModelCatalog;
   providerEfforts: readonly ProviderReasoningEffortOption[];
+  /** Its CLI's start defaults here (an added provider's CLI's too). */
+  start?: CliStartDefaults;
 }): NewChatProviderOffer {
   const efforts = effortList(input.providerEfforts);
   const same = (list: NewChatEffortOption[]): boolean => list.length === efforts.length && list.every((item, index) => item.id === efforts[index]?.id);
@@ -298,8 +306,18 @@ export function newChatProviderOffer(input: {
     // The model its CLI runs on by default (the computer's chip says the same).
     defaultModelLabel: shortLabel(input.vendorDefaultModelLabel ?? (usual ? nameOf(usual) : input.label)),
     models,
-    efforts: usualEfforts.length > 0 ? usualEfforts : efforts
+    efforts: usualEfforts.length > 0 ? usualEfforts : efforts,
+    ...offeredStart(input.start, Boolean(input.hostVendor))
   };
+}
+
+/** The start defaults the phone is told: the mode, and the effort for a
+ *  provider whose model is the CLI's own (an added provider's is the
+ *  vendor's). */
+function offeredStart(start: CliStartDefaults | undefined, hosted: boolean): Pick<NewChatProviderOffer, "start"> {
+  if (!start) return {};
+  const value = { ...(start.access ? { access: start.access } : {}), ...(!hosted && start.reasoningEffort ? { reasoningEffort: start.reasoningEffort } : {}) };
+  return Object.keys(value).length > 0 ? { start: value } : {};
 }
 
 /** What the phone's chip chose for the main session. */
@@ -332,9 +350,11 @@ export function newChatMainSessionFor(
   if (!choice) return offered;
   const provider = (providers ?? []).find((item) => item.kind === choice.kind && (item.hostId ?? "") === (choice.hostId ?? ""));
   if (!provider) {
-    // Its CLI's mode, on the provider the offer has.
+    // Its CLI's mode, on the provider the offer has (the one her config
+    // starts that CLI in, when the phone named none it has).
     const same = choice.kind === offered.kind;
-    return { ...offered, ...applyChatAccessOptionById(offered.kind, same ? choice.access : undefined, offered.permissions, same && choice.plan) };
+    const start = (providers ?? []).find((item) => item.kind === offered.kind && !item.hostId)?.start?.access;
+    return { ...offered, ...applyChatAccessOptionById(offered.kind, same ? choice.access : undefined, offered.permissions, same && choice.plan, start) };
   }
   const model = choice.model && provider.models.some((item) => item.id === choice.model) ? choice.model : undefined;
   const efforts = (model ? provider.models.find((item) => item.id === model)?.efforts : undefined) ?? provider.efforts;
@@ -347,7 +367,7 @@ export function newChatMainSessionFor(
     ...(provider.hostId ? { hostId: provider.hostId, hostLabel: provider.hostLabel, hostVendor: provider.hostVendor } : {}),
     ...(model ? { model } : {}),
     ...(reasoningEffort ? { reasoningEffort } : {}),
-    ...applyChatAccessOptionById(provider.kind, choice.access, offered.permissions, choice.plan),
+    ...applyChatAccessOptionById(provider.kind, choice.access, offered.permissions, choice.plan, provider.start?.access),
     ...(choice.homeMachineId ? { homeMachineId: choice.homeMachineId } : {})
   };
 }

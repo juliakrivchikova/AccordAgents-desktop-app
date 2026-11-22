@@ -1,4 +1,5 @@
 import { cloudRunSelection, type CloudRunPreparationProgress, type CloudRunSelection } from "../../shared/cloudRunPreparation";
+import type { CliStartDefaultsByKind } from "../../shared/cliStartDefaults";
 import {
   forkCutFor, forkedChatTitle, forkedMainSessionPermissions, forkOriginFor, forkToNewChatLocalProviders, forkToNewChatReasonInChat, isForkableSessionKind,
   lastMemberTurnEnd, memberAsItRunsNow, memberHasFinishedReply, type ForkToNewChatMachineSupport, type ForkToNewChatOffer
@@ -1346,6 +1347,7 @@ export class ChatService {
    *  member's session in another chat (Fork to new chat; its last hello). */
   private machineForkToNewChatSupport?: (machineId: string) => ForkToNewChatMachineSupport;
   private machineCliModesSupport?: (machineId: string) => boolean;
+  private machineCliStartDefaults?: (machineId: string) => CliStartDefaultsByKind | undefined;
   /** Members moving (on the computer) or whose session this machine just
    *  handed over: their turns wait for it (memberMoveGate). */
   private readonly memberMoveGates = new Map<string, { done: Promise<void>; release: () => void }>();
@@ -1607,6 +1609,13 @@ export class ChatService {
 
   /** Desktop side: whether a machine runs Codex's Full Access and Plan mode
    *  (its last hello), for the phone's New chat offer. */
+  /** What each CLI on a machine starts a new session in with that machine's
+   *  own config (its last hello): the phone's New chat starts a main session
+   *  that runs there in it. */
+  setMachineCliStartDefaults(lookup: ((machineId: string) => CliStartDefaultsByKind | undefined) | undefined): void {
+    this.machineCliStartDefaults = lookup;
+  }
+
   setMachineCliModesSupport(lookup: ((machineId: string) => boolean) | undefined): void {
     this.machineCliModesSupport = lookup;
   }
@@ -2218,8 +2227,18 @@ export class ChatService {
       ...(fork ? { fork } : {}),
       // This computer runs Codex's Full Access and Plan mode; each machine as
       // its program says.
-      cliModes: { machines: Object.fromEntries(machines.map((machine) => [machine.id, this.machineCliModesSupport?.(machine.id) === true])) }
+      cliModes: { machines: Object.fromEntries(machines.map((machine) => [machine.id, this.machineCliModesSupport?.(machine.id) === true])) },
+      // What each machine's CLIs start in with its own config (this
+      // computer's are with each provider): a main session the phone starts
+      // there starts in it.
+      ...this.newChatMachineStartDefaults(machines)
     };
+  }
+
+  private newChatMachineStartDefaults(machines: ReadonlyArray<{ id: string }>): Pick<HubNewChatOptions, "cliStart"> {
+    const known = machines.map((machine) => [machine.id, this.machineCliStartDefaults?.(machine.id)] as const)
+      .filter((entry): entry is readonly [string, CliStartDefaultsByKind] => Boolean(entry[1]));
+    return known.length > 0 ? { cliStart: { machines: Object.fromEntries(known) } } : {};
   }
 
   /**
@@ -2251,12 +2270,19 @@ export class ChatService {
     // it last had (none yet: its default model only), and a list that is
     // due is read in the background; one that changed publishes the offer
     // again (onNewChatOffersChanged).
-    return options.map((option) => newChatProviderOffer({
-      ...option,
-      vendorDefaultModelLabel: option.hostVendor ? cliProviderHostDefaultModelLabel({ vendor: option.hostVendor }) : undefined,
-      catalog: this.cachedMainSessionModelCatalog(option, settings),
-      providerEfforts: reasoningEffortOptionsForProvider(option.kind)
-    }));
+    return options.map((option) => {
+      const catalog = this.cachedMainSessionModelCatalog(option, settings);
+      // An added provider runs its CLI with the User's own config too: the
+      // mode that CLI starts in is the one its own list says.
+      const start = option.hostId ? this.cachedMainSessionModelCatalog({ kind: option.kind, label: option.label }, settings)?.startDefaults : catalog?.startDefaults;
+      return newChatProviderOffer({
+        ...option,
+        vendorDefaultModelLabel: option.hostVendor ? cliProviderHostDefaultModelLabel({ vendor: option.hostVendor }) : undefined,
+        catalog,
+        providerEfforts: reasoningEffortOptionsForProvider(option.kind),
+        ...(start ? { start } : {})
+      });
+    });
   }
 
   /** Told when a provider's model list read in the background changed what
@@ -2275,7 +2301,9 @@ export class ChatService {
       ? now - entry.failedAt >= MAIN_SESSION_CATALOG_RETRY_MS
       : now - entry.readAt >= MAIN_SESSION_CATALOG_FRESH_MS;
     if (due && !entry.reading) {
-      const before = JSON.stringify(entry.catalog?.models ?? null);
+      // What the phone is told of it: its models and its start defaults.
+      const offered = (catalog: ProviderModelCatalog | undefined): string => JSON.stringify([catalog?.models ?? null, catalog?.startDefaults ?? null]);
+      const before = offered(entry.catalog);
       entry.reading = this.mainSessionModelCatalog(option, settings)
         .catch(() => undefined)
         .then((catalog) => {
@@ -2286,7 +2314,7 @@ export class ChatService {
           } else {
             entry.failedAt = Date.now();
           }
-          if (JSON.stringify(entry.catalog?.models ?? null) !== before) this.onNewChatOffersChanged?.();
+          if (offered(entry.catalog) !== before) this.onNewChatOffersChanged?.();
         })
         .finally(() => { entry.reading = undefined; });
     }

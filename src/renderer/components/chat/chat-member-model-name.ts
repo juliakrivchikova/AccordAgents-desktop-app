@@ -1,10 +1,11 @@
 import { useEffect, useMemo, useState } from "react";
 
 import { cliProviderHostDefaultModelLabel, cliProviderHostModelCatalog } from "../../../shared/cliProviderHosts";
+import type { CliStartDefaults } from "../../../shared/cliStartDefaults";
 import type { ChatParticipant, ProviderModel, ProviderModelCatalog } from "../../../shared/types";
 import { chatCliProviderLabel } from "./chat-participant-drafts";
 
-type ModelNamedMember = Pick<ChatParticipant, "kind" | "hostId" | "hostLabel" | "hostVendor">;
+type ModelNamedMember = Pick<ChatParticipant, "kind"> & Partial<Pick<ChatParticipant, "hostId" | "hostLabel" | "hostVendor">>;
 
 /** A model's name for a chip: its label without the id Codex repeats in
  *  brackets ("GPT-5.5 (gpt-5.5)" reads "GPT-5.5"). */
@@ -21,9 +22,12 @@ export function chipModelLabel(model: ProviderModel): string {
  * answer, Codex's model/list, `agy models`), else the CLI's own name ("Claude
  * Code"): never "Default model".
  */
-export function memberDefaultModelName(member: ModelNamedMember, catalog: ProviderModelCatalog | undefined): string {
+export function memberDefaultModelName(member: ModelNamedMember, catalog: ProviderModelCatalog | undefined, start?: CliStartDefaults): string {
   const vendorDefault = member.hostVendor ? cliProviderHostDefaultModelLabel({ vendor: member.hostVendor }) : undefined;
   if (vendorDefault) return vendorDefault;
+  // The model the User's own config starts the CLI in where it runs (a
+  // machine reads its own): the one its CLI's list marks here.
+  if (start?.modelLabel && !member.hostId) return start.modelLabel;
   // A model the app's own provider setting names is not what a member runs on.
   const used = catalog?.models.find((model) => model.recommended && model.source !== "configured" && !model.hidden);
   return used ? chipModelLabel(used) : chatCliProviderLabel(member.kind, member.hostLabel);
@@ -58,6 +62,12 @@ function catalogFor(member: ModelNamedMember): Promise<ProviderModelCatalog | un
   return entry.catalog;
 }
 
+/** The CLI's model list as the composer's controls read it (the same list
+ *  every control shares), for one asked outside a component. */
+export function memberModelCatalogFor(member: ModelNamedMember): Promise<ProviderModelCatalog | undefined> {
+  return catalogFor(member);
+}
+
 /** memberDefaultModelName for a chip, once its CLI's list is known; the
  *  CLI's name meanwhile. Asks nothing while `enabled` is false. */
 export function useMemberDefaultModelName(member: ModelNamedMember, enabled: boolean): string {
@@ -79,9 +89,9 @@ export function useMemberDefaultModelName(member: ModelNamedMember, enabled: boo
 
 /** What a model chip names: the member's own model by its name in the list
  *  (T3 Code's "Opus 5.5", not the id), else memberDefaultModelName. */
-export function memberModelName(member: ModelNamedMember & { model?: string }, catalog: ProviderModelCatalog | undefined): string {
+export function memberModelName(member: ModelNamedMember & { model?: string }, catalog: ProviderModelCatalog | undefined, start?: CliStartDefaults): string {
   const explicit = member.model?.trim();
-  if (!explicit) return memberDefaultModelName(member, catalog);
+  if (!explicit) return memberDefaultModelName(member, catalog, start);
   const listed = catalog?.models.find((model) => model.id === explicit);
   return listed ? chipModelLabel(listed) : explicit;
 }

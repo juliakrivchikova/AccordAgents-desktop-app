@@ -28,11 +28,14 @@ import {
   codexPlanModeOn,
   currentChatAccessId,
   defaultChatAccessOption,
+  FULL_ACCESS_CONFIRMATION,
   selectedChatAccessOption,
+  startChatAccessOption,
   withClassicChatPermissions,
   withCodexPlanMode
 } from "./chatAccessModes";
-import { forkedMainSessionPermissions } from "./forkToNewChat";
+import { antigravityStartAccess, claudeStartAccess, codexStartAccess, normalizeCliStartDefaultsByKind } from "./cliStartDefaults";
+import { forkedMainSessionPermissions, memberAsItRunsNow } from "./forkToNewChat";
 import { newChatMainSessionFor } from "./newChat";
 import { chatPermissionPromptLines, chatPermissionSummaryLine } from "./permissionPrompt";
 import type { ChatParticipant } from "./types";
@@ -262,4 +265,84 @@ test("a Codex member on a machine whose program is older is not given Full Acces
   assert.equal(codexModesUnavailableReason(member, { name: "Box", lastHello: { cliModesSupported: true } }), undefined);
   assert.equal(codexModesUnavailableReason({ kind: "codex-cli" }, undefined), undefined, "on this computer");
   assert.equal(codexModesUnavailableReason({ kind: "claude-code", homeMachineId: "m-box" }, undefined), undefined, "only Codex has them");
+});
+
+test("a new main session starts in the mode the User's own config starts its CLI in, read where it runs", () => {
+  // Codex 0.155.1: the preset /permissions marks current for config/read.
+  assert.equal(codexStartAccess({}), "workspace-write", "nothing set: Ask for approval, in a folder it trusts");
+  assert.equal(codexStartAccess({ approvals_reviewer: "guardian_subagent" }), "auto-review", "her config: Approve for me");
+  assert.equal(codexStartAccess({ approvals_reviewer: "auto_review", approval_policy: "on-request", sandbox_mode: "workspace-write" }), "auto-review");
+  assert.equal(codexStartAccess({ sandbox_mode: "read-only" }), "read-only");
+  assert.equal(codexStartAccess({ sandbox_mode: "danger-full-access", approval_policy: "never" }), "full-access");
+  // Codex's "Custom permissions": no preset, so the CLI's built-in one.
+  assert.equal(codexStartAccess({ approval_policy: "untrusted" }), undefined);
+  assert.equal(codexStartAccess({ sandbox_mode: "danger-full-access" }), undefined);
+  assert.equal(codexStartAccess(undefined), undefined);
+  // Claude Code 2.1.330: its initialize answer's current_permission_mode.
+  assert.equal(claudeStartAccess("default"), "manual");
+  assert.equal(claudeStartAccess("acceptEdits"), "acceptEdits");
+  assert.equal(claudeStartAccess("plan"), "plan");
+  assert.equal(claudeStartAccess("auto"), "auto");
+  assert.equal(claudeStartAccess("bypassPermissions"), undefined, "not offered by the composer");
+  // agy 1.5.14: settings.json agentMode; none saved: Auto where it has it.
+  assert.equal(antigravityStartAccess(undefined, "darwin"), "auto");
+  assert.equal(antigravityStartAccess({}, "linux"), "auto");
+  assert.equal(antigravityStartAccess({}, "win32"), "default");
+  assert.equal(antigravityStartAccess({ agentMode: "" }, "darwin"), "default");
+  assert.equal(antigravityStartAccess({ agentMode: "accept-edits" }, "darwin"), "accept-edits");
+  assert.equal(antigravityStartAccess({ agentMode: "plan" }, "darwin"), "plan");
+  // The mode it starts in: that one when offered (Read Only too), else the built-in.
+  assert.equal(startChatAccessOption("codex-cli", "auto-review").label, "Approve for me");
+  assert.equal(startChatAccessOption("codex-cli", "read-only").label, "Read Only");
+  assert.equal(startChatAccessOption("codex-cli", "full-access").label, "Full Access");
+  assert.equal(startChatAccessOption("claude-code", "acceptEdits").label, "Accept edits");
+  assert.equal(startChatAccessOption("claude-code", "default").label, "Manual", "the old id is the mode it is now");
+  assert.equal(startChatAccessOption("gemini-cli", "auto").label, "Auto mode");
+  assert.equal(startChatAccessOption("claude-code", undefined).label, defaultChatAccessOption("claude-code").label);
+  assert.equal(startChatAccessOption("codex-cli", "nonsense").label, defaultChatAccessOption("codex-cli").label);
+  // The phone names no mode: the one her config starts the CLI in.
+  const applied = applyChatAccessOptionById("codex-cli", undefined, defaultChatAgentPermissions(), false, "auto-review");
+  assert.equal(selectedChatAccessOption("codex-cli", applied.agentMode, applied.permissions)?.label, "Approve for me");
+  // Travelling start defaults keep their known fields only.
+  assert.deepEqual(normalizeCliStartDefaultsByKind({ "codex-cli": { access: "auto-review", model: "gpt-5.6-luna", modelLabel: "GPT-5.6-Luna", reasoningEffort: "low", extra: 1 }, bogus: {} }),
+    { "codex-cli": { access: "auto-review", model: "gpt-5.6-luna", modelLabel: "GPT-5.6-Luna", reasoningEffort: "low" } });
+  assert.equal(normalizeCliStartDefaultsByKind("nope"), undefined);
+});
+
+test("the phone's main session takes the start mode its provider offers when it names none", () => {
+  const offered: ChatParticipant = {
+    id: "main-session", handle: "main", roleConfigId: "main-session", kind: "codex-cli", agentMode: "default", permissions: defaultChatAgentPermissions()
+  };
+  const providers = [{ kind: "codex-cli" as const, label: "Codex", defaultModelLabel: "GPT-5.6-Luna", models: [], efforts: [], start: { access: "auto-review" } }];
+  const made = newChatMainSessionFor(offered, providers, { kind: "codex-cli", access: "not-a-mode" });
+  assert.equal(selectedChatAccessOption(made.kind, made.agentMode, made.permissions)?.label, "Approve for me");
+  const chosen = newChatMainSessionFor(offered, providers, { kind: "codex-cli", access: "workspace-write" });
+  assert.equal(selectedChatAccessOption(chosen.kind, chosen.agentMode, chosen.permissions)?.label, "Ask for approval");
+});
+
+test("Codex's question before Full Access is Codex's own, word for word (Codex 0.155.1's /permissions)", () => {
+  assert.equal(FULL_ACCESS_CONFIRMATION.title, "Enable full access?");
+  assert.equal(FULL_ACCESS_CONFIRMATION.body, "When Codex runs with full access, it can edit any file on your computer and run commands with network, without your approval. Exercise caution when enabling full access. This significantly increases the risk of data loss, leaks, or unexpected behavior.");
+  assert.deepEqual(FULL_ACCESS_CONFIRMATION.confirm, { label: "Yes, continue anyway", detail: "Apply full access for this session" });
+  assert.deepEqual(FULL_ACCESS_CONFIRMATION.cancel, { label: "Cancel", detail: "Go back without enabling full access" });
+});
+
+test("a member the main session made in Plan runs as each CLI runs a subagent then: Claude Code's stays in Plan, Codex's runs Default", () => {
+  const permissions = { ...defaultChatAgentPermissions(), workspaceWrite: true, shell: { enabled: true, rules: [] }, cliApprovals: true as const };
+  const member = (kind: ChatParticipant["kind"], agentMode: ChatParticipant["agentMode"], extra: Partial<ChatParticipant["permissions"]> = {}): ChatParticipant => ({
+    id: `m-${kind}`, handle: "m", roleConfigId: "r", kind, agentMode, permissions: { ...permissions, ...extra }, delegatedByParticipantId: "main"
+  });
+  // Claude Code: "When the main conversation is in plan mode, the subagent
+  // stays in plan mode whichever permissionMode you set" (its docs), seen too.
+  const claudeMain: ChatParticipant = { id: "main", handle: "main", roleConfigId: "main-session", kind: "claude-code", agentMode: "plan", permissions };
+  for (const mode of ["default", "auto", "plan"] as const) {
+    const running = memberAsItRunsNow(member("claude-code", mode), claudeMain);
+    assert.equal(running.agentMode, "plan", `a Claude Code member asked for ${mode} runs Plan`);
+  }
+  // Codex: a subagent spawned in Plan mode runs Codex's Default
+  // collaboration mode with the parent's sandbox and approvals.
+  const codexMain: ChatParticipant = { id: "main", handle: "main", roleConfigId: "main-session", kind: "codex-cli", agentMode: "default", permissions: { ...permissions, codexPlanMode: true } };
+  const codexMember = memberAsItRunsNow(member("codex-cli", "default"), codexMain);
+  assert.equal(codexPlanModeOn(codexMember.kind, codexMember.agentMode, codexMember.permissions), false, "not in Plan mode");
+  assert.equal(selectedChatAccessOption(codexMember.kind, codexMember.agentMode, codexMember.permissions)?.label, "Ask for approval", "the main session's preset");
 });

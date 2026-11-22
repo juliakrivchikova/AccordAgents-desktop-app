@@ -11,7 +11,8 @@ import { defaultChatAgentPermissions } from "../../../shared/agentPermissions";
 import { chatAccessOptions, selectedChatAccessOption, codexPlanModeOn } from "../../../shared/chatAccessModes";
 import type { ChatAgentMode, ChatParticipant } from "../../../shared/types";
 import { ChatMemberComposerControls, type ChatModelAccessPatch } from "./chat-model-access-picker";
-import { accessHeldReason, applyChatAccessOptionKeepingPlan } from "./chat-access-controls";
+import { accessHeldReason, accessIcon, applyChatAccessOptionKeepingPlan, ComposerControlIcon } from "./chat-access-controls";
+import { newChatMainSessionParticipantConfig } from "./chat-main-session-draft";
 import { ChatMemberActionsMenu } from "./chat-member-model-access";
 import { resetMemberModelCatalogs } from "./chat-member-model-name";
 import { ChatTitleMenuContent, type ChatViewHeaderState } from "./chat-view-switch";
@@ -163,4 +164,95 @@ test("a member the main session made is held only above the main session's mode:
   assert.equal(held("plan"), undefined, "Plan edits nothing: not above Manual");
   assert.match(held("acceptEdits") ?? "", /Not above the main session's mode \(Manual\)/);
   assert.match(held("auto") ?? "", /Not above/);
+});
+
+test("the model chip names the model that runs: her config's, not the one the CLI's list marks default; the effort her config sets", async () => {
+  // As the main process lists it: config.toml's gpt-5.6-luna marked, GPT-6-Luna not.
+  const efforts = [{ id: "low" as const, label: "Low" }, { id: "medium" as const, label: "Medium" }];
+  const catalog = {
+    kind: "codex-cli", authoritative: true, fetchedAt: "t",
+    models: [
+      { id: "gpt-6-luna", label: "GPT-6-Luna (gpt-6-luna)", recommended: false, source: "cli", supportedReasoningEfforts: efforts },
+      { id: "gpt-5.6-luna", label: "GPT-5.6-Luna (gpt-5.6-luna)", recommended: true, source: "cli", supportedReasoningEfforts: efforts }
+    ],
+    startDefaults: { access: "auto-review", model: "gpt-5.6-luna", modelLabel: "GPT-5.6-Luna", reasoningEffort: "low" }
+  };
+  const view = await renderControls(CODEX, noop, { listProviderModels: async () => catalog });
+  try {
+    assert.equal(textOf(view.root.find(byTestId("chat-model-model"))), "GPT-5.6-Luna");
+    assert.equal(textOf(view.root.find(byTestId("chat-model-effort"))), "Low", "the effort her config sets, not a bare Default");
+    await act(async () => { view.root.find(byTestId("chat-model-effort")).props.onClick(); });
+    const defaultRow = view.root.findAll(byTestId("chat-effort-option")).find((row) => row.props["data-value"] === "")!;
+    assert.equal(defaultRow.props["aria-checked"], true, "nothing chosen: Default, which runs at Low");
+    assert.match(textOf(defaultRow), /^DefaultLow$/);
+  } finally {
+    view.done();
+  }
+  // A model chosen: its own name, and Default effort is the CLI's.
+  const chosen = await renderControls({ ...CODEX, model: "gpt-6-luna" }, noop, { listProviderModels: async () => catalog });
+  try {
+    assert.equal(textOf(chosen.root.find(byTestId("chat-model-model"))), "GPT-6-Luna");
+    assert.equal(textOf(chosen.root.find(byTestId("chat-model-effort"))), "Default");
+  } finally {
+    chosen.done();
+  }
+});
+
+test("a member on a machine: its chip names the model that machine's own config runs", async () => {
+  const onBox = { ...CODEX, homeMachineId: "m-box" };
+  const view = await renderControls(onBox, noop, {
+    listMachines: async () => ({ machines: [{ id: "m-box", name: "Box" }], status: [{ machineId: "m-box", name: "Box", connected: true,
+      lastHello: { cliModesSupported: true, cliStartDefaults: { "codex-cli": { access: "read-only", model: "gpt-5.5", modelLabel: "GPT-5.5" } } } }] })
+  });
+  try {
+    assert.equal(textOf(view.root.find(byTestId("chat-model-model"))), "GPT-5.5");
+  } finally {
+    view.done();
+  }
+});
+
+test("choosing Codex's Full Access asks first in Codex's words; only Yes switches, Cancel goes back to the list", async () => {
+  const patches: ChatModelAccessPatch[] = [];
+  const view = await renderControls(CODEX, (patch) => { patches.push(patch); });
+  try {
+    await act(async () => { view.root.find(byTestId("chat-model-mode")).props.onClick(); });
+    const full = () => view.root.findAll(byTestId("chat-access-option")).find((row) => row.props["data-value"] === "full-access")!;
+    await act(async () => { full().props.onClick(); });
+    assert.deepEqual(patches, [], "nothing switched yet");
+    const confirm = view.root.find(byTestId("chat-full-access-confirm"));
+    assert.match(textOf(confirm), /^Enable full access\?When Codex runs with full access, it can edit any file on your computer/);
+    assert.equal(view.root.findAll(byTestId("chat-access-option")).length, 0, "in place of the list");
+    await act(async () => { view.root.find(byTestId("chat-full-access-confirm-cancel")).props.onClick(); });
+    assert.deepEqual(patches, [], "Cancel switches nothing");
+    assert.ok(full(), "back to the list");
+    await act(async () => { full().props.onClick(); });
+    await act(async () => { view.root.find(byTestId("chat-full-access-confirm-yes")).props.onClick(); });
+    assert.equal(patches.length, 1);
+    assert.equal(selectedChatAccessOption("codex-cli", patches[0]!.agentMode, patches[0]!.permissions)?.label, "Full Access");
+    // Another mode switches at once, as Codex's picker does.
+    await act(async () => { view.root.find(byTestId("chat-model-mode")).props.onClick(); });
+    await act(async () => { view.root.findAll(byTestId("chat-access-option")).find((row) => row.props["data-value"] === "auto-review")!.props.onClick(); });
+    assert.equal(patches.length, 2);
+  } finally {
+    view.done();
+  }
+});
+
+test("a new main session in the sessions view starts in the mode her config starts its CLI in, else the CLI's built-in one", () => {
+  const made = newChatMainSessionParticipantConfig("codex-cli", true, undefined, true, "auto-review");
+  assert.equal(selectedChatAccessOption("codex-cli", made.agentMode, made.permissions)?.label, "Approve for me");
+  const claude = newChatMainSessionParticipantConfig("claude-code", true, undefined, true, "acceptEdits");
+  assert.equal(selectedChatAccessOption("claude-code", claude.agentMode, claude.permissions)?.label, "Accept edits");
+  const unknown = newChatMainSessionParticipantConfig("claude-code", true, undefined, true, undefined);
+  assert.equal(selectedChatAccessOption("claude-code", unknown.agentMode, unknown.permissions)?.label, "Manual");
+});
+
+test("in a narrow composer a control turns into an icon whose name stays in its tooltip, never a one-letter stub", () => {
+  for (const option of [...chatAccessOptions("claude-code"), ...chatAccessOptions("codex-cli"), ...chatAccessOptions("gemini-cli")]) {
+    assert.ok(accessIcon(option), `${option.label} has an icon`);
+  }
+  let renderer: ReturnType<typeof create> | undefined;
+  act(() => { renderer = create(<ComposerControlIcon icon={accessIcon(chatAccessOptions("claude-code")[0])} label="Manual" />); });
+  assert.equal(textOf(renderer!.root), "Manual", "the name for screen readers");
+  act(() => renderer!.unmount());
 });

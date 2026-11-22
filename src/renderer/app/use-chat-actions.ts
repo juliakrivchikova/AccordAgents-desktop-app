@@ -27,6 +27,7 @@ import {
   validateChatStartupDrafts
 } from "../components/chat/chat-participant-drafts";
 import { NEW_CHAT_MAIN_SESSION_PARTICIPANT_ID, newChatMainSessionParticipantDraft } from "../components/chat/chat-main-session-draft";
+import { cliStartDefaultsFor } from "../components/chat/use-cli-start-defaults";
 import { newChatViewFor } from "../../shared/mainSession";
 import {
   type MainSessionProviderChoice,
@@ -231,8 +232,13 @@ export function useChatActions(state: AppState, conversationActions: Conversatio
     // Assistant (docs/main-session.md). In the sessions view nobody else:
     // the main session makes members itself, and an @handle in the first
     // message picks none.
+    // The mode the User's own config starts its CLI in where it will run
+    // (this computer, or the machine chosen for it on New chat).
+    const startAccess = sessionsView
+      ? (await cliStartDefaultsFor({ kind: mainProvider.kind, homeMachineId: mainSessionRuntimeOverride?.homeMachineId, cloudRun: mainSessionRuntimeOverride?.cloudRun }))?.access
+      : undefined;
     const participants = [
-      newChatMainSessionParticipantDraft(mainProvider.kind, mainSessionRuntimeOverride, Boolean(state.repoPath.trim()), mainProvider.hostId, sessionsView),
+      newChatMainSessionParticipantDraft(mainProvider.kind, mainSessionRuntimeOverride, Boolean(state.repoPath.trim()), mainProvider.hostId, sessionsView, startAccess),
       ...(sessionsView ? [] : selectedOrMentionedChatParticipantDrafts(
         state.settings.chatParticipantConfigs,
         state.selectedChatParticipantConfigIds,

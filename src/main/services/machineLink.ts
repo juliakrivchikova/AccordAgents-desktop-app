@@ -13,6 +13,7 @@
  * settings on the server, sealed for that machine alone.
  */
 
+import { normalizeCliStartDefaultsByKind, type CliStartDefaultsByKind } from "../../shared/cliStartDefaults";
 import type { MachineMemberRestartSupport } from "../../shared/memberRestart";
 import type { MachineSessionMoveSupport, MachineSessionMoveTarget } from "../../shared/memberSessionMove";
 import { forkToNewChatSupportFromHello, type ForkToNewChatMachineSupport } from "../../shared/forkToNewChat";
@@ -435,6 +436,12 @@ export class MachineLinkService {
    *  set them, by the last hello it sent this desktop. */
   cliModesSupport(machineId: string): boolean {
     return (this.connections.get(machineId)?.record ?? this.enrolled.get(machineId))?.lastHello?.cliModesSupported === true;
+  }
+
+  /** What each CLI on a machine starts a new session in with that machine's
+   *  own config, by the last hello it sent this desktop. */
+  cliStartDefaults(machineId: string): CliStartDefaultsByKind | undefined {
+    return normalizeCliStartDefaultsByKind((this.connections.get(machineId)?.record ?? this.enrolled.get(machineId))?.lastHello?.cliStartDefaults);
   }
 
   /** Ask a machine to do something with its scheduled scripts and wait for

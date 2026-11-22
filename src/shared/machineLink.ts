@@ -12,6 +12,7 @@
  * (machineControlAuthentication, machineChannelSealing).
  */
 
+import type { CliStartDefaultsByKind } from "./cliStartDefaults";
 import type { ChatMessage } from "./types";
 import type { MachineProgressFrame } from "./machineProgress";
 import type { TrustedDeviceRecord } from "./machineTrust";
@@ -104,6 +105,11 @@ export interface MachineHelloBody {
    *  view's menus set them (src/shared/chatAccessModes.ts); absent before,
    *  when Full Access ran as Ask for approval and Plan mode was dropped. */
   cliModesSupported?: boolean;
+  /** What each CLI here starts a new session in with this machine's own
+   *  config (src/shared/cliStartDefaults.ts): a new main session that runs
+   *  here starts in it, and its composer names its model. Absent from a
+   *  runtime from before, or until the CLIs have said. */
+  cliStartDefaults?: CliStartDefaultsByKind;
   /** An enabled scheduled script keeps this machine from stopping when idle.
    *  Not a run: the desktop's update gate does not wait on it. */
   keepAwake?: boolean;

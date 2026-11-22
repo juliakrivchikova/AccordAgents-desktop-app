@@ -1,9 +1,13 @@
+import { useEffect, useRef, useState } from "react";
+import { ClipboardList, Eye, Lock, PenLine, ShieldCheck, ShieldOff, SlidersHorizontal, type LucideIcon } from "lucide-react";
+
 import { effectiveChatAgentPermissionsForProvider, normalizeChatAgentMode, normalizeChatAgentPermissions } from "../../../shared/agentPermissions";
 import {
   applyChatAccessOption,
   chatAccessMenuOptions,
   chatAccessModeSet,
   codexPlanModeOn,
+  FULL_ACCESS_CONFIRMATION,
   selectedChatAccessOption,
   withCodexPlanMode,
   type ChatAccessOption
@@ -26,6 +30,8 @@ export function ChatAccessControl(props: {
   modesReason?: string;
   onChange: (patch: ChatModelAccessPatch) => unknown;
   testId: string;
+  /** A narrow composer: the mode's icon, its name in the tooltip and menu. */
+  iconOnly?: boolean;
 }): JSX.Element {
   const { value } = props;
   const set = chatAccessModeSet(value.kind);
@@ -33,7 +39,8 @@ export function ChatAccessControl(props: {
   const label = access?.label ?? "Custom";
   return (
     <ComposerMenu testId={`${props.testId}-mode`} title={`${set.title}: ${label}`} width={320} align="end"
-      label={<span className="chat-composer-control-text">{label}</span>}>
+      bare={props.iconOnly} triggerClassName={props.iconOnly ? "chat-model-chip composer-menu-trigger is-icon" : undefined}
+      label={props.iconOnly ? <ComposerControlIcon icon={accessIcon(access)} label={label} /> : <span className="chat-composer-control-text">{label}</span>}>
       {(close) => (
         <ChatAccessMenu value={value} mainSession={props.mainSession} disabled={props.disabled} modesReason={props.modesReason}
           onSelect={(option) => {
@@ -46,8 +53,33 @@ export function ChatAccessControl(props: {
   );
 }
 
+/** A control's value as an icon in a narrow composer; its name stays for
+ *  screen readers (the control's tooltip and menu say it too). */
+export function ComposerControlIcon(props: { icon: LucideIcon; label: string }): JSX.Element {
+  const Icon = props.icon;
+  return (
+    <span className="chat-composer-control-icon">
+      <Icon size={14} aria-hidden />
+      <span className="sr-only">{props.label}</span>
+    </span>
+  );
+}
+
+/** A mode's icon, as T3 Code draws its permission modes: a lock for asking
+ *  before changes, a pen for edits without asking, a list for planning, a
+ *  checked shield for the CLI deciding, a crossed one for Full Access. */
+export function accessIcon(option: ChatAccessOption | undefined): LucideIcon {
+  if (!option) return SlidersHorizontal;
+  if (option.agentMode === "full-access") return ShieldOff;
+  if (option.agentMode === "auto") return ShieldCheck;
+  if (option.agentMode === "plan") return ClipboardList;
+  if (option.id === "read-only") return Eye;
+  return option.workspaceWrite ? PenLine : Lock;
+}
+
 /** A CLI's permission modes under its own title, each with the vendor's
- *  description; one a member is held back from is disabled with the reason. */
+ *  description; one a member is held back from is disabled with the reason.
+ *  Codex's Full Access is asked about first, in Codex's own words. */
 export function ChatAccessMenu(props: {
   value: ChatModelAccessValue;
   mainSession?: ChatParticipant;
@@ -59,6 +91,14 @@ export function ChatAccessMenu(props: {
   const { value } = props;
   const set = chatAccessModeSet(value.kind);
   const access = selectedChatAccessOption(value.kind, value.agentMode, value.permissions);
+  const [confirming, setConfirming] = useState<ChatAccessOption>();
+  if (confirming) {
+    return (
+      <FullAccessConfirmation
+        onConfirm={() => props.onSelect(confirming)}
+        onBack={() => setConfirming(undefined)} />
+    );
+  }
   return (
     <ComposerMenuSection label={set.title} testId="chat-access-menu">
       {props.disabled && <ComposerMenuNote testId="chat-access-busy">{TURN_RUNNING_NOTE}</ComposerMenuNote>}
@@ -71,11 +111,32 @@ export function ChatAccessMenu(props: {
         return (
           <ComposerMenuItem key={option.id} testId="chat-access-option" value={option.id} selected={option.id === access?.id}
             disabled={props.disabled || Boolean(held)} label={option.label} detail={held ?? option.detail}
-            onSelect={() => props.onSelect(option)} />
+            onSelect={() => option.agentMode === "full-access" && option.id !== access?.id ? setConfirming(option) : props.onSelect(option)} />
         );
       })}
       {set.note && <ComposerMenuNote testId="chat-access-note">{set.note}</ComposerMenuNote>}
     </ComposerMenuSection>
+  );
+}
+
+/** Codex's question before Full Access, in place of its list (Codex 0.155.1's
+ *  `/permissions`): only "Yes, continue anyway" switches; "Cancel" goes back
+ *  to the list. The keyboard lands on "Yes", as Codex's cursor does. */
+function FullAccessConfirmation(props: { onConfirm: () => void; onBack: () => void }): JSX.Element {
+  const ref = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    ref.current?.querySelector<HTMLElement>("[role='menuitem']")?.focus({ preventScroll: true });
+  }, []);
+  return (
+    <div ref={ref} className="composer-menu-confirm" data-testid="chat-full-access-confirm">
+      <ComposerMenuSection label={FULL_ACCESS_CONFIRMATION.title} testId="chat-full-access-confirm-section">
+        <ComposerMenuNote testId="chat-full-access-confirm-body">{FULL_ACCESS_CONFIRMATION.body}</ComposerMenuNote>
+        <ComposerMenuItem role="menuitem" testId="chat-full-access-confirm-yes" label={FULL_ACCESS_CONFIRMATION.confirm.label}
+          detail={FULL_ACCESS_CONFIRMATION.confirm.detail} onSelect={props.onConfirm} />
+        <ComposerMenuItem role="menuitem" testId="chat-full-access-confirm-cancel" label={FULL_ACCESS_CONFIRMATION.cancel.label}
+          detail={FULL_ACCESS_CONFIRMATION.cancel.detail} onSelect={props.onBack} />
+      </ComposerMenuSection>
+    </div>
   );
 }
 
@@ -88,6 +149,8 @@ export function ChatCodexPlanToggle(props: {
   modesReason?: string;
   onChange: (patch: ChatModelAccessPatch) => unknown;
   testId: string;
+  /** A narrow composer: its icon, its name in the tooltip. */
+  iconOnly?: boolean;
 }): JSX.Element | null {
   const { value } = props;
   const plan = chatAccessModeSet("codex-cli").plan;
@@ -96,10 +159,10 @@ export function ChatCodexPlanToggle(props: {
   const blocked = !on ? props.modesReason : undefined;
   const title = props.disabled ? `${plan.label}. ${TURN_RUNNING_NOTE}` : blocked ? `${plan.label}. ${blocked}` : plan.label;
   return (
-    <button type="button" className={on ? "chat-model-chip chat-composer-toggle is-on" : "chat-model-chip chat-composer-toggle"}
+    <button type="button" className={`chat-model-chip chat-composer-toggle${on ? " is-on" : ""}${props.iconOnly ? " is-icon" : ""}`}
       data-testid={`${props.testId}-plan`} aria-pressed={on} title={title} aria-label={title} disabled={props.disabled || Boolean(blocked)}
       onClick={() => props.onChange(withCodexPlanMode(value.agentMode, value.permissions, !on))}>
-      <span className="chat-composer-control-text">{plan.label}</span>
+      {props.iconOnly ? <ComposerControlIcon icon={ClipboardList} label={plan.label} /> : <span className="chat-composer-control-text">{plan.label}</span>}
     </button>
   );
 }

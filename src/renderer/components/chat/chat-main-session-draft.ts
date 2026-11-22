@@ -1,7 +1,7 @@
 import { MAIN_SESSION_HANDLE, MAIN_SESSION_ROLE_ID } from "../../../shared/mainSession";
 import type { ChatParticipantConfig, ChatProviderKind } from "../../../shared/types";
 import { newChatMemberPermissions } from "../../../shared/agentPermissions";
-import { applyChatAccessOption, defaultChatAccessOption } from "../../../shared/chatAccessModes";
+import { applyChatAccessOption, startChatAccessOption } from "../../../shared/chatAccessModes";
 import { isChatAssistantParticipant } from "../conversation/conversation-display";
 import {
   type ChatParticipantDraft,
@@ -20,12 +20,15 @@ export function newChatMainSessionParticipantConfig(
   kind: ChatProviderKind,
   hasProject = true,
   hostId?: string,
-  /** A chat that opens in the sessions view: its main session starts in its
-   *  CLI's own default mode (chatAccessModes.ts), as the CLI starts. */
-  sessionsView = false
+  /** A chat that opens in the sessions view: its main session starts in the
+   *  mode its CLI starts in (chatAccessModes.ts), as the CLI starts. */
+  sessionsView = false,
+  /** That mode by the CLI's name, as the User's own config sets it where the
+   *  main session runs (CliStartDefaults.access); none: the CLI's built-in. */
+  startAccess?: string
 ): ChatParticipantConfig {
   const permissions = { ...newChatMemberPermissions(hasProject), requestParticipants: "allow" as const, manageRolesParticipants: "allow" as const };
-  const access = sessionsView ? applyChatAccessOption(defaultChatAccessOption(kind), permissions) : { agentMode: "default" as const, permissions };
+  const access = sessionsView ? applyChatAccessOption(startChatAccessOption(kind, startAccess), permissions) : { agentMode: "default" as const, permissions };
   return {
     id: NEW_CHAT_MAIN_SESSION_PARTICIPANT_ID,
     handle: MAIN_SESSION_HANDLE,
@@ -37,7 +40,7 @@ export function newChatMainSessionParticipantConfig(
     // The rights an ordinary member starts with in this chat (reading its
     // project when it has one), asking members without a card as its role
     // does; the app makes the same one (ChatService.ensureMainSessionParticipant).
-    // In the sessions view its CLI's default mode on top: what it is not
+    // In the sessions view the mode its CLI starts in on top: what it is not
     // granted, the CLI asks about.
     agentMode: access.agentMode,
     permissions: access.permissions,
@@ -54,10 +57,11 @@ export function newChatMainSessionParticipantDraft(
   runtimeOverride: ChatParticipantRuntimeOverride | undefined,
   hasProject = true,
   hostId?: string,
-  sessionsView = false
+  sessionsView = false,
+  startAccess?: string
 ): ChatParticipantDraft {
   const draft = chatParticipantConfigToDraftWithRuntimeOverrides(
-    newChatMainSessionParticipantConfig(kind, hasProject, hostId, sessionsView),
+    newChatMainSessionParticipantConfig(kind, hasProject, hostId, sessionsView, startAccess),
     runtimeOverride ? { [NEW_CHAT_MAIN_SESSION_PARTICIPANT_ID]: runtimeOverride } : {}
   );
   // The sessions view's picker has no repository switch: the main session
