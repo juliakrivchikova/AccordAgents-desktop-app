@@ -290,6 +290,10 @@ export interface ChatSearchConversationSnapshot {
   oldestMessageAt?: string;
   newestMessageAt?: string;
   participants: ChatParticipant[];
+  /** The chat's main session and view, for how its results name authors
+   *  (the sessions view names none). */
+  mainSessionParticipantId?: string;
+  chatView?: string;
   sourceReadable?: boolean;
 }
 
@@ -558,12 +562,16 @@ export class StorageService {
   }
 
   /** A chat's kind, project folder and members, without its messages or
-   *  the rest of its body (members' memory asks this on every request). */
-  async conversationAccess(id: string): Promise<{ kind: string; repoPath?: string; participants: unknown[] } | undefined> {
+   *  the rest of its body (members' memory asks this on every request); its
+   *  main session and view, for how the server words what it sends outside
+   *  (an urgent alert names nobody by handle in the sessions view). */
+  async conversationAccess(id: string): Promise<{ kind: string; repoPath?: string; participants: unknown[]; mainSessionParticipantId?: string; chatView?: string } | undefined> {
     await this.init();
-    const rows = await this.queryJson<{ kind: string; repoPath: string | null; participantsJson: string | null }>(
+    const rows = await this.queryJson<{ kind: string; repoPath: string | null; participantsJson: string | null; mainSessionParticipantId: string | null; chatView: string | null }>(
       `select kind, repo_path as repoPath,
-         json_extract(coalesce(nullif(body_json, ''), payload_json), '$.metadata.participants') as participantsJson
+         json_extract(coalesce(nullif(body_json, ''), payload_json), '$.metadata.participants') as participantsJson,
+         json_extract(coalesce(nullif(body_json, ''), payload_json), '$.metadata.mainSessionParticipantId') as mainSessionParticipantId,
+         json_extract(coalesce(nullif(body_json, ''), payload_json), '$.metadata.chatView') as chatView
        from conversations where id = ${sqlString(id)};`
     );
     const row = rows[0];
@@ -575,7 +583,35 @@ export class StorageService {
     } catch {
       participants = [];
     }
-    return { kind: row.kind, ...(row.repoPath ? { repoPath: row.repoPath } : {}), participants };
+    return {
+      kind: row.kind,
+      ...(row.repoPath ? { repoPath: row.repoPath } : {}),
+      participants,
+      ...(typeof row.mainSessionParticipantId === "string" && row.mainSessionParticipantId ? { mainSessionParticipantId: row.mainSessionParticipantId } : {}),
+      ...(typeof row.chatView === "string" && row.chatView ? { chatView: row.chatView } : {})
+    };
+  }
+
+  /** The chat's newest messages that give a member a task (its request
+   *  messages), read without the rest of the chat: how the sessions view
+   *  titles that member (sessionsMemberTitle). */
+  async memberTaskMessages(conversationId: string, participantId: string, limit = 5): Promise<ChatMessage[]> {
+    await this.init();
+    const rows = await this.queryJson<{ payloadJson: string }>(
+      `select payload_json as payloadJson from conversation_messages
+       where conversation_id = ${sqlString(conversationId)}
+         and instr(payload_json, '"participantRequest"') > 0
+         and instr(payload_json, ${sqlString(participantId)}) > 0
+       order by sequence desc limit ${Math.max(1, Math.floor(limit))};`
+    );
+    return rows.flatMap((row) => {
+      try {
+        const message = JSON.parse(row.payloadJson) as ChatMessage;
+        return message && typeof message === "object" ? [message] : [];
+      } catch {
+        return [];
+      }
+    }).reverse();
   }
 
   /** A chat's member session records (this device's own), without its
@@ -1301,6 +1337,8 @@ export class StorageService {
       oldestMessageAt?: string | null;
       newestMessageAt?: string | null;
       participantsHex?: string;
+      mainSessionParticipantId?: string | null;
+      chatView?: string | null;
       payloadValid: number | string;
     }>(`
       with chat_bodies as (
@@ -1333,6 +1371,8 @@ export class StorageService {
         ${includeParticipants
           ? "case when json_valid(c.source_json) then hex(coalesce(json_extract(c.source_json, '$.metadata.participants'), '[]')) end"
           : "NULL"} as participantsHex,
+        case when json_valid(c.source_json) then json_extract(c.source_json, '$.metadata.mainSessionParticipantId') end as mainSessionParticipantId,
+        case when json_valid(c.source_json) then json_extract(c.source_json, '$.metadata.chatView') end as chatView,
         json_valid(c.source_json) as payloadValid
       from chat_bodies c
       left join message_stats s on s.conversation_id = c.id
@@ -1354,6 +1394,8 @@ export class StorageService {
             ? parseHexJson<unknown[]>(row.participantsHex, `chat search participants ${row.conversationId}`)
               .filter(isStoredChatParticipant)
             : [],
+          ...(typeof row.mainSessionParticipantId === "string" && row.mainSessionParticipantId ? { mainSessionParticipantId: row.mainSessionParticipantId } : {}),
+          ...(typeof row.chatView === "string" && row.chatView ? { chatView: row.chatView } : {}),
           sourceReadable
         };
       } catch (error) {

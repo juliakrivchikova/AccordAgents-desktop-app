@@ -1,5 +1,5 @@
 import { CloudProviderAuth } from "../cloud-provider-auth";
-import { memo, useState } from "react";
+import { memo, useState, type ReactNode } from "react";
 import { messageDelivery } from "../../../shared/messageDelivery";
 import { ChatMessageRefusal } from "./chat-message-refusal";
 import { AlertTriangle, CheckCircle2, ChevronDown, ChevronUp, Copy, FileText, ListChecks, RefreshCw, Reply, Smile, X } from "lucide-react";
@@ -105,6 +105,9 @@ export const ChatMessageItem = memo(function ChatMessageItem(props: {
    *  member's session). */
   presentation?: "sessions";
   authorLabel?: string;
+  /** The sessions view: the author's mark where it has no name (the main
+   *  session in a member's session: its provider's logo). */
+  authorMark?: ReactNode;
   /** The sessions view: the main session's tasks of this turn, shown in its
    *  "Worked for …" fold (under the reply while it is being written). */
   sessionsWork?: readonly SessionsTaskEntry[];
@@ -435,6 +438,7 @@ export const ChatMessageItem = memo(function ChatMessageItem(props: {
             streamingStartedAt={streamingStartedAt}
             sessions={sessions}
             authorLabel={props.authorLabel}
+            authorMark={props.authorMark}
             inThread={props.inThread}
           />
           {/* One quiet "Worked for …" for every reply of the sessions view. */}

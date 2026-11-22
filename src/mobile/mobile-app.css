@@ -3717,6 +3717,15 @@ button.mobile-chat-group-title:active {
   flex-shrink: 0;
 }
 
+/* A sessions-view chat's row: its provider's logo, no avatar picture. */
+.act-avatar-glyph {
+  width: 38px;
+  height: 38px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
 .act-col {
   flex: 1;
   min-width: 0;

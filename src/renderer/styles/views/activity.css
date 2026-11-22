@@ -291,6 +291,16 @@
   border-radius: 10px;
 }
 
+/* A sessions-view chat's row: its provider's logo, no avatar picture. */
+.activity-avatar-glyph {
+  display: inline-flex;
+  width: 40px;
+  height: 40px;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: center;
+}
+
 .activity-avatar-fallback {
   display: inline-flex;
   width: 40px;

@@ -7150,7 +7150,7 @@
     if (!back) {
       return;
     }
-    const label = memberSession || accordScreen ? "Back to the main session" : "Back to the chat";
+    const label = memberSession || accordScreen ? "Back" : "Back to the chat";
     if (back.getAttribute("aria-label") !== label) back.setAttribute("aria-label", label);
     const shouldShow = Boolean(openThreadRoot || memberSession || accordScreen);
     if (back.classList.contains("is-visible") !== shouldShow) {
@@ -8529,11 +8529,12 @@
     if (side) {
       side.hidden = empty || (!canStop && !stopping);
       side.disabled = !canStop;
-      side.setAttribute("aria-label", stopping ? "Stopping" : ids[0] && state && ids[0] === state.mainId ? "Stop the main session" : "Stop this member");
+      side.setAttribute("aria-label", stopping ? "Stopping" : ids[0] && state && ids[0] === state.mainId ? "Stop" : "Stop this member");
     }
     const mode = empty && canStop ? "stop" : empty && stopping ? "stopping" : "send";
-    const whose = ids[0] && state && ids[0] === state.mainId ? "the main session" : "this member";
-    button.setAttribute("aria-label", mode === "send" ? "Send message" : mode === "stop" ? "Stop " + whose : "Stopping " + whose);
+    // The main session is named by nothing in the sessions view.
+    const whose = ids[0] && state && ids[0] === state.mainId ? "" : " this member";
+    button.setAttribute("aria-label", mode === "send" ? "Send message" : mode === "stop" ? "Stop" + whose : "Stopping" + whose);
     if ((button.dataset.mode || "send") === mode) return;
     button.dataset.mode = mode;
     button.classList.toggle("is-stop", mode !== "send");
@@ -8785,6 +8786,16 @@
     return avatarForLabel(conversationMembers(conversationId), handle || "Agent");
   }
 
+  /** The provider of the member an Activity row is about, by its handle. */
+  function activityMemberKind(conversationId, handle) {
+    const chat = loadChats().find(function (item) { return item.id === conversationId; });
+    const key = String(handle || "").trim().replace(/^@/, "").toLowerCase();
+    const member = chat && key ? chatMembers(chat).find(function (item) {
+      return [item.handle, item.mentionHandle].some(function (name) { return String(name || "").replace(/^@/, "").toLowerCase() === key; });
+    }) : undefined;
+    return member && member.kind ? member.kind : "";
+  }
+
   /** Who an Activity row is about, as its chat's view names it: its handle,
    *  or in the sessions view a member's task ("" for the main session). */
   function activityRowWho(row) {
@@ -8792,6 +8803,14 @@
   }
 
   function activityRowAvatar(conversationId, handle) {
+    // A sessions-view chat has no avatars: the member's provider logo.
+    if (sessionsViewNamesFor(conversationId)) {
+      const glyph = document.createElement("span");
+      glyph.className = "act-avatar act-avatar-glyph";
+      glyph.setAttribute("aria-hidden", "true");
+      glyph.append(providerLogoElement(activityMemberKind(conversationId, handle), ""));
+      return glyph;
+    }
     const avatar = document.createElement("span");
     avatar.className = "mobile-chat-avatar act-avatar";
     paintAvatar(avatar, activityAvatarFor(conversationId, handle), conversationId);
@@ -9244,7 +9263,7 @@
       minute: Math.floor(Date.now() / 60_000),
       rows: rows.map(function (row) {
         return [row.key, row.chatTitle, row.handle, row.machineName, row.preview, row.at, row.count, row.read,
-          row.cancellable, row.stopping, avatarSignature(activityAvatarFor(row.conversationId, row.handle)),
+          row.cancellable, row.stopping, avatarSignature(activityAvatarFor(row.conversationId, row.handle)), activityRowWho(row), Boolean(sessionsViewNamesFor(row.conversationId)),
           row.card ? [isCardLocked(row.card.id), cardSentText(row.card.id), controlCardAnswering.has(row.card.id), controlCardErrors.get(row.card.id) || ""] : 0,
           row.runId ? stopRequestedRunIds.has(row.runId) : 0];
       })
@@ -10288,6 +10307,7 @@
       // one must be told apart (the main session in a member's session).
       presentation: entry.presentation,
       authorLabel: entry.authorLabel,
+      authorKind: entry.authorKind,
       worked: sessionsView ? entry.workedMs : undefined,
       // Its steps (a running reply's rows; what its Worked for opens to, and
       // whether it is open).
@@ -10432,6 +10452,20 @@
       return formatClockTime(entry.createdAt) || entry.status;
     }
     return entry.status;
+  }
+
+  /** A row's author: its name, or in the sessions view the main session's
+   *  provider logo where an author must be told apart (a member's session). */
+  function fillRowHandle(handle, entry) {
+    if (entry.authorKind) {
+      if (handle.dataset.authorKind !== entry.authorKind) {
+        handle.dataset.authorKind = entry.authorKind;
+        handle.replaceChildren(providerLogoElement(entry.authorKind === "unknown" ? "" : entry.authorKind, "is-chip"));
+      }
+      return;
+    }
+    delete handle.dataset.authorKind;
+    handle.textContent = rowHandleText(entry);
   }
 
   function rowHandleText(entry) {
@@ -11403,14 +11437,14 @@
     const open = document.createElement("button");
     open.type = "button";
     open.className = "finished-note-open";
-    // The sessions view names the main session by what it is, with its
-    // provider's logo: no handle and no avatar there.
+    // The sessions view names a member by its task with its provider's logo,
+    // the main session by nothing: no handle, label or avatar there.
     const sessionsView = entry.presentation === "sessions";
     const sessionsState = sessionsView && lastSessionsState ? lastSessionsState : undefined;
-    const label = sessionsState && note.participantId === sessionsState.mainId ? "Main session"
+    const label = sessionsState && note.participantId === sessionsState.mainId ? ""
       : sessionsState ? sessionsMemberTitleOf(sessionsState, note.participantId) : note.participantLabel || "A member";
     // Its name is what it says (who, the time, the reply's first words).
-    open.title = "Go to " + label + "'s reply";
+    open.title = label ? "Go to " + label + "'s reply" : "Go to the reply";
     open.dataset.finishedNoteTarget = note.messageId;
     let avatar;
     if (sessionsState) {
@@ -11430,7 +11464,8 @@
     who.className = "finished-note-actor";
     who.textContent = label;
     const when = formatClockTime(entry.createdAt);
-    title.append(who, document.createTextNode(" finished answering" + (when ? " · " + when : "")));
+    if (label) title.append(who, document.createTextNode(" finished answering" + (when ? " · " + when : "")));
+    else title.append(document.createTextNode("Finished answering" + (when ? " · " + when : "")));
     const preview = document.createElement("div");
     preview.className = "finished-note-preview";
     preview.textContent = entry.content || "";
@@ -11519,7 +11554,7 @@
       meta.className = "message-meta";
       const handle = document.createElement("span");
       handle.className = "message-handle";
-      handle.textContent = rowHandleText(entry);
+      fillRowHandle(handle, entry);
       const status = document.createElement("span");
       status.className = "message-status";
       status.textContent = messageStatusLabel(entry);
@@ -12008,7 +12043,7 @@
         return false;
       }
       applyRowIdentity(avatar, entry);
-      handle.textContent = rowHandleText(entry);
+      fillRowHandle(handle, entry);
       status.textContent = messageStatusLabel(entry);
       const meta = status.parentElement;
       if (!meta) {
@@ -12476,7 +12511,7 @@
   function sessionsMemberName(member, fallback) {
     const state = lastSessionsState;
     if (member && state && member.id !== state.mainId) return sessionsMemberTitleOf(state, member);
-    return member ? (member.id && state && member.id === state.mainId ? "Main session" : member.handle) : fallback || "A member";
+    return member ? (member.id && state && member.id === state.mainId ? "" : member.handle) : fallback || "A member";
   }
 
   /** The members a mention in a message names, for its link chip: each
@@ -12655,13 +12690,15 @@
       if (given) {
         const key = drawn.rowKey || drawn.id;
         rows.push({ ...base, taskFold: {
-          label: batch.requesterParticipantId === state.mainId ? "Task from the main session" : "Task from " + sessionsMemberTitleOf(state, batch.requesterParticipantId),
+          label: batch.requesterParticipantId === state.mainId ? "Task" : "Task from " + sessionsMemberTitleOf(state, batch.requesterParticipantId),
           preview: shared.firstTextLine(given.prompt),
           open: openTaskFolds.has(key)
         } });
         return;
       }
-      rows.push(drawn.author === "agent" && drawn.participantId === state.mainId ? { ...base, authorLabel: "Main session" } : base);
+      // The main session's answer here is told apart by its provider's logo,
+      // named by nothing.
+      rows.push(drawn.author === "agent" && drawn.participantId === state.mainId ? { ...base, authorKind: state.mainMember ? state.mainMember.kind || "unknown" : "unknown" } : base);
     });
     if (shown === 0) {
       rows.push({ rowKey: "member-session-empty", id: "member-session-empty", conversationId: state.conversationId, author: "system",
@@ -13109,7 +13146,7 @@
     text.className = "sessions-waiting-text";
     text.textContent = waiting.text;
     wrap.append(spinner, text);
-    if (waiting.canStop || waiting.stopping) wrap.append(sessionsStopButton(waiting.memberIds, waiting.canStop, waiting.stopping, "Stop the tasks the main session waits on"));
+    if (waiting.canStop || waiting.stopping) wrap.append(sessionsStopButton(waiting.memberIds, waiting.canStop, waiting.stopping, "Stop the tasks"));
     return wrap;
   }
 

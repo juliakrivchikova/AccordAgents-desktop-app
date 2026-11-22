@@ -231,7 +231,15 @@ chat without a main session is always `classic`; its switch is disabled.
     on the desktop and the phone (`sessionsViewText`, `sessionsViewReplyText`,
     `sessionsViewSummaryText` in `src/shared/sessionsViewText.ts`), so the
     classic view keeps every handle; what a member wrote, a tool's request
-    (a command) and anything quoted stay as written;
+    (a command) and anything quoted stay as written. The same holds for search
+    results (a member's message shows no author), Activity rows (no avatar:
+    the member's provider logo), an add-member card (no handle field or
+    avatar picker; the handle is still made underneath) and the urgent
+    alert's Telegram message and call (her server names a member by its task
+    and the main session by nothing). No label names the main session
+    either: in a member's session its task is "Task" and its answers carry
+    its provider's logo; Stop is "Stop"; the New chat note says which CLI
+    runs the chat;
   - the Accord: above the composer one quiet line (Accord · its name ·
     where it stands) that opens the whole card in the side panel; the
     classic view keeps the pinned card;

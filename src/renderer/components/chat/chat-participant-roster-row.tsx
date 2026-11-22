@@ -58,11 +58,12 @@ export function ChatParticipantRosterRow(props: {
   /** Opened at its settings (one member's settings, the sessions view). */
   defaultExpanded?: boolean;
 }): JSX.Element {
-  // The sessions view names no handles: the main session, or the member's task title.
+  // The sessions view names no handles and no label for the main session: a
+  // member by its task's title, the main session by its CLI ("Claude Code").
   const sessionsLinks = useChatSessionsLinks();
   const displayName = (sessionsLinks
     ? props.participant.id === sessionsLinks.mainSessionId
-      ? "Main session"
+      ? chatCliProviderLabel(props.participant.kind)
       : sessionsLinks.byHandle.get(props.participant.handle.toLowerCase())?.title
     : undefined) || chatParticipantDisplayName(props.participant);
   const roleLabel = props.participantRoleLabel(props.participant);

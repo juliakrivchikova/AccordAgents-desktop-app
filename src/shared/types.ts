@@ -2929,6 +2929,9 @@ export interface ChatSearchMessageMatch extends ChatSearchMatchBase {
   threadRootId?: string;
   role: "user" | "participant";
   authorLabel: string;
+  /** The chat is shown in the sessions view, which names no member: the
+   *  result shows no author for a member's message. */
+  sessionsView?: boolean;
   createdAt: string;
   snippetText: string;
   highlightRanges: ChatSearchHighlightRange[];

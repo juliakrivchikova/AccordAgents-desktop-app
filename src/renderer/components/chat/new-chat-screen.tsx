@@ -178,8 +178,7 @@ export function NewChatScreen(props: {
     () => assistantSubstituteNote({
       agents: props.agents,
       providers: props.settings.providers,
-      explicitKind: props.settings.assistantProviderKind,
-      subject: "The main session"
+      explicitKind: props.settings.assistantProviderKind
     }),
     [props.agents, props.settings.assistantProviderKind, props.settings.providers]
   );

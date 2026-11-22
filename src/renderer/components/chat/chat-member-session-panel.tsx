@@ -156,12 +156,17 @@ export function ChatMemberSessionPanel(props: {
             return <ChatMemberTaskFold key={message.id} message={message} prompt={task.prompt} fromMain={task.requester === props.mainSessionId} />;
           }
           const itemProps = props.messageProps(message);
+          // The main session's answer here is told apart by its provider's
+          // logo, named by nothing (no label for it in this view).
+          const mainSession = message.role === "participant" && message.participantId === props.mainSessionId
+            ? itemProps.participants?.find((participant) => participant.id === props.mainSessionId)
+            : undefined;
           return (
             <ChatMessageItem
               key={message.id}
               {...itemProps}
               presentation="sessions"
-              authorLabel={message.role === "participant" && message.participantId === props.mainSessionId ? "Main session" : undefined}
+              authorMark={mainSession ? <ChatProviderMark member={mainSession} /> : undefined}
               onOpenThread={undefined}
             />
           );
@@ -203,7 +208,9 @@ function taskFor(message: ChatMessage, participantId: string): { prompt: string;
 /** The task the member was given, folded to one line; opens to the whole. */
 export const ChatMemberTaskFold = memo(function ChatMemberTaskFold(props: { message: ChatMessage; prompt: string; fromMain: boolean }): JSX.Element {
   const [open, setOpen] = useState(false);
-  const label = props.fromMain ? "Task from the main session" : "Task from another session";
+  // The main session is named by nothing in the sessions view: its task is
+  // the task.
+  const label = props.fromMain ? "Task" : "Task from another session";
   const preview = useMemo(() => firstTextLine(props.prompt), [props.prompt]);
   return (
     <div className={`chat-member-task ${open ? "is-open" : ""}`} data-message-id={props.message.id} data-testid="chat-member-task">

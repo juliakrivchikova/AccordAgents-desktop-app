@@ -289,6 +289,7 @@ export class ChatSearchService {
             ...(row.threadRootId ? { threadRootId: row.threadRootId } : {}),
             role: row.role,
             authorLabel: row.authorLabel,
+            ...(snapshotInSessionsView(snapshot) ? { sessionsView: true } : {}),
             createdAt: row.createdAt,
             snippetText: parsedSnippet.text,
             highlightRanges: parsedSnippet.highlightRanges,
@@ -553,6 +554,12 @@ function replacementChunks(replacements: ChatSearchDocumentReplacement[]): ChatS
     result.push(current);
   }
   return result;
+}
+
+/** A chat with a main session shown in the sessions view (a chat gets its
+ *  view when its main session is made, docs/main-session.md). */
+function snapshotInSessionsView(snapshot: ChatSearchConversationSnapshot): boolean {
+  return Boolean(snapshot.mainSessionParticipantId) && (snapshot.chatView ?? "sessions") === "sessions";
 }
 
 function corpusFingerprint(scope: ChatSearchConversationSnapshot[]): string {

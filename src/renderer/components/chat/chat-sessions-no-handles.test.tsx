@@ -23,6 +23,8 @@ import { ChatSessionsPresentationContext } from "./chat-member-mark";
 import { ChatSessionsLinksContext, ChatSessionsNamesContext, sessionsViewNamesFromLinks, type ChatSessionsLinks } from "./chat-sessions-links";
 import { chatDisplayContent } from "./chat-display-content";
 import { ChatUsedApprovalLine } from "./chat-used-card-row";
+import { ChatSearchResults } from "../search/chat-search-results";
+import { ActivityRow } from "../activity/activity-view";
 import { Terminal } from "lucide-react";
 import { DREW, MAIN, PARTICIPANTS, chatMessage, disclosure, sessionsConversation } from "./chat-sessions-fixtures.test";
 
@@ -262,4 +264,48 @@ test("a failed reply keeps what the member wrote; a used card keeps its command;
   assert.equal(chatDisplayContent(request("inferred", [MAIN]), "@drew", "main"), "Asked for input.");
   assert.equal(chatDisplayContent(request("inferred", [MAIN, DREW]), "@drew", "main"), "Asked @drew for input.");
   assert.equal(chatDisplayContent(request("mcp", [MAIN]), "@drew"), "@main Which colour?", "classic: as before");
+});
+
+test("search results, Activity rows and add-member cards of a sessions-view chat name nobody and show no avatar; a classic chat keeps both", () => {
+  const match = (conversationId: string, snippetText: string, sessionsView?: boolean) => ({
+    kind: "message" as const, conversationId, conversationTitle: conversationId, conversationUpdatedAt: AT, archived: false, messageId: `m-${conversationId}`,
+    role: "participant" as const, authorLabel: "@drew", ...(sessionsView ? { sessionsView } : {}), createdAt: AT, snippetText, highlightRanges: [], rank: 1
+  });
+  const response = {
+    status: "ok" as const, matches: [match("Sessions chat", "Marigold deployed", true), match("Classic chat", "Marigold planted")],
+    coverage: { eligibleChatCount: 2, searchedChatCount: 2, messagePeriod: null, sourceSnapshotAt: AT, completeness: "complete" as const },
+    messageMatchCount: 2, matchedChatCount: 2, hasMore: false
+  };
+  const results = render(false, (
+    <ChatSearchResults query="marigold" loading={false} loadingMore={false} response={response} activeIndex={0}
+      onActiveIndexChange={() => undefined} onOpenConversation={() => undefined} onOpenMessage={() => undefined} onLoadMore={() => undefined} />
+  ));
+  assert.match(results.text, /@drew: Marigold planted/, "classic: the author as before");
+  assert.doesNotMatch(results.text, /@drew: Marigold deployed/, "sessions view: a member's words alone");
+  results.unmount();
+
+  const row = (participant: Record<string, unknown>) => (
+    <ActivityRow active={false} cancelling={false} onSelect={() => undefined} onMarkRead={() => undefined} onCancelPending={() => undefined} onClear={() => undefined}
+      item={{ id: "i", conversationId: "c", conversationTitle: "Login bug", status: "recent", kind: "message", title: "t", preview: "Done.", createdAt: AT, updatedAt: AT,
+        participant: { id: MAIN.id, handle: "main", kind: "claude-code", ...participant }, target: {} } as never} />
+  );
+  let renderer: ReturnType<typeof create> | undefined;
+  act(() => { renderer = create(<TooltipProvider>{row({ displayName: "" })}</TooltipProvider>); });
+  const sessionsRow = renderer!.root;
+  assert.equal(sessionsRow.findAll((node) => typeof node.props.className === "string" && node.props.className.split(/\s+/).includes("activity-avatar")).length, 0, "no avatar picture");
+  assert.ok(sessionsRow.findAll((node) => node.props?.["data-provider-kind"] === "claude-code").length > 0, "its provider's logo");
+  assert.doesNotMatch(shownText(sessionsRow), /@main|post in|main session/i, "named by nothing");
+  act(() => renderer!.unmount());
+  act(() => { renderer = create(<TooltipProvider>{row({})}</TooltipProvider>); });
+  assert.match(shownText(renderer!.root), /@main post in/, "classic: as before");
+  act(() => renderer!.unmount());
+
+  const addition = approval(MAIN, { toolName: "app_participants_request_change", summary: "Add @reviewer",
+    request: { operations: [{ type: "add_new_participant_to_chat", participant: { handle: "reviewer", roleConfigId: "generic-participant", kind: "codex-cli" } }] } as never });
+  const sessionsCard = render(true, cardElement(addition));
+  assert.doesNotMatch(sessionsCard.text, /Member handle|Change avatar|@reviewer|reviewer/, "no handle field, no avatar picker");
+  sessionsCard.unmount();
+  const classicCard = render(false, cardElement(addition));
+  assert.match(classicCard.text, /Member handle/, "classic: the handle field as before");
+  classicCard.unmount();
 });

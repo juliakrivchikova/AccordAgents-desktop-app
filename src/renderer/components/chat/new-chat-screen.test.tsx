@@ -116,7 +116,7 @@ test("a saved CLI that is not ready gives way to a ready one, says so under the 
   assert.equal(renderer.root.findAllByProps({ "data-testid": "new-chat-provider-unavailable" }).length, 0);
   assert.equal(
     textOf(renderer.root.findByProps({ "data-testid": "new-chat-assistant-note" })),
-    "The main session uses Codex in this chat: Claude Code, your saved choice, needs sign-in."
+    "Codex runs this chat: Claude Code, your saved choice, needs sign-in."
   );
   const start = renderer.root.findByProps({ "data-testid": "new-chat-start" });
   assert.equal(start.props.disabled, false);

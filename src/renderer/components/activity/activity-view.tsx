@@ -21,6 +21,7 @@ import {
 } from "../../lib/sidebar-width-storage";
 import { chatActivityShowsGenericCancel } from "../chat/chat-codex-approval-presentation";
 import { MIN_ACTIVITY_DETAIL_WIDTH, MIN_ACTIVITY_LIST_WIDTH, NARROW_ACTIVITY_LIST_MAX_WIDTH } from "../../lib/activity-sizing";
+import { ChatProviderMark } from "../chat/chat-member-mark";
 
 type ActivityStatusTab = "running" | "pending" | "rest";
 
@@ -281,7 +282,7 @@ function emptyActivityTabDescription(tab: ActivityStatusTab): string {
   return "Finished member updates will appear here.";
 }
 
-function ActivityRow({
+export function ActivityRow({
   item,
   active,
   cancelling,
@@ -317,7 +318,12 @@ function ActivityRow({
         onClick={onSelect}
       >
         <span className="activity-status-dot" aria-hidden="true" />
-        {item.participant ? (
+        {item.participant?.displayName !== undefined ? (
+          // A sessions-view chat has no avatars: its provider's logo.
+          <span className="activity-avatar-glyph" aria-hidden="true">
+            <ChatProviderMark className="is-large" member={item.participant} />
+          </span>
+        ) : item.participant ? (
           <Avatar className="activity-avatar mini-avatar" spec={avatarForActivityParticipant(item.participant)} />
         ) : (
           <span className="activity-avatar-fallback" aria-hidden="true">

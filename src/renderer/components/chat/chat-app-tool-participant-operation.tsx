@@ -10,7 +10,7 @@ import type { ChatAgentMode, ChatExistingParticipantOverrides, ChatParticipantCh
 import { avatarForParticipant } from "../avatar/avatar";
 import { chatParticipantDisplayName, chatParticipantReference } from "../conversation/conversation-display";
 import { avatarForChatParticipant, mapChatAvatarIdToKind } from "./chat-avatars";
-import { ChatMemberMark } from "./chat-member-mark";
+import { ChatMemberMark, ChatProviderMark, useChatSessionsPresentation } from "./chat-member-mark";
 import { CHAT_AGENT_MODE_OPTIONS, chatAgentModeLabel, chatProviderOptionId, chatProviderOptionPatch, chatProviderOptions } from "./chat-participant-drafts";
 import { cliProviderHostDefaultModel, cliProviderHostForParticipant } from "../../../shared/cliProviderHosts";
 import { isRoleOfferedForNewMembers } from "../../../shared/mainSession";
@@ -38,6 +38,9 @@ export function ChatAppToolParticipantChangeOperation(props: {
   onChange: (request: ChatParticipantChangeRequest) => void;
 }): JSX.Element {
   const hosts = props.cliProviderHosts ?? [];
+  // The sessions view has no handles and no avatars: a member added here is
+  // its provider's logo and its role; its handle is still made underneath.
+  const sessions = useChatSessionsPresentation();
   function updateNewParticipant(
     index: number,
     patch: { saveAsPreset?: boolean; participant?: Partial<ChatRosterChangeParticipantInput> }
@@ -101,7 +104,7 @@ export function ChatAppToolParticipantChangeOperation(props: {
               <div className="chat-app-tool-review-participant-head">
                 <ChatMemberMark className="chat-app-tool-review-avatar" markClassName="is-large" avatar={savedAvatar} member={savedParticipant} />
                 <div>
-                  <strong>{savedParticipant ? chatParticipantReference(savedParticipant.handle) : operation.participantConfigId}</strong>
+                  {!sessions && <strong>{savedParticipant ? chatParticipantReference(savedParticipant.handle) : operation.participantConfigId}</strong>}
                   <span>{displayChatRoleLabel(savedRole, savedParticipant?.roleConfigId ?? "Saved member preset")}</span>
                 </div>
               </div>
@@ -135,14 +138,16 @@ export function ChatAppToolParticipantChangeOperation(props: {
         return (
           <div className="chat-app-tool-review-block is-participant-review" key={`${operation.type}-${operation.participant.handle}-${index}`}>
             <div className="chat-app-tool-review-participant-head">
-              <ChatAppToolAvatarField
-                kind={participant.kind}
-                handle={participant.handle}
-                avatarId={participant.avatarId}
-                onSelect={(avatarId) => patchParticipant({ avatarId })}
-              />
+              {sessions ? <ChatProviderMark className="is-large" member={participant} /> : (
+                <ChatAppToolAvatarField
+                  kind={participant.kind}
+                  handle={participant.handle}
+                  avatarId={participant.avatarId}
+                  onSelect={(avatarId) => patchParticipant({ avatarId })}
+                />
+              )}
               <div>
-                <ChatAppToolHandleField handle={participant.handle} onChange={(handle) => patchParticipant({ handle })} />
+                {!sessions && <ChatAppToolHandleField handle={participant.handle} onChange={(handle) => patchParticipant({ handle })} />}
                 <span>{displayChatRoleLabel(role, participant.roleConfigId)}</span>
               </div>
             </div>

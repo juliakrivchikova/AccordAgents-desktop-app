@@ -157,7 +157,7 @@ test("the sessions view's main composer has no active-runs pill; its button stop
   assert.ok("onStopAllRuns" in idle && idle.onStopAllRuns === undefined);
   assert.equal(idle.stop, undefined, "nothing to stop while the main session is idle");
   const busy = sessionsComposerProps(MAIN.id, undefined, { runIds: ["run-main", "run-main-queued"], onStopRun: (runId) => stopped.push(runId) });
-  assert.equal(busy.stop?.label, "Stop the main session");
+  assert.equal(busy.stop?.label, "Stop");
   busy.stop?.onStop();
   assert.deepEqual(stopped, ["run-main", "run-main-queued"], "the main session's runs only");
 
@@ -166,12 +166,12 @@ test("the sessions view's main composer has no active-runs pill; its button stop
   const empty = button(false);
   const stop = empty.root.find((node) => node.type === "button");
   assert.equal(stop.props["data-testid"], "chat-composer-stop");
-  assert.equal(stop.props["aria-label"], "Stop the main session");
+  assert.equal(stop.props["aria-label"], "Stop");
   assert.equal(stop.props.disabled, undefined, "enabled with nothing typed");
   empty.unmount();
   const typed = button(true);
   const buttons = typed.root.findAll((node) => node.type === "button");
-  assert.deepEqual(buttons.map((node) => node.props["aria-label"]), ["Stop the main session", "Send message"],
+  assert.deepEqual(buttons.map((node) => node.props["aria-label"]), ["Stop", "Send message"],
     "typing keeps a way to stop, as a CLI interrupts whatever is in its prompt; Send stays the main button");
   assert.ok(buttons[0]!.props.className.includes("is-beside-send"), "the secondary Stop");
   act(() => buttons[1]!.props.onClick());
@@ -190,7 +190,7 @@ test("the sessions view's main composer has no active-runs pill; its button stop
   classic.unmount();
 });
 
-test("a member's settings card names it by its task in the sessions view, the main session as Main session; the classic view keeps the handle", () => {
+test("a member's settings card names it by its task in the sessions view, the main session by its CLI (no label for it); the classic view keeps the handle", () => {
   const links: ChatSessionsLinks = {
     mainSessionId: MAIN.id, mainHandle: "main",
     byHandle: new Map([["drew", { id: DREW.id, title: "Fix the logout" }]]), openMember: () => undefined
@@ -208,7 +208,7 @@ test("a member's settings card names it by its task in the sessions view, the ma
   assert.equal(name(drew.root), "Fix the logout");
   drew.unmount();
   const main = renderIn(true, <ChatSessionsLinksContext.Provider value={links}>{row(MAIN)}</ChatSessionsLinksContext.Provider>);
-  assert.equal(name(main.root), "Main session");
+  assert.equal(name(main.root), "Claude Code");
   main.unmount();
   const classic = renderIn(false, row(DREW));
   assert.match(name(classic.root), /drew/);
@@ -275,7 +275,8 @@ test("a turn-finished note names the main session and members without handles in
     </ChatSessionsLinksContext.Provider>
   );
   const main = renderIn(true, note(MAIN));
-  assert.match(textOf(main.root), /Main session finished answering/);
+  assert.match(textOf(main.root), /^Finished answering/);
+  assert.doesNotMatch(textOf(main.root), /main session/i);
   main.unmount();
   const drew = renderIn(true, note(DREW));
   assert.match(textOf(drew.root), /Fix the logout finished answering/);

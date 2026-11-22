@@ -5618,7 +5618,7 @@ test("a saved main session CLI that is not ready gives way to a ready one, on th
   const offered = await service.newChatOptions([]);
   assert.equal(offered?.unavailable, undefined);
   assert.equal(offered?.assistant.kind, "codex-cli");
-  assert.equal(offered?.assistantNote, "The main session uses Codex in this chat: Claude Code, your saved choice, needs sign-in.",
+  assert.equal(offered?.assistantNote, "Codex runs this chat: Claude Code, your saved choice, needs sign-in.",
     "the note names the saved CLI, so the saved choice is still Claude Code");
 });
 

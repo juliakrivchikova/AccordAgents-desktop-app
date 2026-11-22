@@ -176,7 +176,8 @@ test("a member's session shows its task folded to one line, its messages without
   });
   const root = renderer!.root;
   const fold = root.find(byTestId("chat-member-task"));
-  assert.match(textOf(fold), /Task from the main session/);
+  assert.match(textOf(fold), /^Task/, "the main session's task is the task: no label for the main session");
+  assert.doesNotMatch(textOf(fold), /main session/i);
   assert.match(textOf(fold), /Task for drew: fix the drew part/);
   assert.doesNotMatch(textOf(fold), /with every detail/, "folded to its first line");
   act(() => fold.findAll((node) => node.type === "button")[0]!.props.onClick());
@@ -186,7 +187,9 @@ test("a member's session shows its task folded to one line, its messages without
   assert.deepEqual(articles.map((article) => article.props["data-message-id"]), ["drew-question", "main-answer", "to-drew", "drew-running"]);
   assert.ok(articles.every((article) => article.props["data-presentation"] === "sessions"));
   assert.equal(root.findAll((node) => typeof node.type === "string" && typeof node.props.className === "string" && node.props.className.split(" ").includes("message-avatar")).length, 0);
-  assert.match(textOf(articles[1]!), /Main session/, "the main session's answer says who wrote it");
+  const answerMeta = articles[1]!.find((node) => typeof node.props.className === "string" && node.props.className.split(" ").includes("message-meta"));
+  assert.ok(answerMeta.findAll((node) => node.props?.["data-provider-kind"] === MAIN.kind).length > 0, "the main session's answer is told apart by its provider's logo");
+  assert.doesNotMatch(textOf(articles[1]!), /main session/i, "named by nothing");
 
   const composer = root.find((node) => node.props?.testId === "chat-member-composer");
   assert.equal(composer.props.placeholder, "Message Task for drew: fix the drew part...");

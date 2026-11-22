@@ -3,7 +3,7 @@ import type { ChatAppToolApproval, ChatRoleConfig, ChatRosterChangeOperation, Ch
 import { chatParticipantDisplayName, chatParticipantReference } from "../conversation/conversation-display";
 import { chatReasoningEffortLabel } from "../../../shared/reasoningEffort";
 import { avatarForChatParticipant } from "./chat-avatars";
-import { ChatMemberMark } from "./chat-member-mark";
+import { ChatMemberMark, useChatSessionsPresentation } from "./chat-member-mark";
 import { participantProviderLabel } from "./chat-conversation-data";
 import { rosterPermissionGrantLabels } from "./chat-participant-config-panel";
 import { displayChatRoleLabel } from "./chat-role-labels";
@@ -32,7 +32,10 @@ export function RosterApprovalTitle({ requesterHandle, added }: { requesterHandl
 export function ChatAppToolRosterOperation({ operation, roles }: { operation: ChatRosterChangeOperation; roles: ChatRoleConfig[] }): JSX.Element {
   const participant = operation.participant;
   const label = chatParticipantDisplayName(participant);
-  const shownLabel = useSessionsViewLabel()(label);
+  // The sessions view names no handles: a member being added (it has no task
+  // yet) is its role, else its provider.
+  const sessions = useChatSessionsPresentation();
+  const shownLabel = sessions ? roleLabelForRosterParticipant(participant, roles) || participantProviderLabel(participant.kind) : label;
   const details = [
     participantProviderLabel(participant.kind),
     participant.model,
@@ -54,7 +57,7 @@ export function ChatAppToolRosterOperation({ operation, roles }: { operation: Ch
       <ChatMemberMark className="chat-app-tool-roster-avatar" markClassName="is-large" avatar={avatar} member={participant} />
       <div className="chat-app-tool-roster-participant-info">
         <strong>{shownLabel}</strong>
-        <span>{details.join(" · ")}</span>
+        <span>{(sessions ? details.filter((detail) => detail !== shownLabel) : details).join(" · ")}</span>
       </div>
     </div>
   );

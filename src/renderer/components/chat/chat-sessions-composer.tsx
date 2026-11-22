@@ -49,7 +49,7 @@ export function sessionsComposerProps(
     activeRunCount: 0,
     onStopAllRuns: undefined,
     stop: runIds.length > 0 && onStopRun
-      ? { label: "Stop the main session", onStop: () => runIds.forEach((runId) => onStopRun(runId)) }
+      ? { label: "Stop", onStop: () => runIds.forEach((runId) => onStopRun(runId)) }
       : undefined
   };
 }

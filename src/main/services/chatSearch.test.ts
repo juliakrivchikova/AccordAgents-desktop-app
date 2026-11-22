@@ -123,6 +123,23 @@ test("chat search indexes title-only matches and refreshes title state independe
   });
 });
 
+test("a chat shown in the sessions view marks its results so a member's message shows no author (no handles there); a classic chat's keep theirs", async () => {
+  await withStorage(async (storage) => {
+    const main = { ...participant("participant-a", undefined, "drew"), roleConfigId: "main-session" };
+    const sessions = conversation("sessions-chat", "Sessions chat", false, [message("s-reply", "participant", "Marigold deployed", "2026-01-04T00:00:00.000Z")], [main]);
+    sessions.metadata = { ...sessions.metadata, mainSessionParticipantId: main.id, chatView: "sessions" };
+    const classic = conversation("classic-chat", "Classic chat", false, [message("c-reply", "participant", "Marigold planted", "2026-01-04T00:01:00.000Z")], [main]);
+    classic.metadata = { ...classic.metadata, mainSessionParticipantId: main.id, chatView: "classic" };
+    await storage.saveConversation(sessions);
+    await storage.saveConversation(classic);
+    const response = await new ChatSearchService(storage).search({ requester: { kind: "user" }, query: "marigold" });
+    const byChat = new Map(messageMatches(response).map((match) => [match.conversationId, match]));
+    assert.equal(byChat.get("sessions-chat")?.sessionsView, true);
+    assert.equal(byChat.get("classic-chat")?.sessionsView, undefined);
+    assert.equal(byChat.get("classic-chat")?.authorLabel, "@drew", "the stored label is unchanged");
+  });
+});
+
 test("chat search composite freshness detects a new message when conversation updatedAt does not move", async () => {
   await withStorage(async (storage) => {
     const chat = conversation("freshness", "Freshness", false, [
