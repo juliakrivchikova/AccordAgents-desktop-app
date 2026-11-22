@@ -1847,7 +1847,7 @@ test("codex app-server stream keeps raw tool output out of agent text and comple
     "Calling app_roles_describe_options({\"role\":\"engineer\"})\n",
     "Called app_roles_describe_options({\"role\":\"engineer\"})\n"
   ]);
-  assert.match(mcpEvents.at(-1)?.activityDetail ?? "", /"role": "engineer"/);
+  assert.match(mcpEvents.at(-1)?.activityDetail ?? "", /\{"role":"engineer"\}/, "its arguments, compact");
   assert.match(mcpEvents.at(-1)?.activityDetail ?? "", /MCP_RESULT_LAST/);
 
   const visibleTranscript = outputs.filter((event) => event.kind === "text").at(-1)?.cumulative ?? "";
@@ -1969,7 +1969,7 @@ test("codex app-server bounds MCP and dynamic tool invocation summaries without 
   const startedDetail = mcpEvents[0]?.activityDetail ?? "";
   const completedDetail = mcpEvents[1]?.activityDetail ?? "";
   assert.ok(startedDetail.length <= 1_800);
-  assert.match(startedDetail, /"path": "src\/large\.ts"/);
+  assert.match(startedDetail, /"path":"src\/large\.ts"/);
   assert.match(startedDetail, /INVOCATION_START/);
   assert.match(startedDetail, /chars omitted/);
   assert.doesNotMatch(startedDetail, /RAW_ARGUMENT_END/);
@@ -6997,14 +6997,16 @@ test("claude warm: each tool call of a step is its own row in the CLI's words, n
   send({ type: "assistant", message: { role: "assistant", content: [
     { type: "tool_use", id: "toolu_a", name: "Read", input: { file_path: "/repo/src/a.ts" } },
     { type: "tool_use", id: "toolu_b", name: "Bash", input: { command: "npm test", description: "Run unit tests" } },
-    { type: "tool_use", id: "toolu_c", name: "mcp__claude_ai_Context7__resolve-library-id", input: { libraryName: "react" } }
+    { type: "tool_use", id: "toolu_c", name: "mcp__claude_ai_Context7__resolve-library-id", input: { libraryName: "react" } },
+    { type: "tool_use", id: "toolu_d", name: "EnterPlanMode", input: {} },
+    { type: "tool_use", id: "toolu_e", name: "ExitPlanMode", input: { plan: "# Plan\n\n1. Fix the login." } }
   ] } });
   const rows = outputs.filter((event) => event.kind === "tool").map((event: any) => [event.activityItemId, event.text.trim(), event.activityKind]);
   assert.deepEqual(rows, [
     ["toolu_a", "Reading src/a.ts", "tool"],
     ["toolu_b", "Running unit tests", "command"],
     ["toolu_c", "claude.ai Context7 - resolve-library-id (MCP)", "tool"]
-  ]);
+  ], "no row for the plan tools: the plan card is ExitPlanMode's dialog");
   assert.equal((outputs.find((event: any) => event.activityItemId === "toolu_b") as any)?.activityDetail, "npm test");
 });
 

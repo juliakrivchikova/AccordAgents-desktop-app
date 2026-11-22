@@ -118,6 +118,7 @@ import {
 } from "./geminiExec";
 import type { ParticipantRunResult } from "./providers";
 import {
+  CLAUDE_TOOLS_WITHOUT_ROW,
   claudeToolActivity,
   codexCommandActivity,
   codexFileChangeActivity,
@@ -9310,7 +9311,7 @@ export class CliAgentRunner {
         continue;
       }
       const name = this.stringField(blockRecord, "name");
-      if (name) {
+      if (name && !CLAUDE_TOOLS_WITHOUT_ROW.has(name)) {
         const id = this.stringField(blockRecord, "id");
         calls.push({ ...claudeToolActivity(name, this.asRecord(blockRecord.input), toolContext), ...(id ? { id } : {}) });
       }

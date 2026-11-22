@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { claudeRunningTitle } from "./claudeRunningTitle";
 import {
+  CLAUDE_TOOLS_WITHOUT_ROW,
   CLI_ACTIVITY_DETAIL_MAX_CHARS,
   CLI_ACTIVITY_LABEL_MAX_CHARS,
   claudeToolActivity,
@@ -68,10 +69,30 @@ test("Claude reads, searches and MCP calls: the CLI's words, paths relative to t
   assert.deepEqual(claudeToolActivity("mcp__claude_ai_Context7__resolve-library-id", { libraryName: "react" }, { mcpServerNames: names }), {
     label: "claude.ai Context7 - resolve-library-id (MCP)",
     kind: "tool",
-    detail: "{\n  \"libraryName\": \"react\"\n}"
+    detail: "{\"libraryName\":\"react\"}"
   });
   assert.equal(claudeToolActivity("mcp__accord_agents__app_chat_get_context", {}).label, "accord_agents - app_chat_get_context (MCP)");
   assert.equal(claudeToolActivity("ToolSearch", { query: "select:x" }).label, "ToolSearch", "a tool the app knows no words for is named as the CLI names it");
+});
+
+test("a step keeps its arguments compact, and none of a body the app keeps itself (size check)", () => {
+  const todos = { todos: [{ content: "Fix the login", status: "pending", activeForm: "Fixing the login" }] };
+  assert.equal(claudeToolActivity("TodoWrite", todos).detail, JSON.stringify(todos), "compact JSON, no indentation");
+  const post = "word ".repeat(400);
+  assert.equal(claudeToolActivity("mcp__accord_agents__app_chat_send_message", { content: post }).detail, undefined,
+    "a message the chat already shows is not kept again with the step");
+  assert.equal(claudeToolActivity("mcp__accord_agents__app_chat_request_participants", { requests: [{ target: "drew", prompt: post }] }).detail, undefined,
+    "nor a request its card keeps");
+  assert.equal(claudeToolActivity("mcp__accord_agents__app_chat_read_messages", { limit: 60 }).detail, '{"limit":60}', "short arguments stay");
+  assert.equal(claudeToolActivity("mcp__other__send", { content: post }).detail?.startsWith('{"content":"word word'), true, "another server's arguments stay");
+  assert.equal(codexMcpActivity("accord_agents", "app_chat_send_message", { content: post }, true).detail, undefined);
+  assert.equal(codexMcpActivity("context7", "query-docs", { query: "react" }, true).detail, '{"query":"react"}');
+});
+
+test("ExitPlanMode and EnterPlanMode get no row: the CLI draws nothing at the call; the plan card is its dialog", () => {
+  assert.equal(CLAUDE_TOOLS_WITHOUT_ROW.has("ExitPlanMode"), true);
+  assert.equal(CLAUDE_TOOLS_WITHOUT_ROW.has("EnterPlanMode"), true);
+  assert.equal(CLAUDE_TOOLS_WITHOUT_ROW.has("Bash"), false);
 });
 
 test("a row stays one bounded line and its detail is capped, however big the call (size check)", () => {

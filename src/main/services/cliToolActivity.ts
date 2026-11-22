@@ -123,14 +123,31 @@ function stringInput(input: Record<string, unknown> | undefined, key: string): s
   return typeof value === "string" && value.trim() ? value : undefined;
 }
 
-function jsonDetail(value: unknown): string | undefined {
+/** The app's own MCP server. What its tools carry (a message, a request, a
+ *  document, a note) the app keeps itself, so a step of it keeps short
+ *  arguments only (an id, a limit), never such a body a second time. */
+const APP_MCP_SERVER = "accord_agents";
+const APP_TOOL_DETAIL_MAX_CHARS = 200;
+
+/** Claude Code tools that get no row: the CLI draws nothing when they are
+ *  called. ExitPlanMode is its "Exit plan mode?" dialog, which is the plan
+ *  card here; EnterPlanMode's "Entered plan mode" comes only with its result
+ *  (a row is drawn at the call, so it could say so of a call she declined),
+ *  and the mode chip follows the CLI into plan mode. */
+export const CLAUDE_TOOLS_WITHOUT_ROW: ReadonlySet<string> = new Set(["ExitPlanMode", "EnterPlanMode"]);
+
+/** A call's arguments as its row keeps them: compact JSON. */
+function jsonDetail(value: unknown, server?: string): string | undefined {
   if (value === undefined || value === null) return undefined;
   if (typeof value === "object" && Object.keys(value as Record<string, unknown>).length === 0) return undefined;
+  let compact: string;
   try {
-    return cliActivityDetail(JSON.stringify(value, null, 2));
+    compact = JSON.stringify(value);
   } catch {
     return undefined;
   }
+  if (server === APP_MCP_SERVER && compact.length > APP_TOOL_DETAIL_MAX_CHARS) return undefined;
+  return cliActivityDetail(compact);
 }
 
 /** A Claude Code tool call's row, in the CLI's words for it. */
@@ -201,7 +218,7 @@ export function claudeToolActivity(
       const mcp = mcpToolParts(name);
       if (mcp) {
         const server = context.mcpServerNames?.get(mcp.server) ?? mcp.server;
-        return row(`${server} - ${mcp.tool} (MCP)`, "tool", jsonDetail(input));
+        return row(`${server} - ${mcp.tool} (MCP)`, "tool", jsonDetail(input, mcp.server));
       }
       return row(name, "tool", jsonDetail(input));
     }
@@ -287,7 +304,7 @@ export function codexMcpActivity(server: string | undefined, tool: string | unde
   } catch {
     compact = "";
   }
-  const detail = jsonDetail(args);
+  const detail = jsonDetail(args, server);
   return {
     label: cliActivityLabel(`${finished ? "Called" : "Calling"} ${name}(${compact})`),
     kind: "tool",

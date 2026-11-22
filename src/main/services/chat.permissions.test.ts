@@ -593,7 +593,13 @@ test("agent progress sink coalesces activity only by item id and caps retained a
 
 test("agent progress sink: a step's words change as it ends, a label stays one bounded line, and one reply's details stay within budget", () => {
   const service = testService().service as any;
-  const sink = service.createAgentProgressSink("run-1", undefined, chatParticipant("codex-cli"), "message-1");
+  // What the window gets with each live update: the whole list, so its
+  // details must stay within the same budget on every one.
+  let mostDetailsInOneUpdate = 0;
+  const sink = service.createAgentProgressSink("run-1", (progress: ReviewProgress) => {
+    const details = (progress.agentProgress?.activityEvents ?? []).reduce((sum, event) => sum + (event.detail?.length ?? 0), 0);
+    mostDetailsInOneUpdate = Math.max(mostDetailsInOneUpdate, details);
+  }, chatParticipant("codex-cli"), "message-1");
   sink.emit({ kind: "tool", text: "Running npm test", activityKind: "command", activityStatus: "started", activityDetail: "npm test", activityItemId: "cmd-1" });
   sink.emit({ kind: "tool", text: "Ran npm test", activityKind: "command", activityStatus: "completed", activityItemId: "cmd-1" });
   assert.deepEqual(sink.activityEvents().map((event: ChatAgentActivityEvent) => [event.itemId, event.label, event.detail, event.status]), [
@@ -609,10 +615,11 @@ test("agent progress sink: a step's words change as it ends, a label stays one b
   }
   const events: ChatAgentActivityEvent[] = sink.activityEvents();
   const totalDetails = events.reduce((sum, event) => sum + (event.detail?.length ?? 0), 0);
-  assert.ok(totalDetails <= 200_000, `all details of one reply stay within the budget (${totalDetails})`);
+  assert.ok(totalDetails <= 24_000, `all details of one reply stay within the budget (${totalDetails})`);
   assert.ok(events.find((event) => event.itemId === "step-149")?.detail?.startsWith("149:"), "the newest steps keep their details");
   assert.equal(events.find((event) => event.itemId === "step-0")?.detail, undefined, "the oldest lose theirs first");
   assert.equal(events.find((event) => event.itemId === "step-0")?.label, "Running step 0", "and keep their words");
+  assert.ok(mostDetailsInOneUpdate > 0 && mostDetailsInOneUpdate <= 24_000, `no live update carries more (${mostDetailsInOneUpdate})`);
 });
 
 test("agent progress sink keeps in-progress formatted stream for visible runs", async () => {
