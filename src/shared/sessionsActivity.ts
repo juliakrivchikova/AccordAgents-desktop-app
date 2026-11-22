@@ -21,7 +21,13 @@ export const PHONE_ACTIVITY_ROWS_MAX = 12;
 export const PHONE_ACTIVITY_ROW_CHARS = 120;
 
 const THINKING_LABEL = /^(thinking|reasoning)\b/i;
-const READ_LABEL = /^(reading|viewing)\b/i;
+const READ_LABEL = /^(reading|viewing|read)\b/i;
+/** A label that only says what kind of step it is: the app's own words from
+ *  before rows took each CLI's ("Using Bash", "Running command"), kept in
+ *  stored replies, or a CLI's that says no more. Its row says the step's
+ *  detail instead when there is one; a label in the CLI's own words ("Running
+ *  npm test", "Reading src/a.ts") is the row. */
+const KIND_ONLY_LABEL = /^(running command|reading (file|file outline|code|result)|viewing image|updating files|listing files|scanning files|searching (files|code)|fetching url|handling a tool error|using \S+( (search|tool))?|(spawning|messaging|waiting for|using) subagent)$/i;
 
 function oneLine(value: string | undefined): string {
   return (value ?? "").replace(/\s+/g, " ").trim();
@@ -33,13 +39,13 @@ function detailLine(detail: string | undefined): string {
   return oneLine(first);
 }
 
-/** One step of a reply as its row shows it. The detail (the command, the
- *  query, the path) is what the row says when the CLI gave one; else the
- *  step's own label ("Reading file", "Using Bash"). */
+/** One step of a reply as its row shows it: its label when that is in the
+ *  CLI's own words ("Running npm test"); else the detail (the command, the
+ *  query, the path) when the CLI gave one; else the label ("Using Bash"). */
 export function sessionsActivityRow(event: Pick<ChatAgentActivityEvent, "kind" | "label" | "detail">): SessionsActivityRow {
   const label = oneLine(event.label);
   const detail = detailLine(event.detail);
-  const text = (fallback: string) => detail || fallback;
+  const text = (fallback: string) => (label && !KIND_ONLY_LABEL.test(label) ? label : detail) || fallback;
   if (THINKING_LABEL.test(label)) {
     return { kind: "thinking", text: detail || (label.replace(THINKING_LABEL, "").replace(/^[\s:.…-]+/, "") || label) };
   }

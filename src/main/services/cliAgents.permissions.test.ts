@@ -193,7 +193,8 @@ function makeClaudeWarmHarness(runner: any, options: { lifecycle?: boolean } = {
     selfResumeExpectedUntil: 0,
     interruptTarget: undefined as unknown,
     interruptRequestId: undefined as string | undefined,
-    onSelfResumedTurn: undefined as ((turn: any) => void) | undefined
+    onSelfResumedTurn: undefined as ((turn: any) => void) | undefined,
+    toolContext: {} as Record<string, unknown>
   };
   const flags = { unusable: false, settled: 0 };
   const hooks = {
@@ -1487,7 +1488,7 @@ test("codex app-server stream rejoins mid-sentence agent messages around tool us
   send({ method: "item/completed", params: { item: { type: "agentMessage", text: "about 1 EUR = 89.88 RUB." } } });
   send({ method: "turn/completed", params: { turn: { status: "completed" } } });
 
-  assert.equal(outputs.find((event) => event.kind === "tool")?.text, "Using web search\n");
+  assert.equal(outputs.find((event) => event.kind === "tool")?.text, "Searching the web\n", "Codex's TUI words for a web search that runs");
   assert.equal(outputs.filter((event) => event.kind === "text").at(-1)?.cumulative, "Current EUR/RUB is about 1 EUR = 89.88 RUB.");
   assert.equal((resolved[0] as { content: string }).content, "Current EUR/RUB is about 1 EUR = 89.88 RUB.");
 });
@@ -1780,7 +1781,11 @@ test("codex app-server stream keeps raw tool output out of agent text and comple
 
   const mcpEvents = outputs.filter((event) => event.activityItemId === "mcp-1");
   assert.deepEqual(mcpEvents.map((event) => event.activityStatus), ["started", "completed"]);
-  assert.equal(mcpEvents[1]?.text, mcpEvents[0]?.text);
+  // Codex's TUI words; a completion that names nothing keeps what the start named.
+  assert.deepEqual(mcpEvents.map((event) => event.text), [
+    "Calling app_roles_describe_options({\"role\":\"engineer\"})\n",
+    "Called app_roles_describe_options({\"role\":\"engineer\"})\n"
+  ]);
   assert.match(mcpEvents.at(-1)?.activityDetail ?? "", /"role": "engineer"/);
   assert.match(mcpEvents.at(-1)?.activityDetail ?? "", /MCP_RESULT_LAST/);
 
@@ -6719,6 +6724,56 @@ test("claude warm: a background task finishing while idle produces a self-starte
   assert.equal(result.content, "The soak finished.");
   assert.equal(state.replies.length, 0);
   assert.equal(harness.flags.unusable, false);
+});
+
+test("claude warm: each tool call of a step is its own row in the CLI's words, named by the session's folder and MCP servers", () => {
+  const runner = makeRunner() as any;
+  const harness = makeClaudeWarmHarness(runner, { lifecycle: true });
+  const { outputs } = harness.addReply({ origin: { runId: "run-1", messageId: "reply-1" } });
+  const { send } = harness;
+  send({ type: "command_lifecycle", command_uuid: "cmd-1", state: "started" });
+  send({ type: "system", subtype: "init", cwd: "/repo", mcp_servers: [{ name: "claude.ai Context7", status: "connected" }, { name: "accord_agents", status: "connected" }] });
+  send({ type: "assistant", message: { role: "assistant", content: [
+    { type: "tool_use", id: "toolu_a", name: "Read", input: { file_path: "/repo/src/a.ts" } },
+    { type: "tool_use", id: "toolu_b", name: "Bash", input: { command: "npm test", description: "Run unit tests" } },
+    { type: "tool_use", id: "toolu_c", name: "mcp__claude_ai_Context7__resolve-library-id", input: { libraryName: "react" } }
+  ] } });
+  const rows = outputs.filter((event) => event.kind === "tool").map((event: any) => [event.activityItemId, event.text.trim(), event.activityKind]);
+  assert.deepEqual(rows, [
+    ["toolu_a", "Reading src/a.ts", "tool"],
+    ["toolu_b", "Running unit tests", "command"],
+    ["toolu_c", "claude.ai Context7 - resolve-library-id (MCP)", "tool"]
+  ]);
+  assert.equal((outputs.find((event: any) => event.activityItemId === "toolu_b") as any)?.activityDetail, "npm test");
+});
+
+test("claude warm: a message that joins the running step says which step it joined, and a step the CLI started itself by its own start", () => {
+  const runner = makeRunner() as any;
+  const harness = makeClaudeWarmHarness(runner, { lifecycle: true });
+  const { send, state } = harness;
+  const starts: unknown[] = [];
+  harness.addReply({ origin: { runId: "run-1", messageId: "reply-1" } });
+  harness.addReply({ origin: { runId: "run-2", messageId: "reply-2" }, onStarted: (start: unknown) => starts.push(start) });
+  send({ type: "command_lifecycle", command_uuid: "cmd-1", state: "started" });
+  send({ type: "system", subtype: "init" });
+  send({ type: "command_lifecycle", command_uuid: "cmd-2", state: "started" });
+  assert.equal(starts.length, 1);
+  assert.deepEqual((starts[0] as any).joinedReply, { runId: "run-1", messageId: "reply-1" }, "it continues the step reply-1's message started");
+  assert.ok(Number.isFinite((starts[0] as any).joinedStepStartedAt), "with when that step began");
+  send({ type: "result", subtype: "success", result: "done" });
+
+  // Background work finishes while idle: the CLI starts a step itself, then a
+  // message joins it. Its origin is the older reply's: the step's own start counts.
+  state.onSelfResumedTurn = (turn: any) => turn.attach({ onOutput: () => undefined });
+  send({ type: "system", subtype: "init" });
+  const selfStarted = state.active;
+  assert.equal(selfStarted?.commandUuid, undefined);
+  const joinedStarts: any[] = [];
+  harness.addReply({ origin: { runId: "run-3", messageId: "reply-3" }, onStarted: (start: unknown) => joinedStarts.push(start) });
+  send({ type: "command_lifecycle", command_uuid: "cmd-3", state: "started" });
+  assert.equal(joinedStarts.length, 1);
+  assert.equal(joinedStarts[0].joinedReply, undefined);
+  assert.equal(joinedStarts[0].joinedStepStartedAt, selfStarted.stepStartedAt ?? selfStarted.startedAt);
 });
 
 test("claude warm: a self-started step with no handler is dropped without retiring the process", () => {

@@ -232,7 +232,8 @@ export const ChatMessageItem = memo(function ChatMessageItem(props: {
     truncated: processingTranscript.truncated,
     omittedActivityEventCount: processingTranscript.omittedActivityEventCount
   }) : undefined;
-  const queuedBehind = isStreaming ? message.metadata?.queuedBehind : undefined;
+  // Queued here (queuedBehind) or, for a member on a machine, by its own word (turnQueued), as on the phone.
+  const queuedBehind = isStreaming ? message.metadata?.queuedBehind ?? (message.metadata?.turnQueued ? { handle: participant?.handle ?? "" } : undefined) : undefined;
   const stopPending = isStreaming ? message.metadata?.stopPending : undefined;
   const workedMs = typeof message.metadata?.workedMs === "number" && Number.isFinite(message.metadata.workedMs) && message.metadata.workedMs >= 0
     ? message.metadata.workedMs

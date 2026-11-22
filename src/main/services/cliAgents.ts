@@ -110,6 +110,18 @@ import {
   parseGeminiTranscriptActivity
 } from "./geminiExec";
 import type { ParticipantRunResult } from "./providers";
+import {
+  claudeToolActivity,
+  codexCommandActivity,
+  codexFileChangeActivity,
+  codexMcpActivity,
+  codexWebSearchActivity,
+  mcpServerToolPrefix,
+  type ClaudeToolActivityContext,
+  type CliToolActivity,
+  type CodexCommandAction,
+  type CodexFileChange
+} from "./cliToolActivity";
 import { APP_TOOL_PERMISSION_WAIT_MS } from "../../shared/appMcpToolContracts";
 
 const MAX_CLI_ERROR_CHARS = 500;
@@ -182,7 +194,6 @@ const ANTIGRAVITY_EXECUTABLE_ENV = "ACCORD_AGENTS_ANTIGRAVITY_EXECUTABLE";
 const NATIVE_GOAL_IDLE_WARNING_MS = 5 * 60_000;
 const CODEX_APP_SERVER_DISABLED_ENV = "ACCORD_AGENTS_CODEX_APP_SERVER";
 const CODEX_APP_SERVER_MCP_TOKEN_ENV = "ACCORD_AGENTS_MCP_TOKEN";
-const CODEX_ACTIVITY_INVOCATION_MAX_CHARS = 1_800;
 const CODEX_ACTIVITY_OUTPUT_MAX_LINES = 20;
 const CODEX_ACTIVITY_OUTPUT_MAX_CHARS = 2_000;
 const CLAUDE_CODE_LOGIN_SHELL_AUTH_ENV_KEYS = [
@@ -506,7 +517,7 @@ export interface CliAgentWarmOptions {
   /** Claude: the CLI handed this run's message to a step (it starts now, or
    *  joins the step that is running). Until then the process may still be
    *  working on an earlier message. */
-  onReplyStarted?: () => void;
+  onReplyStarted?: (start?: CliAgentReplyStart) => void;
   /** Claude: this run's message was written to the CLI (it is in the CLI's
    *  queue from now on, in the order messages were written). */
   onMessageWritten?: () => void;
@@ -530,6 +541,18 @@ export interface CliAgentReplyOrigin {
   messageId: string;
   threadId?: string;
   chatThreadRootId?: string;
+}
+
+/** How the CLI started a reply's message. */
+export interface CliAgentReplyStart {
+  /** It was handed to the step that was running (sent mid-step): the reply
+   *  that step was answering until now, when a message of the chat started
+   *  that step (not for a step the CLI started on its own: its origin is the
+   *  older reply whose background work finished). */
+  joinedReply?: CliAgentReplyOrigin;
+  /** When that running step began (epoch ms). Like the CLI's one spinner,
+   *  the work counts from it. */
+  joinedStepStartedAt?: number;
 }
 
 export interface CliAgentSelfResumedTurn {
@@ -669,7 +692,7 @@ interface ClaudeWarmRunContext {
   origin?: CliAgentReplyOrigin;
   onSelfResumedTurn?: (turn: CliAgentSelfResumedTurn) => void;
   onBackgroundTasksChanged?: (tasks: CliAgentBackgroundTask[]) => void;
-  onReplyStarted?: () => void;
+  onReplyStarted?: (start?: CliAgentReplyStart) => void;
   onMessageWritten?: () => void;
   onPromptSuggestion?: (suggestion: string) => void;
   allowEmptyContent?: boolean;
@@ -721,7 +744,10 @@ interface ClaudeWarmReply {
   detachSignal?: () => void;
   /** Output of a self-started reply produced before the app attached to it. */
   buffered?: CliAgentOutputEvent[];
-  onStarted?: () => void;
+  /** When the CLI step this reply is answering began (epoch ms): when the CLI
+   *  started its message, or, for one handed to a running step, that step's. */
+  stepStartedAt?: number;
+  onStarted?: (start?: CliAgentReplyStart) => void;
   onWritten?: () => void;
   /** Receives the CLI's next-prompt suggestion if this reply ends well. */
   onPromptSuggestion?: (suggestion: string) => void;
@@ -788,6 +814,9 @@ interface ClaudeWarmProcessState {
   /** What the CLI said about the last compaction of this session, numbered,
    *  so a /compact that compacted nothing is told from one that did. */
   lastCompactBoundary?: ClaudeCompactBoundary;
+  /** The session's folder and MCP servers, as its `system/init` said: a tool
+   *  row names paths and servers the way the CLI's transcript does. */
+  toolContext: ClaudeToolActivityContext;
 }
 
 interface ClaudeCompactBoundary {
@@ -810,6 +839,7 @@ interface ClaudeWarmProcessHooks {
 interface ClaudeOneShotStreamState {
   buffer: string;
   streamedText: string;
+  toolContext: ClaudeToolActivityContext;
   messages: string[];
   lastAssistantUuid?: string;
   nextTextBlockStartsBlock: boolean;
@@ -857,6 +887,8 @@ interface CachedModelCatalog {
 interface CodexAppServerPendingTurn {
   startedAt: number;
   threadId: string;
+  /** The session's folder: an edit's row names its file relative to it. */
+  cwd?: string;
   turnId?: string;
   /** The last of its turns that completed (a goal runs several): where the
    *  thread stands when the reply ends (sessionCut). */
@@ -869,6 +901,8 @@ interface CodexAppServerPendingTurn {
     label: string;
     kind: ChatAgentActivityKind;
     detail?: string;
+    /** The item as it started: its completion may carry only what changed. */
+    item?: Record<string, unknown>;
   }>;
   agentTextPendingCarriageReturn?: boolean;
   completedAgentMessages: string[];
@@ -4829,6 +4863,7 @@ export class CliAgentRunner {
           pendingTurn = {
             startedAt,
             threadId: currentThreadId,
+            cwd: repoPath,
             messages: [],
             streamedText: "",
             visibleTranscript: "",
@@ -5361,14 +5396,14 @@ export class CliAgentRunner {
       if (itemType === "agentMessage" && pending.streamedText.trim()) {
         pending.nextAgentMessageStartsBlock = true;
       }
-      const summary = this.codexAppServerToolSummary(item);
+      const summary = this.codexAppServerToolSummary(item, false, pending.cwd);
       const activityItemId = this.stringField(item ?? {}, "id");
       if (summary) {
         if (
           activityItemId &&
           (itemType === "commandExecution" || itemType === "mcpToolCall" || itemType === "fileChange")
         ) {
-          pending.activityItems.set(activityItemId, summary);
+          pending.activityItems.set(activityItemId, { ...summary, ...(item ? { item } : {}) });
         }
         this.emitLiveOutput(pending.onOutput, "tool", `${summary.label}\n`, undefined, {
           activityKind: summary.kind,
@@ -5399,14 +5434,13 @@ export class CliAgentRunner {
       const detail = this.codexAppServerFileChangesDetail(params.changes);
       if (detail) {
         const activityItemId = this.stringField(params, "itemId");
+        // A patch updated while it runs is proposed, not applied yet.
+        const summary = codexFileChangeActivity(this.codexAppServerFileChanges(params.changes), pending.cwd, detail, false);
         if (activityItemId) {
-          pending.activityItems.set(activityItemId, {
-            label: "Updating files",
-            kind: "file-edit",
-            detail
-          });
+          const prior = pending.activityItems.get(activityItemId)?.item;
+          pending.activityItems.set(activityItemId, { ...summary, item: { ...(prior ?? { id: activityItemId, type: "fileChange" }), changes: params.changes } });
         }
-        this.emitLiveOutput(pending.onOutput, "tool", "Updating files\n", undefined, {
+        this.emitLiveOutput(pending.onOutput, "tool", `${summary.label}\n`, undefined, {
           activityKind: "file-edit",
           activityStatus: "started",
           ...(activityItemId ? { activityItemId } : {}),
@@ -5450,11 +5484,15 @@ export class CliAgentRunner {
         itemType === "fileChange"
       ) {
         const priorSummary = itemId ? pending.activityItems.get(itemId) : undefined;
-        const completedSummary = this.codexAppServerToolSummary(item);
+        // What the item said as it started, with what its completion says.
+        const finishedItem = priorSummary?.item && item ? { ...priorSummary.item, ...item } : item;
+        const completedSummary = this.codexAppServerToolSummary(finishedItem, true, pending.cwd);
+        const itemStatus = this.stringField(finishedItem ?? {}, "status");
+        // The row takes the CLI's finished words ("Ran …", "Called …"); a
+        // step that failed or was declined ends failed.
         const summary = completedSummary
           ? {
             ...completedSummary,
-            label: priorSummary?.label ?? completedSummary.label,
             kind: priorSummary?.kind ?? completedSummary.kind
           }
           : priorSummary;
@@ -5468,7 +5506,7 @@ export class CliAgentRunner {
             );
           this.emitLiveOutput(pending.onOutput, "tool", `${summary.label}\n`, undefined, {
             activityKind: summary.kind,
-            activityStatus: "completed",
+            activityStatus: itemStatus === "failed" || itemStatus === "declined" ? "failed" : "completed",
             ...(itemId ? { activityItemId: itemId } : {}),
             ...(detail ? { activityDetail: detail } : {})
           });
@@ -5804,22 +5842,6 @@ export class CliAgentRunner {
     ].filter((part): part is string => Boolean(part)).join("\n\n") || undefined;
   }
 
-  private codexAppServerBoundedInvocationSummary(invocation: string | undefined): string | undefined {
-    const normalized = invocation?.trimEnd();
-    if (!normalized || normalized.length <= CODEX_ACTIVITY_INVOCATION_MAX_CHARS) {
-      return normalized || undefined;
-    }
-    let keep = CODEX_ACTIVITY_INVOCATION_MAX_CHARS;
-    let omitted = normalized.length - keep;
-    let marker = `… [+${omitted} chars omitted]`;
-    while (keep + marker.length > CODEX_ACTIVITY_INVOCATION_MAX_CHARS) {
-      keep = Math.max(0, CODEX_ACTIVITY_INVOCATION_MAX_CHARS - marker.length);
-      omitted = normalized.length - keep;
-      marker = `… [+${omitted} chars omitted]`;
-    }
-    return `${normalized.slice(0, keep)}${marker}`;
-  }
-
   private codexAppServerBoundedOutputTail(output: string | undefined): string | undefined {
     if (!output) {
       return undefined;
@@ -5875,6 +5897,19 @@ export class CliAgentRunner {
       return [this.codexAppServerReadableJson(record) ?? ""];
     }).filter(Boolean);
     return parts.length > 0 ? parts.join("\n") : undefined;
+  }
+
+  /** An edit's files as the row counts them: path, kind, diff. */
+  private codexAppServerFileChanges(value: unknown): CodexFileChange[] {
+    if (!Array.isArray(value)) {
+      return [];
+    }
+    return value.map((entry) => {
+      const record = this.asRecord(entry) ?? {};
+      const kindRecord = this.asRecord(record.kind);
+      const kind = this.stringField(record, "kind") ?? this.stringField(kindRecord ?? {}, "type");
+      return { path: this.stringField(record, "path"), kind, diff: this.stringField(record, "diff") };
+    });
   }
 
   private codexAppServerFileChangesDetail(value: unknown): string | undefined {
@@ -5933,37 +5968,28 @@ export class CliAgentRunner {
     });
   }
 
-  private codexAppServerToolSummary(item: Record<string, unknown> | undefined): { label: string; kind: ChatAgentActivityKind; detail?: string } | undefined {
+  /** A Codex item's row in the words of Codex's TUI (cliToolActivity.ts):
+   *  what it says while the item runs, or once it is `finished`. */
+  private codexAppServerToolSummary(
+    item: Record<string, unknown> | undefined,
+    finished: boolean,
+    cwd: string | undefined
+  ): { label: string; kind: ChatAgentActivityKind; detail?: string } | undefined {
     if (!item) {
       return undefined;
     }
     const type = this.stringField(item, "type");
     if (type === "commandExecution") {
-      return {
-        label: "Running command",
-        kind: "command",
-        detail: this.codexAppServerBoundedInvocationSummary(this.stringField(item, "command"))
-      };
+      const actions = Array.isArray(item.commandActions)
+        ? item.commandActions.map((action) => this.asRecord(action) ?? {}) as CodexCommandAction[]
+        : undefined;
+      return codexCommandActivity(this.stringField(item, "command"), actions, finished, this.stringField(item, "status"));
     }
     if (type === "mcpToolCall") {
-      const tool = this.stringField(item, "tool");
-      return {
-        label: tool ? this.toolActivityLabel(tool) : "Using MCP tool",
-        kind: "tool",
-        detail: this.codexAppServerBoundedInvocationSummary(
-          this.codexAppServerReadableJson(item.arguments)
-        )
-      };
+      return codexMcpActivity(this.stringField(item, "server"), this.stringField(item, "tool"), item.arguments, finished);
     }
     if (type === "dynamicToolCall") {
-      const tool = this.stringField(item, "tool");
-      return {
-        label: tool ? this.toolActivityLabel(tool) : "Using tool",
-        kind: "tool",
-        detail: this.codexAppServerBoundedInvocationSummary(
-          this.codexAppServerReadableJson(item.arguments)
-        )
-      };
+      return codexMcpActivity(this.stringField(item, "namespace"), this.stringField(item, "tool"), item.arguments, finished);
     }
     if (type === "collabAgentToolCall") {
       const tool = this.stringField(item, "tool");
@@ -5978,13 +6004,13 @@ export class CliAgentRunner {
       return { label, kind: "tool", detail };
     }
     if (type === "webSearch") {
-      return { label: "Using web search", kind: "web", detail: this.stringField(item, "query") };
+      return codexWebSearchActivity(this.stringField(item, "query"), finished);
     }
     if (type === "imageView") {
       return { label: "Viewing image", kind: "tool", detail: this.stringField(item, "path") };
     }
     if (type === "fileChange") {
-      return { label: "Updating files", kind: "file-edit", detail: this.codexAppServerFileChangesDetail(item.changes) };
+      return codexFileChangeActivity(this.codexAppServerFileChanges(item.changes), cwd, this.codexAppServerFileChangesDetail(item.changes), finished, this.stringField(item, "status"));
     }
     return undefined;
   }
@@ -6395,6 +6421,7 @@ export class CliAgentRunner {
         ? {
             buffer: "",
             streamedText: "",
+            toolContext: {},
             messages: [],
             nextTextBlockStartsBlock: false
           }
@@ -6571,9 +6598,9 @@ export class CliAgentRunner {
             origin: warm.origin,
             onSelfResumedTurn: warm.onSelfResumedTurn,
             onBackgroundTasksChanged: warm.onBackgroundTasksChanged,
-            onReplyStarted: () => {
+            onReplyStarted: (start) => {
               replyStarted = true;
-              if (!freshProcess) warm.onReplyStarted?.();
+              if (!freshProcess) warm.onReplyStarted?.(start);
             },
             onMessageWritten: warm.onMessageWritten,
             onPromptSuggestion: warm.onPromptSuggestion,
@@ -6835,7 +6862,8 @@ export class CliAgentRunner {
       reportedBackgroundTasks: "[]",
       lastTaskEventAt: 0,
       selfResumeExpectedUntil: 0,
-      controlWaiters: new Map()
+      controlWaiters: new Map(),
+      toolContext: {}
     };
     const capturedBackgroundProcesses = new Map<string, CapturedPosixProcess>();
     /** Each waiter settles once its condition holds (or the process is gone). */
@@ -7349,6 +7377,7 @@ export class CliAgentRunner {
         };
       }
       if (subtype === "init") {
+        this.noteClaudeToolContext(record, state.toolContext);
         this.startClaudeWarmStep(state, participant, hooks);
       } else {
         this.trackClaudeBackgroundTasks(record, subtype, state, participant);
@@ -7385,7 +7414,7 @@ export class CliAgentRunner {
       hooks.settled();
       return;
     }
-    this.applyClaudeWarmReplyEvent(reply, event);
+    this.applyClaudeWarmReplyEvent(reply, event, state.toolContext);
   }
 
   private noteClaudeWarmReplyIdentity(reply: ClaudeWarmReply, event: unknown, state: ClaudeWarmProcessState): void {
@@ -7397,15 +7426,9 @@ export class CliAgentRunner {
   }
 
   /** Tool rows and text of the running step, streamed into its reply. */
-  private applyClaudeWarmReplyEvent(reply: ClaudeWarmReply, event: unknown): void {
+  private applyClaudeWarmReplyEvent(reply: ClaudeWarmReply, event: unknown, toolContext: ClaudeToolActivityContext): void {
     const onOutput = this.claudeWarmReplyOutput(reply);
-    const toolSummary = this.claudeWarmToolSummary(event);
-    if (toolSummary) {
-      this.emitLiveOutput(onOutput, "tool", `${toolSummary.label}\n`, undefined, {
-        activityKind: toolSummary.kind,
-        activityStatus: "started"
-      });
-    }
+    this.emitClaudeToolRows(onOutput, event, toolContext);
     if (this.claudeWarmTextBlockStarted(event) && reply.streamedText.trim()) {
       reply.nextTextBlockStartsBlock = true;
     }
@@ -7476,11 +7499,12 @@ export class CliAgentRunner {
     this.startClaudeSelfResumedReply(state, participant, hooks);
   }
 
-  private activateClaudeWarmReply(state: ClaudeWarmProcessState, reply: ClaudeWarmReply): void {
+  private activateClaudeWarmReply(state: ClaudeWarmProcessState, reply: ClaudeWarmReply, start?: CliAgentReplyStart): void {
     reply.started = true;
+    reply.stepStartedAt = start?.joinedStepStartedAt ?? Date.now();
     state.active = reply;
     try {
-      reply.onStarted?.();
+      reply.onStarted?.(start);
     } catch {
       // A failing observer must not stop the reply from being routed.
     }
@@ -7614,6 +7638,7 @@ export class CliAgentRunner {
     }
     if (lifecycle === "started") {
       const previous = state.active;
+      let start: CliAgentReplyStart | undefined;
       if (previous && previous !== reply && previous.stopRequested && !previous.settled) {
         // Stopped as the next message joined its step: it ends stopped.
         this.removeClaudeWarmReply(state, previous);
@@ -7625,8 +7650,14 @@ export class CliAgentRunner {
         // step produces from now on answers the new message.
         this.finishClaudeWarmReply(state, previous, this.claudeWarmSegmentText(previous, undefined), undefined, participant, { allowEmpty: true });
         void this.writeDebugLog("cli-agent-claude-message-joined-step", { participantId: participant.id });
+        // A step the CLI started on its own carries the origin of the work
+        // that finished, an older reply: its own start is the step's.
+        start = {
+          ...(previous.commandUuid && previous.origin ? { joinedReply: previous.origin } : {}),
+          joinedStepStartedAt: previous.stepStartedAt ?? previous.startedAt
+        };
       }
-      this.activateClaudeWarmReply(state, reply);
+      this.activateClaudeWarmReply(state, reply, start);
       if (reply.stopRequested) {
         // Its removal from the queue came too late: stop it now that it runs.
         state.interruptTarget = reply;
@@ -7933,13 +7964,11 @@ export class CliAgentRunner {
     state.usedTokens = this.findContextUsedTokens(event) ?? state.usedTokens;
     state.contextWindowTokens = this.findContextWindowTokens(event) ?? state.contextWindowTokens;
     state.error = this.claudeWarmStreamError(event) ?? state.error;
-    const toolSummary = this.claudeWarmToolSummary(event);
-    if (toolSummary) {
-      this.emitLiveOutput(options.onOutput, "tool", `${toolSummary.label}\n`, undefined, {
-        activityKind: toolSummary.kind,
-        activityStatus: "started"
-      });
+    const record = this.asRecord(event);
+    if (record && this.stringField(record, "type") === "system" && this.stringField(record, "subtype") === "init") {
+      this.noteClaudeToolContext(record, state.toolContext);
     }
+    this.emitClaudeToolRows(options.onOutput, event, state.toolContext);
     if (this.claudeWarmTextBlockStarted(event) && state.streamedText.trim()) {
       state.nextTextBlockStartsBlock = true;
     }
@@ -8823,44 +8852,6 @@ export class CliAgentRunner {
     };
   }
 
-  private emitCodexLiveOutput(
-    line: string,
-    onOutput: CliAgentOutputCallback | undefined,
-    deltaAccumulator?: { value: string },
-    onSessionId?: CliAgentSessionIdCallback
-  ): void {
-    try {
-      const event = JSON.parse(line) as unknown;
-      this.reportSessionId(onSessionId, this.findSessionId(event));
-      if (!onOutput) {
-        return;
-      }
-      const delta = this.extractCodexAssistantStreamingDelta(event);
-      if (delta && deltaAccumulator) {
-        deltaAccumulator.value += delta;
-        this.emitLiveOutput(onOutput, "text", delta, deltaAccumulator.value);
-        return;
-      }
-      const completedMessage = this.extractCodexAssistantMessage(event);
-      if (completedMessage && deltaAccumulator && !deltaAccumulator.value.trim()) {
-        deltaAccumulator.value = completedMessage;
-        this.emitLiveOutput(onOutput, "text", completedMessage, deltaAccumulator.value);
-        return;
-      }
-      const toolSummary = this.codexToolSummary(event);
-      if (toolSummary) {
-        this.emitLiveOutput(onOutput, "tool", `${toolSummary.label}\n`, undefined, {
-          activityKind: toolSummary.kind,
-          activityStatus: "started",
-          ...(toolSummary.itemId ? { activityItemId: toolSummary.itemId } : {})
-        });
-      }
-    } catch {
-      // Ignore non-JSON CLI output in the live chat panel; stderr/stdout diagnostics
-      // are still captured by the final command result and debug logs.
-    }
-  }
-
   private reportSessionId(onSessionId: CliAgentSessionIdCallback | undefined, sessionId: string | undefined): void {
     const normalized = sessionId?.trim();
     if (!normalized) {
@@ -8893,52 +8884,6 @@ export class CliAgentRunner {
     return text.replace(/\u001b\[[0-?]*[ -/]*[@-~]/g, "");
   }
 
-  private codexToolSummary(event: unknown): { label: string; kind: ChatAgentActivityKind; itemId?: string } | undefined {
-    const record = this.asRecord(event);
-    if (!record) {
-      return undefined;
-    }
-    const method = this.stringField(record, "method");
-    if (method === "item/autoApprovalReview/started") {
-      return { label: "Auto-reviewing approval request", kind: "approval" };
-    }
-    if (method === "item/autoApprovalReview/completed") {
-      return { label: "Auto-review completed", kind: "approval" };
-    }
-    const item = this.asRecord(record.item) ?? record;
-    const itemId = this.stringField(item, "id") ?? this.stringField(record, "itemId");
-    const type = `${this.stringField(record, "type") ?? ""} ${this.stringField(item, "type") ?? ""}`.toLowerCase();
-    const name = this.stringField(item, "name") ?? this.stringField(item, "tool_name");
-    const command = this.stringField(item, "command") ?? this.stringField(item, "cmd");
-    if (command && /command|exec|shell|bash/.test(type)) {
-      return { label: "Running command", kind: "command", itemId };
-    }
-    if (name && /tool|function|call/.test(type)) {
-      return { label: this.toolActivityLabel(name), kind: "tool", itemId };
-    }
-    if (/read|grep|glob|ls/.test(type) && name) {
-      return { label: this.toolActivityLabel(name), kind: "tool", itemId };
-    }
-    return undefined;
-  }
-
-  private toolActivityLabel(name: string): string {
-    const normalized = name.toLowerCase();
-    if (normalized === "read") {
-      return "Reading file";
-    }
-    if (normalized === "grep") {
-      return "Searching files";
-    }
-    if (normalized === "glob") {
-      return "Scanning files";
-    }
-    if (normalized === "ls") {
-      return "Listing files";
-    }
-    return `Using ${name}`;
-  }
-
   private claudeWarmTextBlockStarted(event: unknown): boolean {
     const record = this.asRecord(event);
     if (!record || this.stringField(record, "type") !== "stream_event") {
@@ -8952,16 +8897,31 @@ export class CliAgentRunner {
     return this.stringField(block ?? {}, "type") === "text";
   }
 
-  private claudeWarmToolSummary(event: unknown): { label: string; kind: ChatAgentActivityKind } | undefined {
+  /** One row per tool call of an assistant message (a subagent's too, as
+   *  before), in the CLI's own words for it (cliToolActivity.ts), keyed by
+   *  the call's id. */
+  private emitClaudeToolRows(onOutput: CliAgentOutputCallback | undefined, event: unknown, toolContext: ClaudeToolActivityContext): void {
+    for (const call of this.claudeToolCalls(event, toolContext)) {
+      this.emitLiveOutput(onOutput, "tool", `${call.label}\n`, undefined, {
+        activityKind: call.kind,
+        activityStatus: "started",
+        ...(call.detail ? { activityDetail: call.detail } : {}),
+        ...(call.id ? { activityItemId: call.id } : {})
+      });
+    }
+  }
+
+  private claudeToolCalls(event: unknown, toolContext: ClaudeToolActivityContext): Array<CliToolActivity & { id?: string }> {
     const record = this.asRecord(event);
     if (!record) {
-      return undefined;
+      return [];
     }
     const message = this.asRecord(record.message) ?? record;
     const content = message.content;
     if (!Array.isArray(content)) {
-      return undefined;
+      return [];
     }
+    const calls: Array<CliToolActivity & { id?: string }> = [];
     for (const block of content) {
       const blockRecord = this.asRecord(block);
       if (!blockRecord || this.stringField(blockRecord, "type") !== "tool_use") {
@@ -8969,24 +8929,29 @@ export class CliAgentRunner {
       }
       const name = this.stringField(blockRecord, "name");
       if (name) {
-        return { label: this.toolActivityLabel(name), kind: this.claudeActivityKindForTool(name) };
+        const id = this.stringField(blockRecord, "id");
+        calls.push({ ...claudeToolActivity(name, this.asRecord(blockRecord.input), toolContext), ...(id ? { id } : {}) });
       }
     }
-    return undefined;
+    return calls;
   }
 
-  private claudeActivityKindForTool(name: string): ChatAgentActivityKind {
-    const normalized = name.toLowerCase();
-    if (normalized === "bash") {
-      return "command";
+  /** The session's folder and MCP servers from the CLI's `system/init`. */
+  private noteClaudeToolContext(record: Record<string, unknown>, toolContext: ClaudeToolActivityContext): void {
+    const cwd = this.stringField(record, "cwd");
+    if (cwd) {
+      toolContext.cwd = cwd;
     }
-    if (normalized === "websearch" || normalized === "webfetch") {
-      return "web";
+    if (Array.isArray(record.mcp_servers)) {
+      const names = new Map<string, string>();
+      for (const server of record.mcp_servers) {
+        const name = this.stringField(this.asRecord(server) ?? {}, "name");
+        if (name) {
+          names.set(mcpServerToolPrefix(name), name);
+        }
+      }
+      toolContext.mcpServerNames = names;
     }
-    if (["edit", "write", "multiedit", "notebookedit"].includes(normalized)) {
-      return "file-edit";
-    }
-    return "tool";
   }
 
   private withoutWarm(options: CliAgentRunOptions): CliAgentRunOptions {

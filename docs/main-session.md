@@ -361,10 +361,22 @@ chat without a main session is always `classic`; its switch is disabled.
     and in a member's session: a quiet "Working for 4s" (live) over a
     hairline, then one muted line per step with an outline icon by its kind
     and what it is about (`sessionsActivityRow`, from the activity events
-    the run already reports): thinking (brain), web search (globe, the
-    query), shell (terminal, the command), file read (file, the path), edit
-    (pencil, the path), any other tool (wrench, its label); the newest one
-    shimmers (still for reduced motion). The member's words and its posts
+    the run already reports): thinking (brain), web search (globe), shell
+    (terminal), file read (file), edit (pencil), any other tool (wrench);
+    the newest one shimmers (still for reduced motion). A step says what
+    the member's own CLI says for it (`cliToolActivity.ts`, 2026-11-22: "Using
+    Bash" told the User nothing): Claude Code's "Running <description in its
+    -ing form, or the command cut to 50 columns>", "Reading src/a.ts",
+    "Searching for TODO", "Update(a.ts)", "<server> - <tool> (MCP)"; Codex's
+    "Running …" then "Ran …", "Read a.ts", "Search TODO", "Edited a.ts (+1
+    -1)", "Called server.tool({…})"; a stored step with only the app's old
+    word shows its detail (the command, the query, the path). A step's
+    label is one line of at most 200 characters, its detail at most 1,800,
+    and one reply's details 200,000 together (the oldest lose theirs first).
+    A message the User sends while a Claude member works is "Queued" (no
+    clock) until its CLI hands it to the running step at the next tool
+    result; from then its reply is the turn's one "Working for", counted
+    from the start of the step it joined, as the CLI's one spinner is. The member's words and its posts
     stay its words, in order between the rows; its turn's tasks follow as
     their rows. No status label, no "Thinking" word, no grouped boxes, no
     Stop or copy on a running reply (the composer stops it, also with

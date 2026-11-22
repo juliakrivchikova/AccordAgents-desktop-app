@@ -33,18 +33,20 @@ const step = (n, kind, label, detail) => ({ id: `a${n}`, sequence: n, kind, labe
 const WORK = [
   step(1, "status", "Thinking", "I need the current exchange rate, so I'll run a standard web search."),
   step(2, "web", "Using web search", "EUR to USD exchange rate today"),
-  step(3, "command", "Running command", "npm test -- --grep login\nsecond line"),
+  // In the member's CLI's own words (cliToolActivity.ts); the others are
+  // stored rows in the app's old words, which show their detail.
+  step(3, "command", "Running npm test -- --grep login second line", "npm test -- --grep login\nsecond line"),
   step(4, "tool", "Reading file", "src/login.ts"),
   step(5, "file-edit", "Updating files", "src/login.css"),
-  step(6, "tool", "Using mcp__accord_agents__app_chat_get_context")
+  step(6, "tool", "accord_agents - app_chat_get_context (MCP)", "{}")
 ];
 const WORK_ROWS = [
   ["thinking", "I need the current exchange rate, so I'll run a standard web search."],
   ["web", "EUR to USD exchange rate today"],
-  ["shell", "npm test -- --grep login"],
+  ["shell", "Running npm test -- --grep login second line"],
   ["read", "src/login.ts"],
   ["edit", "src/login.css"],
-  ["tool", "Using mcp__accord_agents__app_chat_get_context"]
+  ["tool", "accord_agents - app_chat_get_context (MCP)"]
 ];
 
 const running = (fields = {}) => ({ id: "r1", role: "participant", participantId: MAIN.id, participantLabel: "@main", content: "", status: "pending", createdAt: at(0.2),
