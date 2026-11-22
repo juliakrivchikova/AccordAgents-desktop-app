@@ -26117,6 +26117,10 @@ export class ChatService {
           this.finishServerTurn(run.runId, "interrupted");
           ended += 1;
         }
+        // The requests those turns answered end as the next start would end
+        // them (a phone showed "Waiting on …" with Stop meanwhile); one with
+        // a member on a machine still at work goes on.
+        if (changed && this.markOrphanedParticipantRequestsInterrupted(conversation, { ignoreLocalRequestLocks: true })) changed = true;
         if (changed) {
           conversation.updatedAt = new Date().toISOString();
           this.queueSnapshot(conversation);

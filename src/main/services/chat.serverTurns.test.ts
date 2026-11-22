@@ -462,3 +462,25 @@ test("quitting the computer leaves a member on a machine running there", async (
   assert.equal(await h.chat.endTurnsForQuit(), 0);
   assert.equal((await h.storage.getConversation("chat-m"))?.messages.find((message) => message.id === "m-reply")?.status, "pending");
 });
+
+test("quitting ends the requests whose tasks it ended, as the next start would", async (t) => {
+  const h = await setup(t);
+  const at = new Date().toISOString();
+  const main: ChatParticipant = { ...desk, id: "33333333-3333-4333-8333-333333333333", handle: "main" } as ChatParticipant;
+  const request: ChatMessage = { id: "task-1", role: "participant", participantId: main.id, participantLabel: "@main", content: "", createdAt: at, status: "done",
+    metadata: { participantRequest: { id: "batch-1", requesterParticipantId: main.id, requesterHandle: "main", source: "explicit", resumeRequester: true, status: "running",
+      depth: 1, createdAt: at, updatedAt: at, delegation: { start: "clean" },
+      items: [{ targetParticipantId: desk.id, targetHandle: "taylor", prompt: "Write it", title: "Essay", status: "running", replyMessageId: "task-reply", createdAt: at, updatedAt: at }] } } } as unknown as ChatMessage;
+  const reply: ChatMessage = { id: "task-reply", role: "participant", participantId: desk.id, participantLabel: "@taylor", content: "", createdAt: at, status: "pending",
+    metadata: { runId: "run-task", sourceMessageId: "task-1" } } as ChatMessage;
+  const chat = localChat("chat-t", [request, reply]);
+  chat.metadata = { ...chat.metadata, participants: [main, desk] } as Conversation["metadata"];
+  await save(h.chat, chat);
+  (h.chat as unknown as { chatRunMeta: Map<string, unknown> }).chatRunMeta.set("run-task", { conversationId: "chat-t", participantId: desk.id, participantHandle: "taylor" });
+  h.chat.beginQuit();
+  assert.equal(await h.chat.endTurnsForQuit(), 1);
+  const stored = (await h.storage.getConversation("chat-t"))!;
+  assert.equal(stored.messages.find((message) => message.id === "task-reply")?.status, "error");
+  const batch = stored.messages.find((message) => message.id === "task-1")?.metadata?.participantRequest;
+  assert.equal(batch?.items[0].status, "interrupted", "no phone shows it waiting on that task");
+});
