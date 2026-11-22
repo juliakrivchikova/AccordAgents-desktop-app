@@ -73,9 +73,12 @@ export function sessionsTaskStatus(
 export function sessionsMemberStatus(
   memberStatus: ChatParticipantRosterStatus | undefined,
   task: Pick<ChatParticipantRequestItem, "status" | "createdAt"> | undefined,
-  memberFinishedAt?: string
+  memberFinishedAt?: string,
+  /** A card of its waits for the User (sessionsMembersWaitingForUser): it
+   *  waits for her even while its run is live, blocked on her answer. */
+  waitsForUser = false
 ): SessionsWorkStatus {
-  if (memberStatus === "pending") return "waiting";
+  if (waitsForUser || memberStatus === "pending") return "waiting";
   if (isMemberWorking(memberStatus)) return "running";
   const stale = task !== undefined && !endedSinceTask(task, memberFinishedAt);
   if (memberStatus === "stopped" && !stale) return "stopped";
@@ -345,6 +348,25 @@ export function openMemberCardMessages(messages: readonly ChatMessage[], index: 
     (isWaitingChoice(message) || isWaitingMentionApproval(message)) && sessionsViewLane(message, index).kind === "member");
 }
 
+/** Members a card waits on the User for: an open choice or mention question
+ *  of theirs, or a request of theirs she has to approve (a tool, a command,
+ *  a change of the chat; `approvals`: the chat's pendingAppToolApprovals).
+ *  Blocked on her answer, such a member is "Waiting for you", not running,
+ *  even while its run is live (Codex's "Needs input"). */
+export function sessionsMembersWaitingForUser(messages: readonly ChatMessage[], approvals?: unknown): Set<string> {
+  const waiting = new Set<string>();
+  for (const message of messages) {
+    if (message.role === "participant" && message.participantId && (isWaitingChoice(message) || isWaitingMentionApproval(message))) {
+      waiting.add(message.participantId);
+    }
+  }
+  for (const item of Array.isArray(approvals) ? approvals : []) {
+    const approval = item as Partial<Pick<ChatAppToolApproval, "status" | "requesterParticipantId">> | null;
+    if (approval?.status === "pending" && typeof approval.requesterParticipantId === "string") waiting.add(approval.requesterParticipantId);
+  }
+  return waiting;
+}
+
 export interface SessionsMemberRow {
   participant: ChatParticipant;
   status: SessionsWorkStatus;
@@ -361,12 +383,14 @@ export function sessionsMemberRows(
   mainSessionId: string,
   statusById: ReadonlyMap<string, ChatParticipantRosterStatus>,
   tasks: ReadonlyMap<string, SessionsMemberTask>,
-  finishedAt?: ReadonlyMap<string, string>
+  finishedAt?: ReadonlyMap<string, string>,
+  /** Members a card waits on the User for (sessionsMembersWaitingForUser). */
+  waitingForUser?: ReadonlySet<string>
 ): { current: SessionsMemberRow[]; previous: SessionsMemberRow[] } {
   const rows: SessionsMemberRow[] = participants.flatMap((participant) => {
     if (participant.id === mainSessionId) return [];
     const task = tasks.get(participant.id);
-    const status = sessionsMemberStatus(statusById.get(participant.id), task?.item, finishedAt?.get(participant.id));
+    const status = sessionsMemberStatus(statusById.get(participant.id), task?.item, finishedAt?.get(participant.id), waitingForUser?.has(participant.id) === true);
     return [{ participant, status, ...(task ? { task } : {}) }];
   });
   if (!rows.some((row) => row.status === "running" || row.status === "waiting")) {

@@ -56,7 +56,7 @@ export type ChatAgentDetail = (model: MemberModelSummary) => string;
 function RowMeta(props: { row: ChatAgentRowData; model?: string }): JSX.Element {
   const { row } = props;
   if (row.status === "waiting" || row.status === "failed" || row.status === "stopped") {
-    return <span className={`chat-agent-meta is-${row.status}`}>{SESSIONS_WORK_STATUS_LABELS[row.status]}</span>;
+    return <span className={`chat-agent-meta chat-agent-state is-${row.status}`}>{SESSIONS_WORK_STATUS_LABELS[row.status]}</span>;
   }
   const time = row.status === "running" && row.since
     ? <LiveElapsed since={row.since} compact />

@@ -16,12 +16,12 @@ import {
 } from "../../../shared/mainSession";
 import {
   isMainSessionDelegationRosterCard,
-  isMemberWorking,
   latestTaskByMember,
   openMemberCardMessages,
   sessionsFormerMemberStatus,
   sessionsMemberActivity,
   sessionsMemberRows,
+  sessionsMembersWaitingForUser,
   sessionsMemberTitle,
   sessionsTaskEntries,
   sessionsWaitingText,
@@ -61,6 +61,8 @@ export interface ChatSessionsView {
   openCardMessageIds: ReadonlySet<string>;
   messagesById: ReadonlyMap<string, ChatMessage>;
   tasksByMember: ReadonlyMap<string, SessionsMemberTask>;
+  /** Members a card waits on the User for: "Waiting for you" while they run. */
+  waitingForUser: ReadonlySet<string>;
   activity: SessionsMemberActivity;
   /** Each request message's tasks, by the message's id. */
   taskEntriesByMessageId: ReadonlyMap<string, readonly SessionsTaskEntry[]>;
@@ -132,12 +134,13 @@ export function useChatSessionsView(input: {
       messagesById: new Map(messages.map((message) => [message.id, message])),
       tasksByMember: latestTaskByMember(messages),
       titleTasksByMember: titleTaskByMember(messages),
+      waitingForUser: sessionsMembersWaitingForUser(messages, conversation.metadata.pendingAppToolApprovals),
       activity: sessionsMemberActivity(messages),
       waitingIds: membersMainSessionWaitsOn(messages, index),
       mainStreaming: messages.some((message) => isPendingReply(message) && message.participantId === mainId),
       requestMessages: messages.filter((message) => message.metadata?.participantRequest)
     };
-  }, [conversation.messages, mainId]);
+  }, [conversation.messages, conversation.metadata.pendingAppToolApprovals, mainId]);
 
   const former = useMemo(
     () => (mainId ? sessionsFormerMembers(conversation.messages, participants, mainId) : []),
@@ -177,6 +180,7 @@ export function useChatSessionsView(input: {
         return participant ? [participant] : [];
       });
     const index = placement.index;
+    const memberRows = sessionsMemberRows(participants, mainId, participantStatusById, placement.tasksByMember, placement.activity.finishedAt, placement.waitingForUser);
     return {
       mainSessionId: mainId,
       index,
@@ -184,16 +188,17 @@ export function useChatSessionsView(input: {
       openCardMessageIds: placement.openCardMessageIds,
       messagesById: placement.messagesById,
       tasksByMember: placement.tasksByMember,
+      waitingForUser: placement.waitingForUser,
       activity: placement.activity,
       taskEntriesByMessageId,
       workByReplyId,
-      memberRows: sessionsMemberRows(participants, mainId, participantStatusById, placement.tasksByMember, placement.activity.finishedAt),
+      memberRows,
       formerRows: former.map((member) => {
         const task = placement.tasksByMember.get(member.id);
         return { member, title: memberTitle(member.id), status: sessionsFormerMemberStatus(task?.item), ...(task ? { task } : {}) };
       }),
-      runningMemberCount: participants.filter((participant) =>
-        participant.id !== mainId && isMemberWorking(participantStatusById.get(participant.id))).length,
+      // Running, not waiting for the User: as the panel's "Agents · N running".
+      runningMemberCount: memberRows.current.filter((row) => row.status === "running").length,
       waitingOn,
       waitingText: sessionsWaitingText(waitingOn.map((participant) => memberTitle(participant.id))),
       waitingRunIds: waitingOn.flatMap((participant) => activeRunSummary.runIdsByParticipantId.get(participant.id) ?? []),

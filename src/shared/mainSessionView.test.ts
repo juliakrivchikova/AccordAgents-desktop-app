@@ -34,6 +34,7 @@ import {
   sessionsTaskTitle,
   shortenAtWord,
   sessionsMentionPieces,
+  sessionsMembersWaitingForUser,
   sessionsWaitingText,
   titleTaskByMember
 } from "./mainSessionView";
@@ -335,6 +336,23 @@ test("a member keeps the title its delegation gave it: a later task without one 
   ];
   assert.equal(sessionsMemberTitle(participants[2]!, titleTaskByMember(untitled).get("p-gera")?.item), "Check the release feed");
   assert.equal(titleTaskByMember([]).size, 0);
+});
+
+test("a member blocked on the User's approval or choice waits for her even while its run is live", () => {
+  const messages = chat();
+  const approvals = [
+    { id: "a1", status: "pending", requesterParticipantId: "p-drew", toolName: "Write" },
+    { id: "a2", status: "approved", requesterParticipantId: "p-gera", toolName: "Write" },
+    null
+  ];
+  const waiting = sessionsMembersWaitingForUser(messages, approvals);
+  assert.deepEqual([...waiting].sort(), ["p-drew", "p-taylor"], "drew's approval and taylor's open choice; gera's approval is answered");
+  assert.equal(sessionsMemberStatus("running", undefined, undefined, true), "waiting", "a live run blocked on her reads Waiting for you");
+  assert.equal(sessionsMemberStatus("running", undefined, undefined, false), "running");
+  const statuses = new Map([["p-drew", "running" as const], ["p-gera", "idle" as const], ["p-taylor", "running" as const]]);
+  const rows = sessionsMemberRows(participants, "p-main", statuses, latestTaskByMember(messages), undefined, waiting);
+  assert.deepEqual(rows.current.map((row) => [row.participant.id, row.status]), [["p-drew", "waiting"], ["p-taylor", "waiting"]]);
+  assert.equal(sessionsMembersWaitingForUser([], undefined).size, 0);
 });
 
 test("a task entry carries its title, its state, its time and one line of its result", () => {

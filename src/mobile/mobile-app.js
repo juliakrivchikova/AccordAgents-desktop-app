@@ -12586,7 +12586,17 @@
     // The task each member is named by: its delegation's, else its first; a
     // follow-up never renames it (shared titleTaskByMember, as the computer).
     const titleTasksByMember = typeof shared.titleTaskByMember === "function" ? shared.titleTaskByMember(messages) : tasksByMember;
-    const memberRows = shared.sessionsMemberRows(members, mainId, statusById, tasksByMember, activity.finishedAt);
+    // A member a card waits on the User for (its choice or mention question,
+    // a permission it asked) waits for her even while its turn runs, as on
+    // the computer (shared sessionsMembersWaitingForUser); a permission card
+    // names its member by handle.
+    const waitingForUser = typeof shared.sessionsMembersWaitingForUser === "function" ? shared.sessionsMembersWaitingForUser(messages) : new Set();
+    controlCardsFor(conversationId).forEach(function (card) {
+      if (!card || card.status !== "pending" || card.kind !== "permission" || typeof card.requesterLabel !== "string") return;
+      const member = members.find(function (item) { return item.handle && "@" + String(item.handle).replace(/^@/, "") === card.requesterLabel; });
+      if (member) waitingForUser.add(member.id);
+    });
+    const memberRows = shared.sessionsMemberRows(members, mainId, statusById, tasksByMember, activity.finishedAt, waitingForUser);
     const formerMembers = shared.sessionsFormerMembers(messages, members, mainId);
     const openCardIds = new Set(shared.openMemberCardMessages(messages, index).map(function (message) { return message.id; }));
     const mainMessages = shared.mainTimelineMessages(messages, index);
@@ -12604,9 +12614,8 @@
       statusById: statusById, runsByMember: runsByMember, tasksByMember: tasksByMember, titleTasksByMember: titleTasksByMember, memberRows: memberRows, waitingIds: waitingIds,
       activity: activity, messagesById: messagesById, replies: replies, openCardIds: openCardIds,
       mainIds: new Set(mainMessages.map(function (message) { return message.id; })), placement: placement,
-      runningCount: members.filter(function (member) {
-        return member.id !== mainId && shared.isMemberWorking(statusById.get(member.id));
-      }).length,
+      // Running, not waiting for the User, as the computer counts them.
+      runningCount: memberRows.current.filter(function (row) { return row.status === "running"; }).length,
       knownMember: function (id) {
         return id !== mainId && (members.some(function (member) { return member.id === id; }) || formerMembers.some(function (member) { return member.id === id; }));
       }

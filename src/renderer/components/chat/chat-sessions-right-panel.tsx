@@ -196,7 +196,7 @@ export function ChatSessionsRightPanel(props: {
   const task = sessions.tasksByMember.get(memberId)?.item;
   const status = former
     ? former.status
-    : sessionsMemberStatus(props.participantStatusById.get(memberId), task, sessions.activity.finishedAt.get(memberId));
+    : sessionsMemberStatus(props.participantStatusById.get(memberId), task, sessions.activity.finishedAt.get(memberId), sessions.waitingForUser.has(memberId));
   return (
     <ChatMemberSessionPanel
       key={memberId}

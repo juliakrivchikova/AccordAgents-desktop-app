@@ -620,7 +620,9 @@
 .chat-agent-row.has-stop:hover .chat-agent-time,
 .chat-agent-row.has-stop:focus-within .chat-agent-time,
 .chat-agent-row.has-stop:hover .chat-agent-sep,
-.chat-agent-row.has-stop:focus-within .chat-agent-sep {
+.chat-agent-row.has-stop:focus-within .chat-agent-sep,
+.chat-agent-row.has-stop:hover .chat-agent-state,
+.chat-agent-row.has-stop:focus-within .chat-agent-state {
   visibility: hidden;
 }
 
@@ -652,7 +654,8 @@
   }
 
   .chat-agent-row.has-stop .chat-agent-time,
-  .chat-agent-row.has-stop .chat-agent-sep {
+  .chat-agent-row.has-stop .chat-agent-sep,
+  .chat-agent-row.has-stop .chat-agent-state {
     visibility: hidden;
   }
 }
