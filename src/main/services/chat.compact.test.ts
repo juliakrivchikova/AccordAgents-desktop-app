@@ -1286,7 +1286,7 @@ test("a compaction gives Codex its app tools as a Codex turn does, gives Gemini 
       chatSession(gemini, "gemini-session"),
       // At the current config version: one at an older version tries the
       // CLI's own mechanism again (refreshExistingSessionForParticipant).
-      { ...chatSession(fallback, "fallback-session"), roleRuntime: "prompt-fallback" as const, runtimeConfigVersion: 23 }
+      { ...chatSession(fallback, "fallback-session"), roleRuntime: "prompt-fallback" as const, runtimeConfigVersion: 24 }
     ]);
     const issued: Array<Record<string, unknown>> = [];
     const appMcp = {

@@ -32,10 +32,6 @@ export interface ParticipantRunResult {
    *  transcript, this part has no "Worked for" of its own (the turn's one is
    *  on its last part). */
   turnContinues?: boolean;
-  /** The CLI compacted the conversation while this turn ran (Claude Code's
-   *  own compaction when its context fills): it rebuilt its system prompt
-   *  from the text its process was launched with. */
-  compacted?: boolean;
 }
 
 export class ProviderRunner {
