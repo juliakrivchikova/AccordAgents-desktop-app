@@ -9,7 +9,7 @@ import type { ChatModelAccessAction } from "./chat-model-access-picker";
 import { ChatMemberActionItems } from "./chat-member-model-access";
 import { ChatBackgroundTasksContext } from "./chat-roster-status";
 
-export const CHAT_VIEW_SWITCH_DISABLED_REASON = "This chat was made before main sessions, so it has the classic view only.";
+export const CHAT_VIEW_SWITCH_DISABLED_REASON = "This chat was made before the Sessions view, so it has the Classic view only.";
 
 // The icon stands in for the label when the header is narrow (chat-sessions.css).
 const VIEW_OPTIONS: ReadonlyArray<{ view: ChatViewMode; label: string; icon: LucideIcon }> = [

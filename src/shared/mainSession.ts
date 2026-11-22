@@ -29,6 +29,9 @@ import { turnFinishedNoteOf } from "./turnFinishedNoteSource";
 
 export const MAIN_SESSION_ROLE_ID = "main-session";
 export const MAIN_SESSION_HANDLE = "main";
+/** Why a new chat cannot start without its main session's role, said
+ *  without naming a main session (the User, 2026-11-22). */
+export const MAIN_SESSION_ROLE_MISSING_MESSAGE = "The role new chats start with is missing from Settings. Restart the app and try again.";
 export const DEFAULT_CHAT_VIEW: ChatViewMode = "sessions";
 export const CHAT_VIEW_MODES: readonly ChatViewMode[] = ["classic", "sessions"];
 

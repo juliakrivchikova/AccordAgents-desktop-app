@@ -1,4 +1,4 @@
-import { MAIN_SESSION_ROLE_ID, WORKFLOW_MANAGER_ROLE_ID, isRoleOfferedForNewMembers } from "../../../shared/mainSession";
+import { MAIN_SESSION_ROLE_ID, MAIN_SESSION_ROLE_MISSING_MESSAGE, WORKFLOW_MANAGER_ROLE_ID, isRoleOfferedForNewMembers } from "../../../shared/mainSession";
 import type {
   AgentHealth,
   AppSettings,
@@ -608,7 +608,7 @@ export function validateChatStartupDrafts(
 ): string | undefined {
   if (drafts.length === 0) {
     if (!roles.some((role) => role.id === MAIN_SESSION_ROLE_ID)) {
-      return "The main session role is required to start a chat.";
+      return MAIN_SESSION_ROLE_MISSING_MESSAGE;
     }
     if (readyProviderKinds(agents, providers).length === 0) {
       return NO_READY_CLI_MESSAGE;

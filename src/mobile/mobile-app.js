@@ -3951,15 +3951,29 @@
     list.append(box);
   }
 
+  /** A member's name on New chat. The main session is named by its provider
+   *  (an added provider by its own name, else its CLI's, spelled as the
+   *  computer's chatCliProviderLabel spells it), as the computer's sessions
+   *  view names it; no words name a main session (the User, 2026-11-22).
+   *  The computer's classic New chat names it by its @ name, which this row
+   *  shows on its second line. */
   function newChatMemberName(participant) {
-    if (isMainSessionMember(participant)) return "Main session";
+    if (isMainSessionMember(participant)) return newChatProviderName(participant);
     return participant.roleConfigId === "administrator" ? "Chat Assistant" : "@" + participant.handle;
   }
 
-  /** A member row's second line on New chat: its role and its CLI; the main
-   *  session's own name is its role, so its @ name stands there instead. */
+  function newChatProviderName(participant) {
+    const host = typeof participant.hostLabel === "string" ? participant.hostLabel.trim() : "";
+    if (host) return host;
+    return participant.kind === "gemini-cli" ? "Antigravity" : memberKindLabel(participant.kind) || "CLI";
+  }
+
+  /** A member row's second line on New chat: its role and its CLI. The main
+   *  session's name is already its provider, so its @ name stands there
+   *  alone. */
   function newChatMemberRoleLine(participant) {
-    const role = isMainSessionMember(participant) ? "@" + participant.handle : newChatOffer && newChatOffer.roles[participant.roleConfigId];
+    if (isMainSessionMember(participant)) return "@" + participant.handle;
+    const role = newChatOffer && newChatOffer.roles[participant.roleConfigId];
     return [role, memberKindLabel(participant.kind)].filter(Boolean).join(" \u00b7 ");
   }
 
@@ -12296,7 +12310,7 @@
   // The member whose session is open, for this visit of the chat (like the
   // open thread).
   const OPEN_MEMBER_SESSION_KEY = "accordagents.mobile.openMemberSessionId.v1";
-  const CHAT_VIEW_SWITCH_DISABLED_REASON = "This chat was made before main sessions, so it has the classic view only.";
+  const CHAT_VIEW_SWITCH_DISABLED_REASON = "This chat was made before the Sessions view, so it has the Classic view only.";
   /** A view this phone asked for, shown until the server's list says so (as a
    *  pin is): kept while it waits to be sent, dropped when refused, and once
    *  taken, kept this long at most for the list to catch up. */
@@ -13553,15 +13567,14 @@
   }
 
   /** The Fork to new chat item for a member: what it makes, "Checking…",
-   *  or why not, and whether a tap makes it. In the sessions view (the
-   *  title's menu) what it makes names no main session, as the computer's
-   *  menus there say it. */
-  function paintForkItem(button, detail, chat, participantId, sessionsView) {
+   *  or why not, and whether a tap makes it. What it makes is the
+   *  computer's words, the same in both views. */
+  function paintForkItem(button, detail, chat, participantId) {
     const shared = mobileSharedRules();
     const state = forkMenu && forkMenu.key === forkMenuKey(chat.id, participantId) ? forkMenu : undefined;
     const checking = !state || state.status === "checking";
     const ready = !checking && !state.reason && Boolean(state.plan) && !forkStarting;
-    const makes = (sessionsView && shared.FORK_TO_NEW_CHAT_SESSIONS_DETAIL) || shared.FORK_TO_NEW_CHAT_DETAIL;
+    const makes = shared.FORK_TO_NEW_CHAT_DETAIL;
     const text = forkStarting ? "Starting the new chat…" : checking ? "Checking…" : state.reason || makes;
     const disabled = ready ? "false" : "true";
     if (button.getAttribute("aria-disabled") !== disabled) button.setAttribute("aria-disabled", disabled);
@@ -13577,7 +13590,7 @@
     if (button.hidden === shown) button.hidden = !shown;
     if (!shown) return;
     // The title's menu is the sessions view's alone (chatTitleMenuState).
-    paintForkItem(button, detail, chat, participantId, true);
+    paintForkItem(button, detail, chat, participantId);
   }
 
   /** Both places the item is: what it says changed (read, starting, failed). */

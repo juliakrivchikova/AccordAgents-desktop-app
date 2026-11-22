@@ -439,9 +439,63 @@ test("the sessions view (T3 Code's way): tasks inside the turn's Worked fold, ch
     group: document.getElementById("chat-view-switch").classList.contains("is-disabled"),
     chevron: ${visible("#chat-title-chevron")},
     sessionsRows: document.querySelectorAll("#message-list .message-row.is-sessions").length,
-    avatar: getComputedStyle(document.querySelector('#message-list .message-row[data-thread-root="o2"] .message-avatar')).display
+    avatar: getComputedStyle(document.querySelector('#message-list .message-row[data-thread-root="o2"] .message-avatar')).display,
+    why: document.getElementById("chat-view-switch").title
   }))()`);
-  assert.deepEqual(old, { group: true, chevron: false, sessionsRows: 0, avatar: "flex" });
+  assert.deepEqual(old, { group: true, chevron: false, sessionsRows: 0, avatar: "flex",
+    why: "This chat was made before the Sessions view, so it has the Classic view only." }, "why, in the switch's own words: no main session named");
+});
+
+test("classic New chat on the phone names the main session by its provider, never as a main session", { timeout: 120_000 }, async (t) => {
+  const hub = await startMobileHub();
+  const site = await serveMobileShell({ port: 8394, hubOrigins: [hub.base] });
+  const profile = await tempProfile("aa-mobile-sessions-classic-new-");
+  const chrome = launchChrome({ port: 9544, profile, url: `${site.origin}/` });
+  let app;
+  t.after(async () => {
+    app?.close();
+    chrome.kill("SIGKILL");
+    await site.close();
+    await hub.close();
+    await rm(profile, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
+  });
+  await hub.createChat("conv-seed", { title: "Seed", participants: [DREW] });
+  const mainSession = { id: "t-main", handle: "main", roleConfigId: "main-session", kind: "claude-code" };
+  const drew = member("drew", { id: "t-drew", participantConfigId: "c-drew" });
+  const newChat = { projects: [], assistant: mainSession, mainSession, defaultChatView: "classic", members: [{ configId: "c-drew", uses: 1, participant: drew }] };
+  await hub.call("PUT", "/v1/catalog", { catalog: { version: 1, publishedAt: new Date().toISOString(),
+    roles: { "software-engineer": "Engineer", "main-session": "Main session" }, prompts: [], skills: [], avatars: {}, newChat } });
+  app = await attachApp({ port: 9544 });
+  await pairPage(app, { hub, siteOrigin: site.origin, query: "qa=1" });
+  await app.waitFor(`!document.getElementById("new-chat-button").hidden`, "New chat");
+  await app.evaluate(`document.getElementById("new-chat-button").click()`);
+  await app.waitFor(`document.querySelectorAll("#new-chat-members .new-chat-member").length === 2`, "the main session and the saved member");
+  const shown = await app.evaluate(`(() => {
+    const row = document.querySelector('#new-chat-members .new-chat-member[data-handle="main"]');
+    return {
+      name: row.querySelector("strong").textContent,
+      role: row.querySelector(".members-sheet-role").textContent,
+      button: document.getElementById("new-chat-members-button").getAttribute("aria-label"),
+      words: document.querySelector(".new-chat-card").textContent + " " + document.getElementById("new-chat-members").textContent
+    };
+  })()`);
+  assert.deepEqual([shown.name, shown.role, shown.button], ["Claude Code", "@main", "Members: Claude Code"], "its provider's name, as the computer names it");
+  assert.doesNotMatch(shown.words, /main session/i, "no main session named");
+
+  // On an added provider: that provider's own name; on Antigravity: the
+  // computer's name for it.
+  for (const [lead, name] of [
+    [{ ...mainSession, hostId: "zai", hostLabel: "Z.ai GLM", hostVendor: "zai" }, "Z.ai GLM"],
+    [{ ...mainSession, kind: "gemini-cli" }, "Antigravity"]
+  ]) {
+    await app.evaluate(`document.getElementById("new-chat-close").click()`);
+    await hub.call("PUT", "/v1/catalog", { catalog: { version: 1, publishedAt: new Date().toISOString(),
+      roles: { "software-engineer": "Engineer", "main-session": "Main session" }, prompts: [], skills: [], avatars: {},
+      newChat: { ...newChat, assistant: lead, mainSession: lead } } });
+    await app.evaluate(`document.getElementById("new-chat-button").click()`);
+    await app.waitFor(`document.querySelector('#new-chat-members .new-chat-member[data-handle="main"] strong')?.textContent === ${JSON.stringify(name)}`, name);
+    assert.equal(await app.evaluate(`document.getElementById("new-chat-members-button").getAttribute("aria-label")`), `Members: ${name}`);
+  }
 });
 
 test("New chat on the phone leads with the main session, and the chat it makes has it", { timeout: 120_000 }, async (t) => {

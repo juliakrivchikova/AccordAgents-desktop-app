@@ -32,8 +32,8 @@ export function NewChatDefaultsRows(props: {
     <Fragment>
       <div className="gen-row">
         <div className="gen-row-text">
-          <div className="gen-row-title">Main session provider</div>
-          <div className="gen-row-desc">Default CLI for the main session of new chats.</div>
+          <div className="gen-row-title">Default provider for new chats</div>
+          <div className="gen-row-desc">The CLI a new chat starts on.</div>
         </div>
         <AppSelect
           value={props.assistantProviderKind ?? ""}
@@ -50,7 +50,7 @@ export function NewChatDefaultsRows(props: {
             };
           })}
           placeholder="Choose provider"
-          ariaLabel="Main session provider"
+          ariaLabel="Default provider for new chats"
           testId="assistant-provider-select"
           size="sm"
           className={SELECT_CLASS_NAME}

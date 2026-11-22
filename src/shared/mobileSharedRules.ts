@@ -82,7 +82,7 @@ export { accordLaunchCardForMessage } from "./accordLaunchCard";
 // member with, its rights as it runs now, and the new chat's main session
 // and title as the computer makes them.
 export {
-  FORK_TO_NEW_CHAT_DETAIL, FORK_TO_NEW_CHAT_LABEL, FORK_TO_NEW_CHAT_SESSIONS_DETAIL, forkToNewChatReasonFromOffer, forkedChatTitle, forkedMainSessionFor, memberAsItRunsNow
+  FORK_TO_NEW_CHAT_DETAIL, FORK_TO_NEW_CHAT_LABEL, forkToNewChatReasonFromOffer, forkedChatTitle, forkedMainSessionFor, memberAsItRunsNow
 } from "./forkToNewChat";
 // What the app wrote (cards, failures, statuses, Activity rows), as a
 // sessions-view chat shows it: no handles, a member by its task, the main
