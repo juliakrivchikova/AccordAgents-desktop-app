@@ -1730,7 +1730,7 @@ export class ChatService {
         usage = await this.cliRunner.contextUsageForSession(
           this.cliParticipantForSession(participant, session),
           session.sessionId,
-          { waitForLog: false }
+          { waitForLog: false, known: existingUsage[session.participantId] }
         );
       } catch (error) {
         await this.debugLogs.write("chat.context-usage-refresh.error", {
