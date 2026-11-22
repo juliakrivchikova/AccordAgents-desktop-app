@@ -30,6 +30,13 @@
   font-weight: 500;
 }
 
+.chat-compaction-card-who .mini-avatar {
+  width: 20px;
+  height: 20px;
+  border-radius: 6px;
+  font-size: 10px;
+}
+
 .chat-compaction-card-who span {
   overflow: hidden;
   text-overflow: ellipsis;
