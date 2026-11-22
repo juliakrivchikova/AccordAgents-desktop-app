@@ -5646,7 +5646,7 @@ export class CliAgentRunner {
             ? invocation
             : this.codexAppServerCompletedActivityDetail(
               invocation,
-              this.codexAppServerCompletedActivityOutput(item)
+              this.codexAppServerCompletedActivityOutput(finishedItem)
             );
           this.emitLiveOutput(pending.onOutput, "tool", `${summary.label}\n`, undefined, {
             activityKind: summary.kind,
@@ -5968,6 +5968,11 @@ export class CliAgentRunner {
       const error = this.asRecord(item.error);
       if (error) {
         return this.stringField(error, "message");
+      }
+      // The app's own tools answer with what the app keeps itself (messages,
+      // requests, documents): the step keeps no copy of it.
+      if (this.stringField(item, "server") === GEMINI_APP_MCP_SERVER) {
+        return undefined;
       }
       const result = this.asRecord(item.result);
       return result ? this.codexAppServerOutputContent(result.content) : undefined;
