@@ -1986,6 +1986,10 @@ export interface ChatPromptContextPointerAdvance {
 export interface ChatPromptContextParticipantPointers {
   timeline?: ChatPromptContextPointerEntry;
   threads?: Record<string, ChatPromptContextPointerEntry>;
+  /** The member's chat context started over at this time (its session
+   *  started clean): a pointer to a message from before it, held by a copy
+   *  of the chat read earlier, is not taken back when copies are merged. */
+  forgottenAt?: string;
 }
 
 export type ChatPromptContextPointers = Record<string, ChatPromptContextParticipantPointers>;

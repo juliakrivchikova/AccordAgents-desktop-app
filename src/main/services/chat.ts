@@ -12042,7 +12042,7 @@ export class ChatService {
       unavailableImagesBlock,
       continuationNote
     ].filter(Boolean);
-    const prompt = orderedBlocks.join("\n\n");
+    const prompt = this.notAsCliCommand(orderedBlocks.join("\n\n"));
 
     return {
       prompt,
@@ -12064,6 +12064,20 @@ export class ChatService {
         total: prompt.length
       }
     };
+  }
+
+  /**
+   * A message that starts with "/" goes with a zero-width space before it,
+   * so the CLI takes it as text and runs no command of its own, as before
+   * her text reached the CLI as typed (the User, 2026-11-22): running CLI
+   * commands from her messages, with their output shown and the app's state
+   * kept in step, is a task of its own. Claude Code 2.1.330 and Antigravity
+   * 1.5.14 both run "/cost" or "/help" sent as is, and neither does with
+   * U+200B before it (Antigravity trims a plain space; Claude Code does not).
+   * `/compact` is the app's own command (sendMessage, startServerTurn).
+   */
+  private notAsCliCommand(prompt: string): string {
+    return prompt.startsWith("/") ? `\u200B${prompt}` : prompt;
   }
 
   /**
@@ -12342,7 +12356,10 @@ export class ChatService {
     if (!pointers[participantId]) {
       return;
     }
-    delete pointers[participantId];
+    // A marker, not a deletion: copies of the chat are merged pointer by
+    // pointer (mergePromptContextPointers), so a copy read before this must
+    // not bring the old pointers back.
+    pointers[participantId] = { forgottenAt: new Date().toISOString() };
     conversation.metadata = { ...conversation.metadata, promptContextPointers: pointers };
   }
 
@@ -14141,6 +14158,10 @@ export class ChatService {
     );
     if (participants) {
       merged.participants = participants;
+    }
+    const promptContextPointers = this.mergePromptContextPointers(storedMetadata.promptContextPointers, currentMetadata.promptContextPointers);
+    if (promptContextPointers) {
+      merged.promptContextPointers = promptContextPointers;
     }
     const compactions = this.mergeParticipantCompactions(storedMetadata, currentMetadata, liveRunIdsHere);
     if (compactions) {
@@ -19395,8 +19416,11 @@ export class ChatService {
       if (!participantId || !value || typeof value !== "object" || Array.isArray(value)) {
         continue;
       }
-      const record = value as { timeline?: unknown; threads?: unknown };
+      const record = value as { timeline?: unknown; threads?: unknown; forgottenAt?: unknown };
       const participantPointers: ChatPromptContextParticipantPointers = {};
+      if (typeof record.forgottenAt === "string" && this.lastMessageTimestamp(record.forgottenAt) !== undefined) {
+        participantPointers.forgottenAt = record.forgottenAt;
+      }
       const timeline = this.normalizedPromptContextPointerEntry(record.timeline);
       if (timeline) {
         participantPointers.timeline = timeline;
@@ -19413,11 +19437,68 @@ export class ChatService {
           participantPointers.threads = threads;
         }
       }
-      if (participantPointers.timeline || participantPointers.threads) {
+      if (participantPointers.timeline || participantPointers.threads || participantPointers.forgottenAt) {
         result[participantId] = participantPointers;
       }
     }
     return result;
+  }
+
+  /**
+   * Where each member has read the chat to, from two copies of it (the one
+   * saved and the one a flow holds): per member and per scope, the pointer
+   * further on. A flow that read the chat before another turn moved a
+   * pointer (a member's turn running while the main session's turn ended)
+   * would otherwise put the pointer back, and the main session would be sent
+   * again, as unseen, the message it had answered. A member whose context
+   * started over keeps only pointers to messages written after that.
+   */
+  private mergePromptContextPointers(storedRaw: unknown, currentRaw: unknown): ChatPromptContextPointers | undefined {
+    const stored = this.normalizedPromptContextPointers(storedRaw);
+    const current = this.normalizedPromptContextPointers(currentRaw);
+    const participantIds = new Set([...Object.keys(stored), ...Object.keys(current)]);
+    if (participantIds.size === 0) {
+      return undefined;
+    }
+    const merged: ChatPromptContextPointers = {};
+    for (const participantId of participantIds) {
+      const a = stored[participantId];
+      const b = current[participantId];
+      const forgottenAt = [a?.forgottenAt, b?.forgottenAt]
+        .filter((value): value is string => Boolean(value))
+        .sort((x, y) => (this.lastMessageTimestamp(x) ?? 0) - (this.lastMessageTimestamp(y) ?? 0))
+        .pop();
+      const forgottenTime = this.lastMessageTimestamp(forgottenAt);
+      const kept = (entry: ChatPromptContextPointerEntry | undefined): ChatPromptContextPointerEntry | undefined => {
+        if (!entry || forgottenTime === undefined) return entry;
+        const at = this.lastMessageTimestamp(entry.createdAt);
+        return at !== undefined && at > forgottenTime ? entry : undefined;
+      };
+      const further = (x: ChatPromptContextPointerEntry | undefined, y: ChatPromptContextPointerEntry | undefined): ChatPromptContextPointerEntry | undefined => {
+        const left = kept(x);
+        const right = kept(y);
+        if (!left || !right) return left ?? right;
+        const chosen = this.promptContextPointerAtOrAfter(left, right) ? left : right;
+        const postsReadThrough = this.newestPostsReadThrough(chosen.createdAt, [left.postsReadThrough, right.postsReadThrough]);
+        const { postsReadThrough: _ignored, ...rest } = chosen;
+        return postsReadThrough ? { ...rest, postsReadThrough } : rest;
+      };
+      const participantPointers: ChatPromptContextParticipantPointers = {};
+      const timeline = further(a?.timeline, b?.timeline);
+      if (timeline) participantPointers.timeline = timeline;
+      const threadRootIds = new Set([...Object.keys(a?.threads ?? {}), ...Object.keys(b?.threads ?? {})]);
+      const threads: Record<string, ChatPromptContextPointerEntry> = {};
+      for (const threadRootId of threadRootIds) {
+        const entry = further(a?.threads?.[threadRootId], b?.threads?.[threadRootId]);
+        if (entry) threads[threadRootId] = entry;
+      }
+      if (Object.keys(threads).length > 0) participantPointers.threads = threads;
+      if (forgottenAt) participantPointers.forgottenAt = forgottenAt;
+      if (participantPointers.timeline || participantPointers.threads || participantPointers.forgottenAt) {
+        merged[participantId] = participantPointers;
+      }
+    }
+    return merged;
   }
 
   private normalizedPromptContextPointerAdvance(raw: unknown): ChatPromptContextPointerAdvance | undefined {

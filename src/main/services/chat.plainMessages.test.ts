@@ -524,3 +524,87 @@ test("a Claude Code or Codex session that fell back to instructions in its messa
     assert.equal(internals.refreshExistingSessionForParticipant(current, participant, undefined, 23).roleRuntime, "prompt-fallback", `${kind} at the current version`);
   }
 });
+
+test("after a turn that gave a member a task, her next message to the main session is her words alone: what it already answered is not sent again as unseen", async () => {
+  const main = mainSession();
+  const worker = member("worker-id", "worker", { kind: "claude-code" });
+  const conversation = chat([main, worker], { participantSessions: [currentSession(main, "main-cli"), currentSession(worker, "worker-cli", GENERIC_ROLE)] });
+  let service!: ChatService;
+  let storageRef!: { current: Conversation };
+  const built = testService(conversation, async (participant, prompt, runOptions) => {
+    if (participant.id === main.id && prompt === "Ask the worker to run the tests.") {
+      // The main session gives the task during its turn, as its tool call does.
+      const userMessage = storageRef.current.messages.find((message) => message.role === "user" && message.content === prompt)!;
+      const asked = await service.requestParticipantsFromTool({
+        conversationId: storageRef.current.id, participantId: main.id, roleConfigId: MAIN_ROLE.id, roleConfigVersion: 1,
+        capabilities: ["participants.manage", "participants.delegate", "participants.request"],
+        triggerMessageId: userMessage.id, triggerThreadId: userMessage.metadata?.threadId ?? userMessage.id, participantRequestDepth: 0,
+        runId: runOptions?.warm?.origin?.runId
+      } as never, { requests: [{ target: "worker", prompt: "Run the tests." }] });
+      assert.equal((asked as { ok?: boolean }).ok, true, JSON.stringify(asked));
+      // Its turn ends a moment after the worker has started.
+      await new Promise((resolve) => setTimeout(resolve, 30));
+    }
+    return { participant, ok: true, content: `Done by ${participant.id}.`, durationMs: 1 };
+  });
+  service = built.service;
+  storageRef = built.storage;
+  const { storage, runs } = built;
+  markTold(service, storage);
+
+  await send(service, storage, runs, "Ask the worker to run the tests.");
+  // The worker answers and the main session is resumed with it.
+  await waitFor(() => runs.filter((run) => run.participant.id === main.id).length >= 2 && storage.current.metadata.running !== true);
+  await waitFor(() => !(storage.current.metadata.activeRunIds as string[] | undefined)?.length);
+  await new Promise((resolve) => setTimeout(resolve, 50));
+
+  const next = await send(service, storage, runs, "What next?");
+  assert.equal(next.prompt, "What next?", "the task message it answered is not sent again as unseen");
+});
+
+test("pointers of two copies of a chat merge member by member and scope by scope, the one further on winning; a context that started over is not brought back", () => {
+  const { service } = testService(chat([mainSession()]));
+  const internals = service as any;
+  const at = (minute: number) => `2026-11-20T08:${String(minute).padStart(2, "0")}:00.000Z`;
+  const entry = (id: string, sequence: number, minute: number, posts?: number) => ({ messageId: id, sequence, createdAt: at(minute), ...(posts ? { postsReadThrough: at(posts) } : {}) });
+  const stored = {
+    main: { timeline: entry("m5", 5, 5), threads: { t1: entry("t1-3", 3, 3) } },
+    worker: { timeline: entry("m2", 2, 2) }
+  };
+  // A flow that read the chat before main's turn moved its pointer, and moved worker's itself.
+  const stale = {
+    main: { timeline: entry("m3", 3, 3, 4), threads: { t1: entry("t1-2", 2, 2), t2: entry("t2-1", 1, 1) } },
+    worker: { timeline: entry("m4", 4, 4) }
+  };
+  const merged = internals.mergePromptContextPointers(stored, stale);
+  assert.deepEqual(merged.main.timeline, entry("m5", 5, 5), "the saved pointer further on is kept");
+  assert.deepEqual(merged.main.threads, { t1: entry("t1-3", 3, 3), t2: entry("t2-1", 1, 1) });
+  assert.deepEqual(merged.worker.timeline, entry("m4", 4, 4), "the flow's own move is kept");
+  // The metadata merge every chat write goes through uses it.
+  const metadata = internals.mergeStoredChatMetadata({ promptContextPointers: stored }, { promptContextPointers: stale });
+  assert.deepEqual(metadata.promptContextPointers, merged);
+
+  // A member whose context started over: a copy read before keeps no old pointer; a later one survives.
+  const forgotten = { main: { forgottenAt: at(6) } };
+  assert.deepEqual(internals.mergePromptContextPointers(forgotten, stale).main, { forgottenAt: at(6) });
+  const after = { main: { forgottenAt: at(6), timeline: entry("m7", 7, 7) } };
+  assert.deepEqual(internals.mergePromptContextPointers(after, stale).main, { forgottenAt: at(6), timeline: entry("m7", 7, 7) });
+  const conversation = chat([mainSession()], { promptContextPointers: stored });
+  internals.forgetPromptContextPointers(conversation, "main");
+  assert.ok(conversation.metadata.promptContextPointers?.main?.forgottenAt);
+  assert.equal(conversation.metadata.promptContextPointers?.main?.timeline, undefined);
+});
+
+test("a message that starts with \"/\" reaches the CLI with a zero-width space before it, so no CLI runs it as its own command (as before)", () => {
+  const main = mainSession();
+  const conversation = chat([main]);
+  const { service } = testService(conversation);
+  const internals = service as any;
+  const build = (content: string) => internals.buildPromptParts(conversation, main, currentSession(main, "s"), { id: "u", role: "user", content, createdAt: NOW, status: "done" }, "/tmp/ws", false, {
+    includeRoleInstructions: false, agentMode: "default", permissions: main.permissions
+  }).prompt as string;
+  assert.equal(build("/model opus"), "\u200B/model opus");
+  assert.equal(build("/review the diff"), "\u200B/review the diff");
+  assert.equal(build("look at /tmp/x"), "look at /tmp/x", "only a leading slash");
+  assert.equal(build("plain"), "plain");
+});
