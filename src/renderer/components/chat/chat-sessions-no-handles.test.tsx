@@ -70,7 +70,12 @@ function shownText(root: ReactTestInstance): string {
   return [textOf(root), ...labels].join("\n");
 }
 
-function render(sessions: boolean, element: ReactElement): { text: string; unmount: () => void } {
+/** Only the words on screen, without tooltips and labels. */
+function visibleText(node: ReactTestInstance | string): string {
+  return typeof node === "string" ? node : node.children.map(visibleText).join("");
+}
+
+function render(sessions: boolean, element: ReactElement): { text: string; visible: string; unmount: () => void } {
   let renderer: ReturnType<typeof create> | undefined;
   act(() => {
     renderer = create(
@@ -83,7 +88,7 @@ function render(sessions: boolean, element: ReactElement): { text: string; unmou
       </TooltipProvider>
     );
   });
-  return { text: shownText(renderer!.root), unmount: () => act(() => renderer!.unmount()) };
+  return { text: shownText(renderer!.root), visible: visibleText(renderer!.root), unmount: () => act(() => renderer!.unmount()) };
 }
 
 function approval(requester: typeof MAIN, patch: Partial<ChatAppToolApproval>): ChatAppToolApproval {
@@ -220,6 +225,7 @@ test("a sessions-view chat's cards, failed replies, status line and notes name n
   const classicQueued = render(false, <ChatMessageItem {...itemProps(appReplies()[3]!)} />);
   assert.match(classicQueued.text, /Queued/);
   assert.doesNotMatch(classicQueued.text, /waiting for/, "just \"Queued\", as the CLI says it");
+  assert.equal(classicQueued.visible.match(/Queued/g)?.length, 1, "said once, as the CLI does");
   classicQueued.unmount();
   const classicLaunch = render(false, <ChatAccordLaunchCard card={{ facilitator: "main", members: ["drew"], subject: "Ship?" }} participants={PARTICIPANTS} />);
   assert.match(classicLaunch.text, /@main[\s\S]*@drew/);

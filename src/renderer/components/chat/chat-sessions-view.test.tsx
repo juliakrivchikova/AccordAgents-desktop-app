@@ -311,6 +311,7 @@ test("a finished message shows no member state, only its time among its hover co
   } as Partial<ChatMessage>);
   const queuedRow = renderSessionsRow(queued, sessions);
   assert.equal(textOf(queuedRow.find(hasClass("chat-rt-status"))), "Queued");
+  assert.equal(textOf(queuedRow).match(/Queued/g)?.length, 1, "said once, as the CLI does");
   assert.equal(queuedRow.findAll((node) => node.props?.["data-testid"] === "chat-sessions-working").length, 0, "not working yet");
 
   // An author the view must tell apart keeps only that (a member's open card
