@@ -191,13 +191,13 @@ export const TURN_RUNNING_NOTE = "Its turn is running: change this when it ends.
  * Whether a CLI takes a new permission mode while its turn runs, as its own
  * terminal does (checked 2026-11-22): Claude Code 2.1.330's Shift+Tab switches
  * it at once, for the rest of that turn (the app sends the CLI's own
- * `set_permission_mode` to its live process); Codex 0.155.1's `/permissions`
- * opens and saves while it works (its Plan mode, Shift+Tab, does not change
- * then: that toggle waits). Antigravity's print mode takes its mode when each
- * run starts, so its menu waits.
+ * `set_permission_mode` to its live process). Codex refuses it while a task
+ * runs (0.171.0: "Cannot change: a task is running."; its Plan mode,
+ * Shift+Tab, did not change mid-turn in 0.155.1), and Antigravity's print
+ * mode takes its mode when each run starts: their menus wait.
  */
 export function modeChangesWhileTurnRuns(kind: ChatParticipant["kind"]): boolean {
-  return kind === "claude-code" || kind === "codex-cli";
+  return kind === "claude-code";
 }
 
 /** A member's settings with its CLI's mode set to `option`, Codex's Plan

@@ -128,7 +128,7 @@ test("a Cloud run member is held back by the machine on its AWS instance; its ow
   }
 });
 
-test("while its turn runs, its permission mode changes where its CLI takes one then (Claude Code, Codex); the rest waits, and Antigravity's mode too", async () => {
+test("while its turn runs, its permission mode changes where its CLI takes one then (Claude Code); Codex's modes and Plan mode and Antigravity's mode wait", async () => {
   const host = window as unknown as { consensus?: unknown };
   const previous = host.consensus;
   resetMemberModelCatalogs();
@@ -137,7 +137,7 @@ test("while its turn runs, its permission mode changes where its CLI takes one t
     permissions: { ...CODEX.permissions!, cliApprovals: true, codexPlanMode: undefined, workspaceWrite: false } };
   const agy: ChatParticipant = { ...claude, id: "agy-1", handle: "agy", kind: "gemini-cli" };
   try {
-    for (const [member, changes] of [[claude, true], [CODEX, true], [agy, false]] as const) {
+    for (const [member, changes] of [[claude, true], [CODEX, false], [agy, false]] as const) {
       const patches: unknown[] = [];
       let renderer: ReturnType<typeof create> | undefined;
       await act(async () => {
@@ -152,7 +152,7 @@ test("while its turn runs, its permission mode changes where its CLI takes one t
         assert.equal(renderer!.root.find(byTestId("chat-model-plan")).props.disabled, true, "Codex's Plan mode waits (Shift+Tab does nothing while Codex works)");
       }
       if (changes) {
-        const wanted = member.kind === "claude-code" ? "acceptEdits" : "auto-review";
+        const wanted = "acceptEdits";
         const target = rows.find((row) => row.props["data-value"] === wanted && typeof row.props.onClick === "function")!;
         await act(async () => { target.props.onClick(); });
         assert.equal(patches.length, 1, `${member.kind}: the choice is saved at once`);

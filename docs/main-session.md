@@ -165,10 +165,11 @@ switch is disabled.
     of that turn, which the app does with the CLI's own stream-json control
     request `set_permission_mode` to the member's live process (a control
     run refused a Write in default mode; switched mid-turn, the same Write
-    ran); Codex 0.155.1's `/permissions` opens and saves while it works
-    (its Plan mode, Shift+Tab, does not change while it works: that toggle
-    waits); Antigravity's print mode takes its mode when each run starts,
-    so its menu waits (`modeChangesWhileTurnRuns`). The
+    ran). Codex refuses it while a task runs (0.171.0's own words: "Cannot
+    change: a task is running."; 0.155.1 had "Wait for the current turn to
+    finish before changing permissions.", and its Plan mode, Shift+Tab, did
+    not change mid-turn), and Antigravity's print mode takes its mode when
+    each run starts: their menus wait (`modeChangesWhileTurnRuns`). The
     access is the CLI's own mode, run as the CLI runs it
     (`src/shared/chatAccessModes.ts`, the permissions' `cliApprovals`: what
     is not granted the CLI asks about instead of the app taking it away;

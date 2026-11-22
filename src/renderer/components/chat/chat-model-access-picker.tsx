@@ -165,7 +165,7 @@ export function ChatMemberComposerControls(props: {
         </ComposerMenu>
       )}
       {/* The mode while its turn runs, where its CLI takes one then (Shift+Tab
-          in Claude Code, /permissions in Codex); the rest waits. */}
+          in Claude Code); the rest waits. */}
       <ChatAccessControl value={value} mainSession={props.mainSession} disabled={props.disabled && !modeChangesWhileTurnRuns(value.kind)} modesReason={modesReason} onChange={onChange} testId={prefix}
         iconOnly={density >= COMPOSER_DENSITY.modeIcon} />
       {value.kind === "codex-cli" && (
