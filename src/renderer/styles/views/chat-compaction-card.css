@@ -11,12 +11,19 @@
   outline: none;
 }
 
-/* Under its member's message, and in the sessions view (no avatars), it
-   starts where the text does. */
+/* Under its member's message it starts where the text does. */
 .chat-compaction-card.is-embedded,
 .chat-compaction-card.is-sessions {
   max-width: 683px;
   margin-left: 0;
+}
+
+/* In the sessions view (no avatars) the waiting cards' slot is not a
+   timeline row: the card takes the rows' reading inset, so it starts where
+   the text does and where its folded line will. */
+.chat-view.is-sessions-view .chat-app-tool-approval-slot .chat-compaction-card.is-sessions {
+  margin-left: max(28px, var(--chat-reading-inset));
+  max-width: min(683px, calc(100% - 2 * max(28px, var(--chat-reading-inset))));
 }
 
 .chat-compaction-card-who {
@@ -30,14 +37,16 @@
   font-weight: 500;
 }
 
-.chat-compaction-card-who .mini-avatar {
+/* The who line's avatar size, as a caller's sizing class (the avatar
+   contract: size and corners come from here, nothing else). */
+.chat-compaction-card-who-avatar {
   width: 20px;
   height: 20px;
   border-radius: 6px;
   font-size: 10px;
 }
 
-.chat-compaction-card-who span {
+.chat-compaction-card-who-name {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -51,8 +60,11 @@
   box-shadow: 0 1px 2px var(--app-shadow);
 }
 
-.chat-compaction-card:focus-visible .chat-compaction-card-panel {
-  border-color: var(--app-focus-border);
+/* Focused (by keyboard, or by Activity's Open in chat): the ring every
+   card draws, while Enter compacts. */
+.chat-compaction-card:focus-visible .chat-compaction-card-panel,
+.chat-compaction-card.approval-focused .chat-compaction-card-panel {
+  box-shadow: var(--focus-ring), 0 1px 2px var(--app-shadow);
 }
 
 .chat-compaction-card-top {
@@ -94,11 +106,6 @@
   line-height: 21px;
 }
 
-.chat-compaction-card.is-waiting .chat-compaction-card-desc {
-  margin: 0;
-  color: var(--app-text-secondary);
-}
-
 .chat-compaction-card-refusal {
   margin: 8px 0 0;
   color: var(--app-danger);
@@ -114,7 +121,8 @@
 }
 
 .chat-compaction-card-bar {
-  flex: 0 0 220px;
+  flex: 0 1 220px;
+  min-width: 96px;
   height: 6px;
   overflow: hidden;
   border-radius: 99px;
@@ -147,6 +155,7 @@
 
 .chat-compaction-card-foot {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   gap: 10px;
   margin-top: 16px;
@@ -189,8 +198,19 @@
   color: var(--app-text-strong);
 }
 
+.chat-compaction-card-not-now:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+
+.chat-compaction-card-check:has(input:disabled),
+.chat-compaction-card-check input:disabled {
+  cursor: default;
+  opacity: 0.55;
+}
+
 .chat-compaction-card-compact {
-  gap: 8px;
+  gap: 8px !important;
   min-height: 36px;
   padding-inline: 16px !important;
   border-radius: 10px !important;

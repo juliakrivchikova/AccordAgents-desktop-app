@@ -7,6 +7,7 @@ import {
   COMPACTION_CARD_CHAT_SCOPE,
   COMPACTION_CARD_COMPACT,
   COMPACTION_CARD_KEEPS,
+  COMPACTION_CARD_METER_NAME,
   COMPACTION_CARD_NOT_NOW,
   COMPACTION_CARD_SENTENCE,
   COMPACTION_CARD_TITLE,
@@ -50,12 +51,15 @@ export function ChatCompactionApprovalCard(props: {
   const queuedDecision = approval.machineDecisionPending;
 
   if (queuedDecision) {
+    // As every card says it while a machine confirms (chat-app-tool-approval-card).
     return (
-      <section className={`chat-compaction-card is-waiting ${props.embedded ? "is-embedded" : ""} ${sessions ? "is-sessions" : ""}`} aria-label={COMPACTION_CARD_TITLE}
+      <section className="chat-app-tool-approval-card is-compact-result" aria-label={COMPACTION_CARD_TITLE}
         data-app-tool-approval-id={approval.id} tabIndex={-1}>
-        <p className="chat-compaction-card-desc">
-          {queuedDecision.approve ? "Approval saved" : "Refusal saved"}. Waiting for machine {queuedDecision.machineName} to confirm the decision.
-        </p>
+        <ChatMemberMark className="message-avatar chat-app-tool-approval-avatar" markClassName="is-large" avatar={requesterAvatar} member={requester} />
+        <div className="chat-app-tool-approval-body">
+          <strong>{queuedDecision.approve ? "Approval saved" : "Refusal saved"}</strong>
+          <p>Waiting for machine {queuedDecision.machineName} to confirm the decision.</p>
+        </div>
       </section>
     );
   }
@@ -97,8 +101,8 @@ export function ChatCompactionApprovalCard(props: {
       {/* Under its member's own message the message names it already. */}
       {requesterName && !props.embedded && (
         <div className="chat-compaction-card-who">
-          {!sessions && <ChatMemberMark className="mini-avatar" markClassName="is-mini" avatar={requesterAvatar} member={requester} />}
-          <span>{requesterName}</span>
+          {!sessions && <ChatMemberMark className="chat-compaction-card-who-avatar" markClassName="is-mini" avatar={requesterAvatar} member={requester} />}
+          <span className="chat-compaction-card-who-name">{requesterName}</span>
         </div>
       )}
       <div className="chat-compaction-card-panel">
@@ -111,10 +115,10 @@ export function ChatCompactionApprovalCard(props: {
             {percentage !== undefined && (
               <div className="chat-compaction-card-meter">
                 <div className="chat-compaction-card-bar" role="meter" aria-valuemin={0} aria-valuemax={100} aria-valuenow={percentage}
-                  aria-label={compactionMeterLabel(percentage)}>
+                  aria-label={COMPACTION_CARD_METER_NAME} aria-valuetext={compactionMeterLabel(percentage)}>
                   <span style={{ width: `${percentage}%` }} />
                 </div>
-                <span className="chat-compaction-card-meter-label">{compactionMeterLabel(percentage)}</span>
+                <span className="chat-compaction-card-meter-label" aria-hidden="true">{compactionMeterLabel(percentage)}</span>
               </div>
             )}
             {request.instructions && (

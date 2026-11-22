@@ -65,6 +65,58 @@ for (const kind of ["claude-code", "codex-cli"] as const) {
   });
 }
 
+test("a session log's context: subagent lines skipped, the CLI's own window kept for the same model only", async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), "accordagents-claude-known-"));
+  try {
+    const runner = makeRunner();
+    const internals = runner as unknown as { findClaudeSessionLogPath(sessionId: string): Promise<string | undefined> };
+    const call = (model: string, input: number, extra: Record<string, unknown> = {}): string =>
+      JSON.stringify({ type: "assistant", ...extra, message: { model, usage: { input_tokens: 2, cache_creation_input_tokens: 0, cache_read_input_tokens: input - 2, output_tokens: 9 } } });
+    const file = path.join(dir, "session.jsonl");
+    // The member's last call, then a subagent's (older CLIs wrote those into the same log).
+    await writeFile(file, `${call("claude-haiku-4-5", 97_902)}\n${call("claude-sonnet-5-5", 150_000, { isSidechain: true })}\n`);
+    internals.findClaudeSessionLogPath = async () => file;
+    const claude = { id: "claude-known", kind: "claude-code" as const, label: "Claude", model: "haiku" };
+    const plain = await runner.contextUsageForSession(claude, "s", { waitForLog: false });
+    assert.deepEqual([plain?.usedTokens, plain?.contextWindowTokens, plain?.model], [97_902, 200_000, "claude-haiku-4-5"], "the member's call, not the subagent's");
+    const stored = { usedTokens: 1, percentage: 0, source: "claude-code" as const, updatedAt: "2026-11-22T00:00:00.000Z" };
+    // The window the CLI named for this model at the last turn wins over the map...
+    const same = await runner.contextUsageForSession(claude, "s", { waitForLog: false, known: { ...stored, contextWindowTokens: 1_000_000, model: "claude-haiku-4-5" } });
+    assert.equal(same?.contextWindowTokens, 1_000_000);
+    // ...but not another model's, nor another CLI's.
+    const other = await runner.contextUsageForSession(claude, "s", { waitForLog: false, known: { ...stored, contextWindowTokens: 1_000_000, model: "claude-sonnet-5-5" } });
+    assert.equal(other?.contextWindowTokens, 200_000);
+    const codex = await runner.contextUsageForSession(claude, "s", { waitForLog: false, known: { ...stored, source: "codex-cli", contextWindowTokens: 258_400, model: "claude-haiku-4-5" } });
+    assert.equal(codex?.contextWindowTokens, 200_000);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("a Codex rollout's context is its latest token count with usage, read from the end", async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), "accordagents-codex-rollout-"));
+  try {
+    const runner = makeRunner();
+    const internals = runner as unknown as { findCodexSessionLogPath(sessionId: string): Promise<string | undefined> };
+    const count = (total: number, window: number): string => JSON.stringify({ type: "event_msg", payload: { type: "token_count",
+      info: { total_token_usage: { total_tokens: 9_999_999 }, last_token_usage: { total_tokens: total }, model_context_window: window } } });
+    const file = path.join(dir, "rollout-x-s.jsonl");
+    await writeFile(file, [
+      count(151_216, 258_400),
+      JSON.stringify({ type: "response_item", payload: { type: "message", content: "token_count is just a word here" } }),
+      count(23_410, 258_400),
+      // Rate limits only, then a line still being written.
+      JSON.stringify({ type: "event_msg", payload: { type: "token_count", info: null, rate_limits: {} } }),
+      "{\"type\":\"event_msg\",\"payload\":{\"type\":\"token_c"
+    ].join("\n"));
+    internals.findCodexSessionLogPath = async () => file;
+    const usage = await runner.contextUsageForSession({ id: "codex", kind: "codex-cli", label: "Codex" }, "s", { waitForLog: false });
+    assert.deepEqual([usage?.usedTokens, usage?.contextWindowTokens, usage?.percentage], [23_410, 258_400, 5]);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
 test("Claude context usage read from the end of the log matches reading the whole log", async () => {
   const dir = await mkdtemp(path.join(tmpdir(), "accordagents-claude-log-"));
   try {

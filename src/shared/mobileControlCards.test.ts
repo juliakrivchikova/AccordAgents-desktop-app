@@ -269,7 +269,7 @@ test("a compaction card on the phone says what the desktop card says and answers
   assert.equal(pending?.title, "Compact the conversation?");
   assert.equal(pending?.summary, "The context is almost full. After this reply the older part of the conversation is replaced by a short summary, and work continues from it.");
   assert.doesNotMatch(`${pending?.title} ${pending?.summary}`, /\bit to\b|provider session|@drew/);
-  assert.deepEqual(pending?.meter, { percentage: 82, label: "82% of context used" });
+  assert.deepEqual(pending?.meter, { percentage: 82, label: "82% of context used", name: "Context used" });
   assert.deepEqual(pending?.keeps, { label: "Summary keeps:", text: "beta.3 status, your rules, open defects" });
   assert.equal(pending?.chatScopeLabel, "Don't ask again in this chat");
   assert.deepEqual(pending?.options.map((option) => [option.id, option.label]), [["deny", "Not now"], ["allow", "Compact"]]);

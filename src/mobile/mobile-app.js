@@ -7750,7 +7750,8 @@
     const options = Array.isArray(card.options) ? card.options : [];
     const option = options.find(function (item) { return answer && item.id === answer.optionId; });
     const said = option ? option.label || option.id : (answer && answer.optionId) || "";
-    return said && answer && answer.optionId === "allow" && answer.chatScope && card.chatScopeLabel ? said + " · " + card.chatScopeLabel : said;
+    // Worded as the folded line on the desktop says it (compactionCardEnding).
+    return said && answer && answer.optionId === card.primaryOptionId && answer.chatScope && card.chatScopeLabel ? said + " · " + card.chatScopeLabel : said;
   }
 
   /** The answer a card on its way folds to, while it is written and after. */
@@ -8397,12 +8398,14 @@
       bar.setAttribute("aria-valuemin", "0");
       bar.setAttribute("aria-valuemax", "100");
       bar.setAttribute("aria-valuenow", String(card.meter.percentage));
-      bar.setAttribute("aria-label", card.meter.label || "");
+      bar.setAttribute("aria-label", card.meter.name || "Context used");
+      bar.setAttribute("aria-valuetext", card.meter.label || "");
       const fill = document.createElement("span");
       fill.style.width = Math.max(0, Math.min(100, card.meter.percentage)) + "%";
       bar.append(fill);
       const label = document.createElement("span");
       label.className = "control-card-meter-label";
+      label.setAttribute("aria-hidden", "true");
       label.textContent = card.meter.label || "";
       meter.append(bar, label);
       wrap.append(meter);

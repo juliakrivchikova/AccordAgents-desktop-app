@@ -1,5 +1,5 @@
-// The compaction card the User approved on 2026-11-22
-// (.scratch/mockups/compaction-card.html): its words, its meter, its answers,
+// The compaction card the User approved on 2026-11-22: its words, its meter,
+// its answers,
 // who it names in each view, and its folded line once answered.
 import assert from "node:assert/strict";
 import test from "node:test";
@@ -119,8 +119,13 @@ test("Compact allows once, Compact with the box allows for this chat, Not now de
 
   const enter = render(approval());
   const section = byClass(enter.root, "chat-compaction-card")[0];
-  const target = { closest: () => null };
-  act(() => { section.props.onKeyDown({ key: "Enter", target, preventDefault: () => undefined }); });
+  const onCard = { closest: () => null };
+  const onControl = { closest: () => ({}) };
+  // Enter on a control is that control's (Not now, the box), Shift+Enter is not Compact.
+  act(() => { section.props.onKeyDown({ key: "Enter", target: onControl, preventDefault: () => undefined }); });
+  act(() => { section.props.onKeyDown({ key: "Enter", shiftKey: true, target: onCard, preventDefault: () => undefined }); });
+  assert.deepEqual(enter.answers, []);
+  act(() => { section.props.onKeyDown({ key: "Enter", target: onCard, preventDefault: () => undefined }); });
   assert.deepEqual(enter.answers, [["approval-compact", true, "once"]]);
   act(() => enter.renderer.unmount());
 });

@@ -15,7 +15,6 @@ import { readCliHelpText } from "./cliHelpText";
 import { visitLinesFromEnd } from "./linesFromEnd";
 import type {
   AgentContextUsage,
-  AgentContextUsageSource,
   AgentDetectionRequest,
   AgentHealth,
   ChatAgentActivityEvent,
@@ -6493,7 +6492,7 @@ export class CliAgentRunner {
             sessionId,
             participant,
             SESSION_LOG_RETRIES,
-            streamState?.contextWindowTokens ?? this.claudeResultContextWindow(result.stdout)
+            streamState?.contextWindowTokens ?? this.claudeJsonResult(result.stdout)
           )
       }, participant, options), streamState?.resultEvent ?? result.stdout, participant, options.nativeGoal ? "one-shot-stream" : "one-shot");
     } catch (error) {
@@ -9727,12 +9726,12 @@ export class CliAgentRunner {
     });
   }
 
-  /** The window a Claude Code `--output-format json` result names for the
-   *  member's model; undefined for any other output. */
-  private claudeResultContextWindow(stdout: string): number | undefined {
+  /** A Claude Code `--output-format json` result (it names each model's
+   *  window in `modelUsage`); undefined for any other output. */
+  private claudeJsonResult(stdout: string): { resultEvent: unknown } | undefined {
     try {
       const event = JSON.parse(stdout) as unknown;
-      return claudeContextWindowFromResult(event, this.findModelId(event));
+      return this.asRecord(event)?.type === "result" ? { resultEvent: event } : undefined;
     } catch {
       return undefined;
     }
@@ -9790,7 +9789,7 @@ export class CliAgentRunner {
     sessionId: string | undefined,
     participant: ParticipantConfig,
     attempts = SESSION_LOG_RETRIES,
-    knownWindow?: ClaudeKnownContextWindow | number
+    knownWindow?: ClaudeKnownContextWindow | number | { resultEvent: unknown }
   ): Promise<AgentContextUsage | undefined> {
     if (!sessionId) {
       return undefined;
@@ -9812,7 +9811,7 @@ export class CliAgentRunner {
   private async extractClaudeSessionLogContextUsage(
     sessionId: string,
     participant: ParticipantConfig,
-    knownWindow?: ClaudeKnownContextWindow | number
+    knownWindow?: ClaudeKnownContextWindow | number | { resultEvent: unknown }
   ): Promise<AgentContextUsage | undefined> {
     const filePath = await this.findClaudeSessionLogPath(sessionId);
     if (!filePath) {
@@ -9845,7 +9844,14 @@ export class CliAgentRunner {
       return undefined;
     }
     const model = reading.model ?? participant.model;
-    const known = typeof knownWindow === "number" ? { contextWindowTokens: knownWindow } : knownWindow;
+    const known: ClaudeKnownContextWindow | undefined = typeof knownWindow === "number"
+      ? { contextWindowTokens: knownWindow }
+      : knownWindow && "resultEvent" in knownWindow
+        ? (() => {
+            const window = claudeContextWindowFromResult(knownWindow.resultEvent, model);
+            return window ? { contextWindowTokens: window } : undefined;
+          })()
+        : knownWindow;
     const knownApplies = known && (!known.model || !model || claudeCanonicalModelId(known.model) === claudeCanonicalModelId(model));
     return buildAgentContextUsage({
       usedTokens: reading.usedTokens,
@@ -9916,30 +9922,6 @@ export class CliAgentRunner {
 
   private findModelId(value: unknown): string | undefined {
     return this.findStringField(value, ["model", "model_id", "modelId", "resolved_model", "resolvedModel"]);
-  }
-
-  private findNumberField(value: unknown, keys: string[]): number | undefined {
-    const stack: unknown[] = [value];
-    const wanted = new Set(keys);
-    while (stack.length) {
-      const current = stack.pop();
-      if (Array.isArray(current)) {
-        stack.push(...current);
-        continue;
-      }
-      const record = this.asRecord(current);
-      if (!record) {
-        continue;
-      }
-      for (const key of wanted) {
-        const number = this.numberField(record, key);
-        if (number) {
-          return number;
-        }
-      }
-      stack.push(...Object.values(record).filter((nested) => nested && typeof nested === "object"));
-    }
-    return undefined;
   }
 
   private findStringField(value: unknown, keys: string[]): string | undefined {
@@ -10143,18 +10125,6 @@ export class CliAgentRunner {
   private stringField(record: Record<string, unknown>, key: string): string | undefined {
     const value = record[key];
     return typeof value === "string" ? value : undefined;
-  }
-
-  private numberField(record: Record<string, unknown>, key: string): number | undefined {
-    const value = record[key];
-    if (typeof value === "number" && Number.isFinite(value) && value > 0) {
-      return Math.floor(value);
-    }
-    if (typeof value === "string" && /^\d+(?:\.\d+)?$/.test(value.trim())) {
-      const parsed = Number(value);
-      return Number.isFinite(parsed) && parsed > 0 ? Math.floor(parsed) : undefined;
-    }
-    return undefined;
   }
 
   private findSessionId(value: unknown): string | undefined {

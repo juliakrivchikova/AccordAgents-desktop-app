@@ -7,6 +7,7 @@ import {
   codexContextFromEvent,
   isClaudeCompactBoundary
 } from "./cliContextUsage";
+import { compactionCardEnding } from "../../shared/compactionCard";
 import {
   buildAgentContextUsage,
   contextUsedPercentage,
@@ -130,4 +131,18 @@ test("Claude's percentage rounds used / window as /context does", () => {
 test("A Codex figure stored by an older build reads with Codex's percentage", () => {
   const stored = { usedTokens: 39_344, contextWindowTokens: 258_400, percentage: 15, source: "codex-cli", updatedAt: "2026-11-22T06:43:12.109Z" };
   assert.equal(normalizeAgentContextUsage(stored)?.percentage, 11);
+});
+
+test("a compaction card ends as the folded line says it, for every outcome", () => {
+  const cases: Array<[Parameters<typeof compactionCardEnding>[0], { ended: string; detail?: string }]> = [
+    [{ status: "approved", approvalScope: "once" }, { ended: "Compact" }],
+    [{ status: "approved" }, { ended: "Compact" }],
+    [{ status: "approved", approvalScope: "chat" }, { ended: "Compact · Don't ask again in this chat" }],
+    [{ status: "auto-applied" }, { ended: "Compact" }],
+    [{ status: "denied" }, { ended: "Not now" }],
+    [{ status: "denied", error: "Context compaction is already queued or running for @drew." }, { ended: "Not compacted", detail: "Context compaction is already queued or running for @drew." }],
+    [{ status: "expired" }, { ended: "Expired" }],
+    [{ status: "cancelled", error: "@drew left." }, { ended: "Cancelled", detail: "@drew left." }]
+  ];
+  for (const [approval, expected] of cases) assert.deepEqual(compactionCardEnding(approval), expected, JSON.stringify(approval));
 });

@@ -15,17 +15,18 @@
  */
 
 import type { ChatAppToolApproval, ChatChoiceOption, ChatMessage, ChatParticipantRemovalRequest, ChatPendingChoice, Conversation } from "./types";
-import { APP_CHAT_REQUEST_COMPACTION_TOOL, APP_CONNECTOR_SIGN_IN_TOOL, APP_PARTICIPANTS_REQUEST_CHANGE_TOOL } from "./appMcpToolContracts";
+import { APP_CONNECTOR_SIGN_IN_TOOL, APP_PARTICIPANTS_REQUEST_CHANGE_TOOL } from "./appMcpToolContracts";
 import {
   COMPACTION_CARD_CHAT_SCOPE,
   COMPACTION_CARD_COMPACT,
   COMPACTION_CARD_KEEPS,
+  COMPACTION_CARD_METER_NAME,
   COMPACTION_CARD_NOT_NOW,
   COMPACTION_CARD_SENTENCE,
   COMPACTION_CARD_TITLE,
   compactionCardEnding,
-  compactionCardPercentage,
-  compactionMeterLabel
+  compactionMeterLabel,
+  selfCompactionRequestOf
 } from "./compactionCard";
 import { connectorSignInHost, isConnectorSignInRequest } from "./connectorSignIn";
 import type { HubCard } from "./hubOps";
@@ -73,7 +74,7 @@ export interface MobileControlCard {
    *  operation id each was sent under, so the phone that sent one stops waiting. */
   refusedAnswers?: Array<{ operationId: string; reason: string }>;
   /** A compaction card's context meter, as the desktop card draws it. */
-  meter?: { percentage: number; label: string };
+  meter?: { percentage: number; label: string; name: string };
   /** A compaction card's "Summary keeps:" line. */
   keeps?: { label: string; text: string };
   /** A box beside the answers that, ticked, makes an approval hold for the
@@ -109,16 +110,6 @@ function removalRequest(approval: ChatAppToolApproval): ChatParticipantRemovalRe
     request.operations.every((operation) => typeof operation?.handle === "string" && typeof operation.participantId === "string")
     ? request as ChatParticipantRemovalRequest
     : undefined;
-}
-
-function selfCompactionRequest(approval: ChatAppToolApproval): { instructions?: string; contextPercentage?: number } | undefined {
-  const request = approval.request as { type?: unknown; instructions?: unknown; contextPercentage?: unknown } | undefined;
-  if (approval.toolName !== APP_CHAT_REQUEST_COMPACTION_TOOL || request?.type !== "self_compaction") return undefined;
-  const instructions = typeof request.instructions === "string" && request.instructions.trim() ? request.instructions.trim() : undefined;
-  return {
-    ...(instructions ? { instructions } : {}),
-    ...(typeof request.contextPercentage === "number" ? { contextPercentage: request.contextPercentage } : {})
-  };
 }
 
 /** Whether a card should be shown for this approval: one that asks, and an
@@ -234,10 +225,10 @@ export function controlCardFromApproval(conversationId: string, approval: ChatAp
       ...(signIn && !elsewhere ? { signInUrl: request.authUrl } : {})
     };
   }
-  const compaction = selfCompactionRequest(approval);
+  const compaction = selfCompactionRequestOf(approval);
   if (compaction) {
     // The desktop's card, word for word (src/shared/compactionCard.ts).
-    const percentage = compactionCardPercentage(compaction.contextPercentage);
+    const percentage = compaction.contextPercentage;
     return {
       id: approval.id,
       kind: "permission",
@@ -249,7 +240,7 @@ export function controlCardFromApproval(conversationId: string, approval: ChatAp
       options: [{ id: "deny", label: COMPACTION_CARD_NOT_NOW }, { id: "allow", label: COMPACTION_CARD_COMPACT }],
       primaryOptionId: "allow",
       chatScopeLabel: COMPACTION_CARD_CHAT_SCOPE,
-      ...(percentage !== undefined ? { meter: { percentage, label: compactionMeterLabel(percentage) } } : {}),
+      ...(percentage !== undefined ? { meter: { percentage, label: compactionMeterLabel(percentage), name: COMPACTION_CARD_METER_NAME } } : {}),
       ...(compaction.instructions ? { keeps: { label: COMPACTION_CARD_KEEPS, text: compaction.instructions } } : {}),
       allowsCustomAnswer: false,
       allowsCancel: false,
@@ -370,7 +361,7 @@ export function controlCardFromHubCard(
     // A card that words its answers (a removal: "Yes, remove @x") says the
     // one given; a plain permission says Allowed or Denied; a compaction
     // ends as its folded line on the desktop does.
-    const said = selfCompactionRequest(raised.approval)
+    const said = selfCompactionRequestOf(raised.approval)
       ? compactionCardEnding({ status: approve ? "approved" : "denied", approvalScope: card.answer?.scope === "chat" ? "chat" : "once" }).ended
       : chosen && chosen.label !== ALLOW.label && chosen.label !== DENY.label ? chosen.label : approve ? "Allowed" : "Denied";
     const { codexDecisionId: _decision, draftOverride: _draft, meter: _meter, keeps: _keeps, chatScopeLabel: _scope, primaryOptionId: _primary, ...shown } = base;
