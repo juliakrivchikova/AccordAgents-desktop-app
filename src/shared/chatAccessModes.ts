@@ -369,3 +369,15 @@ export function inCliOwnMode(
   const option = legacyCodexPlan ? undefined : selectedChatAccessOption(kind, mode, { ...normalized, cliApprovals: true });
   return applyChatAccessOptionById(kind, legacyCodexPlan ? "plan" : option?.id, normalized);
 }
+
+/** A chat's members in their CLI's own mode (inCliOwnMode), for a chat shown
+ *  in the sessions view: undefined when every member already is in one. */
+export function membersInCliOwnMode<T extends { kind: ChatProviderKind; agentMode?: ChatAgentMode; permissions?: ChatAgentPermissions }>(members: readonly T[]): T[] | undefined {
+  let changed = false;
+  const next = members.map((member) => {
+    if (normalizeChatAgentPermissions(member.permissions).cliApprovals) return member;
+    changed = true;
+    return { ...member, ...inCliOwnMode(member.kind, member.agentMode, member.permissions) };
+  });
+  return changed ? next : undefined;
+}

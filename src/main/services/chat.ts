@@ -4,9 +4,9 @@ import {
   forkCutFor, forkedChatTitle, forkedMainSessionAccess, forkOriginFor, forkToNewChatLocalProviders, forkToNewChatReasonInChat, isForkableSessionKind,
   lastMemberTurnEnd, memberAsItRunsNow, memberHasFinishedReply, type ForkToNewChatMachineSupport, type ForkToNewChatOffer
 } from "../../shared/forkToNewChat";
-import { applyChatAccessOptionById, cliModesTurnRefusal, inCliOwnMode, type CliModesMachineSupport } from "../../shared/chatAccessModes";
+import { applyChatAccessOptionById, cliModesTurnRefusal, inCliOwnMode, membersInCliOwnMode, type CliModesMachineSupport } from "../../shared/chatAccessModes";
 import { newChatMainSessionStart } from "../../shared/newChatDefaults";
-import { DEFAULT_CHAT_VIEW, MAIN_SESSION_HANDLE, MAIN_SESSION_ROLE_ID, canSwitchChatView, isChatViewMode, isMainSessionChat, isMainSessionParticipant, isRoleOfferedForNewMembers, mainSessionMemberOf, mainSessionParticipantId } from "../../shared/mainSession";
+import { DEFAULT_CHAT_VIEW, MAIN_SESSION_HANDLE, MAIN_SESSION_ROLE_ID, canSwitchChatView, chatViewFor, isChatViewMode, isMainSessionChat, isMainSessionParticipant, isRoleOfferedForNewMembers, mainSessionMemberOf, mainSessionParticipantId } from "../../shared/mainSession";
 import { SESSIONS_TASK_GIVEN_TITLE_MAX_CHARS, firstTextLine, sessionsTaskTitle, shortenAtWord } from "../../shared/mainSessionView";
 import { createHash, randomUUID } from "node:crypto";
 import { constants as fsConstants, realpathSync } from "node:fs";
@@ -2541,9 +2541,34 @@ export class ChatService {
       if (conversation.metadata.chatView === request.view) {
         return conversation;
       }
-      conversation.metadata = { ...conversation.metadata, chatView: request.view };
+      // Shown in the sessions view, members with rights from the classic
+      // view run in their CLI's own mode from now on (the User, 2026-11-22).
+      const converted = request.view === "sessions" ? membersInCliOwnMode(this.chatParticipants(conversation)) : undefined;
+      conversation.metadata = { ...conversation.metadata, chatView: request.view, ...(converted ? { participants: converted } : {}) };
       await this.saveConversation(conversation);
       return conversation;
+    });
+  }
+
+  /** A chat switched to the sessions view on another device (the phone):
+   *  this computer moves its members with rights from the classic view into
+   *  their CLI's own mode, as a switch made here does (setChatView). Only the
+   *  computer writes it, so devices never race on the same change. */
+  private convertMembersForSessionsView(conversationId: string): void {
+    if (this.machineRuntime) return;
+    void (async () => {
+      await this.waitForQueuedSave(conversationId);
+      const conversation = await this.storage.getConversation(conversationId);
+      if (!conversation || conversation.kind !== "chat" || chatViewFor(conversation.metadata) !== "sessions") return;
+      await this.withChatMutation(conversation, async () => {
+        if (chatViewFor(conversation.metadata) !== "sessions") return;
+        const converted = membersInCliOwnMode(this.chatParticipants(conversation));
+        if (!converted) return;
+        conversation.metadata = { ...conversation.metadata, participants: converted };
+        await this.saveConversation(conversation);
+      });
+    })().catch((error) => {
+      void this.debugLogs.write("chat.sessions-view.cli-mode-failed", { conversationId, error: error instanceof Error ? error.message : String(error) }).catch(() => undefined);
     });
   }
 
@@ -25652,6 +25677,11 @@ export class ChatService {
     this.retireRemovedMembers(conversationId, dropped);
     // An archived chat closes its members' sessions, wherever it was archived.
     if (archivedNow) await this.cliRunner.closeConversationSessions(conversationId).catch(() => undefined);
+    // Switched to the sessions view on another device: its members with
+    // rights from the classic view go into their CLI's own mode.
+    if (entries.some((entry) => entry.deviceId !== me && entry.effect.kind === "conversation.update" && entry.effect.metadata?.chatView === "sessions")) {
+      this.convertMembersForSessionsView(conversationId);
+    }
     // New messages from other devices are what a watching member reads next.
     if (entries.some((entry) => entry.deviceId !== me && entry.effect.kind === "message.create")) {
       this.scheduleAutoWatchEvaluation(conversationId, "server-messages");

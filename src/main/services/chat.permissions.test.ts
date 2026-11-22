@@ -48,6 +48,7 @@ import { DEFAULT_CHAT_PROMPT_CONTEXT } from "../../shared/chatPromptContext";
 import { EMPTY_MOBILE_CONTROL_SETTINGS } from "../../shared/mobilePairing";
 import { preferredReadyAssistantProviderKind } from "../../shared/cliReadiness";
 import { MAIN_SESSION_ROLE_ID } from "../../shared/mainSession";
+import { selectedChatAccessOption } from "../../shared/chatAccessModes";
 import { CHAT_INTERIM_POSTS_MAX_CHARS } from "../../shared/interimPosts";
 import type {
   AgentHealth,
@@ -5702,6 +5703,26 @@ test("the chat's view switches only in a chat with a main session", async () => 
   const old = testService({ conversation: oldChat });
   await assert.rejects(() => old.service.setChatView({ conversationId: oldChat.id, view: "sessions" }), /one view only/);
   assert.equal(old.storage.current.metadata.chatView, undefined);
+});
+
+test("switched to the sessions view, members with rights from the classic view run in their CLI's own mode from then on, here and when the phone switched it", async () => {
+  const classicRights = { ...defaultChatAgentPermissions(), workspaceWrite: true, webAccess: true };
+  const main = { ...chatParticipant("claude-code"), id: "main-participant", handle: "main", roleConfigId: MAIN_SESSION_ROLE_ID, agentMode: "auto" as const, permissions: classicRights };
+  const helper = { ...chatParticipant("codex-cli"), id: "helper", handle: "helper", agentMode: "default" as const, permissions: { ...classicRights, workspaceWrite: false } };
+  const mainChat = chatConversation([main, helper], { mainSessionParticipantId: main.id, chatView: "classic" });
+  const { service, storage } = testService({ conversation: mainChat });
+  await service.setChatView({ conversationId: mainChat.id, view: "sessions" });
+  const modes = () => (storage.current.metadata.participants as ChatParticipant[]).map((member) =>
+    [member.handle, member.agentMode, selectedChatAccessOption(member.kind, member.agentMode, member.permissions)?.id, normalizeChatAgentPermissions(member.permissions).webAccess]);
+  assert.deepEqual(modes(), [["main", "auto", "auto", true], ["helper", "default", "read-only", true]], "the CLI mode each ran in, its other rights kept");
+  await service.setChatView({ conversationId: mainChat.id, view: "classic" });
+  assert.deepEqual(modes(), [["main", "auto", "auto", true], ["helper", "default", "read-only", true]], "for good: back in the classic view they stay in it");
+
+  // Switched on the phone: the computer moves them when the switch reaches it.
+  const phoneChat = chatConversation([main, helper], { mainSessionParticipantId: main.id, chatView: "sessions" });
+  const phone = testService({ conversation: phoneChat });
+  (phone.service as any).convertMembersForSessionsView(phoneChat.id);
+  await waitFor(() => (phone.storage.current.metadata.participants as ChatParticipant[]).every((member) => normalizeChatAgentPermissions(member.permissions).cliApprovals === true));
 });
 
 test("static chat instructions include structured participant request and reply guidance", () => {
