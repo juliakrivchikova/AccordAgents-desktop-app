@@ -376,7 +376,7 @@ test("a member of a chat from before becomes the main session of a new sessions-
   assert.deepEqual(storage.store.get(source.id), source, "the member and its chat are untouched");
 });
 
-test("the new chat's first message forks the member's CLI session; the copy is told it is the main session of the new chat, and reminded later", async () => {
+test("the new chat's first message forks the member's CLI session; the copy is told once it is the main session of the new chat, and later messages are her words alone", async () => {
   const source = oldChat([ASSISTANT, REVIEWER]);
   const { service, storage, runs } = testService({
     conversations: [source],
@@ -409,7 +409,8 @@ test("the new chat's first message forks the member's CLI session; the copy is t
   const second = runs[1]!;
   assert.equal(second.options.forkFromSessionId, undefined);
   assert.equal(second.options.sessionId, "fork-own-session", "its own session from then on");
-  assert.match(second.prompt, /Reminder: you are @main \(role: Main session\), the main session of this chat, forked from @reviewer's session in the chat "Old chat"/);
+  assert.equal(second.prompt, "And now the tests.", "her message as she typed it: the note stays in the copy's context, and a compaction renders the main session's own instructions");
+  assert.match(second.options.role?.instructions ?? "", /You are @main in AccordAgents Chat\./, "its own instructions go with every launch");
   assert.deepEqual(sessionsOf(storage.store.get(source.id)), [sessionRecord(REVIEWER, "src-cli-session")], "the member's own session is untouched");
 });
 

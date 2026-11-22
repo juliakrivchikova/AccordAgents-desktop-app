@@ -1090,7 +1090,7 @@ export interface ChatParticipantSession {
   forkFrom?: ChatSessionForkSource;
   /** The member whose session this one was forked from. Kept after the fork
    *  has its own id: both CLIs keep the source's system and developer
-   *  instructions in a fork, so each turn reminds the member who it is. */
+   *  instructions in a fork, so its first turn tells the member who it is. */
   forkedFromParticipantId?: string;
   executionSessionId?: string;
   roleConfigId: string;
@@ -1118,6 +1118,11 @@ export interface ChatParticipantSession {
   /** Device-local: it moved here with this session, and its next turn tells
    *  it so (memberMovedNote); cleared once a turn of it succeeded. */
   movedHere?: { from: string; to: string; at: string };
+  /** A hash of the member's access (repository, mode, permissions) as its
+   *  CLI session was last told it, in its instructions or a note: the CLI
+   *  keeps the instructions a session started with, so a turn whose access
+   *  differs says the change once. Absent for a session told nothing yet. */
+  instructionsAccessHash?: string;
   updatedAt: string;
 }
 

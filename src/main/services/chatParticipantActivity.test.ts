@@ -787,17 +787,13 @@ test("participant activity guidance is local-only and absent from detached remot
   const session = participantSession(local);
   const harness = chatServiceHarness([chatConversation([local, remote])]);
 
-  const localInstructions = (harness.service as any).nativeRoleInstructions(local, session) as string;
-  const remoteInstructions = (harness.service as any).nativeRoleInstructions(remote, {
-    ...session,
-    participantId: remote.id,
-    participantKind: remote.kind
-  }) as string;
-  const remoteFallback = (harness.service as any).promptFallbackStaticInstructions(remote, {
-    ...session,
-    participantId: remote.id,
-    participantKind: remote.kind
-  }) as string;
+  const conversation = chatConversation([local, remote]);
+  const access = { agentMode: "default", permissions: local.permissions };
+  const remoteSession = { ...session, participantId: remote.id, participantKind: remote.kind };
+  const localInstructions = (harness.service as any).sessionInstructions(conversation, local, session, access, "/tmp/ws") as string;
+  const remoteInstructions = (harness.service as any).sessionInstructions(conversation, remote, remoteSession, access, "/tmp/ws") as string;
+  // The same instructions go in-band when the CLI cannot take them natively.
+  const remoteFallback = (harness.service as any).buildPromptParts(conversation, remote, remoteSession, { id: "m", role: "user", content: "Hi.", createdAt: "2026-05-01T00:00:00.000Z", status: "done" }, "/tmp/ws", false, { includeRoleInstructions: true, ...access }).prompt as string;
 
   assert.match(localInstructions, /app_chat_get_participant_activity/);
   assert.doesNotMatch(remoteInstructions, /app_chat_get_participant_activity/);

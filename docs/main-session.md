@@ -561,7 +561,9 @@ chat as that chat's main session, with everything it knew
   the member's chat there (`startFromForkOrigin`; only that chat's session
   records) and forks it as a delegated fork does (`forkFrom` with the source
   chat's id). It is told it is the new chat's main session, not a member,
-  with the main session's role instructions, and reminded on later turns. A
+  with the main session's role instructions, once: later messages are her
+  words alone (the note stays in the copy's context, and once the CLI
+  compacts it renders the main session's own instructions). A
   main session that already answered never becomes a copy again. A member
   that moved to that device and whose session still waits on her server is
   taken first, as its own next turn would take it. When the member's session
@@ -794,8 +796,9 @@ Verified in the installed CLIs, the way the User sees them:
   is.
   `ChatParticipantSession.forkedFromParticipantId` stays: both CLIs keep the
   source's system/developer instructions in a fork (verified on Claude Code
-  2.1.329 and Codex 0.155.1), so the member is told who it is on its first
-  turn and reminded on later ones. When the source session is gone (only
+  2.1.329/2.1.330 and Codex 0.155.1), so the member is told who it is, with
+  its access, on its first turn only; Claude Code renders the member's own
+  appended instructions once the copy compacts. When the source session is gone (only
   the CLIs' own words: Claude Code "No conversation found", Codex "no
   rollout found for thread id", `isForkSourceMissingError`), the member
   starts a clean session in that same turn, from a prompt that still

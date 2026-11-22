@@ -133,7 +133,7 @@ test("buildPrompt adds repo file guidance based on repoRead permission", () => {
   assert.match(allowedPrompt, /You may read these\./);
 });
 
-test("buildPromptParts section sizes stay under baseline caps across envelope branches", () => {
+test("buildPromptParts: a resumed session's message is User's text alone; its instructions come whole only when it must be told them again", () => {
   const participant = chatParticipant();
   const conversationWithRepo = chatConversation([participant], "/repo");
   const conversationNoRepo = chatConversation([participant], "");
@@ -160,81 +160,55 @@ test("buildPromptParts section sizes stay under baseline caps across envelope br
     includeRoleInstructions,
     agentMode: "default",
     permissions
-  }) as { prompt: string; sections: { staticEnvelope: number; dynamicHeader: number; promptContext: number; trigger: number; mentions: number; currentRequest: number; total: number } };
+  }) as { prompt: string; sections: { staticEnvelope: number; accessNote: number; promptContext: number; trigger: number; mentions: number; total: number } };
 
-  const slimRepoRead = build(conversationWithRepo, permGranted, false);
-  const slimNoRepoRead = build(conversationWithRepo, permBlocked, false);
-  const slimNoRepo = build(conversationNoRepo, permGranted, false);
+  for (const [label, parts] of [
+    ["repo+repoRead", build(conversationWithRepo, permGranted, false)],
+    ["repo+no-repoRead", build(conversationWithRepo, permBlocked, false)],
+    ["no-repo", build(conversationNoRepo, permGranted, false)]
+  ] as const) {
+    assert.equal(parts.prompt, "Short trigger.", `${label}: exactly what User typed`);
+    assert.equal(parts.sections.total, "Short trigger.".length, label);
+    assert.equal(parts.sections.staticEnvelope, 0, label);
+  }
+
+  // A session told its instructions again (a role change, a session made
+  // before they moved into the CLI's instructions): once, whole, then her text.
   const fullRepoRead = build(conversationWithRepo, permGranted, true);
   const fullNoRepoRead = build(conversationWithRepo, permBlocked, true);
-
-  // Per-section caps for slim envelope (resumed CLI session, no refresh).
-  for (const [label, parts] of [
-    ["slim repo+repoRead", slimRepoRead],
-    ["slim repo+no-repoRead", slimNoRepoRead],
-    ["slim no-repo", slimNoRepo]
-  ] as const) {
-    assert.equal(parts.sections.staticEnvelope, 0, `${label}: staticEnvelope should be empty on slim`);
-    assert.ok(parts.sections.dynamicHeader < 1000, `${label}: dynamicHeader too large: ${parts.sections.dynamicHeader}`);
-    assert.equal(parts.sections.promptContext, 0, `${label}: promptContext should be empty without automatic context`);
-    assert.ok(parts.sections.trigger < 350, `${label}: trigger too large: ${parts.sections.trigger}`);
-    assert.equal(parts.sections.mentions, 0, `${label}: mentions should be empty when no #file tokens`);
-    assert.ok(parts.sections.currentRequest < 130, `${label}: currentRequest too large: ${parts.sections.currentRequest}`);
+  for (const parts of [fullRepoRead, fullNoRepoRead]) {
+    assert.ok(parts.prompt.endsWith("\n\nShort trigger."));
+    assert.ok(parts.sections.staticEnvelope < 13500, `staticEnvelope too large: ${parts.sections.staticEnvelope}`);
   }
-
-  // Per-section caps for full envelope.
-  for (const [label, parts] of [
-    ["full repo+repoRead", fullRepoRead],
-    ["full repo+no-repoRead", fullNoRepoRead]
-  ] as const) {
-    assert.equal(parts.sections.dynamicHeader, 0, `${label}: dynamicHeader is folded into staticEnvelope when role instructions are included`);
-    // Bumped from 7450 when app_chat_send_message was added, then when its guidance
-    // was expanded, then when app_chat_set_title joined the always-on app MCP surface,
-    // then from 7950 for the members' long-term memory instructions (~1.2 KB).
-    // Intentional growth; keep tightening any further bloat.
-    assert.ok(parts.sections.staticEnvelope < 9200, `${label}: staticEnvelope too large: ${parts.sections.staticEnvelope}`);
-    assert.equal(parts.sections.promptContext, 0, `${label}: promptContext should be empty without automatic context`);
-    assert.ok(parts.sections.trigger < 350, `${label}: trigger too large: ${parts.sections.trigger}`);
-    assert.ok(parts.sections.currentRequest < 130, `${label}: currentRequest too large: ${parts.sections.currentRequest}`);
-  }
-
-  // Total caps (carried over from v2; tighten deliberately if intentional growth happens).
-  assert.ok(slimRepoRead.sections.total < 1100, `slim repo+repoRead total too large: ${slimRepoRead.sections.total}`);
-  assert.ok(slimNoRepoRead.sections.total < 1500, `slim repo+no-repoRead total too large: ${slimNoRepoRead.sections.total}`);
-  assert.ok(slimNoRepo.sections.total < 1500, `slim no-repo total too large: ${slimNoRepo.sections.total}`);
-  // Full totals grew with the staticEnvelope (members' memory instructions).
-  assert.ok(fullRepoRead.sections.total < 9350, `full repo+repoRead total too large: ${fullRepoRead.sections.total}`);
-  assert.ok(fullNoRepoRead.sections.total < 9450, `full repo+no-repoRead total too large: ${fullNoRepoRead.sections.total}`);
-  assert.ok(slimRepoRead.sections.total * 4 < fullRepoRead.sections.total, "slim envelope should be at least 4x smaller than full");
-
-  // Repo-read state appears once: on the Repository line (and the escalation line when blocked).
-  assert.equal(/repo read /.test(slimRepoRead.prompt), false, "slim repo+repoRead should not say 'repo read' on the Permissions line");
-  assert.match(slimRepoRead.prompt, /Repository: \/repo \(repoRead allowed\)/);
-  assert.match(slimNoRepoRead.prompt, /Repository: \/repo \(repoRead blocked\)/);
-  assert.match(slimNoRepoRead.prompt, /repoRead.*app_permissions_request_change/);
+  assert.match(fullRepoRead.prompt, /Repository: \/repo \(repoRead allowed\)/);
+  assert.match(fullNoRepoRead.prompt, /Repository: \/repo \(repoRead blocked\)/);
+  assert.match(fullNoRepoRead.prompt, /repoRead.*app_permissions_request_change/);
 });
 
-test("buildPrompt adds addressee guidance for multiple resolved participant mentions", () => {
+test("the session's instructions say once who acts on a message naming several members, and how to write a handle", () => {
   const drew = chatParticipant({}, { id: "participant-drew", handle: "drew" });
   const taylor = chatParticipant({}, { id: "participant-taylor", handle: "taylor" });
   const conversation = chatConversation([drew, taylor], "/repo");
   const triggerMessage = userMessage("trigger-1", "@drew @taylor what do you both think?");
   conversation.messages.push(triggerMessage);
   const service = testService({ canRequestPermissions: true }).service as any;
+  const access = { agentMode: "default", permissions: normalizeChatAgentPermissions(defaultChatAgentPermissions()) };
   const prompt = service.buildPrompt(conversation, drew, chatSession(drew), triggerMessage, "/workspace", false, {
     includeRoleInstructions: false,
-    agentMode: "default",
-    permissions: normalizeChatAgentPermissions(defaultChatAgentPermissions())
+    ...access
   }) as string;
+  assert.equal(prompt, "@drew @taylor what do you both think?", "the message as typed, nothing around it");
 
-  assert.match(prompt, /First determine who the message is addressed to\./);
-  assert.match(prompt, /my handle is the primary\/direct addressee/);
-  assert.match(prompt, /app context says this is a participant request addressed to me/);
-  assert.match(prompt, /Reply only "Noted" if/);
-  assert.match(prompt, /even if my handle appears inside the requested action/);
+  const instructions = service.sessionInstructions(conversation, drew, chatSession(drew), access, "/workspace") as string;
+  assert.match(instructions, /When one message mentions several members, act on it only if you are its direct addressee or it is a request addressed to you; otherwise reply only "Noted"\./);
+  assert.match(instructions, /Writing another participant's handle:/);
+  assert.match(instructions, /is a request for that participant to run, not a reference to them/);
+  assert.match(instructions, /use their plain name or wrap the handle in backticks/);
+  assert.match(instructions, /Your access now/);
+  assert.match(instructions, /Repository: \/repo \(repoRead allowed\)/);
 });
 
-test("buildPrompt addressee guidance ignores non-participant mentions and selected skills", () => {
+test("a message's files and selected skills follow its text, one short line each", () => {
   const drew = chatParticipant({}, { id: "participant-drew", handle: "drew" });
   const taylor = chatParticipant({}, { id: "participant-taylor", handle: "taylor" });
   const conversation = chatConversation([drew, taylor], "/repo");
@@ -252,51 +226,10 @@ test("buildPrompt addressee guidance ignores non-participant mentions and select
     permissions: normalizeChatAgentPermissions(defaultChatAgentPermissions())
   }) as string;
 
-  assert.doesNotMatch(prompt, /First determine who the message is addressed to\./);
+  assert.ok(prompt.startsWith("@drew inspect @src/foo.ts with /qa.\n\n"));
+  assert.match(prompt, /^Selected skill: .+\(skill name: /m);
   assert.match(prompt, /Referenced repository files/);
-  assert.match(prompt, /Selected skills for this turn/);
-});
-
-test("buildPrompt warns that writing a handle triggers that participant", () => {
-  const drew = chatParticipant({}, { id: "participant-drew", handle: "drew" });
-  const taylor = chatParticipant({}, { id: "participant-taylor", handle: "taylor" });
-  const conversation = chatConversation([drew, taylor], "/repo");
-  const triggerMessage = userMessage("trigger-1", "@drew what do you think?");
-  conversation.messages.push(triggerMessage);
-  const service = testService({ canRequestPermissions: true }).service as any;
-  const prompt = service.buildPrompt(conversation, drew, chatSession(drew), triggerMessage, "/workspace", false, {
-    includeRoleInstructions: false,
-    agentMode: "default",
-    permissions: normalizeChatAgentPermissions(defaultChatAgentPermissions())
-  }) as string;
-
-  assert.match(prompt, /Writing another participant's handle:/);
-  assert.match(prompt, /is a request for that participant to run, not a reference to them/);
-  assert.match(prompt, /use their plain name or wrap the handle in backticks/);
-
-  // The block rides along on every participant turn, so it has to stay small.
-  const parts = service.buildPromptParts(conversation, drew, chatSession(drew), triggerMessage, "/workspace", false, {
-    includeRoleInstructions: false,
-    agentMode: "default",
-    permissions: normalizeChatAgentPermissions(defaultChatAgentPermissions())
-  }) as { sections: { mentionTrigger: number } };
-  assert.ok(parts.sections.mentionTrigger > 0, "mentionTrigger section should be measured");
-  assert.ok(parts.sections.mentionTrigger < 260, `mentionTrigger section too large: ${parts.sections.mentionTrigger}`);
-});
-
-test("buildPrompt omits handle-trigger guidance when nobody else can be triggered", () => {
-  const drew = chatParticipant({}, { id: "participant-drew", handle: "drew" });
-  const conversation = chatConversation([drew], "/repo");
-  const triggerMessage = userMessage("trigger-1", "@drew what do you think?");
-  conversation.messages.push(triggerMessage);
-  const service = testService({ canRequestPermissions: true }).service as any;
-  const prompt = service.buildPrompt(conversation, drew, chatSession(drew), triggerMessage, "/workspace", false, {
-    includeRoleInstructions: false,
-    agentMode: "default",
-    permissions: normalizeChatAgentPermissions(defaultChatAgentPermissions())
-  }) as string;
-
-  assert.doesNotMatch(prompt, /Writing another participant's handle:/);
+  assert.doesNotMatch(prompt, /mandatory workflows|Final status for a selected-skill turn/, "how a skill runs is in the instructions");
 });
 
 test("sendMessage clears running and emits terminal error when participant run fails", async () => {

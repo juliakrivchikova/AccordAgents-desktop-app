@@ -245,8 +245,8 @@ test("inline selected skill text is preserved in storage and prompt", async () =
     const saved = storage.current as Conversation;
     const userMessage = saved.messages.find((message) => message.role === "user");
     assert.equal(userMessage?.content, "@admin /qa please");
-    assert.match(capturedPrompt, /@admin \/qa please/);
-    assert.match(capturedPrompt, /inline `\/skill-name` text as the native skill invocation/);
+    // Her words as typed, the inline `/qa` kept where she wrote it, then the selected skill.
+    assert.match(capturedPrompt, /\n\n@admin \/qa please\n\nSelected skill: \/qa \(skill name: qa; /);
   } finally {
     await rm(tempRoot, { recursive: true, force: true });
   }
@@ -434,27 +434,27 @@ test("skill prompt tells Codex to use inline slash invocation and direct selecte
     }
   };
 
+  // The message names the skill; how a selected skill runs is said once, in
+  // the session's instructions.
   const promptSection = (service as any).skillMentionsPromptSection(message, "codex-cli") as string;
-  assert.match(promptSection, /Selected skills for this turn are mandatory workflows, not advisory context/);
-  assert.match(promptSection, /Selected-skill execution overrides role brevity\/style preferences/);
-  assert.match(promptSection, /Read the skill file fully before acting/);
-  assert.match(promptSection, /Execute the workflow from its first operational step/);
-  assert.match(promptSection, /Do not answer from general expertise or use the skill only as framing/);
-  assert.match(promptSection, /inline `\/skill-name` text as the native skill invocation/);
-  assert.match(promptSection, /AskUserQuestion/);
-  assert.match(promptSection, /`User choice:` block format/);
-  assert.match(promptSection, /Do not call provider-native AskUserQuestion or interactive question tools/);
-  assert.match(promptSection, /Use `Skill blocked` only when there is no available way to continue/);
-  assert.match(promptSection, /Do not use blocked for normal user input, approval, or product decisions/);
-  assert.match(promptSection, /`Skill complete: <what was produced>`/);
-  assert.match(promptSection, /`Skill paused at required user gate: <what user must answer>`/);
-  assert.match(promptSection, /`Skill blocked: <exact missing file\/tool\/context>`/);
-  assert.match(promptSection, /~\/\.codex\/skills/);
-  assert.match(promptSection, /~\/\.agents\/skills/);
-  assert.match(promptSection, /do not call `app_permissions_request_change` just to read selected skill files/);
+  assert.equal(promptSection, "Selected skill: /qa (skill name: qa; codex-cli personal)");
+  const instructions = ((service as any).selectedSkillInstructions({ participantKind: "codex-cli" }) as string[]).join("\n");
+  assert.match(instructions, /makes that skill a mandatory workflow for the turn, not advisory context/);
+  assert.match(instructions, /overrides role brevity or style preferences/);
+  assert.match(instructions, /Read the skill file fully, run its workflow from its first step, and do not answer from general expertise instead/);
+  assert.match(instructions, /The `\/skill-name` in her message is the skill's invocation/);
+  assert.match(instructions, /If a selected skill uses AskUserQuestion, ask with a `User choice:` block instead/);
+  assert.match(instructions, /Use `Skill blocked` only when there is no way to continue/);
+  assert.match(instructions, /`Skill complete: <what was produced>`/);
+  assert.match(instructions, /`Skill paused at required user gate: <what user must answer>`/);
+  assert.match(instructions, /`Skill blocked: <exact missing file\/tool\/context>`/);
+  assert.match(instructions, /~\/\.codex\/skills/);
+  assert.match(instructions, /~\/\.agents\/skills/);
+  assert.match(instructions, /do not call `app_permissions_request_change` just to read them/);
+  assert.doesNotMatch(((service as any).selectedSkillInstructions({ participantKind: "claude-code" }) as string[]).join("\n"), /~\/\.codex\/skills/);
 });
 
-test("current request line is conditional for selected skill prompts", () => {
+test("a skill message is User's text and its selected skill, with no request line; a plain one is her text alone", () => {
   const participant = chatParticipant();
   const conversation = chatConversation([participant]);
   const { service } = testService({
@@ -475,42 +475,21 @@ test("current request line is conditional for selected skill prompts", () => {
     }
   });
   const normalMessage = chatMessage({ content: "@admin hello" });
-
-  const skillPrompt = (service as any).buildPromptParts(
+  const build = (message: ChatMessage, continuation: boolean) => (service as any).buildPromptParts(
     conversation,
     participant,
     session,
-    skillMessage,
+    message,
     "/tmp/accordagents-history",
-    false,
+    continuation,
     options
   ).prompt as string;
-  assert.match(skillPrompt, /Current request: execute the selected skill workflow for the triggering message/);
-  assert.doesNotMatch(skillPrompt, /Current request: answer the triggering message above/);
 
-  const normalPrompt = (service as any).buildPromptParts(
-    conversation,
-    participant,
-    session,
-    normalMessage,
-    "/tmp/accordagents-history",
-    false,
-    options
-  ).prompt as string;
-  assert.match(normalPrompt, /Current request: answer the triggering message above/);
-  assert.doesNotMatch(normalPrompt, /Current request: execute the selected skill workflow/);
-
-  const continuationPrompt = (service as any).buildPromptParts(
-    conversation,
-    participant,
-    session,
-    skillMessage,
-    "/tmp/accordagents-history",
-    true,
-    options
-  ).prompt as string;
-  assert.match(continuationPrompt, /Current request: control has returned to you after the approved participants have replied/);
-  assert.doesNotMatch(continuationPrompt, /Current request: execute the selected skill workflow/);
+  const skillPrompt = build(skillMessage, false);
+  assert.ok(skillPrompt.startsWith("@admin /qa\n\nSelected skill: "));
+  assert.doesNotMatch(skillPrompt, /Current request/);
+  assert.equal(build(normalMessage, false), "@admin hello");
+  assert.doesNotMatch(build(skillMessage, true), /Current request/);
 });
 
 test("selected skill replies missing final status only write a debug log", () => {
