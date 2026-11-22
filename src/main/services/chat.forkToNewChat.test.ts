@@ -337,6 +337,9 @@ async function forkAndSend(service: ChatService, storage: ReturnType<typeof test
   const mainId = String(created.conversation.metadata.mainSessionParticipantId);
   await service.sendMessage({ conversationId: id, runId: `run-${content}`, content, targetParticipantIds: [mainId] });
   await waitFor(() => (storage.store.get(id)?.messages ?? []).some((message: ChatMessage) => message.participantId === mainId && message.status !== "pending"));
+  // A reply's status can be saved before its turn's last step (the member's
+  // session record) lands: the turn has ended once its run is gone.
+  await waitFor(() => ((storage.store.get(id)?.metadata.activeRunIds as string[] | undefined) ?? []).length === 0);
   return { id, mainId };
 }
 
@@ -682,6 +685,10 @@ test("a clean start that reported no session at all did not start either; a retr
     const { service, storage, runs } = testService({
       conversations: [source],
       run: async (participant, _prompt, runOptions) => {
+        // A CLI run takes time: the session's record at the turn's end is
+        // newer than the one the fork saved (a same-millisecond tie merges
+        // the stored record's copy source back in, which no real turn does).
+        await new Promise((resolve) => setTimeout(resolve, 2));
         if (runOptions.forkFromSessionId) {
           const error = runs.length === 1 ? "failed to read rollout: unexpected end of file" : retryError;
           return { participant, ok: false, content: "", error, durationMs: 1, forkCopyFailed: true };

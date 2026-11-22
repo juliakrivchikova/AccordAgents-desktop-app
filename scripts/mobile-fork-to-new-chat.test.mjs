@@ -565,7 +565,7 @@ test("a fork made after she opened another chat or went back to her chats leaves
   }
   // Its Fork item is hers again, not left "Starting the new chat…".
   await app.waitFor(`document.getElementById("chat-title-fork-detail").textContent !== "Checking…"`, "its fork's answer");
-  assert.deepEqual(await app.evaluate(forkItem), { shown: true, disabled: "false", label: "Fork to new chat", detail: "A new chat whose main session starts from a copy of this session", views: 2 });
+  assert.deepEqual(await app.evaluate(forkItem), { shown: true, disabled: "false", label: "Fork to new chat", detail: "A new chat that starts from a copy of this session", views: 2 });
   await closeMenu(app);
 
   // She went back to her chats and stays there.
