@@ -37,8 +37,13 @@ const CATALOGS: Record<string, ProviderModelCatalog> = {
   },
   "codex-cli": {
     kind: "codex-cli", authoritative: true, fetchedAt: "2026-11-22T00:00:00.000Z",
-    models: [{ id: "gpt-5.5", label: "GPT-5.5 (gpt-5.5)", recommended: true, source: "cli" }],
-    startDefaults: { access: "auto-review" }
+    models: [{ id: "gpt-5.5", label: "GPT-5.5 (gpt-5.5)", recommended: true, source: "cli",
+      supportedReasoningEfforts: [{ id: "low", label: "Low" }, { id: "high", label: "High" }] }],
+    startDefaults: { access: "auto-review", reasoningEffort: "low" }
+  },
+  "gemini-cli": {
+    kind: "gemini-cli", authoritative: true, fetchedAt: "2026-11-22T00:00:00.000Z",
+    models: [{ id: "gemini-3.5-pro", label: "Gemini 3.5 Pro", recommended: true, source: "cli" }]
   }
 };
 
@@ -76,7 +81,13 @@ function optionsOf(testId: string): Promise<string[]> {
   })();
 }
 
-async function mount(initial: { kind?: ChatProviderKind; defaults?: NewChatDefaults; machines?: Array<{ id: string; name: string }> }) {
+async function mount(initial: {
+  kind?: ChatProviderKind;
+  defaults?: NewChatDefaults;
+  machines?: Array<{ id: string; name: string }>;
+  status?: Array<{ machineId: string; name: string; lastHello?: { providers: never[]; cliModesSupported?: boolean } }>;
+  agents?: AgentHealth[];
+}) {
   resetMemberModelCatalogs();
   const updates: NewChatDefaultsUpdate[] = [];
   const providerChanges: ChatProviderKind[] = [];
@@ -84,7 +95,7 @@ async function mount(initial: { kind?: ChatProviderKind; defaults?: NewChatDefau
   let defaults: NewChatDefaults = initial.defaults ?? { compactWithoutAsking: true };
   (globalThis as unknown as { window: { consensus: unknown } }).window.consensus = {
     listProviderModels: async (provider: string) => CATALOGS[provider],
-    listMachines: async () => ({ machines: initial.machines ?? [], status: [] })
+    listMachines: async () => ({ machines: initial.machines ?? [], status: initial.status ?? [] })
   };
   // A test that failed midway leaves its rows: never read them here.
   document.body.replaceChildren();
@@ -96,7 +107,7 @@ async function mount(initial: { kind?: ChatProviderKind; defaults?: NewChatDefau
       <TooltipProvider>
         <NewChatDefaultsRows
           providers={PROVIDERS}
-          agents={AGENTS}
+          agents={initial.agents ?? AGENTS}
           assistantProviderKind={kind}
           newChatDefaults={defaults}
           setAssistantProviderKind={async (next) => { providerChanges.push(next); kind = next; defaults = newChatDefaultsForProvider(defaults); render(); }}
@@ -190,4 +201,40 @@ test("a machine no longer set up reads as this computer; with no machine, Runs o
   assert.equal(find("new-chat-runs-on-select").textContent?.trim(), "This computer");
   assert.equal((find("new-chat-runs-on-select") as HTMLButtonElement).disabled, true);
   await view.unmount();
+});
+
+test("the rows say what each CLI is: its config's effort as Default, a saved model it no longer lists, Antigravity's note, Full Access held back where it cannot run", async () => {
+  const codex = await mount({ kind: "codex-cli", defaults: { kind: "codex-cli", model: "gpt-4-old", homeMachineId: "m-1", compactWithoutAsking: true },
+    machines: [{ id: "m-1", name: "Studio" }], status: [{ machineId: "m-1", name: "Studio", lastHello: { providers: [] } }] });
+  assert.equal(find("new-chat-model-select").textContent?.trim(), "gpt-4-old", "a model it no longer lists, as saved");
+  assert.deepEqual(await optionsOf("new-chat-model-select"), ["GPT-5.5", "gpt-4-old"]);
+  const fullAccess = async (): Promise<string | null | undefined> => {
+    const trigger = find("new-chat-mode-select");
+    await act(async () => { trigger.focus(); trigger.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true })); });
+    await settle();
+    const option = Array.from(document.querySelectorAll<HTMLElement>("[role=option]")).find((item) => item.textContent?.trim() === "Full Access");
+    const disabled = option?.getAttribute("aria-disabled");
+    await act(async () => { document.activeElement?.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true })); });
+    await settle();
+    return disabled;
+  };
+  assert.equal(await fullAccess(), "true", "Studio's program is older: Full Access is not offered there");
+  await codex.unmount();
+
+  const local = await mount({ kind: "codex-cli" });
+  assert.equal(find("new-chat-effort-select").textContent?.trim(), "Default (Low)", "the effort her Codex config sets");
+  assert.notEqual(await fullAccess(), "true", "on this computer Full Access is offered");
+  await local.unmount();
+
+  const agy = await mount({ kind: "gemini-cli" });
+  assert.match(agy.text(), /Antigravity's modes: Default, Accept-edits mode, Auto mode, Plan mode\. Antigravity cannot ask for approval here, so what a mode would prompt for is refused\./);
+  await agy.unmount();
+
+  // No CLI ready and none saved: only the provider and compaction.
+  const none = await mount({ agents: AGENTS.map((agent) => ({ ...agent, authentication: "required" as const })) });
+  assert.equal(document.querySelector("[data-testid=new-chat-model-select]"), null);
+  assert.ok(find("new-chat-compact-toggle"));
+  assert.match(find("assistant-provider-select").textContent ?? "", /Choose provider/);
+  assert.deepEqual(await optionsOf("assistant-provider-select"), ["Codex (not ready)", "Claude Code (not ready)", "Antigravity (not ready)"]);
+  await none.unmount();
 });

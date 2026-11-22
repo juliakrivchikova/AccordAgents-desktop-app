@@ -3702,12 +3702,14 @@
     const pick = function (key) {
       return chosen && Object.prototype.hasOwnProperty.call(newChatMainChoice, key) ? newChatMainChoice[key] : base[key];
     };
+    // The computer's own model and effort stand even when the offer's list
+    // lacks them (not read yet after a restart): it runs them (newChatMainSessionFor).
     const modelWanted = pick("model");
-    const model = modelWanted && provider.models.some(function (item) { return item.id === modelWanted; }) ? modelWanted : undefined;
+    const model = modelWanted && (provider.models.some(function (item) { return item.id === modelWanted; }) || modelWanted === base.model) ? modelWanted : undefined;
     const modelEntry = model ? provider.models.find(function (item) { return item.id === model; }) : undefined;
     const efforts = (modelEntry && modelEntry.efforts) || provider.efforts || [];
     const effortWanted = pick("reasoningEffort");
-    const effort = effortWanted && efforts.some(function (item) { return item.id === effortWanted; }) ? effortWanted : undefined;
+    const effort = effortWanted && (efforts.some(function (item) { return item.id === effortWanted; }) || effortWanted === base.reasoningEffort) ? effortWanted : undefined;
     // Its CLI's mode in the CLI's own terms, the computer's picker's modes and
     // words (chatAccessModes): the one its CLI starts in until one is chosen.
     // Where it runs: one of the machines, once there is one; else this computer.
@@ -3743,8 +3745,8 @@
     const startEffort = !effort && !model && !provider.hostId && start && start.reasoningEffort &&
       efforts.some(function (item) { return item.id === start.reasoningEffort; }) ? start.reasoningEffort : undefined;
     const shownEffort = effort || startEffort;
-    return { provider: provider, model: model, modelLabel: modelEntry ? modelEntry.label : startModelLabel || provider.defaultModelLabel, efforts: efforts,
-      effort: effort, effortLabel: shownEffort ? (efforts.find(function (item) { return item.id === shownEffort; }) || {}).label : undefined,
+    return { provider: provider, model: model, modelLabel: modelEntry ? modelEntry.label : model || startModelLabel || provider.defaultModelLabel, efforts: efforts,
+      effort: effort, effortLabel: shownEffort ? (efforts.find(function (item) { return item.id === shownEffort; }) || { label: shownEffort }).label : undefined,
       startEffortLabel: startEffort ? (efforts.find(function (item) { return item.id === startEffort; }) || {}).label : undefined,
       accessOptions: accessOptions, access: access, accessChosen: accessChosen, accessSet: accessSet, planOffered: planOffered, plan: plan, homeMachineId: homeMachineId };
   }

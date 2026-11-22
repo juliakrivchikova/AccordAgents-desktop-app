@@ -18,14 +18,13 @@ export interface ChatViewModeState {
  */
 export function useChatViewMode(input: {
   conversation: Pick<Conversation, "id" | "metadata">;
-  defaultView?: ChatViewMode;
   /** The view her server saved, to put into the open chat. */
   onSaved?: (saved: ChatViewState) => void;
   onError?: (message: string) => void;
 }): ChatViewModeState {
   const { conversation } = input;
   const canSwitch = canSwitchChatView(conversation.metadata);
-  const saved = chatViewFor(conversation.metadata, input.defaultView);
+  const saved = chatViewFor(conversation.metadata);
   const [picked, setPicked] = useState<{ conversationId: string; view: ChatViewMode; requestId: number }>();
   const requestIdRef = useRef(0);
   const callbacksRef = useRef({ onSaved: input.onSaved, onError: input.onError });

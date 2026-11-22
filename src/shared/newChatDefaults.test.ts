@@ -8,7 +8,7 @@ import {
   newChatMainSessionStart,
   normalizeNewChatDefaults
 } from "./newChatDefaults";
-import { newChatLeadStart } from "./newChat";
+import { newChatLeadStart, newChatMainSessionFor } from "./newChat";
 import type { ChatParticipant } from "./types";
 
 test("what Settings stores is read as the CLI's own when missing or invalid, with compaction without asking unless turned off", () => {
@@ -45,8 +45,8 @@ test("a new chat's main session starts with the choices for its own CLI, on a ma
   assert.deepEqual(newChatMainSessionStart(defaults, { kind: "claude-code" }, ["m-1"]),
     { model: "opus", reasoningEffort: "high", access: "plan", homeMachineId: "m-1", requestCompaction: "ask" });
   assert.deepEqual(newChatMainSessionStart(defaults, { kind: "codex-cli" }, ["m-1"]), { homeMachineId: "m-1", requestCompaction: "ask" }, "another CLI: its own");
-  assert.deepEqual(newChatMainSessionStart(defaults, { kind: "claude-code", hostId: "zai" }, ["m-1"]), { homeMachineId: "m-1", requestCompaction: "ask" },
-    "an added provider: its own");
+  assert.deepEqual(newChatMainSessionStart(defaults, { kind: "claude-code", hostId: "zai" }, ["m-1"]), { requestCompaction: "ask" },
+    "an added provider: its own, on this computer (its key is this computer's)");
   assert.deepEqual(newChatMainSessionStart(defaults, { kind: "claude-code" }, []).homeMachineId, undefined, "a machine no longer set up: this computer");
   assert.equal(newChatMainSessionStart(defaults, { kind: "claude-code" }).homeMachineId, "m-1", "machines not known: as stored");
   assert.equal(newChatMainSessionStart(undefined, { kind: "claude-code" }).requestCompaction, "allow");
@@ -61,10 +61,22 @@ test("the phone starts its New chat controls from the main session the computer 
   } as ChatParticipant;
   assert.deepEqual(newChatLeadStart(lead, { kind: "codex-cli" }), { model: "gpt-5.5", reasoningEffort: "high", access: "auto-review", homeMachineId: "m-1" });
   assert.deepEqual(newChatLeadStart(lead, { kind: "claude-code" }), { homeMachineId: "m-1" }, "another provider: where it runs only");
-  assert.deepEqual(newChatLeadStart(lead, { kind: "codex-cli", hostId: "zai" }), { homeMachineId: "m-1" });
+  assert.deepEqual(newChatLeadStart(lead, { kind: "codex-cli", hostId: "zai" }), {}, "an added provider runs on the computer only");
   // The mode her config starts the CLI in (no mode of its own yet): none.
   const plain = { ...lead, model: undefined, reasoningEffort: undefined, homeMachineId: undefined, agentMode: "default",
     permissions: { ...lead.permissions!, cliApprovals: undefined } } as ChatParticipant;
   assert.deepEqual(newChatLeadStart(plain, { kind: "codex-cli" }), {});
   assert.deepEqual(newChatLeadStart(undefined, { kind: "codex-cli" }), {});
+});
+
+test("the phone's new chat keeps the computer's own model and effort when the offer's list lacks them (not read yet after a restart)", () => {
+  const offered = {
+    id: "main-session", handle: "main", roleConfigId: "main-session", kind: "claude-code", model: "sonnet", reasoningEffort: "high", agentMode: "default",
+    permissions: { repoRead: true, workspaceWrite: false, webAccess: false, requestParticipants: "allow", requestCompaction: "allow", shell: { enabled: false, rules: [] } }
+  } as ChatParticipant;
+  const empty = [{ kind: "claude-code" as const, label: "Claude Code", defaultModelLabel: "Claude Code", models: [], efforts: [] }];
+  const made = newChatMainSessionFor(offered, empty, { kind: "claude-code", model: "sonnet", reasoningEffort: "high" });
+  assert.deepEqual([made.model, made.reasoningEffort, made.permissions?.requestCompaction], ["sonnet", "high", "allow"]);
+  const other = newChatMainSessionFor(offered, empty, { kind: "claude-code", model: "opus", reasoningEffort: "max" });
+  assert.deepEqual([other.model, other.reasoningEffort], [undefined, undefined], "a model the computer neither lists nor runs is not sent");
 });

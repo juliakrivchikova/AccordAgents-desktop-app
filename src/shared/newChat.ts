@@ -212,9 +212,10 @@ export function newChatParticipants(input: {
 }
 
 /** What a new chat's metadata says besides its members: which member is its
- *  main session and the view it opens in (the computer's Settings → General
- *  choice, HubNewChatOptions.defaultChatView). Nothing for a chat without a
- *  main session (an offer from a computer from before). */
+ *  main session and the view it opens in (the sessions view; a computer from
+ *  before 2026-11-22 may still name one, HubNewChatOptions.defaultChatView).
+ *  Nothing for a chat without a main session (an offer from a computer from
+ *  before). */
 export function newChatMetadata(
   participants: ReadonlyArray<Pick<ChatParticipant, "id" | "roleConfigId">>,
   defaultChatView?: ChatViewMode
@@ -356,9 +357,14 @@ export function newChatMainSessionFor(
     const start = (providers ?? []).find((item) => item.kind === offered.kind && !item.hostId)?.start?.access;
     return { ...offered, ...applyChatAccessOptionById(offered.kind, same ? choice.access : undefined, offered.permissions, same && choice.plan, start) };
   }
-  const model = choice.model && provider.models.some((item) => item.id === choice.model) ? choice.model : undefined;
+  // The computer's own main session's model and effort (Settings → General
+  // → New chats) stand even when the offer's list lacks them (a list not
+  // read yet after a restart, the default left out of it).
+  const own = provider.kind === offered.kind && !provider.hostId && !offered.hostId;
+  const model = choice.model && (provider.models.some((item) => item.id === choice.model) || (own && choice.model === offered.model)) ? choice.model : undefined;
   const efforts = (model ? provider.models.find((item) => item.id === model)?.efforts : undefined) ?? provider.efforts;
-  const reasoningEffort = choice.reasoningEffort && efforts.some((item) => item.id === choice.reasoningEffort) ? choice.reasoningEffort : undefined;
+  const reasoningEffort = choice.reasoningEffort && (efforts.some((item) => item.id === choice.reasoningEffort) || (own && choice.reasoningEffort === offered.reasoningEffort))
+    ? choice.reasoningEffort : undefined;
   const { hostId: _hostId, hostLabel: _hostLabel, hostVendor: _hostVendor, model: _model, reasoningEffort: _effort, avatarId: _avatar, ...rest } = offered;
   const { homeMachineId: _home, ...placed } = rest;
   return {
@@ -376,7 +382,8 @@ export function newChatMainSessionFor(
  *  the computer offers (made as Settings → General → New chats starts it,
  *  src/shared/newChatDefaults.ts): on its own provider its model, effort and
  *  mode (none: the CLI's own; no mode of its own: the one her config starts
- *  the CLI in); on any provider where it runs. A choice on the phone wins,
+ *  the CLI in); on any CLI's own sign-in where it runs (an added provider
+ *  runs on the computer only). A choice on the phone wins,
  *  as on the computer's New chat. */
 export function newChatLeadStart(
   lead: ChatParticipant | undefined,
@@ -389,6 +396,7 @@ export function newChatLeadStart(
     ...(own && lead.model ? { model: lead.model } : {}),
     ...(own && lead.reasoningEffort ? { reasoningEffort: lead.reasoningEffort } : {}),
     ...(access ? { access } : {}),
-    ...(lead.homeMachineId ? { homeMachineId: lead.homeMachineId } : {})
+    // An added provider runs on this computer only (its key is the computer's).
+    ...(lead.homeMachineId && !provider.hostId ? { homeMachineId: lead.homeMachineId } : {})
   };
 }

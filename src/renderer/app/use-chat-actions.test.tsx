@@ -318,10 +318,11 @@ test("a new chat starts as Settings → General → New chats says, and what was
   currentSettings.providers = [{ kind: "codex-cli", label: "Codex", enabled: true }];
   currentSettings.assistantProviderKind = "codex-cli";
   currentSettings.newChatDefaults = { kind: "codex-cli", model: "gpt-5.5", reasoningEffort: "high", access: "auto-review", homeMachineId: "m-1", compactWithoutAsking: false };
+  let agentsNow = [readyAgent("codex-cli")];
   const startWith = async (overrides: Record<string, unknown>): Promise<ChatParticipantInput | undefined> => {
     const state = {
       question: "Look at the login",
-      agents: [readyAgent("codex-cli")],
+      agents: agentsNow,
       settings: currentSettings,
       selectedChatParticipantConfigIds: new Set<string>(),
       selectedChatParticipantRuntimeOverrides: overrides,
@@ -370,6 +371,34 @@ test("a new chat starts as Settings → General → New chats says, and what was
   (globalThis as any).window.consensus.listMachines = async () => ({ machines: [{ id: "m-1", name: "Cloud", awsInstanceId: "i-1" }], status: [] });
   const cloud = await startWith({});
   assert.deepEqual([cloud?.homeMachineId, cloud?.cloudRun], [undefined, { instanceId: "i-1" }]);
+
+  // The machines cannot be read: this computer, as the screen showed it.
+  (globalThis as any).window.consensus.listMachines = async () => { throw new Error("no answer"); };
+  const unknown = await startWith({});
+  assert.deepEqual([unknown?.homeMachineId, unknown?.cloudRun], [undefined, undefined]);
+
+  // Codex's Full Access on a machine whose program cannot run it: the mode
+  // Codex starts in there, as the phone does.
+  (globalThis as any).window.consensus.listMachines = async () => ({
+    machines: [{ id: "m-1", name: "Studio" }], status: [{ machineId: "m-1", name: "Studio", lastHello: { providers: [] } }]
+  });
+  currentSettings.newChatDefaults = { ...currentSettings.newChatDefaults!, access: "full-access" };
+  const older = await startWith({});
+  assert.deepEqual([older?.homeMachineId, older?.agentMode], ["m-1", "default"]);
+  (globalThis as any).window.consensus.listMachines = async () => ({
+    machines: [{ id: "m-1", name: "Studio" }], status: [{ machineId: "m-1", name: "Studio", lastHello: { providers: [], cliModesSupported: true } }]
+  });
+  assert.equal((await startWith({}))?.agentMode, "full-access", "a machine whose program runs it");
+
+  // Antigravity on the AWS machine: New chat's Runs on does not set it
+  // there, so this computer.
+  currentSettings.providers = [{ kind: "gemini-cli", label: "Antigravity", enabled: true }];
+  currentSettings.assistantProviderKind = "gemini-cli";
+  currentSettings.newChatDefaults = { homeMachineId: "m-1", compactWithoutAsking: true };
+  (globalThis as any).window.consensus.listMachines = async () => ({ machines: [{ id: "m-1", name: "Cloud", awsInstanceId: "i-1" }], status: [] });
+  agentsNow = [readyAgent("gemini-cli")];
+  const agy = await startWith({});
+  assert.deepEqual([agy?.kind, agy?.homeMachineId, agy?.cloudRun], ["gemini-cli", undefined, undefined]);
 });
 
 test("a sessions-view New chat whose chip provider stopped being ready refuses the send and says so, instead of starting on another CLI", async () => {

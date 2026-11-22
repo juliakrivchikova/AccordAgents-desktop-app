@@ -1,10 +1,11 @@
 import { MAIN_SESSION_HANDLE, MAIN_SESSION_ROLE_ID } from "../../../shared/mainSession";
 import type { ChatParticipantConfig, ChatProviderKind } from "../../../shared/types";
 import { newChatMemberPermissions } from "../../../shared/agentPermissions";
-import { applyChatAccessOption, startChatAccessOption } from "../../../shared/chatAccessModes";
-import type { NewChatMainSessionStart } from "../../../shared/newChatDefaults";
+import { applyChatAccessOption, codexModesUnavailableReason, startChatAccessOption } from "../../../shared/chatAccessModes";
+import { newChatMainSessionStart, type NewChatMainSessionStart } from "../../../shared/newChatDefaults";
 import type { CloudRunSelection } from "../../../shared/cloudRunPreparation";
-import type { MachineRecord } from "../../../shared/machineLink";
+import type { MachineListResult } from "../../../shared/machineLink";
+import { machineOf } from "./use-cli-start-defaults";
 import { isChatAssistantParticipant } from "../conversation/conversation-display";
 import {
   type ChatParticipantDraft,
@@ -99,23 +100,33 @@ export function isNewChatMainSessionOption(participant: Pick<ChatParticipantConf
 }
 
 /** How Settings → General → New chats starts a new chat on this computer's
- *  New chat: its machine set as New chat's Runs on control sets that machine
- *  when it is chosen there (ParticipantRunLocation): a machine on an AWS
- *  instance as Cloud run on that instance, whose first turn makes it ready
- *  and copies the chat's project there; any other machine as its own. */
+ *  New chat (the screen and the send read it alike): newChatMainSessionStart
+ *  over the machines set up now (none known: this computer), with its machine
+ *  set as New chat's Runs on control sets that machine when it is chosen
+ *  there (ParticipantRunLocation): a machine on an AWS instance as Cloud run
+ *  on that instance, whose first turn makes it ready and copies the chat's
+ *  project there; any other machine as its own. Codex's Full Access is not
+ *  started on a machine whose program cannot run it: the mode its CLI starts
+ *  in there instead, as the phone's New chat does (its menus do not offer it
+ *  there either). */
 export type NewChatDesktopStart = Omit<NewChatMainSessionStart, "homeMachineId"> & { homeMachineId?: string; cloudRun?: CloudRunSelection };
 
-export function newChatDesktopStart(
-  start: NewChatMainSessionStart | undefined,
-  kind: ChatProviderKind,
-  machines: ReadonlyArray<Pick<MachineRecord, "id" | "awsInstanceId">>
-): NewChatDesktopStart | undefined {
-  if (!start?.homeMachineId) return start;
-  const instanceId = machines.find((machine) => machine.id === start.homeMachineId)?.awsInstanceId;
-  // Cloud run is Claude Code's and Codex's (the control offers it to them only).
-  if (!instanceId || (kind !== "claude-code" && kind !== "codex-cli")) return start;
-  const { homeMachineId: _machine, ...rest } = start;
-  return { ...rest, cloudRun: { instanceId } };
+export function newChatDesktopStartFor(
+  defaults: unknown,
+  provider: { kind: ChatProviderKind; hostId?: string },
+  machines: MachineListResult
+): NewChatDesktopStart {
+  const start = newChatMainSessionStart(defaults, provider, machines.machines.map((machine) => machine.id));
+  const machineId = start.homeMachineId;
+  const { access, homeMachineId: _machine, ...rest } = start;
+  const fullAccess = provider.kind === "codex-cli" && startChatAccessOption(provider.kind, access).agentMode === "full-access";
+  const keepAccess = access && !(fullAccess && codexModesUnavailableReason({ kind: provider.kind, homeMachineId: machineId }, machineOf(machines, machineId)));
+  const instanceId = machineId ? machines.machines.find((machine) => machine.id === machineId)?.awsInstanceId : undefined;
+  // Cloud run is Claude Code's and Codex's: the control sets a machine on
+  // the AWS instance for them only, so Antigravity stays on this computer.
+  const cloudCli = provider.kind === "claude-code" || provider.kind === "codex-cli";
+  const place = !machineId ? {} : !instanceId ? { homeMachineId: machineId } : cloudCli ? { cloudRun: { instanceId } } : {};
+  return { ...rest, ...(keepAccess ? { access } : {}), ...place };
 }
 
 /** Where the New chat screen's main session runs: what its controls chose

@@ -80,7 +80,7 @@ export function buildChatActivityItems(
 
   // A chat shown in the sessions view names nobody by handle in its rows
   // (shared/sessionsViewText.ts): the app's words are worded for it here.
-  const names = sessionsViewNamesOf(conversation, undefined, options.knownTitles);
+  const names = sessionsViewNamesOf(conversation, options.knownTitles);
   const appText = (text: string): string => sessionsViewText(text, names);
   const summaryText = (text: string): string => sessionsViewSummaryText(text, names);
   // A member's own words in a preview, by the view's mention rule; never the

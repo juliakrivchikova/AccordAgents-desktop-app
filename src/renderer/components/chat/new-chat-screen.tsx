@@ -45,11 +45,10 @@ import {
   isNewChatMainSessionOption,
   NEW_CHAT_MAIN_SESSION_PARTICIPANT_ID,
   newChatMainSessionParticipantConfig,
-  newChatDesktopStart,
+  newChatDesktopStartFor,
   newChatMainSessionParticipantDraft,
   newChatMainSessionPlace
 } from "./chat-main-session-draft";
-import { newChatMainSessionStart } from "../../../shared/newChatDefaults";
 import { startAccessKey, useCliStartDefaults, useMachineList, type NewChatStartAccess } from "./use-cli-start-defaults";
 import { participantOptionInvalidReason } from "./chat-cli-readiness";
 import {
@@ -159,10 +158,11 @@ export function NewChatScreen(props: {
     }),
     [props.agents, props.settings.assistantProviderKind, props.settings.providers]
   );
-  // A new chat that opens in the sessions view has no members picker: its
-  // composer's model chip chooses the main session's provider, model, effort
-  // and access, as T3 Code's does (the User, 2026-11-21). The classic view's
-  // New chat stays as it was.
+  // Every new chat opens in the sessions view, whose New chat has no members
+  // picker: its composer's controls choose the main session's provider,
+  // model, effort and access, as T3 Code's does (the User, 2026-11-21),
+  // starting from Settings → General → New chats. The classic branches
+  // below are no longer reached (newChatViewFor).
   const sessionsView = newChatViewFor() === "sessions";
   const providerOptions = useMemo(
     () => mainSessionProviderOptions(props.agents, props.settings.providers, props.settings.cliProviderHosts),
@@ -216,9 +216,8 @@ export function NewChatScreen(props: {
     }
     onMainSessionOverrideForChange?.(mainProviderKey);
   }, [mainProviderKey, mainSessionOverrideFor, onMainSessionOverrideForChange, onSelectedParticipantRuntimeOverridesChange]);
-  // Leaving New chat without sending: the sessions view's chip choice was
-  // for the chat about to be made, so the next New chat starts from
-  // Settings again (the classic New chat keeps its members and settings).
+  // Leaving New chat without sending: the chip choice was for the chat about
+  // to be made, so the next New chat starts from Settings again.
   const leaveRef = useRef({ sessionsView, onSelectedParticipantRuntimeOverridesChange, onMainSessionProviderChange: props.onMainSessionProviderChange });
   leaveRef.current = { sessionsView, onSelectedParticipantRuntimeOverridesChange, onMainSessionProviderChange: props.onMainSessionProviderChange };
   useEffect(() => () => {
@@ -235,18 +234,10 @@ export function NewChatScreen(props: {
   const machineList = useMachineList();
   // How Settings → General → New chats starts it on this provider: the
   // controls start from it (a machine no longer set up: this computer).
-  const machinesKey = machineList.machines.map((machine) => `${machine.id}\u0001${machine.awsInstanceId ?? ""}`).join("\u0000");
+  // (useMachineList keeps the same list while nothing it reads changed.)
   const newChatStart = useMemo(
-    () => {
-      if (!mainKind) return undefined;
-      const machines = machinesKey ? machinesKey.split("\u0000").map((entry) => {
-        const [id, awsInstanceId] = entry.split("\u0001");
-        return { id: id!, ...(awsInstanceId ? { awsInstanceId } : {}) };
-      }) : [];
-      const start = newChatMainSessionStart(props.settings.newChatDefaults, { kind: mainKind, hostId: mainHostId }, machines.map((machine) => machine.id));
-      return newChatDesktopStart(start, mainKind, machines);
-    },
-    [mainHostId, mainKind, machinesKey, props.settings.newChatDefaults]
+    () => mainKind ? newChatDesktopStartFor(props.settings.newChatDefaults, { kind: mainKind, hostId: mainHostId }, machineList) : undefined,
+    [mainHostId, mainKind, machineList, props.settings.newChatDefaults]
   );
   // The mode the User's own config starts its CLI in where the main session
   // runs (this computer, or the machine chosen for it): it starts there.

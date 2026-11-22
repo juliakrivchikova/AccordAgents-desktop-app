@@ -205,7 +205,10 @@ export function NewChatDefaultsRows(props: {
         </>
       )}
       <div className="gen-card-divider" />
-      <Row title="Mode" description={newChatModeDescription(kind)}>
+      <Row title="Mode" description={access.agentMode === "full-access" && modesReason
+        // A new chat there starts in the mode Codex starts in instead.
+        ? `${newChatModeDescription(kind)} ${modesReason}`
+        : newChatModeDescription(kind)}>
         <AppSelect
           value={access.id}
           options={accessSelectOptions}

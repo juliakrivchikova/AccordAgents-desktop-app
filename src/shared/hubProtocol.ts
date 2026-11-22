@@ -307,8 +307,9 @@ export interface HubNewChatOptions {
   /** The same main session, under the name a phone from before reads, so an
    *  old phone also makes a main-session chat (it was the Chat Assistant). */
   assistant: ChatParticipant;
-  /** The view a new chat opens in, as Settings → General on the computer
-   *  says; unset: sessions. */
+  /** The view a new chat opens in, sent only by a computer from before
+   *  2026-11-22 (its Settings named one) and honoured for it alone; a
+   *  computer since sends none: every new chat opens in the sessions view. */
   defaultChatView?: ChatViewMode;
   /** What the phone's New chat chip offers for the main session in the
    *  sessions view: each provider it can run on (the one `mainSession` runs

@@ -15,8 +15,6 @@ import type { ChatParticipantRequestPermission, ChatProviderKind, ChatReasoningE
 
 export type { NewChatDefaults, NewChatDefaultsUpdate };
 
-export const DEFAULT_NEW_CHAT_DEFAULTS: NewChatDefaults = { compactWithoutAsking: true };
-
 const VALUE_MAX_LENGTH = 256;
 
 function shortText(value: unknown): string | undefined {
@@ -90,7 +88,9 @@ export function newChatCompactionPermission(defaults: Pick<NewChatDefaults, "com
 /** What a new chat's main session starts with on this provider: the model,
  *  effort and mode chosen for its CLI (never for an added provider, nor for
  *  another CLI: those start from their own), where it runs (a machine that
- *  is still set up; none: this computer) and its compaction right. */
+ *  is still set up; none: this computer; an added provider always here: its
+ *  key is this computer's, members on one run on this computer only) and its
+ *  compaction right. */
 export interface NewChatMainSessionStart {
   model?: string;
   reasoningEffort?: ChatReasoningEffort;
@@ -108,7 +108,7 @@ export function newChatMainSessionStart(
 ): NewChatMainSessionStart {
   const normalized = normalizeNewChatDefaults(defaults);
   const ownCli = !provider.hostId && normalized.kind === provider.kind;
-  const homeMachineId = normalized.homeMachineId && (!machineIds || machineIds.includes(normalized.homeMachineId))
+  const homeMachineId = !provider.hostId && normalized.homeMachineId && (!machineIds || machineIds.includes(normalized.homeMachineId))
     ? normalized.homeMachineId
     : undefined;
   return {

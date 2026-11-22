@@ -468,7 +468,11 @@ name no main session.
   where a new chat runs. Codex's Full Access asks Codex's own "Enable full
   access?" first. Codex's Plan mode stays a New chat toggle.
 - **Runs on**: This Mac (This computer elsewhere) or one of her machines
-  (Settings → Machines' list); a machine no longer set up is this computer.
+  (Settings → Machines' list); a machine no longer set up is this computer,
+  and so is any added provider chosen on New chat (its key is this
+  computer's: members on one run here only). Codex's Full Access is not
+  started on a machine whose program cannot run it (the mode its CLI starts
+  in there instead, on the computer and the phone alike).
   The computer's New chat sets it as its Runs on control sets that machine
   when chosen there (`newChatDesktopStart`): a machine on her AWS instance
   as Cloud run on that instance (its first turn makes it ready and copies
@@ -514,7 +518,8 @@ provider from its own, and a choice made there wins for that chat.
   never made on another one silently. The
   chat is made with that main session alone; an @handle in the first
   message picks nobody. Folder and attach stay.
-- **Classic view**: today's New chat, with its members picker.
+- The classic New chat with its members picker is no longer reached
+  (every new chat opens in the sessions view since 2026-11-22).
 - **The phone** gets the same from the New chat offer
   (`HubNewChatOptions.mainSessionProviders`: each provider with its
   default model's name, its models, at most 24, and efforts;

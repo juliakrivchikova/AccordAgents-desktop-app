@@ -93,16 +93,16 @@ export function canSwitchChatView(metadata: ChatMetadataLike | undefined): boole
 /** The view a new chat opens in: always the sessions view (the User,
  *  2026-11-22: Settings no longer names one; each chat's header switches
  *  it). The New chat screen follows it (its controls choose the main
- *  session's provider, model, effort, mode and machine). */
+ *  session's provider, model, effort, mode and machine); its classic
+ *  branches (the members picker) are no longer reached. */
 export function newChatViewFor(): ChatViewMode {
   return DEFAULT_CHAT_VIEW;
 }
 
-/** The view the chat is shown in. */
-export function chatViewFor(metadata: ChatMetadataLike | undefined, fallback?: ChatViewMode): ChatViewMode {
+/** The view the chat is shown in: its own, else the sessions view. */
+export function chatViewFor(metadata: ChatMetadataLike | undefined): ChatViewMode {
   if (!isMainSessionChat(metadata)) return "classic";
-  if (isChatViewMode(metadata?.chatView)) return metadata.chatView;
-  return isChatViewMode(fallback) ? fallback : DEFAULT_CHAT_VIEW;
+  return isChatViewMode(metadata?.chatView) ? metadata.chatView : DEFAULT_CHAT_VIEW;
 }
 
 /** The members a User's message was addressed to, as resolved where it was
