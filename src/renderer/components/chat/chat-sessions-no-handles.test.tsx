@@ -309,6 +309,15 @@ test("search results, Activity rows and add-member cards of a sessions-view chat
   const classicCard = render(false, cardElement(addition));
   assert.match(classicCard.text, /Member handle/, "classic: the handle field as before");
   classicCard.unmount();
+  // Answered: its line counts what it added, names nobody.
+  const cancelled = { ...addition, id: "a-cancelled", status: "denied" as const };
+  const usedLine = render(true, cardElement(cancelled));
+  assert.match(usedLine.text, /Add a member/);
+  assert.doesNotMatch(usedLine.text, /@reviewer|reviewer/);
+  usedLine.unmount();
+  const classicLine = render(false, cardElement(cancelled));
+  assert.match(classicLine.text, /Add @reviewer/, "classic: as before");
+  classicLine.unmount();
 });
 
 test("a member's session: its task from the main session is \"Task\" and its first line reads the main session as a plain word, no handle or label", () => {
