@@ -589,6 +589,15 @@ test("pointers of two copies of a chat merge member by member and scope by scope
   assert.deepEqual(internals.mergePromptContextPointers(forgotten, stale).main, { forgottenAt: at(6) });
   const after = { main: { forgottenAt: at(6), timeline: entry("m7", 7, 7) } };
   assert.deepEqual(internals.mergePromptContextPointers(after, stale).main, { forgottenAt: at(6), timeline: entry("m7", 7, 7) });
+  // A turn that ran after it may point at a message written before it (two messages sent at once share a fork's first turn): kept by when it was written.
+  const committedAfter = { main: { forgottenAt: at(6), timeline: { ...entry("m2", 2, 2), committedAt: at(8) } } };
+  assert.deepEqual(internals.mergePromptContextPointers(committedAfter, stale).main.timeline, { ...entry("m2", 2, 2), committedAt: at(8) }, "the stale copy's older pointer stays dropped");
+  assert.equal(internals.mergePromptContextPointers({ main: { forgottenAt: at(6), timeline: { ...entry("m2", 2, 2), committedAt: at(5) } } }, {}).main.timeline, undefined, "written before it: dropped");
+  // A commit stamps the pointer when it is written.
+  const stamped = chat([mainSession()], { promptContextPointers: { main: { forgottenAt: at(6) } } });
+  internals.commitPromptContextPointerAdvance(stamped, "main", { scope: { type: "timeline" }, entry: entry("m2", 2, 2) });
+  assert.ok(stamped.metadata.promptContextPointers?.main?.timeline?.committedAt);
+  assert.equal(internals.mergePromptContextPointers(stamped.metadata.promptContextPointers, stale).main.timeline.messageId, "m2", "kept; the stale copy's pointer from before the reset is not taken back");
   const conversation = chat([mainSession()], { promptContextPointers: stored });
   internals.forgetPromptContextPointers(conversation, "main");
   assert.ok(conversation.metadata.promptContextPointers?.main?.forgottenAt);
@@ -607,4 +616,20 @@ test("a message that starts with \"/\" reaches the CLI with a zero-width space b
   assert.equal(build("/review the diff"), "\u200B/review the diff");
   assert.equal(build("look at /tmp/x"), "look at /tmp/x", "only a leading slash");
   assert.equal(build("plain"), "plain");
+});
+
+test("an Antigravity member is told once, with its access, what its print mode cannot ask and where it may write; its turns carry none of it", () => {
+  const agy = member("agy-id", "agy", { kind: "gemini-cli" });
+  const conversation = chat([mainSession(), agy]);
+  const { service } = testService(conversation);
+  const internals = service as any;
+  const header = (agentMode: string, patch: Partial<ChatAgentPermissions>) =>
+    internals.participantDynamicHeader(conversation, agy, currentSession(agy, "s", GENERIC_ROLE), { agentMode, permissions: permissions(patch) }) as string;
+  assert.match(header("default", { workspaceWrite: true }), /File modifications are limited to the selected repository workspace \(\/repo\)/);
+  assert.match(header("default", { workspaceWrite: false }), /You are read-only: do not create, modify, or delete files/);
+  const ownMode = header("default", { workspaceWrite: true, cliApprovals: true });
+  assert.match(ownMode, /cannot ask User for approval/);
+  assert.doesNotMatch(ownMode, /You are read-only/);
+  // A Claude or Codex member's access says none of it.
+  assert.doesNotMatch(internals.participantDynamicHeader(conversation, mainSession(), currentSession(mainSession(), "s"), { agentMode: "default", permissions: permissions() }), /File modifications are limited|cannot ask User/);
 });

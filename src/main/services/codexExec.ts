@@ -398,15 +398,9 @@ function codexPrompt(
   }
 
   if (kind === "chat") {
-    const mode = agentModeForRun(kind, options);
-    const readContextAvailable = Boolean(repoPath) || normalizedExtraReadableDirs(options.extraReadableDirs).length > 0;
-    return [
-      `You are running for AccordAgents Chat in ${mode} mode.`,
-      readContextAvailable
-        ? "Read-only file inspection, search, and listing are allowed for the selected repository and app-managed history files described in the prompt. Use these only to gather context."
-        : "No repository or app-managed readable directory is available for this run.",
-      prompt
-    ].join("\n\n");
+    // A chat turn is the member's message as it is (ChatService says the
+    // rest once, in its instructions).
+    return prompt;
   }
 
   const hasRepoContext = Boolean(repoPath) && (kind === "code-review" || Boolean(diffMode));

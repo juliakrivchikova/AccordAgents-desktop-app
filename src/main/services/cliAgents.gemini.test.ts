@@ -71,9 +71,8 @@ test("buildGeminiExecInvocation: new chat run is read-only sandboxed with catalo
     .filter((value): value is string => Boolean(value));
   assert.deepEqual(addDirIndexes, ["/repo/project", "/extra/history"]);
   const printPrompt = flagValue(invocation.args, "--print");
-  assert.ok(printPrompt?.includes("Say hi"));
-  assert.ok(printPrompt?.includes("AccordAgents Chat in default mode"));
-  assert.ok(printPrompt?.includes("read-only"));
+  // The member's message as it is: its mode and access are in its instructions.
+  assert.equal(printPrompt, "Say hi");
   // agy's own print deadline stays behind the app-side timeout.
   assert.equal(flagValue(invocation.args, "--print-timeout"), "180s");
 });
@@ -118,11 +117,11 @@ test("buildGeminiExecInvocation: auto mode and granted write skip tool confirmat
     }
   });
   assert.equal(write.args.includes("--dangerously-skip-permissions"), true);
-  const autoPrompt = flagValue(auto.args, "--print") ?? "";
-  assert.match(autoPrompt, /\/outside\/explicit-target\.txt/);
-  assert.doesNotMatch(autoPrompt, /File modifications are limited to the selected repository workspace/);
+  // A chat turn is the member's message as it is; where it may write is said
+  // once, in its session's instructions (ChatService.antigravityAccessLines).
+  assert.equal(flagValue(auto.args, "--print"), "Create exactly /outside/explicit-target.txt with the text parity-proof.");
   assert.doesNotMatch(JSON.stringify(auto.args), /writable_roots|sandbox\.filesystem\.allowWrite/);
-  assert.match(flagValue(write.args, "--print") ?? "", /Do not create, modify, move, or delete files outside that workspace/);
+  assert.equal(flagValue(write.args, "--print"), "Do work");
 });
 
 test("buildGeminiExecInvocation: app MCP url/token travel through the process environment", () => {
@@ -654,9 +653,7 @@ for (const scenario of [
     const settings = JSON.parse(flagValue(invocation.args, "--settings") ?? "{}") as { agentMode?: string; permissions?: { allow?: string[] } };
     assert.equal(settings.agentMode, scenario.agentModeSetting, "agy's Default is its agentMode \"\" (its --mode has no default)");
     assert.ok(settings.permissions?.allow?.some((rule) => rule.includes("app_chat_set_title")), "the app's own tools stay allowed, as print mode cannot ask");
-    const prompt = flagValue(invocation.args, "--print") ?? "";
-    assert.match(prompt, /cannot ask User for approval/);
-    assert.doesNotMatch(prompt, /This run is read-only/, "not told it is read-only when its mode is what decides");
+    assert.equal(flagValue(invocation.args, "--print"), "Do work", "what print mode cannot ask is in its instructions, said once");
   });
 }
 

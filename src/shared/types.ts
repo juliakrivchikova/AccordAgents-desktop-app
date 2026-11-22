@@ -1972,6 +1972,9 @@ export interface ChatPromptContextPointerEntry {
    *  read (pendingReplyPostsForPromptContext), when newer than the message
    *  above: its next turn reads only posts made after it. */
   postsReadThrough?: string;
+  /** When this device wrote the pointer: a member's context that started
+   *  over (forgottenAt) keeps only pointers written after it. */
+  committedAt?: string;
 }
 
 export type ChatPromptContextPointerScope =

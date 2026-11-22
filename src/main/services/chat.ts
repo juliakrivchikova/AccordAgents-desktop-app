@@ -13250,8 +13250,28 @@ export class ChatService {
     }
     return [
       this.participantRepositoryLine(conversation, participant.kind, options.agentMode, options.permissions),
-      this.participantPermissionPolicy(participant.kind, options.agentMode, options.permissions, canRequestPermissions)
+      this.participantPermissionPolicy(participant.kind, options.agentMode, options.permissions, canRequestPermissions),
+      ...(participant.kind === "gemini-cli" ? this.antigravityAccessLines(conversation.repoPath, options.agentMode, options.permissions) : [])
     ].filter(Boolean).join("\n");
+  }
+
+  /** What an Antigravity member is told about its mode in print mode, part
+   *  of its access (said once, and again when it changes), as its turns
+   *  once said each time (geminiExec). */
+  private antigravityAccessLines(repoPath: string | undefined, agentMode: ChatAgentMode, runPermissions: ChatAgentPermissions): string[] {
+    const mode = chatAgentModeForKind("gemini-cli", agentMode);
+    const permissions = effectiveChatAgentPermissionsForProvider("gemini-cli", mode, runPermissions);
+    const lines: string[] = [];
+    if (repoPath && mode !== "auto" && permissions.workspaceWrite) {
+      lines.push(`File modifications are limited to the selected repository workspace (${repoPath}). Do not create, modify, move, or delete files outside that workspace.`);
+    }
+    if (runPermissions.cliApprovals === true) {
+      // agy's own mode decides; what it would ask about, print mode refuses.
+      lines.push("Antigravity runs in its own permission mode and cannot ask User for approval: an edit or command the mode would ask about is refused, so say what you need instead of retrying it.");
+    } else if (mode !== "auto" && !permissions.workspaceWrite) {
+      lines.push("You are read-only: do not create, modify, or delete files, and do not run mutating terminal commands. Use file and terminal access only to gather context.");
+    }
+    return lines;
   }
 
   private chatAssistantPermissionPolicy(
@@ -19199,8 +19219,11 @@ export class ChatService {
     const pointers = this.normalizedPromptContextPointers(conversation.metadata.promptContextPointers);
     const participantPointers = pointers[participantId] ?? {};
     const current = this.promptContextPointerForScope(participantPointers, advance.scope);
+    // Stamped when written here, so a context that started over keeps it
+    // (mergePromptContextPointers) even when it points at an older message.
+    const advanced: ChatPromptContextPointerEntry = { ...advance.entry, committedAt: new Date().toISOString() };
     // The pointer that stays keeps the newest post either turn read.
-    const kept = this.promptContextPointerAtOrAfter(current, advance.entry) ? current! : advance.entry;
+    const kept = this.promptContextPointerAtOrAfter(current, advanced) ? current! : advanced;
     const postsReadThrough = this.newestPostsReadThrough(kept.createdAt, [current?.postsReadThrough, advance.entry.postsReadThrough]);
     const { postsReadThrough: _previous, ...keptWithoutPosts } = kept;
     const next: ChatPromptContextPointerEntry = postsReadThrough ? { ...keptWithoutPosts, postsReadThrough } : keptWithoutPosts;
@@ -19469,9 +19492,12 @@ export class ChatService {
         .sort((x, y) => (this.lastMessageTimestamp(x) ?? 0) - (this.lastMessageTimestamp(y) ?? 0))
         .pop();
       const forgottenTime = this.lastMessageTimestamp(forgottenAt);
+      // Kept when written after the context started over (both times are
+      // this device's clock); a pointer from before the stamp existed is
+      // judged by its message's time.
       const kept = (entry: ChatPromptContextPointerEntry | undefined): ChatPromptContextPointerEntry | undefined => {
         if (!entry || forgottenTime === undefined) return entry;
-        const at = this.lastMessageTimestamp(entry.createdAt);
+        const at = this.lastMessageTimestamp(entry.committedAt ?? entry.createdAt);
         return at !== undefined && at > forgottenTime ? entry : undefined;
       };
       const further = (x: ChatPromptContextPointerEntry | undefined, y: ChatPromptContextPointerEntry | undefined): ChatPromptContextPointerEntry | undefined => {
@@ -19529,7 +19555,7 @@ export class ChatService {
     if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
       return undefined;
     }
-    const record = raw as { messageId?: unknown; sequence?: unknown; createdAt?: unknown; postsReadThrough?: unknown };
+    const record = raw as { messageId?: unknown; sequence?: unknown; createdAt?: unknown; postsReadThrough?: unknown; committedAt?: unknown };
     if (typeof record.messageId !== "string" || !record.messageId.trim() || typeof record.sequence !== "number" || !Number.isFinite(record.sequence)) {
       return undefined;
     }
@@ -19539,6 +19565,9 @@ export class ChatService {
       ...(typeof record.createdAt === "string" && record.createdAt.trim() ? { createdAt: record.createdAt } : {}),
       ...(typeof record.postsReadThrough === "string" && this.lastMessageTimestamp(record.postsReadThrough) !== undefined
         ? { postsReadThrough: record.postsReadThrough }
+        : {}),
+      ...(typeof record.committedAt === "string" && this.lastMessageTimestamp(record.committedAt) !== undefined
+        ? { committedAt: record.committedAt }
         : {})
     };
   }

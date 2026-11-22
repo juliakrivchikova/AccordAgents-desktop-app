@@ -95,7 +95,7 @@ export function buildGeminiExecInvocation(request: BuildGeminiExecInvocationRequ
   if (options.sessionId) {
     args.push("--conversation", options.sessionId);
   }
-  args.push("--print", geminiPrompt(request.prompt, request.repoPath, request.kind, mode, permissions));
+  args.push("--print", geminiPrompt(request.prompt, request.repoPath, request.kind));
   args.push("--output-format", "json");
   if (options.timeoutMs && options.timeoutMs > 0) {
     // Keep agy's own print-mode deadline behind the app-side runCommand timeout
@@ -154,7 +154,7 @@ export function buildGeminiInteractiveGoalInvocation(
     args,
     env: geminiInvocationEnv(options),
     ...(permissionArgs.settings ? { settings: permissionArgs.settings } : {}),
-    goalPrompt: `/goal ${geminiPrompt(request.prompt, request.repoPath, request.kind, mode, permissions)}`
+    goalPrompt: `/goal ${geminiPrompt(request.prompt, request.repoPath, request.kind)}`
   };
 }
 
@@ -445,9 +445,7 @@ function parseGeminiUsage(value: unknown): GeminiExecUsage | undefined {
 function geminiPrompt(
   prompt: string,
   repoPath: string | undefined,
-  kind: ConversationKind,
-  mode: ChatAgentMode,
-  permissions: ChatAgentPermissions
+  kind: ConversationKind
 ): string {
   if (kind !== "chat") {
     return [
@@ -457,25 +455,10 @@ function geminiPrompt(
       prompt
     ].join("\n\n");
   }
-  const lines = [`You are running for AccordAgents Chat in ${mode} mode.`];
-  if (repoPath) {
-    lines.push(`The selected repository workspace is ${repoPath}.`);
-  }
-  if (repoPath && mode !== "auto" && permissions.workspaceWrite) {
-    lines.push(
-      `File modifications are limited to the selected repository workspace (${repoPath}). Do not create, modify, move, or delete files outside that workspace.`
-    );
-  }
-  if (permissions.cliApprovals === true) {
-    // agy's own mode decides; what it would ask about, print mode refuses.
-    lines.push("Antigravity runs in its own permission mode for this turn and cannot ask User for approval: an edit or command the mode would ask about is refused, so say what you need instead of retrying it.");
-  } else if (mode !== "auto" && !permissions.workspaceWrite) {
-    lines.push(
-      "This run is read-only: do not create, modify, or delete files, and do not run mutating terminal commands. Use file and terminal access only to gather context."
-    );
-  }
-  lines.push(prompt);
-  return lines.join("\n\n");
+  // A chat turn is the member's message as it is: its mode, workspace and
+  // what print mode cannot ask are in its session's instructions, said once
+  // (ChatService.antigravityAccessLines).
+  return prompt;
 }
 
 function agentModeForRun(kind: ConversationKind, options: GeminiExecOptions): ChatAgentMode {
