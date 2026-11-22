@@ -64,6 +64,7 @@ import { UrgentAlertActionsContext } from "./components/chat/urgent-alert-contex
 import { restartingMembers } from "../shared/memberRestart";
 import { TerminalPanel } from "./components/terminal/terminal-panel";
 import { useTerminalPanel } from "./components/terminal/use-terminal-panel";
+import { chatCreationStatus } from "./components/chat/chat-creation-state";
 import "./styles/app.css";
 function App(): JSX.Element {
   const state = useAppState();
@@ -268,9 +269,7 @@ function App(): JSX.Element {
     )
     : view.hasResultContext
       ? state.conversation?.title ?? view.openingConversation?.title ?? "Chat"
-      : isNewChatScreen
-        ? undefined
-        : "New chat";
+      : "New chat";
   const topBarLeading = state.railView === "chats" && state.sidebarCollapsed ? (
     <SidebarToggleButton expanded={false} onToggle={expandSidebar} />
   ) : undefined;
@@ -432,7 +431,9 @@ function App(): JSX.Element {
       sidebarHidden={state.railView === "activity"}
       sidebarWidth={state.sidebarWidth}
       onSidebarWidthChange={state.setSidebarWidth}
-      minWorkspaceWidth={view.hasResultContext ? CHAT_SPLIT_WORKSPACE_MIN_WIDTH : undefined}
+      // New chat keeps the chat's workspace width, so its composer stays put
+      // when the chat opens.
+      minWorkspaceWidth={view.hasResultContext || isNewChatScreen ? CHAT_SPLIT_WORKSPACE_MIN_WIDTH : undefined}
       className={isNewChatScreen ? "is-new-chat-screen" : undefined}
       sidebar={
         state.railView === "settings" ? (
@@ -642,6 +643,12 @@ function App(): JSX.Element {
                 prefillPrompt={newChatPrefill?.prompt}
                 prefillRequestKey={newChatPrefill?.key}
                 busy={state.busy}
+                onOpenChat={navigation.openChat}
+                onRepoInfoChange={state.setRepoInfo}
+                onStopStart={() => void conversationActions.cancelReview()}
+                creationStatus={state.busy && state.startingChatRef.current
+                  ? chatCreationStatus(state.progressLog, state.currentRunId, Boolean(state.chatCreationRef.current?.signal.aborted))
+                  : undefined}
                 renderParticipantAvatar={renderNewChatMemberMark}
                 participantRoleLabel={(participant) => chatRoleLabel(state.settings.chatRoleConfigs, participant)}
                 onPromptChange={state.setQuestion}

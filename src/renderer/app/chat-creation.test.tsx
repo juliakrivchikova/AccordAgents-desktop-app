@@ -13,6 +13,7 @@ import { ConversationPanel } from "../components/conversation/conversation-panel
 import { toast } from "sonner";
 import { takeComposerFocusRequest } from "./composer-focus-request";
 import { upsertConversationSummary } from "./conversation-summaries";
+import { chatCreationStatus } from "../components/chat/chat-creation-state";
 
 function deferred<T>() {
   let resolve!: (value: T) => void;
@@ -100,19 +101,20 @@ test("New Chat shows only its own preparation progress; Stop preserves the draft
   let pending!: Promise<boolean>;
   await act(async () => { pending = h.actions().startChat(); });
   assert.ok(h.runId(), h.state().error);
-  // The card shows once the wait lasts (LOADING_DELAY_MS).
-  await act(async () => { await new Promise((resolve) => setTimeout(resolve, 450)); });
-  assert.match(JSON.stringify(h.renderer.toJSON()), /Starting chat/);
-  assert.doesNotMatch(JSON.stringify(h.renderer.toJSON()), /No conversation selected/);
+  // New chat stays on screen while the chat is made (no card, no blank
+  // frame, the User 2026-11-22); its status line says what this start does.
+  assert.equal(h.renderer.toJSON(), null);
+  const status = (): string => chatCreationStatus(h.state().progressLog, h.state().currentRunId, Boolean(h.state().chatCreationRef.current?.signal.aborted));
+  assert.equal(status(), "Creating your chat…");
   await act(async () => {
     h.progress({ runId: h.runId()!, phase: "initial", message: "Copying project · 42%", createdAt: new Date().toISOString() });
     h.progress({ runId: "other-chat", phase: "initial", message: "UNRELATED", createdAt: new Date().toISOString() });
     await new Promise(resolve => setTimeout(resolve, 30));
   });
-  assert.match(JSON.stringify(h.renderer.toJSON()), /42%/);
-  assert.doesNotMatch(JSON.stringify(h.renderer.toJSON()), /UNRELATED/);
+  assert.match(status(), /42%/);
+  assert.doesNotMatch(status(), /UNRELATED/);
   await act(async () => { await h.navigation().cancelReview(); });
-  assert.match(JSON.stringify(h.renderer.toJSON()), /Stopping preparation/);
+  assert.equal(status(), "Stopping preparation…");
   await act(async () => { h.creation.reject(new Error("Chat creation cancelled.")); assert.equal(await pending, false); });
   assert.equal(h.state().busy, false);
   assert.equal(h.state().question, "Draft must survive");

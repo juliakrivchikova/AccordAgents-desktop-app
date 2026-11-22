@@ -188,7 +188,6 @@ export function ComposerMenu(props: {
         aria-haspopup="menu"
         aria-expanded={open}
         aria-label={props.title}
-        title={props.title}
         disabled={props.disabled}
         onClick={() => setOpen((current) => !current)}
         onKeyDown={(event) => {

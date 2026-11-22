@@ -89,6 +89,15 @@ export function upsertConversationSummary(summaries: ConversationSummary[], conv
   ].sort(compareConversationSummaries);
 }
 
+/** A folder's chats, newest first, as its sidebar group lists them: what New
+ *  chat offers to continue. */
+export function projectChatSummaries(summaries: ConversationSummary[], repoPath: string | undefined, limit: number): ConversationSummary[] {
+  const projectPath = normalizeProjectPath(repoPath);
+  if (!projectPath) return [];
+  const group = buildProjectSessionGroups(summaries).find((item) => item.repoPath === projectPath);
+  return group ? group.sessions.filter((summary) => summary.kind === "chat").sort(compareConversationSummaries).slice(0, limit) : [];
+}
+
 export function compareConversationSummaries(left: ConversationSummary, right: ConversationSummary): number {
   const timeDelta = conversationTimeValue(right.updatedAt) - conversationTimeValue(left.updatedAt);
   return timeDelta || left.title.localeCompare(right.title) || left.id.localeCompare(right.id);

@@ -61,6 +61,8 @@ import type { ChatPanelMessageContext } from "./chat-sessions-right-panel";
 import { ChatSessionsLinksContext, ChatSessionsNamesContext, useStableMap, useStableSessionsViewNames } from "./chat-sessions-links";
 import { mainComposerTargetIds, sessionsComposerProps } from "./chat-sessions-composer";
 import { ChatViewRightPanels } from "./chat-view-right-panels";
+import { ComposerRepoLead, useRepoInfo } from "./composer-context";
+import { FOLDER_BUSY_REASON } from "../../../shared/newChat";
 
 export type { ChatMessageFocusRequest } from "./chat-conversation-types";
 
@@ -121,6 +123,11 @@ export function ChatConversationView(props: ChatConversationViewProps): JSX.Elem
     participantStatusById: participantStatusById
   });
   const sessionsMainMessages = sessions?.mainMessages;
+  // The branch is this computer's checkout: not shown for a main session that
+  // runs on a machine, whose copy it is not.
+  const mainSession = sessions ? participants.find((participant) => participant.id === sessions.mainSessionId) : undefined;
+  const mainSessionLocal = Boolean(sessions) && !mainSession?.homeMachineId && !mainSession?.cloudRun;
+  const [repo, setRepo] = useRepoInfo(mainSessionLocal ? props.conversation.repoPath : undefined);
   const topLevelMessages = useMemo(
     () => sessionsMainMessages ?? chatTopLevelMessages(props.conversation),
     [props.conversation.messages, sessionsMainMessages]
@@ -492,6 +499,8 @@ export function ChatConversationView(props: ChatConversationViewProps): JSX.Elem
               {...sessionsComposerProps(sessions?.mainSessionId, props.renderMemberChip,
                 { runIds: activeRunSummary.runIdsByParticipantId.get(sessions?.mainSessionId ?? "") ?? [], onStopRun: props.onStopRun })}
               status={props.isRunning && !hasPendingParticipantMessage && latestComposerProgress ? <RunStatusLine progress={latestComposerProgress} /> : undefined}
+              contextLead={sessions ? <ComposerRepoLead repoPath={props.conversation.repoPath} repo={repo} onRepoChange={setRepo}
+                lockedReason={props.isRunning ? FOLDER_BUSY_REASON : undefined} /> : undefined}
               testId="chat-main-composer"
               takesFocusRequests
               renderParticipantAvatar={renderComposerMemberMark}

@@ -38,6 +38,11 @@
   margin-bottom: 0;
 }
 
+/* A section's description keeps its distance from the card under it. */
+.settings-view .gen-section > p:not(:last-child) {
+  margin: 0 0 12px;
+}
+
 /* Sections, cards and rows follow the ChatGPT desktop app's settings: a 14px
    section title, 13px row titles over 12px secondary lines, hairline card
    edges and dividers, 12px by 16px row padding. */

@@ -1,6 +1,5 @@
 import { ChatConversationView } from "../chat/chat-conversation-view";
 import type { MainSessionActions } from "../chat/chat-view-switch";
-import { ChatCreationState } from "../chat/chat-creation-state";
 import { SlackView } from "../review/review-view";
 import { LoadingBar } from "@/components/ui/loading-bar";
 import { planDecisionReplies } from "../review/review-conversation-data";
@@ -69,11 +68,7 @@ export function ConversationPanel({
       {view.isOpeningConversation && (
         <LoadingBar label="Loading chat" className={leaving ? "top-[calc(var(--app-header-height)_-_1px)]" : undefined} delayMs={leaving ? undefined : 0} />
       )}
-      {state.busy && !state.conversation && state.startingChatRef.current ? (
-        <ChatCreationState key={state.currentRunId}
-          progress={[...state.progressLog].reverse().find(item => item.runId === state.currentRunId)}
-          stopping={Boolean(state.chatCreationRef.current?.signal.aborted)} />
-      ) : view.isOpeningConversation && !state.conversation ? null : view.conversationKind === "chat" && state.conversation ? (
+      {view.isOpeningConversation && !state.conversation ? null : view.conversationKind === "chat" && state.conversation ? (
         <ChatConversationView
           // One view per chat: nothing it holds (a draft image, a scroll
           // position) carries over to the next chat opened.

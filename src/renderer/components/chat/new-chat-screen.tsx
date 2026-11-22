@@ -10,7 +10,7 @@ import {
   type SetStateAction,
   type UIEvent
 } from "react";
-import { ArrowUpIcon, CheckIcon, CaretDownIcon, FolderOpenIcon, FolderSimpleIcon, ImageIcon, PlusIcon, XCircleIcon } from "@phosphor-icons/react";
+import { ArrowUpIcon, SquareIcon, CheckIcon, CaretDownIcon, FolderOpenIcon, FolderSimpleIcon, ImageIcon, PlusIcon, XCircleIcon } from "@phosphor-icons/react";
 
 import type {
   AgentHealth,
@@ -61,6 +61,12 @@ import { useChatComposerMentions } from "./use-chat-composer-mentions";
 import { sortSavedParticipantOptionsByUsage } from "./new-chat-participant-usage";
 import { useCloseOnOutside, useNewChatMenuMaxHeight } from "./new-chat-menu-hooks";
 import { NewChatModelChip } from "./new-chat-model-chip";
+import { NewChatRecent } from "./new-chat-recent";
+import { ChatCreationStatusLine } from "./chat-creation-state";
+import { ComposerBranchMenu, ComposerContextStrip, ComposerFooterSlot } from "./composer-context";
+import { FOLDER_BUSY_REASON, folderBusy, normalizeProjectPath, projectLabelForPath } from "../../../shared/newChat";
+import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
+import { AccordMergeIcon } from "./accord-merge-icon";
 import type { ChatModelAccessPatch } from "./chat-model-access-picker";
 import { newChatViewFor } from "../../../shared/mainSession";
 import {
@@ -124,6 +130,14 @@ export function NewChatScreen(props: {
   onSelectedParticipantIdsChange: Dispatch<SetStateAction<Set<string>>>;
   onSelectedParticipantRuntimeOverridesChange: Dispatch<SetStateAction<Record<string, ChatParticipantRuntimeOverride>>>;
   onOpenParticipantsSettings: () => void;
+  /** What a branch switch returns: the folder as it is now. */
+  onRepoInfoChange?: (info: GitRepoInfo) => void;
+  /** Stops a chat being made (its CLI check or its creation). */
+  onStopStart?: () => void;
+  /** While the chat is being made: what its preparation is doing. */
+  creationStatus?: string;
+  /** Opens one of the folder's recent chats listed under the heading. */
+  onOpenChat?: (conversationId: string) => void;
   onOpenProviderSettings: () => void;
   onRefreshAgents: () => Promise<AgentHealth[]>;
   onStart: (repoFileMentions?: RepoFileMention[], imageAttachments?: ChatImageInput[], skillMentions?: ChatSkillMention[]) => boolean | void | Promise<boolean | void>;
@@ -131,6 +145,15 @@ export function NewChatScreen(props: {
   const promptRef = useRef<HTMLTextAreaElement>(null);
   const highlightRef = useRef<HTMLDivElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  // A branch switch answers for the folder it was asked for: kept only while
+  // that folder is still the one on screen.
+  const repoPathRef = useRef(props.repoPath);
+  repoPathRef.current = props.repoPath;
+  const keepRepoInfo = (info: GitRepoInfo): void => {
+    if (normalizeProjectPath(info.repoPath) === normalizeProjectPath(repoPathRef.current)) props.onRepoInfoChange?.(info);
+  };
+  const shownRepoInfo = props.repoInfo && normalizeProjectPath(props.repoInfo.repoPath) === normalizeProjectPath(props.repoPath) ? props.repoInfo : undefined;
+  const [footerSlot, setFooterSlot] = useState<HTMLElement | null>(null);
   const handledPrefillCaretKeyRef = useRef<number | undefined>();
   const images = useChatComposerImages(undefined, {
     pendingImages: props.pendingImages,
@@ -262,6 +285,7 @@ export function NewChatScreen(props: {
       : undefined,
     [mainHostId, mainKind, mainSessionOverride, props.repoPath, sessionsView, startAccess]
   );
+  const mainSessionRemote = Boolean(mainSessionDraft?.homeMachineId || mainSessionDraft?.cloudRun);
   const prospectiveParticipantDrafts = useMemo(() => {
     // In the sessions view the chat is made with its main session alone: it
     // makes members itself, and an @handle in the first message picks none.
@@ -430,25 +454,45 @@ export function NewChatScreen(props: {
 
   return (
     <div className={["new-chat-screen", needsProviderSetup ? "has-cli-readiness" : ""].filter(Boolean).join(" ")} data-testid="new-chat-screen">
-      <div className="new-chat-hero">
-        <div className="new-chat-logo" aria-hidden="true">
-          <img src={ACCORDAGENTS_MARK_URL} alt="" draggable="false" />
-        </div>
-        <h1>Start a new chat</h1>
-        <p>Coordinate AI agents in one workspace</p>
+      <div className="new-chat-center">
+        {needsProviderSetup ? (
+          <CliReadinessSetupPanel
+            agents={props.agents}
+            settings={props.settings}
+            checking={props.agents.some((agent) => agent.checking)}
+            onRefresh={props.onRefreshAgents}
+            onOpenSettings={props.onOpenProviderSettings}
+          />
+        ) : (
+          <>
+            <img className="new-chat-mark" src={ACCORDAGENTS_MARK_URL} alt="" aria-hidden="true" draggable="false" />
+            <h1 className="new-chat-title">{props.repoPath ? `New chat in ${projectLabelForPath(props.repoPath)}` : "New chat"}</h1>
+            <p className="new-chat-hint">Describe the task. / runs a command, # adds a file.</p>
+            {props.repoPath && props.onOpenChat && <NewChatRecent summaries={props.summaries} repoPath={props.repoPath} onOpen={props.onOpenChat} />}
+          </>
+        )}
       </div>
 
-      {needsProviderSetup && (
-        <CliReadinessSetupPanel
-          agents={props.agents}
-          settings={props.settings}
-          checking={props.agents.some((agent) => agent.checking)}
-          onRefresh={props.onRefreshAgents}
-          onOpenSettings={props.onOpenProviderSettings}
-        />
-      )}
+      {/* The composer stands where the chat keeps its own, with the same
+          strip, so nothing moves when the chat starts. */}
+      <div className="new-chat-dock" hidden={needsProviderSetup}>
+        {props.repoInfo && !props.repoInfo.isRepo && props.repoInfo.error && (
+          <div className="repo-status new-chat-repo-status bad">
+            <XCircleIcon size={16} aria-hidden />
+            {props.repoInfo.error}
+          </div>
+        )}
 
-      <div className="new-chat-card" hidden={needsProviderSetup}>
+        {readyKinds.length > 0 && validation && <div className="inline-error new-chat-error">{validation}</div>}
+        {!needsProviderSetup && chosenProviderGone && mainProvider && (
+          <p className="new-chat-assistant-note" data-testid="new-chat-assistant-note">
+            {`The provider chosen on the model chip is not ready now: this chat would start on ${mainProvider.label || mainProvider.kind}.`}
+          </p>
+        )}
+        {!needsProviderSetup && !chosenProviderGone && assistantNote && !chosenProviderInEffect && (
+          <p className="new-chat-assistant-note" data-testid="new-chat-assistant-note">{assistantNote}</p>
+        )}
+        {props.creationStatus !== undefined && <ChatCreationStatusLine text={props.creationStatus} />}
         <ChatComposerAttachmentChips
           pendingImages={images.pendingImages}
           removeFileMention={mentions.removeFileMention}
@@ -457,7 +501,48 @@ export function NewChatScreen(props: {
           selectedFileMentions={mentions.selectedFileMentions}
           selectedSkillMentions={mentions.selectedSkillMentions}
         />
-        <div className={["new-chat-input-wrap", mentions.showSkillHighlights ? "has-skill-highlights" : ""].filter(Boolean).join(" ")} {...{ [DICTATION_SESSION_ATTRIBUTE]: "new-chat" }}>
+        <ComposerFooterSlot.Provider value={footerSlot}>
+        <div className="chat-composer-shell">
+        <ComposerContextStrip lead={(
+          <>
+            <FolderPicker
+              repoPath={props.repoPath}
+              settings={props.settings}
+              onRepoPathChange={props.onRepoPathChange}
+              onRepoBlur={props.onRepoBlur}
+              onSelectRepo={props.onSelectRepo}
+            />
+            {/* The folder on screen only (a stale one from before Browse
+                must not be switched), and only for a main session on this
+                computer: a machine's copy is not this checkout. */}
+            {!mainSessionRemote && (
+              <ComposerBranchMenu repo={shownRepoInfo} onRepoChange={keepRepoInfo}
+                lockedReason={folderBusy(props.summaries, props.repoPath) ? FOLDER_BUSY_REASON : undefined} />
+            )}
+          </>
+        )}>
+          {sessionsView ? (mainProvider && mainSessionDraft && (
+            <NewChatModelChip
+              draft={mainSessionDraft}
+              provider={mainProvider}
+              providers={providerOptions}
+              onProviderChange={chooseMainProvider}
+              onChange={changeMainSession}
+            />
+          )) : <ParticipantPicker
+            mainSessionParticipant={mainSessionParticipant}
+            savedParticipantOptions={savedParticipantOptions}
+            cliProviderHosts={props.settings.cliProviderHosts}
+            selectedParticipantIds={props.selectedParticipantIds}
+            selectedParticipantRuntimeOverrides={props.selectedParticipantRuntimeOverrides}
+            renderParticipantAvatar={props.renderParticipantAvatar}
+            participantRoleLabel={props.participantRoleLabel}
+            onSelectedParticipantIdsChange={props.onSelectedParticipantIdsChange}
+            onSelectedParticipantRuntimeOverridesChange={props.onSelectedParticipantRuntimeOverridesChange}
+            onOpenParticipantsSettings={props.onOpenParticipantsSettings}
+          />}
+        </ComposerContextStrip>
+        <div className={["chat-input-wrap", "new-chat-input-wrap", mentions.showSkillHighlights ? "has-skill-highlights" : ""].filter(Boolean).join(" ")} {...{ [DICTATION_SESSION_ATTRIBUTE]: "new-chat" }}>
           <ChatComposerMenus
             fileIndex={mentions.fileIndex}
             insertCommand={mentions.insertCommand}
@@ -470,7 +555,6 @@ export function NewChatScreen(props: {
             mentionOptions={mentions.mentionOptions}
             participantRoleLabel={props.participantRoleLabel}
             renderParticipantAvatar={props.renderParticipantAvatar}
-            slashMenuPlacement="below"
             skillIndex={mentions.skillIndex}
             skillQuery={mentions.skillQuery}
             skillTargetLabel={mentions.skillTargetLabel}
@@ -485,8 +569,10 @@ export function NewChatScreen(props: {
               hasLeadingPluginToken ? "has-leading-plugin-token" : ""
             ].filter(Boolean).join(" ")}
             value={props.prompt}
+            // What was sent at Enter is what the chat starts with.
+            readOnly={props.busy}
             placeholder="What are you working on?"
-            rows={3}
+            rows={1}
             data-testid="new-chat-prompt"
             spellCheck={!mentions.showSkillHighlights}
             onChange={(event) => mentions.updateDraft(event.target.value)}
@@ -579,7 +665,8 @@ export function NewChatScreen(props: {
             </div>
           )}
         </div>
-        <div className="new-chat-toolbar">
+        <div className="chat-composer-toolbar">
+          <div className="chat-composer-tools">
           <input
             ref={fileInputRef}
             type="file"
@@ -592,70 +679,47 @@ export function NewChatScreen(props: {
               void images.addImageFiles(files);
             }}
           />
-          <IconButton label="Attach image" icon={ImageIcon} onClick={() => fileInputRef.current?.click()} />
-          <FolderPicker
-            repoPath={props.repoPath}
-            settings={props.settings}
-            onRepoPathChange={props.onRepoPathChange}
-            onRepoBlur={props.onRepoBlur}
-            onSelectRepo={props.onSelectRepo}
-          />
-          <span className="new-chat-toolbar-spacer" />
-          {sessionsView ? (mainProvider && mainSessionDraft && (
-            <NewChatModelChip
-              draft={mainSessionDraft}
-              provider={mainProvider}
-              providers={providerOptions}
-              onProviderChange={chooseMainProvider}
-              onChange={changeMainSession}
-            />
-          )) : <ParticipantPicker
-            mainSessionParticipant={mainSessionParticipant}
-            savedParticipantOptions={savedParticipantOptions}
-            cliProviderHosts={props.settings.cliProviderHosts}
-            selectedParticipantIds={props.selectedParticipantIds}
-            selectedParticipantRuntimeOverrides={props.selectedParticipantRuntimeOverrides}
-            renderParticipantAvatar={props.renderParticipantAvatar}
-            participantRoleLabel={props.participantRoleLabel}
-            onSelectedParticipantIdsChange={props.onSelectedParticipantIdsChange}
-            onSelectedParticipantRuntimeOverridesChange={props.onSelectedParticipantRuntimeOverridesChange}
-            onOpenParticipantsSettings={props.onOpenParticipantsSettings}
-          />}
+          <IconButton label="Attach image" icon={ImageIcon} disabled={props.busy} onClick={() => fileInputRef.current?.click()} />
+          {/* Where the chat has Start Accord: offered once the chat exists. */}
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <span className="composer-accord-tooltip-trigger">
+                <IconButton label="Start Accord" icon={AccordMergeIcon} disabled data-testid="new-chat-accord-button" onClick={() => undefined} />
+              </span>
+            </TooltipTrigger>
+            <TooltipContent side="top">Start a chat first: Accord runs in a chat.</TooltipContent>
+          </Tooltip>
+          </div>
+          <div className="chat-composer-actions">
+          <span ref={setFooterSlot} className="chat-composer-footer-slot" />
           <SpeechToTextButton
             getTextarea={() => promptRef.current}
             draft={props.prompt}
             onDraftChange={props.onPromptChange}
           />
-          <button
-            type="button"
-            className="new-chat-send"
-            disabled={!canSubmit}
-            title="Start chat"
-            aria-label="Start chat"
-            data-testid="new-chat-start"
-            onClick={() => void startChat()}
-          >
-            {props.busy ? <Spinner size={14} /> : <ArrowUpIcon size={14} weight="bold" aria-hidden />}
-          </button>
+          {props.busy && props.onStopStart ? (
+            // While the chat is being made: Stop, where the chat keeps it.
+            <button type="button" className="composer-send-button is-stop" aria-label="Stop" data-testid="new-chat-stop" onClick={props.onStopStart}>
+              <SquareIcon size={10} weight="fill" />
+            </button>
+          ) : (
+            <button
+              type="button"
+              className="composer-send-button"
+              disabled={!canSubmit}
+              aria-label="Start chat"
+              data-testid="new-chat-start"
+              onClick={() => void startChat()}
+            >
+              {props.busy ? <Spinner size={14} /> : <ArrowUpIcon size={14} weight="bold" aria-hidden />}
+            </button>
+          )}
+          </div>
         </div>
+        </div>
+        </ComposerFooterSlot.Provider>
       </div>
 
-      {props.repoInfo && !props.repoInfo.isRepo && props.repoInfo.error && (
-        <div className="repo-status new-chat-repo-status bad">
-          <XCircleIcon size={16} aria-hidden />
-          {props.repoInfo.error}
-        </div>
-      )}
-
-      {readyKinds.length > 0 && validation && <div className="inline-error new-chat-error">{validation}</div>}
-      {!needsProviderSetup && chosenProviderGone && mainProvider && (
-        <p className="new-chat-assistant-note" data-testid="new-chat-assistant-note">
-          {`The provider chosen on the model chip is not ready now: this chat would start on ${mainProvider.label || mainProvider.kind}.`}
-        </p>
-      )}
-      {!needsProviderSetup && !chosenProviderGone && assistantNote && !chosenProviderInEffect && (
-        <p className="new-chat-assistant-note" data-testid="new-chat-assistant-note">{assistantNote}</p>
-      )}
     </div>
   );
 }

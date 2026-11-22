@@ -305,7 +305,7 @@ test("a second quick choice is made on top of the first one not saved yet: Full 
     assert.equal(saves.length, 1);
     assert.equal(selectedChatAccessOption("codex-cli", saves[0]!.patch.agentMode, saves[0]!.patch.permissions)?.label, "Ask for approval");
     // Shown at once, before it is saved.
-    assert.match(root.find(byTestId("chat-member-controls-mode")).props.title, /Ask for approval/);
+    assert.match(root.find(byTestId("chat-member-controls-mode")).props["aria-label"], /Ask for approval/);
     // Plan clicked while the first choice is still being saved.
     await act(async () => { root.find(byTestId("chat-member-controls-plan")).props.onClick(); });
     assert.equal(saves.length, 2);
@@ -320,17 +320,17 @@ test("a second quick choice is made on top of the first one not saved yet: Full 
       saves[1]!.resolve(true);
       await new Promise((resolve) => setTimeout(resolve, 0));
     });
-    assert.match(root.find(byTestId("chat-member-controls-mode")).props.title, /Ask for approval/);
+    assert.match(root.find(byTestId("chat-member-controls-mode")).props["aria-label"], /Ask for approval/);
     assert.equal(root.find(byTestId("chat-member-controls-plan")).props["aria-pressed"], true);
     // A save that fails shows the member as stored.
     await act(async () => { root.find(byTestId("chat-member-controls-mode")).props.onClick(); });
     await act(async () => { root.findAll(byTestId("chat-access-option")).find((row) => row.props["data-value"] === "auto-review")!.props.onClick(); });
-    assert.match(root.find(byTestId("chat-member-controls-mode")).props.title, /Approve for me/);
+    assert.match(root.find(byTestId("chat-member-controls-mode")).props["aria-label"], /Approve for me/);
     await act(async () => {
       saves[2]!.resolve(false);
       await new Promise((resolve) => setTimeout(resolve, 0));
     });
-    assert.match(root.find(byTestId("chat-member-controls-mode")).props.title, /Ask for approval/, "the failed choice is not left on screen");
+    assert.match(root.find(byTestId("chat-member-controls-mode")).props["aria-label"], /Ask for approval/, "the failed choice is not left on screen");
   } finally {
     if (renderer) act(() => renderer!.unmount());
     host.consensus = previous;

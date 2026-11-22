@@ -3788,10 +3788,8 @@
     box-shadow var(--ui-duration-fast) var(--ui-ease-out);
 }
 
-.chat-composer-shell:focus-within {
-  border-color: var(--ui-primary);
-  box-shadow: var(--ui-shadow-sm), 0 0 0 3px var(--ui-focus);
-}
+/* No highlight while typing: the caret says where the keyboard is (the
+   User, 2026-11-22). */
 
 .chat-composer-toolbar {
   display: flex;

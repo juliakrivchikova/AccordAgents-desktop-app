@@ -29,10 +29,11 @@ export function useAppViewModel(state: AppState) {
   // lasts: a quick open keeps what was there (the New chat screen, say)
   // instead of a blank panel for a tenth of a second.
   const openingSlow = useDelayedFlag(isOpeningConversation);
-  // A new chat still checking its CLIs (no run id yet) keeps New chat on
-  // screen, its send button busy and its choices in place.
-  const startCheckingClis = state.busy && state.startingChatRef.current && !state.currentRunId && !state.conversation;
-  const hasResultContext = Boolean(state.conversation) || (state.busy && !startCheckingClis) || (isOpeningConversation && openingSlow);
+  // A new chat being started keeps New chat on screen, its send button busy,
+  // its choices in place and its composer where the chat will have it, until
+  // the chat itself takes the screen: no card and no blank frame between.
+  const startingChat = state.busy && state.startingChatRef.current && !state.conversation;
+  const hasResultContext = Boolean(state.conversation) || (state.busy && !startingChat) || (isOpeningConversation && openingSlow);
   const pendingDecisions = pendingPlanDecisions(state.conversation);
   const reviewablePlanItems = requiredPlanItemReviewFindings(state.conversation);
   const reviewedPlanItemCount = reviewablePlanItems.filter((finding) => planItemReviewForFinding(finding, planItemReviews(state.conversation))).length;

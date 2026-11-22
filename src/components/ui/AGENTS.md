@@ -34,6 +34,7 @@ This folder is the UI kit: domain-agnostic components built on shadcn and Radix 
 - Hover on rows, list items, menu items and ghost buttons: `hover:bg-ui-row-hover`, a soft brand tint. Never a gray hover.
 - Selected: `bg-ui-row-active text-ui-select-fg`. Cards: `--ui-card-hover-bg` and `--ui-card-hover-border` on hover.
 - Focus: `focus-visible:ring-2 focus-visible:ring-ui-focus-ring`, with `ring-offset-2 ring-offset-ui-bg` on filled controls.
+- The composer is the exception: no border or ring while typing, the caret is enough.
 
 ## Icons
 

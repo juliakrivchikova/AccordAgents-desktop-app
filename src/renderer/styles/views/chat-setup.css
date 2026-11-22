@@ -6,96 +6,130 @@
   --app-workspace-bg: var(--bg);
 }
 
+/* The title row reads "New chat" as the chat's own will read its name. */
 [data-shell="topbar"].new-chat-topbar {
-  border-bottom-width: 0 !important;
   background: var(--app-bg) !important;
 }
 
+/* New chat as "B + C" (the User, 2026-11-22): the folder's heading and its
+   recent chats in the middle, the composer docked where the chat keeps it
+   (the sessions view's reading column, 768px), so nothing moves on Enter. */
 .new-chat-composer {
-  --new-chat-card-center-offset: 74px;
-  --new-chat-card-width: 720px;
-  width: min(100%, 800px);
-  min-height: 100%;
-  justify-content: center;
-  padding: 24px;
+  width: 100%;
+  height: 100%;
+  min-height: 0;
+  padding: 0;
+  gap: 0;
 }
 
 .new-chat-screen {
-  position: relative;
-  display: grid;
-  justify-items: center;
+  display: flex;
+  flex-direction: column;
   width: 100%;
+  height: 100%;
+  min-height: 0;
   color: var(--app-text);
-  transform: translateY(calc(-1 * var(--new-chat-card-center-offset)));
 }
 
-.new-chat-screen.has-cli-readiness {
-  transform: none;
-}
-
-.new-chat-hero {
-  position: relative;
-  z-index: 1;
-  display: grid;
-  justify-items: center;
+.new-chat-center {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  align-items: center;
+  /* Centred while it fits; scrolled from its top (the CLI setup steps) when
+     it does not. */
+  justify-content: safe center;
+  gap: 4px;
+  min-height: 0;
+  padding: 24px;
+  overflow: auto;
   text-align: center;
 }
 
-.new-chat-logo {
-  display: flex;
-  width: 36px;
-  height: 36px;
-  align-items: center;
-  justify-content: center;
-  margin-bottom: 12px;
+.new-chat-center > * {
+  flex: none;
 }
 
-.new-chat-logo img {
-  width: 36px;
-  height: 36px;
+.new-chat-mark {
+  width: 28px;
+  height: 28px;
+  margin-bottom: 8px;
   object-fit: contain;
 }
 
-.new-chat-hero h1 {
+.new-chat-title {
   margin: 0;
   color: var(--ui-text);
-  font-family: var(--font-body);
-  font-size: 20px;
+  font-size: 16px;
   font-weight: 600;
-  line-height: 28px;
-  letter-spacing: -0.01em;
+  line-height: 24px;
 }
 
-.new-chat-hero p {
-  max-width: 440px;
-  margin: 4px 0 0;
-  color: var(--ui-text-2);
+.new-chat-hint {
+  margin: 0;
+  color: var(--ui-text-3);
   font-size: 13px;
   line-height: 20px;
 }
 
-.new-chat-card {
-  position: relative;
-  z-index: 1;
+.new-chat-recent {
   display: grid;
-  width: min(100%, var(--new-chat-card-width));
-  margin-top: 24px;
-  padding: 6px 8px 8px;
-  border: 1px solid var(--ui-border);
-  border-radius: var(--ui-radius-12);
-  background: var(--ui-bg);
-  box-shadow: var(--ui-shadow-sm);
-  transition:
-    border-color var(--ui-duration-fast) var(--ui-ease-out),
-    box-shadow var(--ui-duration-fast) var(--ui-ease-out);
+  gap: 2px;
+  width: min(100%, 420px);
+  margin-top: 14px;
 }
 
-.new-chat-card:focus-within {
-  border-color: var(--ui-primary);
-  box-shadow: var(--ui-shadow-sm), 0 0 0 3px var(--ui-focus);
+.new-chat-recent-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  height: 30px;
+  padding: 0 10px;
+  border: 0;
+  border-radius: var(--ui-radius-8);
+  background: transparent;
+  color: var(--ui-text-2);
+  font: inherit;
+  font-size: 13px;
+  text-align: left;
+  cursor: pointer;
+  transition: background-color var(--ui-duration-fast) var(--ui-ease-out);
 }
 
-.new-chat-card[hidden] {
+.new-chat-recent-row:hover {
+  background: var(--ui-row-hover);
+  color: var(--ui-text);
+}
+
+.new-chat-recent-row:focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring);
+}
+
+.new-chat-recent-title {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.new-chat-recent-time {
+  flex: none;
+  color: var(--ui-text-3);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+
+.new-chat-dock {
+  display: flex;
+  flex: none;
+  flex-direction: column;
+  gap: var(--space-2);
+  padding: 10px max(28px, calc((100% - 768px) / 2)) 18px;
+}
+
+.new-chat-dock[hidden] {
   display: none;
 }
 
@@ -552,24 +586,14 @@
   min-width: 0;
 }
 
-.new-chat-input-wrap .mention-menu {
-  top: 32px;
-  right: auto;
-  bottom: auto;
-  left: 0;
-  width: min(420px, 100%);
-  max-height: 220px;
-}
-
-.new-chat-input-wrap .member-mention-menu {
-  width: min(460px, 100%);
-}
-
+/* One line to start, as the chat's own composer: the composer has the same
+   height before and after Enter. */
 .new-chat-prompt {
+  display: block;
   width: 100%;
-  min-height: 72px;
+  min-height: 27px;
   max-height: 220px;
-  padding: 4px;
+  padding: 3px 4px;
   border: 0;
   outline: 0;
   overflow-y: hidden;
@@ -586,7 +610,7 @@
 }
 
 .new-chat-input-wrap .chat-draft-highlight {
-  padding: 4px;
+  padding: 3px 4px;
   border-radius: 0;
   font-size: 14px;
   line-height: 1.5;
@@ -613,23 +637,6 @@
   color: transparent;
   -webkit-text-fill-color: transparent;
   background: color-mix(in srgb, var(--app-accent) 28%, transparent);
-}
-
-.new-chat-toolbar {
-  display: flex;
-  align-items: center;
-  gap: 2px;
-  min-width: 0;
-  padding-top: 4px;
-}
-
-.new-chat-card > .pending-image-strip {
-  margin-bottom: 10px;
-}
-
-.new-chat-toolbar-spacer {
-  flex: 1 1 auto;
-  min-width: 16px;
 }
 
 .new-chat-folder-picker,
@@ -666,7 +673,6 @@
 }
 
 .new-chat-chip:focus-visible,
-.new-chat-send:focus-visible,
 .new-chat-menu-item:focus-visible {
   outline: none;
   box-shadow: var(--focus-ring);
@@ -712,39 +718,6 @@
   /* No per-context disc background: inherit the base per-kind discs
      (anthropic -> terracotta, codex -> accent-soft, etc.) so Claude's white
      mark stays visible and every kind matches the rest of the app. */
-}
-
-.new-chat-send {
-  display: inline-flex;
-  width: var(--ui-control-sm);
-  height: var(--ui-control-sm);
-  flex: none;
-  align-items: center;
-  justify-content: center;
-  margin-left: 4px;
-  border: 0;
-  border-radius: 999px;
-  background: var(--ui-primary);
-  color: var(--ui-primary-fg);
-  cursor: pointer;
-  transition:
-    background-color var(--ui-duration-fast) var(--ui-ease-out),
-    color var(--ui-duration-fast) var(--ui-ease-out),
-    transform var(--ui-duration-fast) var(--ui-ease-out);
-}
-
-.new-chat-send:hover:not(:disabled) {
-  background: var(--ui-primary-hover);
-}
-
-.new-chat-send:active:not(:disabled) {
-  transform: scale(0.94);
-}
-
-.new-chat-send:disabled {
-  background: var(--ui-bg-muted);
-  color: var(--ui-text-3);
-  cursor: not-allowed;
 }
 
 .new-chat-menu {
@@ -835,23 +808,12 @@
   font-size: 13px;
 }
 
-.new-chat-error,
-.new-chat-repo-status {
-  position: relative;
-  z-index: 1;
-  width: min(100%, var(--new-chat-card-width));
-}
-
 .new-chat-error {
-  margin-top: 10px;
   text-align: center;
 }
 
 .new-chat-assistant-note {
-  position: relative;
-  z-index: 1;
-  width: min(100%, var(--new-chat-card-width));
-  margin: 10px 0 0;
+  margin: 0;
   color: var(--app-muted);
   font-size: 12px;
   line-height: 1.45;
@@ -862,49 +824,6 @@
   justify-content: center;
 }
 
-@media (max-width: 720px) {
-  .new-chat-composer {
-    --new-chat-card-center-offset: 0px;
-    min-height: auto;
-    justify-content: flex-start;
-    padding: 28px 16px 20px;
-  }
-
-  .new-chat-card {
-    border-radius: var(--radius-card);
-    padding: 14px;
-  }
-
-  .new-chat-toolbar {
-    flex-wrap: wrap;
-  }
-
-  .new-chat-toolbar-spacer {
-    display: none;
-  }
-
-  .new-chat-folder-picker,
-  .new-chat-participant-picker {
-    flex: 1 1 220px;
-  }
-
-  .new-chat-chip,
-  .new-chat-participant-trigger {
-    width: 100%;
-    max-width: 100%;
-  }
-
-  .new-chat-send {
-    margin-left: auto;
-  }
-
-  .new-chat-folder-menu,
-  .new-chat-participant-menu {
-    right: auto;
-    left: 0;
-    width: min(320px, calc(100vw - 48px));
-  }
-}
 
 .chat-setup,
 .chat-roster-editor {
