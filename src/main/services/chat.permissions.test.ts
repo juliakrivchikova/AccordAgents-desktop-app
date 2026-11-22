@@ -619,7 +619,8 @@ test("agent progress sink: a step's words change as it ends, a label stays one b
   assert.ok(events.find((event) => event.itemId === "step-149")?.detail?.startsWith("149:"), "the newest steps keep their details");
   assert.equal(events.find((event) => event.itemId === "step-0")?.detail, undefined, "the oldest lose theirs first");
   assert.equal(events.find((event) => event.itemId === "step-0")?.label, "Running step 0", "and keep their words");
-  assert.ok(mostDetailsInOneUpdate > 0 && mostDetailsInOneUpdate <= 24_000, `no live update carries more (${mostDetailsInOneUpdate})`);
+  assert.ok(mostDetailsInOneUpdate > 24_000 - 1_800 && mostDetailsInOneUpdate <= 24_000,
+    `a full update is trimmed to the budget, and none carries more (${mostDetailsInOneUpdate})`);
 });
 
 test("agent progress sink keeps in-progress formatted stream for visible runs", async () => {

@@ -118,6 +118,7 @@ import {
 } from "./geminiExec";
 import type { ParticipantRunResult } from "./providers";
 import {
+  APP_MCP_SERVER,
   CLAUDE_TOOLS_WITHOUT_ROW,
   claudeToolActivity,
   codexCommandActivity,
@@ -5971,7 +5972,7 @@ export class CliAgentRunner {
       }
       // The app's own tools answer with what the app keeps itself (messages,
       // requests, documents): the step keeps no copy of it.
-      if (this.stringField(item, "server") === GEMINI_APP_MCP_SERVER) {
+      if (this.stringField(item, "server") === APP_MCP_SERVER) {
         return undefined;
       }
       const result = this.asRecord(item.result);

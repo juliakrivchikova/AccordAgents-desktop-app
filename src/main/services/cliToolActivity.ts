@@ -123,10 +123,10 @@ function stringInput(input: Record<string, unknown> | undefined, key: string): s
   return typeof value === "string" && value.trim() ? value : undefined;
 }
 
-/** The app's own MCP server. What its tools carry (a message, a request, a
- *  document, a note) the app keeps itself, so a step of it keeps short
- *  arguments only (an id, a limit), never such a body a second time. */
-const APP_MCP_SERVER = "accord_agents";
+/** The app's own MCP server. What its tools carry and answer (a message, a
+ *  request, a document, a note) the app keeps itself, so a step of it keeps
+ *  short arguments only (an id, a limit), never such a body a second time. */
+export const APP_MCP_SERVER = "accord_agents";
 const APP_TOOL_DETAIL_MAX_CHARS = 200;
 
 /** Claude Code tools that get no row: the CLI draws nothing when they are
@@ -136,16 +136,20 @@ const APP_TOOL_DETAIL_MAX_CHARS = 200;
  *  and the mode chip follows the CLI into plan mode. */
 export const CLAUDE_TOOLS_WITHOUT_ROW: ReadonlySet<string> = new Set(["ExitPlanMode", "EnterPlanMode"]);
 
-/** A call's arguments as its row keeps them: compact JSON. */
-function jsonDetail(value: unknown, server?: string): string | undefined {
-  if (value === undefined || value === null) return undefined;
-  if (typeof value === "object" && Object.keys(value as Record<string, unknown>).length === 0) return undefined;
-  let compact: string;
+/** A call's arguments as compact JSON ("" when there are none or they do
+ *  not serialize). */
+function compactJson(value: unknown): string {
+  if (value === undefined || value === null) return "";
   try {
-    compact = JSON.stringify(value);
+    return JSON.stringify(value) ?? "";
   } catch {
-    return undefined;
+    return "";
   }
+}
+
+/** A call's arguments as its row keeps them: compact JSON. */
+function jsonDetail(value: unknown, server?: string, compact = compactJson(value)): string | undefined {
+  if (!compact || (typeof value === "object" && value !== null && Object.keys(value as Record<string, unknown>).length === 0)) return undefined;
   if (server === APP_MCP_SERVER && compact.length > APP_TOOL_DETAIL_MAX_CHARS) return undefined;
   return cliActivityDetail(compact);
 }
@@ -298,13 +302,8 @@ export function codexCommandActivity(
 /** A Codex MCP call's row: "Calling server.tool({…})", then "Called …". */
 export function codexMcpActivity(server: string | undefined, tool: string | undefined, args: unknown, finished: boolean): CliToolActivity {
   const name = [server, tool].filter(Boolean).join(".") || "tool";
-  let compact = "";
-  try {
-    compact = args === undefined || args === null ? "" : JSON.stringify(args);
-  } catch {
-    compact = "";
-  }
-  const detail = jsonDetail(args, server);
+  const compact = compactJson(args);
+  const detail = jsonDetail(args, server, compact);
   return {
     label: cliActivityLabel(`${finished ? "Called" : "Calling"} ${name}(${compact})`),
     kind: "tool",

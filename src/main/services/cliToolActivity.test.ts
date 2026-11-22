@@ -87,6 +87,13 @@ test("a step keeps its arguments compact, and none of a body the app keeps itsel
   assert.equal(claudeToolActivity("mcp__other__send", { content: post }).detail?.startsWith('{"content":"word word'), true, "another server's arguments stay");
   assert.equal(codexMcpActivity("accord_agents", "app_chat_send_message", { content: post }, true).detail, undefined);
   assert.equal(codexMcpActivity("context7", "query-docs", { query: "react" }, true).detail, '{"query":"react"}');
+  // The edge: 200 characters of arguments stay, 201 do not.
+  const sized = (length: number) => ({ id: "x".repeat(length - '{"id":""}'.length) });
+  assert.equal(JSON.stringify(sized(200)).length, 200);
+  assert.equal(claudeToolActivity("mcp__accord_agents__app_artifact_read", sized(200)).detail, JSON.stringify(sized(200)));
+  assert.equal(claudeToolActivity("mcp__accord_agents__app_artifact_read", sized(201)).detail, undefined);
+  assert.equal(codexMcpActivity("accord_agents", "app_artifact_read", sized(200), false).detail, JSON.stringify(sized(200)));
+  assert.equal(codexMcpActivity("accord_agents", "app_artifact_read", sized(201), false).detail, undefined);
 });
 
 test("ExitPlanMode and EnterPlanMode get no row: the CLI draws nothing at the call; the plan card is its dialog", () => {

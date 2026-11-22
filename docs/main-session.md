@@ -457,7 +457,11 @@ switch is disabled.
     -1)", "Called server.tool({…})"; a stored step with only the app's old
     word shows its detail (the command, the query, the path). A step's
     label is one line of at most 200 characters, its detail at most 1,800,
-    and one reply's details 200,000 together (the oldest lose theirs first).
+    and one reply's details 24,000 together (the oldest lose theirs first);
+    arguments are kept as compact JSON, and a step of the app's own tools
+    keeps no copy of a body the app stores itself (a post, a request, a
+    result). Claude's ExitPlanMode and EnterPlanMode get no row: the CLI
+    draws nothing at the call, and the plan card is ExitPlanMode's dialog.
     A message the User sends while a Claude member works is "Queued" (no
     clock) until its CLI hands it to the running step at the next tool
     result; from then its reply is the turn's one "Working for", counted

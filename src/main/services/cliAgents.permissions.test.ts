@@ -1815,6 +1815,14 @@ test("codex app-server stream keeps raw tool output out of agent text and comple
   });
   send({
     method: "item/started",
+    params: { threadId: "thread-1", turnId: "turn-1", item: { id: "mcp-app-failed", type: "mcpToolCall", server: "accord_agents", tool: "app_chat_send_message", arguments: { content: "Hi" } } }
+  });
+  send({
+    method: "item/completed",
+    params: { threadId: "thread-1", turnId: "turn-1", item: { id: "mcp-app-failed", type: "mcpToolCall", status: "failed", error: { message: "APP_TOOL_FAILED" } } }
+  });
+  send({
+    method: "item/started",
     params: {
       threadId: "thread-1",
       turnId: "turn-1",
@@ -1859,6 +1867,9 @@ test("codex app-server stream keeps raw tool output out of agent text and comple
   assert.match(mcpEvents.at(-1)?.activityDetail ?? "", /MCP_RESULT_LAST/);
   // The app's own tool answers with chat text the chat keeps: no copy.
   assert.equal(outputs.filter((event) => event.activityItemId === "mcp-app").at(-1)?.activityDetail, '{"limit":2}');
+  const failed = outputs.filter((event) => event.activityItemId === "mcp-app-failed").at(-1);
+  assert.equal(failed?.activityStatus, "failed");
+  assert.match(failed?.activityDetail ?? "", /Output tail:\nAPP_TOOL_FAILED/, "an app tool's failure keeps its reason");
 
   const visibleTranscript = outputs.filter((event) => event.kind === "text").at(-1)?.cumulative ?? "";
   assert.equal(visibleTranscript, "I’ll inspect it.\n\nDone.");

@@ -756,10 +756,11 @@ const CHAT_PROCESSING_TRANSCRIPT_MAX_CHARS = 2_000_000;
 const CHAT_ACTIVITY_EVENT_MAX_COUNT = 500;
 const CHAT_PROGRESS_FLUSH_INTERVAL_MS = 100;
 const CHAT_ACTIVITY_DETAIL_MAX_CHARS = 4_000;
-/** What all of one reply's step details may take together. They are saved
- *  with the reply, go to the User's server with it, and the window gets the
- *  whole list on every live update, so the oldest steps lose their details
- *  first (their rows keep their words: cliToolActivity.ts). */
+/** What all of one reply's step details may take together: about a dozen
+ *  steps' full details (1,800 each at most, cliToolActivity.ts). They are
+ *  saved with the reply, go to the User's server with it, and the window
+ *  gets the whole list on every live update, so the oldest steps lose their
+ *  details first (withinActivityDetailsBudget); their rows keep their words. */
 const CHAT_ACTIVITY_DETAILS_TOTAL_MAX_CHARS = 24_000;
 /** A row's label is one line; what a CLI hands over as one is kept to this
  *  (the tool rows themselves are shorter: cliToolActivity.ts). */
