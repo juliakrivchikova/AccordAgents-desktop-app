@@ -1627,10 +1627,14 @@ export class ChatService {
    *  (cliModesTurnRefusal): refused with a line, never run as something
    *  else. A machine never asks it of another (the User's server refuses
    *  that, hubOps.ts). */
-  private machineCliModesRefusal(participant: ChatParticipant): string | undefined {
+  private machineCliModesRefusal(conversation: Conversation, participant: ChatParticipant): string | undefined {
     const machineId = participant.homeMachineId;
     if (!machineId || !this.machineCliModesSupport) return undefined;
-    return cliModesTurnRefusal(participant, { name: this.serverLink?.machineName(machineId), support: this.machineCliModesSupport(machineId) });
+    // As it runs this turn: one held to its main session's mode by that.
+    return cliModesTurnRefusal(this.participantForRun(conversation, participant), {
+      name: this.serverLink?.machineName(machineId),
+      support: this.machineCliModesSupport(machineId)
+    });
   }
 
   /** Desktop side: see beforeRemoteTurn and machineProjectReady. */
@@ -9704,7 +9708,7 @@ export class ChatService {
             const askedLater = new Set<string>();
             for (const target of dispatch.targets) {
               if (target.cloudRun && !target.homeMachineId) askedLater.add(target.id);
-              else if (this.machineCliModesRefusal(target)) askedLater.add(target.id);
+              else if (this.machineCliModesRefusal(conversation, target)) askedLater.add(target.id);
               else if (target.homeMachineId && conversation.repoPath && this.machineProjectReady &&
                   !await this.machineProjectReady(target.homeMachineId, conversation.repoPath).catch(() => false)) askedLater.add(target.id);
             }
@@ -26249,6 +26253,19 @@ export class ChatService {
   ): Promise<ChatMessage[]> {
     const link = this.serverLink!;
     const serverRunId = opened.serverRunId;
+    // A machine whose program would run its mode otherwise than its controls
+    // say is never asked: refused before a bubble is shown for it here (one
+    // made for it already says why; a member's request says why in its card).
+    const refused = this.machineCliModesRefusal(conversation, participant);
+    if (refused) {
+      // A turn the server holds for it already (its machine changed, or the
+      // machine greeted again, after the message named it) is stopped there,
+      // so that machine never takes it.
+      if (opened.canonical) {
+        await link.enqueue([{ opId: newOpId(), kind: "turn.stop", conversationId: conversation.id, runId: serverRunId, messageId: triggerMessage.id, participantId: participant.id }]).catch(() => undefined);
+      }
+      throw new RemoteTurnNotStartedError(refused);
+    }
     let placeholder = options.existingPendingMessage;
     if (!placeholder) {
       placeholder = this.message(
@@ -26319,11 +26336,15 @@ export class ChatService {
       }
       if (participant.homeMachineId) {
         const machineId = participant.homeMachineId;
-        // A machine whose program would run its mode otherwise than its
-        // controls say is never asked: the bubble says why, before anything
-        // is copied there.
-        const refusal = this.machineCliModesRefusal(participant);
-        if (refusal) throw new Error(refusal);
+        // A Cloud run machine whose program turned out to run its mode
+        // otherwise than its controls say is never asked either, before
+        // anything is copied there; a bubble shown only here goes (a bubble
+        // made for it already says why).
+        const refusal = this.machineCliModesRefusal(conversation, participant);
+        if (refusal) {
+          if (!options.existingPendingMessage) await this.dropServerPlaceholder(conversation, bubble.id);
+          throw new Error(refusal);
+        }
         // The chat's project is on the member's machine before its turn is
         // asked there (copied once, never over what is there), and the machine
         // knows where it is: its settings on the server say so.
@@ -26370,7 +26391,12 @@ export class ChatService {
       ...(bubble.metadata?.serverPlaceholder ? { pendingMessageId: bubble.id } : {}),
       request: { kind: "turn", ...(options.continuation ? { continuation: true } : {}) } }]);
     const asked = await link.opAnswered(opId);
-    if (asked.status === "rejected") throw new Error(`@${participant.handle} could not be started on ${machineName}: ${asked.reason}`);
+    if (asked.status === "rejected") {
+      // Refused by the server (a machine whose program cannot run its mode,
+      // say): a bubble shown only here goes, as a refused turn has none.
+      if (!options.existingPendingMessage) await this.dropServerPlaceholder(conversation, bubble.id);
+      throw new Error(`@${participant.handle} could not be started on ${machineName}: ${asked.reason}`);
+    }
     let turn: HubTurn | undefined = asked.turn;
     try {
       if (!turn || !placed(turn)) turn = await this.waitForServerTurn(serverRunId, placed, signal);

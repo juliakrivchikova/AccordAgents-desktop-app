@@ -4737,6 +4737,67 @@ test("a member whose machine's program cannot run its Full Access or Plan mode i
   await waitFor(() => h.storage.current.messages.some((item: ChatMessage) => item.content === "FULL_ACCESS_REPLY"));
 });
 
+test("a member's request to a member whose machine cannot run its Full Access fails with the line, leaving no bubble waiting", async () => {
+  const own = { ...defaultChatAgentPermissions(), workspaceWrite: true, cliApprovals: true as const };
+  const manager = { ...chatParticipant("codex-cli", { requestParticipants: "allow" }), id: "manager", handle: "manager" };
+  const target = { ...chatParticipant("codex-cli"), id: "fa-target", handle: "fa", homeMachineId: "box", agentMode: "full-access" as const, permissions: own };
+  let managerRuns = 0;
+  const h = testService({
+    conversation: chatConversation([manager, target]),
+    run: async (participant) => {
+      if (participant.id === manager.id) managerRuns += 1;
+      return { participant, ok: true, content: participant.id === manager.id && managerRuns === 1 ? "@fa Please reply." : "Done.", durationMs: 1 };
+    }
+  });
+  (h.service as any).ensureHistoryFiles = async () => h.tempRoot;
+  h.service.setMachineCliModesSupport(() => "outdated");
+  const link = fakeServerLink("desktop-device", { box: "Cloud box" });
+  h.service.setServerLink(link);
+  await h.service.sendMessage({ conversationId: h.storage.current.id, content: "@manager coordinate this." });
+  const item = () => h.storage.current.messages.find((message: ChatMessage) => message.metadata?.participantRequest)?.metadata?.participantRequest?.items?.[0];
+  await waitFor(() => item()?.status === "failed", 3000);
+  assert.match(item().error, /Cloud box runs an older program that cannot run Full Access/);
+  assert.equal(h.storage.current.messages.some((message: ChatMessage) => message.participantId === target.id && message.status === "pending"), false, "no bubble left waiting for it");
+  assert.equal(link.ops.some((op) => op.kind === "turn.request" && op.participantId === target.id), false, "never asked of its machine");
+});
+
+test("a member's request to a Cloud run member whose machine turns out older fails with the line, leaving no bubble waiting", async () => {
+  const own = { ...defaultChatAgentPermissions(), workspaceWrite: true, cliApprovals: true as const };
+  const manager = { ...chatParticipant("codex-cli", { requestParticipants: "allow" }), id: "manager", handle: "manager" };
+  const target = { ...chatParticipant("codex-cli"), id: "cloud-target", handle: "cloudy", cloudRun: {}, agentMode: "full-access" as const, permissions: own };
+  let managerRuns = 0;
+  const h = testService({
+    conversation: chatConversation([manager, target]),
+    run: async (participant) => {
+      if (participant.id === manager.id) managerRuns += 1;
+      return { participant, ok: true, content: participant.id === manager.id && managerRuns === 1 ? "@cloudy Please reply." : "Done.", durationMs: 1 };
+    }
+  });
+  (h.service as any).ensureHistoryFiles = async () => h.tempRoot;
+  h.service.setMachineCliModesSupport((machineId) => machineId === "old-box" ? "outdated" : "unknown");
+  h.service.setCloudRunPreparation(async () => "old-box");
+  const link = fakeServerLink("desktop-device", { "old-box": "Old box" });
+  h.service.setServerLink(link);
+  await h.service.sendMessage({ conversationId: h.storage.current.id, content: "@manager coordinate this." });
+  const item = () => h.storage.current.messages.find((message: ChatMessage) => message.metadata?.participantRequest)?.metadata?.participantRequest?.items?.[0];
+  await waitFor(() => item()?.status === "failed", 3000);
+  assert.match(item().error, /Old box runs an older program that cannot run Full Access/);
+  assert.equal(h.storage.current.messages.some((message: ChatMessage) => message.participantId === target.id && message.status === "pending"), false, "no bubble left waiting for it");
+  assert.equal(link.ops.some((op) => op.kind === "turn.request"), false, "never asked of that machine");
+});
+
+test("a member the main session made, held below Full Access, is asked of an older machine: it runs there as its controls say", async () => {
+  const own = { ...defaultChatAgentPermissions(), workspaceWrite: true, cliApprovals: true as const };
+  const main = { ...chatParticipant("codex-cli"), id: "main", handle: "main", roleConfigId: "main-session", agentMode: "default" as const, permissions: own };
+  const held = { ...chatParticipant("codex-cli"), id: "held", handle: "held", homeMachineId: "box", delegatedByParticipantId: "main", agentMode: "full-access" as const, permissions: own };
+  const h = testService({ conversation: chatConversation([main, held], { mainSessionParticipantId: "main" }) });
+  h.service.setMachineCliModesSupport(() => "outdated");
+  const link = fakeServerLink("desktop-device", { box: "Cloud box" });
+  h.service.setServerLink(link);
+  await h.service.sendMessage({ conversationId: h.storage.current.id, content: "@held hello", targetParticipantIds: ["held"] });
+  await waitFor(() => link.ops.some((op) => op.kind === "turn.request" && op.participantId === held.id));
+});
+
 test("a Cloud run member's Full Access is refused once its machine turns out to run an older program", async () => {
   const own = { ...defaultChatAgentPermissions(), workspaceWrite: true, cliApprovals: true as const };
   const member = { ...chatParticipant("codex-cli"), id: "cloud-fa", handle: "cloudfa", cloudRun: {}, agentMode: "full-access" as const, permissions: own };

@@ -142,10 +142,13 @@ chat without a main session is always `classic`; its switch is disabled.
     one for Full Access, an eye for Read Only), the effort (a gauge); then
     the model loses its glyph and last its name shortens, never under six
     letters (`useComposerDensity`, measured before paint only when the
-    row's width or what the controls say changes: never on a render that
-    changes neither, such as one per streamed token; reading the controls'
-    size forces a layout of the whole window. Measured 2026-11-22 in the
-    app during a Sonnet 5.5 turn: 133 such reads before, none after). An
+    row's width or what the controls say changes, from the fullest form,
+    and when their own box narrows because something beside them took
+    width (a running turn's chip, the hint under a reply, a long folder
+    name), from where they are: never on a render that changes none of
+    these, such as one per streamed token; reading the controls' size
+    forces a layout of the whole window. Measured 2026-11-22 in the app
+    during a Sonnet 5.5 turn: 133 such reads before, none after). An
     icon's value is its tooltip, its accessible name and its
     menu; no control is ever a one-letter stub. Checked 2026-11-22 in the
     app with both panels open: at 1280×820 "Sonnet 5.5 · Medium · Manual"
@@ -218,13 +221,20 @@ chat without a main session is always `classic`; its switch is disabled.
     settings.json, agy's settings.json) is read again the next time a
     composer shows these (`cliConfigStamp`). A config the CLI's own picker
     has no entry for never starts the session wider than the CLI would run:
-    Codex's "Custom permissions" (an approval policy such as `untrusted`,
-    `never` or a granular one, Full Access's sandbox that asks, a sandbox or
-    reviewer the app does not know) starts in Read Only, Codex's narrowest
-    preset, and a read-only sandbox always does, whoever reviews its asks
-    (her config with `sandbox_mode = "read-only"` added: `config/read`
-    answers `approvals_reviewer: auto_review` beside it, and the session
-    started in Ask for approval before, 2026-11-22; `codexStartAccess`);
+    it starts in the closest mode that runs nothing without her yes that her
+    config would not run without it (asking her is never wider; a wider
+    sandbox, or Codex's own reviewer deciding for her, is). A read-only
+    sandbox always starts in Read Only, whoever reviews its asks (her config
+    with `sandbox_mode = "read-only"` added: `config/read` answers
+    `approvals_reviewer: auto_review` beside it, and the session started in
+    Ask for approval before, 2026-11-22). Codex's "Custom permissions":
+    `never` starts in Ask for approval (it asks her for what `never`
+    refuses); `on-failure` like `on-request` (Approve for me under Codex's
+    reviewer, else Ask for approval); Full Access's sandbox that asks starts
+    in the workspace sandbox the same way; `untrusted` (it asks before
+    commands Ask for approval runs), a granular policy, or a sandbox or
+    reviewer the app cannot read start in Read Only, Codex's narrowest
+    preset (`codexStartAccess`);
     Claude Code's Bypass Permissions, Don't Ask or a mode the app does not
     know start in Manual, which asks before anything her settings do not
     allow (Claude Code 2.1.330's `initialize` says `bypassPermissions` and
@@ -273,21 +283,34 @@ chat without a main session is always `classic`; its switch is disabled.
     while that machine is still to be set up with this computer's program),
     and the phone's New chat offers them only from a computer that runs them
     and for a machine whose program does (`HubNewChatOptions.cliModes`). A
-    member already in one of them there (moved to that machine, or a Cloud
-    run member whose machine turned out older) is never run as something
-    else: its turn is refused, as Fork to new chat, Restart and compaction
-    refuse an older program, with "<machine> runs an older program that
-    cannot run Full Access: Settings → Machines → Upgrade runtime, or choose
-    another mode." (or Plan mode; `cliModesTurnRefusal`) on its bubble, and
-    its menu and Plan mode's tooltip say the reason. The computer never asks
-    the server for that turn (the member is left out of the message's
-    `deliveryTargets`, `machineCliModesRefusal`); a phone's message naming
-    it, or a machine asking it, is refused by the server with the same line
+    Codex member already in one of them there (moved to that machine, or a
+    Cloud run member whose machine turned out older), judged as it runs (one
+    held to its main session's mode by that mode, `memberAsItRunsNow`), is
+    never run as something else: its turn is refused, as Fork to new chat,
+    Restart and compaction refuse an older program, with "<machine> runs an
+    older program that cannot run Full Access: Settings → Machines → Upgrade
+    runtime, or choose another mode." (or Plan mode; `cliModesTurnRefusal`)
+    on its bubble (a member's request to it fails with the line in its card;
+    no bubble is left waiting), and its menu and Plan mode's tooltip say the
+    reason. The computer never asks the server for that turn (the member is
+    left out of the message's `deliveryTargets`, `machineCliModesRefusal`;
+    a turn the server already held for it is stopped there); a phone's
+    message naming it is refused whole by the server with the same line
+    (the phone shows it under the message; the computer posts the message
+    and refuses that member alone), and a phone or machine asking it any
+    turn but a compaction, a restart or a move is refused too
     (`HubOps.cliModesRefusal`), by each machine's program as the computer
     last said it with her member rules (`HubMemberRules.machineCliModes`,
-    published again at each hello). A machine that never greeted the
-    computer is not held back: its program is the one the computer set it up
-    with. Settings from the classic controls are no
+    published again when a hello changes it; an entry in another shape is
+    left out). A machine that never greeted the computer is not held back:
+    its program is the one the computer set it up with. Not held back,
+    because the older program cannot be changed and nothing asks the server
+    for them: turns that machine starts itself (an answered card of its own
+    member, a request between its own members, auto-watch, its scheduled
+    scripts) and turns queued for it before the computer first said its
+    program; and Codex's Ask for approval and Read Only there take the
+    machine's own `approvals_reviewer` (the app names the User from this
+    version on), which the app's setup leaves unset. Settings from the classic controls are no
     mode: the mode control says "Custom", its menu says so, and a classic
     toggle (Read Files, Edit Files, Run Shell, Access Web) ends a mode
     chosen in its menu and Codex's Plan mode with it

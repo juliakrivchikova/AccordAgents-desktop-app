@@ -280,7 +280,7 @@ test("a stored mode a machine's older program would run otherwise refuses its tu
   assert.equal(modeNeedingCliModes({ kind: "codex-cli", agentMode: "full-access", permissions: own }), "Full Access");
   assert.equal(modeNeedingCliModes({ kind: "codex-cli", agentMode: "default", permissions: { ...own, codexPlanMode: true } }), "Plan mode");
   assert.equal(modeNeedingCliModes({ kind: "codex-cli", agentMode: "plan", permissions: own }), "Plan mode", "Codex's old Plan entry is Read Only with Plan mode");
-  assert.equal(modeNeedingCliModes({ kind: "claude-code", agentMode: "full-access", permissions: own }), "Auto", "another CLI's Auto, as its controls name it");
+  assert.equal(modeNeedingCliModes({ kind: "claude-code", agentMode: "full-access", permissions: own }), undefined, "another CLI runs Auto for it; an older program, Default: nothing wider");
   assert.equal(modeNeedingCliModes({ kind: "codex-cli", agentMode: "full-access", permissions: defaultChatAgentPermissions() }), "Full Access", "the classic controls' Full Access too");
   for (const option of chatAccessOptions("codex-cli").filter((item) => item.agentMode !== "full-access")) {
     const applied = applyChatAccessOption(option, own);
@@ -314,14 +314,21 @@ test("a new main session starts in the mode the User's own config starts its CLI
   assert.equal(codexStartAccess({ sandbox_mode: "read-only", approvals_reviewer: "guardian_subagent" }), "read-only");
   assert.equal(codexStartAccess({ sandbox_mode: "read-only", approval_policy: "never" }), "read-only");
   assert.equal(codexStartAccess({ sandbox_mode: "read-only", approval_policy: "untrusted" }), "read-only");
-  // Codex's "Custom permissions": no preset, so its narrowest, Read Only:
-  // never Ask for approval, which would run what her config does not.
-  assert.equal(codexStartAccess({ approval_policy: "untrusted" }), "read-only");
-  assert.equal(codexStartAccess({ approval_policy: "never" }), "read-only");
-  assert.equal(codexStartAccess({ approval_policy: "on-failure", approvals_reviewer: "auto_review" }), "read-only");
+  // Codex's "Custom permissions": the closest preset that runs nothing
+  // without her yes that her config would not (asking her is never wider).
+  assert.equal(codexStartAccess({ approval_policy: "never" }), "workspace-write", "never: it asks her for what never refuses");
+  assert.equal(codexStartAccess({ approval_policy: "never", approvals_reviewer: "auto_review" }), "workspace-write", "never Codex's reviewer, which would approve on its own");
+  assert.equal(codexStartAccess({ approval_policy: "on-failure" }), "workspace-write");
+  assert.equal(codexStartAccess({ approval_policy: "on-failure", approvals_reviewer: "auto_review" }), "auto-review");
+  assert.equal(codexStartAccess({ sandbox_mode: "danger-full-access" }), "workspace-write", "Full Access's sandbox that asks: the workspace sandbox");
+  assert.equal(codexStartAccess({ sandbox_mode: "danger-full-access", approvals_reviewer: "auto_review" }), "auto-review");
+  assert.equal(codexStartAccess({ approvals_reviewer: "someone_new" }), "workspace-write", "a reviewer Codex added later: she reviews instead");
+  // What Ask for approval would run without asking, or what the app cannot
+  // read: Read Only, Codex's narrowest preset.
+  assert.equal(codexStartAccess({ approval_policy: "untrusted" }), "read-only", "untrusted asks before commands Ask for approval runs");
+  assert.equal(codexStartAccess({ sandbox_mode: "danger-full-access", approval_policy: "untrusted" }), "read-only");
   assert.equal(codexStartAccess({ approval_policy: { granular: { sandbox_approval: true } } }), "read-only", "a granular policy");
-  assert.equal(codexStartAccess({ sandbox_mode: "danger-full-access" }), "read-only", "Full Access's sandbox that asks");
-  assert.equal(codexStartAccess({ approvals_reviewer: "someone_new" }), "read-only", "a reviewer Codex added later");
+  assert.equal(codexStartAccess({ approvals_reviewer: { custom: true } }), "read-only", "a reviewer that is not text");
   assert.equal(codexStartAccess({ sandbox_mode: "external-sandbox" }), "read-only", "a sandbox Codex added later");
   assert.equal(codexStartAccess({ sandbox_mode: 3 }), "read-only", "not text");
   assert.equal(startChatAccessOption("codex-cli", codexStartAccess({ sandbox_mode: "read-only", approvals_reviewer: "auto_review" })).label, "Read Only");

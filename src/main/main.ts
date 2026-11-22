@@ -3486,7 +3486,13 @@ void app.whenReady().then(async () => {
     machineLinkService.onHello(() => usageMilestones?.reach("first_cloud_machine"));
     // A machine's program said what it runs (an update, a first hello): the
     // server is told, unless nothing changed (an unchanged set is not sent).
-    machineLinkService.onHello(() => hubMemberRulesPublisher.publish(500));
+    let machinePrograms = "";
+    machineLinkService.onHello(() => {
+      const said = JSON.stringify(machineLinkService?.cliModesByMachine() ?? {});
+      if (said === machinePrograms) return;
+      machinePrograms = said;
+      hubMemberRulesPublisher.publish(500);
+    });
     machineLinkService.onMemberBackgroundTasks((event) => {
       if (event.member) {
         chatService.applyMachineBackgroundTasks(event.machineId, event.member);

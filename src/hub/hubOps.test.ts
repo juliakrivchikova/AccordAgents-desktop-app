@@ -1023,7 +1023,9 @@ test("a phone or a machine never asks a turn of a machine whose program would ru
   // Her computer has said nothing of the machine's program yet: nothing held back.
   assert.equal(status(await fromPhone("before", ["p-fa"])).status, "accepted");
   const rules = (runs: boolean) => ({ version: 1, roles: {}, presets: {}, machineCliModes: { "machine-1": runs } });
-  assert.equal((await h.call(h.owner, "PUT", "/v1/member-rules", { ...rules(false), machineCliModes: { "machine-1": "yes" } })).status, 400, "a program said in its own shape only");
+  // An entry in another shape is left out, never refusing her rules with it.
+  assert.equal((await h.call(h.owner, "PUT", "/v1/member-rules", { ...rules(false), machineCliModes: { "machine-1": "yes" } })).status, 200);
+  assert.equal(status(await fromPhone("odd", ["p-fa"])).status, "accepted", "nothing said of the machine in the right shape: not held back");
   assert.equal((await h.call(h.owner, "PUT", "/v1/member-rules", rules(false))).status, 200);
 
   const refused = status(await fromPhone("u-fa", ["p-fa", "p-desk"]));
@@ -1034,16 +1036,32 @@ test("a phone or a machine never asks a turn of a machine whose program would ru
   assert.match(plan.reason ?? "", /cannot run Plan mode/);
   const turnsFor = async () => (await h.call<{ turns: Array<{ participantId: string; messageId: string }> }>(h.machine, "GET", "/v3/turns")).body.turns
     .map((turn) => `${turn.messageId}:${turn.participantId}`);
-  assert.deepEqual(await turnsFor(), [`before:p-fa`], "nothing refused waits for the machine");
+  assert.deepEqual(await turnsFor(), [`before:p-fa`, `odd:p-fa`], "nothing refused waits for the machine");
   assert.equal(status(await fromPhone("u-ask", ["p-ask"])).status, "accepted", "a mode that program runs as its controls say");
 
   // A machine asking another member's turn, or its own, is held the same way.
   await h.write(h.machine, { opId: id("op"), kind: "message.create", conversationId: chat, message: reply("r-ask", "p-ask", "done", "@fa please check") });
-  const asked = status(await h.write(h.machine, { opId: id("op"), kind: "turn.request", conversationId: chat, runId: `turn-${id("x")}`, messageId: "r-ask", participantId: "p-fa", request: { kind: "turn" } }));
+  const ask = (device: Identity, participantId: string, request?: Record<string, unknown>) => h.write(device, { opId: id("op"), kind: "turn.request", conversationId: chat,
+    runId: `turn-${id("x")}`, messageId: "r-ask", participantId, ...(request ? { request } : {}) } as HubOp);
+  const asked = status(await ask(h.machine, "p-fa", { kind: "turn" }));
   assert.equal(asked.status, "rejected");
   assert.match(asked.reason ?? "", /cannot run Full Access/);
+  assert.equal(status(await ask(h.machine, "p-plan")).status, "rejected", "its own member, no kind said");
+  assert.equal(status(await ask(h.machine, "p-fa", { kind: "continuation" })).status, "rejected", "a kind the server does not know runs the member too");
+  assert.equal(status(await ask(h.phone, "p-fa", { kind: "turn" })).status, "rejected", "a phone's request");
+  assert.equal(status(await ask(h.phone, "p-fa", { kind: "compaction" })).status, "accepted", "a compaction runs no turn in its mode");
   // Her computer refuses its own (it knows each program first): never held here.
   assert.equal(status(await h.write(h.owner, { opId: id("op"), kind: "message.create", conversationId: chat, message: userMessage("u-owner", "hello", ["p-fa"]) })).status, "accepted");
+
+  // A member the main session made, held to a main session in Ask for
+  // approval: it runs as that, which the older program runs as it says.
+  const main = { id: "p-main", handle: "main", label: "Main", kind: "codex-cli", roleConfigId: "main-session", agentMode: "default", permissions: own };
+  const held = { ...fullAccess, id: "p-held", handle: "held", delegatedByParticipantId: "p-main" };
+  const sessions = id("chat");
+  await h.write(h.owner, { opId: id("op"), kind: "conversation.create", conversationId: sessions,
+    conversation: { title: "Sessions", kind: "chat", createdAt: new Date().toISOString(), metadata: { participants: [main, held], mainSessionParticipantId: "p-main" } } } as HubOp);
+  const heldSent = await h.write(h.phone, { opId: id("op"), kind: "message.create", conversationId: sessions, message: userMessage("u-held", "hello", ["p-held"]) });
+  assert.equal(status(heldSent).status, "accepted", "held below Full Access: not refused");
 
   // Updated: asked as before.
   assert.equal((await h.call(h.owner, "PUT", "/v1/member-rules", rules(true))).status, 200);

@@ -11,7 +11,8 @@ import type { HubDevice, HubMemberRules } from "../shared/hubProtocol";
 import { HUB_CARD_ANSWERED_FIRST } from "../shared/hubCards";
 import { TURN_FINISHED_NOTE_SOURCE, turnFinishedNoteOf } from "../shared/turnFinishedNoteSource";
 import { ACCORD_CLOSED_SOURCE, accordClosedLaunchId, recordClosedAccords } from "../shared/accordProgress";
-import { isChatViewMode, mainSessionMemberOf } from "../shared/mainSession";
+import { isChatViewMode, mainSessionMemberOf, mainSessionParticipantId } from "../shared/mainSession";
+import { memberAsItRunsNow } from "../shared/forkToNewChat";
 import {
   HUB_CHAT_PAGE_MESSAGES,
   HUB_FEED_PAGE_BYTES,
@@ -142,12 +143,16 @@ export class HubOps {
     const programs = (await this.memberRules())?.machineCliModes;
     if (!programs) return undefined;
     const members = Array.isArray(conversation.metadata?.participants) ? conversation.metadata.participants as ChatParticipant[] : [];
+    // A member the main session made runs held to the main session's mode,
+    // as on the computer (memberAsItRunsNow): judged as it runs.
+    const mainId = mainSessionParticipantId(conversation.metadata);
+    const mainSession = mainId ? members.find((item) => item?.id === mainId) : undefined;
     for (const participantId of participantIds) {
       const member = members.find((item) => item?.id === participantId);
       const machineId = member?.homeMachineId;
       if (!member || !machineId || typeof programs[machineId] !== "boolean") continue;
       const name = devices.find((item) => item.role === "machine" && item.machineId === machineId)?.name;
-      const refusal = cliModesTurnRefusal(member, { name, support: programs[machineId] ? "supported" : "outdated" });
+      const refusal = cliModesTurnRefusal(memberAsItRunsNow(member, mainSession), { name, support: programs[machineId] ? "supported" : "outdated" });
       if (refusal) return refusal;
     }
     return undefined;
@@ -524,7 +529,10 @@ export class HubOps {
       // A phone or a machine never asks a turn of a machine whose program
       // would run the member's mode otherwise than its controls say (the
       // computer refuses its own: it knows each machine's program first).
-      if ((device.role === "phone" || device.role === "machine") && (!op.request || op.request.kind === "turn")) {
+      // Any request that runs the member: all but a compaction, a restart and
+      // a move of its session (a kind the server does not know included).
+      const runsMember = op.request?.kind !== "compaction" && !isMemberRestartTurnRequest(op.request) && !isMemberSessionExportTurnRequest(op.request);
+      if ((device.role === "phone" || device.role === "machine") && runsMember) {
         const modes = await this.cliModesRefusal(conversation, [op.participantId], devices);
         if (modes) return reject(opId, modes);
       }

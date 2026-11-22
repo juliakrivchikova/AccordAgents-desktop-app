@@ -53,13 +53,18 @@ function codexSetting(value: unknown, fallback: string): string | undefined {
  * (workspace-write when unset), approval policy (on-request when unset) and
  * reviewer (the User when unset; `guardian_subagent` is the old name of
  * `auto_review`). Any other combination is Codex's "Custom permissions",
- * which no preset is: it starts in Read Only, Codex's narrowest preset
- * (read-only sandbox, the User approving each ask), so a session never
- * starts wider than her config runs Codex: a read-only sandbox stays
- * read-only whoever reviews its asks, and a combination the composer has no
- * entry for (an approval policy such as `untrusted` or `never`, Full
- * Access's sandbox that asks, a reviewer Codex added later) loses what it
- * would grant beyond that rather than gaining what Ask for approval grants.
+ * which no preset is: it starts in the closest preset that runs nothing
+ * without the User's yes that her config would not run without it, so a
+ * session never starts wider than her config runs Codex (asking her is
+ * never wider; a wider sandbox or Codex's own reviewer is):
+ * - a read-only sandbox, whoever reviews its asks: Read Only;
+ * - workspace-write, or Full Access's sandbox that asks, with `never`: Ask
+ *   for approval (in the workspace sandbox, asking her for what `never`
+ *   refuses); with `on-request` or `on-failure`: Approve for me under Codex's
+ *   reviewer, else Ask for approval;
+ * - `untrusted` (it asks before any command it does not trust, which Ask
+ *   for approval would run), or a policy, sandbox or reviewer the app does
+ *   not know: Read Only, Codex's narrowest preset.
  * None only when the config could not be read (the CLI's built-in default
  * then, docs/main-session.md).
  */
@@ -69,9 +74,14 @@ export function codexStartAccess(config: { sandbox_mode?: unknown; approval_poli
   const approval = codexSetting(config.approval_policy, "on-request");
   const reviewer = codexSetting(config.approvals_reviewer, "user");
   const autoReview = reviewer === "auto_review" || reviewer === "guardian_subagent";
+  if (sandbox !== "workspace-write" && sandbox !== "danger-full-access") return "read-only";
   if (sandbox === "danger-full-access" && approval === "never") return "full-access";
-  if (sandbox === "workspace-write" && approval === "on-request" && (autoReview || reviewer === "user")) {
-    return autoReview ? "auto-review" : "workspace-write";
+  if (approval === "never") return "workspace-write";
+  if (approval === "on-request" || approval === "on-failure") {
+    if (autoReview) return "auto-review";
+    // The User, or a reviewer Codex added later: Ask for approval names her,
+    // the narrowest reviewer. One that is not text says nothing.
+    return reviewer !== undefined ? "workspace-write" : "read-only";
   }
   return "read-only";
 }

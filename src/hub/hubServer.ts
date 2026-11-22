@@ -1020,13 +1020,13 @@ function validMemberRules(value: unknown): HubMemberRules {
       ...(entry.permissions !== undefined ? { permissions: entry.permissions as unknown as NonNullable<HubMemberRules["presets"][string]["permissions"]> } : {})
     };
   }
+  // Each machine's program as the computer knows it: advisory, so an entry
+  // in another shape is left out rather than refusing her rules with it.
   const machineCliModes: Record<string, boolean> = {};
   const machines = (value as { machineCliModes?: unknown } | undefined)?.machineCliModes;
-  if (machines !== undefined) {
-    if (!isRecord(machines) || Object.keys(machines).length > 500) throw new HubRequestError(400, "Invalid machine programs.");
-    for (const [machineId, runs] of Object.entries(machines)) {
-      if (!id(machineId) || typeof runs !== "boolean") throw new HubRequestError(400, "Invalid machine program.");
-      machineCliModes[machineId] = runs;
+  if (isRecord(machines)) {
+    for (const [machineId, runs] of Object.entries(machines).slice(0, 500)) {
+      if (id(machineId) && typeof runs === "boolean") machineCliModes[machineId] = runs;
     }
   }
   return { version: 1, roles, presets, ...(Object.keys(machineCliModes).length > 0 ? { machineCliModes } : {}) };

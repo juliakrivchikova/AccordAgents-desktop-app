@@ -35,9 +35,11 @@ const ROW_SELECTOR = ".chat-composer-toolbar, .new-chat-toolbar";
  * The density at which `ref`'s controls fit (they overflow their own box,
  * which shrinks with the row, when they do not). Measured before paint each
  * time the row's width or what the controls say (`contentKey`) changes:
- * from the fullest form, one step at a time. Nothing else measures: reading
- * the controls' size forces the browser to lay the page out, and the
- * composer renders again for every streamed token of a running turn.
+ * from the fullest form, one step at a time; and when their own box
+ * narrows (something beside them took width) and clips them: from where
+ * they are. Nothing else measures: reading the controls' size forces the
+ * browser to lay the page out, and the composer renders again for every
+ * streamed token of a running turn.
  */
 export function useComposerDensity(ref: RefObject<HTMLElement>, contentKey: string): number {
   const [density, setDensity] = useState(0);
@@ -81,7 +83,19 @@ export function useComposerDensity(ref: RefObject<HTMLElement>, contentKey: stri
       });
     });
     observer.observe(row);
-    return () => observer.disconnect();
+    // The controls' own box: it narrows, its row as wide as before, when
+    // something beside it takes width (a running turn's chip, the hint
+    // under a reply, a long folder name). Clipped then, one step more
+    // compact; never back to the fullest form from here, which would only
+    // narrow it again.
+    const own = new ResizeObserver(() => {
+      if (overflows(element)) flushSync(() => setMeasure((count) => count + 1));
+    });
+    own.observe(element);
+    return () => {
+      observer.disconnect();
+      own.disconnect();
+    };
   }, [ref]);
 
   return density;

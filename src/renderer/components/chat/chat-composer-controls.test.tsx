@@ -393,13 +393,21 @@ test("narrow controls step down one level at a time until they fit, and measure 
   // How wide the controls are at each level, and how wide their row lets them be.
   const contentAt = [300, 270, 240, 210, 180, 160, 140];
   let available = 400;
-  let observed: ((entries: Array<{ contentRect: { width: number } }>) => void) | undefined;
+  const watching = new Set<{ callback: (entries: Array<{ contentRect: { width: number } }>) => void; targets: Element[] }>();
+  // The row's observer (the toolbar) and the controls' own.
+  const observed = (entries: Array<{ contentRect: { width: number } }>): void => {
+    for (const item of watching) if (item.targets.some((target) => target.classList.contains("chat-composer-toolbar"))) item.callback(entries);
+  };
+  const ownObserved = (): void => {
+    for (const item of watching) if (item.targets.some((target) => !target.classList.contains("chat-composer-toolbar"))) item.callback([]);
+  };
   const globals = globalThis as unknown as { ResizeObserver?: unknown };
   const previousObserver = globals.ResizeObserver;
   globals.ResizeObserver = class {
-    constructor(callback: (entries: Array<{ contentRect: { width: number } }>) => void) { observed = callback; }
-    observe(): void { /* the row */ }
-    disconnect(): void { observed = undefined; }
+    private readonly item: { callback: (entries: Array<{ contentRect: { width: number } }>) => void; targets: Element[] };
+    constructor(callback: (entries: Array<{ contentRect: { width: number } }>) => void) { this.item = { callback, targets: [] }; watching.add(this.item); }
+    observe(target: Element): void { this.item.targets.push(target); }
+    disconnect(): void { watching.delete(this.item); }
   };
   const proto = HTMLDivElement.prototype as unknown as Record<string, unknown>;
   const scroll = Object.getOwnPropertyDescriptor(proto, "scrollWidth");
@@ -417,7 +425,7 @@ test("narrow controls step down one level at a time until they fit, and measure 
   const density = (): number => Number(host.querySelector("[data-density]")?.getAttribute("data-density"));
   const resize = async (width: number): Promise<void> => {
     available = width;
-    await act(async () => { observed?.([{ contentRect: { width } }]); });
+    await act(async () => { observed([{ contentRect: { width } }]); });
   };
   try {
     await act(async () => { root.render(<Probe content="a" />); });
@@ -447,13 +455,21 @@ test("a composer rendered again with nothing new for its controls (a streamed to
   const contentAt = [300, 270, 240, 210, 180, 160, 140];
   let available = 250;
   let reads = 0;
-  let observed: ((entries: Array<{ contentRect: { width: number } }>) => void) | undefined;
+  const watching = new Set<{ callback: (entries: Array<{ contentRect: { width: number } }>) => void; targets: Element[] }>();
+  // The row's observer (the toolbar) and the controls' own.
+  const observed = (entries: Array<{ contentRect: { width: number } }>): void => {
+    for (const item of watching) if (item.targets.some((target) => target.classList.contains("chat-composer-toolbar"))) item.callback(entries);
+  };
+  const ownObserved = (): void => {
+    for (const item of watching) if (item.targets.some((target) => !target.classList.contains("chat-composer-toolbar"))) item.callback([]);
+  };
   const globals = globalThis as unknown as { ResizeObserver?: unknown };
   const previousObserver = globals.ResizeObserver;
   globals.ResizeObserver = class {
-    constructor(callback: (entries: Array<{ contentRect: { width: number } }>) => void) { observed = callback; }
-    observe(): void { /* the row */ }
-    disconnect(): void { observed = undefined; }
+    private readonly item: { callback: (entries: Array<{ contentRect: { width: number } }>) => void; targets: Element[] };
+    constructor(callback: (entries: Array<{ contentRect: { width: number } }>) => void) { this.item = { callback, targets: [] }; watching.add(this.item); }
+    observe(target: Element): void { this.item.targets.push(target); }
+    disconnect(): void { watching.delete(this.item); }
   };
   const proto = HTMLDivElement.prototype as unknown as Record<string, unknown>;
   const scroll = Object.getOwnPropertyDescriptor(proto, "scrollWidth");
@@ -489,10 +505,19 @@ test("a composer rendered again with nothing new for its controls (a streamed to
     assert.equal(density(), 2, "new content fitted again");
     const beforeResize = reads;
     available = 400;
-    await act(async () => { observed?.([{ contentRect: { width: 400 } }]); });
-    await act(async () => { observed?.([{ contentRect: { width: 420 } }]); });
+    await act(async () => { observed([{ contentRect: { width: 400 } }]); });
+    await act(async () => { observed([{ contentRect: { width: 420 } }]); });
     assert.ok(reads > beforeResize, "a wider row is measured");
     assert.equal(density(), 0, "and fits every control by its name");
+    // Something beside the controls takes width (a running turn's chip): the
+    // row as wide as before, their own box narrower, clipping them.
+    available = 250;
+    await act(async () => { ownObserved(); });
+    assert.equal(density(), 2, "clipped by a neighbour: compact until they fit");
+    const fitted = reads;
+    await act(async () => { ownObserved(); });
+    assert.equal(reads, fitted + 1, "their box changing while they fit: one look, no step");
+    assert.equal(density(), 2);
   } finally {
     act(() => root.unmount());
     host.remove();

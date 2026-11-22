@@ -139,7 +139,11 @@ export function codexModesUnavailableReason(
 /** Whether a machine's program runs the CLIs' own modes as the menus set
  *  them (its last hello's `cliModesSupported`): "unknown" before it ever
  *  greeted this computer (a machine's program comes only from this
- *  computer, which set it up with its own). */
+ *  computer, which set it up with its own). A turn is refused only on an
+ *  "outdated" one (cliModesTurnRefusal); the menus offer Full Access and
+ *  Plan mode only on a "supported" one (codexModesUnavailableReason), so a
+ *  machine still to greet is offered neither but runs a member already in
+ *  one. */
 export type CliModesMachineSupport = "supported" | "outdated" | "unknown";
 
 export function cliModesSupportFromHello(hello: { cliModesSupported?: boolean } | undefined): CliModesMachineSupport {
@@ -150,10 +154,14 @@ export function cliModesSupportFromHello(hello: { cliModesSupported?: boolean } 
 /** The mode, as its controls name it, that a machine program from before
  *  the CLIs' own modes would run otherwise than they say: Codex's Full
  *  Access (its `agentMode` reads as Default there: Ask for approval or Read
- *  Only, and another CLI's Auto as Manual or Default) and Codex's Plan mode
- *  (dropped: it would run Default, editing). None when such a program runs
- *  the member as its controls say. */
+ *  Only) and Codex's Plan mode (dropped: it would run Default, editing).
+ *  None when such a program runs the member as its controls say. Pass the
+ *  member as it runs now (memberAsItRunsNow): one held to its main session's
+ *  mode is judged by that. Another CLI never has Full Access (it stores and
+ *  runs Auto, chatAgentModeForKind); one stored so anyway reads as Default
+ *  there, which runs nothing wider. */
 export function modeNeedingCliModes(member: { kind: ChatProviderKind; agentMode?: ChatAgentMode; permissions?: ChatAgentPermissions }): string | undefined {
+  if (member.kind !== "codex-cli") return undefined;
   if (normalizeChatAgentMode(member.agentMode) === "full-access") {
     return selectedChatAccessOption(member.kind, member.agentMode, member.permissions)?.label ?? "Full Access";
   }
