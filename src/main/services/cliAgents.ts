@@ -35,7 +35,7 @@ import type {
   ProviderModelCatalog
 } from "../../shared/types";
 import { chatAgentModeForKind, effectiveChatAgentPermissionsForProvider, normalizeChatAgentMode, normalizeChatAgentPermissions } from "../../shared/agentPermissions";
-import { codexPlanModeOn, withCodexPlanMode } from "../../shared/chatAccessModes";
+import { applyChatAccessOptionById, codexPlanModeOn, withCodexPlanMode } from "../../shared/chatAccessModes";
 import { antigravityStartAccessFromText, claudeStartAccess, codexStartAccess, modelNameWithoutId, type CliStartDefaults, type CliStartDefaultsByKind } from "../../shared/cliStartDefaults";
 import { buildAgentContextUsage, contextWindowForModel } from "../../shared/agentContext";
 import { agentEnvironmentKeyValidationError, filterAllowedAgentEnvironment } from "../../shared/agentEnvironment";
@@ -972,12 +972,33 @@ interface CodexAppServerTurnStartResult {
 
 export type ClaudePermissionMode = "default" | "plan" | "acceptEdits" | "auto";
 
-function isClaudePermissionMode(value: string): value is ClaudePermissionMode {
+/** A control request the member's live Claude Code process did not carry
+ *  out: it refused it (`code`: Claude Code 2.1.330's reason, such as
+ *  `auto_mode_unavailable`), or did not answer in time. */
+export class ClaudeControlError extends Error {
+  readonly code?: string;
+  readonly timedOut: boolean;
+  constructor(message: string, options: { code?: string; timedOut?: boolean } = {}) {
+    super(message);
+    this.name = "ClaudeControlError";
+    this.code = options.code || undefined;
+    this.timedOut = options.timedOut === true;
+  }
+}
+
+/** Claude Code 2.1.330's reasons for refusing a switch to auto mode (its
+ *  `set_permission_mode` error codes): the account, its settings or the
+ *  model do not allow it now, which a new process does not change. */
+export function isClaudeAutoModeRefusal(code: string | undefined): boolean {
+  return typeof code === "string" && code.startsWith("auto_mode_");
+}
+
+export function isClaudePermissionMode(value: string): value is ClaudePermissionMode {
   return value === "default" || value === "plan" || value === "acceptEdits" || value === "auto";
 }
 
 /** Each mode as Claude Code names it (src/shared/chatAccessModes.ts). */
-const CLAUDE_PERMISSION_MODE_LABELS: Record<ClaudePermissionMode, string> = {
+export const CLAUDE_PERMISSION_MODE_LABELS: Readonly<Record<ClaudePermissionMode, string>> = {
   default: "Manual",
   acceptEdits: "Accept edits",
   plan: "Plan",
@@ -6615,29 +6636,44 @@ export class CliAgentRunner {
     if ("error" in acquired) {
       return this.failed(participant, acquired.error);
     }
-    const { entry, fresh: freshProcess } = acquired;
-
-    const claudeEntry = entry;
-    claudeEntry.idleTimeoutMs = warm.idleTimeoutMs;
-    // Whether the CLI took this message into a step: a fork's process that
-    // ended before it did never made the copy (forkCopyFailed below).
-    let replyStarted = false;
     // Messages are not serialized here: the CLI queues them itself and hands a
     // message sent mid-step to the running step, as the dedicated CLI does.
-    return this.trackWarmRun(claudeEntry, async () => {
+    const admit = (claudeEntry: WarmAgentEntry, freshProcess: boolean, replaced: boolean): Promise<ParticipantRunResult> => this.trackWarmRun(claudeEntry, async () => {
+      claudeEntry.idleTimeoutMs = warm.idleTimeoutMs;
       this.clearWarmIdleTimer(claudeEntry);
       if (this.claudeOwnMode(kind, options)) {
-        const notSwitched = await this.alignClaudePermissionMode(claudeEntry, warm.permissionMode?.() ?? this.claudePermissionMode(kind, options), participant, warm, signal);
+        const wanted = warm.permissionMode?.() ?? this.claudePermissionMode(kind, options);
+        // A process started for this message after one that did not switch
+        // is asked once more, which says whether it really runs in the mode
+        // (an account without auto mode refuses it).
+        const notSwitched = await this.alignClaudePermissionMode(claudeEntry, wanted, participant, warm, signal, replaced);
         if (notSwitched) {
+          if (signal?.aborted) {
+            this.scheduleWarmIdleTimerIfLive(claudeEntry, warm.idleTimeoutMs);
+            return this.failed(participant, notSwitched.error);
+          }
+          if (notSwitched.replaceable && !replaced) {
+            // Nothing runs in it: a process started in the member's mode
+            // takes the message instead, as the CLI started again in it.
+            this.warmAgents.delete(key);
+            await this.closeWarmAgent(claudeEntry, "mode-not-switched");
+            const again = await this.acquireClaudeMemberProcess(participant, repoPath, kind, this.withClaudePermissionMode(options, wanted), warm, signal,
+              "starting it again in its mode", options.onOutput);
+            if ("error" in again) return this.failed(participant, again.error);
+            return admit(again.entry, again.fresh, true);
+          }
           if (claudeEntry.unusable) {
             this.warmAgents.delete(key);
             await this.closeWarmAgent(claudeEntry, "unusable");
-          } else if (!claudeEntry.closed && claudeEntry.process.exitCode === null) {
-            this.scheduleWarmIdleTimer(claudeEntry, warm.idleTimeoutMs);
+          } else {
+            this.scheduleWarmIdleTimerIfLive(claudeEntry, warm.idleTimeoutMs);
           }
-          return signal?.aborted ? this.failed(participant, notSwitched) : { ...this.failed(participant, notSwitched), content: notSwitched.message };
+          return { ...this.failed(participant, notSwitched.error), content: notSwitched.error.message };
         }
       }
+      // Whether the CLI took this message into a step: a fork's process that
+      // ended before it did never made the copy (forkCopyFailed below).
+      let replyStarted = false;
       try {
         const result = this.withAppMcpClientStatus(
           await claudeEntry.run(prompt, signal, options.onOutput, options.onSessionId, options.timeoutMs, undefined, undefined, {
@@ -6707,6 +6743,21 @@ export class CliAgentRunner {
           : this.failed(participant, error);
       }
     });
+    return admit(acquired.entry, acquired.fresh, false);
+  }
+
+  private scheduleWarmIdleTimerIfLive(entry: WarmAgentEntry, idleTimeoutMs: number): void {
+    if (!entry.closed && entry.process.exitCode === null) {
+      this.scheduleWarmIdleTimer(entry, idleTimeoutMs);
+    }
+  }
+
+  /** The run's options with Claude Code's mode set to `mode` (its file-edit
+   *  right telling Manual from Accept edits): in its own modes only
+   *  `--permission-mode` depends on it. */
+  private withClaudePermissionMode(options: CliAgentRunOptions, mode: ClaudePermissionMode): CliAgentRunOptions {
+    const access = applyChatAccessOptionById("claude-code", mode, options.permissions);
+    return { ...options, agentMode: access.agentMode, permissions: access.permissions };
   }
 
   /**
@@ -6715,49 +6766,71 @@ export class CliAgentRunner {
    * message of a member in its CLI's own mode goes into its live process, the
    * process is switched to the member's mode (`set_permission_mode`), and the
    * message waits for the CLI's answer: a mode changed between turns keeps
-   * the process and its background work, as in the CLI. Undefined when the
-   * process is in that mode; otherwise the turn does not run in another mode:
-   * the error says why. A process that did not switch is replaced at the next
-   * message when nothing runs in it.
+   * the process and its background work, as in the CLI. `confirm` asks even
+   * when the process should be in it already. Undefined when it runs in the
+   * mode; otherwise the turn does not run in another mode, and the error says
+   * why in the CLI's terms. `replaceable`: nothing runs in the process and a
+   * new one may get the mode (it did not answer, or it refused for a reason
+   * a new process does not have); the process is retired then.
    */
   private async alignClaudePermissionMode(
     entry: WarmAgentEntry,
     wanted: ClaudePermissionMode,
     participant: ParticipantConfig,
     warm: CliAgentWarmOptions,
-    signal: AbortSignal | undefined
-  ): Promise<Error | undefined> {
+    signal: AbortSignal | undefined,
+    confirm = false
+  ): Promise<{ error: Error; replaceable: boolean } | undefined> {
     const current = entry.permissionMode?.();
-    if (current === wanted || !entry.control) {
+    if ((current === wanted && !confirm) || !entry.control) {
       return undefined;
     }
+    const label = CLAUDE_PERMISSION_MODE_LABELS[wanted];
+    const audit = { participantId: participant.id, conversationId: warm.conversationId, from: current ?? null, to: wanted };
+    let reported: string | undefined;
     try {
-      await entry.control({ subtype: "set_permission_mode", mode: wanted }, CLAUDE_PERMISSION_MODE_TIMEOUT_MS, signal);
-      void this.writeDebugLog("cli.claude.permission-mode-aligned", {
-        participantId: participant.id,
-        conversationId: warm.conversationId,
-        from: current ?? null,
-        to: wanted
-      });
-      return undefined;
+      const answer = await entry.control({ subtype: "set_permission_mode", mode: wanted }, CLAUDE_PERMISSION_MODE_TIMEOUT_MS, signal);
+      reported = this.stringField(answer, "mode") ?? entry.permissionMode?.();
     } catch (error) {
       if (signal?.aborted) {
-        return new Error(CLAUDE_WARM_CANCELLED_MESSAGE);
+        return { error: new Error(CLAUDE_WARM_CANCELLED_MESSAGE), replaceable: false };
       }
-      const reason = this.errorText(error);
-      if (entry.isIdle?.() === true) {
-        entry.unusable = true;
+      const reason = this.errorText(error).replace(/[.\s]+$/, "");
+      const code = error instanceof ClaudeControlError ? error.code : undefined;
+      const autoRefused = wanted === "auto" && isClaudeAutoModeRefusal(code);
+      const idle = entry.isIdle?.() === true;
+      // A refusal the account or its settings make (auto mode) comes from a
+      // new process too; a hung or ended process may start again in the mode.
+      const replaceable = idle && !autoRefused && code !== "invalid_mode";
+      if (replaceable) entry.unusable = true;
+      void this.writeDebugLog("cli.claude.permission-mode-align-failed", { ...audit, code: code ?? null, replaceable, message: reason });
+      const name = participant.label;
+      if (autoRefused) {
+        return { error: new Error(`Claude Code's auto mode is not available for ${name} (${reason}), so the message was not sent. Choose another mode for ${name}.`), replaceable: false };
       }
-      void this.writeDebugLog("cli.claude.permission-mode-align-failed", {
-        participantId: participant.id,
-        conversationId: warm.conversationId,
-        from: current ?? null,
-        to: wanted,
-        replaced: entry.unusable === true,
-        message: reason
-      });
-      return new Error(`Claude Code did not switch ${participant.label} to ${CLAUDE_PERMISSION_MODE_LABELS[wanted]} (${reason.replace(/[.\s]+$/, "")}), so the message was not sent. Send it again.`);
+      if (error instanceof ClaudeControlError && error.timedOut) {
+        return {
+          error: new Error(idle
+            ? `Claude Code did not answer when asked to switch ${name} to ${label}, so the message was not sent. Send it again.`
+            : `Claude Code did not answer when asked to switch ${name} to ${label} while its background tasks run, so the message was not sent. Send it again when they have finished, or stop them.`),
+          replaceable
+        };
+      }
+      return {
+        error: new Error(idle
+          ? `Claude Code did not switch ${name} to ${label} (${reason}), so the message was not sent. Send it again.`
+          : `Claude Code did not switch ${name} to ${label} while its background tasks run (${reason}), so the message was not sent. Send it again when they have finished, or stop them.`),
+        replaceable
+      };
     }
+    if (reported !== undefined && reported !== wanted) {
+      // The CLI says it runs another mode: the message is not sent in it.
+      void this.writeDebugLog("cli.claude.permission-mode-align-failed", { ...audit, reported, replaceable: false });
+      const other = isClaudePermissionMode(reported) ? CLAUDE_PERMISSION_MODE_LABELS[reported] : reported;
+      return { error: new Error(`Claude Code switched ${participant.label} to ${other} instead of ${label}, so the message was not sent.`), replaceable: false };
+    }
+    void this.writeDebugLog("cli.claude.permission-mode-aligned", audit);
+    return undefined;
   }
 
   /**
@@ -7248,9 +7321,9 @@ export class CliAgentRunner {
             signal?.addEventListener("abort", onAbort, { once: true });
           });
           if (signal?.aborted) throw new Error(CLAUDE_WARM_CANCELLED_MESSAGE);
-          if (!response) throw new Error(`Claude Code did not answer ${String(request.subtype)} in time.`);
+          if (!response) throw new ClaudeControlError(`Claude Code did not answer ${String(request.subtype)} in time.`, { timedOut: true });
           if (this.stringField(response, "subtype") !== "success") {
-            throw new Error(this.stringField(response, "error") || `Claude Code refused ${String(request.subtype)}.`);
+            throw new ClaudeControlError(this.stringField(response, "error") || `Claude Code refused ${String(request.subtype)}.`, { code: this.stringField(response, "code") });
           }
           const answer = this.asRecord(response.response) ?? {};
           if (requestedMode) {
@@ -8499,6 +8572,17 @@ export class CliAgentRunner {
       .some((entry) => entry.scopeKey === scopeKey && !entry.closed && entry.autoModeSeen?.() === true);
   }
 
+  /** The permission mode the member's live Claude Code process is in (the one
+   *  memberClaudeControl talks to), as far as the app knows; undefined with
+   *  none live here. */
+  memberClaudePermissionMode(conversationId: string, participantId: string): ClaudePermissionMode | undefined {
+    const scopeKey = this.warmAgentScopeKey({ conversationId, participantId, contextKey: "", idleTimeoutMs: 0 });
+    const live = Array.from(this.warmAgents.values())
+      .filter((entry) => entry.scopeKey === scopeKey && !entry.closed && entry.process.exitCode === null && entry.control);
+    const mode = (live.find((item) => item.isReplyIdle?.() === false) ?? live[0])?.permissionMode?.();
+    return mode && isClaudePermissionMode(mode) ? mode : undefined;
+  }
+
   async memberClaudeControl(
     conversationId: string,
     participantId: string,
@@ -9666,7 +9750,14 @@ export class CliAgentRunner {
           if (rule.action === "deny") {
             disallowedTools.push(toolRule);
           } else if (rule.action === "allow") {
-            allowedTools.push(toolRule);
+            // Claude Code's own modes: not a CLI rule. Claude Code 2.1.330
+            // matches a Bash(...) rule inside the Bash tool's own check, so a
+            // matching command would run in its Plan mode too (its plan-mode
+            // refusal only covers checks that pass through), and the process
+            // may be switched into Plan mid-reply. The command is asked and
+            // the app answers it from the rule outside Plan
+            // (ChatService.storedShellRuleAllows).
+            if (!asksForUngranted) allowedTools.push(toolRule);
           } else {
             askTools.push(toolRule);
           }
@@ -9683,13 +9774,22 @@ export class CliAgentRunner {
       disallowedTools.push("Bash");
     }
     for (const toolRule of providerNativeAllowedTools) {
+      // A command rule is the shell's (above); edits and every other tool
+      // stay CLI rules, which Claude Code's Plan mode refuses before them.
+      if (asksForUngranted && this.isClaudeBashCommandRule(toolRule)) continue;
       allowedTools.push(toolRule);
       const toolName = this.claudeToolNameFromAllowedTool(toolRule);
       if (toolName) {
         tools.add(toolName);
       }
     }
+    // Claude Code's own modes: only the app tools pre-authorized for its Auto
+    // (app_chat_export_attachment, which writes into the project, is left to
+    // the CLI there), in every mode, since the process is the same in all;
+    // in Manual the rest is asked through the cards.
+    const autoPreauthorizedAppTools = new Set(options.appMcp?.autoPreauthorizedToolNames ?? []);
     for (const toolName of options.appMcp?.toolNames ?? []) {
+      if (asksForUngranted && (toolName === APP_TOOL_PERMISSION_TOOL || !autoPreauthorizedAppTools.has(toolName))) continue;
       allowedTools.push(`mcp__accord_agents__${toolName}`);
     }
     // Claude's native Skill tool is read-only skill discovery/loading. It must be present even
@@ -9731,6 +9831,11 @@ export class CliAgentRunner {
     }
     const parenIndex = trimmed.indexOf("(");
     return parenIndex > 0 ? trimmed.slice(0, parenIndex) : trimmed;
+  }
+
+  /** A provider-native allow rule for particular commands (`Bash(...)`). */
+  private isClaudeBashCommandRule(toolRule: string): boolean {
+    return /^Bash\s*\(/.test(toolRule.trim());
   }
 
   private claudeBashPermissionRule(rule: ChatShellPermissionRule): string {

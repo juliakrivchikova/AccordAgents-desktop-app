@@ -55,6 +55,7 @@ import type {
   ReviewProgress,
   AppSettings,
   ChatAgentActivityEvent,
+  ChatAgentPermissions,
   ChatAppToolApproval,
   ChatAppToolApprovalPolicy,
   ChatBehaviorRuleConfig,
@@ -1877,14 +1878,19 @@ function liveClaudeProcess(service: ChatService) {
   const process = {
     live: true,
     refuse: undefined as string | undefined,
+    /** The CLI switches to this mode instead of the one asked. */
+    answer: undefined as string | undefined,
+    mode: "default",
     sent: [] as Array<Record<string, unknown>>
   };
   (service as any).cliRunner.memberClaudeControl = async (_conversationId: string, _participantId: string, request: Record<string, unknown>) => {
     if (!process.live) return undefined;
     process.sent.push(request);
     if (process.refuse) throw new Error(process.refuse);
-    return { mode: request.mode };
+    process.mode = process.answer ?? String(request.mode);
+    return { mode: process.mode };
   };
+  (service as any).cliRunner.memberClaudePermissionMode = () => process.live ? process.mode : undefined;
   return process;
 }
 
@@ -1941,15 +1947,138 @@ test("Claude Code's own modes: a mode change keeps the member's live process, is
   assert.notEqual(web.warm.contextKey, manual.warm.contextKey);
 
   // No live process: nothing set (its next turn starts in the saved mode).
-  // Not switched: the saved mode stays and nothing alarming is said.
   process.live = false;
+  const sentBefore = process.sent.length;
   await service.updateParticipantRuntime({ conversationId: conversation.id, participantId: drew.id, agentMode: "plan" });
+  await flushMicrotasks();
+  assert.equal(process.sent.length, sentBefore);
+  assert.equal(storage.current.metadata.warnings?.length ?? 0, 0, "nothing to say");
+  // Not switched: the chat says so in the CLI's words, and the member's mode
+  // is the one its CLI still runs (its menu shows that).
   process.live = true;
+  process.mode = "acceptEdits";
   process.refuse = "Claude Code refused set_permission_mode.";
   await service.updateParticipantRuntime({ conversationId: conversation.id, participantId: drew.id, agentMode: "auto" });
-  await waitFor(() => debugEvents.some((entry) => entry.event === "chat.member-mode.apply-failed"));
-  assert.equal((storage.current.metadata.participants as ChatParticipant[])[0].agentMode, "auto");
-  assert.equal(storage.current.metadata.warnings?.length ?? 0, 0);
+  const refusedLine = "Claude Code did not switch @drew to Auto: Claude Code refused set_permission_mode. @drew stays in Accept edits.";
+  await waitFor(() => (storage.current.metadata.warnings ?? []).includes(refusedLine));
+  assert.ok(storage.current.messages.some((message: ChatMessage) => message.role === "system" && message.content === refusedLine), "a line every device has");
+  await waitFor(() => {
+    const member = (storage.current.metadata.participants as ChatParticipant[])[0];
+    return member.agentMode === "default" && normalizeChatAgentPermissions(member.permissions).workspaceWrite === true;
+  });
+  // The CLI switched to another mode: said, and followed.
+  process.refuse = undefined;
+  process.answer = "plan";
+  await service.updateParticipantRuntime({ conversationId: conversation.id, participantId: drew.id, agentMode: "default", permissions: own });
+  await waitFor(() => (storage.current.metadata.warnings ?? []).includes("Claude Code switched @drew to Plan instead of Manual."));
+  await waitFor(() => (storage.current.metadata.participants as ChatParticipant[])[0].agentMode === "plan");
+  assert.ok(debugEvents.some((entry) => entry.event === "chat.member-mode.apply-failed"));
+});
+
+function fakeAppMcp() {
+  const grants: any[] = [];
+  return {
+    grants,
+    issueToken(grant: any) { grants.push(grant); return { url: "http://127.0.0.1:1/mcp", token: `token-${grants.length}` }; },
+    updateToken(token: string, grant: any) { grants.push(grant); return { url: "http://127.0.0.1:1/mcp", token }; },
+    clientStatus() { return undefined; }
+  };
+}
+
+function ownModeClaude(patch: Partial<ChatAgentPermissions> = {}): ChatParticipant {
+  return { ...chatParticipant("claude-code"), permissions: { ...normalizeChatAgentPermissions({ ...defaultChatAgentPermissions(), repoRead: true, ...patch }), cliApprovals: true as const } };
+}
+
+test("Claude Code's own modes: the app tool grant issued as the CLI takes a message goes by a mode she picked after the turn read the member", async () => {
+  const drew = ownModeClaude();
+  const conversation = chatConversation([drew]);
+  const appMcp = fakeAppMcp();
+  let service!: ChatService;
+  let turns = 0;
+  const built = testService({
+    conversation,
+    appMcp: appMcp as never,
+    run: async (runParticipant, _prompt, _repoPath, _diffMode, _kind, _signal, options) => {
+      turns += 1;
+      if (turns === 2) {
+        // She picks Auto while the message waits for the CLI to take it.
+        await service.updateParticipantRuntime({ conversationId: conversation.id, participantId: drew.id, agentMode: "auto" });
+        options.warm.onReplyStarted?.();
+      }
+      return { participant: runParticipant, ok: true, content: "ok", durationMs: 1, sessionId: "session-drew" };
+    }
+  });
+  service = built.service;
+  (service as any).ensureHistoryFiles = async () => built.tempRoot;
+  liveClaudeProcess(service);
+  await service.sendMessage({ conversationId: conversation.id, runId: "run-1", content: "@drew one" });
+  await waitFor(() => turns === 1 && appMcp.grants.length > 0);
+  assert.equal(appMcp.grants.at(-1).agentMode, "default");
+  await service.sendMessage({ conversationId: conversation.id, runId: "run-2", content: "@drew two" });
+  const firstRun = appMcp.grants[0].runId;
+  await waitFor(() => turns === 2 && appMcp.grants.at(-1)?.runId !== firstRun);
+  assert.equal(appMcp.grants.some((grant) => grant.runId === firstRun && grant.agentMode === "auto"), true, "her pick reached the live grant at once");
+  const grant = appMcp.grants.at(-1);
+  assert.equal(grant.agentMode, "auto", "not the Manual the turn read");
+  assert.equal(normalizeChatAgentPermissions(grant.runPermissions).workspaceWrite, true, "Auto's rights");
+});
+
+test("Claude Code's own modes: after a turn that ran in Accept edits by a once-only grant, the member's live process goes back to its own mode", async () => {
+  const drew = ownModeClaude();
+  const approval = permissionApproval(drew, { kind: "portable", permissions: ["workspaceWrite"] }, { status: "approved", approvalScope: "once" });
+  const conversation = chatConversation([drew], { pendingAppToolApprovals: [approval] });
+  let process!: ReturnType<typeof liveClaudeProcess>;
+  const runs: any[] = [];
+  const { service, tempRoot } = testService({
+    conversation,
+    run: async (runParticipant, _prompt, _repoPath, _diffMode, _kind, _signal, options) => {
+      runs.push(options);
+      // The runner switched the process before the message (alignment).
+      process.mode = options.warm.permissionMode?.() ?? "default";
+      return { participant: runParticipant, ok: true, content: "ok", durationMs: 1, sessionId: "session-drew" };
+    }
+  });
+  (service as any).ensureHistoryFiles = async () => tempRoot;
+  process = liveClaudeProcess(service);
+  await service.sendMessage({ conversationId: conversation.id, runId: "run-once", content: "@drew edit it" });
+  await waitFor(() => runs.length === 1);
+  assert.equal(runs[0].warm.permissionMode(), "acceptEdits", "the once-only grant: Accept edits for this turn");
+  await waitFor(() => process.sent.some((request) => request.mode === "default"));
+  assert.equal(process.mode, "default", "back in Manual for what it does on its own afterwards");
+});
+
+test("Claude Code's own modes: a command a stored shell rule allows is answered by the app outside Plan, never in part, and asked in Plan", async () => {
+  const drew = ownModeClaude({ shell: { enabled: true, rules: [{ action: "allow", match: "prefix", pattern: "git status" }, { action: "deny", match: "prefix", pattern: "git status --danger" }] } });
+  const conversation = chatConversation([drew]);
+  const { service, storage } = testService({ conversation });
+  const actor = (agentMode: string) => ({
+    conversationId: conversation.id, participantId: drew.id, roleConfigId: drew.roleConfigId, roleConfigVersion: 0,
+    capabilities: ["permissions.request" as const], runId: "run-shell", triggerMessageId: "user-message", agentMode
+  });
+  const ask = (agentMode: string, command: string, id: string) =>
+    service.requestToolPermissionFromTool(actor(agentMode) as never, { tool_name: "Bash", input: { command }, tool_use_id: id });
+  assert.equal((await ask("default", "git status --short", "t1")).behavior, "allow", "the rule's command, in Manual");
+  assert.equal((await ask("auto", "git status", "t2")).behavior, "allow", "and in Auto");
+  for (const [agentMode, command, id] of [["plan", "git status", "t3"], ["default", "git status && rm -rf /", "t4"], ["default", "git status --danger now", "t5"], ["default", "git statusx", "t6"]]) {
+    const pending = ask(agentMode, command, id);
+    await waitFor(() => ((storage.current.metadata.pendingAppToolApprovals ?? []) as ChatAppToolApproval[]).some((approval) => approval.status === "pending"));
+    const card = ((storage.current.metadata.pendingAppToolApprovals ?? []) as ChatAppToolApproval[]).find((approval) => approval.status === "pending")!;
+    await service.respondToAppToolApproval({ conversationId: conversation.id, approvalId: card.id, approve: false });
+    assert.equal((await pending).behavior, "deny", `${command} in ${agentMode}: asked`);
+  }
+});
+
+test("Claude Code's own modes: the app tool policy given once for the CLI session does not depend on the mode", () => {
+  const { service } = testService({ conversation: chatConversation([ownModeClaude()]), appMcp: fakeAppMcp() as never });
+  const policy = (agentMode: string, cliApprovals: boolean) => (service as any).appToolPromptPolicy({
+    participantId: "claude-participant", sessionId: "s", roleConfigId: ROLE.id, roleConfigVersion: 1, roleLabel: ROLE.label, roleInstructions: ROLE.instructions,
+    updatedAt: NOW, participantKind: "claude-code", participantAgentMode: agentMode,
+    participantPermissions: { ...defaultChatAgentPermissions(), ...(cliApprovals ? { cliApprovals: true } : {}) },
+    roleAppToolCapabilities: ["permissions.request"]
+  }) as string;
+  assert.equal(policy("auto", true), policy("default", true));
+  assert.equal(policy("plan", true), policy("default", true));
+  assert.notEqual(policy("auto", false), policy("default", false), "a classic member's Auto says its own");
 });
 
 test("a classic Claude Code member's mode is its process's: a new one, and nothing set in a live one", async () => {

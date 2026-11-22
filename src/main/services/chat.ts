@@ -286,7 +286,7 @@ import {
 } from "../../shared/chatDeliveryPolicy";
 import { isDeviceEventBlobReference, type DeviceEventBlobReference } from "../../shared/deviceEventBlobs";
 import { CHAT_PROMPT_SUGGESTION_LOCAL_SOURCE, ChatPromptSuggestionStore, type ChatMemberPromptSuggestion } from "./chatPromptSuggestions";
-import { CLAUDE_PERMISSION_MODE_TIMEOUT_MS, CliAgentRunner, claudeCodePermissionMode, COMPACTION_CANCELLED_BEFORE_START, forkCopyNotMade, isForkSourceMissingError, type ClaudePermissionMode, type CliAgentBackgroundTask, type CliAgentCodexServerRequest, type CliAgentCompactResult, type CliAgentOutputEvent, type CliAgentReplyOrigin, type CliAgentRoleOptions, type CliAgentRunOptions, type CliAgentSelfResumedTurn } from "./cliAgents";
+import { CLAUDE_PERMISSION_MODE_LABELS, CLAUDE_PERMISSION_MODE_TIMEOUT_MS, CliAgentRunner, claudeCodePermissionMode, isClaudePermissionMode, COMPACTION_CANCELLED_BEFORE_START, forkCopyNotMade, isForkSourceMissingError, type ClaudePermissionMode, type CliAgentBackgroundTask, type CliAgentCodexServerRequest, type CliAgentCompactResult, type CliAgentOutputEvent, type CliAgentReplyOrigin, type CliAgentRoleOptions, type CliAgentRunOptions, type CliAgentSelfResumedTurn } from "./cliAgents";
 import { cloudRunWorkerTargetFromSettings, normalizeCloudRunWorkerSettings } from "./cloudRunWorkers";
 import { emitCodexLiveOutput } from "./codexExec";
 import {
@@ -4904,6 +4904,16 @@ export class ChatService {
         const policy = prepared.request.agentMode === "auto" || prepared.request.planApproval
           ? undefined
           : this.toolPermissionPolicyFor(conversation, requester, prepared.request.toolName, prepared.toolInput);
+        // Claude Code's own modes: a command a stored shell rule allows is not
+        // a CLI rule there (Plan would not refuse it), so it is asked and
+        // answered here, outside Plan, as the rule did in the CLI.
+        if (!policy && !prepared.request.planApproval && this.storedShellRuleAllows(conversation, requester, agentMode, prepared.request.toolName, prepared.toolInput)) {
+          return {
+            prepared,
+            route: "policy",
+            decision: { approve: true, scope: "once", source: "policy" }
+          };
+        }
         if (policy) {
           return {
             prepared,
@@ -11106,12 +11116,30 @@ export class ChatService {
     // tools act for, so it moves to this run only when the CLI hands this
     // message to a step; until then the earlier work keeps acting for itself.
     const memberKey = `${conversation.id}:${participant.id}`;
+    // Claude Code's own modes: the mode the member is in as its message goes
+    // in. A mode she picked after this turn read the member is the one (it was
+    // set in the live process already); else this turn's own.
+    const claudeModeNow = claudeModeForTurn
+      ? (): ClaudePermissionMode => {
+          const saved = this.savedClaudeMemberModes.get(memberKey);
+          return saved !== undefined && saved !== claudeModeRead ? saved : claudeModeForTurn;
+        }
+      : undefined;
+    // The grant goes by that mode too, when it is issued: issued at the reply's
+    // start, it must not take back a mode set in the process since.
+    const grantNow = (): ChatAppMcpTokenGrant => {
+      const mode = claudeModeNow?.();
+      if (!mode || mode === claudeModeForTurn) return appMcpGrant;
+      const access = applyChatAccessOptionById("claude-code", mode, permissions);
+      return { ...appMcpGrant, agentMode: access.agentMode, runPermissions: effectiveChatAgentPermissionsForProvider(participant.kind, access.agentMode, access.permissions) };
+    };
     const existingConnection = this.appMcpTokens.has(memberKey) ? this.appMcpConnections.get(memberKey) : undefined;
     const grantAtReplyStart = participant.kind === "claude-code" && !nativeGoal && Boolean(existingConnection);
     const grantThisRun = (): void => {
-      this.issueAppMcpConnection(conversation, participant, appMcpGrant);
+      const grant = grantNow();
+      this.issueAppMcpConnection(conversation, participant, grant);
       if (participant.kind === "claude-code") {
-        this.lastAppMcpGrants.set(memberKey, appMcpGrant);
+        this.lastAppMcpGrants.set(memberKey, grant);
       }
     };
     const onReplyStarted = (): void => {
@@ -11122,9 +11150,10 @@ export class ChatService {
         this.registerInFlightPromptContext(conversation.id, participant.id, preparedPromptContext.pointerAdvance, runId);
       }
     };
-    const appMcp = grantAtReplyStart ? existingConnection : this.issueAppMcpConnection(conversation, participant, appMcpGrant);
-    if (!grantAtReplyStart && participant.kind === "claude-code") {
-      this.lastAppMcpGrants.set(memberKey, appMcpGrant);
+    const firstGrant = grantAtReplyStart ? undefined : grantNow();
+    const appMcp = grantAtReplyStart ? existingConnection : this.issueAppMcpConnection(conversation, participant, firstGrant!);
+    if (firstGrant && participant.kind === "claude-code") {
+      this.lastAppMcpGrants.set(memberKey, firstGrant);
     }
     const triggerAttachments = this.imageAttachments(triggerMessage);
     if (triggerAttachments.length > 0) {
@@ -11268,14 +11297,7 @@ export class ChatService {
             runId,
             text
           }),
-          // A mode the User picked after this turn read the member is the one
-          // its message goes in with (it was set in the live process already).
-          permissionMode: claudeModeForTurn
-            ? () => {
-                const saved = this.savedClaudeMemberModes.get(memberKey);
-                return saved !== undefined && saved !== claudeModeRead ? saved : claudeModeForTurn;
-              }
-            : undefined,
+          permissionMode: claudeModeNow,
           // A mode the CLI moved to itself (a plan she approved): the
           // member's mode follows it.
           onCliPermissionMode: claudeModeForTurn
@@ -11502,6 +11524,13 @@ export class ChatService {
       if (carriedMoveNote) this.moveNotesInFlight.delete(carriedMoveNote);
       unregisterRunProgressCallback();
       options.writeGate?.markWritten();
+      // A turn that ran in another mode by a once-only grant ("Allow once" of
+      // file edits: Accept edits): the member's live process goes back to its
+      // own mode, so what it does on its own afterwards (background tasks)
+      // runs in that.
+      if (claudeModeForTurn && claudeModeRead && claudeModeForTurn !== claudeModeRead) {
+        void this.restoreClaudeMemberMode(conversation.id, participant.id, claudeModeRead);
+      }
       this.releaseInFlightPromptContext(runId);
       for (const [approvalId, claimRunId] of this.oneTimeApprovalClaims) {
         if (claimRunId === runId) {
@@ -12631,7 +12660,11 @@ export class ChatService {
     includeParticipantActivityTool = true,
     mainSessionHandle?: string
   ): string {
-    const agentMode = normalizeChatAgentMode(session.participantAgentMode);
+    // Given once, for the whole CLI session (--agents): a Claude Code member
+    // in its CLI's own mode changes its mode in the same process (Shift+Tab),
+    // so nothing here depends on it; each turn's prompt says the mode.
+    const claudeOwnMode = session.participantKind === "claude-code" && normalizeChatAgentPermissions(session.participantPermissions).cliApprovals === true;
+    const agentMode = claudeOwnMode ? "default" : normalizeChatAgentMode(session.participantAgentMode);
     const canRequestPermissions = this.canRequestPermissionChanges(session);
     const canRequestCompaction = normalizeChatParticipantRequestPermission(
       session.participantPermissions?.requestCompaction
@@ -17311,6 +17344,37 @@ export class ChatService {
    *  rule kept from before answers were scoped, as its card said), else the
    *  scoped rules that together cover it (every command of it by a prefix,
    *  its domain, its folder; src/shared/toolPermissionScope.ts). */
+  /**
+   * A Claude Code member in its CLI's own mode asks about a command a stored
+   * shell rule allows (its allow rules are not CLI rules there: cliAgents
+   * claudeToolConfig): allowed, outside Plan, when the whole input is one
+   * plain command the rule covers (`exact`: that command; `prefix`: it, or it
+   * followed by arguments) and no deny rule covers it. A command joined with
+   * others, redirected or substituted is asked, never matched in part.
+   */
+  private storedShellRuleAllows(conversation: Conversation, requester: ChatParticipant, agentMode: ChatAgentMode, toolName: string, toolInput: unknown): boolean {
+    if (toolName !== "Bash" || requester.kind !== "claude-code" || agentMode === "plan") return false;
+    const permissions = normalizeChatAgentPermissions(this.participantForRun(conversation, requester).permissions);
+    if (permissions.cliApprovals !== true) return false;
+    const raw = toolInput && typeof toolInput === "object" ? (toolInput as { command?: unknown }).command : undefined;
+    const command = typeof raw === "string" ? raw.trim() : "";
+    if (!command || /[;&|<>`\n\r]|\$\(/.test(command)) return false;
+    const covers = (rule: Pick<ChatShellPermissionRule, "match" | "pattern">): boolean => {
+      const pattern = rule.pattern.trim();
+      return Boolean(pattern) && (command === pattern || (rule.match === "prefix" && command.startsWith(`${pattern} `)));
+    };
+    if (permissions.shell.rules.some((rule) => rule.action === "deny" && covers(rule))) return false;
+    const nativeRules = (permissions.providerNative?.["claude-code"]?.allowedTools ?? []).flatMap((toolRule): Array<Pick<ChatShellPermissionRule, "match" | "pattern">> => {
+      const match = /^Bash\s*\((.*)\)$/.exec(toolRule.trim());
+      if (!match) return [];
+      const inner = match[1].trim();
+      return inner.endsWith(":*") ? [{ match: "prefix", pattern: inner.slice(0, -2) }] : [{ match: "exact", pattern: inner }];
+    });
+    // Shell rules count with the shell on, as the CLI was given them; a
+    // provider-native rule always was.
+    return (permissions.shell.enabled && permissions.shell.rules.some((rule) => rule.action === "allow" && covers(rule))) || nativeRules.some(covers);
+  }
+
   private toolPermissionPolicyFor(
     conversation: Conversation,
     participant: ChatParticipant,
@@ -25651,16 +25715,75 @@ export class ChatService {
    *  next message switches its process first (cliAgents
    *  alignClaudePermissionMode). */
   private async applyClaudeMemberMode(conversation: Conversation, member: ChatParticipant, before: ClaudePermissionMode, mode: ClaudePermissionMode): Promise<void> {
-    const runner = this.cliRunner as Partial<Pick<CliAgentRunner, "memberClaudeControl">>;
+    const runner = this.cliRunner as Partial<Pick<CliAgentRunner, "memberClaudeControl" | "memberClaudePermissionMode">>;
     if (!runner.memberClaudeControl) return;
+    const key = `${conversation.id}:${member.id}`;
     const audit = { conversationId: conversation.id, participantId: member.id, from: before, to: mode };
+    const runsNow = (): ClaudePermissionMode | undefined => runner.memberClaudePermissionMode?.call(this.cliRunner, conversation.id, member.id);
+    let reason: string | undefined;
+    let actual: ClaudePermissionMode | undefined;
     try {
       const answer = await runner.memberClaudeControl.call(this.cliRunner, conversation.id, member.id, { subtype: "set_permission_mode", mode }, CLAUDE_PERMISSION_MODE_TIMEOUT_MS);
       if (!answer) return;
-      this.grantLiveMemberMode(conversation, member);
-      await this.debugLogs.write("chat.member-mode.applied", audit);
+      const reported = typeof answer.mode === "string" ? answer.mode : mode;
+      if (reported === mode) {
+        this.grantLiveMemberMode(conversation, member);
+        await this.debugLogs.write("chat.member-mode.applied", audit);
+        return;
+      }
+      actual = isClaudePermissionMode(reported) ? reported : runsNow();
     } catch (error) {
-      await this.debugLogs.write("chat.member-mode.apply-failed", {
+      reason = (error instanceof Error ? error.message : String(error)).replace(/[.\s]+$/, "");
+      actual = runsNow();
+    }
+    await this.debugLogs.write("chat.member-mode.apply-failed", { ...audit, runs: actual ?? null, message: reason ?? null }).catch(() => undefined);
+    // She picked yet another mode meanwhile: that one is being set now.
+    if (this.savedClaudeMemberModes.get(key) !== mode) return;
+    const name = `@${member.handle}`;
+    const runs = actual && actual !== mode ? CLAUDE_PERMISSION_MODE_LABELS[actual] : undefined;
+    this.postMemberModeNotice(conversation.id, reason !== undefined
+      ? `Claude Code did not switch ${name} to ${CLAUDE_PERMISSION_MODE_LABELS[mode]}: ${reason}.${runs ? ` ${name} stays in ${runs}.` : ""}`
+      : `Claude Code switched ${name} to ${runs ?? "another mode"} instead of ${CLAUDE_PERMISSION_MODE_LABELS[mode]}.`);
+    // The member's mode is what its CLI runs: its menu shows that mode.
+    if (actual && actual !== mode) this.followClaudeCliMode(conversation.id, member.id, actual);
+  }
+
+  /** What became of a member's mode, said in the chat: a line every device
+   *  has (it goes to her server with the chat) and, on this device, a chat
+   *  warning, as fork notices are said (postForkNotice). */
+  private postMemberModeNotice(conversationId: string, text: string): void {
+    void (async () => {
+      const conversation = await this.requireChat(conversationId);
+      await this.withChatMutation(conversation, async () => {
+        this.addConversationWarning(conversation, text);
+        conversation.messages.push(this.message("system", text, undefined, { threadId: "system" }));
+        conversation.updatedAt = new Date().toISOString();
+        this.queueSnapshot(conversation);
+      });
+    })().catch((error) => {
+      void this.debugLogs.write("chat.member-mode.notice-failed", {
+        conversationId,
+        message: error instanceof Error ? error.message : String(error)
+      }).catch(() => undefined);
+    });
+  }
+
+  /** After a turn that ran in another mode by a once-only grant: the member's
+   *  live process back in the member's own mode (as saved now). */
+  private async restoreClaudeMemberMode(conversationId: string, participantId: string, read: ClaudePermissionMode): Promise<void> {
+    const runner = this.cliRunner as Partial<Pick<CliAgentRunner, "memberClaudeControl" | "memberClaudePermissionMode">>;
+    const own = this.savedClaudeMemberModes.get(`${conversationId}:${participantId}`) ?? read;
+    const runs = runner.memberClaudePermissionMode?.call(this.cliRunner, conversationId, participantId);
+    if (!runner.memberClaudeControl || !runs || runs === own) return;
+    const audit = { conversationId, participantId, from: runs, to: own };
+    try {
+      if (await runner.memberClaudeControl.call(this.cliRunner, conversationId, participantId, { subtype: "set_permission_mode", mode: own }, CLAUDE_PERMISSION_MODE_TIMEOUT_MS)) {
+        await this.debugLogs.write("chat.member-mode.restored", audit);
+      }
+    } catch (error) {
+      // The member's next message switches its process first (cliAgents
+      // alignClaudePermissionMode).
+      await this.debugLogs.write("chat.member-mode.restore-failed", {
         ...audit,
         message: error instanceof Error ? error.message : String(error)
       }).catch(() => undefined);

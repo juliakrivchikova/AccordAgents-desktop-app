@@ -138,6 +138,20 @@ export function codexModesUnavailableReason(
   return `${machine?.name ?? "Its machine"} runs an older program: Settings → Machines → Upgrade runtime.`;
 }
 
+/** Whether a member's new permission mode reaches it while its turn runs
+ *  where it runs: on this computer, or on a machine whose program sets it in
+ *  the member's live process (its last hello's `liveModeChangeSupported`).
+ *  A member on a machine whose program is from before (or one not heard
+ *  from, or a Cloud run member whose machine is not known here) would take
+ *  it only at its next turn, in a new process: its menu waits for the turn. */
+export function liveModeChangeReaches(
+  member: { homeMachineId?: string; cloudRun?: unknown },
+  machine: { lastHello?: { liveModeChangeSupported?: boolean } } | undefined
+): boolean {
+  if (!member.homeMachineId && !member.cloudRun) return true;
+  return machine?.lastHello?.liveModeChangeSupported === true;
+}
+
 /** Whether a machine's program runs the CLIs' own modes as the menus set
  *  them (its last hello's `cliModesSupported`): "unknown" before it ever
  *  greeted this computer (a machine's program comes only from this

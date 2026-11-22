@@ -7,7 +7,7 @@ import { mainSessionProviderKey, type MainSessionProviderOption } from "../../..
 import type { CloudRunSelection } from "../../../shared/cloudRunPreparation";
 import type { MachineRecord } from "../../../shared/machineLink";
 import type { ChatParticipant, ProviderModel, ProviderModelCatalog, ProviderReasoningEffortOption } from "../../../shared/types";
-import { codexModesUnavailableReason, codexPlanModeOn, selectedChatAccessOption } from "../../../shared/chatAccessModes";
+import { codexModesUnavailableReason, codexPlanModeOn, liveModeChangeReaches, selectedChatAccessOption } from "../../../shared/chatAccessModes";
 import { ChatProviderMark } from "./chat-member-mark";
 import { chipModelLabel, memberDefaultModelName, memberModelName, useMemberModelCatalog } from "./chat-member-model-name";
 import { latestAndOlderModels } from "./chat-model-groups";
@@ -87,6 +87,10 @@ export function ChatMemberComposerControls(props: {
   // (for Cloud run, the machine on the AWS instance it names).
   const modesMachineId = machineIdOf(value, machineList);
   const modesReason = codexModesUnavailableReason({ kind: value.kind, homeMachineId: modesMachineId }, machineOf(machineList, modesMachineId));
+  // The mode while its turn runs: where its CLI takes one then (Shift+Tab in
+  // Claude Code), on this computer or a machine whose program sets it in the
+  // live process; anywhere else it waits for the turn to end.
+  const modeWhileTurnRuns = modeChangesWhileTurnRuns(value.kind) && liveModeChangeReaches(value, machineOf(machineList, modesMachineId));
   // A model chosen without the saved effort: that choice clears it too, so
   // its CLI is never given an effort the model does not have.
   const withEffortFor = (modelId: string | undefined): ChatModelAccessPatch => {
@@ -164,9 +168,7 @@ export function ChatMemberComposerControls(props: {
           )}
         </ComposerMenu>
       )}
-      {/* The mode while its turn runs, where its CLI takes one then (Shift+Tab
-          in Claude Code); the rest waits. */}
-      <ChatAccessControl value={value} mainSession={props.mainSession} disabled={props.disabled && !modeChangesWhileTurnRuns(value.kind)} modesReason={modesReason} onChange={onChange} testId={prefix}
+      <ChatAccessControl value={value} mainSession={props.mainSession} disabled={props.disabled && !modeWhileTurnRuns} modesReason={modesReason} onChange={onChange} testId={prefix}
         iconOnly={density >= COMPOSER_DENSITY.modeIcon} />
       {value.kind === "codex-cli" && (
         <ChatCodexPlanToggle value={value} disabled={props.disabled} modesReason={modesReason} onChange={onChange} testId={prefix} iconOnly={density >= COMPOSER_DENSITY.planIcon} />

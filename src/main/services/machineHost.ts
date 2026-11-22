@@ -646,6 +646,7 @@ export class MachineHostService {
       sessionMoveSupported: true,
       forkToNewChatSupported: true,
       cliModesSupported: true,
+      liveModeChangeSupported: true,
       ...(startDefaults ? { cliStartDefaults: startDefaults } : {}),
       ...(this.options.scripts ? {
         scriptsSupported: true,

@@ -164,6 +164,35 @@ test("while its turn runs, its permission mode changes where its CLI takes one t
   }
 });
 
+test("while its turn runs, a Claude Code member on a machine changes its mode only where the machine's program sets it in the live process; an older program waits", async () => {
+  const host = window as unknown as { consensus?: unknown };
+  const previous = host.consensus;
+  const claude: ChatParticipant = { ...CODEX, id: "claude-box", handle: "claude", kind: "claude-code", agentMode: "default", homeMachineId: "m-box",
+    permissions: { ...CODEX.permissions!, cliApprovals: true, codexPlanMode: undefined, workspaceWrite: false } };
+  try {
+    for (const live of [false, true]) {
+      resetMemberModelCatalogs();
+      host.consensus = {
+        listProviderModels: async () => undefined,
+        listMachines: async () => ({ machines: [{ id: "m-box", name: "Box" }], status: [{ machineId: "m-box", name: "Box", connected: true,
+          lastHello: live ? { cliModesSupported: true, liveModeChangeSupported: true } : { cliModesSupported: true } }] })
+      };
+      let renderer: ReturnType<typeof create> | undefined;
+      await act(async () => {
+        renderer = create(<TooltipProvider><ChatMemberComposerControls value={claude} onChange={noop} disabled /></TooltipProvider>);
+        await new Promise((resolve) => setTimeout(resolve, 0));
+      });
+      await act(async () => { renderer!.root.find(byTestId("chat-model-mode")).props.onClick(); });
+      const rows = renderer!.root.findAll(byTestId("chat-access-option"));
+      assert.equal(rows.every((row) => row.props.disabled), !live, live ? "its program sets it now" : "an older program: the mode waits for the turn");
+      assert.equal(renderer!.root.findAll(byTestId("chat-access-busy")).length, live ? 0 : 1);
+      act(() => renderer!.unmount());
+    }
+  } finally {
+    host.consensus = previous;
+  }
+});
+
 test("while its turn runs, a menu says why its choices wait", async () => {
   const host = window as unknown as { consensus?: unknown };
   const previous = host.consensus;
