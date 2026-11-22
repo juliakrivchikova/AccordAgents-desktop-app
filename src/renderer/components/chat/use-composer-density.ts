@@ -35,13 +35,15 @@ const ROW_SELECTOR = ".chat-composer-toolbar, .new-chat-toolbar";
  * The density at which `ref`'s controls fit (they overflow their own box,
  * which shrinks with the row, when they do not). Measured before paint each
  * time the row's width or what the controls say (`contentKey`) changes:
- * from the fullest form, one step at a time.
+ * from the fullest form, one step at a time. Nothing else measures: reading
+ * the controls' size forces the browser to lay the page out, and the
+ * composer renders again for every streamed token of a running turn.
  */
 export function useComposerDensity(ref: RefObject<HTMLElement>, contentKey: string): number {
   const [density, setDensity] = useState(0);
   // Bumped to measure again even when the density is already 0 (a row that
   // narrowed from its fullest form renders nothing new by itself).
-  const [, setMeasure] = useState(0);
+  const [measure, setMeasure] = useState(0);
   const measured = useRef<{ key: string; width: number }>({ key: contentKey, width: -1 });
 
   // New content starts from its fullest form again.
@@ -50,14 +52,15 @@ export function useComposerDensity(ref: RefObject<HTMLElement>, contentKey: stri
     if (density !== 0) setDensity(0);
   }
 
-  // After every render: one step more compact while the controls overflow.
+  // Once the controls say something new, the row's width changed, or a step
+  // was just taken: one step more compact while the controls overflow.
   useLayoutEffect(() => {
     const element = ref.current;
-    if (!element || typeof element.scrollWidth !== "number") return;
-    if (density < COMPOSER_DENSITY_MAX && overflows(element)) {
+    if (!element || density >= COMPOSER_DENSITY_MAX) return;
+    if (overflows(element)) {
       setDensity((current) => Math.min(COMPOSER_DENSITY_MAX, current + 1));
     }
-  });
+  }, [ref, density, contentKey, measure]);
 
   // The row grew or shrank: measure again from the fullest form, before the
   // browser paints the controls at the old density.

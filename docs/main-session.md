@@ -141,8 +141,12 @@ chat without a main session is always `classic`; its switch is disabled.
     a list for planning, a checked shield for the CLI deciding, a crossed
     one for Full Access, an eye for Read Only), the effort (a gauge); then
     the model loses its glyph and last its name shortens, never under six
-    letters (`useComposerDensity`, measured before paint on every width
-    change). An icon's value is its tooltip, its accessible name and its
+    letters (`useComposerDensity`, measured before paint only when the
+    row's width or what the controls say changes: never on a render that
+    changes neither, such as one per streamed token; reading the controls'
+    size forces a layout of the whole window. Measured 2026-11-22 in the
+    app during a Sonnet 5.5 turn: 133 such reads before, none after). An
+    icon's value is its tooltip, its accessible name and its
     menu; no control is ever a one-letter stub. Checked 2026-11-22 in the
     app with both panels open: at 1280×820 "Sonnet 5.5 · Medium · Manual"
     in both composers and "GPT-5.6-Luna · Low" with the mode and Plan mode

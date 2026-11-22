@@ -401,3 +401,64 @@ test("narrow controls step down one level at a time until they fit, and measure 
     if (client) Object.defineProperty(proto, "clientWidth", client); else delete proto.clientWidth;
   }
 });
+
+test("a composer rendered again with nothing new for its controls (a streamed token) never measures them", async () => {
+  // Reading the controls' size forces a layout of the whole page; a running
+  // turn renders the composer for every token it streams.
+  const contentAt = [300, 270, 240, 210, 180, 160, 140];
+  let available = 250;
+  let reads = 0;
+  let observed: ((entries: Array<{ contentRect: { width: number } }>) => void) | undefined;
+  const globals = globalThis as unknown as { ResizeObserver?: unknown };
+  const previousObserver = globals.ResizeObserver;
+  globals.ResizeObserver = class {
+    constructor(callback: (entries: Array<{ contentRect: { width: number } }>) => void) { observed = callback; }
+    observe(): void { /* the row */ }
+    disconnect(): void { observed = undefined; }
+  };
+  const proto = HTMLDivElement.prototype as unknown as Record<string, unknown>;
+  const scroll = Object.getOwnPropertyDescriptor(proto, "scrollWidth");
+  const client = Object.getOwnPropertyDescriptor(proto, "clientWidth");
+  Object.defineProperty(proto, "scrollWidth", { configurable: true, get(this: HTMLElement) {
+    if (!this.dataset.density) return 0;
+    reads += 1;
+    return contentAt[Number(this.dataset.density)];
+  } });
+  Object.defineProperty(proto, "clientWidth", { configurable: true, get(this: HTMLElement) { return this.dataset.density ? Math.min(available, contentAt[Number(this.dataset.density)]!) : 0; } });
+  function Probe(props: { content: string; token: number }): JSX.Element {
+    const ref = useRef<HTMLDivElement>(null);
+    const density = useComposerDensity(ref, props.content);
+    return <div className="chat-composer-toolbar"><div ref={ref} data-density={String(density)} data-token={props.token} /></div>;
+  }
+  const host = document.createElement("div");
+  document.body.append(host);
+  const root = createRoot(host);
+  const density = (): number => Number(host.querySelector("[data-density]")?.getAttribute("data-density"));
+  try {
+    await act(async () => { root.render(<Probe content="a" token={0} />); });
+    assert.equal(density(), 2, "fitted to its row once");
+    const settled = reads;
+    assert.ok(settled > 0, "measured when it first showed");
+    for (let token = 1; token <= 50; token += 1) {
+      await act(async () => { root.render(<Probe content="a" token={token} />); });
+    }
+    assert.equal(reads, settled, "fifty renders with the same controls: not one measure");
+    assert.equal(density(), 2, "and the same density");
+    // What still measures: new words in the controls, and a row of another width.
+    await act(async () => { root.render(<Probe content="b" token={51} />); });
+    assert.ok(reads > settled, "new content is measured");
+    assert.equal(density(), 2, "new content fitted again");
+    const beforeResize = reads;
+    available = 400;
+    await act(async () => { observed?.([{ contentRect: { width: 400 } }]); });
+    await act(async () => { observed?.([{ contentRect: { width: 420 } }]); });
+    assert.ok(reads > beforeResize, "a wider row is measured");
+    assert.equal(density(), 0, "and fits every control by its name");
+  } finally {
+    act(() => root.unmount());
+    host.remove();
+    globals.ResizeObserver = previousObserver;
+    if (scroll) Object.defineProperty(proto, "scrollWidth", scroll); else delete proto.scrollWidth;
+    if (client) Object.defineProperty(proto, "clientWidth", client); else delete proto.clientWidth;
+  }
+});
