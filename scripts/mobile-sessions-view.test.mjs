@@ -506,6 +506,57 @@ test("classic New chat on the phone names the main session by its provider, neve
   }
 });
 
+test("a view picked on the phone stays while her server catches up with the one picked before it", { timeout: 120_000 }, async (t) => {
+  const hub = await startMobileHub();
+  const site = await serveMobileShell({ port: 8397, hubOrigins: [hub.base] });
+  const profile = await tempProfile("aa-mobile-view-pick-");
+  const chrome = launchChrome({ port: 9547, profile, url: `${site.origin}/` });
+  let app;
+  t.after(async () => {
+    app?.close();
+    chrome.kill("SIGKILL");
+    await site.close();
+    await hub.close();
+    await rm(profile, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
+  });
+  await hub.createChat("conv-pick", {
+    title: "Pick", participants: [MAIN], createdAt: at(10),
+    metadata: { mainSessionParticipantId: MAIN.id, chatView: "sessions" },
+    messages: [
+      { id: "u1", role: "user", content: "Hello", status: "done", createdAt: at(9), metadata: { deliveryTargets: [MAIN.id] } },
+      { id: "r1", role: "participant", participantId: MAIN.id, participantLabel: "@main", content: "Hi.", status: "done", createdAt: at(8), metadata: { sourceMessageId: "u1" } }
+    ]
+  });
+  app = await attachApp({ port: 9547 });
+  await pairPage(app, { hub, siteOrigin: site.origin, query: "qa=1" });
+  await openChat(app, "conv-pick");
+  const sessionsDrawn = `document.querySelectorAll("#message-list .message-row.is-sessions").length > 0`;
+  await app.waitFor(sessionsDrawn, "the sessions view");
+  // Her server is slow to take a view: each change waits a while on the way.
+  hub.setGate((seen) => (seen.ops || []).some((op) => op.kind === "conversation.update" && op.metadata && op.metadata.chatView) ? { delayMs: 1500 } : undefined);
+  const pick = async (view) => {
+    await app.evaluate(`document.getElementById("chat-members-toggle").click()`);
+    await app.waitFor(`Boolean(document.querySelector('#chat-title-menu [data-title-view="${view}"]'))`, "the title's menu");
+    await app.evaluate(`document.querySelector('#chat-title-menu [data-title-view="${view}"]').click()`);
+  };
+  await pick("classic");
+  await app.waitFor(`document.querySelectorAll("#message-list .message-row.is-sessions").length === 0 && document.querySelector('#message-list .message-row[data-thread-root="r1"]') !== null`, "the classic view, at once");
+  // Back to the sessions view before her server has taken the classic one:
+  // the phone keeps showing what she picked while the server catches up.
+  await pick("sessions");
+  await app.waitFor(sessionsDrawn, "the sessions view, at once");
+  await app.evaluate(`(() => { window.__drawnViews = []; const t0 = performance.now();
+    const tick = () => { const drawn = document.querySelectorAll("#message-list .message-row.is-sessions").length > 0 ? "sessions" : "classic";
+      if (window.__drawnViews[window.__drawnViews.length - 1] !== drawn) window.__drawnViews.push(drawn);
+      if (performance.now() - t0 < 6000) setTimeout(tick, 20); };
+    tick(); })()`);
+  const taken = await waitForOp(hub, (op) => op.kind === "conversation.update" && op.metadata && op.metadata.chatView === "sessions");
+  assert.deepEqual(taken.metadata, { chatView: "sessions" });
+  await sleep(6500);
+  assert.deepEqual(await app.evaluate(`window.__drawnViews`), ["sessions"], "never the classic view again while the server caught up");
+  assert.equal((await hub.storage.getConversation("conv-pick")).metadata.chatView, "sessions", "her server holds the view she picked last");
+});
+
 test("New chat on the phone leads with the main session, and the chat it makes has it", { timeout: 120_000 }, async (t) => {
   const hub = await startMobileHub();
   const site = await serveMobileShell({ port: 8393, hubOrigins: [hub.base] });

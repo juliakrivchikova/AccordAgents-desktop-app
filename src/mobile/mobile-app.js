@@ -6837,7 +6837,10 @@
     const sent = override.eventId ? outboxStatusById.get(override.eventId) : undefined;
     const status = sent && sent.status;
     if (status === OUTBOX_SENT && !override.takenAt) override.takenAt = Date.now();
-    const settled = (chat.pinned === true) === override.pinned;
+    // Only once her server has taken this pin: before that, a list saying the
+    // same is an older one (from before a pin undone just ahead of it), and
+    // the next list, with that earlier pin, would show it again.
+    const settled = override.takenAt !== undefined && (chat.pinned === true) === override.pinned;
     const refused = status === OUTBOX_REFUSED || status === OUTBOX_SUPERSEDED;
     const stale = override.takenAt !== undefined && Date.now() - override.takenAt > PIN_OVERRIDE_TAKEN_MS;
     if (settled || refused || stale) {
@@ -12583,7 +12586,10 @@
     const sent = override.eventId ? outboxStatusById.get(override.eventId) : undefined;
     const status = sent && sent.status;
     if (status === OUTBOX_SENT && !override.takenAt) override.takenAt = Date.now();
-    const settled = chat.chatView === override.view;
+    // Only once her server has taken this pick: before that, a list saying
+    // the same view is an older one (from before a pick made just ahead of
+    // it), and the next list, with that earlier pick, would show it again.
+    const settled = override.takenAt !== undefined && chat.chatView === override.view;
     const refused = status === OUTBOX_REFUSED || status === OUTBOX_SUPERSEDED;
     const stale = override.takenAt !== undefined && Date.now() - override.takenAt > VIEW_OVERRIDE_TAKEN_MS;
     if (settled || refused || stale) {
