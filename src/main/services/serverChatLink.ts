@@ -256,26 +256,31 @@ export class ServerChatLink {
     return put;
   }
 
-  /** This device's queue for the server, in its own database: written with
-   *  or without a link standing (a save, a turn's end that comes after the
-   *  link stopped), sent by the link once it stands. */
-  private serverQueue(): ChatServerQueue {
-    const store = this.options.storage.hubClientOps();
+  /** The statements that queue operations with a local save (alsoCommit),
+   *  in this device's own database: a save that began before the link
+   *  stopped still commits with them, and they go at the next start. */
+  private queueSql(ops: HubOp[], condition?: string): string {
+    return this.options.storage.hubClientOps().insertSql(ops, new Date().toISOString(), condition);
+  }
+
+  /** Where the chats queue what they change while no link stands (the app
+   *  quitting, or between two links): sent by the next one that starts. */
+  private parkedQueue(): ChatServerQueue {
     return {
       deviceId: () => this.deviceIdValue,
-      queueSql: (ops, condition) => store.insertSql(ops, new Date().toISOString(), condition),
-      enqueue: async (ops) => {
-        await store.enqueue(ops, new Date().toISOString());
-        this.ops?.nudge();
-      }
+      queueSql: (ops, condition) => this.queueSql(ops, condition),
+      enqueue: (ops) => this.options.storage.hubClientOps().enqueue(ops, new Date().toISOString())
     };
   }
 
   /** The link as ChatService uses it. */
   private chatLink(): ChatServerLink {
-    const queue = this.serverQueue();
     return {
-      ...queue,
+      deviceId: () => this.deviceIdValue,
+      queueSql: (ops, condition) => this.queueSql(ops, condition),
+      // A Stop, a claim or a turn's end sent through a link that has stopped
+      // fails, as before: the parked queue takes the chats' own changes.
+      enqueue: (ops) => this.requireOps().enqueue(ops),
       nudge: () => this.ops?.nudge(),
       messageAccepted: async (conversationId, messageId, signal) => {
         const row = await this.options.storage.hubClientOps().forMessage(conversationId, messageId);
@@ -516,7 +521,7 @@ export class ServerChatLink {
     await this.ops?.stop();
     // What the chats change from here on (a member's reply that ends while
     // the app quits) still queues, and goes at the next start.
-    this.options.chat.setServerLink(undefined, this.deviceIdValue ? this.serverQueue() : undefined);
+    this.options.chat.setServerLink(undefined, this.deviceIdValue ? this.parkedQueue() : undefined);
     this.options.chat.setServerChatReader(undefined);
     this.options.artifacts?.setServerLink(undefined);
     this.ops = undefined;

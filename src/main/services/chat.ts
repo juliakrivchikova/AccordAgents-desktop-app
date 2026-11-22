@@ -2579,7 +2579,7 @@ export class ChatService {
         // The User's server owns the chat (Д1): the deletion goes there with
         // the rows (the tombstone commits with them too), and every other
         // device (its machines too) takes it from there.
-        const serverDelete = this.serverLink?.queueSql([{ opId: newOpId(), kind: "conversation.delete", conversationId: conversation.id }]);
+        const serverDelete = this.serverQueue()?.queueSql([{ opId: newOpId(), kind: "conversation.delete", conversationId: conversation.id }]);
         const deleted = await this.storage.deleteConversation(conversation.id, serverDelete ? { alsoCommitSql: serverDelete } : {});
         if (deleted && serverDelete) this.serverLink?.nudge();
         if (!deleted) {
@@ -25344,16 +25344,16 @@ export class ChatService {
     const link = this.serverLink;
     // A link stopped (the app quitting, or between two links) still queues:
     // what a member ends meanwhile goes at the next start.
-    const queue = link ?? this.parkedServerQueue;
+    const queue = this.serverQueue();
     if (queue && snapshot.kind === "chat") {
       // What this save changed goes to the server (Д1), queued in the same
       // transaction as the save: a crash keeps both or neither.
       let ops: HubOp[] = [];
       const finishes: Array<[string, { conversationId: string; participantId: string; op: HubOp; timer: ReturnType<typeof setTimeout> }]> = [];
       // The cards this chat's members here wait on go up, change or settle
-      // with the save that made them so (Д9), whatever else it emits. Read
-      // from a live link only: the next start reconciles them.
-      const cards = link ? this.serverCardOpsFor(snapshot) : { ops: [] as HubOp[], commit: () => undefined };
+      // with the save that made them so (Д9), whatever else it emits. Only
+      // with a live link: the next start reconciles them.
+      const cards = this.serverCardOpsFor(snapshot);
       if (options.emitChanges !== false) {
         const mayWrite = (message: ChatMessage) => this.mayWriteOnServer(snapshot, message);
         const diff = diffChatChanges(await this.chatChangeBaselineFor(snapshot.id), snapshot, { emitsConversationFields: true, ownsMessage: mayWrite });
@@ -26193,10 +26193,10 @@ export class ChatService {
 
   /** The end of a turn this device ran, said on the server. */
   private finishServerTurn(localRunId: string, outcome: "done" | "error" | "stopped" | "interrupted", contextUsage?: AgentContextUsage): void {
-    const link = this.serverLink ?? this.parkedServerQueue;
+    const queue = this.serverQueue();
     const server = this.serverRunOfLocal.get(localRunId);
     this.serverTurnOpens.delete(localRunId);
-    if (!link || !server) return;
+    if (!queue || !server) return;
     this.serverRunOfLocal.delete(localRunId);
     this.localRunOfServer.delete(server.runId);
     const op: HubOp = { opId: newOpId(), kind: "turn.finish", conversationId: server.conversationId, runId: server.runId, outcome,
@@ -26220,7 +26220,7 @@ export class ChatService {
     if (!deferred) return;
     this.deferredServerFinishes.delete(serverRunId);
     clearTimeout(deferred.timer);
-    void (this.serverLink ?? this.parkedServerQueue)?.enqueue([deferred.op]).catch(() => undefined);
+    void this.serverQueue()?.enqueue([deferred.op]).catch(() => undefined);
   }
 
   /** Waits for a turn on the server to reach one of `states`. */
@@ -26456,17 +26456,25 @@ export class ChatService {
     this.serverLink = link;
     this.parkedServerQueue = link ? undefined : parked;
     if (link) this.serverLinkInstalled = true;
-    this.chatChangeBaselines.clear();
+    // Parked, what was last queued stays the base of the next diff: reading
+    // each chat whole again would hold up a reply's save while the app quits.
+    if (!this.parkedServerQueue) this.chatChangeBaselines.clear();
     // The cards of another server (or none) are read again from it.
     this.serverCards.reset();
     this.mirroredCardSeqs.clear();
+  }
+
+  /** Where this device's chat changes go for the server: the live link, or
+   *  while it is stopped the queue it sends from once it starts again. */
+  private serverQueue(): ChatServerQueue | undefined {
+    return this.serverLink ?? this.parkedServerQueue;
   }
 
   /** Whether this device writes this message on the server: one it wrote
    *  there, or a new one it may write (a member's only where it runs, Д4).
    *  Never a placeholder for a member that runs elsewhere. */
   private mayWriteOnServer(conversation: Conversation, message: ChatMessage): boolean {
-    const queue = this.serverLink ?? this.parkedServerQueue;
+    const queue = this.serverQueue();
     if (!queue || message.metadata?.serverPlaceholder) return false;
     const writer = message.metadata?.serverWriter;
     if (typeof writer === "string") return writer === queue.deviceId();

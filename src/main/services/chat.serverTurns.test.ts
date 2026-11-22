@@ -88,6 +88,7 @@ async function setup(t: test.TestContext) {
   };
   // The computer's app: its chat service and its link to the server. A
   // restart builds both again on the same database.
+  const links: ServerChatLink[] = [];
   const boot = (): { chat: ChatService; link: ServerChatLink } => {
     const chat = new ChatService(storage as never, settings as never, cliRunner as never, { async write() { return undefined; } } as never);
     (chat as unknown as { runParticipantTurn: typeof playTurn }).runParticipantTurn = playTurn;
@@ -102,7 +103,6 @@ async function setup(t: test.TestContext) {
     links.push(link);
     return { chat, link };
   };
-  const links: ServerChatLink[] = [];
   const { chat, link } = boot();
   t.after(async () => {
     for (const each of links) await each.stop();
@@ -272,33 +272,108 @@ test("a claim stopped before it ran is never left taken: taken back if unsent, f
   assert.deepEqual(await run({ status: "answered", outcome: { status: "rejected", reason: "no" } }), ["turn.stop"]);
 });
 
-test("a member's reply that ends while the computer quits, its link to the server already stopped, reaches the server at the next start with its turn's end", async (t) => {
+/** A member's turn running here when the link to the server stops (the app
+ *  quitting: main.ts stops it in before-quit while the members still end; or
+ *  a new server paired: restartServerChatLink). Its reply ends a moment later,
+ *  then a link starts again: the app's next start, or the same link. */
+async function endsWhileTheLinkIsStopped(t: test.TestContext, chatId: string, how: { then: "restart" | "same link" }) {
   const h = await setup(t);
-  await save(h.chat, localChat("chat-q"));
+  await save(h.chat, localChat(chatId));
   await h.link.start();
   await until(async () => (await h.link.status())?.ready ?? false, (ready) => ready);
   h.hold();
-  await h.chat.sendMessage({ conversationId: "chat-q", content: "@taylor long essay" } as never);
+  await h.chat.sendMessage({ conversationId: chatId, content: "@taylor long essay" } as never);
   await until(async () => h.turns.length, (count) => count === 1);
-  const running = await until(() => h.page("chat-q"), (page) => page.messages.some((message) => message.role === "participant" && message.status === "pending"));
+  const running = await until(() => h.page(chatId), (page) => page.messages.some((message) => message.role === "participant" && message.status === "pending"));
   const replyId = running.messages.find((message) => message.role === "participant")!.id;
-  // Quitting stops the link to the server first (main.ts, before-quit); the
-  // member's turn ends a moment later, while the app still runs.
   await h.link.stop();
   h.release();
-  await until(async () => (await h.storage.getConversation("chat-q"))?.messages.find((message) => message.id === replyId)?.status,
-    (status) => status === "done");
-  await h.restart();
+  const local = await until(async () => (await h.storage.getConversation(chatId))?.messages.find((message) => message.id === replyId),
+    (message) => message !== undefined && message.status !== "pending");
+  // The app that quit is gone: nothing of it writes any more.
+  await h.chat.settleChatSaves();
+  if (how.then === "restart") await h.restart();
+  else await h.link.start();
   // The phone reads the server: the reply as the computer shows it, never
   // a member left running there.
-  const settled = await until(() => h.page("chat-q"), (page) => page.messages.find((message) => message.id === replyId)?.status !== "pending" &&
+  const settled = await until(() => h.page(chatId), (page) => page.messages.find((message) => message.id === replyId)?.status !== "pending" &&
     page.turns.every((turn) => turn.state === "finished"), 15_000).catch(async () => {
-    const last = await h.page("chat-q");
+    const last = await h.page(chatId);
     return assert.fail(`the server never got the end: reply ${last.messages.find((message) => message.id === replyId)?.status}, ` +
       `turns ${last.turns.map((turn) => `${turn.state}/${turn.outcome ?? "-"}`).join(", ")}`);
   });
-  const reply = settled.messages.find((message) => message.id === replyId)!;
+  return { h, local: local!, reply: settled.messages.find((message) => message.id === replyId)!, turns: settled.turns };
+}
+
+test("a member's reply that ends while the computer quits, its link to the server already stopped, reaches the server at the next start with its turn's end", async (t) => {
+  const { reply, turns } = await endsWhileTheLinkIsStopped(t, "chat-q", { then: "restart" });
   assert.equal(reply.status, "done");
   assert.equal(reply.content, "reply to @taylor long essay");
-  assert.equal(settled.turns[0].outcome, "done", "the turn ended there as it did here");
+  assert.equal(turns[0].outcome, "done", "the turn ended there as it did here");
+});
+
+test("a member's reply that ends between two links (a new server being linked) goes with the next link, and the member ran once", async (t) => {
+  const { h, reply, turns } = await endsWhileTheLinkIsStopped(t, "chat-l", { then: "same link" });
+  assert.equal(reply.status, "done");
+  assert.equal(reply.content, "reply to @taylor long essay");
+  assert.equal(turns[0].outcome, "done");
+  assert.equal(h.turns.length, 1, "the member ran once");
+});
+
+test("a member's turn stopped while the computer quits ends on the server as stopped at the next start, as it did here", async (t) => {
+  const h = await setup(t);
+  await save(h.chat, localChat("chat-s"));
+  await h.link.start();
+  await until(async () => (await h.link.status())?.ready ?? false, (ready) => ready);
+  h.hold();
+  await h.chat.sendMessage({ conversationId: "chat-s", content: "@taylor long essay" } as never);
+  await until(async () => h.turns.length, (count) => count === 1);
+  const running = await until(() => h.page("chat-s"), (page) => page.messages.some((message) => message.role === "participant" && message.status === "pending"));
+  const replyId = running.messages.find((message) => message.role === "participant")!.id;
+  await h.link.stop();
+  h.chat.cancelRun(h.turns[0].runId);
+  await h.chat.settleChatSaves();
+  await h.restart();
+  const settled = await until(() => h.page("chat-s"), (page) => page.messages.find((message) => message.id === replyId)?.status !== "pending" &&
+    page.turns.every((turn) => turn.state === "finished"), 15_000);
+  // A turn stopped before it wrote anything leaves no reply: gone here and
+  // on the server alike, its turn ended there as stopped.
+  const reply = settled.messages.find((message) => message.id === replyId);
+  const local = (await h.storage.getConversation("chat-s"))!.messages.find((message) => message.id === replyId);
+  assert.equal(local, undefined);
+  assert.equal(reply, undefined, "the phone shows the reply as the computer does");
+  assert.equal(settled.turns[0].outcome, "stopped");
+});
+
+test("a save that began before the link stopped still commits, and what it wrote reaches the server at the next start", async (t) => {
+  const h = await setup(t);
+  await save(h.chat, localChat("chat-r"));
+  await h.link.start();
+  await until(async () => (await h.link.status())?.ready ?? false, (ready) => ready);
+  h.hold();
+  // The save of the User's message waits until the link has stopped: it
+  // queues what it wrote only at its end (storage.saveConversation's onlyIfSql).
+  const storage = h.storage as unknown as { saveConversation: (conversation: Conversation, options?: { alsoCommit?: unknown }) => Promise<unknown> };
+  const original = storage.saveConversation.bind(h.storage);
+  let open!: () => void;
+  let held = false;
+  const gate = new Promise<void>((resolve) => { open = resolve; });
+  storage.saveConversation = async (conversation, options) => {
+    if (conversation.id === "chat-r" && options?.alsoCommit && !held && conversation.messages.some((message) => message.content === "hello there")) {
+      held = true;
+      await gate;
+    }
+    return original(conversation, options);
+  };
+  const sending = h.chat.sendMessage({ conversationId: "chat-r", content: "hello there" } as never);
+  await until(async () => held, (value) => value);
+  await h.link.stop();
+  open();
+  await sending;
+  assert.ok((await h.storage.getConversation("chat-r"))?.messages.some((message) => message.content === "hello there"), "saved here");
+  storage.saveConversation = original;
+  await h.chat.settleChatSaves();
+  await h.restart();
+  await until(() => h.page("chat-r"), (page) => page.messages.some((message) => message.content === "hello there"));
+  h.release();
 });

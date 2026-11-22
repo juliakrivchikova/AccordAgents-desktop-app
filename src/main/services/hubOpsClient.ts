@@ -383,11 +383,6 @@ export class HubOpsClient {
     await this.reading?.catch(() => undefined);
   }
 
-  /** The statements that queue operations with a local save (alsoCommit). */
-  queueSql(ops: HubOp[], condition?: string): string {
-    return this.options.store.insertSql(ops, new Date(this.now()).toISOString(), condition);
-  }
-
   async enqueue(ops: HubOp[]): Promise<void> {
     await this.options.store.enqueue(ops, new Date(this.now()).toISOString());
     this.nudge();
