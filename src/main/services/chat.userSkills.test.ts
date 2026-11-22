@@ -246,7 +246,7 @@ test("inline selected skill text is preserved in storage and prompt", async () =
     const userMessage = saved.messages.find((message) => message.role === "user");
     assert.equal(userMessage?.content, "@admin /qa please");
     // Her words as typed, the inline `/qa` kept where she wrote it, then the selected skill.
-    assert.match(capturedPrompt, /\n\n@admin \/qa please\n\nSelected skill: \/qa \(skill name: qa; /);
+    assert.match(capturedPrompt, /\n\n@admin \/qa please\n\n<<<APP ([0-9a-f]{8})>>>\nSelected skill: \/qa \(skill name: qa; [^\n]*\n<<<END APP \1>>>$/);
   } finally {
     await rm(tempRoot, { recursive: true, force: true });
   }
@@ -486,7 +486,7 @@ test("a skill message is User's text and its selected skill, with no request lin
   ).prompt as string;
 
   const skillPrompt = build(skillMessage, false);
-  assert.ok(skillPrompt.startsWith("@admin /qa\n\nSelected skill: "));
+  assert.match(skillPrompt, /^@admin \/qa\n\n<<<APP ([0-9a-f]{8})>>>\nSelected skill: [^\n]*\n<<<END APP \1>>>$/, "her words outside, the app's note in its block");
   assert.doesNotMatch(skillPrompt, /Current request/);
   assert.equal(build(normalMessage, false), "@admin hello");
   assert.doesNotMatch(build(skillMessage, true), /Current request/);

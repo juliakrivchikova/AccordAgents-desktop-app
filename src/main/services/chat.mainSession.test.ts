@@ -404,7 +404,7 @@ test("a fork starts from a copy of the main session's CLI session and then keeps
   assert.equal(childRun.options.forkFromSessionId, "main-cli-session");
   assert.equal(childRun.options.sessionId || undefined, undefined);
   // Both CLIs keep the source's instructions in a fork: the member is told who it is.
-  assert.match(childRun.prompt, /^You were forked from @main's session/);
+  assert.match(childRun.prompt, /^<<<APP [0-9a-f]{8}>>>\nYou were forked from @main's session/);
   assert.match(childRun.prompt, /You are @refactor, role: Generic Member\. You are not the main session/);
   assert.match(childRun.prompt, /Answer directly\./, "its role's instructions");
 
@@ -445,7 +445,7 @@ test("a fork the CLI could not make starts clean in the same turn: the main sess
     await waitFor(() => delegationBatches(storage.current)[0]?.items[0]?.status === "answered");
     // One turn: the copy, then (its source gone) a clean session at once.
     assert.deepEqual(childRuns().map((run) => run.options.forkFromSessionId ?? null), ["main-cli-session", null], kind);
-    assert.match(childRuns()[1].prompt, /^You were to start from a copy of @main's session, but it could not be copied/, `${kind}: told who it is`);
+    assert.match(childRuns()[1].prompt, /^<<<APP [0-9a-f]{8}>>>\nYou were to start from a copy of @main's session, but it could not be copied/, `${kind}: told who it is`);
     await waitFor(() => sessionOf().sessionId === "clean-session");
     assert.equal(sessionOf().forkFrom, undefined, kind);
     assert.equal(sessionOf().forkedFromParticipantId, undefined, kind);
@@ -543,7 +543,7 @@ test("a fork the CLI starts clean (its source is gone) is still told who it is, 
   assert.equal(result.ok, true, JSON.stringify(result));
   await waitFor(() => runs.some((run) => run.participant.id === result.participantId));
   const fallback = String(runs.find((run) => run.participant.id === result.participantId)!.options.resumeFallbackPrompt);
-  assert.match(fallback, /^You were to start from a copy of @main's session, but it could not be copied/);
+  assert.match(fallback, /^<<<APP [0-9a-f]{8}>>>\nYou were to start from a copy of @main's session, but it could not be copied/);
   assert.match(fallback, /You are @refactor, role: Generic Member\. You are not the main session\./);
   assert.match(fallback, /Do only the task in the request below/);
   assert.match(fallback, /Answer directly\./, "its role's instructions");

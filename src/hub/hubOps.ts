@@ -517,9 +517,12 @@ export class HubOps {
     const trigger = conversation.messages.find((message) => message.id === op.messageId);
     if (!trigger) return reject(opId, "There is no such message.");
     // In the sessions view a mention in a member's reply starts nobody
-    // (docs/main-session.md): a new turn for a request a device inferred from
-    // one is refused, whichever device asks or takes it (a cloud machine on
-    // an older program included). A turn already asked for stands.
+    // (docs/main-session.md): a new turn for a message its device labelled an
+    // inferred request (`source: "inferred"`) is refused, whichever device
+    // asks for it (a cloud machine on an older program included). The server
+    // trusts that label as the device wrote it: a device that leaves it off,
+    // or starts the member some other way, is not stopped here. A turn
+    // already asked for stands.
     if (!current && chatViewFor(conversation.metadata) === "sessions" && trigger.metadata?.participantRequest?.source === "inferred") {
       return reject(opId, "In the sessions view a mention in a member's reply starts nobody.");
     }

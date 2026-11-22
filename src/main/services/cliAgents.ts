@@ -800,6 +800,9 @@ interface ClaudeWarmReply {
   buffered?: CliAgentOutputEvent[];
   /** When the CLI step this reply is answering began (epoch ms): when the CLI
    *  started its message, or, for one handed to a running step, that step's. */
+  /** How many compactions the process had seen when this reply started:
+   *  more by its end means the CLI compacted while it ran. */
+  compactionsAtStart?: number;
   stepStartedAt?: number;
   onStarted?: (start?: CliAgentReplyStart) => void;
   onWritten?: () => void;
@@ -7830,6 +7833,7 @@ export class CliAgentRunner {
 
   private activateClaudeWarmReply(state: ClaudeWarmProcessState, reply: ClaudeWarmReply, start?: CliAgentReplyStart): void {
     reply.started = true;
+    reply.compactionsAtStart = state.lastCompactBoundary?.count ?? 0;
     reply.stepStartedAt = start?.joinedStepStartedAt ?? Date.now();
     state.active = reply;
     try {
@@ -8236,6 +8240,7 @@ export class CliAgentRunner {
       model: contextModel,
       windowFromCli: reply.contextWindowTokens !== undefined
     });
+    const compacted = reply.compactionsAtStart !== undefined && (state.lastCompactBoundary?.count ?? 0) > reply.compactionsAtStart;
     let result: ParticipantRunResult = {
       participant,
       ok: true,
@@ -8245,7 +8250,8 @@ export class CliAgentRunner {
       roleRuntime: reply.roleRuntime,
       contextUsage,
       ...(reply.lastAssistantUuid ? { sessionCut: reply.lastAssistantUuid } : {}),
-      ...(options.turnContinues ? { turnContinues: true } : {})
+      ...(options.turnContinues ? { turnContinues: true } : {}),
+      ...(compacted ? { compacted: true } : {})
     };
     for (const raw of reply.resultEvents) {
       result = this.withClaudePermissionDenialWarning(result, raw, participant, "warm");
