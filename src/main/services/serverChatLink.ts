@@ -2,7 +2,7 @@ import type { HubAlertRequest, HubAlertResult } from "../../shared/urgentAlerts"
 import { accordClosedLaunchId } from "../../shared/accordProgress";
 import { HubClient, HubIdentityError, HubHttpError } from "./hubClient";
 import { HubOpsClient, HUB_FEED_CURSOR_KEY, type HubOpOutcome } from "./hubOpsClient";
-import { conversationFieldsOf, newOpId, type ChatServerLink } from "./chatServerOps";
+import { conversationFieldsOf, newOpId, type ChatServerLink, type ChatServerQueue } from "./chatServerOps";
 import { LOCAL_MESSAGE_METADATA_KEYS } from "./chatChanges";
 import type { HubSigningIdentity } from "./hubAuth";
 import type { StorageService } from "./storage";
@@ -256,12 +256,26 @@ export class ServerChatLink {
     return put;
   }
 
-  /** The link as ChatService uses it. */
-  private chatLink(): ChatServerLink {
+  /** This device's queue for the server, in its own database: written with
+   *  or without a link standing (a save, a turn's end that comes after the
+   *  link stopped), sent by the link once it stands. */
+  private serverQueue(): ChatServerQueue {
+    const store = this.options.storage.hubClientOps();
     return {
       deviceId: () => this.deviceIdValue,
-      queueSql: (ops, condition) => this.requireOps().queueSql(ops, condition),
-      enqueue: (ops) => this.requireOps().enqueue(ops),
+      queueSql: (ops, condition) => store.insertSql(ops, new Date().toISOString(), condition),
+      enqueue: async (ops) => {
+        await store.enqueue(ops, new Date().toISOString());
+        this.ops?.nudge();
+      }
+    };
+  }
+
+  /** The link as ChatService uses it. */
+  private chatLink(): ChatServerLink {
+    const queue = this.serverQueue();
+    return {
+      ...queue,
       nudge: () => this.ops?.nudge(),
       messageAccepted: async (conversationId, messageId, signal) => {
         const row = await this.options.storage.hubClientOps().forMessage(conversationId, messageId);
@@ -500,7 +514,9 @@ export class ServerChatLink {
     legacy?.abort.abort();
     await legacy?.done;
     await this.ops?.stop();
-    this.options.chat.setServerLink(undefined);
+    // What the chats change from here on (a member's reply that ends while
+    // the app quits) still queues, and goes at the next start.
+    this.options.chat.setServerLink(undefined, this.deviceIdValue ? this.serverQueue() : undefined);
     this.options.chat.setServerChatReader(undefined);
     this.options.artifacts?.setServerLink(undefined);
     this.ops = undefined;

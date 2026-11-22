@@ -43,6 +43,13 @@ export interface ChatServerLink {
   cardSettleQueued?(conversationId: string, cardId: string): Promise<boolean>;
 }
 
+/** Where a device's chat changes wait for the User's server while its link
+ *  is stopped (the app quitting, or between two links): the queue the link
+ *  sends from, so they go once it starts again. A member's reply that ends
+ *  in that moment is otherwise saved here only, and the next save diffs
+ *  against it: the server kept the reply running for good (2026-11-22). */
+export type ChatServerQueue = Pick<ChatServerLink, "deviceId" | "queueSql" | "enqueue">;
+
 /** Message metadata a device keeps for itself about the server: the turns
  *  the message asked for, a refusal, and a placeholder bubble
  *  for a member that runs elsewhere, shown until that device writes the real

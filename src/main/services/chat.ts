@@ -27,7 +27,7 @@ import {
 import { mainSessionProviderKey, mainSessionProviderOptions, type MainSessionProviderOption } from "../../shared/mainSessionProviders";
 import { normalizedChatAvatarId } from "../../shared/chatAvatarCatalog";
 import type { HubNewChatOptions } from "../../shared/hubProtocol";
-import { chatChangesToOps, furthestTurnMarks, newOpId, serverSeqOf, sortByServerOrder, turnMark, turnsOfEffect, type ChatServerLink } from "./chatServerOps";
+import { chatChangesToOps, furthestTurnMarks, newOpId, serverSeqOf, sortByServerOrder, turnMark, turnsOfEffect, type ChatServerLink, type ChatServerQueue } from "./chatServerOps";
 import { CHAT_LIST_ORDER_METADATA_KEYS, LOCAL_MESSAGE_METADATA_KEYS, SHARED_CONVERSATION_METADATA_KEYS } from "./chatChanges";
 import { hubTurnRunId, isHubTurnRunId, type HubCard, type HubCardState, type HubFeedEntry, type HubOp, type HubTurn } from "../../shared/hubOps";
 import {
@@ -1224,6 +1224,9 @@ export class ChatService {
   /** A link to the server was installed in this run: without one now, it is
    *  between two (never "no server", which answers could not wait on). */
   private serverLinkInstalled = false;
+  /** While no link stands after one did: where saves still queue what they
+   *  change for the server, sent once a link starts again. */
+  private parkedServerQueue?: ChatServerQueue;
   /** Each chat's timer for its next waiting choice to expire. */
   private readonly choiceExpiryTimers = new Map<string, { atMs: number; timer: NodeJS.Timeout }>();
   /** The clock choices expire by (tests move it). */
@@ -25339,14 +25342,18 @@ export class ChatService {
     options: { emitChanges?: boolean } = {}
   ): Promise<void> {
     const link = this.serverLink;
-    if (link && snapshot.kind === "chat") {
+    // A link stopped (the app quitting, or between two links) still queues:
+    // what a member ends meanwhile goes at the next start.
+    const queue = link ?? this.parkedServerQueue;
+    if (queue && snapshot.kind === "chat") {
       // What this save changed goes to the server (Д1), queued in the same
       // transaction as the save: a crash keeps both or neither.
       let ops: HubOp[] = [];
       const finishes: Array<[string, { conversationId: string; participantId: string; op: HubOp; timer: ReturnType<typeof setTimeout> }]> = [];
       // The cards this chat's members here wait on go up, change or settle
-      // with the save that made them so (Д9), whatever else it emits.
-      const cards = this.serverCardOpsFor(snapshot);
+      // with the save that made them so (Д9), whatever else it emits. Read
+      // from a live link only: the next start reconciles them.
+      const cards = link ? this.serverCardOpsFor(snapshot) : { ops: [] as HubOp[], commit: () => undefined };
       if (options.emitChanges !== false) {
         const mayWrite = (message: ChatMessage) => this.mayWriteOnServer(snapshot, message);
         const diff = diffChatChanges(await this.chatChangeBaselineFor(snapshot.id), snapshot, { emitsConversationFields: true, ownsMessage: mayWrite });
@@ -25366,7 +25373,7 @@ export class ChatService {
       ops.push(...cards.ops);
       try {
         const token = ops.length
-          ? await this.storage.saveConversation(snapshot, { rows, alsoCommit: { sql: link.queueSql(ops), onlyIfSql: (condition) => link.queueSql(ops, condition) } })
+          ? await this.storage.saveConversation(snapshot, { rows, alsoCommit: { sql: queue.queueSql(ops), onlyIfSql: (condition) => queue.queueSql(ops, condition) } })
           : await this.storage.saveConversation(snapshot, { rows });
         this.rememberLastSavedSnapshot(snapshot, token);
         this.rememberChatChangeBaseline(snapshot.id, chatChangeBaseline(snapshot));
@@ -25378,7 +25385,7 @@ export class ChatService {
         throw error;
       }
       for (const [, deferred] of finishes) clearTimeout(deferred.timer);
-      if (ops.length) link.nudge();
+      if (ops.length) link?.nudge();
       return;
     }
     // Not linked to a server (yet): the chat is only saved here. The next
@@ -26186,7 +26193,7 @@ export class ChatService {
 
   /** The end of a turn this device ran, said on the server. */
   private finishServerTurn(localRunId: string, outcome: "done" | "error" | "stopped" | "interrupted", contextUsage?: AgentContextUsage): void {
-    const link = this.serverLink;
+    const link = this.serverLink ?? this.parkedServerQueue;
     const server = this.serverRunOfLocal.get(localRunId);
     this.serverTurnOpens.delete(localRunId);
     if (!link || !server) return;
@@ -26213,7 +26220,7 @@ export class ChatService {
     if (!deferred) return;
     this.deferredServerFinishes.delete(serverRunId);
     clearTimeout(deferred.timer);
-    void this.serverLink?.enqueue([deferred.op]).catch(() => undefined);
+    void (this.serverLink ?? this.parkedServerQueue)?.enqueue([deferred.op]).catch(() => undefined);
   }
 
   /** Waits for a turn on the server to reach one of `states`. */
@@ -26443,9 +26450,11 @@ export class ChatService {
     return refreshed.messages.filter((message) => message.participantId === participant.id && message.metadata?.runId === serverRunId && message.status !== "pending");
   }
 
-  /** Installs (or removes) the link to the User's server (Д1). */
-  setServerLink(link: ChatServerLink | undefined): void {
+  /** Installs (or removes) the link to the User's server (Д1). Without a
+   *  link, `parked` is where saves keep queuing what they change for it. */
+  setServerLink(link: ChatServerLink | undefined, parked?: ChatServerQueue): void {
     this.serverLink = link;
+    this.parkedServerQueue = link ? undefined : parked;
     if (link) this.serverLinkInstalled = true;
     this.chatChangeBaselines.clear();
     // The cards of another server (or none) are read again from it.
@@ -26457,10 +26466,10 @@ export class ChatService {
    *  there, or a new one it may write (a member's only where it runs, Д4).
    *  Never a placeholder for a member that runs elsewhere. */
   private mayWriteOnServer(conversation: Conversation, message: ChatMessage): boolean {
-    const link = this.serverLink;
-    if (!link || message.metadata?.serverPlaceholder) return false;
+    const queue = this.serverLink ?? this.parkedServerQueue;
+    if (!queue || message.metadata?.serverPlaceholder) return false;
     const writer = message.metadata?.serverWriter;
-    if (typeof writer === "string") return writer === link.deviceId();
+    if (typeof writer === "string") return writer === queue.deviceId();
     if (message.role !== "participant") return true;
     const participant = this.chatParticipants(conversation).find((item) => item.id === message.participantId);
     return Boolean(participant) && this.runsHere(participant!);

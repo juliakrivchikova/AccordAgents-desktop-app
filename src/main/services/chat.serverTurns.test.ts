@@ -71,8 +71,7 @@ async function setup(t: test.TestContext) {
   let holdTurns = false;
   const settings = { async getPublicSettings() { return { chatRoleConfigs: [], chatParticipantConfigs: [], providers: [{ kind: "claude-code", enabled: true }] }; } };
   const cliRunner = { async detectAgents() { return []; }, async contextUsageForSession() { return undefined; }, async closeConversationSessions() { return undefined; } };
-  const chat = new ChatService(storage as never, settings as never, cliRunner as never, { async write() { return undefined; } } as never);
-  (chat as unknown as { runParticipantTurn: (...args: unknown[]) => Promise<ChatMessage[]> }).runParticipantTurn = async (_conversation, participant, trigger, runId, signal, _progress, options) => {
+  const playTurn = async (_conversation: unknown, participant: unknown, trigger: unknown, runId: unknown, signal: unknown, _progress: unknown, options: unknown): Promise<ChatMessage[]> => {
     const turn: Turn = { participantId: (participant as ChatParticipant).id, triggerId: (trigger as ChatMessage).id, runId: runId as string, signal: signal as AbortSignal };
     turns.push(turn);
     if (holdTurns) {
@@ -87,16 +86,26 @@ async function setup(t: test.TestContext) {
     pending.status = "done";
     return [pending];
   };
-  const link = new ServerChatLink({
-    storage, chat,
-    identity: () => events.getOrCreateDeviceIdentity(),
-    hubConfig: async () => ({ url: front.url }),
-    machineNames: async () => [],
-    movesChats: true,
-    log: () => undefined
-  });
+  // The computer's app: its chat service and its link to the server. A
+  // restart builds both again on the same database.
+  const boot = (): { chat: ChatService; link: ServerChatLink } => {
+    const chat = new ChatService(storage as never, settings as never, cliRunner as never, { async write() { return undefined; } } as never);
+    (chat as unknown as { runParticipantTurn: typeof playTurn }).runParticipantTurn = playTurn;
+    const link = new ServerChatLink({
+      storage, chat,
+      identity: () => events.getOrCreateDeviceIdentity(),
+      hubConfig: async () => ({ url: front.url }),
+      machineNames: async () => [],
+      movesChats: true,
+      log: () => undefined
+    });
+    links.push(link);
+    return { chat, link };
+  };
+  const links: ServerChatLink[] = [];
+  const { chat, link } = boot();
   t.after(async () => {
-    await link.stop();
+    for (const each of links) await each.stop();
     await front.close();
     await hubServer.close();
     await rm(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
@@ -112,7 +121,13 @@ async function setup(t: test.TestContext) {
   return {
     storage, chat, link, front, phone, identity, turns, page, phoneWrite,
     hold: () => { holdTurns = true; },
-    release: () => { holdTurns = false; release?.(); }
+    release: () => { holdTurns = false; release?.(); },
+    /** The app starts again: a new chat service and link on the same database. */
+    restart: async () => {
+      const device = boot();
+      await device.link.start();
+      return device;
+    }
   };
 }
 
@@ -255,4 +270,35 @@ test("a claim stopped before it ran is never left taken: taken back if unsent, f
   assert.deepEqual(await run({ status: "answered", outcome: { status: "accepted", seq: 5, claim: "already-yours" } }), ["turn.stop", "finish:stopped"]);
   assert.deepEqual(await run({ status: "answered", outcome: { status: "accepted", seq: 5, claim: "stopped" } }), ["turn.stop"], "stopped there already");
   assert.deepEqual(await run({ status: "answered", outcome: { status: "rejected", reason: "no" } }), ["turn.stop"]);
+});
+
+test("a member's reply that ends while the computer quits, its link to the server already stopped, reaches the server at the next start with its turn's end", async (t) => {
+  const h = await setup(t);
+  await save(h.chat, localChat("chat-q"));
+  await h.link.start();
+  await until(async () => (await h.link.status())?.ready ?? false, (ready) => ready);
+  h.hold();
+  await h.chat.sendMessage({ conversationId: "chat-q", content: "@taylor long essay" } as never);
+  await until(async () => h.turns.length, (count) => count === 1);
+  const running = await until(() => h.page("chat-q"), (page) => page.messages.some((message) => message.role === "participant" && message.status === "pending"));
+  const replyId = running.messages.find((message) => message.role === "participant")!.id;
+  // Quitting stops the link to the server first (main.ts, before-quit); the
+  // member's turn ends a moment later, while the app still runs.
+  await h.link.stop();
+  h.release();
+  await until(async () => (await h.storage.getConversation("chat-q"))?.messages.find((message) => message.id === replyId)?.status,
+    (status) => status === "done");
+  await h.restart();
+  // The phone reads the server: the reply as the computer shows it, never
+  // a member left running there.
+  const settled = await until(() => h.page("chat-q"), (page) => page.messages.find((message) => message.id === replyId)?.status !== "pending" &&
+    page.turns.every((turn) => turn.state === "finished"), 15_000).catch(async () => {
+    const last = await h.page("chat-q");
+    return assert.fail(`the server never got the end: reply ${last.messages.find((message) => message.id === replyId)?.status}, ` +
+      `turns ${last.turns.map((turn) => `${turn.state}/${turn.outcome ?? "-"}`).join(", ")}`);
+  });
+  const reply = settled.messages.find((message) => message.id === replyId)!;
+  assert.equal(reply.status, "done");
+  assert.equal(reply.content, "reply to @taylor long essay");
+  assert.equal(settled.turns[0].outcome, "done", "the turn ended there as it did here");
 });
