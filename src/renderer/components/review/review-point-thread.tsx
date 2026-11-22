@@ -1,4 +1,4 @@
-import { CheckCircle2, Columns2, Maximize2, MessageSquare, X } from "lucide-react";
+import { CheckCircleIcon, ColumnsIcon, ArrowsOutSimpleIcon, ChatIcon, XIcon } from "@phosphor-icons/react";
 
 import { Button } from "@/components/ui/button";
 import type {
@@ -78,12 +78,12 @@ export function PointThread(props: {
           {reviewRequired && <PlanItemReviewBadge review={review} />}
           <IconButton
             size="sm"
-            icon={focused ? Columns2 : Maximize2}
+            icon={focused ? ColumnsIcon : ArrowsOutSimpleIcon}
             label={focused ? "Show timeline" : "Expand thread"}
             tooltip={focused ? "Show timeline" : "Expand thread"}
             onClick={focused ? onExitFocus : onFocus}
           />
-          <IconButton size="sm" icon={X} label="Close thread" tooltip="Close thread" onClick={onClose} />
+          <IconButton size="sm" icon={XIcon} label="Close thread" tooltip="Close thread" onClick={onClose} />
         </div>
       </div>
 
@@ -230,11 +230,11 @@ function PlanItemReviewComposer(props: {
         />
         <div className="plan-item-review-actions">
           <Button variant="outline" size="sm" disabled={busy || !draft.trim()} onClick={onSubmitComment}>
-            <MessageSquare size={16} />
+            <ChatIcon size={16} />
             Comment
           </Button>
           <Button variant="outline" size="sm" disabled={busy || review?.status === "confirmed"} onClick={onConfirm}>
-            <CheckCircle2 size={16} />
+            <CheckCircleIcon size={16} />
             Confirm
           </Button>
         </div>

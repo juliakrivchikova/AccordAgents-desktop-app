@@ -181,97 +181,18 @@ export function useChatActions(state: AppState, conversationActions: Conversatio
       state.setError("Enter a message or attach an image to start a chat.");
       return false;
     }
-    // In the sessions view the main session runs on what the New chat chip
-    // chose for this chat (else Settings → General's CLI), and the chat is
-    // made with it alone; the classic view's New chat is as before.
-    const sessionsView = newChatViewFor(state.settings.defaultChatView) === "sessions";
-    const resolveProvider = (agents: typeof state.agents): MainSessionProviderOption | undefined => {
-      const kind = resolveAssistantProviderKind({
-        agents,
-        providers: state.settings.providers,
-        explicitKind: state.settings.assistantProviderKind
-      });
-      if (!sessionsView) return kind ? { kind, label: "" } : undefined;
-      const options = mainSessionProviderOptions(agents, state.settings.providers, state.settings.cliProviderHosts);
-      return resolveMainSessionProvider(state.newChatMainSessionProvider, options, kind);
-    };
-    // The main session's provider the screen showed: settings made for it
-    // there do not carry over to another one.
-    const shownProvider = resolveProvider(state.agents);
-    let agents = state.agents;
-    if (isAgentSnapshotStale(agents)) {
-      try {
-        agents = await conversationActions.refreshAgents({ trigger: "submit" });
-      } catch {
-        state.setError("Could not verify CLI readiness. Check again and retry.");
-        return false;
-      }
-    }
-    const mainProvider = resolveProvider(agents);
-    if (!mainProvider) {
-      // The saved CLI gives way to any ready one: none is ready.
-      state.setError(NO_READY_CLI_MESSAGE);
-      return false;
-    }
-    // The provider the chip showed (or chose) stopped being ready before the
-    // send: the chat is not silently made on another one; the screen now
-    // shows the one it would take, and the next send takes it.
-    const refusal = sessionsView
-      ? newChatProviderChangedRefusal(state.newChatMainSessionProvider, shownProvider, mainProvider, mainSessionProviderOptions(agents, state.settings.providers, state.settings.cliProviderHosts))
-      : undefined;
-    if (refusal) {
-      state.setError(refusal);
-      if (state.newChatMainSessionProvider) state.setNewChatMainSessionProvider?.(undefined);
-      return false;
-    }
-    const overrideMadeFor = state.newChatMainSessionOverrideFor;
-    const mainSessionRuntimeOverride = shownProvider && mainSessionProviderKey(mainProvider) === mainSessionProviderKey(shownProvider) &&
-      !(overrideMadeFor && overrideMadeFor !== mainSessionProviderKey(mainProvider))
-      ? state.selectedChatParticipantRuntimeOverrides[NEW_CHAT_MAIN_SESSION_PARTICIPANT_ID]
-      : undefined;
-    // Every new chat has its main session first, instead of the Chat
-    // Assistant (docs/main-session.md). In the sessions view nobody else:
-    // the main session makes members itself, and an @handle in the first
-    // message picks none.
-    // The mode the User's own config starts its CLI in where it will run
-    // (this computer, or the machine chosen for it on New chat): the one the
-    // screen showed for this provider and place, else read now.
-    const place = { kind: mainProvider.kind, homeMachineId: mainSessionRuntimeOverride?.homeMachineId, cloudRun: mainSessionRuntimeOverride?.cloudRun };
-    const shownStart = state.newChatMainSessionStartAccess;
-    const startAccess = !sessionsView
-      ? undefined
-      : shownStart && shownStart.key === startAccessKey(mainSessionProviderKey(mainProvider), place)
-        ? shownStart.access
-        : (await cliStartDefaultsFor(place))?.access;
-    const participants = [
-      newChatMainSessionParticipantDraft(mainProvider.kind, mainSessionRuntimeOverride, Boolean(state.repoPath.trim()), mainProvider.hostId, sessionsView, startAccess),
-      ...(sessionsView ? [] : selectedOrMentionedChatParticipantDrafts(
-        state.settings.chatParticipantConfigs,
-        state.selectedChatParticipantConfigIds,
-        initialMessage,
-        state.selectedChatParticipantRuntimeOverrides
-      ))
-    ];
-    const validation = validateChatStartupDrafts(
-      participants,
-      state.settings.chatRoleConfigs,
-      agents,
-      state.settings.chatBehaviorRules,
-      state.settings.providers,
-      state.settings.cliProviderHosts
-    );
-    if (validation) {
-      state.setError(validation);
-      return false;
-    }
     if (state.startingChatRef.current) {
       return false;
     }
+    // The send shows from the press on: the CLI check below can take seconds,
+    // and a press that changes nothing on screen reads as a send that did not
+    // happen. New chat stays on screen with its send button busy until the
+    // chat is being made (the run id below), so its choices survive a Stop or
+    // a failed check; Stop works from here on too.
     state.startingChatRef.current = true;
     const runId = crypto.randomUUID();
     const creation = new AbortController();
     state.chatCreationRef.current = creation;
-    state.setCurrentRunId(runId);
     state.setBusy(true);
     let createdConversationId: string | undefined;
     // An Activity preview opened meanwhile is the User's later choice: the new
@@ -282,13 +203,104 @@ export function useChatActions(state: AppState, conversationActions: Conversatio
     // So is a chat opened from the sidebar or search while this one was being
     // created: once it is on screen, the new chat does not take its place. An
     // empty screen (still on New chat, or back from Activity) shows the new chat.
+    // A chat still opening counts as on screen: the new one does not flash in
+    // before it (Back from Activity clears that target and lands here).
     const showCreated = (created: Conversation): void => {
-      state.setConversation((current) =>
-        current && current.id !== created.id && state.openConversationRequestRef.current !== openRequestAtStart
-          ? current
-          : created);
+      state.setConversation((current) => {
+        if (state.openConversationRequestRef.current === openRequestAtStart) return created;
+        if (current && current.id !== created.id) return current;
+        const opening = state.openConversationTargetRef.current;
+        return opening && opening !== created.id ? current : created;
+      });
     };
     try {
+      // In the sessions view the main session runs on what the New chat chip
+      // chose for this chat (else Settings → General's CLI), and the chat is
+      // made with it alone; the classic view's New chat is as before.
+      const sessionsView = newChatViewFor(state.settings.defaultChatView) === "sessions";
+      const resolveProvider = (agents: typeof state.agents): MainSessionProviderOption | undefined => {
+        const kind = resolveAssistantProviderKind({
+          agents,
+          providers: state.settings.providers,
+          explicitKind: state.settings.assistantProviderKind
+        });
+        if (!sessionsView) return kind ? { kind, label: "" } : undefined;
+        const options = mainSessionProviderOptions(agents, state.settings.providers, state.settings.cliProviderHosts);
+        return resolveMainSessionProvider(state.newChatMainSessionProvider, options, kind);
+      };
+      // The main session's provider the screen showed: settings made for it
+      // there do not carry over to another one.
+      const shownProvider = resolveProvider(state.agents);
+      let agents = state.agents;
+      if (isAgentSnapshotStale(agents)) {
+        try {
+          agents = await conversationActions.refreshAgents({ trigger: "submit" });
+        } catch {
+          creation.signal.throwIfAborted();
+          state.setError("Could not verify CLI readiness. Check again and retry.");
+          return false;
+        }
+      }
+      const mainProvider = resolveProvider(agents);
+      if (!mainProvider) {
+        // The saved CLI gives way to any ready one: none is ready.
+        state.setError(NO_READY_CLI_MESSAGE);
+        return false;
+      }
+      // The provider the chip showed (or chose) stopped being ready before the
+      // send: the chat is not silently made on another one; the screen now
+      // shows the one it would take, and the next send takes it.
+      const refusal = sessionsView
+        ? newChatProviderChangedRefusal(state.newChatMainSessionProvider, shownProvider, mainProvider, mainSessionProviderOptions(agents, state.settings.providers, state.settings.cliProviderHosts))
+        : undefined;
+      if (refusal) {
+        state.setError(refusal);
+        if (state.newChatMainSessionProvider) state.setNewChatMainSessionProvider?.(undefined);
+        return false;
+      }
+      const overrideMadeFor = state.newChatMainSessionOverrideFor;
+      const mainSessionRuntimeOverride = shownProvider && mainSessionProviderKey(mainProvider) === mainSessionProviderKey(shownProvider) &&
+        !(overrideMadeFor && overrideMadeFor !== mainSessionProviderKey(mainProvider))
+        ? state.selectedChatParticipantRuntimeOverrides[NEW_CHAT_MAIN_SESSION_PARTICIPANT_ID]
+        : undefined;
+      // Every new chat has its main session first, instead of the Chat
+      // Assistant (docs/main-session.md). In the sessions view nobody else:
+      // the main session makes members itself, and an @handle in the first
+      // message picks none.
+      // The mode the User's own config starts its CLI in where it will run
+      // (this computer, or the machine chosen for it on New chat): the one the
+      // screen showed for this provider and place, else read now.
+      const place = { kind: mainProvider.kind, homeMachineId: mainSessionRuntimeOverride?.homeMachineId, cloudRun: mainSessionRuntimeOverride?.cloudRun };
+      const shownStart = state.newChatMainSessionStartAccess;
+      const startAccess = !sessionsView
+        ? undefined
+        : shownStart && shownStart.key === startAccessKey(mainSessionProviderKey(mainProvider), place)
+          ? shownStart.access
+          : (await cliStartDefaultsFor(place))?.access;
+      const participants = [
+        newChatMainSessionParticipantDraft(mainProvider.kind, mainSessionRuntimeOverride, Boolean(state.repoPath.trim()), mainProvider.hostId, sessionsView, startAccess),
+        ...(sessionsView ? [] : selectedOrMentionedChatParticipantDrafts(
+          state.settings.chatParticipantConfigs,
+          state.selectedChatParticipantConfigIds,
+          initialMessage,
+          state.selectedChatParticipantRuntimeOverrides
+        ))
+      ];
+      const validation = validateChatStartupDrafts(
+        participants,
+        state.settings.chatRoleConfigs,
+        agents,
+        state.settings.chatBehaviorRules,
+        state.settings.providers,
+        state.settings.cliProviderHosts
+      );
+      if (validation) {
+        state.setError(validation);
+        return false;
+      }
+      // Stopped while the CLIs were being checked: no chat is made.
+      creation.signal.throwIfAborted();
+      state.setCurrentRunId(runId);
       const result = await window.consensus.createChatConversation({
         runId,
         title: initialChatTitle(initialMessage, imageAttachments),

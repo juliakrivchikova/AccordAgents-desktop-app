@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import { FileText, Plus, Search, X } from "lucide-react";
+import { FileTextIcon, PlusIcon, MagnifyingGlassIcon, XIcon } from "@phosphor-icons/react";
 
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogClose, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
@@ -40,7 +40,7 @@ export function SavedPromptsSettingsSection(props: {
     <section className="rules-settings-screen prompts-settings-screen">
       <div className="rules-settings-toolbar">
         <label className="rules-search" aria-label="Search prompts">
-          <Search size={16} aria-hidden />
+          <MagnifyingGlassIcon size={16} aria-hidden />
           <input
             value={search}
             onChange={(event) => setSearch(event.target.value)}
@@ -50,8 +50,8 @@ export function SavedPromptsSettingsSection(props: {
         </label>
         <span className="rules-count">{countLabel}</span>
         <span className="rules-toolbar-spacer" />
-        <Button className="rules-new-button" size="lg" data-testid="saved-prompts-new" onClick={() => setEditor({ type: "new" })}>
-          <Plus size={16} aria-hidden />
+        <Button className="rules-new-button" data-testid="saved-prompts-new" onClick={() => setEditor({ type: "new" })}>
+          <PlusIcon size={16} aria-hidden />
           New prompt
         </Button>
       </div>
@@ -105,7 +105,7 @@ function SavedPromptCard(props: {
       </span>
       <span className="behavior-rule-card-desc">{promptCardDescription(props.prompt)}</span>
       <span className="behavior-rule-no-participants">
-        <FileText size={15} aria-hidden />
+        <FileTextIcon size={15} aria-hidden />
         Inserts editable text
       </span>
     </button>
@@ -204,7 +204,7 @@ function SavedPromptEditorDialog(props: {
                 <DialogDescription>{prompt ? `v${prompt.version} saved prompt` : "Reusable composer prompt"}</DialogDescription>
               </span>
               <DialogClose asChild>
-                <IconButton label="Close prompt editor" icon={X} />
+                <IconButton label="Close prompt editor" icon={XIcon} />
               </DialogClose>
             </div>
           </DialogHeader>
@@ -258,7 +258,7 @@ function SavedPromptEditorDialog(props: {
                 data-testid="saved-prompt-delete"
                 onClick={() => setDeleteOpen(true)}
               >
-                <X size={16} />
+                <XIcon size={16} />
                 Delete
               </Button>
             )}

@@ -1,6 +1,6 @@
 import { useEffect, useLayoutEffect, useRef, useState, type KeyboardEvent, type ReactNode } from "react";
 import { createPortal } from "react-dom";
-import { Check, ChevronDown, ChevronRight } from "lucide-react";
+import { CheckIcon, CaretDownIcon, CaretRightIcon } from "@phosphor-icons/react";
 
 /**
  * One quiet control of a sessions-view composer and its own small menu, the
@@ -199,7 +199,7 @@ export function ComposerMenu(props: {
         }}
       >
         {props.label}
-        {!props.bare && <ChevronDown className="composer-menu-chevron" size={12} aria-hidden />}
+        {!props.bare && <CaretDownIcon className="composer-menu-chevron" size={12} aria-hidden />}
       </button>
       {menu && (portalTarget ? createPortal(menu, portalTarget) : menu)}
     </>
@@ -251,7 +251,7 @@ export function ComposerMenuItem(props: {
         {props.detail && <span className="composer-menu-item-detail">{props.detail}</span>}
       </span>
       {role !== "menuitem" && (
-        <span className="composer-menu-check" aria-hidden="true">{props.selected && <Check size={14} />}</span>
+        <span className="composer-menu-check" aria-hidden="true">{props.selected && <CheckIcon size={14} />}</span>
       )}
     </button>
   );
@@ -269,7 +269,7 @@ export function ComposerMenuDisclosure(props: { label: string; open: boolean; on
       <button type="button" role="menuitem" className="composer-menu-item composer-menu-disclosure" aria-expanded={props.open}
         data-testid={props.testId} onClick={props.onToggle}>
         <span className="composer-menu-item-copy"><span className="composer-menu-item-label">{props.label}</span></span>
-        {props.open ? <ChevronDown size={14} aria-hidden /> : <ChevronRight size={14} aria-hidden />}
+        {props.open ? <CaretDownIcon size={14} aria-hidden /> : <CaretRightIcon size={14} aria-hidden />}
       </button>
       {props.open && props.children}
     </>

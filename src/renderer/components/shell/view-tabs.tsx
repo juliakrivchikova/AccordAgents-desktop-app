@@ -1,11 +1,11 @@
-import type { LucideIcon } from "lucide-react";
+import type { Icon as PhosphorIcon } from "@phosphor-icons/react";
 
 import { SegmentedTabs } from "@/renderer/components/segmented-tabs";
 
 export interface ViewTabItem<TValue extends string> {
   value: TValue;
   label: string;
-  icon?: LucideIcon;
+  icon?: PhosphorIcon;
 }
 
 export interface ViewTabsProps<TValue extends string> {

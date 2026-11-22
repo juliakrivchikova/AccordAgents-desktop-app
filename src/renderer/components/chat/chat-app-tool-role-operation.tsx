@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { AlertTriangle, Eye, Pencil } from "lucide-react";
+import { WarningIcon, EyeIcon, PencilSimpleIcon } from "@phosphor-icons/react";
 
 import {
   chatParticipantRequestPermissionExceeds,
@@ -81,7 +81,7 @@ export function ChatAppToolRoleChangeOperation(props: {
                 <strong>{displayChatRoleLabel(archivedRole, operation.role.roleConfigId)}</strong>
               </div>
               <div className="chat-app-tool-review-warning">
-                <AlertTriangle size={14} aria-hidden />
+                <WarningIcon size={14} aria-hidden />
                 <span>This role will be deleted. Existing members keep working under it.</span>
               </div>
             </div>
@@ -163,7 +163,7 @@ function EditableRoleReviewOperation(props: {
                 aria-pressed={previewInstructions}
                 onClick={() => setPreviewInstructions(true)}
               >
-                <Eye size={13} aria-hidden />
+                <EyeIcon size={13} aria-hidden />
                 Preview
               </button>
               <button
@@ -172,7 +172,7 @@ function EditableRoleReviewOperation(props: {
                 aria-pressed={!previewInstructions}
                 onClick={() => setPreviewInstructions(false)}
               >
-                <Pencil size={13} aria-hidden />
+                <PencilSimpleIcon size={13} aria-hidden />
                 Edit
               </button>
             </span>
@@ -193,13 +193,13 @@ function EditableRoleReviewOperation(props: {
       <RoleParticipantDefaultsReview defaults={roleParticipantDefaultsForOperation(props.operation, props.existingRole)} />
       {roleManagementDefaultEscalates(props.operation, props.existingRole) && (
         <div className="chat-app-tool-review-warning">
-          <AlertTriangle size={14} aria-hidden />
+          <WarningIcon size={14} aria-hidden />
           <span>Management escalation: this role default grants or raises role/member management for inheriting members.</span>
         </div>
       )}
       {props.operation.type === "edit_role" && props.savedPresetCount > 0 && (
         <div className="chat-app-tool-review-warning">
-          <AlertTriangle size={14} aria-hidden />
+          <WarningIcon size={14} aria-hidden />
           <span>Editing this role affects members already using it.</span>
         </div>
       )}

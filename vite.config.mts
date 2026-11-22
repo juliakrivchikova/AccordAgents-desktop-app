@@ -21,12 +21,12 @@ export default defineConfig({
           if (!id.includes("node_modules")) {
             return undefined;
           }
-          if (id.includes("/react/") || id.includes("/react-dom/") || id.includes("/scheduler/")) {
+          if (id.includes("/node_modules/react/") || id.includes("/node_modules/react-dom/") || id.includes("/node_modules/scheduler/")) {
             return "react-vendor";
           }
           if (
             id.includes("/radix-ui/") ||
-            id.includes("/lucide-react/") ||
+            id.includes("/@phosphor-icons/react/") ||
             id.includes("/@tanstack/react-virtual/") ||
             id.includes("/cmdk/") ||
             id.includes("/next-themes/") ||

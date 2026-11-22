@@ -1,0 +1,4 @@
+interface:
+  display_name: "Renderer UI Code"
+  short_description: "Write and review renderer React code and UI by the kit rules"
+  default_prompt: "Use $renderer-ui-code to write or review this renderer change by the project's UI kit and React rules."

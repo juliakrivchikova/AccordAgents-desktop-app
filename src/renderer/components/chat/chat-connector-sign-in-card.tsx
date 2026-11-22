@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { PlugZap } from "lucide-react";
+import { PlugChargingIcon } from "@phosphor-icons/react";
 
 import { Button } from "@/components/ui/button";
 import type { ChatAppToolApproval, ChatConnectorSignInRequest, ChatParticipant } from "../../../shared/types";
@@ -99,7 +99,7 @@ export function ChatConnectorSignInCard(props: {
   // Used: one line, like a folded urgent alert (the User, 2026-11-18); its
   // full outcome on hover.
   if (!pending) {
-    return <ChatUsedApprovalLine approval={approval} kind="Connector sign-in" icon={PlugZap} preview={request.connector} {...connectorSignInEnding(approval, request)} />;
+    return <ChatUsedApprovalLine approval={approval} kind="Connector sign-in" icon={PlugChargingIcon} preview={request.connector} {...connectorSignInEnding(approval, request)} />;
   }
 
   return (
@@ -119,7 +119,7 @@ export function ChatConnectorSignInCard(props: {
         <div className="chat-app-tool-approval-panel is-review-change">
           <div className="chat-app-tool-review-header">
             <div className="chat-app-tool-review-chip">
-              <PlugZap size={13} aria-hidden />
+              <PlugChargingIcon size={13} aria-hidden />
               {request.connector}
             </div>
           </div>

@@ -1,4 +1,4 @@
-import { SquareTerminal } from "lucide-react";
+import { TerminalWindowIcon } from "@phosphor-icons/react";
 
 import type { ChatAppToolApproval } from "../../../shared/types";
 import { chatCodexApprovalRequest, chatCodexApprovalShowsCancel } from "./chat-codex-approval-presentation";
@@ -26,5 +26,5 @@ function codexApprovalEnding(approval: ChatAppToolApproval): { preview: string; 
 /** A decided Codex approval: one line, the action it was about, then who
  *  asked, how it ended and when (the whole command on hover). */
 export function ChatCodexApprovalResult({ approval }: { approval: ChatAppToolApproval }): JSX.Element {
-  return <ChatUsedApprovalLine approval={approval} kind="Codex approval" icon={SquareTerminal} {...codexApprovalEnding(approval)} />;
+  return <ChatUsedApprovalLine approval={approval} kind="Codex approval" icon={TerminalWindowIcon} {...codexApprovalEnding(approval)} />;
 }

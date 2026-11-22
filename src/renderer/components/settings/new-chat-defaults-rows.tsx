@@ -9,7 +9,7 @@ import { isChatProviderKind } from "../../../shared/chatProviders";
 import { DEFAULT_CHAT_VIEW, isChatViewMode } from "../../../shared/mainSession";
 import { AppSelect } from "../primitives";
 
-const SELECT_CLASS_NAME = "assistant-provider-select min-h-7 data-[size=sm]:rounded-[10px] border-[var(--app-hairline)] bg-[var(--app-surface)] text-[14px] dark:bg-[var(--app-surface)]";
+const SELECT_CLASS_NAME = "assistant-provider-select min-h-7 border-ui-border bg-ui-bg text-ui-13";
 
 const CHAT_VIEW_OPTIONS: Array<{ value: ChatViewMode; label: string }> = [
   { value: "sessions", label: "Sessions" },

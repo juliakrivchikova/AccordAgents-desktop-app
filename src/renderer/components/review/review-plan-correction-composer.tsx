@@ -1,8 +1,9 @@
 import React from "react";
-import { RefreshCw, SendHorizontal } from "lucide-react";
+import { PaperPlaneRightIcon } from "@phosphor-icons/react";
 
 import { Button } from "@/components/ui/button";
 import { ResizableTextarea } from "../primitives";
+import { Spinner } from "@/components/ui/spinner";
 
 export function PlanCorrectionComposer(props: {
   draft: string;
@@ -45,7 +46,7 @@ export function PlanCorrectionComposer(props: {
           disabled={!canSubmit}
           onClick={onSubmit}
         >
-          {busy ? <RefreshCw size={18} className="spin" /> : <SendHorizontal size={18} />}
+          {busy ? <Spinner size={18} /> : <PaperPlaneRightIcon size={18} />}
         </Button>
       </div>
     </div>

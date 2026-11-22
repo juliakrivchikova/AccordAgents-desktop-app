@@ -1,9 +1,10 @@
 import { useEffect, useRef, useState } from "react";
-import { Loader2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { HUB_SETUP_BLOB_PREFIX, HUB_SETUP_STEPS, parseHubServerBlob, type HubSetupState, type HubSetupStep } from "../../../shared/hubSetup";
 import { AwsCommandBox, AwsDialog } from "./aws-dialog";
 import { ADMIN_COMMAND_TEXT, AwsPasteField, cleanError } from "./aws-shared";
+import { Spinner } from "@/components/ui/spinner";
+import { Delayed } from "@/components/ui/delayed";
 
 const STEP_LABELS: Record<HubSetupStep, string> = {
   connecting: "Connect",
@@ -123,7 +124,7 @@ export function HubServerSection(): JSX.Element {
           </div>
           <Button type="button" variant="outline" size="sm" data-testid="hub-server-setup"
             onClick={() => (updateAvailable ? void run({}) : setOpen(true))}>
-            {installing ? <Loader2 size={14} className="gen-aws-spinner" aria-hidden /> : null}
+            {installing ? <Delayed><Spinner size={14} /></Delayed> : null}
             {actionLabel}
           </Button>
         </div>
@@ -142,7 +143,7 @@ export function HubServerSection(): JSX.Element {
             </Button>
           ) : (
             <Button type="button" size="sm" data-testid="hub-server-install" disabled={installing || !blob.trim()} onClick={() => void run({ blob })}>
-              {installing ? <Loader2 size={14} className="gen-aws-spinner" aria-hidden /> : null}
+              {installing ? <Delayed><Spinner size={14} /></Delayed> : null}
               {installing ? "Installing…" : "Install"}
             </Button>
           )}

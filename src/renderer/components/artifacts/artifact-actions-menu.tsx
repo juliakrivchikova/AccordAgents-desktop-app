@@ -1,5 +1,5 @@
 import type { ReactNode, Ref } from "react";
-import { Archive, BadgeCheck, Check, ChevronDown, FileDiff, FileText, Pencil, RotateCcw, UsersRound } from "lucide-react";
+import { ArchiveIcon, SealCheckIcon, CheckIcon, CaretDownIcon, GitDiffIcon, FileTextIcon, PencilSimpleIcon, ArrowCounterClockwiseIcon, UsersIcon } from "@phosphor-icons/react";
 import { DropdownMenu } from "radix-ui";
 
 import { ArtifactApprovedMark } from "./artifact-approval-badge";
@@ -62,7 +62,7 @@ export function ArtifactActionsMenu(props: ArtifactActionsMenuProps): JSX.Elemen
           <span>{props.title}</span>
           {props.tag ? <span className="artifact-title-tag" data-testid="artifact-title-tag">{props.tag}</span> : null}
           {props.approved && <ArtifactApprovedMark />}
-          <ChevronDown size={15} aria-hidden />
+          <CaretDownIcon size={15} aria-hidden />
         </button>
       </DropdownMenu.Trigger>
       <DropdownMenu.Portal>
@@ -85,14 +85,14 @@ export function ArtifactActionsMenu(props: ArtifactActionsMenuProps): JSX.Elemen
                 onValueChange={(value) => props.view?.onChange(value === "changes")}
               >
                 <DropdownMenu.RadioItem value="content" className="artifact-menu-item" disabled={props.busy}>
-                  <FileText aria-hidden />
+                  <FileTextIcon aria-hidden />
                   <span className="artifact-menu-item-label">Content</span>
-                  <DropdownMenu.ItemIndicator className="artifact-menu-indicator"><Check aria-hidden /></DropdownMenu.ItemIndicator>
+                  <DropdownMenu.ItemIndicator className="artifact-menu-indicator"><CheckIcon aria-hidden /></DropdownMenu.ItemIndicator>
                 </DropdownMenu.RadioItem>
                 <DropdownMenu.RadioItem value="changes" className="artifact-menu-item" disabled={props.busy} data-testid="artifact-show-diff-toggle">
-                  <FileDiff aria-hidden />
+                  <GitDiffIcon aria-hidden />
                   <span className="artifact-menu-item-label">Changes since v{props.view.fromVersion}</span>
-                  <DropdownMenu.ItemIndicator className="artifact-menu-indicator"><Check aria-hidden /></DropdownMenu.ItemIndicator>
+                  <DropdownMenu.ItemIndicator className="artifact-menu-indicator"><CheckIcon aria-hidden /></DropdownMenu.ItemIndicator>
                 </DropdownMenu.RadioItem>
               </DropdownMenu.RadioGroup>
             </>
@@ -101,15 +101,15 @@ export function ArtifactActionsMenu(props: ArtifactActionsMenuProps): JSX.Elemen
           {main.map((action) => (
             action === "sign" ? (
               <DropdownMenu.Item key={action} className="artifact-menu-item" disabled={props.busy} onSelect={props.onSign}>
-                <BadgeCheck aria-hidden /><span className="artifact-menu-item-label">Sign v{props.signVersion}</span>
+                <SealCheckIcon aria-hidden /><span className="artifact-menu-item-label">Sign v{props.signVersion}</span>
               </DropdownMenu.Item>
             ) : action === "rename" ? (
               <DropdownMenu.Item key={action} className="artifact-menu-item" disabled={props.busy} onSelect={props.onRename}>
-                <Pencil aria-hidden /><span className="artifact-menu-item-label">Rename</span>
+                <PencilSimpleIcon aria-hidden /><span className="artifact-menu-item-label">Rename</span>
               </DropdownMenu.Item>
             ) : (
               <DropdownMenu.Item key={action} className="artifact-menu-item" disabled={props.busy} onSelect={props.onOpenAccess}>
-                <UsersRound aria-hidden /><span className="artifact-menu-item-label">Members &amp; access</span>
+                <UsersIcon aria-hidden /><span className="artifact-menu-item-label">Members &amp; access</span>
               </DropdownMenu.Item>
             )
           ))}
@@ -121,7 +121,7 @@ export function ArtifactActionsMenu(props: ArtifactActionsMenuProps): JSX.Elemen
               disabled={props.busy}
               onSelect={() => props.onArchivedChange(action === "archive")}
             >
-              {action === "archive" ? <Archive aria-hidden /> : <RotateCcw aria-hidden />}
+              {action === "archive" ? <ArchiveIcon aria-hidden /> : <ArrowCounterClockwiseIcon aria-hidden />}
               <span className="artifact-menu-item-label">{action === "archive" ? "Archive" : "Restore"}</span>
             </DropdownMenu.Item>
           ))}

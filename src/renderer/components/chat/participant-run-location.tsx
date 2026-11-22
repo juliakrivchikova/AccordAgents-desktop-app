@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { ChevronDown } from "lucide-react";
+import { CaretDownIcon } from "@phosphor-icons/react";
 import type { ChatProviderKind } from "../../../shared/types";
 import type { MachineRecord } from "../../../shared/machineLink";
 import type { CloudRunPreparationState, CloudRunSelection } from "../../../shared/cloudRunPreparation";
@@ -99,7 +99,7 @@ export function ParticipantRunLocation(props: {
         {!props.hideLabel && <span className="chat-rt-toggle-label">Run on:</span>}
         <span className={`chat-rt-ghost${props.disabled || props.locked ? " is-disabled" : ""}`} title={props.locked ? lockedReason : undefined}>
           <span className="chat-rt-ghost-val">{options.find(option => option.value === selected)?.label}</span>
-          <ChevronDown size={11} aria-hidden />
+          <CaretDownIcon size={11} aria-hidden />
           <select className="chat-rt-ghost-native" aria-label="Run on" value={selected}
             disabled={props.disabled || props.locked || (moving ? true : undefined)} onChange={event => select(event.currentTarget.value)}>
             {options.map(option => <option key={option.value} value={option.value}>{option.label}</option>)}

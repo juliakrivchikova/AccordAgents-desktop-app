@@ -1,5 +1,5 @@
 import { useEffect, useRef, type MutableRefObject, type ReactNode } from "react";
-import { FileBox, FileText, ListChecks, Minimize2, Plug, Target } from "lucide-react";
+import { FilesIcon, FileTextIcon, ListChecksIcon, ArrowsInSimpleIcon, PlugIcon, TargetIcon } from "@phosphor-icons/react";
 
 import type {
   ArtifactSummary,
@@ -97,7 +97,7 @@ export function ChatComposerMenus(props: {
               aria-selected={index === props.fileIndex}
               key={artifact.id}
             >
-              <span className="file-mention-icon"><FileBox size={18} /></span>
+              <span className="file-mention-icon"><FilesIcon size={18} /></span>
               <strong>{artifact.name}</strong>
               <span>{artifactSummaryStatusLabel(artifact)}</span>
               {index === 0 && <kbd>Enter</kbd>}
@@ -118,7 +118,7 @@ export function ChatComposerMenus(props: {
                 aria-selected={optionIndex === props.fileIndex}
                 key={file.path}
               >
-                <span className="file-mention-icon"><FileText size={18} /></span>
+                <span className="file-mention-icon"><FileTextIcon size={18} /></span>
                 <strong>{repoFileBasename(file.path)}</strong>
                 <span>{file.path}</span>
                 {optionIndex === 0 && <kbd>Enter</kbd>}
@@ -148,7 +148,7 @@ export function ChatComposerMenus(props: {
                 key={`command:${option.item.id}`}
               >
                 <span className="file-mention-icon">
-                  {option.item.id === "goal" ? <Target size={18} /> : <Minimize2 size={18} />}
+                  {option.item.id === "goal" ? <TargetIcon size={18} /> : <ArrowsInSimpleIcon size={18} />}
                 </span>
                 <strong>{option.item.label}</strong>
                 <span>{option.item.description}</span>
@@ -168,7 +168,7 @@ export function ChatComposerMenus(props: {
                 aria-selected={index === props.skillIndex}
                 key={`prompt:${option.item.id}`}
               >
-                <span className="file-mention-icon"><FileText size={18} /></span>
+                <span className="file-mention-icon"><FileTextIcon size={18} /></span>
                 <strong>/{option.item.trigger}</strong>
                 <span>{option.item.label}</span>
                 <small>Prompt</small>
@@ -189,7 +189,7 @@ export function ChatComposerMenus(props: {
                 aria-selected={index === props.skillIndex}
                 key={`skill:${option.item.skillId}`}
               >
-                <span className="file-mention-icon"><ListChecks size={18} /></span>
+                <span className="file-mention-icon"><ListChecksIcon size={18} /></span>
                 <strong>{option.item.displayName}</strong>
                 <span className="slash-item-copy">
                   <span>{option.item.description ?? "User skill"}</span>
@@ -237,7 +237,7 @@ function PluginMenuIcon(props: { plugin: PluginCatalogItem }): JSX.Element {
       </span>
     );
   }
-  return <span className="file-mention-icon"><Plug size={18} /></span>;
+  return <span className="file-mention-icon"><PlugIcon size={18} /></span>;
 }
 
 function ProviderChips(props: { labels: string[] }): JSX.Element {

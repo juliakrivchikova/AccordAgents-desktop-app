@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { BadgeCheck, CheckCircle2, Copy, Info, Pencil } from "lucide-react";
+import { SealCheckIcon, CheckCircleIcon, CopyIcon, InfoIcon, PencilSimpleIcon } from "@phosphor-icons/react";
 
 import { MarkdownText } from "../content/markdown-text";
 import { IconButton } from "../primitives/icon-button";
@@ -35,7 +35,7 @@ export function ArtifactContentSurface(props: {
       <div className="artifact-content-fabs">
         {props.onSign && (
           <IconButton
-            icon={BadgeCheck}
+            icon={SealCheckIcon}
             label={props.signLabel ?? "Sign"}
             tooltip={props.signLabel ?? "Sign"}
             floating
@@ -46,7 +46,7 @@ export function ArtifactContentSurface(props: {
         )}
         {props.onRevise && (
           <IconButton
-            icon={Pencil}
+            icon={PencilSimpleIcon}
             label="Revise"
             tooltip="Revise"
             floating
@@ -55,7 +55,7 @@ export function ArtifactContentSurface(props: {
           />
         )}
         <IconButton
-          icon={copied ? CheckCircle2 : Copy}
+          icon={copied ? CheckCircleIcon : CopyIcon}
           label={copied ? "Copied" : "Copy content"}
           tooltip={copied ? "Copied" : "Copy content"}
           floating
@@ -67,7 +67,7 @@ export function ArtifactContentSurface(props: {
         <MarkdownText content={props.content} />
         {props.note ? (
           <div className="artifact-version-note">
-            <Info size={14} aria-hidden />
+            <InfoIcon size={14} aria-hidden />
             <span><strong>Note</strong> — {props.note}</span>
           </div>
         ) : null}

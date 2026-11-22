@@ -1,12 +1,12 @@
 import * as React from "react";
 import { cva, type VariantProps } from "class-variance-authority";
-import type { LucideIcon } from "lucide-react";
+import type { Icon as PhosphorIcon } from "@phosphor-icons/react";
 
 import { Badge } from "@/components/ui/badge";
 import { cn } from "@/lib/utils";
 
 const statusBadgeVariants = cva(
-  "inline-flex h-5 items-center gap-1 rounded-full border px-2 text-[11px] font-semibold leading-none whitespace-nowrap shadow-[inset_0_1px_0_color-mix(in_srgb,var(--highlight-color)_22%,transparent)] [&>svg]:text-current [&>svg]:stroke-[2.35]",
+  "inline-flex h-5 items-center gap-1 rounded-full border px-2 text-ui-11 font-semibold leading-none whitespace-nowrap shadow-[inset_0_1px_0_color-mix(in_srgb,var(--highlight-color)_22%,transparent)] [&>svg]:text-current",
   {
     variants: {
       tone: {
@@ -42,7 +42,7 @@ export type StatusBadgeEmphasis = NonNullable<VariantProps<typeof statusBadgeVar
 export interface StatusBadgeProps extends React.ComponentProps<"span"> {
   tone?: StatusBadgeTone;
   emphasis?: StatusBadgeEmphasis;
-  icon?: LucideIcon;
+  icon?: PhosphorIcon;
   uppercase?: boolean;
 }
 

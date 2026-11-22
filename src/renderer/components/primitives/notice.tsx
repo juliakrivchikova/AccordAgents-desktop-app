@@ -1,6 +1,6 @@
 import * as React from "react";
-import { AlertCircle, AlertTriangle, Info } from "lucide-react";
-import type { LucideIcon } from "lucide-react";
+import { WarningCircleIcon, WarningIcon, InfoIcon } from "@phosphor-icons/react";
+import type { Icon as PhosphorIcon } from "@phosphor-icons/react";
 
 import { Alert, AlertAction, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { cn } from "@/lib/utils";
@@ -13,14 +13,14 @@ const TONE_CLASS: Record<NoticeTone, string> = {
   error: "border-[var(--app-danger)]/30 bg-[var(--app-danger-soft)] text-[var(--app-text-strong)]"
 };
 
-const TONE_ICON: Record<NoticeTone, LucideIcon> = {
-  info: Info,
-  warning: AlertTriangle,
-  error: AlertCircle
+const TONE_ICON: Record<NoticeTone, PhosphorIcon> = {
+  info: InfoIcon,
+  warning: WarningIcon,
+  error: WarningCircleIcon
 };
 
 const TONE_ICON_CLASS: Record<NoticeTone, string> = {
-  info: "text-[var(--app-accent)]",
+  info: "text-ui-link",
   warning: "text-[var(--app-warning)]",
   error: "text-[var(--app-danger)]"
 };
@@ -28,7 +28,7 @@ const TONE_ICON_CLASS: Record<NoticeTone, string> = {
 export interface NoticeProps extends Omit<React.ComponentProps<"div">, "title"> {
   tone?: NoticeTone;
   title?: React.ReactNode;
-  icon?: LucideIcon;
+  icon?: PhosphorIcon;
   action?: React.ReactNode;
 }
 

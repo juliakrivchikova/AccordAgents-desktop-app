@@ -1,24 +1,5 @@
 /* visual normalization styles. Keep token-driven; migrate rules into components as views are extracted. */
 
-@keyframes spin {
-  to {
-    transform: rotate(360deg);
-  }
-}
-
-@keyframes progress-dot {
-  0%,
-  80%,
-  100% {
-    transform: translateY(0);
-    opacity: 0.35;
-  }
-  40% {
-    transform: translateY(-2px);
-    opacity: 1;
-  }
-}
-
 @keyframes progress-rail {
   0%,
   100% {
@@ -52,10 +33,6 @@
   }
 }
 
-:where(svg.lucide, svg[data-lucide]) {
-  stroke-width: 1.75;
-}
-
 .compose-layout,
 .slack-thread-panel,
 .chat-thread-panel,
@@ -64,18 +41,12 @@
   background: var(--app-surface);
 }
 
-.toggle input:checked + span {
-  background: var(--app-accent);
-  color: var(--app-surface);
-}
-
 .message-meta,
 .view-heading span,
 .point-message small,
 .thread-panel-head span,
 .thread-empty-state,
 .empty-state,
-.settings-item-head small,
 .plan-source-support-head,
 .plan-source-support-row span,
 .plan-source-details summary {
@@ -116,7 +87,6 @@
 
 .thread-resizer::before,
 .message-body,
-.settings-item,
 .plan-source-support,
 .plan-source-detail-card,
 .markdown-table-wrap,
@@ -134,7 +104,6 @@
 }
 
 .message-body,
-.settings-item,
 .plan-source-support,
 .markdown-table-wrap {
   background: var(--app-surface);
@@ -145,7 +114,6 @@
 .thread-empty-state h2,
 .empty-state h2,
 .message-body,
-.settings-item,
 .markdown-text {
   color: var(--app-text-strong);
 }
@@ -165,7 +133,7 @@
 .message-avatar.avatar-user,
 .thread-avatar.avatar-user {
   background: var(--app-primary);
-  color: var(--app-surface);
+  color: var(--ui-primary-fg);
 }
 
 .message.summary .message-avatar,
@@ -186,7 +154,7 @@
 
 .avatar-custom {
   background: var(--app-avatar-bg);
-  color: var(--app-primary);
+  color: var(--ui-link);
 }
 
 .avatar-gemini {
@@ -209,7 +177,7 @@
 
 .avatar-generic {
   background: color-mix(in srgb, var(--app-accent-soft) 58%, var(--app-avatar-bg));
-  color: var(--app-accent);
+  color: var(--ui-link);
 }
 
 .thread-avatar.typing-avatar,

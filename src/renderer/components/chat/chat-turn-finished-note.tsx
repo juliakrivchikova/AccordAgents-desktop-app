@@ -1,4 +1,4 @@
-import { X } from "lucide-react";
+import { XIcon } from "@phosphor-icons/react";
 import type { ChatMessage, ChatParticipant, ChatTurnFinishedNoteMetadata } from "../../../shared/types";
 import { avatarForParticipant } from "../avatar/avatar";
 import { useFocusChatMessage } from "../content/markdown-text";
@@ -58,7 +58,7 @@ export function ChatTurnFinishedNote(props: {
           <IconButton
             className="chat-turn-finished-note-dismiss"
             size="xs"
-            icon={X}
+            icon={XIcon}
             label="Dismiss note"
             tooltip="Dismiss note"
             onClick={() => props.onDismiss?.(message.id)}

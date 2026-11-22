@@ -1,10 +1,11 @@
 import { useEffect, useRef } from "react";
-import { Loader2, Mic, Square } from "lucide-react";
+import { MicrophoneIcon, SquareIcon } from "@phosphor-icons/react";
 
 import { IconButton } from "@/renderer/components/primitives";
 import { formatSpeechElapsed, insertDictatedText } from "../../../shared/speechToText";
 import { useSpeechToTextState } from "../../app/use-speech-to-text";
 import { useDictation } from "./use-dictation";
+import { Spinner } from "@/components/ui/spinner";
 
 /**
  * The microphone in a message field, shown once speech to text is on and its
@@ -90,7 +91,7 @@ export function SpeechToTextButton(props: {
         >
           <span className="composer-dictation-dot" aria-hidden />
           <span className="composer-dictation-time">{formatSpeechElapsed(dictation.seconds)}</span>
-          <Square size={11} strokeWidth={2.4} aria-hidden />
+          <SquareIcon size={11} aria-hidden />
         </button>
       </>
     );
@@ -102,8 +103,7 @@ export function SpeechToTextButton(props: {
       <IconButton
         ref={buttonRef}
         label={dictation.phase === "recognizing" ? "Recognizing speech…" : "Dictate"}
-        icon={busy ? Loader2 : Mic}
-        iconClassName={busy ? "spin" : undefined}
+        icon={busy ? Spinner : MicrophoneIcon}
         aria-disabled={busy || undefined}
         data-testid="composer-dictation-start"
         data-busy={busy || undefined}

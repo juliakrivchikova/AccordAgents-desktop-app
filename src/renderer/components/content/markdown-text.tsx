@@ -1,5 +1,5 @@
 import { createContext, memo, useContext, useMemo, type ReactNode } from "react";
-import { FileBox } from "lucide-react";
+import { FilesIcon } from "@phosphor-icons/react";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import {
   parseInlineCodeFileLinkTarget,
@@ -221,7 +221,7 @@ function ArtifactLink({ artifactId, label }: { artifactId: string; label?: strin
       onClick={(event) => { event.preventDefault(); activate(); }}
       onKeyDown={(event) => { if (event.key === "Enter" || event.key === " ") { event.preventDefault(); activate(); } }}
     >
-      <FileBox size={15} strokeWidth={2.2} aria-hidden /><span className="artifact-link-name">{name}</span>
+      <FilesIcon size={15} aria-hidden /><span className="artifact-link-name">{name}</span>
     </a>
   );
 }

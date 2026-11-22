@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { Loader2, Send, Square, X } from "lucide-react";
+import { PaperPlaneTiltIcon, SquareIcon, XIcon } from "@phosphor-icons/react";
 
 import { Dialog, DialogClose, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
@@ -22,6 +22,7 @@ import { chatCliProviderLabel } from "../chat/chat-participant-drafts";
 import { rememberCustomAvatar } from "./custom-avatars";
 import { StudioSelect } from "./avatar-studio-select";
 import { IconButton } from "../primitives";
+import { Spinner } from "@/components/ui/spinner";
 
 interface StudioMessage {
   id: string;
@@ -221,7 +222,7 @@ export function AvatarStudioDialog(props: {
               </DialogDescription>
             </span>
             <DialogClose asChild>
-              <IconButton label="Close avatar studio" icon={X} />
+              <IconButton label="Close avatar studio" icon={XIcon} />
             </DialogClose>
           </div>
         </DialogHeader>
@@ -276,7 +277,7 @@ export function AvatarStudioDialog(props: {
               ))}
               {busy && (
                 <div className="avatar-studio-message is-runner is-busy">
-                  <Loader2 size={14} className="spin" aria-hidden /> Drawing…
+                  <Spinner size={14} /> Drawing…
                 </div>
               )}
             </div>
@@ -332,11 +333,11 @@ export function AvatarStudioDialog(props: {
                   size="sm"
                   onClick={() => void window.consensus.cancelAvatarStudioTurn(studioId)}
                 >
-                  <Square size={13} aria-hidden /> Stop
+                  <SquareIcon size={13} aria-hidden /> Stop
                 </Button>
               ) : (
                 <Button type="button" size="sm" disabled={!prompt.trim() || noDrawingProvider} onClick={() => void send()}>
-                  <Send size={13} aria-hidden /> Send
+                  <PaperPlaneTiltIcon size={13} aria-hidden /> Send
                 </Button>
               )}
             </div>

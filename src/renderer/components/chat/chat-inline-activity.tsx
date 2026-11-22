@@ -1,15 +1,6 @@
 import { useId, useMemo } from "react";
-import {
-  Activity,
-  ChevronDown,
-  ChevronRight,
-  FilePenLine,
-  Globe,
-  ShieldCheck,
-  Terminal,
-  Wrench,
-  type LucideIcon
-} from "lucide-react";
+import { PulseIcon, CaretDownIcon, CaretRightIcon, NotePencilIcon, GlobeIcon, ShieldCheckIcon, TerminalIcon, WrenchIcon } from "@phosphor-icons/react";
+import type { Icon as PhosphorIcon } from "@phosphor-icons/react";
 
 import type { ChatAgentActivityEvent, ChatAgentActivityKind } from "../../../shared/types";
 import { chatActivityGroupSummary } from "../../../shared/processingTranscript";
@@ -53,8 +44,8 @@ export function ChatInlineActivityGroup(props: {
         onClick={toggle}
       >
         {expanded
-          ? <ChevronDown className="chat-inline-activity-disclosure-icon" size={14} aria-hidden />
-          : <ChevronRight className="chat-inline-activity-disclosure-icon" size={14} aria-hidden />}
+          ? <CaretDownIcon className="chat-inline-activity-disclosure-icon" size={14} aria-hidden />
+          : <CaretRightIcon className="chat-inline-activity-disclosure-icon" size={14} aria-hidden />}
         <span className={showCurrent ? "streaming-status-label" : undefined}>{label}</span>
       </button>
       {expanded && (
@@ -111,8 +102,8 @@ export function ChatInlineActivityEvent(props: {
           onClick={() => activityDisclosure.toggleActivity(event.id)}
         >
           {activityExpanded
-            ? <ChevronDown className="chat-inline-activity-disclosure-icon" size={14} aria-hidden />
-            : <ChevronRight className="chat-inline-activity-disclosure-icon" size={14} aria-hidden />}
+            ? <CaretDownIcon className="chat-inline-activity-disclosure-icon" size={14} aria-hidden />
+            : <CaretRightIcon className="chat-inline-activity-disclosure-icon" size={14} aria-hidden />}
           <span className={labelClassName}>{event.label}</span>
         </button>
       ) : (
@@ -158,21 +149,21 @@ function maskActivityDetailSecrets(detail: string): string {
     .replace(/((?:^|[\s,{])["']?[A-Za-z0-9_.-]*(?:token|key|password|secret)[A-Za-z0-9_.-]*["']?\s*(?:=|:)\s*["']?)([^\s"',;}]+)/gim, "$1••••");
 }
 
-function iconForActivityKind(kind: ChatAgentActivityKind): LucideIcon {
+function iconForActivityKind(kind: ChatAgentActivityKind): PhosphorIcon {
   if (kind === "command") {
-    return Terminal;
+    return TerminalIcon;
   }
   if (kind === "tool") {
-    return Wrench;
+    return WrenchIcon;
   }
   if (kind === "file-edit") {
-    return FilePenLine;
+    return NotePencilIcon;
   }
   if (kind === "web") {
-    return Globe;
+    return GlobeIcon;
   }
   if (kind === "approval") {
-    return ShieldCheck;
+    return ShieldCheckIcon;
   }
-  return Activity;
+  return PulseIcon;
 }

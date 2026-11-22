@@ -1,5 +1,5 @@
 import type { CSSProperties } from "react";
-import { ArrowLeft, Code2, ExternalLink, FolderOpen, X } from "lucide-react";
+import { ArrowLeftIcon, CodeIcon, ArrowSquareOutIcon, FolderOpenIcon, XIcon } from "@phosphor-icons/react";
 
 import { fileBasename } from "../../../shared/filePreview";
 import type { LocalFileOpenAction, RepoFileExternalOpenAction } from "../../../shared/types";
@@ -45,7 +45,7 @@ function PanelFrame(props: {
       />
       <div data-titlebar className="artifacts-panel-header file-panel-header">
         {props.onBackToThread && (
-          <IconButton label="Back to thread" tooltip="Back to thread" icon={ArrowLeft} onClick={props.onBackToThread} />
+          <IconButton label="Back to thread" tooltip="Back to thread" icon={ArrowLeftIcon} onClick={props.onBackToThread} />
         )}
         <div className="artifacts-panel-title-block file-panel-title-block">
           <h3 className="artifacts-panel-title" title={props.subtitle ?? props.title}>
@@ -54,7 +54,7 @@ function PanelFrame(props: {
         </div>
         {props.status && <span className="file-panel-status">{props.status}</span>}
         {props.actions}
-        <IconButton label="Close file" icon={X} onClick={props.onClose} />
+        <IconButton label="Close file" icon={XIcon} onClick={props.onClose} />
       </div>
       {props.subtitle && (
         // The header row has the app's fixed title height, so the path gets its own line.
@@ -152,13 +152,13 @@ export function FilePanel(props: {
           <IconButton
             label={externalLabel}
             tooltip={externalLabel}
-            icon={externalAction === "intellij-idea" ? Code2 : ExternalLink}
+            icon={externalAction === "intellij-idea" ? CodeIcon : ArrowSquareOutIcon}
             onClick={() => props.openOutside(outsideTarget, externalAction)}
           />
           <IconButton
             label="Reveal in file manager"
             tooltip="Reveal in file manager"
-            icon={FolderOpen}
+            icon={FolderOpenIcon}
             onClick={() => props.openOutside(outsideTarget, "reveal")}
           />
         </>

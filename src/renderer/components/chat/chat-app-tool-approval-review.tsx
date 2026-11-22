@@ -1,4 +1,4 @@
-import { Sparkles, UserPlus } from "lucide-react";
+import { SparkleIcon, UserPlusIcon } from "@phosphor-icons/react";
 
 import { Button } from "@/components/ui/button";
 import type {
@@ -125,7 +125,7 @@ export function ChatAppToolReviewResult(props: {
     <ChatUsedApprovalLine
       approval={props.approval}
       kind={props.participantChange || props.combinedRequest ? "Member change" : "Role change"}
-      icon={props.participantChange || props.combinedRequest ? UserPlus : Sparkles}
+      icon={props.participantChange || props.combinedRequest ? UserPlusIcon : SparkleIcon}
       preview={reviewResultPreview(props.approval, props.roleRequest, props.participantChange, sessions)}
       appPreview
       ended={summary.title}

@@ -77,7 +77,7 @@
 }
 
 .composer-menu-trigger[aria-expanded="true"] {
-  background: var(--app-surface-hover);
+  background: var(--ui-row-hover);
   color: var(--app-text-strong);
 }
 
@@ -117,7 +117,7 @@
 
 .chat-member-actions-trigger:hover,
 .chat-member-actions-trigger[aria-expanded="true"] {
-  background: var(--app-surface-hover);
+  background: var(--ui-row-hover);
   color: var(--app-text-strong);
 }
 
@@ -190,7 +190,7 @@
 
 .composer-menu-item:hover:not(:disabled),
 .composer-menu-item:focus-visible {
-  background: var(--app-surface-hover);
+  background: var(--ui-row-hover);
 }
 
 .composer-menu-item:disabled {

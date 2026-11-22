@@ -1,5 +1,5 @@
 import { useContext, useEffect, useMemo, useState } from "react";
-import { ImagePlus } from "lucide-react";
+import { ImageIcon } from "@phosphor-icons/react";
 
 import {
   Dialog,
@@ -95,7 +95,7 @@ export function ChatImageAttachmentStrip(props: {
               {imageData?.dataUrl ? (
                 <img src={imageData.dataUrl} alt={attachment.filename} />
               ) : (
-                <ImagePlus size={18} aria-hidden />
+                <ImageIcon size={18} aria-hidden />
               )}
               <span>{attachment.filename}</span>
               <small>

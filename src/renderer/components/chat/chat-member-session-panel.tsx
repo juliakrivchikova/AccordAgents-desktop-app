@@ -1,5 +1,5 @@
 import { memo, useLayoutEffect, useMemo, useRef, useState, type ComponentProps, type ReactNode } from "react";
-import { ArrowLeft, ChevronDown, ChevronRight, Square, X } from "lucide-react";
+import { ArrowLeftIcon, CaretDownIcon, CaretRightIcon, SquareIcon, XIcon } from "@phosphor-icons/react";
 
 import { SESSIONS_REMOVED_MEMBER_DETAIL, firstTextLine, type SessionsWorkStatus } from "../../../shared/mainSessionView";
 import type { AppSettings, ChatImageInput, ChatMessage, ChatParticipant, ChatSkillMention, RepoFileMention } from "../../../shared/types";
@@ -124,7 +124,7 @@ export function ChatMemberSessionPanel(props: {
     <section className="chat-thread-panel chat-member-session-panel" aria-label={`${props.title} session`} data-testid="chat-member-session-panel" data-participant-id={member.id} data-read-only={props.readOnly || undefined}>
       <header className="thread-panel-head chat-thread-head chat-member-session-head" data-titlebar>
         <div>
-          <IconButton icon={ArrowLeft} label="Back" tooltip="Back" data-testid="chat-member-session-back" onClick={props.onBack} />
+          <IconButton icon={ArrowLeftIcon} label="Back" tooltip="Back" data-testid="chat-member-session-back" onClick={props.onBack} />
           {member.kind && <ChatProviderMark member={{ kind: member.kind, hostLabel: member.hostLabel }} />}
           <span className="chat-member-session-title">
             <h2>{props.title}</h2>
@@ -136,9 +136,9 @@ export function ChatMemberSessionPanel(props: {
         <div className="thread-panel-actions">
           {props.settings}
           {!props.readOnly && props.onStopRuns && props.runIds.length > 0 && (
-            <IconButton tone="danger" icon={Square} iconClassName="chat-agent-stop-icon" label={`Stop ${props.title}`} tooltip="Stop" data-testid="chat-member-session-stop" onClick={() => props.onStopRuns?.(props.runIds)} />
+            <IconButton tone="danger" icon={SquareIcon} iconWeight="fill" iconClassName="chat-agent-stop-icon" label={`Stop ${props.title}`} tooltip="Stop" data-testid="chat-member-session-stop" onClick={() => props.onStopRuns?.(props.runIds)} />
           )}
-          <IconButton icon={X} label="Close" tooltip="Close" onClick={props.onClose} />
+          <IconButton icon={XIcon} label="Close" tooltip="Close" onClick={props.onClose} />
         </div>
       </header>
       <div
@@ -234,7 +234,7 @@ export const ChatMemberTaskFold = memo(function ChatMemberTaskFold(props: { mess
   return (
     <div className={`chat-member-task ${open ? "is-open" : ""}`} data-message-id={props.message.id} data-testid="chat-member-task">
       <button type="button" className="chat-member-task-toggle" aria-expanded={open} onClick={() => setOpen((current) => !current)}>
-        {open ? <ChevronDown size={14} aria-hidden /> : <ChevronRight size={14} aria-hidden />}
+        {open ? <CaretDownIcon size={14} aria-hidden /> : <CaretRightIcon size={14} aria-hidden />}
         <span className="chat-member-task-label">{label}</span>
         {!open && <span className="chat-member-task-preview">{preview}</span>}
       </button>

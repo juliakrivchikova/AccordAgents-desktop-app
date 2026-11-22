@@ -1,5 +1,5 @@
 import React, { useEffect, useLayoutEffect, useMemo, useRef } from "react";
-import { ImagePlus } from "lucide-react";
+import { ImageIcon } from "@phosphor-icons/react";
 
 import { IconButton, ResizableTextarea } from "@/renderer/components/primitives";
 import { AccordMergeIcon } from "./accord-merge-icon";
@@ -359,7 +359,7 @@ export function ChatComposer(props: ChatComposerProps): JSX.Element {
                 void images.addImageFiles(files);
               }}
             />
-            <IconButton label="Attach image" icon={ImagePlus} onClick={() => fileInputRef.current?.click()} />
+            <IconButton label="Attach image" icon={ImageIcon} onClick={() => fileInputRef.current?.click()} />
             {activeRunCount > 0 && props.onStopAllRuns && (
               <ChatActiveRunPopover
                 activeRunCount={activeRunCount}

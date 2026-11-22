@@ -1,4 +1,5 @@
-import { BellOff, BellRing, ChevronDown, CircleCheck, Clock, PhoneCall, PhoneMissed, Send, TriangleAlert, X, type LucideIcon } from "lucide-react";
+import { BellSlashIcon, BellRingingIcon, CaretDownIcon, CheckCircleIcon, ClockIcon, PhoneCallIcon, PhoneXIcon, PaperPlaneTiltIcon, WarningIcon, XIcon } from "@phosphor-icons/react";
+import type { Icon as PhosphorIcon } from "@phosphor-icons/react";
 import { useContext, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { Button } from "@/components/ui/button";
 import {
@@ -9,14 +10,14 @@ import { ChatMessageWhen } from "./chat-streaming";
 import { UrgentAlertActionsContext } from "./urgent-alert-context";
 import { useSessionsViewLabel, useSessionsViewText } from "./chat-sessions-links";
 
-const STATUS_ICONS: Record<UrgentAlertStatus["icon"], LucideIcon> = {
-  clock: Clock,
-  ringing: PhoneCall,
-  sent: Send,
-  missed: PhoneMissed,
-  check: CircleCheck,
-  off: BellOff,
-  failed: TriangleAlert
+const STATUS_ICONS: Record<UrgentAlertStatus["icon"], PhosphorIcon> = {
+  clock: ClockIcon,
+  ringing: PhoneCallIcon,
+  sent: PaperPlaneTiltIcon,
+  missed: PhoneXIcon,
+  check: CheckCircleIcon,
+  off: BellSlashIcon,
+  failed: WarningIcon
 };
 
 /**
@@ -126,11 +127,11 @@ export function ChatUrgentAlertCard(props: {
             setExpanded(true);
           }}
         >
-          <BellRing className="chat-urgent-alert-folded-bell" size={14} aria-hidden="true" />
+          <BellRingingIcon className="chat-urgent-alert-folded-bell" size={14} aria-hidden="true" />
           <span className="sr-only">Urgent alert: </span>
           <span className="chat-urgent-alert-folded-preview">{message.content}</span>
           <span className="chat-urgent-alert-folded-outcome">{requesterName ? `${requesterName} · ` : ""}{outcome.text}</span>
-          <ChevronDown className="chat-urgent-alert-folded-chevron" size={14} aria-hidden="true" />
+          <CaretDownIcon className="chat-urgent-alert-folded-chevron" size={14} aria-hidden="true" />
         </button>
       </article>
     );
@@ -143,7 +144,7 @@ export function ChatUrgentAlertCard(props: {
     <article ref={card} data-message-id={message.id} className="chat-urgent-alert" aria-label={appText(`Urgent alert from ${requester}`)}>
       <div className="chat-urgent-alert-panel">
         <div className="chat-urgent-alert-head">
-          <BellRing className="chat-urgent-alert-bell" size={18} aria-hidden="true" />
+          <BellRingingIcon className="chat-urgent-alert-bell" size={18} aria-hidden="true" />
           <span className="chat-urgent-alert-title">Urgent alert</span>
           {!awaiting && (
             <button
@@ -159,7 +160,7 @@ export function ChatUrgentAlertCard(props: {
                 setExpanded(false);
               }}
             >
-              <X size={18} aria-hidden="true" />
+              <XIcon size={18} aria-hidden="true" />
             </button>
           )}
         </div>

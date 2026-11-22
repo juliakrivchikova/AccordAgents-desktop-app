@@ -1,5 +1,5 @@
 import { useRef, useState, type FocusEvent, type KeyboardEvent } from "react";
-import { CornerDownLeft, Minimize2 } from "lucide-react";
+import { ArrowElbowDownLeftIcon, ArrowsInSimpleIcon } from "@phosphor-icons/react";
 
 import { Button } from "@/components/ui/button";
 import type { ChatAppToolApproval, ChatAppToolApprovalScope, ChatParticipant, ChatSelfCompactionRequest } from "../../../shared/types";
@@ -83,7 +83,7 @@ export function ChatCompactionApprovalCard(props: {
       <ChatUsedApprovalLine
         approval={approval}
         kind="Compaction"
-        icon={Minimize2}
+        icon={ArrowsInSimpleIcon}
         preview={COMPACTION_CARD_USED_PREVIEW}
         {...compactionCardEnding(approval)}
       />
@@ -129,7 +129,7 @@ export function ChatCompactionApprovalCard(props: {
       )}
       <div className="chat-compaction-card-panel">
         <div className="chat-compaction-card-top">
-          <span className="chat-compaction-card-icon" aria-hidden="true"><Minimize2 size={16} /></span>
+          <span className="chat-compaction-card-icon" aria-hidden="true"><ArrowsInSimpleIcon size={16} /></span>
           <div className="chat-compaction-card-text">
             <h3 className="chat-compaction-card-title">{COMPACTION_CARD_TITLE}</h3>
             <p className="chat-compaction-card-desc">{COMPACTION_CARD_SENTENCE}</p>
@@ -160,7 +160,7 @@ export function ChatCompactionApprovalCard(props: {
           </button>
           <Button type="button" variant="default" size="sm" className="chat-compaction-card-compact" disabled={props.submitting} onClick={compact}>
             <span>{COMPACTION_CARD_COMPACT}</span>
-            <CornerDownLeft size={14} aria-hidden />
+            <ArrowElbowDownLeftIcon size={14} aria-hidden />
           </Button>
         </div>
       </div>

@@ -10,16 +10,7 @@ import {
   type SetStateAction,
   type UIEvent
 } from "react";
-import {
-  ArrowUp,
-  Check,
-  ChevronDown,
-  FolderOpen,
-  ImagePlus,
-  Plus,
-  RefreshCw,
-  XCircle
-} from "lucide-react";
+import { ArrowUpIcon, CheckIcon, CaretDownIcon, FolderOpenIcon, FolderSimpleIcon, ImageIcon, PlusIcon, XCircleIcon } from "@phosphor-icons/react";
 
 import type {
   AgentHealth,
@@ -79,6 +70,7 @@ import {
   mainSessionProviderOptions,
   resolveMainSessionProvider
 } from "../../../shared/mainSessionProviders";
+import { Spinner } from "@/components/ui/spinner";
 
 /** Whether the main session's settings on the New chat screen were made for
  *  another provider than the one it is on now (none recorded: made before
@@ -440,8 +432,6 @@ export function NewChatScreen(props: {
     <div className={["new-chat-screen", needsProviderSetup ? "has-cli-readiness" : ""].filter(Boolean).join(" ")} data-testid="new-chat-screen">
       <div className="new-chat-hero">
         <div className="new-chat-logo" aria-hidden="true">
-          <span className="new-chat-logo-glow" />
-          <span className="new-chat-logo-ring" />
           <img src={ACCORDAGENTS_MARK_URL} alt="" draggable="false" />
         </div>
         <h1>Start a new chat</h1>
@@ -602,7 +592,7 @@ export function NewChatScreen(props: {
               void images.addImageFiles(files);
             }}
           />
-          <IconButton label="Attach image" icon={ImagePlus} onClick={() => fileInputRef.current?.click()} />
+          <IconButton label="Attach image" icon={ImageIcon} onClick={() => fileInputRef.current?.click()} />
           <FolderPicker
             repoPath={props.repoPath}
             settings={props.settings}
@@ -645,14 +635,14 @@ export function NewChatScreen(props: {
             data-testid="new-chat-start"
             onClick={() => void startChat()}
           >
-            {props.busy ? <RefreshCw className="spin" size={18} aria-hidden /> : <ArrowUp size={18} strokeWidth={2.25} aria-hidden />}
+            {props.busy ? <Spinner size={14} /> : <ArrowUpIcon size={14} weight="bold" aria-hidden />}
           </button>
         </div>
       </div>
 
       {props.repoInfo && !props.repoInfo.isRepo && props.repoInfo.error && (
         <div className="repo-status new-chat-repo-status bad">
-          <XCircle size={16} aria-hidden />
+          <XCircleIcon size={16} aria-hidden />
           {props.repoInfo.error}
         </div>
       )}
@@ -714,9 +704,9 @@ function FolderPicker(props: {
         title={repoPath || "Choose a folder"}
         onClick={() => setOpen((current) => !current)}
       >
-        <FolderOpen size={15} aria-hidden />
+        <FolderSimpleIcon size={14} aria-hidden />
         <span>{label}</span>
-        <ChevronDown size={14} aria-hidden />
+        <CaretDownIcon size={14} className="text-ui-text-3" aria-hidden />
       </button>
       {open && (
         <div className="new-chat-menu new-chat-folder-menu" role="menu">
@@ -725,9 +715,9 @@ function FolderPicker(props: {
               <div className="new-chat-menu-section">Recent folders</div>
               {recentOptions.map((path) => (
                 <button key={path} type="button" className="new-chat-menu-item" role="menuitem" onClick={() => selectPath(path)}>
-                  <FolderOpen size={15} aria-hidden />
+                  <FolderOpenIcon size={15} aria-hidden />
                   <span>{folderName(path)}</span>
-                  {repoPath === path && <Check size={14} className="new-chat-menu-check" aria-hidden />}
+                  {repoPath === path && <CheckIcon size={14} className="new-chat-menu-check" aria-hidden />}
                 </button>
               ))}
               <div className="new-chat-menu-divider" />
@@ -742,7 +732,7 @@ function FolderPicker(props: {
               props.onSelectRepo();
             }}
           >
-            <Plus size={15} aria-hidden />
+            <PlusIcon size={15} aria-hidden />
             <span>Browse for a folder...</span>
           </button>
           <button
@@ -754,9 +744,9 @@ function FolderPicker(props: {
               setOpen(false);
             }}
           >
-            <XCircle size={15} aria-hidden />
+            <XCircleIcon size={15} aria-hidden />
             <span>Work without a folder</span>
-            {!repoPath && <Check size={14} className="new-chat-menu-check" aria-hidden />}
+            {!repoPath && <CheckIcon size={14} className="new-chat-menu-check" aria-hidden />}
           </button>
         </div>
       )}
@@ -850,7 +840,7 @@ function ParticipantPicker(props: {
           ))}
         </span>
         <span>{label}</span>
-        <ChevronDown size={14} aria-hidden />
+        <CaretDownIcon size={14} aria-hidden />
       </button>
       {open && (
         <div

@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { CalendarClock, Check, ChevronDown, ChevronRight, KeyRound, ShieldAlert } from "lucide-react";
+import { CalendarDotsIcon, CheckIcon, CaretDownIcon, CaretRightIcon, KeyIcon, ShieldWarningIcon } from "@phosphor-icons/react";
 
 import type { ChatAppToolApproval, ChatAppToolApprovalScope, ChatParticipant } from "../../../shared/types";
 import type { ChatScriptChangeRequest, ScriptRevisionContent } from "../../../shared/scripts";
@@ -11,6 +11,7 @@ import { formatChatTime } from "./chat-format";
 import { ChatAppToolReviewFooter } from "./chat-app-tool-approval-review";
 import { ChatUsedApprovalLine } from "./chat-used-card-row";
 import { useSessionsViewLabel, useSessionsViewText } from "./chat-sessions-links";
+import { Delayed } from "@/components/ui/delayed";
 
 function scriptApprovalTitle(handle: string, request: ChatScriptChangeRequest): string {
   const who = chatParticipantReference(handle);
@@ -156,7 +157,7 @@ export function ChatScriptApprovalCard(props: {
     const ended = approval.status === "approved" ? scriptApprovedEnding(request, schedule)
       : approval.status === "denied" ? "Declined" : approval.status === "cancelled" ? "Cancelled" : "Expired";
     return (
-      <ChatUsedApprovalLine approval={approval} kind="Scheduled task" icon={CalendarClock} preview={request.name} ended={ended}
+      <ChatUsedApprovalLine approval={approval} kind="Scheduled task" icon={CalendarDotsIcon} preview={request.name} ended={ended}
         withoutTime={Boolean(schedule)} detail={approval.error} />
     );
   }
@@ -178,7 +179,7 @@ export function ChatScriptApprovalCard(props: {
         <div className="chat-app-tool-approval-panel is-review-change">
           <div className="chat-app-tool-review-header">
             <div className="chat-app-tool-review-chip">
-              <CalendarClock size={13} aria-hidden />
+              <CalendarDotsIcon size={13} aria-hidden />
               Scheduled task
             </div>
           </div>
@@ -209,7 +210,7 @@ export function ChatScriptApprovalCard(props: {
             {needsKeys && request.secretNames.length > 0 && (
               <div className="chat-script-approval-keys">
                 <div className="chat-script-approval-section-title">
-                  <KeyRound size={13} aria-hidden />
+                  <KeyIcon size={13} aria-hidden />
                   Keys
                 </div>
                 <p className="chat-script-approval-hint">Saved only on {request.hostPhrase}. The task reads them from its environment; agents never see them.</p>
@@ -220,7 +221,7 @@ export function ChatScriptApprovalCard(props: {
                       <code>{name}</code>
                       {saved && !(name in drafts && drafts[name] !== "") ? (
                         <span className="chat-script-approval-key-saved">
-                          <Check size={13} aria-hidden /> Saved
+                          <CheckIcon size={13} aria-hidden /> Saved
                           <button type="button" className="chat-script-approval-link" onClick={() => setDrafts((current) => ({ ...current, [name]: " " }))}>
                             Replace
                           </button>
@@ -261,13 +262,13 @@ export function ChatScriptApprovalCard(props: {
             {request.revisionId && (
               <div className="chat-script-approval-code">
                 <button type="button" className="chat-script-approval-code-toggle" aria-expanded={codeOpen} onClick={() => setCodeOpen((open) => !open)}>
-                  {codeOpen ? <ChevronDown size={14} aria-hidden /> : <ChevronRight size={14} aria-hidden />}
+                  {codeOpen ? <CaretDownIcon size={14} aria-hidden /> : <CaretRightIcon size={14} aria-hidden />}
                   {codeOpen ? "Hide code" : "Show code"} · {request.runtime} · {request.fileCount} {request.fileCount === 1 ? "file" : "files"}, {formatBytes(request.totalBytes)}
                 </button>
                 {codeOpen && (
                   <div className="chat-script-approval-files">
                     {codeError && <p className="chat-script-approval-error">{codeError}</p>}
-                    {!code && !codeError && <p className="chat-script-approval-hint">Loading…</p>}
+                    {!code && !codeError && <Delayed><p className="chat-script-approval-hint">Loading…</p></Delayed>}
                     {code?.files.map((file) => (
                       <div className="chat-script-approval-file" key={file.path}>
                         <div className="chat-script-approval-file-name">{file.path}{file.path === code.entry ? " (runs this)" : ""}</div>
@@ -280,7 +281,7 @@ export function ChatScriptApprovalCard(props: {
             )}
             {needsKeys && (
               <p className="chat-script-approval-warning">
-                <ShieldAlert size={13} aria-hidden />
+                <ShieldWarningIcon size={13} aria-hidden />
                 Runs with your user&apos;s full permissions on {request.hostPhrase}. Read the code before approving.
               </p>
             )}

@@ -1,4 +1,4 @@
-import { AlertTriangle } from "lucide-react";
+import { WarningIcon } from "@phosphor-icons/react";
 import {
   chatParticipantRequestPermissionExceeds,
   normalizeChatAgentMode,
@@ -242,7 +242,7 @@ export function ChatAppToolParticipantChangeOperation(props: {
             </div>
             {broaderThanDefault && (
               <div className="chat-app-tool-review-warning">
-                <AlertTriangle size={14} aria-hidden />
+                <WarningIcon size={14} aria-hidden />
                 <span>Permissions are broader than the read-only default.</span>
               </div>
             )}
@@ -382,7 +382,7 @@ function ParticipantManagementReview(props: {
       </div>
       {showWarning && (
         <div className="chat-app-tool-review-warning">
-          <AlertTriangle size={14} aria-hidden />
+          <WarningIcon size={14} aria-hidden />
           <span>
             Management escalation: role default {participantRequestPermissionLabel(resolution.roleDefault)}
             {resolution.participantExplicit ? `, member override ${participantRequestPermissionLabel(resolution.participantExplicit)}` : ""}

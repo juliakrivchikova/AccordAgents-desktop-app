@@ -1,4 +1,4 @@
-import { AlertTriangle, ArrowRight, Check, CircleCheck, ExternalLink, Loader2, Phone } from "lucide-react";
+import { WarningIcon, ArrowRightIcon, CheckIcon, CheckCircleIcon, ArrowSquareOutIcon, DeviceMobileIcon } from "@phosphor-icons/react";
 import { useEffect, useRef, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { alertsDialogTestLine, alertsTwilioNeedsIdentity } from "../../../shared/urgentAlertSettings";
@@ -14,6 +14,8 @@ import {
   type UrgentAlertSettingsView
 } from "../../../shared/urgentAlerts";
 import { AlertsWizard, alertRequest } from "./alerts-shared";
+import { Spinner } from "@/components/ui/spinner";
+import { Delayed } from "@/components/ui/delayed";
 
 const TWILIO_CONSOLE = "https://console.twilio.com/";
 const TWILIO_VERIFIED = "https://console.twilio.com/us1/develop/phone-numbers/manage/verified";
@@ -195,11 +197,11 @@ export function PhoneConnectDialog(props: {
     (step === 3 && (alertsTwilioNeedsIdentity(error) || (currentTest?.state === "failed" && alertsTwilioNeedsIdentity(currentTest.error))));
   /** Numbers she can still choose from while Twilio will not sell another. */
   const numbersLeft = Boolean(checked?.numbers.length);
-  const spinner = (name: typeof busy) => busy === name ? <Loader2 size={14} className="gen-aws-spinner" aria-hidden /> : null;
+  const spinner = (name: typeof busy) => busy === name ? <Delayed><Spinner size={14} /></Delayed> : null;
 
   const trustHub = (
     <Button type="button" size="sm" onClick={() => void window.consensus.openExternal(TWILIO_TRUST_HUB)} data-testid="alerts-phone-trust-hub">
-      Open Trust Hub <ExternalLink size={13} aria-hidden />
+      Open Trust Hub <ArrowSquareOutIcon size={13} aria-hidden />
     </Button>
   );
   const actions = identity && step === 1 && !numbersLeft ? <>
@@ -234,7 +236,7 @@ export function PhoneConnectDialog(props: {
       {spinner("save")}{currentTest && !calling ? "Save anyway" : "Save without a test"}
     </Button>
     <Button type="button" size="sm" disabled={Boolean(busy) || calling} onClick={() => void callMe()} data-testid="alerts-phone-try">
-      {calling ? <Loader2 size={14} className="gen-aws-spinner" aria-hidden /> : <Phone size={13} aria-hidden />}{calling ? "Calling…" : currentTest ? "Call again" : "Call me now"}
+      {calling ? <Spinner size={14} /> : <DeviceMobileIcon size={13} aria-hidden />}{calling ? "Calling…" : currentTest ? "Call again" : "Call me now"}
     </Button>
   </>;
 
@@ -265,12 +267,12 @@ export function PhoneConnectDialog(props: {
         </div>
         <p className="alerts-wizard-text">Balance and charges are in your Twilio Console.</p>
       </> : busy === "check" && saved && !accountSid ? (
-        <div className="alerts-waiting" role="status"><Loader2 size={13} className="gen-aws-spinner" aria-hidden /> Checking your Twilio account…</div>
+        <div className="alerts-waiting" role="status"><Spinner size={13} /> Checking your Twilio account…</div>
       ) : <>
         <p className="alerts-wizard-text">Calls come from your own Twilio account. You pay Twilio directly.</p>
         <div className="alerts-step-actions">
           <Button type="button" variant="outline" size="sm" onClick={() => void window.consensus.openExternal(TWILIO_CONSOLE)}>
-            Open Twilio Console <ExternalLink size={13} aria-hidden />
+            Open Twilio Console <ArrowSquareOutIcon size={13} aria-hidden />
           </Button>
         </div>
         <div className="alerts-where">In Twilio: <b>Account → API keys &amp; tokens → Live credentials</b></div>
@@ -319,9 +321,9 @@ export function PhoneConnectDialog(props: {
             onKeyDown={(event) => { if (event.key === "Enter" && normalizedTo) goTo(3); }} />
         </label>
         <div className="alerts-hint" id="alerts-phone-to-hint">
-          {verified === true ? <span className="alerts-ok-line"><Check size={13} aria-hidden /> Verified in Twilio</span>
+          {verified === true ? <span className="alerts-ok-line"><CheckIcon size={13} aria-hidden /> Verified in Twilio</span>
             : verified === false ? <span className="alerts-warn-line">
-              <AlertTriangle size={13} aria-hidden /> Not verified in Twilio. A trial account calls only numbers you verify there.{" "}
+              <WarningIcon size={13} aria-hidden /> Not verified in Twilio. A trial account calls only numbers you verify there.{" "}
               <button type="button" className="alerts-text-button" onClick={() => void window.consensus.openExternal(TWILIO_VERIFIED)}>Verify it in Twilio</button>
             </span>
             : "With the country code."}
@@ -331,7 +333,7 @@ export function PhoneConnectDialog(props: {
         <p className="alerts-wizard-title">Make sure it rings</p>
         <div className="alerts-route">
           <span><small>From</small><b>{from}</b></span>
-          <ArrowRight size={15} aria-hidden />
+          <ArrowRightIcon size={15} aria-hidden />
           <span><small>To</small><b>{normalizedTo ?? to}</b></span>
         </div>
         <PhoneTestLine test={currentTest} to={normalizedTo} keypad={keypad} />
@@ -358,7 +360,7 @@ function PhoneTestLine(props: { test?: UrgentAlertPhoneTest; to?: string; keypad
   const words = alertsDialogTestLine(props.test, props.to ?? "your phone", props.keypad);
   const test = props.test;
   if (!test) return <div className="alerts-step-detail">{words}</div>;
-  if (test.state === "calling") return <div className="alerts-waiting" role="status"><Loader2 size={13} className="gen-aws-spinner" aria-hidden /> {words}</div>;
-  if (urgentAlertPhoneTestPassed(test, props.keypad ? "keypad" : "answer")) return <div className="alerts-ok-line" role="status"><CircleCheck size={14} aria-hidden /> {words}</div>;
-  return <div className="alerts-warn-line" role="status"><AlertTriangle size={13} aria-hidden /> {words}</div>;
+  if (test.state === "calling") return <div className="alerts-waiting" role="status"><Spinner size={13} /> {words}</div>;
+  if (urgentAlertPhoneTestPassed(test, props.keypad ? "keypad" : "answer")) return <div className="alerts-ok-line" role="status"><CheckCircleIcon size={14} aria-hidden /> {words}</div>;
+  return <div className="alerts-warn-line" role="status"><WarningIcon size={13} aria-hidden /> {words}</div>;
 }

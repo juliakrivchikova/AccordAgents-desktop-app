@@ -1,5 +1,5 @@
 import { Fragment, useEffect, useState } from "react";
-import { KeyRound, Pencil, Plus, Trash2, X } from "lucide-react";
+import { KeyIcon, PencilSimpleIcon, PlusIcon, TrashIcon, XIcon } from "@phosphor-icons/react";
 
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogClose, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
@@ -34,7 +34,7 @@ export function ProviderHostRows(props: {
           <div className="gen-card-divider" />
           <div className="gen-cli-row gen-host-row" data-provider-host-id={host.id}>
             <span className="gen-cli-icon gen-host-icon" aria-hidden>
-              <KeyRound size={18} />
+              <KeyIcon size={18} />
             </span>
             <div className="gen-cli-text">
               <div className="gen-cli-name">{host.label}</div>
@@ -42,7 +42,7 @@ export function ProviderHostRows(props: {
             </div>
             <IconButton
               label={`Edit ${host.label}`}
-              icon={Pencil}
+              icon={PencilSimpleIcon}
               data-testid={`provider-host-edit-${host.id}`}
               onClick={() => props.onEdit(host)}
             />
@@ -52,8 +52,8 @@ export function ProviderHostRows(props: {
       <div className="gen-card-divider" />
       <div className="gen-host-add-row">
         <Button type="button" variant="outline" size="sm" data-testid="provider-host-add" onClick={props.onAdd}
-          className="rounded-[10px] border-[var(--app-hairline)] text-[14px] font-normal dark:border-[var(--app-hairline)]">
-          <Plus size={14} aria-hidden />
+          className="text-ui-13 font-normal">
+          <PlusIcon size={14} aria-hidden />
           Add provider
         </Button>
         <span className="gen-host-add-hint">Reach another vendor's models through Claude Code, Codex or Antigravity with your own API key.</span>
@@ -224,7 +224,7 @@ export function ProviderHostEditorDialog(props: {
                 </DialogDescription>
               </span>
               <DialogClose asChild>
-                <IconButton label="Close provider editor" icon={X} />
+                <IconButton label="Close provider editor" icon={XIcon} />
               </DialogClose>
             </div>
           </DialogHeader>
@@ -291,7 +291,7 @@ export function ProviderHostEditorDialog(props: {
                 data-testid="provider-host-delete"
                 onClick={() => setDeleteConfirmOpen(true)}
               >
-                <Trash2 size={14} aria-hidden />
+                <TrashIcon size={14} aria-hidden />
                 Remove provider
               </Button>
             )}

@@ -15,7 +15,7 @@ export const TopBar = ({ title, tabs, leading, actions, className }: TopBarProps
     data-shell="topbar"
     data-titlebar
     className={cn(
-      "flex h-[var(--app-header-height)] shrink-0 items-center justify-between gap-2 border-b border-[var(--app-shell-border)] bg-[var(--app-header-bg)] pr-[10px]",
+      "flex h-[var(--app-header-height)] shrink-0 items-center justify-between gap-2 border-b border-ui-border-subtle bg-ui-bg pr-2",
       className
     )}
   >
@@ -25,12 +25,12 @@ export const TopBar = ({ title, tabs, leading, actions, className }: TopBarProps
         tabs
       ) : title ? (
         typeof title === "string" || typeof title === "number" ? (
-          <div className="truncate text-sm font-medium text-foreground">{title}</div>
+          <div className="truncate text-ui-13 font-semibold text-ui-text">{title}</div>
         ) : (
           <div className="min-w-0">{title}</div>
         )
       ) : null}
     </div>
-    <div className="flex shrink-0 items-center gap-1">{actions}</div>
+    <div className="flex shrink-0 items-center gap-0.5">{actions}</div>
   </header>
 );

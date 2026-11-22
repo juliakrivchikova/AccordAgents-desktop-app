@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { Check, Copy } from "lucide-react";
+import { CheckIcon, CopyIcon } from "@phosphor-icons/react";
 import { writeClipboardText, type ClipboardWriteResult } from "../../shared/clipboard";
 import { IconButton } from "./primitives";
 
@@ -30,7 +30,7 @@ function DeviceAuthChallenge({ authUrl, authCode }: { authUrl: string; authCode?
       {authCode ? (
         <div className="provider-device-auth-code-row">
           <code data-testid="cloud-run-device-auth-code">{authCode}</code>
-          <IconButton className="provider-device-auth-copy" label="Copy sign-in code" icon={copyResult === "copied" ? Check : Copy}
+          <IconButton className="provider-device-auth-copy" label="Copy sign-in code" icon={copyResult === "copied" ? CheckIcon : CopyIcon}
             disabled={copying} onClick={() => void copy()} />
           {copyResult === "copied" ? <span role="status">Copied</span> : null}
         </div>

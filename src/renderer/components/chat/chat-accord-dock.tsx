@@ -1,5 +1,5 @@
 import { useContext, useEffect, useRef, useSyncExternalStore, type ReactNode } from "react";
-import { Check, ChevronDown, ChevronRight, X } from "lucide-react";
+import { CheckIcon, CaretDownIcon, CaretRightIcon, XIcon } from "@phosphor-icons/react";
 import {
   accordProgressNoteHead, accordProgressStages, accordProgressStatus, type AccordStage, type AccordStepState
 } from "../../../shared/accordProgress";
@@ -40,7 +40,7 @@ function useDockChoice(launchId: string) {
 function StageMark(props: { state: AccordStepState }): JSX.Element {
   return (
     <span className={`chat-accord-progress-mark is-${props.state}`} aria-hidden="true">
-      {props.state === "done" && <Check size={12} strokeWidth={3} />}
+      {props.state === "done" && <CheckIcon size={12} />}
     </span>
   );
 }
@@ -89,7 +89,7 @@ function Stage(props: { stage: AccordStage; participants?: ChatParticipant[] }):
                   <MemberMark handle={member.handle} participants={props.participants} />
                 </span>
                 <MemberName handle={member.handle} />
-                {member.given && <Check className="chat-accord-progress-member-check" size={12} strokeWidth={3} aria-label="done" />}
+                {member.given && <CheckIcon className="chat-accord-progress-member-check" size={12} aria-label="done" />}
               </span>
             ))}
           </span>
@@ -142,7 +142,7 @@ export function ChatAccordCard(props: {
             onClick={props.onToggleFold}
           >
             <AccordHeading launch={props.launch} title={title} folded={folded} />
-            <ChevronDown className="chat-accord-dock-chevron" size={16} aria-hidden="true" />
+            <CaretDownIcon className="chat-accord-dock-chevron" size={16} aria-hidden="true" />
           </button>
         ) : (
           <div className="chat-accord-dock-toggle is-static">
@@ -150,7 +150,7 @@ export function ChatAccordCard(props: {
           </div>
         )}
         {props.onClose && (
-          <IconButton className="chat-accord-dock-close" size="xs" label={props.closeLabel ?? "Close"} icon={X} onClick={props.onClose} />
+          <IconButton className="chat-accord-dock-close" size="xs" label={props.closeLabel ?? "Close"} icon={XIcon} onClick={props.onClose} />
         )}
       </div>
       {!folded && (
@@ -229,7 +229,7 @@ export function ChatAccordRow(props: { launch: DockedAccord; open?: boolean; tes
       <span className="chat-accord-row-kind">Accord</span>
       <span className="chat-accord-row-title">{title}</span>
       <span className="chat-accord-row-status">{accordProgressStatus(props.launch.progress)}</span>
-      <ChevronRight className="chat-accord-row-chevron" size={14} aria-hidden="true" />
+      <CaretRightIcon className="chat-accord-row-chevron" size={14} aria-hidden="true" />
     </button>
   );
 }
@@ -268,7 +268,7 @@ export function ChatAccordDock(props: {
     return (
       <div className="chat-accord-strip" aria-label="Accord" data-testid="chat-accord-strip">
         <ChatAccordRow launch={launch} open={props.panelOpen} testId="chat-accord-strip-open" onOpen={() => open(launch.launchId)} />
-        <IconButton className="chat-accord-dock-close" size="xs" label="Close" icon={X} onClick={() => void close()} />
+        <IconButton className="chat-accord-dock-close" size="xs" label="Close" icon={XIcon} onClick={() => void close()} />
       </div>
     );
   }

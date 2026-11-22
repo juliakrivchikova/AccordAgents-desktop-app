@@ -1,4 +1,4 @@
-import type { LucideIcon } from "lucide-react";
+import type { Icon as PhosphorIcon } from "@phosphor-icons/react";
 
 import type { ChatAppToolApproval } from "../../../shared/types";
 import { chatParticipantReference } from "../conversation/conversation-display";
@@ -18,7 +18,7 @@ export function ChatUsedApprovalLine(props: {
   approval: ChatAppToolApproval;
   /** What kind of card it was, for its accessible name (its icon says it). */
   kind: string;
-  icon: LucideIcon;
+  icon: PhosphorIcon;
   /** What the card was about. */
   preview: string;
   /** How it ended, in a word or two. */

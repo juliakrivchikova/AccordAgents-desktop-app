@@ -627,11 +627,13 @@ export function useConversationActions(state: AppState): ConversationActions {
   }
 
   async function cancelReview(): Promise<void> {
+    // Stop may arrive after creation saved but before its IPC reply. Do not
+    // send the first message when that reply subsequently reaches the UI.
+    state.chatCreationRef.current?.abort(new Error("Chat creation cancelled."));
+    if (state.chatCreationRef.current) state.setProgressLog(current => [...current]);
+    // A start still checking the CLIs has no run in the main process yet
+    // (its run id is set when the chat is asked for): nothing to stop there.
     if (state.currentRunId) {
-      // Stop may arrive after creation saved but before its IPC reply. Do not
-      // send the first message when that reply subsequently reaches the UI.
-      state.chatCreationRef.current?.abort(new Error("Chat creation cancelled."));
-      if (state.chatCreationRef.current) state.setProgressLog(current => [...current]);
       await window.consensus.cancelReview(state.currentRunId);
     }
   }

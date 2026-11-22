@@ -1,5 +1,5 @@
 import { createContext, useContext, useLayoutEffect, useRef, useState } from "react";
-import { ChevronDown } from "lucide-react";
+import { CaretDownIcon } from "@phosphor-icons/react";
 import { accordClosedLaunchId, accordClosedLineTitle, accordLineOutcome, type DockedAccord } from "../../../shared/accordProgress";
 import type { ChatMessage, ChatParticipant } from "../../../shared/types";
 import { ArtifactsContext } from "../artifacts/artifacts-context";
@@ -78,7 +78,7 @@ export function ChatAccordClosedLine(props: { message: Pick<ChatMessage, "id" | 
         <span className="sr-only">Accord: </span>
         <span className="chat-card-row-preview">{title}</span>
         <span className="chat-card-row-outcome">{accordLineOutcome(accord.progress)}</span>
-        <ChevronDown className="chat-card-row-chevron" size={14} aria-hidden="true" />
+        <CaretDownIcon className="chat-card-row-chevron" size={14} aria-hidden="true" />
       </button>
     </article>
   );

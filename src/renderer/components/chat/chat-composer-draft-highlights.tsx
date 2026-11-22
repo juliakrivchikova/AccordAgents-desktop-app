@@ -1,5 +1,5 @@
 import type { ReactNode } from "react";
-import { FileBox, Puzzle } from "lucide-react";
+import { FilesIcon, PuzzlePieceIcon } from "@phosphor-icons/react";
 
 import type { ChatSkillMention } from "../../../shared/types";
 import {
@@ -29,7 +29,7 @@ export function renderSlashHighlightedDraft(
       className: "chat-draft-plugin-token",
       icon: mention.iconUrl
         ? <img className="chat-draft-plugin-token-icon" src={mention.iconUrl} alt="" aria-hidden="true" />
-        : <Puzzle className="chat-draft-plugin-token-icon" size={15} strokeWidth={2.2} aria-hidden="true" />
+        : <PuzzlePieceIcon className="chat-draft-plugin-token-icon" size={15} aria-hidden="true" />
     });
   }
   for (const mention of skillMentions) {
@@ -41,7 +41,7 @@ export function renderSlashHighlightedDraft(
     end: mention.end,
     key: `artifact-${mention.id}-${index}`,
     className: "chat-draft-artifact-token",
-    content: <><FileBox size={15} strokeWidth={2.2} aria-hidden /><span>{mention.label}</span></>
+    content: <><FilesIcon size={15} aria-hidden /><span>{mention.label}</span></>
   }));
   for (const [mentionIndex, mention] of draftMentionRanges(value).entries()) {
     highlights.push({

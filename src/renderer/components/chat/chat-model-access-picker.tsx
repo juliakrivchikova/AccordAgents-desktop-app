@@ -1,5 +1,5 @@
 import { useMemo, useRef, useState } from "react";
-import { Cloud, Gauge, Laptop, Server } from "lucide-react";
+import { CloudIcon, GaugeIcon, LaptopIcon, HardDrivesIcon } from "@phosphor-icons/react";
 
 import { normalizeChatReasoningEffort, reasoningEffortOptionsForProvider } from "../../../shared/reasoningEffort";
 import { savedModelId } from "../../../shared/geminiModels";
@@ -147,7 +147,7 @@ export function ChatMemberComposerControls(props: {
           align="end"
           {...iconTriggerProps(effortIcon)}
           label={effortIcon
-            ? <ComposerControlIcon icon={Gauge} label={effortLabel} />
+            ? <ComposerControlIcon icon={GaugeIcon} label={effortLabel} />
             : <span className={effort || configEffort ? "chat-composer-control-text" : "chat-composer-control-text is-muted"}>{effortLabel}</span>}
         >
           {(close) => (
@@ -177,7 +177,7 @@ export function ChatMemberComposerControls(props: {
           align="end"
           {...iconTriggerProps(runsOnIcon)}
           label={runsOnIcon
-            ? <ComposerControlIcon icon={value.cloudRun ? Cloud : value.homeMachineId ? Server : Laptop} label={runsOn} />
+            ? <ComposerControlIcon icon={value.cloudRun ? CloudIcon : value.homeMachineId ? HardDrivesIcon : LaptopIcon} label={runsOn} />
             : <span className="chat-composer-control-text">{runsOn}</span>}
         >
           {() => (

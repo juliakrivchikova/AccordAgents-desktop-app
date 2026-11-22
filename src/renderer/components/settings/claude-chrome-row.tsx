@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { Switch } from "@/components/ui/switch";
 
 import type { ClaudeChromeSetting } from "../../../shared/types";
 import { cleanIpcError } from "../../lib/ipc-error";
@@ -49,17 +50,13 @@ export function ClaudeChromeRow(): JSX.Element {
           </div>
           {error ? <div className="gen-row-error" role="alert">{error}</div> : null}
         </div>
-        <label className="toggle">
-          <input
-            type="checkbox"
-            data-testid="claude-chrome-toggle"
-            aria-label="Claude in Chrome"
-            checked={checked}
-            disabled={!setting || requested !== undefined}
-            onChange={(event) => void change(event.target.checked)}
-          />
-          <span />
-        </label>
+        <Switch
+          data-testid="claude-chrome-toggle"
+          aria-label="Claude in Chrome"
+          checked={checked}
+          disabled={!setting || requested !== undefined}
+          onChange={(event) => void change(event.target.checked)}
+        />
       </div>
     </>
   );

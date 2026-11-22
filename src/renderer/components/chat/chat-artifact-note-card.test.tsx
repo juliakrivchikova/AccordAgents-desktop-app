@@ -9,6 +9,8 @@ import { ChatMessageItem } from "./chat-message-item";
 import type { ChatActivityDisclosureState } from "./use-chat-activity-disclosure";
 
 const NOW = "2026-11-04T16:32:00.000Z";
+/** A click as the browser gives it: the card's tooltip trigger reads it. */
+const CLICK = { defaultPrevented: false };
 
 function noteMessage(content: string, metadata: ChatMessage["metadata"] = { appMessageSource: "app_artifact_note", artifactEventId: "e-1" }): ChatMessage {
   return { id: "note-1", role: "system", content, createdAt: NOW, status: "done", metadata } as ChatMessage;
@@ -63,8 +65,8 @@ test("the card names the artifact as it is now, says who did what, and opens it"
   assert.equal(part(second!, "chat-artifact-note-body").length, 0, "no note line without a note");
   assert.equal(part(second!, "chat-artifact-note-actor").length, 1, "the User is not shown as a mention");
   assert.equal(root.findAll((node) => typeof node.props?.className === "string" && node.props.className.includes("message-avatar")).length, 0);
-  assert.equal(first!.findByType("button").props.title, 'Open artifact "Plan v2" · v4 · fully approved', "the hover says where it stands");
-  act(() => { first!.findByType("button").props.onClick(); });
+  assert.equal(first!.findByType("button").props.title, undefined, "no system title over the card (the User, 2026-11-22)");
+  act(() => { first!.findByType("button").props.onClick(CLICK); });
   assert.deepEqual(opened, ["art-1"]);
 });
 
@@ -76,7 +78,7 @@ test("a card for an artifact the screen does not know names it as the note did",
   });
   const meta = renderer!.root.find((node) => node.type === "span" && node.props?.className === "chat-artifact-note-meta");
   assert.match(textOf(meta), /^Plan v1 · /);
-  assert.doesNotThrow(() => act(() => { renderer!.root.findByType("button").props.onClick(); }), "no artifacts list: a click does nothing");
+  assert.doesNotThrow(() => act(() => { renderer!.root.findByType("button").props.onClick(CLICK); }), "no artifacts list: a click does nothing");
 });
 
 test("the timeline row of an artifact note is the card, with the reactions left on it", () => {

@@ -1,11 +1,13 @@
 import { Fragment, useCallback, useEffect, useRef, useState } from "react";
-import { Folder, Loader2 } from "lucide-react";
+import { FolderSimpleIcon } from "@phosphor-icons/react";
 import { Button } from "@/components/ui/button";
 import type { AwsInstanceProject, AwsInstanceProjects } from "../../../shared/types";
 import { AwsConfirmDialog, AwsDialog, AwsWaiting } from "./aws-dialog";
 import { Row } from "./aws-row";
 import { cleanError } from "./aws-shared";
 import { formatBytes, keptText, LOCK_TEXT, plural, WORK_TEXT, type AwsDiskControl } from "./use-aws-disk";
+import { Spinner } from "@/components/ui/spinner";
+import { Delayed } from "@/components/ui/delayed";
 
 /** A path on this computer the way the User reads it. */
 function shortPath(path: string): string {
@@ -186,7 +188,7 @@ function AwsProjectAddDialog(props: { open: boolean; projects?: AwsInstanceProje
       actions={<>
         <Button type="button" variant="outline" size="sm" data-testid="aws-project-add-cancel" onClick={cancel}>Cancel</Button>
         <Button type="button" size="sm" data-testid="aws-project-add-confirm" disabled={Boolean(copying) || !chosen} onClick={() => void add()}>
-          {copying ? <Loader2 size={14} className="gen-aws-spinner" aria-hidden /> : null}
+          {copying ? <Delayed><Spinner size={14} /></Delayed> : null}
           {copying ? "Copying…" : label ? `Copy ${label}` : "Copy"}
         </Button>
       </>}
@@ -198,7 +200,7 @@ function AwsProjectAddDialog(props: { open: boolean; projects?: AwsInstanceProje
               <input type="radio" name="aws-project-add" checked={project.path === chosen} disabled={Boolean(copying)}
                 onChange={() => setChosen(project.path)} aria-label={`${project.label}, ${shortPath(project.path)}`} />
             </span>
-            <Folder size={15} className="gen-aws-tree-icon" aria-hidden />
+            <FolderSimpleIcon size={15} className="gen-aws-tree-icon" aria-hidden />
             <span className="gen-aws-tree-name" title={project.path}><code>{project.label}</code><span> · {shortPath(project.path)}</span></span>
           </label>
         ))}

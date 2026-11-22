@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { BadgeCheck, Eye, FileText, Pencil } from "lucide-react";
+import { SealCheckIcon, EyeIcon, FileTextIcon, PencilSimpleIcon } from "@phosphor-icons/react";
 
 import { artifactMemberLabel, normalizeArtifactMember } from "../../../shared/artifacts";
 import { ARTIFACT_USER_MEMBER } from "../../../shared/types";
@@ -42,10 +42,10 @@ function ArtifactMarkdownEditor(props: {
         <label className="artifact-content-editor-label" htmlFor={props.id}>{props.label}</label>
         <span className="artifact-content-preview-toggle" aria-label="Artifact content editor mode">
           <button type="button" className={preview ? "is-selected" : ""} onClick={() => setPreview(true)}>
-            <Eye size={14} aria-hidden /> Preview
+            <EyeIcon size={14} aria-hidden /> Preview
           </button>
           <button type="button" className={!preview ? "is-selected" : ""} onClick={() => setPreview(false)}>
-            <Pencil size={14} aria-hidden /> Edit
+            <PencilSimpleIcon size={14} aria-hidden /> Edit
           </button>
         </span>
       </div>
@@ -280,7 +280,7 @@ export function AccessArtifactForm(props: {
               </span>
               <div className="aap-perms">
                 <button type="button" className="aap-perm on" aria-pressed="true" title="All chat members can read artifacts">
-                  <FileText size={13} aria-hidden /> Read
+                  <FileTextIcon size={13} aria-hidden /> Read
                 </button>
                 <button
                   type="button"
@@ -291,7 +291,7 @@ export function AccessArtifactForm(props: {
                   title={isUser ? "User always keeps write permission" : isOwner ? "Owner can always write" : undefined}
                   onClick={() => void toggleContributor(member)}
                 >
-                  <Pencil size={13} aria-hidden /> Write
+                  <PencilSimpleIcon size={13} aria-hidden /> Write
                 </button>
                 {canEditSigners && !isFormer && (
                   <button
@@ -302,7 +302,7 @@ export function AccessArtifactForm(props: {
                     data-testid={`artifact-access-sign-${member}`}
                     onClick={() => void toggleSigner(member)}
                   >
-                    <BadgeCheck size={13} aria-hidden /> Sign
+                    <SealCheckIcon size={13} aria-hidden /> Sign
                   </button>
                 )}
               </div>

@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type { CSSProperties } from "react";
-import { ArrowDown } from "lucide-react";
+import { ArrowDownIcon } from "@phosphor-icons/react";
 
 import type {
   ChatAppToolApprovalRequest,
@@ -459,7 +459,7 @@ export function ChatConversationView(props: ChatConversationViewProps): JSX.Elem
               panelLaunchId={panel?.kind === "accord" ? panel.launchId : undefined}
             >
               {!viewport.isStuckToBottom && topLevelMessages.length > 0 && (
-                <IconButton className="chat-jump-to-latest" floating label="Jump to latest" icon={ArrowDown} onClick={viewport.scrollToChatBottom} />
+                <IconButton className="chat-jump-to-latest" floating label="Jump to latest" icon={ArrowDownIcon} onClick={viewport.scrollToChatBottom} />
               )}
             </ChatAccordDockSlot>
             <ChatComposer

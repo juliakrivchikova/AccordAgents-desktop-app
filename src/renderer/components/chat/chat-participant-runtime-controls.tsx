@@ -1,6 +1,6 @@
 import { useState } from "react";
-import { ChevronDown, FileText, Globe2, Pencil, Terminal } from "lucide-react";
-import type { LucideIcon } from "lucide-react";
+import { CaretDownIcon, FileTextIcon, GlobeIcon, PencilSimpleIcon, TerminalIcon } from "@phosphor-icons/react";
+import type { Icon as PhosphorIcon } from "@phosphor-icons/react";
 
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import {
@@ -270,7 +270,7 @@ function GhostSelect(props: {
     <span className={`chat-rt-ghost${props.muted ? " is-muted" : ""}${props.disabled ? " is-disabled" : ""}`}>
       {props.prefix && <span className="chat-rt-ghost-prefix">{props.prefix}</span>}
       <span className="chat-rt-ghost-val">{label}</span>
-      <ChevronDown size={11} aria-hidden />
+      <CaretDownIcon size={11} aria-hidden />
       <select
         className="chat-rt-ghost-native"
         value={props.value}
@@ -373,11 +373,11 @@ function PermissionsToggleRow(props: {
   function set(patch: Partial<ChatAgentPermissions>): void {
     props.onChange(withClassicChatPermissions(permissions, patch, props.participant.kind));
   }
-  const toggles: Array<{ label: string; icon: LucideIcon; checked: boolean; onChange: (value: boolean) => void }> = [
-    { label: "Read Files", icon: FileText, checked: permissions.repoRead, onChange: (value) => set({ repoRead: value }) },
-    { label: "Edit Files", icon: Pencil, checked: permissions.workspaceWrite, onChange: (value) => set({ workspaceWrite: value }) },
-    { label: "Run Shell", icon: Terminal, checked: permissions.shell.enabled, onChange: (value) => set({ shell: { ...permissions.shell, enabled: value } }) },
-    { label: "Access Web", icon: Globe2, checked: permissions.webAccess, onChange: (value) => set({ webAccess: value }) }
+  const toggles: Array<{ label: string; icon: PhosphorIcon; checked: boolean; onChange: (value: boolean) => void }> = [
+    { label: "Read Files", icon: FileTextIcon, checked: permissions.repoRead, onChange: (value) => set({ repoRead: value }) },
+    { label: "Edit Files", icon: PencilSimpleIcon, checked: permissions.workspaceWrite, onChange: (value) => set({ workspaceWrite: value }) },
+    { label: "Run Shell", icon: TerminalIcon, checked: permissions.shell.enabled, onChange: (value) => set({ shell: { ...permissions.shell, enabled: value } }) },
+    { label: "Access Web", icon: GlobeIcon, checked: permissions.webAccess, onChange: (value) => set({ webAccess: value }) }
   ];
   return (
     <div className="chat-rt-perms">

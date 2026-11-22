@@ -13,7 +13,7 @@
   justify-content: center;
   width: 50px;
   height: 50px;
-  border-radius: 9px;
+  border-radius: 8px;
   background: var(--app-success);
   color: var(--app-surface);
   font-size: 12px;
@@ -33,8 +33,7 @@
   max-height: none;
 }
 
-.message-body,
-.settings-item {
+.message-body {
   border: 1px solid var(--app-border);
   border-radius: var(--radius-control);
   background: var(--app-surface);
@@ -136,7 +135,7 @@
 .point-message h3,
 .thread-panel-head h2 {
   margin: 10px 0 8px;
-  font-size: 15px;
+  font-size: 14px;
   line-height: 1.35;
 }
 
@@ -170,7 +169,7 @@
   justify-content: center;
   width: 44px;
   height: 44px;
-  border-radius: 9px;
+  border-radius: 8px;
   background: var(--app-warning);
   color: var(--app-surface);
   font-size: 12px;
@@ -316,7 +315,7 @@
 
 .thread-bubble h3 {
   margin: 8px 0;
-  font-size: 15px;
+  font-size: 14px;
   line-height: 1.35;
 }
 
@@ -344,7 +343,7 @@
 }
 
 .markdown-text h4 {
-  font-size: 15px;
+  font-size: 14px;
   line-height: 1.35;
 }
 
@@ -361,7 +360,7 @@
 }
 
 .markdown-preview .markdown-heading-1 {
-  font-size: 18px;
+  font-size: 16px;
   font-weight: 700;
 }
 
@@ -370,7 +369,7 @@
 }
 
 .markdown-preview .markdown-heading-3 {
-  font-size: 14.5px;
+  font-size: 14px;
 }
 
 .markdown-preview .markdown-text > .markdown-heading:not(:first-child) {
@@ -482,7 +481,7 @@
   flex: none;
   width: 38px;
   height: 38px;
-  border-radius: 9px;
+  border-radius: 8px;
   font-size: 13px;
   font-weight: 800;
 }
@@ -528,7 +527,7 @@
   min-width: 0;
   overflow: hidden;
   padding: 3px 5px;
-  border-radius: 5px;
+  border-radius: 6px;
   background: var(--app-surface-subtle);
   color: var(--app-text-strong);
   font-family: var(--font-code, ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace);
@@ -765,7 +764,7 @@ ul.markdown-list {
 .thread-empty-state h2 {
   margin: 12px 0 6px;
   color: var(--app-text-strong);
-  font-size: 18px;
+  font-size: 16px;
 }
 
 .thread-empty-state p {
@@ -786,7 +785,7 @@ ul.markdown-list {
 .empty-state h2 {
   margin: 12px 0 6px;
   color: var(--app-text-strong);
-  font-size: 22px;
+  font-size: 20px;
 }
 
 .empty-state p {
@@ -834,47 +833,11 @@ ul.markdown-list {
 
 .settings-view h1 {
   margin: 0 0 18px;
-  font-size: 24px;
+  font-size: 20px;
 }
 
 .settings-view-head h1 {
   margin: 0;
-}
-
-.settings-grid {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 14px;
-}
-
-.settings-item {
-  padding: 14px;
-}
-
-.settings-item-head {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-}
-
-.settings-item-head div {
-  display: flex;
-  flex-direction: column;
-  gap: 3px;
-}
-
-.settings-item-head .settings-item-actions,
-.settings-item-actions {
-  display: flex;
-  flex-direction: row;
-  align-items: center;
-  justify-content: flex-end;
-  gap: 8px;
-}
-
-.settings-item-head small {
-  color: var(--app-muted);
 }
 
 .inline-error {
@@ -884,17 +847,18 @@ ul.markdown-list {
   line-height: 1.35;
 }
 
-/* The switch, as small as the ChatGPT app's: 32 by 20 with a light track
-   when off. */
+/* The kit Switch (src/components/ui/switch.tsx): a native checkbox drawn as
+   a 28 by 16 track. */
 .toggle {
   position: relative;
   display: inline-flex;
   flex: none;
-  width: 32px;
-  height: 20px;
+  width: 28px;
+  height: 16px;
 }
 
 .toggle input {
+  position: absolute;
   opacity: 0;
   width: 0;
   height: 0;
@@ -903,13 +867,15 @@ ul.markdown-list {
 .toggle span {
   position: absolute;
   inset: 0;
-  border-radius: var(--radius-pill);
-  background: var(--app-surface-muted);
+  border-radius: 999px;
+  background: var(--ui-bg-muted);
   cursor: pointer;
+  transition: background-color var(--ui-duration-base) var(--ui-ease-out);
 }
 
+/* Off and usable reads stronger than off and disabled. */
 .toggle input:not(:checked):not(:disabled) + span {
-  background: var(--app-toggle-off);
+  background: var(--ui-border-strong);
 }
 
 .toggle input:disabled + span {
@@ -925,58 +891,42 @@ ul.markdown-list {
 .toggle span::before {
   content: "";
   position: absolute;
-  width: 16px;
-  height: 16px;
-  left: 2px;
   top: 2px;
+  left: 2px;
+  width: 12px;
+  height: 12px;
   border-radius: 50%;
-  background: var(--app-toggle-knob);
-  transition: transform 120ms ease;
+  background: var(--ui-switch-knob);
+  box-shadow: var(--ui-switch-knob-shadow);
+  transition: transform var(--ui-duration-base) var(--ui-ease-out);
 }
 
 .toggle input:checked + span {
-  background: var(--app-success);
-}
-
-/* The switch's input is invisible, so focus shows on its track: a thin
-   edge inside it, light on a switched-on track as on the primary button. */
-.toggle input:focus-visible + span {
-  box-shadow: var(--focus-ring);
-}
-
-.toggle input:checked:focus-visible + span {
-  box-shadow: inset 0 0 0 1px var(--app-surface);
-}
-
-.toggle input:checked:disabled + span {
-  background: var(--app-accent-soft);
-}
-
-.toggle input:checked:disabled + span::before {
-  background: color-mix(in srgb, var(--app-accent) 72%, var(--app-surface));
+  background: var(--ui-primary);
 }
 
 .toggle input:checked + span::before {
   transform: translateX(12px);
-  background: var(--app-surface);
 }
 
-.spin {
-  animation: spin 900ms linear infinite;
+.toggle input:focus-visible + span {
+  box-shadow: var(--focus-ring);
+}
+
+.toggle input:checked:disabled + span {
+  opacity: 0.5;
 }
 
 .app-inactive .progress-active .message-body::before,
 .app-inactive .progress-active .message-body::after,
-.app-inactive .typing-dots i,
-.app-inactive .spin {
+.app-inactive .typing-dots i {
   animation-play-state: paused !important;
 }
 
 @media (prefers-reduced-motion: reduce) {
   .progress-active .message-body::before,
   .progress-active .message-body::after,
-  .typing-dots i,
-  .spin {
+  .typing-dots i {
     animation: none !important;
   }
 }

@@ -50,6 +50,10 @@ Equivalent npm scripts are in `package.json`, for example `npm run dev`, `npm ru
 
 Use strict TypeScript and keep types explicit at IPC, service, and shared boundaries. Match the existing style: 2-space indentation, double quotes, semicolons, and named imports. React components and service classes use `PascalCase`; functions, hooks, variables, and IPC handlers use `camelCase`. Keep shared contracts in `src/shared/types.ts`.
 
+## Renderer UI code
+
+Before writing or changing anything under `src/renderer` or `src/components`, read `src/components/ui/AGENTS.md`: the UI kit, its tokens, sizes and radii, hover and focus, icons, Select, Spinner, and the loading and layout-stability rules the User set. Write and review renderer code with the repo-local `renderer-ui-code` skill (`.agents/skills/renderer-ui-code`, mirrored in `.claude/skills`): find and reuse before writing, one implementation per concern, state and effects where they belong, pure functions, types instead of tests, and the checks that close a change. Keep `SKILL.md` and `references/` identical in both copies; `agents/openai.yaml` is Codex-only and lives in `.agents` alone, as for the other repo skills.
+
 ## Testing Guidelines
 
 There is no full test suite or single full-project lint runner, but targeted Node service tests and renderer lint guardrails exist. Run `make typecheck` and `make build` before submitting broad changes. Use `make lint-colors`, `make lint-lines`, and `make lint-unused` for renderer style, line-count, and unused/orphan checks. Run `npm run test:permissions` for chat permissions, cancellation, role archive behavior, repo-file mentions, participant request threads, rename, git repo-file listing, CLI permission behavior, or warnings, and `npm run test:app-skills` for app-skill service changes. For behavior that touches Electron IPC, provider integrations, git diff handling, conversation storage, or chat concurrency, include manual verification notes in the PR. If adding tests, colocate them near the code under test or use `*.test.ts` / `*.test.tsx`, and add the command to `package.json`.

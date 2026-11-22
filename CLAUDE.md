@@ -172,6 +172,7 @@ Key routing rules:
 - Bugs/errors → invoke /investigate
 - QA/testing site behavior → invoke /qa or /qa-only
 - Code review/diff check → invoke /review
+- Writing, changing or reviewing renderer UI or React code → invoke /renderer-ui-code (and read `src/components/ui/AGENTS.md`)
 - Visual polish → invoke /design-review
 - Ship/deploy/PR → invoke /ship or /land-and-deploy
 - Save progress → invoke /context-save

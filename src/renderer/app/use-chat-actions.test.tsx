@@ -385,7 +385,9 @@ test("stale New Chat readiness refresh failure fails closed and preserves the co
     chatCreationRef: { current: undefined },
     chatBeforeActivityRef: { current: undefined }, openConversationRequestRef: { current: 0 }, railViewRef: { current: "chats" },
     setError: (value: string | undefined) => { error = value; },
-    setWarnings: () => undefined
+    setWarnings: () => undefined,
+    setCurrentRunId: () => undefined,
+    setBusy: () => undefined
   } as unknown as AppState;
   const conversationActions = {
     refreshAgents: async () => { throw new Error("probe failed"); }
@@ -413,6 +415,7 @@ test("stale New Chat readiness refresh failure fails closed and preserves the co
   assert.equal(state.question, "/office-hours #src/main.ts Draft");
   assert.equal(state.newChatPendingImages.length, 1);
   assert.deepEqual(state.newChatRepoFileMentions, [{ path: "src/main.ts" }]);
+  assert.equal(state.startingChatRef.current, false, "a failed check leaves New chat ready for the next press");
   renderer.unmount();
 });
 

@@ -1,10 +1,11 @@
 import { useEffect, useState } from "react";
-import { CheckCircle2, Copy, Loader2, QrCode, ShieldX } from "lucide-react";
+import { CheckCircleIcon, CopyIcon, QrCodeIcon, ShieldSlashIcon } from "@phosphor-icons/react";
 import QRCode from "qrcode";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import type { CreatePhoneInviteResult, MobileControlSettings } from "../../../shared/types";
 import { writeClipboardText } from "../../../shared/clipboard";
+import { Spinner } from "@/components/ui/spinner";
 
 // The Revoke button is the only way to kill a pairing, and it needs the handle
 // returned when the pairing was created. Settings unmounts as soon as the user
@@ -124,7 +125,7 @@ export function DevicePairingSection(props: {
       onClick={() => void createPairing()}
     >
       <span className="gen-pill-lead">
-        {status === "busy" ? <Loader2 className="spin" size={16} aria-hidden /> : <QrCode size={16} aria-hidden />}
+        {status === "busy" ? <Spinner size={16} /> : <QrCodeIcon size={16} aria-hidden />}
       </span>
       <span className="gen-pill-label">Generate</span>
     </button>
@@ -173,7 +174,7 @@ export function DevicePairingSection(props: {
                     {qrDataUrl ? (
                       <img src={qrDataUrl} alt="Mobile control QR" />
                     ) : (
-                      <QrCode size={96} aria-hidden />
+                      <QrCodeIcon size={96} aria-hidden />
                     )}
                     {status === "revoked" ? <span className="device-pairing-state">Revoked</span> : null}
                   </div>
@@ -195,7 +196,7 @@ export function DevicePairingSection(props: {
                       disabled={status === "busy" || status === "revoked"}
                       onClick={() => void revokePairing()}
                     >
-                      <span className="gen-pill-lead"><ShieldX size={16} aria-hidden /></span>
+                      <span className="gen-pill-lead"><ShieldSlashIcon size={16} aria-hidden /></span>
                       <span className="gen-pill-label">{confirmingRevoke ? "Revoke permanently" : "Revoke"}</span>
                     </button>
                     <button
@@ -206,7 +207,7 @@ export function DevicePairingSection(props: {
                       onClick={() => void copyMobileUrl()}
                     >
                       <span className="gen-pill-lead">
-                        {status === "copied" ? <CheckCircle2 size={16} aria-hidden /> : <Copy size={16} aria-hidden />}
+                        {status === "copied" ? <CheckCircleIcon size={16} aria-hidden /> : <CopyIcon size={16} aria-hidden />}
                       </span>
                       <span className="gen-pill-label">{status === "copied" ? "Copied" : "Copy URL"}</span>
                     </button>

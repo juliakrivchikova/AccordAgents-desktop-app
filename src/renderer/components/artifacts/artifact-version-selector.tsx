@@ -1,5 +1,5 @@
 import type { ReactNode } from "react";
-import { BadgeCheck, Check, ChevronRight, History } from "lucide-react";
+import { SealCheckIcon, CheckIcon, CaretRightIcon, ClockCounterClockwiseIcon } from "@phosphor-icons/react";
 import { DropdownMenu } from "radix-ui";
 
 import type { ArtifactDraftView, ArtifactVersionMeta } from "../../../shared/types";
@@ -147,12 +147,12 @@ export function ArtifactVersionSubmenu(props: {
   return (
     <DropdownMenu.Sub>
       <DropdownMenu.SubTrigger className="artifact-menu-item artifact-version-subtrigger" disabled={props.disabled} data-testid="artifact-version-selector">
-        <History aria-hidden />
+        <ClockCounterClockwiseIcon aria-hidden />
         <span className="artifact-menu-item-label">
           <span>Version</span>
           <span className="artifact-version-subtrigger-meta">{props.label}</span>
         </span>
-        <ChevronRight className="artifact-menu-chevron" aria-hidden />
+        <CaretRightIcon className="artifact-menu-chevron" aria-hidden />
       </DropdownMenu.SubTrigger>
       <DropdownMenu.Portal>
         <DropdownMenu.SubContent className="artifact-menu artifact-version-menu" sideOffset={6} collisionPadding={12}>
@@ -179,14 +179,14 @@ function ArtifactPickerRow({ entry }: { entry: ArtifactPickerEntry }): JSX.Eleme
   return (
     <DropdownMenu.RadioItem value={entry.value} className="artifact-menu-item artifact-version-item">
       <span className="artifact-menu-check">
-        <DropdownMenu.ItemIndicator><Check size={15} aria-hidden /></DropdownMenu.ItemIndicator>
+        <DropdownMenu.ItemIndicator><CheckIcon size={15} aria-hidden /></DropdownMenu.ItemIndicator>
       </span>
       <span className="artifact-version-row">
         <span className="artifact-version-row-title">
           <span>{entry.title}</span>
           {entry.signed ? (
             <span className={`artifact-version-signed${complete ? " is-complete" : ""}`}>
-              {complete ? <BadgeCheck size={13} aria-hidden /> : null}
+              {complete ? <SealCheckIcon size={13} aria-hidden /> : null}
               Signed {entry.signed.count}/{entry.signed.required}
             </span>
           ) : null}

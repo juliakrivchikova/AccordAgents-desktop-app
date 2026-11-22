@@ -1,4 +1,5 @@
 import { Fragment, useState } from "react";
+import { Switch } from "@/components/ui/switch";
 
 import type {
   AgentHealth,
@@ -114,15 +115,11 @@ export function GeneralSettingsSection(props: {
                     <div className="gen-cli-name">{displayLabel}</div>
                     <div className="gen-cli-sub">{healthLine(provider.enabled, health)}</div>
                   </div>
-                  <label className="toggle">
-                    <input
-                      type="checkbox"
-                      data-testid={`provider-toggle-${provider.kind}`}
-                      checked={provider.enabled}
-                      onChange={(event) => void props.updateProvider(provider, { enabled: event.target.checked })}
-                    />
-                    <span />
-                  </label>
+                  <Switch
+                    data-testid={`provider-toggle-${provider.kind}`}
+                    checked={provider.enabled}
+                    onChange={(event) => void props.updateProvider(provider, { enabled: event.target.checked })}
+                  />
                 </div>
               </Fragment>
             );
@@ -156,7 +153,7 @@ export function GeneralSettingsSection(props: {
                 What happens when you click an inside-workspace file reference in chat.
               </div>
             </div>
-            <FileOpenDropdown options={FILE_OPEN_OPTIONS} action={props.repoFileOpenAction ?? null} onChange={props.setRepoFileOpenPreference} />
+            <FileOpenDropdown options={FILE_OPEN_OPTIONS} action={props.repoFileOpenAction ?? null} ariaLabel="Default file open destination" onChange={props.setRepoFileOpenPreference} />
           </div>
           <div className="gen-card-divider" />
           <div className="gen-row">
@@ -169,6 +166,7 @@ export function GeneralSettingsSection(props: {
             <FileOpenDropdown
               options={EXTERNAL_OPEN_OPTIONS}
               action={props.repoFileExternalOpenAction ?? null}
+              ariaLabel="Open files outside the side panel"
               onChange={async (action) => {
                 await props.setRepoFileExternalOpenPreference(action === "open" || action === "intellij-idea" ? action : null);
               }}
@@ -184,15 +182,11 @@ export function GeneralSettingsSection(props: {
                 Send error reports and anonymous usage counts: active installs, your operating system and language, which supported CLIs are set up, which first steps you have reached (like your first chat), which features you use (like roles and documents) and which model providers you connect. Never your messages, code, file names or keys; file paths, links and secrets are removed from error reports. Turning on applies on next restart.
               </div>
             </div>
-            <label className="toggle">
-              <input
-                type="checkbox"
-                data-testid="crash-reports-toggle"
-                checked={props.crashReports}
-                onChange={(event) => void props.setCrashReports(event.target.checked)}
-              />
-              <span />
-            </label>
+            <Switch
+              data-testid="crash-reports-toggle"
+              checked={props.crashReports}
+              onChange={(event) => void props.setCrashReports(event.target.checked)}
+            />
           </div>
           <div className="gen-card-divider" />
           <div className="gen-row">

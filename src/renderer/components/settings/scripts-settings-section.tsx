@@ -3,6 +3,7 @@ import { useEffect, useState } from "react";
 import type { ScheduledScriptSummary } from "../../../shared/scripts";
 import { errorText } from "../review/review-conversation-data";
 import { ScriptSettingsItem } from "./scripts-settings-item";
+import { Delayed } from "@/components/ui/delayed";
 
 /** Settings → Scheduled Tasks: every scheduled script, on this computer and on its
  *  machines, its state, history and keys, with the direct controls (on/off,
@@ -34,7 +35,7 @@ export function ScriptsSettingsSection(): JSX.Element {
       <div className="gen-section-head">
         <h2 className="gen-section-title">Scheduled tasks</h2>
         <span className="gen-section-meta">
-          {scripts ? `${scripts.length} ${scripts.length === 1 ? "task" : "tasks"}` : "Loading"}
+          {scripts ? `${scripts.length} ${scripts.length === 1 ? "task" : "tasks"}` : <Delayed>Loading</Delayed>}
         </span>
       </div>
       <p className="scripts-settings-meta">

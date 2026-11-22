@@ -1,5 +1,5 @@
 import { type CSSProperties, useCallback, useEffect, useRef, useState } from "react";
-import { ArrowLeft, FilePlus2, X } from "lucide-react";
+import { ArrowLeftIcon, FilePlusIcon, XIcon } from "@phosphor-icons/react";
 import { ARTIFACT_USER_MEMBER } from "../../../shared/types";
 import { artifactMemberLabel, artifactSummaryStatusLabel } from "../../../shared/artifacts";
 import type {
@@ -21,6 +21,7 @@ import { loadArtifactDetail } from "./artifact-detail-loader";
 import { loadArtifactDiff } from "./artifact-diff-loader";
 import { ArtifactDraftInbox } from "./draft-inbox";
 import { ArtifactsList } from "./artifacts-list";
+import { Delayed } from "@/components/ui/delayed";
 type PanelMode = "view" | "create" | "revise";
 type ArtifactListStatus = "active" | "archived";
 export function ArtifactsPanel(props: {
@@ -447,7 +448,7 @@ export function ArtifactsPanel(props: {
         {props.selectedId || mode === "create" ? (
           <IconButton
             label="Back to artifact list"
-            icon={ArrowLeft}
+            icon={ArrowLeftIcon}
             onClick={() => {
               setMode("view");
               setAccessOpen(false);
@@ -511,12 +512,12 @@ export function ArtifactsPanel(props: {
         {!props.selectedId && mode !== "create" && (
           <IconButton
             label="New artifact"
-            icon={FilePlus2}
+            icon={FilePlusIcon}
             tooltip="New artifact"
             onClick={() => { clearTransient(); setAccessOpen(false); setMode("create"); }}
           />
         )}
-        <IconButton label="Close artifacts" icon={X} onClick={props.onClose} />
+        <IconButton label="Close artifacts" icon={XIcon} onClick={props.onClose} />
       </div>
       {accessOpen && detail ? (
         <AccessArtifactForm
@@ -601,7 +602,7 @@ export function ArtifactsPanel(props: {
           />
         </div>
       ) : !detail ? (
-        <div className="artifacts-panel-body artifacts-empty">Loading artifact…</div>
+        <div className="artifacts-panel-body artifacts-empty"><Delayed>Loading artifact…</Delayed></div>
       ) : detail.lifecycle === "collecting_drafts" ? (
         <ArtifactDraftInbox detail={detail} selectedDraftId={selectedDraft?.id} />
       ) : (

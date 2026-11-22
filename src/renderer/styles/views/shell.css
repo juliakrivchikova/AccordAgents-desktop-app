@@ -1,24 +1,17 @@
-/* App shell: sidebar/workspace split, collapse animation, and the frosted
-   glass sidebar. The sidebar stays in the grid as a fixed-width child of a
-   clipped slot so collapsing animates the track to 0 without reflowing the
-   sidebar's contents. */
+/* App shell: sidebar/workspace split and the sidebar's collapse. The track
+   changes width once (the composer measures its controls on every width
+   change); the sidebar itself slides and fades over the workspace. */
 
 .app-shell-root {
   position: relative;
   grid-template-columns: var(--app-sidebar-width) minmax(0, 1fr);
   grid-template-rows: minmax(0, 1fr);
   background: var(--app-sidebar-bg);
-  transition: grid-template-columns 280ms cubic-bezier(0.22, 1, 0.36, 1);
 }
 
 .app-shell-root.resizing-sidebar {
   cursor: col-resize;
   user-select: none;
-  transition: none;
-}
-
-.app-shell-root.switching-sidebar-visibility {
-  transition: none;
 }
 
 .app-shell-root[data-sidebar-collapsed="true"] {
@@ -26,15 +19,35 @@
 }
 
 .app-shell-sidebar-slot {
+  position: relative;
+  z-index: var(--z-sidebar);
   grid-column: 1;
   grid-row: 1;
   min-width: 0;
-  overflow: hidden;
 }
 
 .app-shell-sidebar-slot > [data-shell="sidebar"] {
   width: var(--app-sidebar-width);
   height: 100%;
+  transition:
+    transform var(--ui-duration-slow) var(--ui-ease-out),
+    opacity var(--ui-duration-base) var(--ui-ease-out),
+    visibility 0s linear 0s;
+}
+
+.app-shell-root[data-sidebar-collapsed="true"] .app-shell-sidebar-slot > [data-shell="sidebar"] {
+  visibility: hidden;
+  opacity: 0;
+  transform: translateX(-24px);
+  transition:
+    transform var(--ui-duration-slow) var(--ui-ease-out),
+    opacity var(--ui-duration-base) var(--ui-ease-out),
+    visibility 0s linear var(--ui-duration-slow);
+}
+
+.app-shell-root.switching-sidebar-visibility .app-shell-sidebar-slot > [data-shell="sidebar"],
+.app-shell-root.resizing-sidebar .app-shell-sidebar-slot > [data-shell="sidebar"] {
+  transition: none;
 }
 
 .app-shell-root[data-sidebar-collapsed="true"] .app-shell-sidebar-slot {
@@ -53,15 +66,30 @@
   background: transparent;
 }
 
+/* The workspace is a panel laid on the window (the User, 2026-11-22): the
+   sidebar sits on the window's own color, the workspace a rounded card inset
+   by --app-workspace-inset. Its title rows are shorter by twice the inset
+   and its border, so their middle stays level with the traffic lights and
+   the sidebar's top row. */
+.app-shell-root {
+  --app-workspace-inset: 5px;
+}
+
 [data-shell="workspace"] {
+  --app-header-height: calc(var(--app-window-header-height) - 2 * (var(--app-workspace-inset) + 1px));
   grid-column: 2;
   grid-row: 1;
-  border-left: 1px solid var(--app-shell-border);
-  background: var(--app-workspace-bg);
+  margin: var(--app-workspace-inset) var(--app-workspace-inset) var(--app-workspace-inset) 0;
+  border: 1px solid var(--ui-border);
+  border-radius: var(--ui-radius-12);
+  background: var(--ui-bg);
+  box-shadow: var(--ui-shadow-sm);
+  /* Its own layers (composer, docks, popovers) stay under the sliding sidebar. */
+  isolation: isolate;
 }
 
 .app-shell-root[data-sidebar-collapsed="true"] [data-shell="workspace"] {
-  border-left: 0;
+  margin-left: var(--app-workspace-inset);
 }
 
 /* The top row of each pane is also the window's title bar: one narrow band
@@ -128,14 +156,17 @@
   align-items: center;
   justify-content: space-between;
   gap: 8px;
-  padding: 0 10px 0 16px;
+  padding: 0 8px 0 16px;
   color: var(--app-text-strong);
   font-size: 13px;
   font-weight: 600;
 }
 
+/* The toggle stands where the collapsed sidebar's toggle stands in the
+   workspace title row (past the panel's inset and border), so hiding and
+   showing the sidebar never moves it. */
 .app-shell-root[data-platform="mac"] .sidebar-brand-row {
-  padding-left: var(--app-traffic-light-inset);
+  padding-left: calc(var(--app-traffic-light-inset) + var(--app-workspace-inset) + 1px);
 }
 
 [data-shell="topbar"] {
@@ -156,12 +187,6 @@
   background: var(--app-border-strong);
 }
 
-@media (prefers-reduced-motion: reduce) {
-  .app-shell-root {
-    transition: none;
-  }
-}
-
 [data-shell="sidebar"] {
   background: var(--app-sidebar-bg);
 }
@@ -177,8 +202,18 @@
   background: var(--app-surface);
 }
 
+/* With the sidebar hidden, the toggle stands where every other view keeps
+   it (past the lights, in the workspace title row), not at the edge of the
+   centered column; the title keeps clear of the lights and the toggle. */
 .app-shell-root[data-platform="mac"][data-sidebar-collapsed="true"] .settings-view-head {
-  padding-left: max(0px, calc(var(--app-traffic-light-inset) - 24px - max(0px, (100vw - 1280px) / 2)));
+  padding-left: max(0px, calc(var(--app-traffic-light-inset) + 36px - 24px - max(0px, (100vw - 1280px) / 2)));
+}
+
+.app-shell-root[data-platform="mac"][data-sidebar-collapsed="true"] .settings-view-sidebar-toggle {
+  position: fixed;
+  z-index: 3;
+  top: calc(var(--app-workspace-inset) + 1px + (var(--app-header-height) - 28px) / 2);
+  left: calc(var(--app-workspace-inset) + 1px + var(--app-traffic-light-inset));
 }
 
 /* Errors and warnings (app/app-notices.tsx): a stack in the bottom-right
@@ -228,7 +263,7 @@
 .app-notice-dismiss-all {
   align-self: flex-end;
   border: 0;
-  border-radius: 6px;
+  border-radius: var(--ui-radius-8);
   padding: 2px 8px;
   color: var(--app-muted);
   background: var(--app-surface);
