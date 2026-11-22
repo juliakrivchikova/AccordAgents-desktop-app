@@ -2930,6 +2930,10 @@ export type ConversationMetadata = Record<string, unknown> & {
    *  (ChatService.convertMembersForSessionsView), so that is done once and a
    *  later change is not undone. Shared through her server. */
   cliModesConvertedAt?: string;
+  /** The same, as this computer recorded it: never shared, so a server on an
+   *  older program that drops cliModesConvertedAt (and a full read from it)
+   *  does not make the computer move the members again at its next start. */
+  cliModesConvertedHereAt?: string;
   /** This device's own record of the Accords folded into the chat (a line
    *  her server took), worked out from the whole chat, not the loaded page:
    *  their cards are not pinned (accordProgress.ts). Never shared. */

@@ -639,6 +639,13 @@ interface CompactChatCommand {
 }
 
 const HANDLE_PATTERN = /^[A-Za-z0-9_-]{1,32}$/;
+
+/** Whether the computer moved a sessions-view chat's members into their
+ *  CLI's own mode already: its shared mark, or its own record of it (kept
+ *  when a server on an older program drops the shared one). */
+function cliModesConverted(metadata: { cliModesConvertedAt?: string; cliModesConvertedHereAt?: string }): boolean {
+  return Boolean(metadata.cliModesConvertedAt || metadata.cliModesConvertedHereAt);
+}
 /** Claude Code's tools that edit files (a once-only grant of file edits
  *  answers one of them; ChatService.takeClaudeOnceEdit). */
 const CLAUDE_FILE_EDIT_TOOLS: ReadonlySet<string> = new Set(["Edit", "Write", "MultiEdit", "NotebookEdit"]);
@@ -1827,7 +1834,7 @@ export class ChatService {
     }
     // A chat in the sessions view opened here with members on rights from
     // the classic view: they move into their CLI's own mode, once.
-    if (!this.machineRuntime && chatViewFor(conversation.metadata) === "sessions" && !conversation.metadata.cliModesConvertedAt) {
+    if (!this.machineRuntime && chatViewFor(conversation.metadata) === "sessions" && !cliModesConverted(conversation.metadata)) {
       this.convertMembersForSessionsView(conversation.id, true);
     }
     const participants = new Map(this.chatParticipants(conversation).map((participant) => [participant.id, participant]));
@@ -2743,15 +2750,17 @@ export class ChatService {
       await this.waitForQueuedSave(conversationId);
       const conversation = await this.storage.getConversation(conversationId);
       if (!conversation || conversation.kind !== "chat" || chatViewFor(conversation.metadata) !== "sessions") return;
-      if (once && conversation.metadata.cliModesConvertedAt) return;
+      if (once && cliModesConverted(conversation.metadata)) return;
       await this.withChatMutation(conversation, async () => {
-        if (chatViewFor(conversation.metadata) !== "sessions" || (once && conversation.metadata.cliModesConvertedAt)) return;
+        if (chatViewFor(conversation.metadata) !== "sessions" || (once && cliModesConverted(conversation.metadata))) return;
         const converted = membersInCliOwnMode(this.chatParticipants(conversation));
         if (!converted && !once) return;
+        const at = conversation.metadata.cliModesConvertedAt ?? conversation.metadata.cliModesConvertedHereAt ?? new Date().toISOString();
         conversation.metadata = {
           ...conversation.metadata,
           ...(converted ? { participants: converted } : {}),
-          cliModesConvertedAt: conversation.metadata.cliModesConvertedAt ?? new Date().toISOString()
+          cliModesConvertedAt: at,
+          cliModesConvertedHereAt: at
         };
         await this.saveConversation(conversation);
       });
