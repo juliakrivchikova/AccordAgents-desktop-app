@@ -14,7 +14,9 @@ import type { ChatAgentMode, ChatAgentPermissions, ChatProviderKind } from "./ty
  *   cycle): names and descriptions as the Claude desktop app's Code sessions
  *   list them.
  * - Codex 0.155.1 (its `/permissions` picker): Ask for approval, Approve for
- *   me (auto-review), Full Access, with the picker's descriptions. Read Only
+ *   me (auto-review), Full Access, with the picker's descriptions; rechecked
+ *   in Codex 0.171.0's own strings (2026-11-22), whose Approve for me line
+ *   lost its full stop. Read Only
  *   is still one of its presets but not in the picker: it shows only while a
  *   member is in it. Plan mode is Codex's collaboration mode (`/plan`,
  *   Shift+Tab), on top of any of these, not one of them.
@@ -76,7 +78,7 @@ const CODEX_ACCESS: ChatAccessModeSet = {
       agentMode: "default",
       workspaceWrite: true
     },
-    { id: "auto-review", label: "Approve for me", detail: "Only ask for actions detected as potentially unsafe.", agentMode: "auto" },
+    { id: "auto-review", label: "Approve for me", detail: "Only ask for actions detected as potentially unsafe", agentMode: "auto" },
     {
       id: "full-access",
       label: "Full Access",

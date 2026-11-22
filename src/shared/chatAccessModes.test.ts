@@ -56,7 +56,7 @@ test("each CLI's modes by its own names and in its own order, described in the v
   assert.equal(chatAccessModeSet("claude-code").title, "Permission mode");
   // Codex 0.155.1's /permissions picker; Read Only is a preset it no longer offers.
   assert.deepEqual(chatAccessOptions("codex-cli").map((option) => option.label), ["Ask for approval", "Approve for me", "Full Access"]);
-  assert.equal(chatAccessOptions("codex-cli")[1]!.detail, "Only ask for actions detected as potentially unsafe.");
+  assert.equal(chatAccessOptions("codex-cli")[1]!.detail, "Only ask for actions detected as potentially unsafe");
   assert.match(chatAccessOptions("codex-cli")[2]!.detail ?? "", /^Codex can edit files outside this workspace and access the internet without asking for approval\. Exercise caution when using\.$/);
   assert.ok(!chatAccessOptions("codex-cli").some((option) => /plan/i.test(option.label)), "Plan mode is not one of Codex's permissions");
   assert.equal(chatAccessModeSet("codex-cli").plan?.label, "Plan mode");
