@@ -118,6 +118,8 @@ const MAX_CLI_EVENT_SUMMARIES = 2;
 const CLI_AGENT_COMPACT_TIMEOUT_MS = 5 * 60_000;
 /** How long the CLI gets to answer `get_context_usage`. */
 const CLAUDE_CONTEXT_USAGE_TIMEOUT_MS = 15_000;
+/** How long the CLI gets to answer `set_permission_mode` (Shift+Tab). */
+export const CLAUDE_PERMISSION_MODE_TIMEOUT_MS = 15_000;
 const WARM_AGENT_KILL_GRACE_MS = 1500;
 const WINDOWS_WARM_AGENT_KILL_GRACE_MS = 750;
 const CLAUDE_BACKGROUND_PROCESS_CAPTURE_INTERVAL_MS = 100;
@@ -515,6 +517,11 @@ export interface CliAgentWarmOptions {
    *  input). Given only when the caller shows suggestions; the process is
    *  started with the flag only then and only when the CLI supports it. */
   onPromptSuggestion?: (suggestion: string) => void;
+  /** Claude, a member in its CLI's own mode: the permission mode the member
+   *  is in as its message goes into the live process (a mode the User picked
+   *  after this run read its settings wins over the run's). Without it, the
+   *  run's own mode. */
+  permissionMode?: () => ClaudePermissionMode | undefined;
 }
 
 /** A background task the CLI reports as live, with the reply that started it. */
@@ -639,6 +646,10 @@ interface WarmAgentEntry {
    *  `mcp_authenticate`, `mcp_reconnect`), answered while a reply runs too.
    *  Its response, or an error with the CLI's words. */
   control?: (request: Record<string, unknown>, timeoutMs: number, signal?: AbortSignal) => Promise<Record<string, unknown>>;
+  /** Claude only: the permission mode the process is in, as far as the app
+   *  knows: `--permission-mode` at its start, then each `set_permission_mode`
+   *  it accepted and each mode the CLI reported itself (its `system` events). */
+  permissionMode?: () => string | undefined;
   /** Claude only: the CLI's figures for the last compaction it ran. */
   lastCompactBoundary?: () => ClaudeCompactBoundary | undefined;
   queue: Promise<void>;
@@ -788,6 +799,8 @@ interface ClaudeWarmProcessState {
   /** What the CLI said about the last compaction of this session, numbered,
    *  so a /compact that compacted nothing is told from one that did. */
   lastCompactBoundary?: ClaudeCompactBoundary;
+  /** The session's permission mode (WarmAgentEntry.permissionMode). */
+  permissionMode?: string;
 }
 
 interface ClaudeCompactBoundary {
@@ -942,7 +955,36 @@ interface CodexAppServerTurnStartResult {
   };
 }
 
-type ClaudePermissionMode = "default" | "plan" | "acceptEdits" | "auto";
+export type ClaudePermissionMode = "default" | "plan" | "acceptEdits" | "auto";
+
+/** Each mode as Claude Code names it (src/shared/chatAccessModes.ts). */
+const CLAUDE_PERMISSION_MODE_LABELS: Record<ClaudePermissionMode, string> = {
+  default: "Manual",
+  acceptEdits: "Accept edits",
+  plan: "Plan",
+  auto: "Auto"
+};
+
+/** Claude Code's `--permission-mode` for a chat member's mode and rights:
+ *  Manual (`default`) or Accept edits by the file-edit right, Plan, or Auto.
+ *  Codex's Full Access is not a Claude Code mode: Auto, the broadest one
+ *  Claude Code offers without extra flags. */
+export function claudeCodePermissionMode(agentMode: ChatAgentMode | undefined, permissions: ChatAgentPermissions | undefined): ClaudePermissionMode {
+  const mode = chatAgentModeForKind("claude-code", agentMode);
+  if (mode === "plan") {
+    return "plan";
+  }
+  if (mode === "auto") {
+    // Native Claude auto mode: a classifier auto-approves safe tool calls (incl. Bash)
+    // and blocks dangerous ones without prompting — the headless-friendly analog of
+    // Codex Auto-review. If the installed CLI lacks it, runClaudeOneShot fails the run
+    // loudly with an upgrade message rather than silently running a different mode.
+    return "auto";
+  }
+  return effectiveChatAgentPermissionsForProvider("claude-code", mode, normalizeChatAgentPermissions(permissions)).workspaceWrite
+    ? "acceptEdits"
+    : "default";
+}
 
 interface ClaudeToolConfig {
   permissionMode: ClaudePermissionMode;
@@ -6565,6 +6607,18 @@ export class CliAgentRunner {
     // message sent mid-step to the running step, as the dedicated CLI does.
     return this.trackWarmRun(claudeEntry, async () => {
       this.clearWarmIdleTimer(claudeEntry);
+      if (this.claudeOwnMode(kind, options)) {
+        const notSwitched = await this.alignClaudePermissionMode(claudeEntry, warm.permissionMode?.() ?? this.claudePermissionMode(kind, options), participant, warm, signal);
+        if (notSwitched) {
+          if (claudeEntry.unusable) {
+            this.warmAgents.delete(key);
+            await this.closeWarmAgent(claudeEntry, "unusable");
+          } else if (!claudeEntry.closed && claudeEntry.process.exitCode === null) {
+            this.scheduleWarmIdleTimer(claudeEntry, warm.idleTimeoutMs);
+          }
+          return signal?.aborted ? this.failed(participant, notSwitched) : { ...this.failed(participant, notSwitched), content: notSwitched.message };
+        }
+      }
       try {
         const result = this.withAppMcpClientStatus(
           await claudeEntry.run(prompt, signal, options.onOutput, options.onSessionId, options.timeoutMs, undefined, undefined, {
@@ -6634,6 +6688,57 @@ export class CliAgentRunner {
           : this.failed(participant, error);
       }
     });
+  }
+
+  /**
+   * Claude Code's permission mode belongs to the session, not to a message
+   * (Shift+Tab in the CLI switches it for the reply running too). Before a
+   * message of a member in its CLI's own mode goes into its live process, the
+   * process is switched to the member's mode (`set_permission_mode`), and the
+   * message waits for the CLI's answer: a mode changed between turns keeps
+   * the process and its background work, as in the CLI. Undefined when the
+   * process is in that mode; otherwise the turn does not run in another mode:
+   * the error says why. A process that did not switch is replaced at the next
+   * message when nothing runs in it.
+   */
+  private async alignClaudePermissionMode(
+    entry: WarmAgentEntry,
+    wanted: ClaudePermissionMode,
+    participant: ParticipantConfig,
+    warm: CliAgentWarmOptions,
+    signal: AbortSignal | undefined
+  ): Promise<Error | undefined> {
+    const current = entry.permissionMode?.();
+    if (current === wanted || !entry.control) {
+      return undefined;
+    }
+    try {
+      await entry.control({ subtype: "set_permission_mode", mode: wanted }, CLAUDE_PERMISSION_MODE_TIMEOUT_MS, signal);
+      void this.writeDebugLog("cli.claude.permission-mode-aligned", {
+        participantId: participant.id,
+        conversationId: warm.conversationId,
+        from: current ?? null,
+        to: wanted
+      });
+      return undefined;
+    } catch (error) {
+      if (signal?.aborted) {
+        return new Error(CLAUDE_WARM_CANCELLED_MESSAGE);
+      }
+      const reason = this.errorText(error);
+      if (entry.isIdle?.() === true) {
+        entry.unusable = true;
+      }
+      void this.writeDebugLog("cli.claude.permission-mode-align-failed", {
+        participantId: participant.id,
+        conversationId: warm.conversationId,
+        from: current ?? null,
+        to: wanted,
+        replaced: entry.unusable === true,
+        message: reason
+      });
+      return new Error(`Claude Code did not switch ${participant.label} to ${CLAUDE_PERMISSION_MODE_LABELS[wanted]} (${reason.replace(/[.\s]+$/, "")}), so the message was not sent. Send it again.`);
+    }
   }
 
   /**
@@ -6835,7 +6940,8 @@ export class CliAgentRunner {
       reportedBackgroundTasks: "[]",
       lastTaskEventAt: 0,
       selfResumeExpectedUntil: 0,
-      controlWaiters: new Map()
+      controlWaiters: new Map(),
+      permissionMode: toolConfig.permissionMode
     };
     const capturedBackgroundProcesses = new Map<string, CapturedPosixProcess>();
     /** Each waiter settles once its condition holds (or the process is gone). */
@@ -7119,8 +7225,14 @@ export class CliAgentRunner {
         if (this.stringField(response, "subtype") !== "success") {
           throw new Error(this.stringField(response, "error") || `Claude Code refused ${String(request.subtype)}.`);
         }
-        return this.asRecord(response.response) ?? {};
+        const answer = this.asRecord(response.response) ?? {};
+        if (request.subtype === "set_permission_mode" && typeof request.mode === "string") {
+          // Claude Code 2.1.330 answers with the mode it switched to.
+          state.permissionMode = this.stringField(answer, "mode") ?? request.mode;
+        }
+        return answer;
       },
+      permissionMode: () => state.permissionMode,
       lastCompactBoundary: () => state.lastCompactBoundary,
       run: (
         turnPrompt: string,
@@ -7328,6 +7440,12 @@ export class CliAgentRunner {
     const subtype = this.stringField(record, "subtype");
     state.sessionId = this.findSessionId(event) ?? state.sessionId ?? fallbackSessionId;
     state.model = this.findModelId(event) ?? state.model ?? participant.model;
+    // The CLI says its mode on `system/init` and on every `system/status`,
+    // including a switch it made itself (a plan the User approved).
+    const reportedMode = type === "system" && !record.parent_tool_use_id ? this.stringField(record, "permissionMode") : undefined;
+    if (reportedMode) {
+      state.permissionMode = reportedMode;
+    }
     if (type === "command_lifecycle") {
       this.handleClaudeCommandLifecycle(record, state, participant, hooks);
       return;
@@ -9061,6 +9179,11 @@ export class CliAgentRunner {
   }
 
   private shouldPassClaudeAllowedTools(kind: ConversationKind, options: CliAgentRunOptions): boolean {
+    // In Claude Code's own modes the allow list is the same in every mode
+    // (claudeToolConfig); the CLI's Auto applies it as the CLI does.
+    if (this.claudeOwnMode(kind, options)) {
+      return true;
+    }
     return !(kind === "chat" && chatAgentModeForKind("claude-code", this.agentModeForRun(kind, options)) === "auto");
   }
 
@@ -9109,7 +9232,9 @@ export class CliAgentRunner {
     const agentMode = chatAgentModeForKind("claude-code", this.agentModeForRun(kind, options));
     if (
       kind !== "chat" ||
-      (agentMode !== "default" && agentMode !== "auto") ||
+      // Every mode of Claude Code's own asks through the cards: the process
+      // may be switched into a mode that asks while it runs.
+      (!this.claudeOwnMode(kind, options) && agentMode !== "default" && agentMode !== "auto") ||
       !options.appMcp?.toolNames.includes(APP_TOOL_PERMISSION_TOOL)
     ) {
       return undefined;
@@ -9406,21 +9531,15 @@ export class CliAgentRunner {
   }
 
   private claudePermissionMode(kind: ConversationKind, options: CliAgentRunOptions): ClaudePermissionMode {
-    // Codex's Full Access is not a Claude Code mode: Auto, the broadest one
-    // Claude Code offers without extra flags.
-    const agentMode = chatAgentModeForKind("claude-code", this.agentModeForRun(kind, options));
-    if (agentMode === "plan") {
-      return "plan";
-    }
-    if (agentMode === "auto") {
-      // Native Claude auto mode: a classifier auto-approves safe tool calls (incl. Bash)
-      // and blocks dangerous ones without prompting — the headless-friendly analog of
-      // Codex Auto-review. If the installed CLI lacks it, runClaudeOneShot fails the run
-      // loudly with an upgrade message rather than silently running a different mode.
-      return "auto";
-    }
-    const permissions = this.permissionsForRun("claude-code", agentMode, options);
-    return permissions.workspaceWrite ? "acceptEdits" : "default";
+    return claudeCodePermissionMode(this.agentModeForRun(kind, options), options.permissions);
+  }
+
+  /** A chat member in Claude Code's own mode (the sessions view's access,
+   *  `cliApprovals`): only `--permission-mode` tells its modes apart, so the
+   *  mode can change in its live process, as Shift+Tab changes it in the
+   *  CLI (claudeToolConfig). */
+  private claudeOwnMode(kind: ConversationKind, options: CliAgentRunOptions): boolean {
+    return kind === "chat" && normalizeChatAgentPermissions(options.permissions).cliApprovals === true;
   }
 
   private claudeToolConfig(
@@ -9431,17 +9550,22 @@ export class CliAgentRunner {
   ): ClaudeToolConfig {
     const agentMode = chatAgentModeForKind("claude-code", this.agentModeForRun(kind, options));
     const permissionMode = this.claudePermissionMode(kind, options);
-    const permissions = this.permissionsForRun("claude-code", agentMode, options);
+    // Claude Code's own modes (the sessions view's Manual, Accept edits, Plan
+    // and Auto): what is not granted is not taken away but asked about, each
+    // ask an approval card through --permission-prompt-tool, as the CLI asks
+    // in its terminal. Deny rules stay hard stops. The tools are the same in
+    // every mode and only --permission-mode tells them apart, so the CLI's
+    // own Plan mode and Auto classifier decide, and the mode can change in
+    // the live process mid-reply exactly as Shift+Tab changes it in the CLI.
+    const asksForUngranted = this.claudeOwnMode(kind, options);
+    const permissions = asksForUngranted
+      ? normalizeChatAgentPermissions(options.permissions)
+      : this.permissionsForRun("claude-code", agentMode, options);
     const tools = new Set<string>();
     const allowedTools: string[] = [];
     const disallowedTools: string[] = [];
     const askTools: string[] = [];
     const providerNativeAllowedTools = permissions.providerNative?.["claude-code"]?.allowedTools ?? [];
-    // Claude Code's own default modes (the sessions view's Default and Accept
-    // edits): what is not granted is not taken away but asked about, each
-    // ask an approval card through --permission-prompt-tool, as the CLI asks
-    // in its terminal. Deny rules stay hard stops.
-    const asksForUngranted = permissions.cliApprovals === true && agentMode === "default";
     const readContextAvailable = Boolean(repoPath) || extraReadableDirs.length > 0;
     const readTools = ["Read", "Grep", "Glob", "LS"];
     // Claude Code 2.1 validates --disallowedTools strictly and rejects MultiEdit as
@@ -9478,9 +9602,9 @@ export class CliAgentRunner {
       tools.add("Bash");
       for (const rule of permissions.shell.rules) {
         const toolRule = this.claudeBashPermissionRule(rule);
-        if (agentMode !== "auto") {
-          // Auto uses the provider's native classifier without app-stored shell policy.
-          // Default mode continues to honor every explicit app rule.
+        if (agentMode !== "auto" || asksForUngranted) {
+          // Classic Auto uses the provider's native classifier without app-stored shell policy.
+          // Default mode, and every mode of the CLI's own, honor every explicit app rule.
           if (rule.action === "deny") {
             disallowedTools.push(toolRule);
           } else if (rule.action === "allow") {
