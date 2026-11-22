@@ -909,6 +909,9 @@ export interface AgentContextUsage {
   source: AgentContextUsageSource;
   updatedAt: string;
   model?: string;
+  /** The window is the one the CLI itself reported for the model (not the
+   *  app's map): reading the session log again keeps it for that model. */
+  windowFromCli?: true;
 }
 
 /** A member's mode. "full-access" is Codex's Full Access preset (its
@@ -1618,6 +1621,11 @@ export interface ChatCodexApprovalRequest {
 export interface ChatSelfCompactionRequest {
   type: "self_compaction";
   instructions?: string;
+  /** The member's context indicator (AgentContextUsage.percentage) when it
+   *  asked: the card's meter, the same on the desktop and the phone. Set by
+   *  the app, never taken from the member's arguments; absent when the
+   *  indicator had no figure (the card then shows no meter). */
+  contextPercentage?: number;
 }
 
 export interface ChatAppToolApproval {

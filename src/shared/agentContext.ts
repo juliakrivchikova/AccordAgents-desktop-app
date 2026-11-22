@@ -26,6 +26,7 @@ const OPENAI_MODEL_CONTEXT_WINDOWS: Record<string, number> = {
 const CLAUDE_MODEL_CONTEXT_WINDOWS: Record<string, number> = {
   "sonnet": 1_000_000,
   "opus": 1_000_000,
+  "haiku": 1_000_000,
   "claude-fable-5": 1_000_000,
   "claude-sonnet-4-6": 1_000_000,
   "claude-opus-4-8": 1_000_000,
@@ -68,6 +69,10 @@ export function contextWindowForModel(kind: ProviderKind, model: string | undefi
     return contextWindowFromMap(OPENAI_MODEL_CONTEXT_WINDOWS, normalized) ?? openAiFamilyContextWindow(normalized);
   }
   if (kind === "claude-code" || kind === "anthropic") {
+    // The CLI's own suffix for a model run with the 1M window ("sonnet[1m]").
+    if (/\[1m\]$/.test(normalized)) {
+      return 1_000_000;
+    }
     return contextWindowFromMap(CLAUDE_MODEL_CONTEXT_WINDOWS, normalized)
       ?? claudeFamilyContextWindow(normalized)
       ?? glmFamilyContextWindow(normalized);
@@ -108,8 +113,11 @@ function claudeFamilyContextWindow(normalizedModel: string): number | undefined 
   if (normalizedModel.startsWith("claude-fable")) {
     return 1_000_000;
   }
-  if (normalizedModel.startsWith("claude-haiku-4")) {
-    return 200_000;
+  // Claude Code 2.1.330 runs claude-haiku-5-5 with a 1M window and
+  // claude-haiku-4-5 with 200k (its own `modelUsage.contextWindow`).
+  const haiku = normalizedModel.match(/^claude-haiku-(\d+)/);
+  if (haiku) {
+    return Number(haiku[1]) >= 5 ? 1_000_000 : 200_000;
   }
   return undefined;
 }
@@ -135,26 +143,51 @@ export function buildAgentContextUsage(input: {
   source: AgentContextUsageSource;
   updatedAt?: string;
   model?: string;
+  windowFromCli?: boolean;
 }): AgentContextUsage | undefined {
   const usedTokens = positiveInteger(input.usedTokens);
   const contextWindowTokens = positiveInteger(input.contextWindowTokens);
   if (!usedTokens || !contextWindowTokens) {
     return undefined;
   }
-  const percentage = Math.max(0, Math.min(100, Math.round((usedTokens / contextWindowTokens) * 100)));
+  const percentage = contextUsedPercentage(input.source, usedTokens, contextWindowTokens);
   return {
     usedTokens,
     contextWindowTokens,
     percentage,
     source: input.source,
     updatedAt: input.updatedAt ?? new Date().toISOString(),
-    model: input.model?.trim() || undefined
+    model: input.model?.trim() || undefined,
+    ...(input.windowFromCli ? { windowFromCli: true as const } : {})
   };
 }
 
+/** Tokens Codex counts as always in the context (system prompt, fixed tool
+ *  instructions): its "% context left" leaves them out of both the used part
+ *  and the window (`BASELINE_TOKENS`, codex-rs protocol and tui token_usage,
+ *  0.155.1). */
+const CODEX_BASELINE_TOKENS = 12_000;
+
+/** How much of the window is used, as the member's own CLI says it:
+ *  Claude Code's `/context` rounds used / window (2.1.330); Codex shows
+ *  100 − its "% context left", which leaves its baseline out (0.155.1);
+ *  Antigravity shows no figure of its own, so used / window. */
+export function contextUsedPercentage(source: AgentContextUsageSource, usedTokens: number, contextWindowTokens: number): number {
+  if (source === "codex-cli") {
+    if (contextWindowTokens <= CODEX_BASELINE_TOKENS) {
+      return 100;
+    }
+    const effectiveWindow = contextWindowTokens - CODEX_BASELINE_TOKENS;
+    const used = Math.max(0, usedTokens - CODEX_BASELINE_TOKENS);
+    const remaining = Math.max(0, effectiveWindow - used);
+    const left = Math.max(0, Math.min(100, Math.round((remaining / effectiveWindow) * 100)));
+    return 100 - left;
+  }
+  return Math.max(0, Math.min(100, Math.round((usedTokens / contextWindowTokens) * 100)));
+}
+
 export function formatContextUsageLabel(usage: AgentContextUsage): string {
-  const remainingTokens = Math.max(0, usage.contextWindowTokens - usage.usedTokens);
-  const remainingPercentage = Math.max(0, Math.min(100, Math.round((remainingTokens / usage.contextWindowTokens) * 100)));
+  const remainingPercentage = Math.max(0, Math.min(100, 100 - usage.percentage));
   return `${remainingPercentage}% left (${formatContextTokenCount(usage.usedTokens)} used / ${formatContextTokenCount(usage.contextWindowTokens)} tokens)`;
 }
 
@@ -186,7 +219,8 @@ export function normalizeAgentContextUsage(value: unknown): AgentContextUsage | 
     contextWindowTokens: record.contextWindowTokens,
     source,
     updatedAt: record.updatedAt,
-    model: typeof record.model === "string" ? record.model : undefined
+    model: typeof record.model === "string" ? record.model : undefined,
+    windowFromCli: record.windowFromCli === true
   });
 }
 

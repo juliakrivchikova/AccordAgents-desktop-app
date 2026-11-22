@@ -15,7 +15,6 @@ import { readCliHelpText } from "./cliHelpText";
 import { visitLinesFromEnd } from "./linesFromEnd";
 import type {
   AgentContextUsage,
-  AgentContextUsageSource,
   AgentDetectionRequest,
   AgentHealth,
   ChatAgentActivityEvent,
@@ -38,6 +37,14 @@ import { chatAgentModeForKind, effectiveChatAgentPermissionsForProvider, normali
 import { codexPlanModeOn, withCodexPlanMode } from "../../shared/chatAccessModes";
 import { antigravityStartAccessFromText, claudeStartAccess, codexStartAccess, modelNameWithoutId, type CliStartDefaults, type CliStartDefaultsByKind } from "../../shared/cliStartDefaults";
 import { buildAgentContextUsage, contextWindowForModel } from "../../shared/agentContext";
+import {
+  claudeCanonicalModelId,
+  claudeContextWindowFromResult,
+  claudeMainThreadContext,
+  codexContextFromEvent,
+  isClaudeCompactBoundary,
+  type CliContextReading
+} from "./cliContextUsage";
 import { agentEnvironmentKeyValidationError, filterAllowedAgentEnvironment } from "../../shared/agentEnvironment";
 import { GEMINI_API_KEY_SETTINGS, geminiApiKeyEnv } from "../../shared/cliProviderHosts";
 import { CLI_AGENT_RUN_TIMEOUT_DEFAULT_MS, normalizeCliAgentRunTimeoutMs } from "../../shared/cliAgentRunSettings";
@@ -709,7 +716,10 @@ interface ClaudeWarmReply {
   lastAssistantUuid?: string;
   sessionId?: string;
   model?: string;
+  /** The context of the reply's latest main-thread model call, the model
+   *  that made it, and the CLI's window for that model (cliContextUsage). */
   usedTokens?: number;
+  contextModel?: string;
   contextWindowTokens?: number;
   /** Where background work started by this reply belongs (see CliAgentReplyOrigin). */
   origin?: CliAgentReplyOrigin;
@@ -807,6 +817,13 @@ interface ClaudeWarmProcessHooks {
   markUnusableIfIdle: () => void;
 }
 
+/** The window Claude Code reported for a model (a result's `modelUsage`, or
+ *  the member's stored usage), used for that model's session-log reading. */
+interface ClaudeKnownContextWindow {
+  contextWindowTokens: number;
+  model?: string;
+}
+
 interface ClaudeOneShotStreamState {
   buffer: string;
   streamedText: string;
@@ -818,6 +835,7 @@ interface ClaudeOneShotStreamState {
   sessionId?: string;
   model?: string;
   usedTokens?: number;
+  contextModel?: string;
   contextWindowTokens?: number;
 }
 
@@ -2174,7 +2192,7 @@ export class CliAgentRunner {
   async contextUsageForSession(
     participant: ParticipantConfig,
     sessionId: string | undefined,
-    options: { waitForLog?: boolean } = {}
+    options: { waitForLog?: boolean; known?: AgentContextUsage } = {}
   ): Promise<AgentContextUsage | undefined> {
     if (!sessionId) {
       return undefined;
@@ -2184,7 +2202,14 @@ export class CliAgentRunner {
       return this.extractCodexSessionLogContextUsageWithRetry(sessionId, participant, attempts);
     }
     if (participant.kind === "claude-code") {
-      return this.extractClaudeSessionLogContextUsageWithRetry(sessionId, participant, attempts);
+      // The window the CLI reported for this model at the member's last
+      // turn: Claude's session log names none.
+      // Only a window the CLI reported: one an older build stored came from
+      // the map or from another model's entry.
+      const known = options.known?.source === "claude-code" && options.known.windowFromCli
+        ? { contextWindowTokens: options.known.contextWindowTokens, model: options.known.model }
+        : undefined;
+      return this.extractClaudeSessionLogContextUsageWithRetry(sessionId, participant, attempts, known);
     }
     if (participant.kind === "gemini-cli") {
       return this.geminiSessionUsage.get(sessionId);
@@ -5131,7 +5156,7 @@ export class CliAgentRunner {
       return false;
     }
     if (eventNames.some((name) => this.isCodexAppServerTokenUsageEventName(name))) {
-      pending.contextUsage = this.agentContextUsageFromEvent(record, participant, "codex-cli") ?? pending.contextUsage;
+      pending.contextUsage = this.codexContextUsage(codexContextFromEvent(record), participant) ?? pending.contextUsage;
       return true;
     }
     // Newer codex builds (>= 0.139) signal a completed compaction with a normal
@@ -5172,7 +5197,7 @@ export class CliAgentRunner {
         participant,
         ok: true,
         sessionId: current.threadId,
-        contextUsage: this.agentContextUsageFromEvent(record, participant, "codex-cli") ?? current.contextUsage,
+        contextUsage: current.contextUsage,
         providerNative: true
       });
       return true;
@@ -5224,7 +5249,10 @@ export class CliAgentRunner {
   }
 
   private isCodexAppServerTokenUsageEventName(name: string): boolean {
-    return this.normalizedCodexAppServerEventName(name) === "thread_tokenusage_updated";
+    const normalized = this.normalizedCodexAppServerEventName(name);
+    // The CLI-style event the app-server notification mirrors (`token_count`,
+    // or `codex/event/token_count` with it in `params.msg`).
+    return normalized === "thread_tokenusage_updated" || normalized === "token_count" || normalized.endsWith("_token_count");
   }
 
   private isCodexAppServerCompactCompleteEventName(name: string): boolean {
@@ -5480,7 +5508,7 @@ export class CliAgentRunner {
       return;
     }
     if (method === "thread/tokenUsage/updated") {
-      pending.contextUsage = this.agentContextUsageFromEvent(record, participant, "codex-cli") ?? pending.contextUsage;
+      pending.contextUsage = this.codexContextUsage(codexContextFromEvent(record), participant) ?? pending.contextUsage;
       return;
     }
     if (method === "error") {
@@ -6040,9 +6068,9 @@ export class CliAgentRunner {
         durationMs: Date.now() - startedAt,
         sessionId,
         roleRuntime: options.role ? "codex-developer-instructions" : undefined,
-        contextUsage:
-          this.extractCodexContextUsage(result.stdout, participant) ??
-          await this.extractCodexSessionLogContextUsageWithRetry(sessionId, participant),
+        // `codex exec --json` reports no context (its turn.completed usage
+        // sums the turn's calls): the rollout's token counts do.
+        contextUsage: await this.extractCodexSessionLogContextUsageWithRetry(sessionId, participant),
         warnings: [nonInteractiveApprovalWarning]
       }, participant, options);
     } catch (error) {
@@ -6455,12 +6483,21 @@ export class CliAgentRunner {
           (streamState
             ? buildAgentContextUsage({
                 usedTokens: streamState.usedTokens,
-                contextWindowTokens: streamState.contextWindowTokens ?? contextWindowForModel(participant.kind, streamState.model),
+                contextWindowTokens: streamState.contextWindowTokens ?? contextWindowForModel(participant.kind, streamState.contextModel ?? streamState.model),
                 source: "claude-code",
-                model: streamState.model
+                model: streamState.contextModel ?? streamState.model,
+                windowFromCli: streamState.contextWindowTokens !== undefined
               })
-            : this.extractClaudeContextUsage(result.stdout, participant)) ??
-          await this.extractClaudeSessionLogContextUsageWithRetry(sessionId, participant)
+            : undefined) ??
+          // `--output-format json` prints only the result, whose usage sums
+          // the turn's calls: the context is its session log's last call,
+          // against the window the result names.
+          await this.extractClaudeSessionLogContextUsageWithRetry(
+            sessionId,
+            participant,
+            SESSION_LOG_RETRIES,
+            streamState?.contextWindowTokens ?? this.claudeJsonResult(result.stdout)
+          )
       }, participant, options), streamState?.resultEvent ?? result.stdout, participant, options.nativeGoal ? "one-shot-stream" : "one-shot");
     } catch (error) {
       if (chatAgentModeForKind("claude-code", this.agentModeForRun(kind, options)) === "auto" && this.isClaudePermissionModeUnsupported(error)) {
@@ -7094,7 +7131,8 @@ export class CliAgentRunner {
           usedTokens: typeof answer?.totalTokens === "number" ? answer.totalTokens : undefined,
           contextWindowTokens: typeof answer?.maxTokens === "number" ? answer.maxTokens : undefined,
           source: "claude-code",
-          model: state.model ?? participant.model
+          model: state.model ?? participant.model,
+          windowFromCli: true
         });
       },
       control: async (request: Record<string, unknown>, timeoutMs: number, signal?: AbortSignal) => {
@@ -7392,8 +7430,12 @@ export class CliAgentRunner {
     reply.sessionId = state.sessionId ?? reply.sessionId;
     this.reportSessionId(reply.onSessionId, reply.sessionId);
     reply.model = state.model ?? reply.model;
-    reply.usedTokens = this.findContextUsedTokens(event) ?? reply.usedTokens;
-    reply.contextWindowTokens = this.findContextWindowTokens(event) ?? reply.contextWindowTokens;
+    const context = claudeMainThreadContext(event);
+    if (context) {
+      reply.usedTokens = context.usedTokens;
+      reply.contextModel = context.model ?? reply.contextModel;
+    }
+    reply.contextWindowTokens = claudeContextWindowFromResult(event, reply.contextModel ?? reply.model) ?? reply.contextWindowTokens;
   }
 
   /** Tool rows and text of the running step, streamed into its reply. */
@@ -7868,11 +7910,13 @@ export class CliAgentRunner {
     }
     const sessionId = (event === undefined ? undefined : this.findSessionId(event)) ?? reply.sessionId;
     this.reportSessionId(reply.onSessionId, sessionId);
+    const contextModel = reply.contextModel ?? reply.model;
     const contextUsage = buildAgentContextUsage({
       usedTokens: reply.usedTokens,
-      contextWindowTokens: reply.contextWindowTokens ?? contextWindowForModel(participant.kind, reply.model),
+      contextWindowTokens: reply.contextWindowTokens ?? contextWindowForModel(participant.kind, contextModel),
       source: "claude-code",
-      model: reply.model
+      model: contextModel,
+      windowFromCli: reply.contextWindowTokens !== undefined
     });
     let result: ParticipantRunResult = {
       participant,
@@ -7891,7 +7935,7 @@ export class CliAgentRunner {
       reply.resolve(result);
       return;
     }
-    void this.extractClaudeSessionLogContextUsageWithRetry(sessionId, participant)
+    void this.extractClaudeSessionLogContextUsageWithRetry(sessionId, participant, SESSION_LOG_RETRIES, reply.contextWindowTokens)
       .then((logUsage) => reply.resolve({ ...result, contextUsage: logUsage }))
       .catch(() => reply.resolve(result));
   }
@@ -7930,8 +7974,12 @@ export class CliAgentRunner {
     state.sessionId = this.findSessionId(event) ?? state.sessionId;
     this.reportSessionId(options.onSessionId, state.sessionId);
     state.model = this.findModelId(event) ?? state.model ?? participant.model;
-    state.usedTokens = this.findContextUsedTokens(event) ?? state.usedTokens;
-    state.contextWindowTokens = this.findContextWindowTokens(event) ?? state.contextWindowTokens;
+    const context = claudeMainThreadContext(event);
+    if (context) {
+      state.usedTokens = context.usedTokens;
+      state.contextModel = context.model ?? state.contextModel;
+    }
+    state.contextWindowTokens = claudeContextWindowFromResult(event, state.contextModel ?? state.model) ?? state.contextWindowTokens;
     state.error = this.claudeWarmStreamError(event) ?? state.error;
     const toolSummary = this.claudeWarmToolSummary(event);
     if (toolSummary) {
@@ -9670,39 +9718,27 @@ export class CliAgentRunner {
     );
   }
 
-  private extractCodexContextUsage(stdout: string, participant: ParticipantConfig): AgentContextUsage | undefined {
-    let latest: AgentContextUsage | undefined;
-    let model = participant.model;
-    let usedTokens: number | undefined;
-    let contextWindowTokens: number | undefined;
-    for (const line of stdout.split(/\r?\n/)) {
-      if (!line.trim()) {
-        continue;
-      }
-      try {
-        const event = JSON.parse(line) as unknown;
-        model = this.findModelId(event) ?? model;
-        usedTokens = this.findContextUsedTokens(event) ?? usedTokens;
-        contextWindowTokens = this.findContextWindowTokens(event) ?? contextWindowTokens;
-        const usage = buildAgentContextUsage({
-          usedTokens,
-          contextWindowTokens: contextWindowTokens ?? contextWindowForModel(participant.kind, model),
-          source: "codex-cli",
-          model
-        });
-        if (usage) {
-          latest = usage;
-        }
-      } catch {
-        // Non-JSON output cannot carry structured usage.
-      }
+  /** The member's context from one Codex reading, against the window
+   *  Codex reported (its model's entry in the map when it did not). */
+  private codexContextUsage(reading: CliContextReading | undefined, participant: ParticipantConfig): AgentContextUsage | undefined {
+    if (!reading) {
+      return undefined;
     }
-    return latest;
+    return buildAgentContextUsage({
+      usedTokens: reading.usedTokens,
+      contextWindowTokens: reading.contextWindowTokens ?? contextWindowForModel(participant.kind, participant.model),
+      source: "codex-cli",
+      model: participant.model,
+      windowFromCli: reading.contextWindowTokens !== undefined
+    });
   }
 
-  private extractClaudeContextUsage(stdout: string, participant: ParticipantConfig): AgentContextUsage | undefined {
+  /** A Claude Code `--output-format json` result (it names each model's
+   *  window in `modelUsage`); undefined for any other output. */
+  private claudeJsonResult(stdout: string): { resultEvent: unknown } | undefined {
     try {
-      return this.agentContextUsageFromEvent(JSON.parse(stdout) as unknown, participant, "claude-code");
+      const event = JSON.parse(stdout) as unknown;
+      return this.asRecord(event)?.type === "result" ? { resultEvent: event } : undefined;
     } catch {
       return undefined;
     }
@@ -9726,6 +9762,9 @@ export class CliAgentRunner {
     return undefined;
   }
 
+  /** The rollout's latest token count with usage in it, read from the end
+   *  (a compaction's own count, Codex's estimate of the new history, is the
+   *  latest one right after it). */
   private async extractCodexSessionLogContextUsage(
     sessionId: string,
     participant: ParticipantConfig
@@ -9734,19 +9773,36 @@ export class CliAgentRunner {
     if (!filePath) {
       return undefined;
     }
-    return this.extractCodexContextUsage(await this.readOptionalFile(filePath), participant);
+    let reading: CliContextReading | undefined;
+    await visitLinesFromEnd(filePath, (line) => {
+      if (!line.includes("token_count")) {
+        return false;
+      }
+      try {
+        const found = codexContextFromEvent(JSON.parse(line) as unknown);
+        if (found?.usedTokens) {
+          reading = found;
+          return true;
+        }
+      } catch {
+        // A partial line at the end of a rollout being written.
+      }
+      return false;
+    });
+    return this.codexContextUsage(reading, participant);
   }
 
   private async extractClaudeSessionLogContextUsageWithRetry(
     sessionId: string | undefined,
     participant: ParticipantConfig,
-    attempts = SESSION_LOG_RETRIES
+    attempts = SESSION_LOG_RETRIES,
+    knownWindow?: ClaudeKnownContextWindow | number | { resultEvent: unknown }
   ): Promise<AgentContextUsage | undefined> {
     if (!sessionId) {
       return undefined;
     }
     for (let attempt = 0; attempt < attempts; attempt += 1) {
-      const usage = await this.extractClaudeSessionLogContextUsage(sessionId, participant);
+      const usage = await this.extractClaudeSessionLogContextUsage(sessionId, participant, knownWindow);
       if (usage || attempt === attempts - 1) {
         return usage;
       }
@@ -9755,9 +9811,14 @@ export class CliAgentRunner {
     return undefined;
   }
 
+  /** The context of the session's last main-thread model call, as the CLI's
+   *  own /context reads it after a resume. The log names no window: the one
+   *  the CLI reported for this model (`knownWindow`, from a result or the
+   *  member's stored usage) wins over the map. */
   private async extractClaudeSessionLogContextUsage(
     sessionId: string,
-    participant: ParticipantConfig
+    participant: ParticipantConfig,
+    knownWindow?: ClaudeKnownContextWindow | number | { resultEvent: unknown }
   ): Promise<AgentContextUsage | undefined> {
     const filePath = await this.findClaudeSessionLogPath(sessionId);
     if (!filePath) {
@@ -9766,7 +9827,7 @@ export class CliAgentRunner {
     // The newest usage wins, so the log is read from its end: opening a chat used to
     // read and parse every line of logs that reach 120 MB, blocking the app for half a
     // second per open.
-    let latest: AgentContextUsage | undefined;
+    let reading: CliContextReading | undefined;
     await visitLinesFromEnd(filePath, (line) => {
       if (!line.trim()) {
         return false;
@@ -9776,34 +9837,47 @@ export class CliAgentRunner {
         // A compaction boundary resets the conversation: usage recorded before it
         // is stale (pre-compact), so meeting one first means there is no usage
         // yet and we never report the old, larger context after a /compact.
-        if (this.isClaudeCompactBoundary(event)) {
+        if (isClaudeCompactBoundary(event)) {
           return true;
         }
-        latest = this.agentContextUsageFromEvent(event, participant, "claude-code");
-        return latest !== undefined;
+        reading = claudeMainThreadContext(event);
+        return reading !== undefined;
       } catch {
         // Ignore partial or diagnostic lines in Claude's local session log.
         return false;
       }
     });
-    return latest;
-  }
-
-  private isClaudeCompactBoundary(event: unknown): boolean {
-    const record = this.asRecord(event);
-    if (!record) {
-      return false;
+    if (!reading) {
+      return undefined;
     }
-    return this.stringField(record, "subtype") === "compact_boundary" || record.isCompactSummary === true;
+    const model = reading.model ?? participant.model;
+    const known: ClaudeKnownContextWindow | undefined = typeof knownWindow === "number"
+      ? { contextWindowTokens: knownWindow }
+      : knownWindow && "resultEvent" in knownWindow
+        ? (() => {
+            const window = claudeContextWindowFromResult(knownWindow.resultEvent, model);
+            return window ? { contextWindowTokens: window } : undefined;
+          })()
+        : knownWindow;
+    const knownApplies = known && (!known.model || !model || claudeCanonicalModelId(known.model) === claudeCanonicalModelId(model));
+    return buildAgentContextUsage({
+      usedTokens: reading.usedTokens,
+      contextWindowTokens: (knownApplies ? known.contextWindowTokens : undefined) ?? contextWindowForModel(participant.kind, model),
+      source: "claude-code",
+      model,
+      windowFromCli: Boolean(knownApplies)
+    });
   }
 
   private async findClaudeSessionLogPath(sessionId: string): Promise<string | undefined> {
-    return this.findFileByName(path.join(homedir(), ".claude", "projects"), `${sessionId}.jsonl`, 5);
+    // Where the CLI keeps them: CLAUDE_CONFIG_DIR when set (cliConfigStamp).
+    const configDir = commandEnvironment().CLAUDE_CONFIG_DIR?.trim() || path.join(homedir(), ".claude");
+    return this.findFileByName(path.join(configDir, "projects"), `${sessionId}.jsonl`, 5);
   }
 
   private async findCodexSessionLogPath(sessionId: string): Promise<string | undefined> {
     return this.findFileByNameMatch(
-      path.join(homedir(), ".codex", "sessions"),
+      path.join(commandEnvironment().CODEX_HOME?.trim() || path.join(homedir(), ".codex"), "sessions"),
       (fileName) => fileName.endsWith(".jsonl") && fileName.includes(sessionId),
       6
     );
@@ -9856,177 +9930,8 @@ export class CliAgentRunner {
     });
   }
 
-  private agentContextUsageFromEvent(
-    event: unknown,
-    participant: ParticipantConfig,
-    source: AgentContextUsageSource
-  ): AgentContextUsage | undefined {
-    const model = this.findModelId(event) ?? participant.model;
-    return buildAgentContextUsage({
-      usedTokens: this.findContextUsedTokens(event),
-      contextWindowTokens: this.findContextWindowTokens(event) ?? contextWindowForModel(participant.kind, model),
-      source,
-      model
-    });
-  }
-
-  private findContextUsedTokens(value: unknown): number | undefined {
-    const explicit = this.findNumberField(value, [
-      "context_window_used_tokens",
-      "contextWindowUsedTokens",
-      "context_used_tokens",
-      "contextUsedTokens",
-      "context_tokens",
-      "contextTokens",
-      "used_tokens",
-      "usedTokens"
-    ]);
-    if (explicit) {
-      return explicit;
-    }
-    // Codex reports per-turn usage nested as last_token_usage / tokenUsage.last.
-    // The current context occupancy is the most recent turn's total tokens, which
-    // is what Codex itself shows as "context left" and what drops after a compact.
-    const lastTurn = this.findCodexLastTurnUsedTokens(value);
-    if (lastTurn) {
-      return lastTurn;
-    }
-    const usage = this.findUsageRecord(value);
-    if (usage) {
-      const fromUsage = this.inputTokensFromUsage(usage) ?? this.numberField(usage, "total_tokens") ?? this.numberField(usage, "totalTokens");
-      if (fromUsage) {
-        return fromUsage;
-      }
-    }
-    return this.findNumberField(value, ["input_tokens", "inputTokens", "prompt_tokens", "promptTokens"]);
-  }
-
-  private findCodexLastTurnUsedTokens(value: unknown): number | undefined {
-    const last = this.findCodexLastTurnRecord(value);
-    if (!last) {
-      return undefined;
-    }
-    return (
-      this.numberField(last, "total_tokens") ??
-      this.numberField(last, "totalTokens") ??
-      this.numberField(last, "input_tokens") ??
-      this.numberField(last, "inputTokens")
-    );
-  }
-
-  private findCodexLastTurnRecord(value: unknown): Record<string, unknown> | undefined {
-    // Rollout log shape: { ...: { last_token_usage: { total_tokens, ... } } }
-    const direct = this.findRecordByKey(value, ["last_token_usage", "lastTokenUsage"]);
-    if (direct) {
-      return direct;
-    }
-    // app-server event shape: { params: { tokenUsage: { last: { totalTokens, ... } } } }
-    const container = this.findRecordByKey(value, ["tokenUsage", "token_usage"]);
-    if (container) {
-      const last = this.asRecord(container.last) ?? this.asRecord(container.last_token_usage) ?? this.asRecord(container.lastTokenUsage);
-      if (last) {
-        return last;
-      }
-    }
-    return undefined;
-  }
-
-  private findRecordByKey(value: unknown, keys: string[]): Record<string, unknown> | undefined {
-    const wanted = new Set(keys);
-    const stack: unknown[] = [value];
-    while (stack.length) {
-      const current = stack.pop();
-      if (Array.isArray(current)) {
-        stack.push(...current);
-        continue;
-      }
-      const record = this.asRecord(current);
-      if (!record) {
-        continue;
-      }
-      for (const key of wanted) {
-        const child = this.asRecord(record[key]);
-        if (child) {
-          return child;
-        }
-      }
-      stack.push(...Object.values(record).filter((nested) => nested && typeof nested === "object"));
-    }
-    return undefined;
-  }
-
-  private findContextWindowTokens(value: unknown): number | undefined {
-    return this.findNumberField(value, [
-      "model_context_window",
-      "modelContextWindow",
-      "context_window_tokens",
-      "contextWindowTokens",
-      "context_window",
-      "contextWindow",
-      "max_context_tokens",
-      "maxContextTokens"
-    ]);
-  }
-
   private findModelId(value: unknown): string | undefined {
     return this.findStringField(value, ["model", "model_id", "modelId", "resolved_model", "resolvedModel"]);
-  }
-
-  private inputTokensFromUsage(usage: Record<string, unknown>): number | undefined {
-    const inputTokens = this.numberField(usage, "input_tokens") ?? this.numberField(usage, "inputTokens");
-    const promptTokens = this.numberField(usage, "prompt_tokens") ?? this.numberField(usage, "promptTokens");
-    const anthropicCacheTokens =
-      (this.numberField(usage, "cache_creation_input_tokens") ?? this.numberField(usage, "cacheCreationInputTokens") ?? 0) +
-      (this.numberField(usage, "cache_read_input_tokens") ?? this.numberField(usage, "cacheReadInputTokens") ?? 0);
-    if (inputTokens || anthropicCacheTokens > 0) {
-      return (inputTokens ?? 0) + anthropicCacheTokens;
-    }
-    return promptTokens;
-  }
-
-  private findUsageRecord(value: unknown): Record<string, unknown> | undefined {
-    const stack: unknown[] = [value];
-    while (stack.length) {
-      const current = stack.pop();
-      if (Array.isArray(current)) {
-        stack.push(...current);
-        continue;
-      }
-      const record = this.asRecord(current);
-      if (!record) {
-        continue;
-      }
-      const usage = this.asRecord(record.usage) ?? this.asRecord(record.token_usage) ?? this.asRecord(record.tokenUsage);
-      if (usage) {
-        return usage;
-      }
-      stack.push(...Object.values(record).filter((nested) => nested && typeof nested === "object"));
-    }
-    return undefined;
-  }
-
-  private findNumberField(value: unknown, keys: string[]): number | undefined {
-    const stack: unknown[] = [value];
-    const wanted = new Set(keys);
-    while (stack.length) {
-      const current = stack.pop();
-      if (Array.isArray(current)) {
-        stack.push(...current);
-        continue;
-      }
-      const record = this.asRecord(current);
-      if (!record) {
-        continue;
-      }
-      for (const key of wanted) {
-        const number = this.numberField(record, key);
-        if (number) {
-          return number;
-        }
-      }
-      stack.push(...Object.values(record).filter((nested) => nested && typeof nested === "object"));
-    }
-    return undefined;
   }
 
   private findStringField(value: unknown, keys: string[]): string | undefined {
@@ -10230,18 +10135,6 @@ export class CliAgentRunner {
   private stringField(record: Record<string, unknown>, key: string): string | undefined {
     const value = record[key];
     return typeof value === "string" ? value : undefined;
-  }
-
-  private numberField(record: Record<string, unknown>, key: string): number | undefined {
-    const value = record[key];
-    if (typeof value === "number" && Number.isFinite(value) && value > 0) {
-      return Math.floor(value);
-    }
-    if (typeof value === "string" && /^\d+(?:\.\d+)?$/.test(value.trim())) {
-      const parsed = Number(value);
-      return Number.isFinite(parsed) && parsed > 0 ? Math.floor(parsed) : undefined;
-    }
-    return undefined;
   }
 
   private findSessionId(value: unknown): string | undefined {

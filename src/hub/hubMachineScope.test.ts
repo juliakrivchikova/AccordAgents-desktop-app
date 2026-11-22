@@ -4,7 +4,7 @@ import test from "node:test";
 import type { HubCard } from "../shared/hubOps";
 import type { HubMemberRules } from "../shared/hubProtocol";
 import type { ChatMessage, Conversation } from "../shared/types";
-import { approvalGrantKey, machineMayAsk, scopeMachineConversationUpdate } from "./hubMachineScope";
+import { approvalGrantKey, keptApproval, machineMayAsk, scopeMachineConversationUpdate } from "./hubMachineScope";
 
 const hashOf = (content: string) => createHash("sha256").update(content).digest("hex");
 
@@ -578,6 +578,43 @@ test("a cloud main session adds a member on the User's Mac or another machine wi
   // It says the main session added it, so every device holds it to the main
   // session's rights at each turn.
   assert.equal(members(scoped).get("p-mac")?.delegatedByParticipantId, "p-main");
+});
+
+// "Don't ask again in this chat" on a member's compaction card (the User,
+// 2026-11-22): its machine sets the member to compact without asking, as the
+// desktop does for a local member. Once, Not now, or its machine's own
+// policy (`auto`) gives nothing.
+test("a compaction allowed for the chat on its card lets the machine raise its member's compaction right", () => {
+  const asks = { ...boxR, permissions: { ...boxR.permissions, requestCompaction: "ask" } };
+  const raised = { ...asks, permissions: { ...asks.permissions, requestCompaction: "allow" } };
+  const compactionRight = (scoped: ReturnType<typeof scopeMachineConversationUpdate>) =>
+    (members(scoped).get("p-box")?.permissions as Record<string, unknown>).requestCompaction;
+  let scoped = scopeMachineConversationUpdate(chatWith([deskR, asks]), { metadata: { participants: [deskR, raised] } }, "machine-1", { rules });
+  assert.equal(compactionRight(scoped), "ask", "not without her answer");
+  assert.ok(scoped.refused.includes("participants.p-box.rights"));
+
+  const always = approved("p-box", "app_chat_request_compaction", { type: "self_compaction", contextPercentage: 82 }, { approve: true, scope: "chat" });
+  scoped = scopeMachineConversationUpdate(chatWith([deskR, asks]), { metadata: { participants: [deskR, raised] } }, "machine-1", { rules, approvals: [always] });
+  assert.equal(compactionRight(scoped), "allow");
+  assert.deepEqual(scoped.refused, []);
+  // As the server keeps her answer once its card is settled (keptApproval).
+  scoped = scopeMachineConversationUpdate(chatWith([deskR, asks]), { metadata: { participants: [deskR, raised] } }, "machine-1", { rules, approvals: [keptApproval(always)!] });
+  assert.equal(compactionRight(scoped), "allow");
+
+  for (const answer of [
+    approved("p-box", "app_chat_request_compaction", { type: "self_compaction" }, { approve: true, scope: "once" }),
+    approved("p-box", "app_chat_request_compaction", { type: "self_compaction" }, { approve: false, scope: "chat" }),
+    approved("p-box", "app_chat_request_compaction", { type: "self_compaction" }, { approve: true, scope: "chat", auto: true }),
+    approved("p-desk", "app_chat_request_compaction", { type: "self_compaction" }, { approve: true, scope: "chat" })
+  ]) {
+    scoped = scopeMachineConversationUpdate(chatWith([deskR, asks]), { metadata: { participants: [deskR, raised] } }, "machine-1", { rules, approvals: [answer] });
+    assert.equal(compactionRight(scoped), "ask");
+  }
+  // It grants compacting, nothing else the write asks for.
+  scoped = scopeMachineConversationUpdate(chatWith([deskR, asks]), { metadata: { participants: [deskR, { ...raised, permissions: { ...raised.permissions, webAccess: true } }] } }, "machine-1",
+    { rules, approvals: [always] });
+  assert.equal(compactionRight(scoped), "allow");
+  assert.notEqual((members(scoped).get("p-box")?.permissions as Record<string, unknown>).webAccess, true);
 });
 
 test("its own member's rights rise only by what the User granted it for the chat, once", () => {

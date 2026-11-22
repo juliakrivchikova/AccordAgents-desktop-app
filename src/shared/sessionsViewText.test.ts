@@ -60,7 +60,6 @@ function appTexts(main: string, member: string): string[] {
       `Do you want to allow @${handle} to use Bash?`,
       `No, tell @${handle} what to do differently`,
       `Yes, allow @${handle} to use WebFetch in this chat`,
-      `Yes, always allow @${handle} to compact its context`,
       `@${handle} needs approval before Codex can continue`,
       `@${handle} wants to add a member to this chat`,
       `@${handle} wants to remove @gone from this chat`,

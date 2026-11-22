@@ -204,7 +204,7 @@ test("compactParticipant refreshes stored context usage from the session after c
         usedTokens: 900,
         contextWindowTokens: 1000,
         percentage: 90,
-        source: "codex-cli",
+        source: "claude-code",
         updatedAt: NOW
       }
     };
@@ -221,7 +221,7 @@ test("compactParticipant refreshes stored context usage from the session after c
           usedTokens: 120,
           contextWindowTokens: 1000,
           percentage: 12,
-          source: "codex-cli",
+          source: "claude-code",
           updatedAt: NOW
         };
       }
@@ -434,7 +434,7 @@ test("compactParticipant clears running state when compact fails", async () => {
         usedTokens: 900,
         contextWindowTokens: 1000,
         percentage: 90,
-        source: "codex-cli",
+        source: "claude-code",
         updatedAt: NOW
       }
     };
@@ -452,7 +452,7 @@ test("compactParticipant clears running state when compact fails", async () => {
           usedTokens: 120,
           contextWindowTokens: 1000,
           percentage: 12,
-          source: "codex-cli",
+          source: "claude-code",
           updatedAt: "2026-01-01T00:01:00.000Z"
         };
       }
@@ -526,7 +526,7 @@ test("compactParticipant does not overwrite newer context usage after compact fa
         usedTokens: 300,
         contextWindowTokens: 1000,
         percentage: 30,
-        source: "codex-cli",
+        source: "claude-code",
         updatedAt: "2026-01-01T00:02:00.000Z"
       }
     };
@@ -541,7 +541,7 @@ test("compactParticipant does not overwrite newer context usage after compact fa
         usedTokens: 120,
         contextWindowTokens: 1000,
         percentage: 12,
-        source: "codex-cli",
+        source: "claude-code",
         updatedAt: "2026-01-01T00:01:00.000Z"
       })
     });
@@ -610,6 +610,56 @@ test("requestSelfCompactionFromTool asks for approval by default", async () => {
   assert.equal(approvals[0].toolName, "app_chat_request_compaction");
   assert.equal(approvals[0].capability, "compaction.request");
   assert.deepEqual(approvals[0].request, { type: "self_compaction" });
+});
+
+// The card's meter is the member's context indicator when it asked (the
+// User's compaction card, 2026-11-22), set by the app: a figure the member
+// writes into its arguments is not taken.
+test("requestSelfCompactionFromTool puts the member's context indicator on the card, never the member's own figure", async () => {
+  const participant = chatParticipant();
+  const conversation = chatConversation([participant], [chatSession(participant, "session-1")]);
+  conversation.metadata.agentContextUsageByParticipant = {
+    [participant.id]: { usedTokens: 820_000, contextWindowTokens: 1_000_000, percentage: 82, source: "claude-code", updatedAt: NOW }
+  };
+  const neverCompacts = async (runParticipant: ParticipantConfig) => ({ participant: runParticipant, ok: true, sessionId: "session-1" });
+  const { service, storage } = testService({ conversation, compactSession: neverCompacts });
+
+  const result = await service.requestSelfCompactionFromTool(selfCompactionActor(participant), {
+    instructions: "beta.3 status, your rules, open defects",
+    contextPercentage: 5
+  });
+
+  assert.equal(result.status, "pending_user_approval");
+  const approvals = storage.current.metadata.pendingAppToolApprovals as Array<Record<string, unknown>>;
+  assert.deepEqual(approvals[0].request, { type: "self_compaction", instructions: "beta.3 status, your rules, open defects", contextPercentage: 82 });
+
+  // No figure yet (a member that never finished a turn): no meter.
+  const fresh = chatParticipant({ id: "participant-fresh", handle: "fresh" });
+  const second = chatConversation([fresh], [chatSession(fresh, "session-2")]);
+  const other = testService({ conversation: second, compactSession: neverCompacts });
+  await other.service.requestSelfCompactionFromTool(selfCompactionActor(fresh), { contextPercentage: 50 });
+  const freshApprovals = other.storage.current.metadata.pendingAppToolApprovals as Array<Record<string, unknown>>;
+  assert.deepEqual(freshApprovals[0].request, { type: "self_compaction" });
+
+  // It asks in the middle of its turn: the session log read now gives the
+  // figure, and the indicator shows the same.
+  const live = chatParticipant({ id: "participant-live", handle: "live" });
+  const third = chatConversation([live], [chatSession(live, "session-3")]);
+  third.metadata.agentContextUsageByParticipant = {
+    [live.id]: { usedTokens: 500_000, contextWindowTokens: 1_000_000, percentage: 50, source: "claude-code", updatedAt: "2026-01-01T00:00:00.000Z" }
+  };
+  const liveService = testService({
+    conversation: third,
+    compactSession: neverCompacts,
+    contextUsageForSession: async (_participant, sessionId) => {
+      assert.equal(sessionId, "session-3");
+      return { usedTokens: 910_000, contextWindowTokens: 1_000_000, percentage: 91, source: "claude-code", updatedAt: new Date().toISOString() };
+    }
+  });
+  await liveService.service.requestSelfCompactionFromTool(selfCompactionActor(live), {});
+  const liveApprovals = liveService.storage.current.metadata.pendingAppToolApprovals as Array<Record<string, unknown>>;
+  assert.deepEqual(liveApprovals[0].request, { type: "self_compaction", contextPercentage: 91 });
+  assert.equal(liveService.storage.current.metadata.agentContextUsageByParticipant?.[live.id]?.percentage, 91);
 });
 
 test("requestSelfCompactionFromTool queues behind the current participant turn and resumes the same session", async () => {

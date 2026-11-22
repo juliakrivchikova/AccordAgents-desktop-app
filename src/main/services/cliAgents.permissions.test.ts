@@ -30,6 +30,8 @@ import { CommandError, ensureLoginShellEnvPrimed } from "./command";
 import type { CodexServerRequestDelivery } from "./codexApprovals";
 import { buildCodexExecInvocation, CODEX_APP_SERVER_MCP_TOKEN_ENV } from "./codexExec";
 import { isCodexCollaborationModeRefusal } from "./cliAgents";
+import { claudeMainThreadContext, isClaudeCompactBoundary } from "./cliContextUsage";
+import { buildAgentContextUsage, contextWindowForModel } from "../../shared/agentContext";
 import type { ParticipantRunResult } from "./providers";
 import { defaultChatAgentPermissions } from "../../shared/agentPermissions";
 import { APP_TOOL_PERMISSION_WAIT_MS } from "../../shared/appMcpToolContracts";
@@ -63,6 +65,62 @@ for (const kind of ["claude-code", "codex-cli"] as const) {
   });
 }
 
+test("a session log's context: subagent lines skipped, the CLI's own window kept for the same model only", async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), "accordagents-claude-known-"));
+  try {
+    const runner = makeRunner();
+    const internals = runner as unknown as { findClaudeSessionLogPath(sessionId: string): Promise<string | undefined> };
+    const call = (model: string, input: number, extra: Record<string, unknown> = {}): string =>
+      JSON.stringify({ type: "assistant", ...extra, message: { model, usage: { input_tokens: 2, cache_creation_input_tokens: 0, cache_read_input_tokens: input - 2, output_tokens: 9 } } });
+    const file = path.join(dir, "session.jsonl");
+    // The member's last call, then a subagent's (older CLIs wrote those into the same log).
+    await writeFile(file, `${call("claude-haiku-4-5", 97_902)}\n${call("claude-sonnet-5-5", 150_000, { isSidechain: true })}\n`);
+    internals.findClaudeSessionLogPath = async () => file;
+    const claude = { id: "claude-known", kind: "claude-code" as const, label: "Claude", model: "haiku" };
+    const plain = await runner.contextUsageForSession(claude, "s", { waitForLog: false });
+    assert.deepEqual([plain?.usedTokens, plain?.contextWindowTokens, plain?.model], [97_902, 200_000, "claude-haiku-4-5"], "the member's call, not the subagent's");
+    const stored = { usedTokens: 1, percentage: 0, source: "claude-code" as const, updatedAt: "2026-11-22T00:00:00.000Z" };
+    // The window the CLI named for this model at the last turn wins over the map...
+    const same = await runner.contextUsageForSession(claude, "s", { waitForLog: false, known: { ...stored, contextWindowTokens: 1_000_000, model: "claude-haiku-4-5", windowFromCli: true } });
+    assert.equal(same?.contextWindowTokens, 1_000_000);
+    assert.equal(same?.windowFromCli, true);
+    // A window an older build stored (the map's, or another model's entry) is not kept.
+    const legacy = await runner.contextUsageForSession(claude, "s", { waitForLog: false, known: { ...stored, contextWindowTokens: 1_000_000, model: "claude-haiku-4-5" } });
+    assert.equal(legacy?.contextWindowTokens, 200_000);
+    // ...but not another model's, nor another CLI's.
+    const other = await runner.contextUsageForSession(claude, "s", { waitForLog: false, known: { ...stored, contextWindowTokens: 1_000_000, model: "claude-sonnet-5-5", windowFromCli: true } });
+    assert.equal(other?.contextWindowTokens, 200_000);
+    const codex = await runner.contextUsageForSession(claude, "s", { waitForLog: false, known: { ...stored, source: "codex-cli", contextWindowTokens: 258_400, model: "claude-haiku-4-5", windowFromCli: true } });
+    assert.equal(codex?.contextWindowTokens, 200_000);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("a Codex rollout's context is its latest token count with usage, read from the end", async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), "accordagents-codex-rollout-"));
+  try {
+    const runner = makeRunner();
+    const internals = runner as unknown as { findCodexSessionLogPath(sessionId: string): Promise<string | undefined> };
+    const count = (total: number, window: number): string => JSON.stringify({ type: "event_msg", payload: { type: "token_count",
+      info: { total_token_usage: { total_tokens: 9_999_999 }, last_token_usage: { total_tokens: total }, model_context_window: window } } });
+    const file = path.join(dir, "rollout-x-s.jsonl");
+    await writeFile(file, [
+      count(151_216, 258_400),
+      JSON.stringify({ type: "response_item", payload: { type: "message", content: "token_count is just a word here" } }),
+      count(23_410, 258_400),
+      // Rate limits only, then a line still being written.
+      JSON.stringify({ type: "event_msg", payload: { type: "token_count", info: null, rate_limits: {} } }),
+      "{\"type\":\"event_msg\",\"payload\":{\"type\":\"token_c"
+    ].join("\n"));
+    internals.findCodexSessionLogPath = async () => file;
+    const usage = await runner.contextUsageForSession({ id: "codex", kind: "codex-cli", label: "Codex" }, "s", { waitForLog: false });
+    assert.deepEqual([usage?.usedTokens, usage?.contextWindowTokens, usage?.percentage], [23_410, 258_400, 5]);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
 test("Claude context usage read from the end of the log matches reading the whole log", async () => {
   const dir = await mkdtemp(path.join(tmpdir(), "accordagents-claude-log-"));
   try {
@@ -73,26 +131,29 @@ test("Claude context usage read from the end of the log matches reading the whol
     const filler = JSON.stringify({ type: "user", message: { content: "п".repeat(300_000) } });
     const internals = runner as unknown as {
       findClaudeSessionLogPath(sessionId: string): Promise<string | undefined>;
-      agentContextUsageFromEvent(event: unknown, participant: unknown, source: string): unknown;
-      isClaudeCompactBoundary(event: unknown): boolean;
     };
     // The whole-log reading this replaced: the last usage after the last compaction boundary.
     const wholeLog = (content: string): unknown => {
-      let latest: unknown;
+      let latest: { usedTokens?: number; model?: string } | undefined;
       for (const line of content.split(/\r?\n/)) {
         if (!line.trim()) continue;
         try {
           const event = JSON.parse(line) as unknown;
-          if (internals.isClaudeCompactBoundary(event)) {
+          if (isClaudeCompactBoundary(event)) {
             latest = undefined;
             continue;
           }
-          latest = internals.agentContextUsageFromEvent(event, claude, "claude-code") ?? latest;
+          latest = claudeMainThreadContext(event) ?? latest;
         } catch {
           // partial line
         }
       }
-      return latest;
+      return latest && buildAgentContextUsage({
+        usedTokens: latest.usedTokens,
+        contextWindowTokens: contextWindowForModel("claude-code", latest.model),
+        source: "claude-code",
+        model: latest.model
+      });
     };
     const cases: Record<string, string[]> = {
       "usage then filler": [usage(1000), filler, usage(52_000), filler, "{\"type\":\"last-prompt\"}"],
@@ -4609,6 +4670,27 @@ readline.createInterface({ input: process.stdin }).on("line", (line) => {
     }, 400);
     return;
   }
+  if (text === "Work with tools.") {
+    // A turn of three model calls and a subagent, as Claude Code 2.1.330
+    // streams it (captured 2026-11-22): each main-thread call carries the
+    // context it sent; the subagent's call (parent_tool_use_id) its own; the
+    // result sums every call of the turn and names each model's window.
+    send({ type: "system", subtype: "init", session_id: "fixture-session", model: "claude-sonnet-5-5" });
+    const call = (input, parent, model) => ({ type: "assistant", parent_tool_use_id: parent, session_id: "fixture-session",
+      message: { model, role: "assistant", content: [{ type: "text", text: "step" }],
+        usage: { input_tokens: 2, cache_creation_input_tokens: 1000, cache_read_input_tokens: input - 1002, output_tokens: 40 } } });
+    send({ type: "stream_event", parent_tool_use_id: null, session_id: "fixture-session", event: { type: "message_start", message: { model: "claude-sonnet-5-5", usage: { input_tokens: 2, cache_creation_input_tokens: 1000, cache_read_input_tokens: 28998 } } } });
+    send(call(30000, null, "claude-sonnet-5-5"));
+    send(call(61000, null, "claude-sonnet-5-5"));
+    send(call(150000, "toolu_sub", "claude-haiku-4-5"));
+    send(call(62995, null, "claude-sonnet-5-5"));
+    send({ type: "assistant", parent_tool_use_id: null, session_id: "fixture-session", message: { model: "<synthetic>", role: "assistant", content: [{ type: "text", text: "Done." }], usage: { input_tokens: 0, cache_creation_input_tokens: 0, cache_read_input_tokens: 0, output_tokens: 0 } } });
+    send({ type: "result", subtype: "success", result: "Done.", session_id: "fixture-session",
+      usage: { input_tokens: 8, cache_creation_input_tokens: 4000, cache_read_input_tokens: 299987, output_tokens: 160 },
+      modelUsage: { "claude-sonnet-5-5": { contextWindow: 1000000 }, "claude-haiku-4-5": { contextWindow: 200000 } } });
+    send({ type: "command_lifecycle", command_uuid: uuid, state: "completed" });
+    return;
+  }
   if (text.startsWith("/compact") && messagesTokens === 0) {
     // What Claude Code 2.1.280 answers with nothing to compact (verified).
     send({ type: "system", subtype: "init", session_id: "fixture-session" });
@@ -4641,6 +4723,29 @@ readline.createInterface({ input: process.stdin }).on("line", (line) => {
 async function readFixtureLog(log: string): Promise<Array<{ pid: number; started?: string[]; message?: string; control?: string; background?: string; replied?: string; compacted?: string; compacting?: string }>> {
   return (await readFile(log, "utf8")).trim().split(/\r?\n/).filter(Boolean).map((line) => JSON.parse(line));
 }
+
+test("Claude's context after a turn of tool calls and a subagent is its last main-thread call, as /context reports it", { timeout: 15_000 }, async () => {
+  if (process.platform === "win32") return;
+  const fixtureDir = await mkdtemp(path.join(tmpdir(), "accord-claude-context-turn-"));
+  const { claudePath } = await writeClaudeCompactionFixture(fixtureDir);
+  const runner = makeRunner() as any;
+  runner.nativeProcessDbPath = path.join(fixtureDir, "native-processes.sqlite3");
+  runner.providerExecutableForRun = async () => claudePath;
+  const participant = { id: "claude-context", kind: "claude-code", label: "Claude", model: "sonnet" };
+  const warm = { conversationId: "conversation-context", participantId: participant.id, contextKey: "context-turn", idleTimeoutMs: 60_000 };
+  try {
+    const reply = await runner.run(participant, "Work with tools.", fixtureDir, undefined, "chat", undefined, { agentMode: "default", warm, sessionId: "fixture-session" });
+    assert.equal(reply.ok, true, JSON.stringify(reply));
+    assert.equal(reply.contextUsage?.usedTokens, 62995,
+      "the last main-thread call (what /context shows), not the result's sum of every call (303,995) nor the subagent's 150k");
+    assert.equal(reply.contextUsage?.contextWindowTokens, 1000000, "the main model's window from the result, not the subagent model's 200k");
+    assert.equal(reply.contextUsage?.percentage, 6);
+    assert.equal(reply.contextUsage?.model, "claude-sonnet-5-5");
+  } finally {
+    await runner.shutdownWarmAgents();
+    await rm(fixtureDir, { recursive: true, force: true });
+  }
+});
 
 test("Claude /compact runs in the member's live process, so its next reply continues from the compacted context", { timeout: 15_000 }, async () => {
   if (process.platform === "win32") return;
@@ -6152,10 +6257,7 @@ test("codex app-server compact returns token usage captured during compact", () 
     method: "thread/tokenUsage/updated",
     params: {
       threadId: "session-1",
-      usage: {
-        input_tokens: 120
-      },
-      contextWindowTokens: 1000
+      tokenUsage: { total: { totalTokens: 900_000 }, last: { totalTokens: 120_000 }, modelContextWindow: 1_000_000 }
     }
   }, participant, pending, cleanupPending, rejectPending), true);
 
@@ -6168,9 +6270,10 @@ test("codex app-server compact returns token usage captured during compact", () 
 
   assert.equal(resolved.ok, true);
   assert.equal(resolved.sessionId, "session-1");
-  assert.equal(resolved.contextUsage.usedTokens, 120);
-  assert.equal(resolved.contextUsage.contextWindowTokens, 1000);
-  assert.equal(resolved.contextUsage.percentage, 12);
+  assert.equal(resolved.contextUsage.usedTokens, 120_000, "the last call's total, not the session's cumulative 900k");
+  assert.equal(resolved.contextUsage.contextWindowTokens, 1_000_000);
+  // Codex's own "% context left" leaves its 12k baseline out: 89% left.
+  assert.equal(resolved.contextUsage.percentage, 11);
 });
 
 test("codex app-server compact resolves CLI-style context_compacted events", () => {
@@ -6202,23 +6305,29 @@ test("codex app-server compact resolves CLI-style context_compacted events", () 
     throw error;
   };
 
+  // Codex reports the compacted history's estimate as a token count first.
+  assert.equal(runner.handleCodexAppServerCompactNotification({
+    type: "event",
+    msg: {
+      type: "token_count",
+      thread_id: "session-1",
+      info: { last_token_usage: { total_tokens: 80_000 }, model_context_window: 258_400 }
+    }
+  }, participant, pending, cleanupPending, rejectPending), true);
   assert.equal(runner.handleCodexAppServerCompactNotification({
     type: "event",
     msg: {
       type: "context_compacted",
       thread_id: "session-1",
-      usage: {
-        input_tokens: 80
-      },
-      context_window_tokens: 1000
+      usage: { input_tokens: 999_999 }
     }
   }, participant, pending, cleanupPending, rejectPending), true);
 
   assert.equal(resolved.ok, true);
   assert.equal(resolved.sessionId, "session-1");
-  assert.equal(resolved.contextUsage.usedTokens, 80);
-  assert.equal(resolved.contextUsage.contextWindowTokens, 1000);
-  assert.equal(resolved.contextUsage.percentage, 8);
+  assert.equal(resolved.contextUsage.usedTokens, 80_000, "the token count, never a usage the completion carries");
+  assert.equal(resolved.contextUsage.contextWindowTokens, 258_400);
+  assert.equal(resolved.contextUsage.percentage, 28);
 });
 
 test("codex app-server compact resolves compact completion event variants", () => {
@@ -6251,20 +6360,20 @@ test("codex app-server compact resolves compact completion event variants", () =
   };
 
   assert.equal(runner.handleCodexAppServerCompactNotification({
+    method: "thread/tokenUsage/updated",
+    params: { threadId: "session-1", tokenUsage: { last: { totalTokens: 70_000 }, modelContextWindow: 1_000_000 } }
+  }, participant, pending, cleanupPending, rejectPending), true);
+  assert.equal(runner.handleCodexAppServerCompactNotification({
     method: "thread/compact/completed",
     params: {
-      threadId: "session-1",
-      usage: {
-        input_tokens: 70
-      },
-      contextWindowTokens: 1000
+      threadId: "session-1"
     }
   }, participant, pending, cleanupPending, rejectPending), true);
 
   assert.equal(resolved.ok, true);
   assert.equal(resolved.sessionId, "session-1");
-  assert.equal(resolved.contextUsage.usedTokens, 70);
-  assert.equal(resolved.contextUsage.percentage, 7);
+  assert.equal(resolved.contextUsage.usedTokens, 70_000);
+  assert.equal(resolved.contextUsage.percentage, 6);
 });
 
 function makeCompactPending(threadId: string): { pending: any; cleanupPending: () => any; rejectPending: (error: Error) => void; getResolved: () => any; getRejected: () => Error | undefined } {
@@ -6340,7 +6449,8 @@ test("codex app-server compact resolves on the compaction turn lifecycle (no thr
   assert.equal(resolved.sessionId, "session-1");
   assert.equal(resolved.contextUsage.usedTokens, 5519);
   assert.equal(resolved.contextUsage.contextWindowTokens, 258400);
-  assert.equal(resolved.contextUsage.percentage, 2);
+  // Below Codex's 12k baseline its status reads "100% left".
+  assert.equal(resolved.contextUsage.percentage, 0);
 });
 
 test("codex app-server compact ignores a stray turn/completed before the compaction turn", () => {
@@ -6375,46 +6485,6 @@ test("codex app-server compact rejects when the compaction turn fails", () => {
 
   assert.equal(ctx.getResolved(), undefined);
   assert.match(String(ctx.getRejected()?.message), /model overloaded/);
-});
-
-test("findContextUsedTokens reads the last turn total tokens from both codex shapes", () => {
-  const runner = makeRunner() as any;
-  // Rollout log shape (post-compact: input_tokens 0 but total_tokens carries the summary size).
-  assert.equal(runner.findContextUsedTokens({
-    payload: {
-      type: "token_count",
-      info: {
-        total_token_usage: { input_tokens: 0, total_tokens: 0 },
-        last_token_usage: { input_tokens: 0, total_tokens: 5519 },
-        model_context_window: 258400
-      }
-    }
-  }), 5519);
-  // App-server event shape.
-  assert.equal(runner.findContextUsedTokens({
-    method: "thread/tokenUsage/updated",
-    params: { tokenUsage: { total: { totalTokens: 0 }, last: { totalTokens: 6093 }, modelContextWindow: 258400 } }
-  }), 6093);
-  // A populated session prefers the most recent turn over the cumulative total.
-  assert.equal(runner.findContextUsedTokens({
-    payload: {
-      info: {
-        total_token_usage: { input_tokens: 65128346, total_tokens: 65320914 },
-        last_token_usage: { input_tokens: 150556, total_tokens: 151216 }
-      }
-    }
-  }), 151216);
-});
-
-test("agentContextUsageFromEvent resolves a window for current model ids", () => {
-  const runner = makeRunner() as any;
-  const claude = runner.agentContextUsageFromEvent(
-    { message: { model: "claude-opus-4-8", usage: { input_tokens: 4042, cache_creation_input_tokens: 13829, cache_read_input_tokens: 0 } } },
-    { kind: "claude-code", label: "@claude" },
-    "claude-code"
-  );
-  assert.equal(claude.usedTokens, 17871);
-  assert.equal(claude.contextWindowTokens, 1_000_000);
 });
 
 /** A stand-in for the process a compaction runs in: records what it was

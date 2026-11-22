@@ -63,6 +63,7 @@ import { chatToolPermissionIsScoped, chatToolPermissionScopesEqual, normalizeCha
 import {
   APP_CHAT_REQUEST_PARTICIPANTS_TOOL,
   APP_PARTICIPANTS_REQUEST_CHANGE_TOOL,
+  APP_CHAT_REQUEST_COMPACTION_TOOL,
   APP_PERMISSIONS_REQUEST_CHANGE_TOOL,
   APP_ROSTER_REQUEST_CHANGE_TOOL
 } from "../shared/appMcpToolContracts";
@@ -392,7 +393,8 @@ function rightsWithin(wanted: ChatAgentPermissions, ceiling: ChatAgentPermission
 
 /** Its own member's mode and rights, never beyond what the server has for
  *  it (what the User set) but for what she granted it for the chat on its
- *  permission cards (app_permissions_request_change): the app on a machine
+ *  permission cards (app_permissions_request_change) and its compaction
+ *  cards (app_chat_request_compaction, "Don't ask again"): the app on a machine
  *  raises neither otherwise, and a write around it could raise them and then
  *  add members as broad (docs/main-session.md). Less is always fine. A grant
  *  this write uses is noted, so it gives its change once. */
@@ -421,11 +423,16 @@ function keepGrantedRights(next: ChatParticipant, current: ChatParticipant, appr
   const had = normalizeChatAgentPermissions(current.permissions);
   const wanted = normalizeChatAgentPermissions(next.permissions);
   if (!rightsBeyond(wanted, had)) return kept;
-  const grants = approved.filter((item) => item.scope === "chat" && item.approval.toolName === APP_PERMISSIONS_REQUEST_CHANGE_TOOL &&
-    item.card.participantId === current.id);
+  // Her "for the chat" answers on its own cards: a permission card grants
+  // what it asked; a compaction card ("Don't ask again in this chat") lets
+  // it compact without asking, and nothing else.
+  const grants = approved.filter((item) => item.scope === "chat" && item.card.participantId === current.id &&
+    (item.approval.toolName === APP_PERMISSIONS_REQUEST_CHANGE_TOOL || item.approval.toolName === APP_CHAT_REQUEST_COMPACTION_TOOL));
   let ceiling = had;
   for (const grant of grants) {
-    const raised = withGrant(ceiling, grant.request);
+    const raised = grant.approval.toolName === APP_CHAT_REQUEST_COMPACTION_TOOL
+      ? { ...ceiling, requestCompaction: "allow" as const }
+      : withGrant(ceiling, grant.request);
     // Noted only when this write takes something it gives.
     if (rightsBeyond(raised, ceiling) && rightsBeyond(normalizeChatAgentPermissions({ ...rightsWithin(wanted, raised) }), ceiling)) noted.add(grant.key);
     ceiling = raised;

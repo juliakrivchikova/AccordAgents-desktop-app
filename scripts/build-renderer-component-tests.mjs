@@ -25,6 +25,7 @@ await build({
     "renderer/components/chat/chat-composer-plugin-token.test.ts",
     "renderer/components/chat/chat-participant-drafts.test.ts",
     "renderer/components/chat/chat-app-tool-member-removal.test.tsx",
+    "renderer/components/chat/chat-compaction-approval-card.test.tsx",
     "renderer/components/chat/chat-timeline-layout.test.ts",
     "renderer/components/chat/chat-timeline-scroll.test.tsx",
     "renderer/components/chat/chat-timeline-topup.test.tsx",

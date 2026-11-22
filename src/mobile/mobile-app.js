@@ -7606,6 +7606,10 @@
         cardKind: "permission",
         answer: {
           approve: approve,
+          // A card with a "for the rest of the chat" box says which it is,
+          // as the desktop's card does (a compaction: Compact, or Compact
+          // and don't ask again in this chat).
+          ...(approve && card.chatScopeLabel ? { scope: answer.chatScope ? "chat" : "once" } : {}),
           ...(card.codexDecisionId ? { codexDecisionId: card.codexDecisionId } : {}),
           ...(card.draftOverride ? { draftOverride: card.draftOverride } : {})
         }
@@ -7751,7 +7755,9 @@
     if (answer && typeof answer.customAnswer === "string") return answer.customAnswer;
     const options = Array.isArray(card.options) ? card.options : [];
     const option = options.find(function (item) { return answer && item.id === answer.optionId; });
-    return option ? option.label || option.id : (answer && answer.optionId) || "";
+    const said = option ? option.label || option.id : (answer && answer.optionId) || "";
+    // Worded as the folded line on the desktop says it (compactionCardEnding).
+    return said && answer && answer.optionId === card.primaryOptionId && answer.chatScope && card.chatScopeLabel ? said + " · " + card.chatScopeLabel : said;
   }
 
   /** The answer a card on its way folds to, while it is written and after. */
@@ -7919,8 +7925,14 @@
     return JSON.stringify([card.id, card.kind, card.status, card.waiting === true, card.outcome || "", card.title, card.summary, cardRequesterLabel(card),
       card.machineName, card.options, card.recommendedOptionId, card.allowsCustomAnswer, card.allowsCancel,
       isCardLocked(card.id) || controlCardAnswering.has(card.id), controlCardErrors.get(card.id) || "",
-      cardSentText(card.id), cardOutcome(card.id) || "", card.signInUrl || ""]);
+      cardSentText(card.id), cardOutcome(card.id) || "", card.signInUrl || "",
+      card.meter || null, card.keeps || null, card.chatScopeLabel || "", card.primaryOptionId || ""]);
   }
+
+  // A card's "for the rest of the chat" box, by card, outside the card: the
+  // same card is drawn in the chat and on Activity, and drawn again when it
+  // changes, and a ticked box must survive both.
+  const cardChatScopeTicked = new Set();
 
   // What was picked on a choice and not sent yet, by card. Outside the card:
   // the same card is drawn in the chat and on Activity, and drawn again when
@@ -8341,6 +8353,11 @@
       appendCardState(wrap, card);
       return wrap;
     }
+    if (card.chatScopeLabel && card.primaryOptionId) {
+      permissionCardWithBox(wrap, card, sent);
+      appendCardState(wrap, card);
+      return wrap;
+    }
     const options = document.createElement("div");
     options.className = "control-card-options";
     for (const option of Array.isArray(card.options) ? card.options : []) {
@@ -8370,6 +8387,75 @@
     wrap.append(options);
     appendCardState(wrap, card);
     return wrap;
+  }
+
+  /** A permission card laid out as the desktop's compaction card is: its
+   *  context meter and what the summary keeps, then the "for the rest of
+   *  the chat" box on the left and its answers on the right, the primary
+   *  one last and filled. */
+  function permissionCardWithBox(wrap, card, sent) {
+    wrap.classList.add("control-card-boxed");
+    if (card.meter && typeof card.meter.percentage === "number") {
+      const meter = document.createElement("div");
+      meter.className = "control-card-meter";
+      const bar = document.createElement("div");
+      bar.className = "control-card-meter-bar";
+      bar.setAttribute("role", "meter");
+      bar.setAttribute("aria-valuemin", "0");
+      bar.setAttribute("aria-valuemax", "100");
+      bar.setAttribute("aria-valuenow", String(card.meter.percentage));
+      bar.setAttribute("aria-label", card.meter.name || "Context used");
+      bar.setAttribute("aria-valuetext", card.meter.label || "");
+      const fill = document.createElement("span");
+      fill.style.width = Math.max(0, Math.min(100, card.meter.percentage)) + "%";
+      bar.append(fill);
+      const label = document.createElement("span");
+      label.className = "control-card-meter-label";
+      label.setAttribute("aria-hidden", "true");
+      label.textContent = card.meter.label || "";
+      meter.append(bar, label);
+      wrap.append(meter);
+    }
+    if (card.keeps && card.keeps.text) {
+      const keeps = document.createElement("p");
+      keeps.className = "control-card-keeps";
+      const lead = document.createElement("b");
+      lead.textContent = card.keeps.label || "";
+      keeps.append(lead, document.createTextNode(" " + card.keeps.text));
+      wrap.append(keeps);
+    }
+    const box = document.createElement("label");
+    box.className = "control-card-box";
+    const input = document.createElement("input");
+    input.type = "checkbox";
+    input.checked = cardChatScopeTicked.has(card.id);
+    input.disabled = sent;
+    input.addEventListener("change", function () {
+      if (input.checked) cardChatScopeTicked.add(card.id);
+      else cardChatScopeTicked.delete(card.id);
+    });
+    const boxText = document.createElement("span");
+    boxText.textContent = card.chatScopeLabel;
+    box.append(input, boxText);
+    wrap.append(box);
+    const actions = document.createElement("div");
+    actions.className = "control-card-actions";
+    const options = Array.isArray(card.options) ? card.options : [];
+    const ordered = options.filter(function (option) { return option.id !== card.primaryOptionId; })
+      .concat(options.filter(function (option) { return option.id === card.primaryOptionId; }));
+    for (const option of ordered) {
+      const button = document.createElement("button");
+      button.type = "button";
+      button.className = option.id === card.primaryOptionId ? "control-card-submit" : "control-card-cancel";
+      button.dataset.optionId = option.id;
+      button.textContent = cardAppText(card, option.label) || option.id;
+      button.disabled = sent;
+      button.addEventListener("click", function () {
+        void answerControlCard(card, { optionId: option.id, chatScope: cardChatScopeTicked.has(card.id) });
+      });
+      actions.append(button);
+    }
+    wrap.append(actions);
   }
 
   /** What a card says under its options. An answer on its way only fades the

@@ -15,6 +15,7 @@ import type {
   ChatToolPermissionRequest,
   Conversation
 } from "../../../shared/types";
+import { selfCompactionRequestOf } from "../../../shared/compactionCard";
 import { isChatScriptChangeRequest, type ChatScriptChangeRequest } from "../../../shared/scripts";
 import { isConnectorSignInRequest } from "../../../shared/connectorSignIn";
 import { chatToolPermissionIsScoped, normalizeChatToolPermissionScope } from "../../../shared/toolPermissionScope";
@@ -108,17 +109,7 @@ export function chatAppToolApprovals(conversation: Conversation | undefined): Ch
 }
 
 export function chatSelfCompactionRequest(approval: ChatAppToolApproval): ChatSelfCompactionRequest | undefined {
-  if (approval.toolName !== APP_CHAT_REQUEST_COMPACTION_TOOL) {
-    return undefined;
-  }
-  const request = approval.request as Partial<ChatSelfCompactionRequest>;
-  return request.type === "self_compaction" &&
-    (request.instructions === undefined || typeof request.instructions === "string")
-    ? {
-        type: "self_compaction",
-        instructions: request.instructions?.trim() || undefined
-      }
-    : undefined;
+  return selfCompactionRequestOf(approval);
 }
 
 export function chatRoleChangeRequest(approval: ChatAppToolApproval): ChatRoleChangeRequest | undefined {
