@@ -46,6 +46,10 @@ export const FORK_TO_NEW_CHAT_LABEL = "Fork to new chat";
 /** What the menus show under the item when it can be chosen. */
 export const FORK_TO_NEW_CHAT_DETAIL = "A new chat whose main session starts from a copy of this session";
 
+/** The same in the sessions view, whose words name no main session
+ *  (docs/main-session.md): its member … menus and the chat title's menu. */
+export const FORK_TO_NEW_CHAT_SESSIONS_DETAIL = "A new chat that starts from a copy of this session";
+
 const CHAT_TITLE_MAX_LENGTH = 80;
 const FORK_TITLE_SUFFIX = " (fork)";
 

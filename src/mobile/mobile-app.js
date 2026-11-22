@@ -13532,13 +13532,16 @@
   }
 
   /** The Fork to new chat item for a member: what it makes, "Checking…",
-   *  or why not, and whether a tap makes it. */
-  function paintForkItem(button, detail, chat, participantId) {
+   *  or why not, and whether a tap makes it. In the sessions view (the
+   *  title's menu) what it makes names no main session, as the computer's
+   *  menus there say it. */
+  function paintForkItem(button, detail, chat, participantId, sessionsView) {
     const shared = mobileSharedRules();
     const state = forkMenu && forkMenu.key === forkMenuKey(chat.id, participantId) ? forkMenu : undefined;
     const checking = !state || state.status === "checking";
     const ready = !checking && !state.reason && Boolean(state.plan) && !forkStarting;
-    const text = forkStarting ? "Starting the new chat…" : checking ? "Checking…" : state.reason || shared.FORK_TO_NEW_CHAT_DETAIL;
+    const makes = (sessionsView && shared.FORK_TO_NEW_CHAT_SESSIONS_DETAIL) || shared.FORK_TO_NEW_CHAT_DETAIL;
+    const text = forkStarting ? "Starting the new chat…" : checking ? "Checking…" : state.reason || makes;
     const disabled = ready ? "false" : "true";
     if (button.getAttribute("aria-disabled") !== disabled) button.setAttribute("aria-disabled", disabled);
     button.dataset.forkParticipant = participantId;
@@ -13552,7 +13555,8 @@
     const shown = Boolean(chat && participantId && forkOffered());
     if (button.hidden === shown) button.hidden = !shown;
     if (!shown) return;
-    paintForkItem(button, detail, chat, participantId);
+    // The title's menu is the sessions view's alone (chatTitleMenuState).
+    paintForkItem(button, detail, chat, participantId, true);
   }
 
   /** Both places the item is: what it says changed (read, starting, failed). */

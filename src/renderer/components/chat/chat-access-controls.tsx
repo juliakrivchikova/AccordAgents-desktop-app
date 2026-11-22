@@ -189,7 +189,8 @@ export function applyChatAccessOptionKeepingPlan(value: Pick<ChatModelAccessValu
 
 /** Why a member cannot have this mode: one the main session made never runs
  *  above the main session's mode and rights as they are now
- *  (memberAsItRunsNow); none otherwise. */
+ *  (memberAsItRunsNow); none otherwise. Said as the sessions view says it,
+ *  naming no main session: its mode is the chat's (the main composer's). */
 export function accessHeldReason(value: ChatModelAccessValue, option: ChatAccessOption, mainSession: ChatParticipant | undefined): string | undefined {
   if (!value.delegatedByParticipantId || !mainSession || !value.id || mainSession.id === value.id) return undefined;
   const applied = applyChatAccessOption(option, value.permissions);
@@ -202,5 +203,5 @@ export function accessHeldReason(value: ChatModelAccessValue, option: ChatAccess
     edits(running.agentMode, running.permissions) !== edits(applied.agentMode, applied.permissions);
   if (!held) return undefined;
   const mainMode = selectedChatAccessOption(mainSession.kind, mainSession.agentMode, mainSession.permissions)?.label ?? "Custom";
-  return `Not above the main session's mode (${mainMode}).`;
+  return `Not above the chat's mode (${mainMode}).`;
 }

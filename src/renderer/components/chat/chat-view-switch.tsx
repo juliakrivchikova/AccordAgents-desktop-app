@@ -161,7 +161,8 @@ export function ChatViewTitleMenu(): JSX.Element | null {
 }
 
 /** What the title's menu holds: the view switch, then the main session's …
- *  actions (Restart, Fork to new chat) under "Main session". */
+ *  actions (Restart, Fork to new chat) under a hairline, with no label: the
+ *  sessions view names no main session (docs/main-session.md). */
 export function ChatTitleMenuContent(props: { state: ChatViewHeaderState; onPicked: () => void; mainSessionBackgroundTasks: number }): JSX.Element {
   const main = props.state.mainSession;
   const mainActions = main ? main.actions(main.id, props.onPicked, props.mainSessionBackgroundTasks) : [];
@@ -170,7 +171,6 @@ export function ChatTitleMenuContent(props: { state: ChatViewHeaderState; onPick
       <ChatViewMenuItems state={props.state} onPicked={props.onPicked} />
       {mainActions.length > 0 && (
         <div className="chat-title-menu-group" data-testid="chat-title-menu-main-session">
-          <div className="chat-title-menu-label">Main session</div>
           <ChatMemberActionItems actions={mainActions} />
         </div>
       )}

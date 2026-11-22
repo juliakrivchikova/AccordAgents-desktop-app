@@ -175,7 +175,7 @@ test("the phone forks a member to a new chat from the title's menu as the comput
 
   // --- the main session, on the main timeline ------------------------------
   const mainItem = await openForkMenu(app);
-  assert.deepEqual(mainItem, { shown: true, disabled: "false", label: "Fork to new chat", detail: "A new chat whose main session starts from a copy of this session", views: 2 },
+  assert.deepEqual(mainItem, { shown: true, disabled: "false", label: "Fork to new chat", detail: "A new chat that starts from a copy of this session", views: 2 },
     "beside the chat's view, offered for the main session");
   await closeMenu(app);
 
@@ -262,7 +262,7 @@ test("the phone forks a member to a new chat from the title's menu as the comput
 
   // --- drew, forked ---------------------------------------------------------
   const drewItem = await openForkMenu(app);
-  assert.deepEqual({ disabled: drewItem.disabled, detail: drewItem.detail }, { disabled: "false", detail: "A new chat whose main session starts from a copy of this session" });
+  assert.deepEqual({ disabled: drewItem.disabled, detail: drewItem.detail }, { disabled: "false", detail: "A new chat that starts from a copy of this session" });
   await app.evaluate(`document.getElementById("chat-title-fork").click()`);
   const create = await waitForOp(hub, (op) => op.kind === "conversation.create");
   assert.equal(create.conversation.title, "Login page (fork)");

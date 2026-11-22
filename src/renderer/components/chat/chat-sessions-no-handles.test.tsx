@@ -26,8 +26,14 @@ import { ChatUsedApprovalLine } from "./chat-used-card-row";
 import { ChatSearchResults } from "../search/chat-search-results";
 import { ActivityRow } from "../activity/activity-view";
 import { ChatMemberTaskFold } from "./chat-member-session-panel";
+import { defaultChatAgentPermissions } from "../../../shared/agentPermissions";
+import { memberRestartLine } from "../../../shared/memberRestart";
+import { ChatAccessMenu } from "./chat-access-controls";
+import { ChatMemberActionItems, memberSettingsActions } from "./chat-member-model-access";
+import { ChatMemberComposerControls } from "./chat-model-access-picker";
+import { ChatTitleMenuContent, type ChatViewHeaderState } from "./chat-view-switch";
 import { Terminal } from "lucide-react";
-import { DREW, MAIN, PARTICIPANTS, chatMessage, disclosure, sessionsConversation } from "./chat-sessions-fixtures.test";
+import { DREW, MAIN, PARTICIPANTS, chatMessage, disclosure, member, sessionsConversation } from "./chat-sessions-fixtures.test";
 
 const HANDLES = /(^|[^A-Za-z0-9_@./-])@(main|drew|gera|taylor)\b/i;
 const AT = "2026-11-20T10:30:00.000Z";
@@ -348,4 +354,56 @@ test("Activity keeps a tool request's words exactly as written, and the newest r
   const titles = knownSessionsTitles([item("Fix login", "2026-11-20T09:00:00.000Z", "pending"), item("Update docs", "2026-11-20T10:00:00.000Z", "recent")], "c");
   assert.equal(titles.get(DREW.id), "Update docs", "an older kept row does not bring back its task");
   assert.equal(knownSessionsTitles([item("drew", "2026-11-20T10:00:00.000Z", "recent")], "c").size, 0, "a handle is no title");
+});
+
+test("the controls under its composers and in its menus name nobody: a member's … menu, the chat title's menu, a held mode, the chips, Restart's lines", async () => {
+  const noop = (): void => undefined;
+  const actions = (participant: typeof MAIN, tasks: number) => memberSettingsActions({
+    participant: { id: participant.id, kind: participant.kind }, status: "idle", backgroundTaskCount: tasks, onRestart: noop,
+    onForkToNewChat: noop, onRemove: participant.id === MAIN.id ? undefined : noop, close: noop
+  });
+  const shown: string[] = [];
+  // A member's … menu in its session's header, and Fork disabled with its reason.
+  const memberMenu = render(true, <ChatMemberActionItems actions={actions(DREW, 1)} />);
+  assert.match(memberMenu.text, /Fork to new chat/);
+  assert.match(memberMenu.text, /A new chat that starts from a copy of this session/);
+  shown.push(memberMenu.text);
+  memberMenu.unmount();
+  // The chat title's menu: the view switch, then the main session's Restart
+  // and Fork with no label over them.
+  const state: ChatViewHeaderState = { view: "sessions", canSwitch: true, onChangeView: noop,
+    mainSession: { id: MAIN.id, actions: (_id, close, tasks) => actions(MAIN, tasks).map((action) => ({ ...action, onSelect: close })) } };
+  const titleMenu = render(true, <ChatTitleMenuContent state={state} onPicked={noop} mainSessionBackgroundTasks={2} />);
+  assert.match(titleMenu.text, /Restart \(stops 2 background tasks\)/);
+  shown.push(titleMenu.text);
+  titleMenu.unmount();
+  // A member the main session made, held to its mode: the reason names the chat's mode.
+  const ceiling = { ...MAIN, agentMode: "default" as const, permissions: { ...defaultChatAgentPermissions(), workspaceWrite: false, cliApprovals: true as const } };
+  const made = { ...member("p-made", "made"), delegatedByParticipantId: MAIN.id, agentMode: "auto" as const,
+    permissions: { ...defaultChatAgentPermissions(), workspaceWrite: true, cliApprovals: true as const } };
+  const modeMenu = render(true, <ChatAccessMenu value={made} mainSession={ceiling} onSelect={noop} />);
+  assert.match(modeMenu.text, /Not above the chat's mode \(Manual\)/);
+  shown.push(modeMenu.text);
+  modeMenu.unmount();
+  // The chips under a member's composer: model, effort, mode.
+  let chips: ReturnType<typeof create> | undefined;
+  await act(async () => {
+    chips = create(<TooltipProvider><ChatMemberComposerControls value={made} mainSession={ceiling} onChange={noop} runsOn={{}} /></TooltipProvider>);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  });
+  shown.push(shownText(chips!.root));
+  act(() => chips!.unmount());
+  // Restart's lines and refusals, as the chat's notices show them.
+  const names = sessionsViewNamesOf(sessionsChat("sessions"));
+  const lines = [memberRestartLine("main", 0), memberRestartLine("drew", 2), "@main is busy. Restart it when it is done.",
+    "@main has background tasks running. Restart it again to stop them.", "@drew is moving. Restart it once it moved."]
+    .map((line) => sessionsViewText(line, names));
+  assert.deepEqual(lines.slice(0, 3), ["Restarted. Its next reply picks up the current connectors and settings.",
+    "Restarted “Task for drew: fix the drew part” and stopped its 2 background tasks. Its next reply picks up the current connectors and settings.",
+    "It is busy. Restart it when it is done."]);
+  shown.push(...lines);
+  for (const text of shown) {
+    assert.doesNotMatch(text, HANDLES, text);
+    assert.doesNotMatch(text, /main session/i, text);
+  }
 });

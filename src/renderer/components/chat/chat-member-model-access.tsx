@@ -2,7 +2,7 @@ import { useCallback, useContext } from "react";
 import { MoreHorizontal } from "lucide-react";
 
 import { canRestartParticipant, memberProcessRestartable } from "../../../shared/chatParticipantStatus";
-import { FORK_TO_NEW_CHAT_DETAIL, FORK_TO_NEW_CHAT_LABEL } from "../../../shared/forkToNewChat";
+import { FORK_TO_NEW_CHAT_LABEL, FORK_TO_NEW_CHAT_SESSIONS_DETAIL } from "../../../shared/forkToNewChat";
 import type { MemberRestartInProgress } from "../../../shared/memberRestart";
 import type { ChatParticipant } from "../../../shared/types";
 import { ChatMemberComposerControls, type ChatModelAccessAction, type ChatModelAccessPatch } from "./chat-model-access-picker";
@@ -157,7 +157,8 @@ export function memberSettingsActions(input: {
     const reason = input.forkToNewChatDisabledReason;
     actions.push({
       label: FORK_TO_NEW_CHAT_LABEL,
-      detail: reason ?? FORK_TO_NEW_CHAT_DETAIL,
+      // The sessions view's words: no main session named.
+      detail: reason ?? FORK_TO_NEW_CHAT_SESSIONS_DETAIL,
       disabled: Boolean(reason),
       onSelect: () => {
         input.close();

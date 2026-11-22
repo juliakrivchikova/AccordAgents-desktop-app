@@ -149,7 +149,7 @@ test("the chat title's menu lists the main session's Restart and Fork to new cha
   let renderer: ReturnType<typeof create> | undefined;
   act(() => { renderer = create(<ChatTitleMenuContent state={state} onPicked={() => { picked += 1; }} mainSessionBackgroundTasks={2} />); });
   const group = renderer!.root.find(byTestId("chat-title-menu-main-session"));
-  assert.match(textOf(group), /^Main session/);
+  assert.doesNotMatch(textOf(group), /main session/i, "no label names the main session: the sessions view names it by nothing");
   assert.deepEqual(group.findAll(byTestId("chat-member-action")).map((item) => textOf(item.find((node) => node.props.className === "composer-menu-item-label"))), ["Restart", "Fork to new chat"]);
   assert.deepEqual(calls[0], ["p-main", 2], "its background work is named to Restart");
   act(() => group.findAll(byTestId("chat-member-action"))[1]!.props.onClick());
@@ -160,13 +160,13 @@ test("the chat title's menu lists the main session's Restart and Fork to new cha
   act(() => renderer!.unmount());
 });
 
-test("a member the main session made is held only above the main session's mode: Plan, below Manual, stays open", () => {
+test("a member the main session made is held only above the main session's mode, said as the chat's mode: Plan, below Manual, stays open", () => {
   const main = { ...CODEX, id: "p-main", kind: "claude-code" as const, agentMode: "default" as ChatAgentMode, permissions: { ...defaultChatAgentPermissions(), workspaceWrite: false, cliApprovals: true as const } };
   const member = { ...CODEX, id: "p-made", kind: "claude-code" as const, delegatedByParticipantId: "p-main", agentMode: "auto" as ChatAgentMode, permissions: { ...defaultChatAgentPermissions(), workspaceWrite: true, cliApprovals: true as const } };
   const held = (id: string) => accessHeldReason(member, chatAccessOptions("claude-code").find((option) => option.id === id)!, main);
   assert.equal(held("manual"), undefined);
   assert.equal(held("plan"), undefined, "Plan edits nothing: not above Manual");
-  assert.match(held("acceptEdits") ?? "", /Not above the main session's mode \(Manual\)/);
+  assert.equal(held("acceptEdits"), "Not above the chat's mode (Manual).");
   assert.match(held("auto") ?? "", /Not above/);
 });
 

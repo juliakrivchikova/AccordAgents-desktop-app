@@ -259,7 +259,8 @@ chat without a main session is always `classic`; its switch is disabled.
     (`withClassicChatPermissions`), so what it turns off is refused, not
     asked about. A member the main session made is held to the main
     session's mode: a mode above it is shown disabled with "Not above the
-    main session's mode (<its mode>)." (`accessHeldReason`, by the same
+    chat's mode (<its mode>)." (the main composer's mode; the view names no
+    main session) (`accessHeldReason`, by the same
     rule its turns run by, `memberAsItRunsNow`), never granted. A member held
     to a main session without the CLI's own mode loses its own mode too; an
     Antigravity member then runs Default with no edits (`--sandbox`), never
@@ -268,7 +269,10 @@ chat without a main session is always `classic`; its switch is disabled.
     work it stops, not Antigravity; Fork to new chat; and, for a member,
     Remove from chat) are in the … menu of its session's header; the main
     session's (Restart, Fork to new chat) are in the chat title's menu under
-    "Main session". Its provider stays the one it was made with. No name,
+    the view switch, after a hairline and with no label (no label names the
+    main session); Fork's line there and in a member's … menu reads "A new
+    chat that starts from a copy of this session" (the classic view's keeps
+    its own words). Its provider stays the one it was made with. No name,
     status, member rights or auto-watch: the main session's chat behaviour
     is fixed (it creates and asks members, request and manage are allowed
     as its role gives them, and it is told when its tasks end). The model

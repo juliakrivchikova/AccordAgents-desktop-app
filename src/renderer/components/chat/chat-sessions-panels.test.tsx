@@ -6,7 +6,7 @@ import { TooltipProvider } from "@/components/ui/tooltip";
 import { buildSessionsViewIndex, memberSessionMessages } from "../../../shared/mainSession";
 import { latestTaskByMember, sessionsMemberActivity, sessionsMemberRows, sessionsMemberTitle } from "../../../shared/mainSessionView";
 import type { AppSettings, ChatMessage, Conversation } from "../../../shared/types";
-import { FORK_TO_NEW_CHAT_DETAIL, FORK_TO_NEW_CHAT_LABEL } from "../../../shared/forkToNewChat";
+import { FORK_TO_NEW_CHAT_LABEL, FORK_TO_NEW_CHAT_SESSIONS_DETAIL } from "../../../shared/forkToNewChat";
 import { ChatParticipantRosterRow } from "./chat-participant-roster-row";
 import { forkToNewChatReasonFor, machineForkSupportFrom } from "./use-fork-to-new-chat";
 import { ChatMembersPanel } from "./chat-members-panel";
@@ -408,7 +408,7 @@ test("Claude Code's permission modes by their names, Antigravity's with what it 
     const rows = held.root.findAll(byTestId("chat-access-option"));
     const state = rows.map((row) => [row.props["data-value"], row.props.disabled]);
     assert.deepEqual(state, [["manual", false], ["acceptEdits", true], ["plan", false], ["auto", true]], "never above the main session's Manual");
-    assert.match(textOf(rows[3]!), /Not above the main session's mode \(Manual\)/, "the reason in its place");
+    assert.match(textOf(rows[3]!), /Not above the chat's mode \(Manual\)/, "the reason in its place, naming no main session");
   } finally {
     held.done();
   }
@@ -631,7 +631,7 @@ test("Fork to new chat sits in a member's … menu (the main session's chip too)
   assert.deepEqual(offered.map((action) => action.label), ["Restart", FORK_TO_NEW_CHAT_LABEL, "Remove from chat"]);
   const fork = offered[1]!;
   assert.equal(fork.disabled, false);
-  assert.equal(fork.detail, FORK_TO_NEW_CHAT_DETAIL, "what it makes, under it");
+  assert.equal(fork.detail, FORK_TO_NEW_CHAT_SESSIONS_DETAIL, "what it makes, under it, naming no main session");
   fork.onSelect();
   assert.deepEqual(forked, [DREW.id]);
   assert.equal(closed, 1, "the settings close: the new chat opens");
