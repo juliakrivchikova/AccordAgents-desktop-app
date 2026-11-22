@@ -5,7 +5,7 @@ import {
   lastMemberTurnEnd, memberAsItRunsNow, memberHasFinishedReply, type ForkToNewChatMachineSupport, type ForkToNewChatOffer
 } from "../../shared/forkToNewChat";
 import { cliModesTurnRefusal, type CliModesMachineSupport } from "../../shared/chatAccessModes";
-import { DEFAULT_CHAT_VIEW, MAIN_SESSION_HANDLE, MAIN_SESSION_ROLE_ID, canSwitchChatView, isChatViewMode, isMainSessionChat, isMainSessionParticipant, isRoleOfferedForNewMembers, mainSessionMemberOf, mainSessionParticipantId } from "../../shared/mainSession";
+import { DEFAULT_CHAT_VIEW, MAIN_SESSION_HANDLE, MAIN_SESSION_ROLE_ID, MAIN_SESSION_ROLE_MISSING_MESSAGE, canSwitchChatView, isChatViewMode, isMainSessionChat, isMainSessionParticipant, isRoleOfferedForNewMembers, mainSessionMemberOf, mainSessionParticipantId } from "../../shared/mainSession";
 import { SESSIONS_TASK_GIVEN_TITLE_MAX_CHARS, firstTextLine, sessionsTaskTitle, shortenAtWord } from "../../shared/mainSessionView";
 import { createHash, randomUUID } from "node:crypto";
 import { constants as fsConstants, realpathSync } from "node:fs";
@@ -669,7 +669,7 @@ const CHAT_CONTEXT_READ_MAX_LIMIT = 200;
 function splitMainSessionInput(items: ChatParticipantInput[]): { mainSession?: ChatParticipantInput; members: ChatParticipantInput[] } {
   const mainSessions = items.filter((item) => item.roleConfigId === MAIN_SESSION_ROLE_ID);
   if (mainSessions.length > 1) {
-    throw new Error("A chat has one main session.");
+    throw new Error("A new chat starts with only one session of its own.");
   }
   return { mainSession: mainSessions[0], members: items.filter((item) => item.roleConfigId !== MAIN_SESSION_ROLE_ID) };
 }
@@ -1827,7 +1827,7 @@ export class ChatService {
       const readyKinds = readyProviderKinds(agents, settings.providers);
       const cannotStart = this.newChatBlockedReason(agents, settings, assistantProviderKind);
       if (cannotStart || !assistantProviderKind) {
-        throw new Error(cannotStart ?? "Could not initialize the main session's provider. Check General Settings and try again.");
+        throw new Error(cannotStart ?? "Could not choose a provider for the new chat. Check General Settings and try again.");
       }
       const hasRequestedParticipants = request.participants.length > 0;
       const skipDefaultParticipants = request.skipDefaultParticipants === true;
@@ -1945,7 +1945,7 @@ export class ChatService {
       }
       const role = settings.chatRoleConfigs.find((candidate) => candidate.id === MAIN_SESSION_ROLE_ID);
       if (!role) {
-        throw new Error("The main session's role is missing from Settings. Restart the app and try again.");
+        throw new Error(MAIN_SESSION_ROLE_MISSING_MESSAGE);
       }
       const repoPath = source.repoPath?.trim() || undefined;
       // Its access as it is (its CLI's mode and what it may read, edit, run
@@ -1971,7 +1971,7 @@ export class ChatService {
         }
       });
       if (!created) {
-        throw new Error("Could not make the new chat's main session.");
+        throw new Error("Could not make the new chat.");
       }
       const mainSession: ChatParticipant = { ...created, forkOrigin: forkOriginFor(source, member, seen) };
       signal?.throwIfAborted();
@@ -2969,7 +2969,7 @@ export class ChatService {
       throw new Error("Chat Assistant cannot be removed from the chat.");
     }
     if (targets.some((target) => this.isChatMainSession(conversation, target))) {
-      throw new Error("The main session cannot be removed from its chat.");
+      throw new Error("This chat's own session cannot be removed.");
     }
     if (participants.length - targets.length < 1) {
       throw new Error("The last chat member cannot be removed.");
@@ -6786,7 +6786,7 @@ export class ChatService {
         throw new Error("Chat Assistant cannot be removed from the chat.");
       }
       if (this.isChatMainSession(conversation, member)) {
-        throw new Error("The main session cannot be removed from its chat.");
+        throw new Error("This chat's own session cannot be removed.");
       }
       if (!operations.some((operation) => operation.participantId === member.id)) {
         operations.push({ type: "remove_participant_from_chat", participantId: member.id, handle: member.handle });
@@ -12329,7 +12329,7 @@ export class ChatService {
   private forkStartedCleanNotice(conversation: Conversation, participant: ChatParticipant, forkSource: ChatSessionForkSource, when: "now" | "turn"): string {
     const origin = this.otherChatForkOrigin(conversation, participant, forkSource.participantId);
     const source = origin ? undefined : this.chatParticipants(conversation).find((item) => item.id === forkSource.participantId);
-    const sessionName = origin ? this.forkOriginSessionName(origin) : `${source ? `@${source.handle}'s` : "the main session's"} session`;
+    const sessionName = origin ? this.forkOriginSessionName(origin) : source ? `@${source.handle}'s session` : "the session it was forked from";
     return when === "now"
       ? `@${participant.handle} could not start from a copy of ${sessionName}, so it started a clean session from the saved chat context.`
       : `@${participant.handle} could not start from a copy of ${sessionName}, so this turn started a clean session.`;
@@ -14993,7 +14993,7 @@ export class ChatService {
       // A chat makes its one main session itself (ensureMainSessionParticipant);
       // no other member is given that role.
       if (role.id === MAIN_SESSION_ROLE_ID && options.mainSession !== true) {
-        throw new Error(`The "${role.label}" role cannot be given to @${handle}: a chat makes its own main session.`);
+        throw new Error(`The "${role.label}" role cannot be given to @${handle}: a chat gives it only to its own session.`);
       }
       if (item.cloudRun && item.kind !== "codex-cli" && item.kind !== "claude-code") throw new Error("This provider does not support Cloud run.");
       const requestedRuleIds = new Set(this.normalizeBehaviorRuleIds(item.behaviorRuleIds));
@@ -15093,7 +15093,7 @@ export class ChatService {
     const settings = await this.settings.getPublicSettings();
     const role = settings.chatRoleConfigs.find((candidate) => candidate.id === MAIN_SESSION_ROLE_ID);
     if (!role) {
-      throw new Error("The main session's role is missing from Settings. Restart the app and try again.");
+      throw new Error(MAIN_SESSION_ROLE_MISSING_MESSAGE);
     }
     const requested = options.requested;
     const handles = new Set(participants.map((participant) => participant.handle.toLowerCase()));
@@ -16443,7 +16443,7 @@ export class ChatService {
       // (docs/main-session.md); another member's "@x /accord" starts nothing.
       if (this.hasStandaloneAccordSkillToken(sourceMessage.content) && isMainSessionChat(conversation.metadata) &&
         !isMainSessionParticipant(conversation.metadata, participant.id)) {
-        this.addConversationWarning(conversation, `@${participant.handle} cannot start an Accord in this chat; only the main session starts one.`);
+        this.addConversationWarning(conversation, `@${participant.handle} cannot start an Accord in this chat; only this chat's own session starts one.`);
         void this.debugLogs.write("chat.accord.inferred-refused", {
           conversationId: conversation.id,
           messageId: sourceMessage.id,

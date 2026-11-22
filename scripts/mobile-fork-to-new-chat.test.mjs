@@ -408,7 +408,7 @@ test("in the classic view the phone forks a member from a small action on its ro
   await hub.addMessages("conv-old", [{ id: "u-later", role: "user", content: "Anything else?", status: "done", createdAt: new Date().toISOString(), metadata: { deliveryTargets: [ASSISTANT.id] } }]);
   await app.waitFor(`[...document.querySelectorAll("#message-list .message-row")].some((row) => row.textContent.includes("Anything else?"))`, "the new message");
   assert.deepEqual(await app.evaluate(sheetFork), { under: "p-assistant", disabled: "false", label: "Fork to new chat",
-    detail: "A new chat whose main session starts from a copy of this session", open: ["p-assistant"] });
+    detail: "A new chat that starts from a copy of this session", open: ["p-assistant"] });
 
   // The phone cannot write its queue: nothing is queued or listed, and the item says why.
   await app.evaluate(`(() => { const real = IDBObjectStore.prototype.put; IDBObjectStore.prototype.put = function () {
@@ -427,7 +427,7 @@ test("in the classic view the phone forks a member from a small action on its ro
 
   // The Assistant, forked: the same chat the title's menu makes.
   const ready = await openSheetFork(app, "p-assistant");
-  assert.deepEqual({ disabled: ready.disabled, detail: ready.detail }, { disabled: "false", detail: "A new chat whose main session starts from a copy of this session" });
+  assert.deepEqual({ disabled: ready.disabled, detail: ready.detail }, { disabled: "false", detail: "A new chat that starts from a copy of this session" });
   // The Assistant finishes another reply while the item is open: the copy
   // ends with what she sees when she taps, so with this one.
   const later = { id: "a2", role: "participant", participantId: ASSISTANT.id, participantLabel: "@assistant", content: "Summed up again.", status: "done", createdAt: at(1),

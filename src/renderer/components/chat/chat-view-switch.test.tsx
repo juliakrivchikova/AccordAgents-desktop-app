@@ -44,6 +44,8 @@ test("an old chat's switch is disabled and says why; there is no members button"
   const group = root.find(byTestId("chat-view-switch"));
   assert.equal(group.props["data-chat-view"], "classic");
   assert.equal(group.props["data-disabled-reason"], CHAT_VIEW_SWITCH_DISABLED_REASON);
+  assert.equal(CHAT_VIEW_SWITCH_DISABLED_REASON, "This chat was made before the Sessions view, so it has the Classic view only.",
+    "the views by the switch's own labels, no main session named");
   const buttons = group.findAll((node) => node.type === "button");
   assert.deepEqual(buttons.map((button) => [button.props["data-view"], button.props.disabled, button.props["aria-pressed"]]),
     [["sessions", true, false], ["classic", true, true]]);

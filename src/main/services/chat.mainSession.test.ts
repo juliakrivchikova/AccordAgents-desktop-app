@@ -1123,7 +1123,7 @@ test("in a main-session chat another member's '@x /accord' reply starts nothing;
   await (service as any).createImplicitParticipantRequestApproval(conversation, worker, [fromWorker]);
   assert.equal(conversation.messages.some((message) => message.metadata?.participantRequest), false, "no request, no Accord");
   assert.equal(normalizeChatAgentPermissions(participantsOf(conversation).find((item) => item.id === other.id)!.permissions).requestParticipants, "ask");
-  assert.ok((conversation.metadata.warnings as string[]).some((warning) => warning.includes("only the main session starts one")));
+  assert.ok((conversation.metadata.warnings as string[]).some((warning) => warning.includes("only this chat's own session starts one")));
 
   const fromMain: ChatMessage = {
     id: "main-reply", role: "participant", participantId: main.id, participantLabel: "@main",

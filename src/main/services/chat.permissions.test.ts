@@ -5572,12 +5572,12 @@ test("the New chat screen's own row is the main session as the User set it; a ch
   assert.equal(participants.filter((item) => item.roleConfigId === MAIN_SESSION_ROLE_ID).length, 1);
   assert.equal(created.conversation.metadata.mainSessionParticipantId, main.id);
 
-  await assert.rejects(() => service.createConversation({ title: "Two", participants: [row, { ...row, handle: "other" }] }), /one main session/);
+  await assert.rejects(() => service.createConversation({ title: "Two", participants: [row, { ...row, handle: "other" }] }), /^Error: A new chat starts with only one session of its own\.$/);
 
   storage.current = created.conversation;
   await assert.rejects(
     () => service.addParticipant({ conversationId: created.conversation.id, participant: { handle: "second", roleConfigId: MAIN_SESSION_ROLE_ID, kind: "codex-cli" } }),
-    /a chat makes its own main session/
+    /a chat gives it only to its own session\.$/
   );
 });
 
@@ -5588,7 +5588,7 @@ test("the main session cannot be removed from its chat", async () => {
   const { service, storage } = testService({ conversation });
   await assert.rejects(
     () => service.removeParticipant({ conversationId: conversation.id, participantId: main.id }),
-    /main session cannot be removed/
+    /^Error: This chat's own session cannot be removed\.$/
   );
   await service.removeParticipant({ conversationId: conversation.id, participantId: codex.id });
   assert.deepEqual((storage.current.metadata.participants as ChatParticipant[]).map((item) => item.id), [main.id], "another member can be");

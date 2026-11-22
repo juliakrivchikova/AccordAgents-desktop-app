@@ -6,7 +6,7 @@ import { TooltipProvider } from "@/components/ui/tooltip";
 import { buildSessionsViewIndex, memberSessionMessages } from "../../../shared/mainSession";
 import { latestTaskByMember, sessionsMemberActivity, sessionsMemberRows, sessionsMemberTitle } from "../../../shared/mainSessionView";
 import type { AppSettings, ChatMessage, Conversation } from "../../../shared/types";
-import { FORK_TO_NEW_CHAT_DETAIL, FORK_TO_NEW_CHAT_LABEL, FORK_TO_NEW_CHAT_SESSIONS_DETAIL } from "../../../shared/forkToNewChat";
+import { FORK_TO_NEW_CHAT_DETAIL, FORK_TO_NEW_CHAT_LABEL } from "../../../shared/forkToNewChat";
 import { ChatParticipantRosterRow } from "./chat-participant-roster-row";
 import { forkToNewChatReasonFor, machineForkSupportFrom } from "./use-fork-to-new-chat";
 import { ChatMembersPanel } from "./chat-members-panel";
@@ -631,7 +631,7 @@ test("Fork to new chat sits in a member's … menu (the main session's in the ch
   assert.deepEqual(offered.map((action) => action.label), ["Restart", FORK_TO_NEW_CHAT_LABEL, "Remove from chat"]);
   const fork = offered[1]!;
   assert.equal(fork.disabled, false);
-  assert.equal(fork.detail, FORK_TO_NEW_CHAT_SESSIONS_DETAIL, "what it makes, under it, naming no main session");
+  assert.equal(fork.detail, "A new chat that starts from a copy of this session", "what it makes, under it, naming no main session");
   fork.onSelect();
   assert.deepEqual(forked, [DREW.id]);
   assert.equal(closed, 1, "the settings close: the new chat opens");
@@ -664,8 +664,9 @@ test("the classic roster card has Fork to new chat next to Restart, disabled wit
   const button = () => renderer!.root.find((node) => node.type === "button" && node.props["data-testid"] === "chat-participant-fork");
   assert.match(String(button().props["aria-label"]), /^Fork to new chat: /);
   assert.equal(button().props.disabled, false);
+  assert.equal(FORK_TO_NEW_CHAT_DETAIL, "A new chat that starts from a copy of this session");
   assert.ok(renderer!.root.findAll((node) => typeof node.props?.children === "string" && node.props.children === `Fork to new chat. ${FORK_TO_NEW_CHAT_DETAIL}.`).length > 0,
-    "the classic view keeps its own words for what it makes");
+    "the classic view says what it makes in the same words, naming no main session");
   act(() => button().props.onClick(click));
   assert.deepEqual(forked, [DREW.id]);
   act(() => renderer!.update(card("It has not run yet, so it has no session to copy.")));
