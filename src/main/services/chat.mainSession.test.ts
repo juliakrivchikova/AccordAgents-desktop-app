@@ -1243,7 +1243,8 @@ test("in the sessions view an @handle in a member's reply or post starts nobody;
       reply("main-reply", main, "@worker please check the logs."),
       reply("worker-reply", worker, "Done. @other can you confirm the numbers?"),
       reply("worker-post", worker, "@main the build is green.", { appMessageSource: "app_chat_send_message" }),
-      reply("main-accord", main, "@other /accord on the rollout plan.")
+      reply("main-accord", main, "@other /accord on the rollout plan."),
+      reply("worker-accord", worker, "@other /accord on the rollout plan.")
     ];
     for (const message of messages) {
       conversation.messages.push(message);
@@ -1252,6 +1253,7 @@ test("in the sessions view an @handle in a member's reply or post starts nobody;
       assert.deepEqual(started, [], `${chatView ?? "default view"}: ${message.id} starts nobody`);
     }
     assert.equal(requests(conversation).length, 0, "no task row, no turn");
+    assert.deepEqual(conversation.metadata.warnings ?? [], [], "no warning either, the Accord one included");
     assert.equal(normalizeChatAgentPermissions(participantsOf(conversation).find((item) => item.id === other.id)!.permissions).requestParticipants, "ask",
       "no Accord leave either");
     assert.match((service as any).mentionTriggerPromptSection(conversation), /starts nobody/);

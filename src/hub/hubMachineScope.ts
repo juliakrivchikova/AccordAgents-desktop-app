@@ -69,7 +69,7 @@ import {
 } from "../shared/appMcpToolContracts";
 import { claudePlanApprovalOption, claudePlanModeSettings, isClaudePlanApprovalRequest } from "../shared/claudePlanApproval";
 import type { HubCard, HubUserApproval } from "../shared/hubOps";
-import { mainSessionParticipantId } from "../shared/mainSession";
+import { chatViewFor, mainSessionParticipantId } from "../shared/mainSession";
 import type { HubMemberRules } from "../shared/hubProtocol";
 import type {
   ChatAgentMode,
@@ -212,6 +212,7 @@ interface Leave {
 function accordNaming(conversation: Conversation, member: ChatParticipant, used: ReadonlySet<string>): Leave | undefined {
   const mainSessionId = mainSessionParticipantId(conversation.metadata);
   const mainSession = mainSessionId ? participantsOf(conversation.metadata?.participants).find((item) => item.id === mainSessionId) : undefined;
+  const sessionsView = chatViewFor(conversation.metadata) === "sessions";
   let best: Leave | undefined;
   for (const message of conversation.messages) {
     if (message.role !== "user" && message.role !== "participant") continue;
@@ -225,6 +226,10 @@ function accordNaming(conversation: Conversation, member: ChatParticipant, used:
     if (!accord || !names(message, member)) continue;
     const byMainSession = message.role === "participant" && Boolean(mainSessionId) && message.participantId === mainSessionId;
     if (byMainSession && !mainSession) continue;
+    // In the sessions view a mention in a reply starts nobody: the main
+    // session names a facilitator only by starting an Accord with the app
+    // tool (its launch message), as the app gives that leave.
+    if (byMainSession && sessionsView && message.metadata?.accordLaunchByMainSession !== true) continue;
     const cap: ChatParticipantRequestPermission = byMainSession ? requestRight(mainSession!) : "allow";
     if (!best || rank(cap) > rank(best.cap)) best = { cap, key: accordGrantKey(message.id, member.id) };
   }

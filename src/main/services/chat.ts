@@ -16659,12 +16659,18 @@ export class ChatService {
       if (inferred.length === 0) {
         continue;
       }
-      // In a chat with a main session only it starts an Accord
-      // (docs/main-session.md); another member's "@x /accord" starts nothing.
-      if (this.hasStandaloneAccordSkillToken(sourceMessage.content) && isMainSessionChat(conversation.metadata) &&
-        !isMainSessionParticipant(conversation.metadata, participant.id)) {
-        this.addConversationWarning(conversation, `@${participant.handle} cannot start an Accord in this chat; only the main session starts one.`);
-        void this.debugLogs.write("chat.accord.inferred-refused", {
+      // In the sessions view an @handle in a member's reply or post starts
+      // nobody, as a mention in text wakes nobody in Claude Code (the User,
+      // 2026-11-22): a member is asked with app_chat_request_participants or
+      // app_chat_delegate_task (its answer to such a task goes back to the
+      // main session), an Accord is started with app_chat_start_accord, and
+      // no warning is shown for an "@x /accord" either. The classic view
+      // keeps reading such a mention as a request. Every device that runs a
+      // member (this computer, a cloud machine) decides it here; the User's
+      // server refuses a turn for such a request from an older program
+      // (hubOps applyTurn).
+      if (chatViewFor(conversation.metadata) === "sessions") {
+        void this.debugLogs.write("chat.participant-request.inferred-skipped-sessions-view", {
           conversationId: conversation.id,
           messageId: sourceMessage.id,
           requesterParticipantId: participant.id,
@@ -16672,15 +16678,12 @@ export class ChatService {
         });
         continue;
       }
-      // In the sessions view an @handle in a member's reply or post starts
-      // nobody, as a mention in text wakes nobody in Claude Code (the User,
-      // 2026-11-22): members' replies go back to the main session, and a
-      // member is asked with app_chat_request_participants or
-      // app_chat_delegate_task (an Accord with app_chat_start_accord). The
-      // classic view keeps reading such a mention as a request. Every device
-      // that runs a member (this computer, a cloud machine) decides it here.
-      if (chatViewFor(conversation.metadata) === "sessions") {
-        void this.debugLogs.write("chat.participant-request.inferred-skipped-sessions-view", {
+      // In a chat with a main session only it starts an Accord
+      // (docs/main-session.md); another member's "@x /accord" starts nothing.
+      if (this.hasStandaloneAccordSkillToken(sourceMessage.content) && isMainSessionChat(conversation.metadata) &&
+        !isMainSessionParticipant(conversation.metadata, participant.id)) {
+        this.addConversationWarning(conversation, `@${participant.handle} cannot start an Accord in this chat; only the main session starts one.`);
+        void this.debugLogs.write("chat.accord.inferred-refused", {
           conversationId: conversation.id,
           messageId: sourceMessage.id,
           requesterParticipantId: participant.id,

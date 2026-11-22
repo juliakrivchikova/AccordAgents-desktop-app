@@ -41,12 +41,17 @@ verbatim there). Modelled on T3 Code (`~/reference/t3code`,
   wherever it runs (`ChatService.createImplicitParticipantRequestApproval`,
   the same code on this computer and on a cloud machine). Its posts
   (`app_chat_send_message`) are the same; a main session's "@x /accord"
-  starts no Accord. Members are asked with `app_chat_request_participants`
-  or `app_chat_delegate_task`, an Accord with `app_chat_start_accord`, and
-  members' replies go back to the main session; the User's own @mentions
-  still address members. The member prompt says so instead of "an @handle is
-  a request". The classic view of the same chat keeps reading such a mention
-  as a request, as before.
+  starts no Accord and no warning. Members are asked with
+  `app_chat_request_participants` or `app_chat_delegate_task` (a member's
+  answer to such a task goes back to the main session), an Accord with
+  `app_chat_start_accord`; what the User writes to a member (its session's
+  composer) still reaches it. The member prompt says so instead of "an
+  @handle is a request". The User's server holds to it too: it refuses a new
+  turn for a request inferred from a reply in a sessions-view chat (a cloud
+  machine on an older program), and gives a facilitator leave to ask only
+  from the main session's `app_chat_start_accord` launch, not from an
+  "@x /accord" in its reply. The classic view of the same chat keeps reading
+  such a mention as a request, as before.
 - **The Chat Assistant and the Workflow Manager role are not in new chats.**
   Chats made before stay exactly as they are (with their Assistant).
 
@@ -77,10 +82,13 @@ full).
   read automatically; the reader saw only the posts, and reads the reply
   with `app_chat_read_messages`.
 
-## The two views (a view only)
+## The two views (a view only, but for one rule)
 
 Switched per chat by the User any number of times (the chat header), shared
-through her server like the pin (`metadata.chatView`). Every new chat opens
+through her server like the pin (`metadata.chatView`). The chat works the
+same in both views but for one rule: in `sessions` an @handle in a member's
+reply starts nobody (see the rule above), in `classic` it asks that member
+as before. Every new chat opens
 in `sessions`, on the computer and from the phone (the User, 2026-11-22:
 Settings no longer names a view for new chats; a `defaultChatView` stored
 before is dropped). A chat without a main session is always `classic`; its

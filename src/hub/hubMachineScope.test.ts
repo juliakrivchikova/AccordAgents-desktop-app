@@ -522,7 +522,8 @@ test("in a chat with a main session only the User and the main session start an 
   const fromMember = { id: "m-acc", role: "participant", participantId: "p-helper", content: "/accord @desk please run it", createdAt: "t" };
   let scoped = scopeMachineConversationUpdate(mainSessionChatWith([deskR, mainOnMachine, helperOnMachine], [fromMember]), { metadata: { participants: [leave, mainOnMachine, helperOnMachine] } }, "machine-1", { rules: mainRules });
   assert.deepEqual(members(scoped).get("p-desk"), deskR, "another member's /accord gives no leave");
-  const fromMain = { ...fromMember, participantId: "p-main" };
+  // The main session's Accord launch (app_chat_start_accord).
+  const fromMain = { ...fromMember, participantId: "p-main", metadata: { accordLaunchByMainSession: true } };
   scoped = scopeMachineConversationUpdate(mainSessionChatWith([deskR, mainOnMachine, helperOnMachine], [fromMain]), { metadata: { participants: [leave, mainOnMachine, helperOnMachine] } }, "machine-1", { rules: mainRules });
   assert.equal((members(scoped).get("p-desk")?.permissions as Record<string, unknown>).requestParticipants, "allow");
   const fromUser = { id: "m-user", role: "user", content: "@desk /accord with @helper", createdAt: "t" };
@@ -705,7 +706,9 @@ test("the main session's `/accord` gives its facilitator no more leave to ask th
   const asking = { ...mainOnMachine, permissions: { ...mainOnMachine.permissions, requestParticipants: "ask" } };
   const denied = { ...deskR, permissions: { requestParticipants: "deny" } };
   const helperOnMachine = { ...boxR, id: "p-helper", handle: "helper", permissions: { requestParticipants: "deny" } };
-  const fromMain = { id: "m-acc", role: "participant", participantId: "p-main", content: "/accord @desk please run it with @helper", createdAt: "t" };
+  // Its Accord launch (app_chat_start_accord), as the app writes it.
+  const fromMain = { id: "m-acc", role: "participant", participantId: "p-main", content: "/accord @desk please run it with @helper", createdAt: "t",
+    metadata: { accordLaunchByMainSession: true } };
   const chat = mainSessionChatWith([denied, asking, helperOnMachine], [fromMain]);
   // A facilitator elsewhere: "ask", never "allow".
   let scoped = scopeMachineConversationUpdate(chat, { metadata: { participants: [{ ...denied, permissions: { requestParticipants: "allow" } }, asking, helperOnMachine] } }, "machine-1", { rules: mainRules });
@@ -720,6 +723,23 @@ test("the main session's `/accord` gives its facilitator no more leave to ask th
   scoped = scopeMachineConversationUpdate(mainSessionChatWith([denied, asking, helperOnMachine], [fromUser]),
     { metadata: { participants: [{ ...denied, permissions: { requestParticipants: "allow" } }, asking, helperOnMachine] } }, "machine-1", { rules: mainRules });
   assert.equal((members(scoped).get("p-desk")?.permissions as Record<string, unknown>).requestParticipants, "allow");
+});
+
+test("in the sessions view the main session's reply naming a facilitator with `/accord` gives no leave; its Accord launch does; the classic view as before", () => {
+  const denied = { ...deskR, permissions: { requestParticipants: "deny" } };
+  const raised = { metadata: { participants: [{ ...denied, permissions: { requestParticipants: "allow" } }, mainOnMachine] } };
+  const leaveOf = (chat: Conversation) =>
+    (members(scopeMachineConversationUpdate(chat, raised, "machine-1", { rules: mainRules })).get("p-desk")?.permissions as Record<string, unknown>).requestParticipants;
+  const replyText = { id: "m-acc", role: "participant", participantId: "p-main", content: "@desk /accord on the rollout plan", createdAt: "t" };
+  assert.equal(leaveOf(mainSessionChatWith([denied, mainOnMachine], [replyText])), "deny", "a mention in its reply starts nobody in the sessions view");
+  const sessions = mainSessionChatWith([denied, mainOnMachine], [replyText]);
+  sessions.metadata.chatView = "sessions";
+  assert.equal(leaveOf(sessions), "deny");
+  const launch = { ...replyText, metadata: { accordLaunchByMainSession: true } };
+  assert.equal(leaveOf(mainSessionChatWith([denied, mainOnMachine], [launch])), "allow", "its app_chat_start_accord launch gives the leave");
+  const classic = mainSessionChatWith([denied, mainOnMachine], [replyText]);
+  classic.metadata.chatView = "classic";
+  assert.equal(leaveOf(classic), "allow", "the classic view reads the reply as before");
 });
 
 test("a member the main session made asks others no more freely than the main session can now", () => {

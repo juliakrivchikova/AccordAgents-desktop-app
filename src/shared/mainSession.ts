@@ -7,8 +7,10 @@
 // not in such a chat. A chat made before keeps its Assistant and is always
 // shown the old way.
 //
-// The view is only how the chat is shown, switched by the User any number of
-// times; the chat works the same in both:
+// The view is how the chat is shown, switched by the User any number of
+// times; the chat works the same in both, except that in "sessions" an
+// @handle in a member's reply starts nobody (ChatService
+// createImplicitParticipantRequestApproval; the User, 2026-11-22):
 //   - "classic": today's timeline, every member's reply on it, with avatars;
 //   - "sessions": the main timeline holds the User and the main session only
 //     (plus the cards the User must answer and a card for every task the main
