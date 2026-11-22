@@ -34,7 +34,10 @@ import {
   sessionsTaskTitle,
   shortenAtWord,
   sessionsMentionPieces,
-  sessionsWaitingText
+  approvalHoldsTurn,
+  sessionsMembersWaitingForUser,
+  sessionsWaitingText,
+  titleTaskByMember
 } from "./mainSessionView";
 import type { ChatMessage, ChatParticipant, ChatParticipantRequestBatch, ChatParticipantRequestItem } from "./types";
 
@@ -280,7 +283,7 @@ test("a stopped task's row says Stopped, muted", () => {
 
 test("members are named by their task, not their handle", () => {
   assert.equal(sessionsMemberTitle({ handle: "drew" }, { prompt: "## Fix the login\n\nmore", targetHandle: "drew" }), "Fix the login");
-  assert.equal(sessionsMemberTitle({ handle: "@drew" }), "drew");
+  assert.equal(sessionsMemberTitle({ handle: "@drew" }), "Agent", "never a handle: a member with no task is Agent");
   assert.equal(sessionsMemberDetail({ provider: "Claude Code", model: "opus", roleLabel: "Member", roleConfigId: "generic-participant" }), "Claude Code · opus");
   assert.equal(sessionsMemberDetail({ provider: "Codex CLI", roleLabel: "Reviewer", roleConfigId: "reviewer" }), "Codex CLI · Reviewer");
   assert.equal(sessionsWaitingText(["Fix the login", "Check logout"]), "Waiting on 2 tasks: Fix the login, Check logout");
@@ -306,12 +309,70 @@ test("a task is named by its short title: the main session's, else its first sen
   assert.ok(long.length <= 40);
   assert.equal(sessionsTaskTitle({ prompt: "## Fix the **login** button\nwith the new tokens" }), "Fix the login button", "markdown left out");
   assert.equal(sessionsTaskTitle({ prompt: "" }), "");
-  assert.equal(sessionsMemberTitle({ handle: "@drew" }, { prompt: "", targetHandle: "drew" }), "drew", "a task without text leaves the handle");
+  assert.equal(sessionsMemberTitle({ handle: "@drew" }, { prompt: "", targetHandle: "drew" }), "Agent", "a task without text: Agent, never the handle");
   // One word longer than the room is cut inside it.
   assert.equal(shortenAtWord("x".repeat(60), 40), `${"x".repeat(39)}…`);
   assert.equal(shortenAtWord("Short enough", 40), "Short enough");
   // A given title is kept to 80 characters.
   assert.ok(sessionsTaskTitle({ prompt: "x", title: "word ".repeat(40) }).length <= 80);
+});
+
+test("a member keeps the title its delegation gave it: a later task without one does not rename it", () => {
+  const delegated = { ...item("p-drew", "answered", 3), prompt: "Implement new chats in General.", title: "Новые чаты в General" };
+  const followUp = { ...item("p-drew", "running", 20), prompt: 'Two additions to your task "Новые чаты в General": also the phone.' };
+  const messages = [
+    message("delegate", "participant", 3, { participantId: "p-main", metadata: { participantRequest: batch("d1", "p-main", [delegated], { delegation: { start: "clean" } }) } }),
+    message("follow-up", "participant", 20, { participantId: "p-main", metadata: { participantRequest: batch("f1", "p-main", [followUp]) } })
+  ];
+  const drew = participants[1]!;
+  assert.equal(sessionsMemberTitle(drew, titleTaskByMember(messages).get("p-drew")?.item), "Новые чаты в General", "named by its delegation");
+  assert.equal(latestTaskByMember(messages).get("p-drew")?.item.status, "running", "its state still follows its latest task");
+  // A newer titled task (another delegation-style title) does rename it.
+  const retitled = [...messages, message("again", "participant", 30, { participantId: "p-main", metadata: { participantRequest: batch("d2", "p-main", [{ ...item("p-drew", "running", 30), title: "Ход как в Claude Code" }]) } })];
+  assert.equal(sessionsMemberTitle(drew, titleTaskByMember(retitled).get("p-drew")?.item), "Ход как в Claude Code");
+  // Never titled: its first task names it, not the newest one.
+  const untitled = [
+    message("first", "participant", 3, { participantId: "p-main", metadata: { participantRequest: batch("u1", "p-main", [{ ...item("p-gera", "answered", 3), prompt: "Check the release feed." }]) } }),
+    message("second", "participant", 9, { participantId: "p-main", metadata: { participantRequest: batch("u2", "p-main", [{ ...item("p-gera", "running", 9), prompt: "One more thing about it." }]) } })
+  ];
+  assert.equal(sessionsMemberTitle(participants[2]!, titleTaskByMember(untitled).get("p-gera")?.item), "Check the release feed");
+  assert.equal(titleTaskByMember([]).size, 0);
+});
+
+test("a member held up by the User waits for her even while its run is live; a request that does not hold its turn, or a card its newer turn went past, does not", () => {
+  const messages = chat();
+  const approvals = [
+    { status: "pending" as const, requesterParticipantId: "p-drew", toolName: "app_tool_permission" },
+    { status: "pending" as const, requesterParticipantId: "p-gera", toolName: "app_scripts_request_change" },
+    { status: "pending" as const, requesterParticipantId: "p-gera", toolName: "codex_auto_review_approval", resumeContext: { runId: "r1", triggerMessageId: "t1" } },
+    { status: "approved" as const, requesterParticipantId: "p-taylor", toolName: "app_tool_permission" }
+  ];
+  const waiting = sessionsMembersWaitingForUser(messages, approvals);
+  assert.deepEqual([...waiting].sort(), ["p-drew", "p-gera", "p-taylor"],
+    "drew's tool permission, gera's Codex approval (it names its run) and taylor's open choice");
+  assert.deepEqual([...sessionsMembersWaitingForUser(messages, [approvals[1]!])].sort(), ["p-taylor"], "a script request returns at once: gera works on");
+  assert.equal(approvalHoldsTurn({ toolName: "app_connector_sign_in" }), true);
+  assert.equal(approvalHoldsTurn({ toolName: "app_permissions_request_change" }), false);
+  // taylor's choice is answered by a newer turn of its own: it went on.
+  const later = [...messages, message("taylor-turn", "participant", 12, { participantId: "p-taylor", status: "pending", content: "" })];
+  assert.equal(sessionsMembersWaitingForUser(later).has("p-taylor"), false, "a card from before its turn in progress");
+  assert.equal(sessionsMemberStatus("running", undefined, undefined, true), "waiting", "a live run held up by her reads Waiting for you");
+  assert.equal(sessionsMemberStatus("running", undefined, undefined, false), "running");
+  const statuses = new Map([["p-drew", "running" as const], ["p-gera", "idle" as const], ["p-taylor", "running" as const]]);
+  const rows = sessionsMemberRows(participants, "p-main", statuses, latestTaskByMember(messages), undefined, sessionsMembersWaitingForUser(messages, [approvals[0]!]));
+  assert.deepEqual(rows.current.map((row) => [row.participant.id, row.status]), [["p-drew", "waiting"], ["p-taylor", "waiting"]]);
+  // Its running task reads the same in the main session's reply.
+  const entry = sessionsTaskEntries(messages[3]!, messages[3]!.metadata!.participantRequest!, statuses, sessionsMemberActivity(messages), new Map(), undefined, undefined, new Set(["p-drew"]));
+  assert.equal(entry.find((item) => item.item.targetParticipantId === "p-drew")?.status, "waiting");
+  assert.equal(sessionsMembersWaitingForUser([], undefined).size, 0);
+});
+
+test("a member is named by the title kept with it before any task read on this device", () => {
+  const followUp = { ...item("p-drew", "running", 20), prompt: 'Two additions to your task "Новые чаты в General": the phone too.' };
+  const kept = { ...participants[1]!, taskTitle: "  Новые чаты\n в General " };
+  assert.equal(sessionsMemberTitle(kept, followUp), "Новые чаты в General", "the delegation is not among the loaded messages");
+  assert.equal(sessionsMemberTitle(kept), "Новые чаты в General");
+  assert.equal(sessionsMemberTitle({ ...kept, taskTitle: "" }, followUp), 'Two additions to your task "Новые чаты…', "none kept: the loaded task names it");
 });
 
 test("a task entry carries its title, its state, its time and one line of its result", () => {

@@ -7,7 +7,7 @@ import { isPendingReply, isWaitingChoice } from "./chatActiveRuns";
 import { stripChatControlBlocks } from "./chatControlBlocks";
 import type { ChatParticipantRosterStatus } from "./chatParticipantStatus";
 import { sessionsViewLane, type SessionsViewIndex } from "./mainSession";
-import { APP_PARTICIPANTS_REQUEST_CHANGE_TOOL } from "./appMcpToolContracts";
+import { APP_CONNECTOR_SIGN_IN_TOOL, APP_PARTICIPANTS_REQUEST_CHANGE_TOOL, APP_TOOL_PERMISSION_TOOL } from "./appMcpToolContracts";
 import type { ChatAppToolApproval, ChatMessage, ChatParticipant, ChatParticipantRequestBatch, ChatParticipantRequestItem } from "./types";
 
 /** The ordinary member's role: the sessions view names no role for it. */
@@ -73,9 +73,12 @@ export function sessionsTaskStatus(
 export function sessionsMemberStatus(
   memberStatus: ChatParticipantRosterStatus | undefined,
   task: Pick<ChatParticipantRequestItem, "status" | "createdAt"> | undefined,
-  memberFinishedAt?: string
+  memberFinishedAt?: string,
+  /** A card of its waits for the User (sessionsMembersWaitingForUser): it
+   *  waits for her even while its run is live, blocked on her answer. */
+  waitsForUser = false
 ): SessionsWorkStatus {
-  if (memberStatus === "pending") return "waiting";
+  if (waitsForUser || memberStatus === "pending") return "waiting";
   if (isMemberWorking(memberStatus)) return "running";
   const stale = task !== undefined && !endedSinceTask(task, memberFinishedAt);
   if (memberStatus === "stopped" && !stale) return "stopped";
@@ -158,14 +161,23 @@ export function sessionsTaskTitle(item: Pick<ChatParticipantRequestItem, "prompt
   return shortenAtWord(plain, SESSIONS_TASK_TITLE_MAX_CHARS);
 }
 
-/** A member's title in the sessions view (as in T3 Code): its current or
- *  latest task's title (sessionsTaskTitle); its handle without "@" only
- *  while it has none. */
+/** What the sessions view calls a member with no task to be named by. */
+export const SESSIONS_UNTITLED_MEMBER = "Agent";
+
+/** A member's title in the sessions view (as in T3 Code): the title its
+ *  delegation gave it, kept with the member (ChatParticipant.taskTitle),
+ *  else the title of the task it is named by among the loaded messages
+ *  (titleTaskByMember: the newest titled one, else its first;
+ *  sessionsTaskTitle); "Agent" while it has none, never its handle. */
 export function sessionsMemberTitle(
-  member: { handle?: string } | undefined,
+  member: { handle?: string; taskTitle?: unknown } | undefined,
   task?: Pick<ChatParticipantRequestItem, "prompt" | "targetHandle"> & { title?: unknown }
 ): string {
-  return (task ? sessionsTaskTitle(task) : "") || (member?.handle ?? task?.targetHandle ?? "").trim().replace(/^@/, "") || "Session";
+  const kept = typeof member?.taskTitle === "string" ? member.taskTitle.replace(/\s+/g, " ").trim() : "";
+  if (kept) return shortenAtWord(kept, SESSIONS_TASK_GIVEN_TITLE_MAX_CHARS);
+  // Never a handle (the User: the sessions view shows none): a member with
+  // no task to be named by is "Agent".
+  return (task ? sessionsTaskTitle(task) : "") || SESSIONS_UNTITLED_MEMBER;
 }
 
 /** The line under a member's title: its provider, model and role (the role
@@ -220,15 +232,17 @@ export function sessionsTaskEntries(
   appText: (text: string) => string = (text) => text,
   /** The view's reading of a member's own words (its reply's line), by its
    *  mention rule (sessionsMentionText). */
-  wordsText: (text: string) => string = (text) => text
+  wordsText: (text: string) => string = (text) => text,
+  /** Members held up by the User (sessionsMembersWaitingForUser): a task
+   *  of theirs that runs waits for her, as their row in the side panel. */
+  waitingForUser?: ReadonlySet<string>
 ): SessionsTaskEntry[] {
   return batch.items.map((item) => {
     const memberId = item.targetParticipantId;
-    const status = sessionsTaskStatus(item, statusById.get(memberId), activity.finishedAt.get(memberId));
+    const taskStatus = sessionsTaskStatus(item, statusById.get(memberId), activity.finishedAt.get(memberId));
+    const status = taskStatus === "running" && waitingForUser?.has(memberId) ? "waiting" : taskStatus;
     const running = activity.runningSince.get(memberId);
-    const reply = item.replyMessageId ? messagesById.get(item.replyMessageId) : undefined;
-    const worked = typeof reply?.metadata?.workedMs === "number" && Number.isFinite(reply.metadata.workedMs) ? reply.metadata.workedMs : undefined;
-    const elapsed = item.updatedAt ? Date.parse(item.updatedAt) - Date.parse(item.createdAt) : NaN;
+    const durationMs = sessionsTaskDurationMs(item, messagesById);
     const replyLine = status === "done" ? sessionsTaskReplyLine(item, messagesById) : undefined;
     const line = status === "done" ? (replyLine ? wordsText(replyLine) : replyLine)
       : status === "failed" ? appText(firstTextLine(item.error)) || undefined
@@ -239,11 +253,39 @@ export function sessionsTaskEntries(
       title: sessionsMemberTitle(undefined, item),
       status,
       ...(status === "running" ? { since: running && running >= item.createdAt ? running : item.createdAt } : {}),
-      ...(status !== "running" && status !== "waiting" && (worked ?? elapsed) >= 0 ? { durationMs: worked ?? elapsed } : {}),
+      ...(status !== "running" && status !== "waiting" && durationMs !== undefined ? { durationMs } : {}),
       ...(line ? { line } : {}),
       ...(status === "stopped" ? { lineMuted: true as const } : {})
     };
   });
+}
+
+/** From this many minutes on, hours are whole ("12h"), as T3 Code says them. */
+const WHOLE_HOURS_FROM_MINUTES = 600;
+
+/** A duration as T3 Code's agent row says it: "5s", "8m", "1.5h", "12h";
+ *  the side panel's rows, desktop and phone. */
+export function sessionsCompactDuration(ms: number): string {
+  const seconds = Math.max(0, Math.floor(ms / 1000));
+  if (seconds < 60) return `${seconds}s`;
+  const minutes = Math.floor(seconds / 60);
+  if (minutes < 60) return `${minutes}m`;
+  if (minutes >= WHOLE_HOURS_FROM_MINUTES) return `${Math.floor(minutes / 60)}h`;
+  // Tenths of an hour, rounded down: 90 minutes is "1.5h".
+  return `${Math.floor(minutes / 6) / 10}h`;
+}
+
+/** How long a task took, once it ended: the time its reply worked, else from
+ *  when it was given to its last change; none when neither reads. */
+export function sessionsTaskDurationMs(
+  item: Pick<ChatParticipantRequestItem, "replyMessageId" | "createdAt" | "updatedAt">,
+  messagesById: ReadonlyMap<string, ChatMessage>
+): number | undefined {
+  const reply = item.replyMessageId ? messagesById.get(item.replyMessageId) : undefined;
+  const worked = typeof reply?.metadata?.workedMs === "number" && Number.isFinite(reply.metadata.workedMs) ? reply.metadata.workedMs : undefined;
+  const elapsed = item.updatedAt ? Date.parse(item.updatedAt) - Date.parse(item.createdAt) : NaN;
+  const duration = worked ?? elapsed;
+  return Number.isFinite(duration) && duration >= 0 ? duration : undefined;
 }
 
 /** When the member's work on a task started: its reply in progress (the turn
@@ -292,6 +334,31 @@ export function latestTaskByMember(messages: readonly ChatMessage[]): Map<string
   return tasks;
 }
 
+/** The task each member is named by (sessionsMemberTitle), as T3 Code
+ *  titles a thread once: the newest task the main session titled (the
+ *  delegation that made the member, app_chat_delegate_task), else its first
+ *  task. A later task without a title of its own ("Two additions to your
+ *  task …") never renames the member; its state still follows its latest
+ *  task (latestTaskByMember). */
+export function titleTaskByMember(messages: readonly ChatMessage[]): Map<string, SessionsMemberTask> {
+  const titled = new Map<string, SessionsMemberTask>();
+  const first = new Map<string, SessionsMemberTask>();
+  for (const message of messages) {
+    const batch = message.metadata?.participantRequest;
+    if (!batch) continue;
+    for (const item of batch.items) {
+      const task = { messageId: message.id, batch, item };
+      const earliest = first.get(item.targetParticipantId);
+      if (!earliest || item.createdAt < earliest.item.createdAt) first.set(item.targetParticipantId, task);
+      if (typeof item.title !== "string" || !item.title.trim()) continue;
+      const newest = titled.get(item.targetParticipantId);
+      if (!newest || newest.item.createdAt <= item.createdAt) titled.set(item.targetParticipantId, task);
+    }
+  }
+  for (const [participantId, task] of titled) first.set(participantId, task);
+  return first;
+}
+
 /** A member's message asking the User whether to bring in the members it
  *  mentioned, not yet answered (here or on her server). */
 export function isWaitingMentionApproval(message: Pick<ChatMessage, "id" | "role" | "metadata">): boolean {
@@ -306,6 +373,67 @@ export function isWaitingMentionApproval(message: Pick<ChatMessage, "id" | "role
 export function openMemberCardMessages(messages: readonly ChatMessage[], index: SessionsViewIndex): ChatMessage[] {
   return messages.filter((message) =>
     (isWaitingChoice(message) || isWaitingMentionApproval(message)) && sessionsViewLane(message, index).kind === "member");
+}
+
+/** Requests whose member's turn stops until the User answers: its CLI's
+ *  permission prompt for a tool, and a connector sign-in. A Codex approval
+ *  says so by naming the run it holds (resumeContext). Every other request a
+ *  member makes (a script, a role, a member, a permission for later) returns
+ *  at once and its member works on. */
+const BLOCKING_APPROVAL_TOOLS: ReadonlySet<string> = new Set([APP_TOOL_PERMISSION_TOOL, APP_CONNECTOR_SIGN_IN_TOOL]);
+
+/** Members held up by the User: a request of theirs that stops their turn
+ *  until she answers (BLOCKING_APPROVAL_TOOLS, or one that names its run;
+ *  `approvals`: the chat's pendingAppToolApprovals), or an open choice or
+ *  mention question of theirs no newer turn of theirs has gone past. Such a
+ *  member is "Waiting for you", not running, even while its run is live
+ *  (Codex's "Needs input"). */
+export function sessionsMembersWaitingForUser(
+  messages: readonly ChatMessage[],
+  approvals?: readonly Partial<Pick<ChatAppToolApproval, "status" | "requesterParticipantId" | "toolName" | "resumeContext" | "createdAt">>[]
+): Set<string> {
+  return new Set(sessionsMembersWaitingSince(messages, approvals).keys());
+}
+
+/** sessionsMembersWaitingForUser with when each began to wait (its oldest
+ *  card that still holds it up): how long it worked before is its row's
+ *  time while it waits. */
+export function sessionsMembersWaitingSince(
+  messages: readonly ChatMessage[],
+  approvals?: readonly Partial<Pick<ChatAppToolApproval, "status" | "requesterParticipantId" | "toolName" | "resumeContext" | "createdAt">>[]
+): Map<string, string> {
+  const waiting = new Map<string, string>();
+  const note = (participantId: string, at: string | undefined): void => {
+    const known = waiting.get(participantId);
+    const when = typeof at === "string" ? at : "";
+    if (known === undefined || (when && (!known || when < known))) waiting.set(participantId, when);
+  };
+  // When each member's turn in progress started: a card from before it is
+  // one the member went on from (the main session answered it, a new task).
+  const turnStartedAt = new Map<string, string>();
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    const message = messages[index]!;
+    if (message.participantId && !turnStartedAt.has(message.participantId) && isPendingReply(message)) {
+      turnStartedAt.set(message.participantId, message.createdAt);
+    }
+  }
+  for (const message of messages) {
+    if (message.role !== "participant" || !message.participantId || !(isWaitingChoice(message) || isWaitingMentionApproval(message))) continue;
+    const started = turnStartedAt.get(message.participantId);
+    if (started === undefined || started <= message.createdAt) note(message.participantId, message.createdAt);
+  }
+  for (const approval of Array.isArray(approvals) ? approvals : []) {
+    if (approval?.status === "pending" && typeof approval.requesterParticipantId === "string" && approvalHoldsTurn(approval)) {
+      note(approval.requesterParticipantId, approval.createdAt);
+    }
+  }
+  return waiting;
+}
+
+/** Whether a member's request stops its turn until the User answers
+ *  (BLOCKING_APPROVAL_TOOLS, or a request that names the run it holds). */
+export function approvalHoldsTurn(approval: Partial<Pick<ChatAppToolApproval, "toolName" | "resumeContext">>): boolean {
+  return BLOCKING_APPROVAL_TOOLS.has(approval.toolName ?? "") || typeof approval.resumeContext?.runId === "string";
 }
 
 export interface SessionsMemberRow {
@@ -324,12 +452,14 @@ export function sessionsMemberRows(
   mainSessionId: string,
   statusById: ReadonlyMap<string, ChatParticipantRosterStatus>,
   tasks: ReadonlyMap<string, SessionsMemberTask>,
-  finishedAt?: ReadonlyMap<string, string>
+  finishedAt?: ReadonlyMap<string, string>,
+  /** Members a card waits on the User for (sessionsMembersWaitingForUser). */
+  waitingForUser?: ReadonlySet<string>
 ): { current: SessionsMemberRow[]; previous: SessionsMemberRow[] } {
   const rows: SessionsMemberRow[] = participants.flatMap((participant) => {
     if (participant.id === mainSessionId) return [];
     const task = tasks.get(participant.id);
-    const status = sessionsMemberStatus(statusById.get(participant.id), task?.item, finishedAt?.get(participant.id));
+    const status = sessionsMemberStatus(statusById.get(participant.id), task?.item, finishedAt?.get(participant.id), waitingForUser?.has(participant.id) === true);
     return [{ participant, status, ...(task ? { task } : {}) }];
   });
   if (!rows.some((row) => row.status === "running" || row.status === "waiting")) {
@@ -338,6 +468,12 @@ export function sessionsMemberRows(
   const finished = (row: SessionsMemberRow): boolean =>
     Boolean(row.task) && (row.status === "done" || row.status === "failed" || row.status === "stopped");
   return { current: rows.filter((row) => !finished(row)), previous: rows.filter(finished) };
+}
+
+/** How many of the listed members run (not waiting for the User): the side
+ *  panel's "Agents · N running" and the count on its icon, desktop and phone. */
+export function sessionsRunningCount(rows: { current: readonly Pick<SessionsMemberRow, "status">[] }): number {
+  return rows.current.filter((row) => row.status === "running").length;
 }
 
 /** "N tasks · K running" for a task card that gave several tasks. */

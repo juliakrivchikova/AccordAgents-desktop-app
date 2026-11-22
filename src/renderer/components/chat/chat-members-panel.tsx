@@ -1,14 +1,14 @@
 import { useState, type ReactNode } from "react";
-import { ChevronDown, ChevronRight, X } from "lucide-react";
+import { Bot, ChevronDown, X } from "lucide-react";
 
 import type { DockedAccord } from "../../../shared/accordProgress";
-import { SESSIONS_REMOVED_MEMBER_DETAIL, type SessionsMemberActivity, type SessionsMemberRow } from "../../../shared/mainSessionView";
+import { SESSIONS_REMOVED_MEMBER_DETAIL, sessionsRunningCount, type SessionsMemberActivity, type SessionsMemberRow, type SessionsMemberTask } from "../../../shared/mainSessionView";
 import type { ChatParticipant } from "../../../shared/types";
-import { Button } from "@/components/ui/button";
 import { IconButton } from "../primitives";
 import { ChatAccordRow } from "./chat-accord-dock";
+import { ChatAgentRow, type ChatAgentDetail } from "./chat-agent-row";
 import { ChatProviderMark, ChatProviderMarkSlot } from "./chat-member-mark";
-import { ChatElapsed, ChatWorkStatusLabel } from "./chat-task-card";
+import { useMachineList } from "./use-cli-start-defaults";
 import type { SessionsFormerRow } from "./use-chat-sessions-view";
 
 export interface ChatMembersPanelProps {
@@ -20,135 +20,133 @@ export interface ChatMembersPanelProps {
   formerRows?: readonly SessionsFormerRow[];
   activity: SessionsMemberActivity;
   runIdsByParticipantId: ReadonlyMap<string, readonly string[]>;
-  /** A member's title (its task) and the line under it (provider, model). */
+  /** A member's title: the task it is named by. */
   memberTitle: (participantId: string) => string;
-  memberDetail: (participant: ChatParticipant) => string;
+  /** The line under a member's title in its hover card, from the model and
+   *  effort it runs on (its CLI, model, effort, a non-generic role). */
+  memberDetail?: (participant: ChatParticipant) => ChatAgentDetail;
+  /** How long a member's latest task took, once it ended. */
+  taskDurationMs?: (row: { task?: SessionsMemberTask }) => number | undefined;
+  /** When each member held up by the User began to wait. */
+  waitingSince?: ReadonlyMap<string, string>;
+  /** What a running member does now: its newest step. */
+  currentStep?: (participantId: string) => string | undefined;
+  /** How a member's latest task ended, in one line. */
+  taskResult?: (participantId: string) => string | undefined;
   onOpenMember: (participantId: string) => void;
   onStopRuns?: (runIds: readonly string[]) => void;
   onClose: () => void;
 }
 
-/** The sessions view's right panel (T3 Code's agents list): no title, only
- *  its close button (the User, 2026-11-21); the chat's latest Accord, then
- *  the sessions the main session delegated (never the main session itself,
- *  whose settings are its composer chip), each its provider's glyph and its
- *  task, what it does and Stop; while one works, those that ended under
- *  "Previous"; those no longer in the chat under "Removed", read-only.
- *  Nothing is said when there are none. */
+/** The sessions view's right panel, as T3 Code's side panel (the User,
+ *  2026-11-22): no title, only its close button; the chat's latest Accord;
+ *  then "Agents · N running", the sessions the main session delegated (never
+ *  the main session itself, whose settings are its composer's controls), one
+ *  line each, Stop on a row's hover and no Stop all; those that worked and
+ *  ended folded under "Previous agents", those no longer in the chat under
+ *  "Removed", read-only. Nothing is said when there are none. */
 export function ChatMembersPanel(props: ChatMembersPanelProps): JSX.Element {
-  const allRows = [...props.rows.current, ...props.rows.previous];
-  const allRunIds = allRows.flatMap((row) => props.runIdsByParticipantId.get(row.participant.id) ?? []);
+  const machines = useMachineList();
   const former = props.formerRows ?? [];
+  const runningCount = sessionsRunningCount(props.rows);
   const renderRow = (row: SessionsMemberRow): JSX.Element => {
     const { participant, status } = row;
     const runIds = props.runIdsByParticipantId.get(participant.id) ?? [];
-    const title = props.memberTitle(participant.id);
     const running = props.activity.runningSince.get(participant.id);
     const since = status === "running" ? running ?? row.task?.item.createdAt : undefined;
+    // Every row says how long it works or worked (the User, 2026-11-22):
+    // waiting, from its turn's start to when it began to wait; ended, its task.
+    const waitedAt = status === "waiting" ? props.waitingSince?.get(participant.id) : undefined;
+    const workedBeforeWaiting = running && waitedAt ? Date.parse(waitedAt) - Date.parse(running) : NaN;
+    const durationMs = status === "running" || status === "idle" ? undefined
+      : Number.isFinite(workedBeforeWaiting) && workedBeforeWaiting >= 0 ? workedBeforeWaiting
+        : props.taskDurationMs?.(row);
+    const step = status === "running" ? props.currentStep?.(participant.id) : undefined;
+    const result = status === "done" || status === "failed" ? props.taskResult?.(participant.id) : undefined;
     return (
-      <ChatMembersPanelRow
+      <ChatAgentRow
         key={participant.id}
-        id={participant.id}
-        status={status}
-        mark={<ChatProviderMark member={participant} />}
-        title={title}
-        detail={props.memberDetail(participant)}
-        since={since}
-        stop={props.onStopRuns && runIds.length > 0 ? () => props.onStopRuns?.(runIds) : undefined}
-        onOpen={() => props.onOpenMember(participant.id)}
+        participant={participant}
+        machines={machines}
+        detail={props.memberDetail?.(participant)}
+        row={{
+          id: participant.id,
+          status,
+          mark: <ChatProviderMark member={participant} />,
+          title: props.memberTitle(participant.id),
+          ...(since ? { since } : {}),
+          ...(durationMs !== undefined ? { durationMs } : {}),
+          ...(step ? { step } : {}),
+          ...(result ? { result } : {}),
+          // Stop only while it runs (the User, 2026-11-22): one waiting for
+          // her answer is stopped from its session, or by her answer.
+          ...(props.onStopRuns && status === "running" && runIds.length > 0 ? { stop: () => props.onStopRuns?.(runIds) } : {}),
+          onOpen: () => props.onOpenMember(participant.id)
+        }}
       />
     );
   };
   return (
-    <section className="chat-thread-panel chat-members-panel" aria-label="Sessions" data-testid="chat-members-panel">
+    <section className="chat-thread-panel chat-members-panel" aria-label="Side panel" data-testid="chat-members-panel">
       <header className="thread-panel-head chat-thread-head chat-members-head" data-titlebar>
         <div />
         <div className="thread-panel-actions">
-          {props.onStopRuns && allRunIds.length > 0 && (
-            <Button variant="ghost" size="sm" data-testid="chat-members-stop-all" onClick={() => props.onStopRuns?.(allRunIds)}>
-              Stop all
-            </Button>
-          )}
           <IconButton icon={X} label="Close" tooltip="Close" onClick={props.onClose} />
         </div>
       </header>
       <div className="chat-thread-body chat-members-body" data-testid="chat-members-body">
         {props.accord && props.onOpenAccord && (
-          <ChatAccordRow launch={props.accord} testId="chat-members-accord" onOpen={() => props.onOpenAccord?.(props.accord!.launchId)} />
+          <div className="chat-side-section">
+            <ChatAccordRow launch={props.accord} testId="chat-members-accord" onOpen={() => props.onOpenAccord?.(props.accord!.launchId)} />
+          </div>
         )}
-        {props.rows.current.length > 0 && <div className="chat-members-list">{props.rows.current.map(renderRow)}</div>}
-        <ChatMembersGroup label="Previous" testId="chat-members-previous" count={props.rows.previous.length}>
+        {props.rows.current.length > 0 && (
+          <div className="chat-side-section" data-testid="chat-members-agents">
+            <h3 className="chat-side-heading">{runningCount > 0 ? `Agents · ${runningCount} running` : "Agents"}</h3>
+            <ul className="chat-agent-list">{props.rows.current.map(renderRow)}</ul>
+          </div>
+        )}
+        <ChatAgentsGroup label="Previous agents" testId="chat-members-previous" count={props.rows.previous.length}>
           {props.rows.previous.map(renderRow)}
-        </ChatMembersGroup>
-        <ChatMembersGroup label="Removed" testId="chat-members-removed" count={former.length}>
+        </ChatAgentsGroup>
+        <ChatAgentsGroup label="Removed" testId="chat-members-removed" count={former.length}>
           {former.map((row) => (
-            <ChatMembersPanelRow
+            <ChatAgentRow
               key={row.member.id}
-              id={row.member.id}
-              status={row.status}
-              mark={row.member.kind ? <ChatProviderMark member={{ kind: row.member.kind }} /> : <ChatProviderMarkSlot />}
-              title={row.title}
-              detail={SESSIONS_REMOVED_MEMBER_DETAIL}
-              onOpen={() => props.onOpenMember(row.member.id)}
+              machines={machines}
+              fixedDetail={SESSIONS_REMOVED_MEMBER_DETAIL}
+              row={{
+                id: row.member.id,
+                status: row.status,
+                mark: row.member.kind ? <ChatProviderMark member={{ kind: row.member.kind }} /> : <ChatProviderMarkSlot />,
+                title: row.title,
+                ...(row.status !== "idle" && props.taskDurationMs?.(row) !== undefined ? { durationMs: props.taskDurationMs(row)! } : {}),
+                onOpen: () => props.onOpenMember(row.member.id)
+              }}
             />
           ))}
-        </ChatMembersGroup>
+        </ChatAgentsGroup>
       </div>
     </section>
   );
 }
 
-function ChatMembersGroup(props: { label: string; testId: string; count: number; children: ReactNode }): JSX.Element | null {
+/** A folded group of the panel (T3 Code's "Previous agents"): a row with its
+ *  name, its count while folded and a chevron. */
+function ChatAgentsGroup(props: { label: string; testId: string; count: number; children: ReactNode }): JSX.Element | null {
   const [open, setOpen] = useState(false);
   if (props.count === 0) {
     return null;
   }
   return (
-    <div className="chat-members-previous" data-testid={props.testId}>
-      <button type="button" className="chat-members-previous-toggle" aria-expanded={open} onClick={() => setOpen((current) => !current)}>
-        {open ? <ChevronDown size={14} aria-hidden /> : <ChevronRight size={14} aria-hidden />}
-        <span>{props.label}</span>
-        <span className="chat-members-previous-count">{props.count}</span>
+    <div className="chat-side-section" data-testid={props.testId}>
+      <button type="button" className="chat-agents-group-toggle" aria-expanded={open} onClick={() => setOpen((current) => !current)}>
+        <Bot className="chat-agents-group-icon" size={16} strokeWidth={1.75} aria-hidden="true" />
+        <span className="chat-agents-group-label">{props.label}</span>
+        {!open && <span className="chat-agents-group-count">{props.count}</span>}
+        <ChevronDown className={open ? "chat-agents-group-chevron" : "chat-agents-group-chevron is-folded"} size={16} strokeWidth={1.75} aria-hidden="true" />
       </button>
-      {open && <div className="chat-members-list">{props.children}</div>}
-    </div>
-  );
-}
-
-function ChatMembersPanelRow(props: {
-  id: string;
-  status: SessionsMemberRow["status"];
-  mark: JSX.Element;
-  title: string;
-  detail: string;
-  since?: string;
-  stop?: () => void;
-  onOpen: () => void;
-}): JSX.Element {
-  return (
-    <div className="chat-members-row" data-testid="chat-members-row" data-participant-id={props.id} data-member-status={props.status}>
-      <button type="button" className="chat-members-row-main" onClick={props.onOpen}>
-        {props.mark}
-        <span className="chat-members-row-text">
-          <strong className="chat-members-row-name">{props.title}</strong>
-          {props.detail && <span className="chat-members-row-task">{props.detail}</span>}
-        </span>
-        <span className="chat-members-row-state">
-          {props.status !== "idle" && <ChatWorkStatusLabel status={props.status} />}
-          {props.since && <ChatElapsed className="chat-members-row-elapsed" since={props.since} />}
-        </span>
-      </button>
-      {props.stop && (
-        <IconButton
-          size="xs"
-          tone="danger"
-          icon={X}
-          label={`Stop ${props.title}`}
-          tooltip="Stop"
-          data-testid="chat-members-row-stop"
-          onClick={props.stop}
-        />
-      )}
+      {open && <ul className="chat-agent-list">{props.children}</ul>}
     </div>
   );
 }

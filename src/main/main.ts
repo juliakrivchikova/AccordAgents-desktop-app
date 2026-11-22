@@ -2526,6 +2526,11 @@ function registerIpc(): void {
     if (!result) {
       return result;
     }
+    // Members made before their task's title was kept with them get it once,
+    // after the chat is open (its snapshot then carries them).
+    void chatService.backfillSessionsTaskTitles(result.conversation).catch((error: unknown) => {
+      console.warn(`[sessions] Member titles could not be backfilled: ${error instanceof Error ? error.message : String(error)}`);
+    });
     // openConversation returns a paginated window of messages consistent with
     // result.messagePage. hydrateContextUsage runs withChatMutation ->
     // refreshStoredChatState, which reassigns conversation.messages to the full

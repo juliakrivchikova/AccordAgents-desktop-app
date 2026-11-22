@@ -69,7 +69,7 @@ export {
 export {
   SESSIONS_REMOVED_MEMBER_DETAIL, SESSIONS_WORK_STATUS_LABELS, firstTextLine, isMainSessionDelegationRosterCard, isMemberWorking, latestTaskByMember, memberRunningSince,
   openMemberCardMessages, sessionsDelegationSummary, sessionsFormerMemberStatus, sessionsMemberActivity, sessionsMemberDetail, sessionsMemberRows,
-  sessionsMemberStatus, sessionsMemberTitle, sessionsTaskEntries, sessionsTaskGroupLabel, sessionsTaskReplyLine, sessionsTaskRunningSince,
+  sessionsMemberStatus, sessionsMemberTitle, sessionsMembersWaitingForUser, sessionsMembersWaitingSince, sessionsRunningCount, sessionsTaskEntries, titleTaskByMember, sessionsCompactDuration, sessionsTaskDurationMs, sessionsTaskGroupLabel, sessionsTaskReplyLine, sessionsTaskRunningSince,
   sessionsTaskStatus, sessionsWaitingText
 } from "./mainSessionView";
 // A member's handle in a message, in code and outside it: which `@handle`

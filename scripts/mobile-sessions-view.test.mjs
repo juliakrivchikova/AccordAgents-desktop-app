@@ -242,6 +242,11 @@ test("the sessions view (T3 Code's way): tasks inside the turn's Worked fold, ch
     accord: document.querySelector(".sessions-accord-row")?.textContent || "",
     rows: [...document.querySelectorAll("#members-sheet-list .sessions-member-row")].map((row) => [row.dataset.memberSession, row.dataset.memberStatus,
       row.querySelector(".members-sheet-task").textContent, row.querySelector(".provider-logo").dataset.providerKind, Boolean(row.querySelector(".sessions-stop"))]),
+    // Every row the computer's anatomy: a dot on its glyph, its task, its time; no state words, no model.
+    anatomy: [...document.querySelectorAll("#members-sheet-list .sessions-member-row")].map((row) => [
+      row.querySelector(".sessions-agent-dot")?.className || "",
+      Boolean(row.querySelector(".sessions-agent-meta .sessions-elapsed.is-compact, .sessions-agent-meta .sessions-agent-time")),
+      /Running|Waiting for you|Done|Failed|Stopped|Claude Code|Antigravity/.test(row.innerText)]),
     groups: [...document.querySelectorAll("#members-sheet-list .members-previous-toggle")].map((node) => node.textContent),
     handles: /@[A-Za-z]/.test(document.getElementById("members-sheet-list").innerText),
     members: /members?/i.test(document.getElementById("members-sheet").innerText),
@@ -249,14 +254,16 @@ test("the sessions view (T3 Code's way): tasks inside the turn's Worked fold, ch
   }))()`);
   assert.equal(sheet.title, "", "the panel has no title");
   assert.equal(sheet.titleHidden, true);
-  assert.equal(sheet.stopAll, true);
+  assert.equal(sheet.stopAll, false, "no Stop all: each session is stopped from its row");
   assert.equal(sheet.main, false, "the main session is not listed: its settings are its composer chip");
   assert.equal(sheet.members, false, "the sessions view never says members");
   assert.equal(sheet.bare, true, "provider marks are bare glyphs");
   assert.match(sheet.accord, /^AccordButton colour · Drafts/, "the chat's Accord, by its document");
   assert.deepEqual(sheet.rows, [["p-drew", "running", "Restyle the login button", "claude-code", true], ["p-sam", "running", "Check the server logs for every failed…", "gemini-cli", true]],
-    "the members at work, by task, with Stop; the one that ended under Previous");
-  assert.deepEqual(sheet.groups, ["Previous1", "Removed1"]);
+    "the members at work, by task, with Stop; the one that ended under Previous agents");
+  assert.deepEqual(sheet.anatomy, [["sessions-agent-dot is-running", true, false], ["sessions-agent-dot is-running", true, false]],
+    "a pulsing dot and its time; no state words, no model");
+  assert.deepEqual(sheet.groups, ["Previous agents1", "Removed1"]);
   assert.equal(sheet.handles, false, "no handles in the panel");
   // Stop on sam, which has written nothing yet, names its turn.
   await app.evaluate(`document.querySelector('#members-sheet-list .sessions-member-row[data-member-session="p-sam"] .sessions-stop').click()`);
@@ -266,6 +273,7 @@ test("the sessions view (T3 Code's way): tasks inside the turn's Worked fold, ch
   await app.evaluate(`document.querySelector('#members-sheet-list [data-members-removed]').click()`);
   await app.waitFor(`document.querySelector('#members-sheet-list .sessions-member-row.is-former[data-member-session="${OLGA_ID}"]') !== null`, "Removed opened");
   assert.equal(await app.evaluate(`document.querySelector('#members-sheet-list .is-former .members-sheet-task').textContent`), "Summarise the old report");
+  assert.equal(await app.evaluate(`document.querySelector('#members-sheet-list .is-former .sessions-agent-dot')`), null, "an ended session has no dot");
   await app.evaluate(`document.querySelector('#members-sheet-list .is-former').click()`);
   await app.waitFor(`${title} === "Summarise the old report" && document.querySelector('#message-list .message-row[data-thread-root="olga-reply"]') !== null`, "the removed member's session");
   const former = await app.evaluate(`({ composer: getComputedStyle(document.getElementById("composer-form")).display, stop: document.querySelectorAll("#message-list .sessions-stop").length,
@@ -569,3 +577,73 @@ async function waitForOp(hub, matches, timeoutMs = 15_000) {
   }
   throw new Error("the phone did not send the operation");
 }
+
+test("the phone's side panel names a member by its delegation's title and shows one its permission holds up as Waiting for you, out of the running count", { timeout: 180_000 }, async (t) => {
+  const hub = await startMobileHub();
+  const site = await serveMobileShell({ port: 8391, hubOrigins: [hub.base] });
+  const profile = await tempProfile("aa-mobile-side-panel-");
+  const chrome = launchChrome({ port: 9541, profile, url: `${site.origin}/` });
+  let app;
+  t.after(async () => {
+    app?.close();
+    chrome.kill("SIGKILL");
+    await site.close();
+    await hub.close();
+    await rm(profile, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
+  });
+  // drew keeps its delegation's title with it (its delegation is not among
+  // the messages); taylor's titled delegation and an untitled follow-up are.
+  const drew = { ...DREW, taskTitle: "Restyle the button" };
+  await hub.createChat("conv-panel", {
+    title: "Side panel", participants: [MAIN, drew, TAYLOR, SAM], createdAt: at(40),
+    metadata: { mainSessionParticipantId: MAIN.id, chatView: "sessions" },
+    messages: [
+      { id: "pu1", role: "user", content: "Go", status: "done", createdAt: at(30), metadata: { deliveryTargets: [MAIN.id] } },
+      request("pd-taylor", "pu1", 29, [item(TAYLOR.id, "taylor", "Run the login tests and report.", "answered", 29, { title: "Login tests", doneAt: 20 })]),
+      request("pf-drew", "pu1", 10, [item(DREW.id, "drew", "Two additions to your task \"Restyle the button\": the phone too.", "running", 10)]),
+      request("pf-taylor", "pu1", 9, [item(TAYLOR.id, "taylor", "Two additions to your task \"Login tests\": add the logout test.", "running", 9)]),
+      request("pd-sam", "pu1", 8, [item(SAM.id, "sam", "Read the logs.", "running", 8, { title: "Server logs" })]),
+      { id: "pdrew-run", role: "participant", participantId: DREW.id, participantLabel: "@drew", content: "", status: "pending", createdAt: at(5),
+        metadata: { runId: "run-pdrew", sourceMessageId: "pf-drew" } },
+      { id: "ptaylor-run", role: "participant", participantId: TAYLOR.id, participantLabel: "@taylor", content: "Adding it", status: "pending", createdAt: at(4),
+        metadata: { runId: "run-ptaylor", sourceMessageId: "pf-taylor" } },
+      { id: "psam-run", role: "participant", participantId: SAM.id, participantLabel: "@sam", content: "Reading", status: "pending", createdAt: at(3),
+        metadata: { runId: "run-psam", sourceMessageId: "pd-sam" } }
+    ]
+  });
+  // drew's turn waits on its CLI's permission prompt; sam's script request
+  // does not hold its turn.
+  const now = new Date().toISOString();
+  const approval = (id, participantId, handle, toolName, summary) => ({
+    id, conversationId: "conv-panel", requesterParticipantId: participantId, requesterHandle: handle, requesterRoleConfigId: "software-engineer",
+    toolName, capability: "permissions.request", status: "pending", request: { toolName: "Write", input: { file_path: "/tmp/x" } }, summary, createdAt: now, updatedAt: now
+  });
+  await hub.raiseApproval("conv-panel", approval("ap-drew", DREW.id, "drew", "app_tool_permission", "Grant @drew Write"));
+  await hub.raiseApproval("conv-panel", approval("ap-sam", SAM.id, "sam", "app_scripts_request_change", "Add a scheduled script"));
+  app = await attachApp({ port: 9541 });
+  await pairPage(app, { hub, siteOrigin: site.origin, query: "qa=1" });
+  await openChat(app, "conv-panel");
+  await app.waitFor(`${visible("#chat-members-button")}`, "the panel's icon");
+  await app.waitFor(`document.getElementById("chat-members-button").getAttribute("aria-label") === "Side panel (2 running)"`,
+    "taylor and sam run; drew waits for the User", 20_000);
+  await app.evaluate(`document.getElementById("chat-members-button").click()`);
+  await app.waitFor(`${visible("#members-sheet")} && document.querySelectorAll("#members-sheet-list .sessions-member-row").length >= 3`, "the panel");
+  const rows = await app.evaluate(`[...document.querySelectorAll("#members-sheet-list .sessions-member-row")].map((row) =>
+    [row.dataset.memberSession, row.dataset.memberStatus, row.querySelector(".members-sheet-task").textContent])`);
+  assert.deepEqual(rows, [
+    [DREW.id, "waiting", "Restyle the button"],
+    [TAYLOR.id, "running", "Login tests"],
+    [SAM.id, "running", "Server logs"]
+  ], "titles from the delegations, never a follow-up's words; only the held-up turn waits");
+  // Every row: its dot and its time; no state words, no model.
+  const meta = await app.evaluate(`[...document.querySelectorAll("#members-sheet-list .sessions-member-row")].map((row) =>
+    [row.querySelector(".sessions-agent-dot").className, /^\\d/.test(row.querySelector(".sessions-agent-meta .sessions-elapsed, .sessions-agent-meta .sessions-agent-time")?.textContent || ""),
+      /Running|Waiting for you|Done|Failed|Stopped|Claude Code|Codex|Antigravity/.test(row.innerText), row.getAttribute("aria-label")])`);
+  assert.deepEqual(meta, [
+    ["sessions-agent-dot is-waiting", true, false, "Restyle the button, Waiting for you"],
+    ["sessions-agent-dot is-running", true, false, "Login tests, Running"],
+    ["sessions-agent-dot is-running", true, false, "Server logs, Running"]
+  ], "a dot per state, a time on every row (drew: how long it worked before it began to wait), the state in words only for a screen reader");
+  assert.deepEqual(await app.evaluate(`[...document.querySelectorAll("#members-sheet-list .sessions-member-row")].map((row) => Boolean(row.querySelector(".sessions-stop")))`),
+    [false, true, true], "Stop only while it runs: not on drew, which waits for the User though its turn is live");
+});

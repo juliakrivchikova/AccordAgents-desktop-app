@@ -158,7 +158,6 @@ test("the members panel lists the chat's latest Accord first, as a row that open
       activity={{ runningSince: new Map(), finishedAt: new Map() }}
       runIdsByParticipantId={new Map()}
       memberTitle={() => ""}
-      memberDetail={() => ""}
       onOpenMember={noop}
       onClose={noop}
     />
@@ -172,7 +171,7 @@ test("the members panel lists the chat's latest Accord first, as a row that open
   panel.unmount();
 
   const none = renderIn(true, (
-    <ChatMembersPanel rows={{ current: [], previous: [] }} activity={{ runningSince: new Map(), finishedAt: new Map() }} runIdsByParticipantId={new Map()} memberTitle={() => ""} memberDetail={() => ""} onOpenMember={noop} onClose={noop} />
+    <ChatMembersPanel rows={{ current: [], previous: [] }} activity={{ runningSince: new Map(), finishedAt: new Map() }} runIdsByParticipantId={new Map()} memberTitle={() => ""} onOpenMember={noop} onClose={noop} />
   ));
   assert.equal(none.root.findAll(byTestId("chat-members-accord")).length, 0, "no Accord, no row");
   none.unmount();

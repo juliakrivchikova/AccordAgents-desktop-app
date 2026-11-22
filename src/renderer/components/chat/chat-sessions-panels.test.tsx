@@ -10,6 +10,8 @@ import { FORK_TO_NEW_CHAT_DETAIL, FORK_TO_NEW_CHAT_LABEL } from "../../../shared
 import { ChatParticipantRosterRow } from "./chat-participant-roster-row";
 import { forkToNewChatReasonFor, machineForkSupportFrom } from "./use-fork-to-new-chat";
 import { ChatMembersPanel } from "./chat-members-panel";
+import { ChatAgentCard, formatCompactDuration } from "./chat-agent-row";
+import { memberEffortLabel, useMemberModelSummary } from "./use-member-model-summary";
 import { ChatMemberComposerControls, ChatModelMenu, type ChatModelAccessPatch } from "./chat-model-access-picker";
 import { latestAndOlderModels, modelFamily } from "./chat-model-groups";
 import { resetMemberModelCatalogs } from "./chat-member-model-name";
@@ -40,66 +42,174 @@ const SETTINGS = { chatRoleConfigs: [], chatSavedPrompts: [], chatParticipantCon
   get: (_target, name) => (String(name).startsWith("on") ? () => noop : async () => undefined)
 });
 
-test("the members panel lists every member but the main session, ended ones under Previous, each with its state, task and Stop", () => {
+test("the side panel lists every session but the main session as T3 Code does: glyph and state dot, task title, model name and time, Stop per row only", async () => {
   const messages = sessionsMessages();
-  const rows = sessionsMemberRows(PARTICIPANTS, MAIN.id, STATUSES, latestTaskByMember(messages));
+  // drew runs on Claude Code's "opus": the row names the model as the CLI's list does.
+  const drew = { ...DREW, kind: "claude-code" as const, model: "opus" };
+  const participants = PARTICIPANTS.map((member) => member.id === DREW.id ? drew : member);
+  const rows = sessionsMemberRows(participants, MAIN.id, STATUSES, latestTaskByMember(messages));
   const stopped: Array<readonly string[]> = [];
   const opened: string[] = [];
+  const bridge = (window as unknown as { consensus: unknown }).consensus;
+  resetMemberModelCatalogs();
+  (window as unknown as { consensus: unknown }).consensus = new Proxy({}, {
+    get: (_target, name) => name === "listProviderModels"
+      ? async (kind: string) => kind === "claude-code"
+        ? { models: [{ id: "opus", label: "Opus 5.5", recommended: true, source: "cli" }, { id: "haiku", label: "Haiku 5.5", source: "cli" }] }
+        : undefined
+      : String(name).startsWith("on") ? () => noop : async () => undefined
+  });
+  let renderer: ReturnType<typeof create> | undefined;
+  try {
+    await act(async () => {
+      renderer = create(
+        <TooltipProvider>
+          <ChatMembersPanel
+            rows={rows}
+            formerRows={[{ member: { id: "p-gone", handle: "gone", kind: "gemini-cli" }, title: "Old task", status: "done" }]}
+            activity={sessionsMemberActivity(messages)}
+            runIdsByParticipantId={new Map([[DREW.id, ["run-drew"]]])}
+            memberTitle={(id) => sessionsMemberTitle(participants.find((member) => member.id === id), latestTaskByMember(messages).get(id)?.item)}
+            onOpenMember={(id) => opened.push(id)}
+            onStopRuns={(runIds) => stopped.push(runIds)}
+            onClose={noop}
+          />
+        </TooltipProvider>
+      );
+    });
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 0)); });
+    const root = renderer!.root;
+    const memberRows = () => root.findAll(byTestId("chat-members-row"));
+    assert.deepEqual(memberRows().map((row) => [row.props["data-participant-id"], row.props["data-member-status"]]), [[DREW.id, "running"], [TAYLOR.id, "waiting"]],
+      "the main session is not listed; gera's task is done, so it waits under Previous agents");
+    assert.equal(textOf(root.find(byTestId("chat-members-agents")).find((node) => node.type === "h3")), "Agents · 1 running");
+    const drewRow = memberRows()[0]!;
+    assert.equal(textOf(drewRow.find((node) => typeof node.props?.className === "string" && node.props.className === "chat-agent-title")), "Task for drew: fix the drew part", "named by its task");
+    assert.doesNotMatch(textOf(drewRow), /Opus|opus|Claude Code/, "no model in a row (the User, 2026-11-22): its hover card names it");
+    // The name its hover card gives the model: the CLI's list's, never the id.
+    let probe: ReturnType<typeof create> | undefined;
+    const ModelProbe = (): JSX.Element => <span>{useMemberModelSummary(drew, { machines: [], status: [] }).model}</span>;
+    await act(async () => { probe = create(<ModelProbe />); });
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 0)); });
+    assert.equal(textOf(probe!.root.find((node) => node.type === "span")), "Opus 5.5");
+    act(() => probe!.unmount());
+    assert.doesNotMatch(textOf(root), /@/, "no handles");
+    assert.equal(drewRow.findAll((node) => node.props?.["data-provider-kind"] === "claude-code").length, 1, "its provider's glyph");
+    assert.equal(drewRow.findAll((node) => typeof node.props?.className === "string" && node.props.className === "chat-agent-dot is-running").length, 1, "a dot for its state");
+    assert.equal(drewRow.findAll(byTestId("chat-agent-time")).length, 1, "how long it runs");
+    // No state in words in a row (the User, 2026-11-22): the dot says it, the card and the accessible name in words.
+    const taylorRow = memberRows()[1]!;
+    assert.doesNotMatch(textOf(taylorRow), /Waiting for you|Running|Done|Failed|Stopped/, "no state words in a row");
+    assert.equal(taylorRow.findAll((node) => typeof node.props?.className === "string" && node.props.className === "chat-agent-dot is-waiting").length, 1, "its dot says it waits");
+    assert.match(String(taylorRow.find((node) => node.type === "button" && node.props.className === "chat-agent-row-main").props["aria-label"]), /Waiting for you/, "said to a screen reader");
+    assert.doesNotMatch(textOf(drewRow), /Running/, "a running row says so only by its dot");
+    assert.doesNotMatch(textOf(taylorRow), /Antigravity/, "no model or CLI name in a row");
+    assert.equal(memberRows()[1]!.findAll(byTestId("chat-members-row-stop")).length, 0, "nothing to stop for a session that runs nothing");
+    assert.equal(root.findAll(byTestId("chat-members-stop-all")).length, 0, "no Stop all");
+    assert.doesNotMatch(textOf(root), /Stop all/);
+
+    act(() => drewRow.findAll(byTestId("chat-members-row-stop"))[0]!.props.onClick(click));
+    assert.deepEqual(stopped, [["run-drew"]], "Stop stops that session only");
+
+    act(() => drewRow.findAll((node) => node.type === "button" && node.props.className === "chat-agent-row-main")[0]!.props.onClick());
+    assert.deepEqual(opened, [DREW.id], "a click opens its session");
+
+    const previous = root.find(byTestId("chat-members-previous"));
+    assert.equal(textOf(previous), "Previous agents1", "folded, with its count");
+    act(() => previous.findAll((node) => node.type === "button")[0]!.props.onClick());
+    assert.deepEqual(memberRows().map((row) => row.props["data-participant-id"]), [DREW.id, TAYLOR.id, GERA.id]);
+    const geraRow = memberRows()[2]!;
+    assert.equal(geraRow.props["data-member-status"], "done");
+    assert.equal(geraRow.findAll((node) => typeof node.props?.className === "string" && node.props.className.startsWith("chat-agent-dot")).length, 0,
+      "an ended session has no dot: its state no longer matters (its card still says it)");
+    assert.equal(textOf(root.find(byTestId("chat-members-previous")).find((node) => node.type === "button" && node.props.className === "chat-agents-group-toggle")), "Previous agents", "the count goes once it is open");
+
+    const removed = root.find(byTestId("chat-members-removed"));
+    assert.equal(textOf(removed), "Removed1", "a session no longer in the chat, folded");
+    act(() => removed.findAll((node) => node.type === "button")[0]!.props.onClick());
+    const gone = memberRows().find((row) => row.props["data-participant-id"] === "p-gone")!;
+    assert.match(textOf(gone), /Old task/);
+    assert.equal(gone.findAll((node) => node.props?.["data-provider-kind"] === "gemini-cli").length, 1, "it keeps the glyph its task named");
+    assert.equal(gone.findAll(byTestId("chat-members-row-stop")).length, 0, "read-only: no Stop");
+    act(() => gone.findAll((node) => node.type === "button" && node.props.className === "chat-agent-row-main")[0]!.props.onClick());
+    assert.deepEqual(opened, [DREW.id, "p-gone"], "its session opens");
+    act(() => renderer!.unmount());
+  } finally {
+    (window as unknown as { consensus: unknown }).consensus = bridge;
+    resetMemberModelCatalogs();
+  }
+});
+
+test("every row has the same anatomy: a waiting one says how long it worked before it began to wait, an ended one its task's time", () => {
+  const started = new Date(Date.now() - 5 * 60_000).toISOString();
+  const waited = new Date(Date.now() - 3 * 60_000).toISOString();
+  const rows = {
+    current: [
+      { participant: TAYLOR, status: "waiting" as const },
+      { participant: DREW, status: "stopped" as const, task: { messageId: "m", batch: {} as never, item: {} as never } }
+    ],
+    previous: []
+  };
   let renderer: ReturnType<typeof create> | undefined;
   act(() => {
     renderer = create(
       <TooltipProvider>
-        <ChatMembersPanel
-          rows={rows}
-          formerRows={[{ member: { id: "p-gone", handle: "gone", kind: "gemini-cli" }, title: "Old task", status: "done" }]}
-          activity={sessionsMemberActivity(messages)}
-          runIdsByParticipantId={new Map([[DREW.id, ["run-drew"]]])}
-          memberTitle={(id) => sessionsMemberTitle(PARTICIPANTS.find((member) => member.id === id), latestTaskByMember(messages).get(id)?.item)}
-          memberDetail={(member) => member.kind === "codex-cli" ? "Codex CLI · gpt-5" : "Claude Code"}
-          onOpenMember={(id) => opened.push(id)}
-          onStopRuns={(runIds) => stopped.push(runIds)}
-          onClose={noop}
-        />
+        <ChatMembersPanel rows={rows} activity={{ runningSince: new Map([[TAYLOR.id, started]]), finishedAt: new Map() }} runIdsByParticipantId={new Map([[TAYLOR.id, ["run-taylor"]]])}
+          onStopRuns={noop}
+          memberTitle={(id) => id === TAYLOR.id ? "Ask about the DB" : "Restyle"} waitingSince={new Map([[TAYLOR.id, waited]])}
+          taskDurationMs={() => 245_000} onOpenMember={noop} onClose={noop} />
       </TooltipProvider>
     );
   });
-  const root = renderer!.root;
-  const memberRows = () => root.findAll(byTestId("chat-members-row"));
-  assert.deepEqual(memberRows().map((row) => [row.props["data-participant-id"], row.props["data-member-status"]]), [[DREW.id, "running"], [TAYLOR.id, "waiting"]],
-    "the main session is not listed; gera's task is done, so it waits under Previous");
-  const drew = memberRows()[0]!;
-  assert.equal(textOf(drew.find((node) => node.type === "strong")), "Task for drew: fix the drew part", "named by its task");
-  assert.match(textOf(drew), /Codex CLI · gpt-5/, "its provider and model under it");
-  assert.doesNotMatch(textOf(root), /@/, "no handles");
-  assert.equal(drew.findAll((node) => node.props?.["data-provider-kind"] === DREW.kind).length, 1, "its provider's logo");
-  assert.match(textOf(drew), /Running/);
-  assert.equal(drew.findAll((node) => typeof node.type === "string" && typeof node.props.className === "string" && node.props.className.includes("chat-members-row-elapsed")).length, 1);
-  assert.equal(memberRows()[1]!.findAll(byTestId("chat-members-row-stop")).length, 0, "nothing to stop for a member that runs nothing");
-
-  act(() => drew.findAll(byTestId("chat-members-row-stop"))[0]!.props.onClick(click));
-  act(() => root.findAll(byTestId("chat-members-stop-all"))[0]!.props.onClick(click));
-  assert.deepEqual(stopped, [["run-drew"], ["run-drew"]]);
-
-  act(() => drew.findAll((node) => node.type === "button" && node.props.className === "chat-members-row-main")[0]!.props.onClick());
-  assert.deepEqual(opened, [DREW.id]);
-
-  const previous = root.find(byTestId("chat-members-previous"));
-  assert.match(textOf(previous), /Previous1/);
-  act(() => previous.findAll((node) => node.type === "button")[0]!.props.onClick());
-  assert.deepEqual(memberRows().map((row) => row.props["data-participant-id"]), [DREW.id, TAYLOR.id, GERA.id]);
-  assert.match(textOf(memberRows()[2]!), /Done/);
-
-  const removed = root.find(byTestId("chat-members-removed"));
-  assert.match(textOf(removed), /Removed1/, "a member no longer in the chat, folded");
-  act(() => removed.findAll((node) => node.type === "button")[0]!.props.onClick());
-  const gone = memberRows().find((row) => row.props["data-participant-id"] === "p-gone")!;
-  assert.match(textOf(gone), /Old task/);
-  assert.match(textOf(gone), /Removed from the chat/, "the same words as the phone");
-  assert.equal(gone.findAll((node) => node.props?.["data-provider-kind"] === "gemini-cli").length, 1, "it keeps the logo its task named");
-  assert.equal(gone.findAll(byTestId("chat-members-row-stop")).length, 0, "read-only: no Stop");
-  act(() => gone.findAll((node) => node.type === "button" && node.props.className === "chat-members-row-main")[0]!.props.onClick());
-  assert.deepEqual(opened, [DREW.id, "p-gone"], "its session opens");
+  const times = renderer!.root.findAll(byTestId("chat-agent-time")).map((node) => textOf(node));
+  assert.deepEqual(times, ["2m", "4m"], "waiting: from its turn's start to when it began to wait; stopped: its task's time");
+  assert.equal(renderer!.root.findAll(byTestId("chat-members-row-stop")).length, 0, "Stop only while it runs: not on one waiting for the User, though its run is live");
   act(() => renderer!.unmount());
+});
+
+test("an agent's hover card names its CLI, model and effort, its state and time, its background work and what it does now", () => {
+  const card = (row: Parameters<typeof ChatAgentCard>[0]["row"], backgroundTasks = 0): string => {
+    let renderer: ReturnType<typeof create> | undefined;
+    act(() => { renderer = create(<ChatAgentCard row={row} detail="Claude Code · Opus 5.5 · High" backgroundTasks={backgroundTasks} />); });
+    const text = renderer!.root.children.map((child) => textOf(child as ReactTestInstance)).join("|");
+    act(() => renderer!.unmount());
+    return text;
+  };
+  const base = { id: "p-drew", mark: null, title: "Ход как в Claude Code", onOpen: noop };
+  const running = card({ ...base, status: "running", since: new Date(Date.now() - 516_000).toISOString(), step: "npm run build" }, 2);
+  assert.match(running, /^Ход как в Claude Code\|Claude Code · Opus 5\.5 · High\|Running · 8m 3\ds · 2 background tasks\|npm run build$/);
+  assert.equal(card({ ...base, status: "done", durationMs: 245_000, result: "Done: new chats open in General." }),
+    "Ход как в Claude Code|Claude Code · Opus 5.5 · High|Done · 4m 5s|Done: new chats open in General.");
+  assert.equal(card({ ...base, status: "waiting" }), "Ход как в Claude Code|Claude Code · Opus 5.5 · High|Waiting for you", "no time known: none");
+  assert.equal(card({ ...base, status: "waiting", durationMs: 125_000 }), "Ход как в Claude Code|Claude Code · Opus 5.5 · High|Waiting for you · 2m 5s", "how long it worked before");
+  assert.equal(card({ ...base, status: "idle" }), "Ход как в Claude Code|Claude Code · Opus 5.5 · High|", "nothing more for one that never had a task");
+  assert.equal(formatCompactDuration(5_000), "5s");
+  assert.equal(formatCompactDuration(516_000), "8m");
+  assert.equal(formatCompactDuration(90 * 60_000), "1.5h");
+  assert.equal(formatCompactDuration(12 * 3_600_000), "12h");
+  // The edges between the units.
+  assert.equal(formatCompactDuration(59_999), "59s");
+  assert.equal(formatCompactDuration(60_000), "1m");
+  assert.equal(formatCompactDuration(3_599_999), "59m");
+  assert.equal(formatCompactDuration(3_600_000), "1h");
+  assert.equal(formatCompactDuration(599 * 60_000), "9.9h");
+  assert.equal(formatCompactDuration(600 * 60_000), "10h");
+  assert.equal(formatCompactDuration(-1), "0s");
+});
+
+test("a row's effort is the composer chip's: its own when its model has it, else her config's for the model her config starts", () => {
+  const efforts = [{ id: "low", label: "Low" }, { id: "high", label: "High" }, { id: "max", label: "Max" }];
+  const catalog = { models: [
+    { id: "opus", label: "Opus 5.5", recommended: true, source: "cli", supportedReasoningEfforts: efforts },
+    { id: "haiku", label: "Haiku 5.5", source: "cli", supportedReasoningEfforts: [{ id: "low", label: "Low" }] }
+  ] } as unknown as Parameters<typeof memberEffortLabel>[1];
+  const claude = { kind: "claude-code" as const };
+  assert.equal(memberEffortLabel({ ...claude, reasoningEffort: "high" }, catalog, undefined), "High", "its own");
+  assert.equal(memberEffortLabel({ ...claude, model: "haiku", reasoningEffort: "high" }, catalog, undefined), undefined, "its model has no High");
+  assert.equal(memberEffortLabel(claude, catalog, { reasoningEffort: "max" } as never), "Max", "her config's, for the default model");
+  assert.equal(memberEffortLabel(claude, catalog, { model: "haiku", reasoningEffort: "max" } as never), undefined, "her config starts Haiku, which has no Max");
+  assert.equal(memberEffortLabel({ ...claude, model: "opus" }, catalog, { reasoningEffort: "max" } as never), undefined, "a model of its own: her config's effort is not its");
+  assert.equal(memberEffortLabel({ ...claude, hostId: "host-1" }, catalog, { reasoningEffort: "max" } as never), undefined, "an added provider: not her CLI's config");
 });
 
 test("with nobody running or waiting, the members panel lists every member as it is, no folded Previous", () => {
@@ -113,7 +223,7 @@ test("with nobody running or waiting, the members panel lists every member as it
   act(() => {
     renderer = create(
       <TooltipProvider>
-        <ChatMembersPanel rows={rows} activity={sessionsMemberActivity(messages)} runIdsByParticipantId={new Map()} memberTitle={() => "A task"} memberDetail={() => ""} onOpenMember={noop} onClose={noop} />
+        <ChatMembersPanel rows={rows} activity={sessionsMemberActivity(messages)} runIdsByParticipantId={new Map()} memberTitle={() => "A task"} onOpenMember={noop} onClose={noop} />
       </TooltipProvider>
     );
   });
@@ -293,7 +403,7 @@ test("the side panel has no title and no main session row, says nothing when emp
       <TooltipProvider>
         <ChatMembersPanel
           rows={sessionsMemberRows(PARTICIPANTS, MAIN.id, STATUSES, latestTaskByMember(messages))}
-          activity={sessionsMemberActivity(messages)} runIdsByParticipantId={new Map()} memberTitle={() => "A task"} memberDetail={() => ""}
+          activity={sessionsMemberActivity(messages)} runIdsByParticipantId={new Map()} memberTitle={() => "A task"}
           onOpenMember={noop} onClose={noop}
         />
       </TooltipProvider>
@@ -312,7 +422,7 @@ test("the side panel has no title and no main session row, says nothing when emp
     empty = create(
       <TooltipProvider>
         <ChatMembersPanel rows={{ current: [], previous: [] }} activity={sessionsMemberActivity([])} runIdsByParticipantId={new Map()}
-          memberTitle={() => ""} memberDetail={() => ""} onOpenMember={noop} onClose={noop} />
+          memberTitle={() => ""} onOpenMember={noop} onClose={noop} />
       </TooltipProvider>
     );
   });

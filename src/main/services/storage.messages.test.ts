@@ -687,3 +687,49 @@ function basicConversation(id: string, messages: ChatMessage[]): Conversation {
     metadata: {}
   };
 }
+
+test("memberTaskMessages reads a member's delegation when its newest tasks are untitled follow-ups", async () => {
+  const request = (id: string, sequence: number, title?: string, delegation = false): { sequence: number; payloadJson: string } => ({
+    sequence,
+    payloadJson: JSON.stringify({
+      id,
+      role: "participant",
+      content: "",
+      createdAt: `2026-11-22T10:${String(sequence).padStart(2, "0")}:00.000Z`,
+      metadata: {
+        participantRequest: {
+          id: `b-${id}`,
+          ...(delegation ? { delegation: { start: "clean" } } : {}),
+          items: [{ targetParticipantId: "p-drew", prompt: `Follow-up ${id}`, ...(title ? { title } : {}), createdAt: `2026-11-22T10:${String(sequence).padStart(2, "0")}:00.000Z` }]
+        }
+      }
+    })
+  });
+  const asked: string[] = [];
+  const followUps = [10, 9, 8, 7, 6].map((sequence) => request(`f${sequence}`, sequence));
+  const storage = fakeStorage(async (sql) => {
+    asked.push(sql);
+    return sql.includes(`'"delegation"'`) ? [request("d1", 1, "Новые чаты в General", true)] : followUps;
+  });
+  const messages = await storage.memberTaskMessages("chat", "p-drew");
+  assert.deepEqual(messages.map((message) => message.id), ["d1", "f6", "f7", "f8", "f9", "f10"], "the delegation first, then the newest five, oldest first");
+  assert.equal(asked.length, 2);
+
+  // A titled task among the newest: nothing more is read.
+  const titledAsked: string[] = [];
+  const titled = fakeStorage(async (sql) => {
+    titledAsked.push(sql);
+    return [request("f10", 10), request("d9", 9, "Ход как в Claude Code", true)];
+  });
+  assert.deepEqual((await titled.memberTaskMessages("chat", "p-drew")).map((message) => message.id), ["d9", "f10"]);
+  assert.equal(titledAsked.length, 1);
+
+  // An untitled delegation already among the newest: listed once.
+  const untitledAsked: string[] = [];
+  const untitled = fakeStorage(async (sql) => {
+    untitledAsked.push(sql);
+    return sql.includes(`'"delegation"'`) ? [request("d5", 5, undefined, true)] : [request("f6", 6), request("d5", 5, undefined, true)];
+  });
+  assert.deepEqual((await untitled.memberTaskMessages("chat", "p-drew")).map((message) => message.id), ["d5", "f6"]);
+  assert.equal(untitledAsked.length, 2);
+});

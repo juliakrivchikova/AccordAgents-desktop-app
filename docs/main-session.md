@@ -28,8 +28,9 @@ verbatim there). Modelled on T3 Code (`~/reference/t3code`,
   said so). A task given after its turn ended comes back on its own.
 - **A member never gets broader rights than the main session** (repo, edits,
   web, shell and its rules, mode, member requests, member management).
-- **No limit** on how many members run at once; every member is listed and
-  can be stopped, and there is Stop all.
+- **No limit** on how many members run at once; every member is listed in
+  the side panel and each is stopped from its own row (no Stop all, as in
+  T3 Code; the User, 2026-11-22).
 - **Members ask the main session, not the User.** It answers from what it
   knows of the User's intent and asks the User only when it cannot.
   Approvals of members' commands still reach the User on the main timeline.
@@ -78,12 +79,27 @@ chat without a main session is always `classic`; its switch is disabled.
     provider's bare glyph (Claude's orange asterisk, Codex's glyph,
     Antigravity's "A", sized to the text line, no tile; `ProviderIcon`
     `bare`, the phone's `providerLogoElement`; Settings → Local CLI setup and
-    the classic New chat keep the tile) and its current or latest task's short title, as
-    T3 Code titles a thread: the 2–6 word `title` the main session gives
-    the task in `app_chat_delegate_task`, else the task's first sentence cut
-    at a word to 40 characters (`sessionsTaskTitle`, `sessionsMemberTitle`;
-    the phone gets it with the task), with provider, model and a non-generic role
-    under it (`sessionsMemberDetail`); in a message, in prose and in code
+    the classic New chat keep the tile) and the short title of the task it
+    is named by, as T3 Code titles a thread once: the 2–6 word `title` the
+    main session gave the task in `app_chat_delegate_task`, kept with the
+    member when it is added (`ChatParticipant.taskTitle`: it names the
+    member however much of the chat a device has loaded, on the desktop,
+    the phone, her server's alerts and Activity; a machine cannot change
+    it, Fork to new chat does not carry it; members made before get it once
+    when the desktop opens the chat, from its whole stored history: their
+    delegation's title, else their first task's first line,
+    `backfillSessionsTaskTitles`, `metadata.sessionsTaskTitlesBackfilled`);
+    for a member without one the newest titled task among the loaded
+    messages, else its first task's first sentence cut at a word to 40
+    characters, else "Agent", never its handle; a later task without a title of its own ("Two additions to
+    your task …") never renames it, while its state follows its latest task
+    (`titleTaskByMember`, `sessionsTaskTitle`, `sessionsMemberTitle`; tasks
+    travel to the phone saying whether the main session gave their title,
+    `MobileTaskItem.titled`), with its
+    CLI, its model by its name in the CLI's list ("Opus 5.5", never the id
+    "opus"; `useMemberModelSummary`, as its composer chip), its effort and a
+    non-generic role in its hover card and its session's header
+    (`sessionsMemberDetail`); in a message, in prose and in code
     alike, only an exact `@handle` of a member or a former member (at most
     32 characters, not part of a longer word, an e-mail address, a path or
     a package name such as `@types/node`) is a chip (logo + task) that
@@ -390,11 +406,40 @@ chat without a main session is always `classic`; its switch is disabled.
     a dot while an Accord is open); the view switch is in the chat title's
     menu and the roster's popover is not shown. The side panel has no title,
     only its close button, as Claude desktop's right panel (the User,
-    2026-11-21); it lists the chat's latest Accord and the sessions the main
-    session delegated (provider, task, status, elapsed time, Stop) with Stop
-    all, never the main session itself (its settings are its composer's controls);
-    while one runs or waits for the User the ended ones are under
-    "Previous"; those no longer in the chat are under "Removed"
+    2026-11-21), and is laid out as T3 Code's (the User, 2026-11-22;
+    `chat-members-panel.tsx`, `chat-agent-row.tsx`): sections divided by a
+    hairline; the chat's latest Accord as a row; then "Agents · N running"
+    (just "Agents" while none runs), the sessions the main session
+    delegated, never the main session itself (its settings are its
+    composer's controls), one 32px line each: the provider's bare glyph
+    with a dot only while its state matters, its only mark of it in the row
+    (no state words there; the User, 2026-11-22): Running, the accent, the
+    dot fading in and out with the app's own pulse (`chat-rt-pulse`, still
+    for reduced motion); Waiting for
+    you, amber; a session that ended (done, failed, stopped) or never
+    worked has no dot, in Previous agents and anywhere else, its hover
+    card says it (only the states `SessionsWorkStatus` has; Waiting for you also while its run is live when the User
+    holds its turn: its CLI's tool permission, a connector sign-in, a Codex
+    approval naming its run, or a choice or mention question of its that no
+    newer turn of its went past (`sessionsMembersWaitingForUser`,
+    `approvalHoldsTurn`); a request that returns at once, such as a script,
+    a role or a member, does not; its task rows and its session's header
+    say the same, and the phone reads it from its permission cards'
+    `requesterParticipantId` and `holdsTurn`), the title on one line, and
+    muted at the end how long it runs ("8m", T3 Code's compact time) or
+    worked (one waiting for the User: from its turn's start to when it
+    began to wait), the same on every row; no model in a row (the User,
+    2026-11-22): its model and effort are in its hover card, its state in
+    words in its hover card and its accessible name. The phone's side panel
+    draws the same rows, without Stop all. Hovering a row that runs shows a quiet square
+    Stop in the time's place (only while it runs: one waiting for her is
+    stopped from its session or answered); there is no Stop all. Hovering a row shows,
+    to its left, T3 Code's card: the title, CLI · model · effort (and a
+    non-generic role), the state · full time · "N background tasks", then
+    what it does now (its newest step) or how its task ended (its reply's
+    first line, or why it failed). While one runs or waits for the User the
+    ended ones are folded under "Previous agents" (its count while
+    folded); those no longer in the chat are folded under "Removed"
     (`sessionsFormerMembers`). With nothing delegated it says nothing. A member opens its **whole session** in the
     same panel (Back to the list) with its … menu in its header and a composer
     that writes to it only; a removed member's session is read-only;

@@ -1636,6 +1636,9 @@
       // member every message without an addressee goes to) and a draft's
       // administrator. Dropping it sent a message to nobody.
       ...(typeof value.roleConfigId === "string" && value.roleConfigId ? { roleConfigId: value.roleConfigId } : {}),
+      // The title its delegation gave it: its name in the sessions view
+      // (shared sessionsMemberTitle), however much of the chat is loaded.
+      ...(typeof value.taskTitle === "string" && value.taskTitle.trim() ? { taskTitle: value.taskTitle } : {}),
       // Where this member actually runs, and what that machine needs to run
       // it. Present only for members that live on a machine.
       homeMachineId: typeof value.homeMachineId === "string" ? value.homeMachineId : undefined,
@@ -5704,8 +5707,11 @@
         targetParticipantId: item.targetParticipantId,
         targetHandle: text(item.targetHandle),
         prompt: text(item.prompt),
-        // Its short title, as the desktop names the member by it.
-        ...(typeof item.title === "string" && item.title ? { title: item.title } : {}),
+        // Its short title when the main session gave it: only that title
+        // names the member, as on the desktop (shared titleTaskByMember); a
+        // follow-up's is made again from its text. A server from before
+        // does not say which, so its title is kept.
+        ...(typeof item.title === "string" && item.title && item.titled !== false ? { title: item.title } : {}),
         status: item.status,
         createdAt: text(item.createdAt),
         ...(typeof item.updatedAt === "string" && item.updatedAt ? { updatedAt: item.updatedAt } : {}),
@@ -10558,7 +10564,7 @@
       }
       // The sessions view's running times count the way the desktop's do.
       for (const node of document.querySelectorAll(".sessions-elapsed")) {
-        const next = formatWorked(node.dataset.startedAt);
+        const next = node.classList.contains("is-compact") ? compactElapsed(node.dataset.startedAt) : formatWorked(node.dataset.startedAt);
         if (node.textContent !== next) node.textContent = next;
       }
     }, 1000);
@@ -12583,7 +12589,22 @@
     const messagesById = new Map(messages.map(function (message) { return [message.id, message]; }));
     const activity = shared.sessionsMemberActivity(messages);
     const tasksByMember = shared.latestTaskByMember(messages);
-    const memberRows = shared.sessionsMemberRows(members, mainId, statusById, tasksByMember, activity.finishedAt);
+    // The task each member is named by: its delegation's, else its first; a
+    // follow-up never renames it (shared titleTaskByMember, as the computer).
+    const titleTasksByMember = typeof shared.titleTaskByMember === "function" ? shared.titleTaskByMember(messages) : tasksByMember;
+    // A member held up by the User (its choice or mention question no newer
+    // turn of its went past, a permission its turn waits on) waits for her
+    // even while its turn runs, as on the computer (shared
+    // sessionsMembersWaitingForUser). A server from before marks no card.
+    const waitingSince = typeof shared.sessionsMembersWaitingSince === "function" ? shared.sessionsMembersWaitingSince(messages) : new Map();
+    controlCardsFor(conversationId).forEach(function (card) {
+      if (!card || card.status !== "pending" || card.holdsTurn !== true || typeof card.requesterParticipantId !== "string") return;
+      if (!members.some(function (item) { return item.id === card.requesterParticipantId; })) return;
+      const known = waitingSince.get(card.requesterParticipantId);
+      if (known === undefined || (card.createdAt && (!known || card.createdAt < known))) waitingSince.set(card.requesterParticipantId, card.createdAt || "");
+    });
+    const waitingForUser = new Set(waitingSince.keys());
+    const memberRows = shared.sessionsMemberRows(members, mainId, statusById, tasksByMember, activity.finishedAt, waitingForUser);
     const formerMembers = shared.sessionsFormerMembers(messages, members, mainId);
     const openCardIds = new Set(shared.openMemberCardMessages(messages, index).map(function (message) { return message.id; }));
     const mainMessages = shared.mainTimelineMessages(messages, index);
@@ -12598,12 +12619,12 @@
     const state = {
       conversationId: conversationId, chat: chat, mainId: mainId, mainMember: mainMember, mainHandle: mainMember ? mainMember.handle : "main",
       rows: rows, messages: messages, index: index, members: members, formerMembers: formerMembers,
-      statusById: statusById, runsByMember: runsByMember, tasksByMember: tasksByMember, memberRows: memberRows, waitingIds: waitingIds,
+      statusById: statusById, runsByMember: runsByMember, tasksByMember: tasksByMember, titleTasksByMember: titleTasksByMember, waitingForUser: waitingForUser, waitingSince: waitingSince, memberRows: memberRows, waitingIds: waitingIds,
       activity: activity, messagesById: messagesById, replies: replies, openCardIds: openCardIds,
       mainIds: new Set(mainMessages.map(function (message) { return message.id; })), placement: placement,
-      runningCount: members.filter(function (member) {
-        return member.id !== mainId && shared.isMemberWorking(statusById.get(member.id));
-      }).length,
+      // Running, not waiting for the User, as the computer counts them.
+      runningCount: typeof shared.sessionsRunningCount === "function" ? shared.sessionsRunningCount(memberRows)
+        : memberRows.current.filter(function (row) { return row.status === "running"; }).length,
       knownMember: function (id) {
         return id !== mainId && (members.some(function (member) { return member.id === id; }) || formerMembers.some(function (member) { return member.id === id; }));
       }
@@ -12618,15 +12639,16 @@
     return state;
   }
 
-  /** A member as the sessions view names it (T3 Code's way): its current or
-   *  latest task's short title (shared sessionsTaskTitle); no handle. */
+  /** A member as the sessions view names it (T3 Code's way): the short
+   *  title of the task it is named by (shared titleTaskByMember: its
+   *  delegation's, else its first); no handle. */
   function sessionsMemberTitleOf(state, memberOrId) {
     const shared = sessionsRules();
     const id = typeof memberOrId === "string" ? memberOrId : memberOrId && memberOrId.id;
     const member = typeof memberOrId === "string"
       ? state.members.find(function (item) { return item.id === id; }) || state.formerMembers.find(function (item) { return item.id === id; })
       : memberOrId;
-    const task = id ? state.tasksByMember.get(id) : undefined;
+    const task = id ? (state.titleTasksByMember || state.tasksByMember).get(id) : undefined;
     return shared.sessionsMemberTitle(member, task ? task.item : undefined);
   }
 
@@ -12722,7 +12744,7 @@
     const names = state.viewNames;
     const appText = function (text) { return names ? shared.sessionsViewText(text, names) : text; };
     const wordsText = function (text) { return names && typeof shared.sessionsMentionText === "function" ? shared.sessionsMentionText(text, names) : text; };
-    return shared.sessionsTaskEntries(message, batch, state.statusById, state.activity, state.messagesById, appText, wordsText).map(function (entry) {
+    return shared.sessionsTaskEntries(message, batch, state.statusById, state.activity, state.messagesById, appText, wordsText, state.waitingForUser).map(function (entry) {
       const member = state.members.find(function (candidate) { return candidate.id === entry.item.targetParticipantId; });
       return {
         participantId: entry.item.targetParticipantId,
@@ -12804,7 +12826,8 @@
     const ids = new Set(shared.memberSessionMessages(state.messages, participantId, state.index).map(function (message) { return message.id; }));
     const task = state.tasksByMember.get(participantId);
     const status = member.former ? shared.sessionsFormerMemberStatus(task ? task.item : undefined)
-      : shared.sessionsMemberStatus(state.statusById.get(participantId), task ? task.item : undefined, state.activity.finishedAt.get(participantId));
+      : shared.sessionsMemberStatus(state.statusById.get(participantId), task ? task.item : undefined, state.activity.finishedAt.get(participantId),
+        Boolean(state.waitingForUser && state.waitingForUser.has(participantId)));
     const rows = [{
       rowKey: "member-session-head\u0000" + participantId, id: "member-session-head", conversationId: state.conversationId, author: "system",
       status: "Done", content: "", createdAt: "", presentation: "sessions",
@@ -12901,8 +12924,20 @@
     const node = document.createElement("span");
     node.className = "sessions-elapsed" + (className ? " " + className : "");
     node.dataset.startedAt = since;
-    node.textContent = formatWorked(since);
+    node.textContent = node.classList.contains("is-compact") ? compactElapsed(since) : formatWorked(since);
     return node;
+  }
+
+  /** A side panel row's time, T3 Code's short way ("5s", "8m", "1.5h"), by
+   *  the computer's rule (shared sessionsCompactDuration). */
+  function compactDuration(ms) {
+    const shared = sessionsRules();
+    return shared && typeof shared.sessionsCompactDuration === "function" ? shared.sessionsCompactDuration(ms) : formatWorkedMs(ms);
+  }
+
+  function compactElapsed(startedAt) {
+    const started = Date.parse(startedAt || "");
+    return compactDuration(Number.isFinite(started) ? Date.now() - started : 0);
   }
 
   function sessionsStatusElement(status) {
@@ -13969,27 +14004,31 @@
    *  read only). Nothing is said when there are none. */
   function renderSessionsMembersSheet(state, list, title) {
     const shared = sessionsRules();
+    // No Stop all, as on the computer: each session is stopped from its row.
     const stopAll = document.getElementById("members-sheet-stop-all");
+    if (stopAll) stopAll.hidden = true;
     const rows = state.memberRows;
-    const all = rows.current.concat(rows.previous);
-    const ids = all.map(function (row) { return row.participant.id; });
-    const canStopAll = sessionsCanStop(state, ids);
-    const stoppingAll = sessionsStopping(state, ids);
-    if (stopAll) {
-      stopAll.hidden = !(canStopAll || stoppingAll);
-      stopAll.dataset.stopMembers = ids.join(",");
-      stopAll.disabled = !canStopAll;
-      stopAll.textContent = stoppingAll ? "Stopping…" : "Stop all";
-    }
+    // How long a member works or worked (every row says it, as on the
+    // computer): waiting, from its turn's start to when it began to wait;
+    // ended, its task.
+    const workedMs = function (row, since) {
+      const waitedAt = row.status === "waiting" && state.waitingSince ? state.waitingSince.get(row.participant.id) : undefined;
+      const running = shared.memberRunningSince(row.participant.id, state.messages);
+      const beforeWaiting = running && waitedAt ? Date.parse(waitedAt) - Date.parse(running) : NaN;
+      if (Number.isFinite(beforeWaiting) && beforeWaiting >= 0) return beforeWaiting;
+      return row.task && typeof shared.sessionsTaskDurationMs === "function" ? shared.sessionsTaskDurationMs(row.task.item, state.messagesById) : undefined;
+    };
     const describe = function (row) {
       const id = row.participant.id;
+      const since = row.status === "running" ? sessionsMemberSince(state, id) : undefined;
+      const worked = row.status === "running" || row.status === "idle" ? undefined : workedMs(row, since);
       return {
         id: id,
         kind: row.participant.kind || "",
         name: sessionsMemberTitleOf(state, row.participant),
-        detail: [sessionsMemberDetailOf(row.participant), memberLocationLabel(row.participant)].filter(Boolean).join(" · "),
         status: row.status,
-        since: row.status === "running" ? sessionsMemberSince(state, id) : undefined,
+        since: since,
+        workedMs: worked,
         canStop: sessionsCanStop(state, [id]),
         stopping: sessionsStopping(state, [id])
       };
@@ -13998,8 +14037,10 @@
     const previous = rows.previous.map(describe);
     const removed = state.formerMembers.map(function (former) {
       const task = state.tasksByMember.get(former.id);
-      return { id: former.id, kind: formerMemberKind(former), name: sessionsMemberTitleOf(state, former.id), detail: sessionsRemovedMemberDetail(),
-        status: shared.sessionsFormerMemberStatus(task ? task.item : undefined), former: true };
+      const status = shared.sessionsFormerMemberStatus(task ? task.item : undefined);
+      return { id: former.id, kind: formerMemberKind(former), name: sessionsMemberTitleOf(state, former.id),
+        status: status, workedMs: status !== "idle" && task && typeof shared.sessionsTaskDurationMs === "function" ? shared.sessionsTaskDurationMs(task.item, state.messagesById) : undefined,
+        former: true };
     });
     const docked = state.openAccord || undefined;
     const accord = docked ? { launchId: docked.launchId, text: docked.progress.title + " · " + shared.accordProgressStatus(docked.progress) } : undefined;
@@ -14033,29 +14074,44 @@
       item.append(icon, text);
       list.append(item);
     }
+    // One line per session, the computer's anatomy (the User, 2026-11-22):
+    // its provider's glyph with a dot while it runs (pulsing) or waits for
+    // the User, no state words, its task, and how long it works or worked;
+    // no model; Stop at the end while it runs.
+    const statusLabel = function (status) {
+      return shared && shared.SESSIONS_WORK_STATUS_LABELS ? shared.SESSIONS_WORK_STATUS_LABELS[status] || status : status;
+    };
     const rowElement = function (row) {
       const item = document.createElement("div");
-      item.className = "members-sheet-row sessions-member-row is-openable" + (row.former ? " is-former" : "");
+      item.className = "members-sheet-row sessions-member-row sessions-agent-row is-openable" + (row.former ? " is-former" : "");
       item.dataset.memberSession = row.id;
       item.dataset.memberStatus = row.status;
       item.setAttribute("role", "button");
       item.tabIndex = 0;
-      const copy = document.createElement("span");
-      copy.className = "members-sheet-copy";
-      const nameLine = document.createElement("span");
-      nameLine.className = "members-sheet-name-line";
+      item.setAttribute("aria-label", row.status === "idle" ? row.name : row.name + ", " + statusLabel(row.status));
+      const glyph = document.createElement("span");
+      glyph.className = "sessions-agent-glyph";
+      glyph.append(providerLogoElement(row.kind));
+      // A dot only while its state matters, as on the computer: it runs
+      // (pulsing) or waits for the User; none once it ended.
+      if (row.status === "running" || row.status === "waiting") {
+        const dot = document.createElement("span");
+        dot.className = "sessions-agent-dot is-" + row.status;
+        dot.setAttribute("aria-hidden", "true");
+        glyph.append(dot);
+      }
       const name = document.createElement("strong");
       name.className = "members-sheet-task";
       name.textContent = row.name;
-      nameLine.append(name);
-      if (row.status !== "idle") nameLine.append(sessionsStatusElement(row.status));
-      if (row.since) nameLine.append(sessionsElapsedElement(row.since, "members-sheet-elapsed"));
-      const where = document.createElement("span");
-      where.className = "members-sheet-location";
-      where.textContent = row.detail;
-      copy.append(nameLine, where);
-      item.append(providerLogoElement(row.kind), copy);
-      if (!row.former && (row.canStop || row.stopping)) item.append(sessionsStopButton([row.id], row.canStop, row.stopping, "Stop " + row.name, "members-sheet-stop"));
+      const meta = document.createElement("span");
+      meta.className = "sessions-agent-meta";
+      const time = row.since ? sessionsElapsedElement(row.since, "is-compact")
+        : typeof row.workedMs === "number" ? Object.assign(document.createElement("span"), { className: "sessions-agent-time", textContent: compactDuration(row.workedMs) })
+          : undefined;
+      if (time) meta.append(time);
+      item.append(glyph, name, meta);
+      // Stop only while it runs, as on the computer.
+      if (!row.former && (row.status === "running" || row.stopping) && (row.canStop || row.stopping)) item.append(sessionsStopButton([row.id], row.canStop, row.stopping, "Stop " + row.name, "members-sheet-stop"));
       return item;
     };
     const group = function (label, dataName, open, entries) {
@@ -14075,7 +14131,7 @@
       if (open) for (const row of entries) list.append(rowElement(row));
     };
     for (const row of current) list.append(rowElement(row));
-    if (previous.length > 0) group("Previous", "membersPrevious", membersPreviousOpen, previous);
+    if (previous.length > 0) group("Previous agents", "membersPrevious", membersPreviousOpen, previous);
     if (removed.length > 0) group("Removed", "membersRemoved", membersRemovedOpen, removed);
   }
 

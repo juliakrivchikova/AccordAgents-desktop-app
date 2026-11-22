@@ -2526,6 +2526,60 @@ export class ChatService {
   /** The User's switch of the chat's view (shared/mainSession.ts): shared
    *  through her server like the pin. A chat without a main session has one
    *  view only. */
+  /**
+   * Members of a sessions-view chat made before the title of their task was
+   * kept with them (ChatParticipant.taskTitle) get it once, from the chat's
+   * whole stored history, so the view names them however much of the chat a
+   * device has loaded: the newest title the main session gave a task of
+   * theirs (their delegation), else their first task's first line
+   * (sessionsTaskTitle). Never a handle: a member that never had a task keeps
+   * none, and the view names it "Agent". Done once per chat
+   * (metadata.sessionsTaskTitlesBackfilled); members added later get theirs
+   * when they are made. `opened`: the chat as just opened, read only to
+   * decide whether there is anything to do.
+   */
+  async backfillSessionsTaskTitles(opened: Pick<Conversation, "id" | "kind" | "metadata">): Promise<void> {
+    if (opened.kind !== "chat" || opened.metadata.sessionsTaskTitlesBackfilled === true) return;
+    const mainId = mainSessionParticipantId(opened.metadata);
+    if (!mainId) return;
+    const lacking = (participants: readonly ChatParticipant[]): ChatParticipant[] =>
+      participants.filter((participant) => participant.id !== mainId && !(typeof participant.taskTitle === "string" && participant.taskTitle.trim()));
+    if (lacking(this.chatParticipants(opened as Conversation)).length === 0) return;
+    const batches = await this.storage.chatRequestBatches(opened.id);
+    const given = new Map<string, string>();
+    const first = new Map<string, ChatParticipantRequestItem>();
+    for (const batch of batches) {
+      for (const item of batch.items) {
+        if (!item || typeof item.targetParticipantId !== "string") continue;
+        if (!first.has(item.targetParticipantId)) first.set(item.targetParticipantId, item);
+        const title = typeof item.title === "string" ? item.title.replace(/\s+/g, " ").trim() : "";
+        if (title) given.set(item.targetParticipantId, title);
+      }
+    }
+    const titleOf = (participantId: string): string => {
+      const kept = given.get(participantId);
+      if (kept) return kept;
+      const task = first.get(participantId);
+      return task ? sessionsTaskTitle({ prompt: task.prompt }) : "";
+    };
+    await this.waitForQueuedSave(opened.id);
+    const conversation = await this.storage.getConversation(opened.id);
+    if (!conversation || conversation.kind !== "chat" || conversation.metadata.sessionsTaskTitlesBackfilled === true) return;
+    await this.withChatMutation(conversation, async () => {
+      const missing = new Set(lacking(this.chatParticipants(conversation)).map((participant) => participant.id));
+      const participants = this.chatParticipants(conversation).map((participant) => {
+        const title = missing.has(participant.id) ? titleOf(participant.id) : "";
+        return title ? { ...participant, taskTitle: title } : participant;
+      });
+      conversation.metadata = { ...conversation.metadata, participants, sessionsTaskTitlesBackfilled: true };
+      await this.saveConversation(conversation);
+    });
+    await this.debugLogs.write("chat.sessions-titles.backfill", {
+      conversationId: opened.id,
+      titled: [...first.keys()].filter((id) => titleOf(id)).length
+    });
+  }
+
   async setChatView(request: SetChatViewRequest): Promise<Conversation | undefined> {
     if (!isChatViewMode(request.view)) {
       throw new Error("Unknown chat view.");
@@ -5566,12 +5620,13 @@ export class ChatService {
         reason: input.reason,
         operations: [{ type: "add_new_participant_to_chat", saveAsPreset: false, participant: memberInput }]
       };
-      const [child] = this.markAddedWithoutCard(conversation, this.applyPreparedRosterChange(conversation, {
+      const [marked] = this.markAddedWithoutCard(conversation, this.applyPreparedRosterChange(conversation, {
         request: { reason: input.reason, operations: [{ type: "add", participant: memberInput }] },
         participants: [validated],
         summary,
         managementEscalation: false
       }), callerNow.id);
+      const child = this.withTaskTitle(conversation, marked, input.title);
       const approval = this.newAppToolApproval(conversation, callerNow, APP_PARTICIPANTS_REQUEST_CHANGE_TOOL, "participants.manage", request, summary, "auto-applied");
       approval.approvalScope = "chat";
       approval.appliedParticipantIds = [child.id];
@@ -5892,6 +5947,20 @@ export class ChatService {
     });
     conversation.metadata = { ...conversation.metadata, participants };
     return added.map((participant) => marked.get(participant.id) ?? participant);
+  }
+
+  /** The member made for a task keeps that task's title (ChatParticipant
+   *  taskTitle): the sessions view names it by it however much of the chat
+   *  a device has loaded. The member as the chat has it now. */
+  private withTaskTitle(conversation: Conversation, member: ChatParticipant, title: string | undefined): ChatParticipant {
+    const taskTitle = title?.replace(/\s+/g, " ").trim();
+    if (!taskTitle) return member;
+    const next = { ...member, taskTitle };
+    conversation.metadata = {
+      ...conversation.metadata,
+      participants: this.chatParticipants(conversation).map((participant) => participant.id === member.id ? next : participant)
+    };
+    return next;
   }
 
   /** What a member added without a card in a chat with a main session may

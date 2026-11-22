@@ -59,7 +59,8 @@
 .chat-worked-fold-toggle:focus-visible,
 .chat-member-chip:focus-visible,
 .chat-model-chip:focus-visible,
-.chat-members-row-main:focus-visible {
+.chat-agent-row-main:focus-visible,
+.chat-agents-group-toggle:focus-visible {
   outline: none;
   box-shadow: var(--focus-ring);
 }
@@ -430,44 +431,82 @@
   white-space: nowrap;
 }
 
-/* Members panel */
+/* The side panel (T3 Code's agents list, the User, 2026-11-22): sections
+   divided by a hairline, 32px rows with the provider's glyph and a dot for
+   the state, the task on one line, the model and time muted at the end. */
+
+.chat-members-panel .thread-panel-head.chat-members-head {
+  border-bottom-color: transparent;
+}
 
 .chat-members-body {
   display: grid;
   align-content: start;
-  gap: 12px;
+  padding: 0 8px 12px;
 }
 
-.chat-members-empty {
-  margin: 8px 0;
-  color: var(--app-muted);
-  font-size: 13px;
-}
-
-.chat-members-list {
+.chat-side-section {
   display: grid;
   gap: 2px;
+  padding: 8px 0 10px;
 }
 
-.chat-members-row {
+.chat-side-section + .chat-side-section {
+  border-top: 1px solid var(--app-hairline);
+}
+
+.chat-side-heading {
   display: flex;
   align-items: center;
-  gap: 4px;
-  border-radius: var(--radius-control);
+  min-height: 28px;
+  margin: 0;
+  padding: 0 10px;
+  color: var(--app-muted);
+  font-size: 11px;
+  font-weight: 500;
+  user-select: none;
 }
 
-.chat-members-row:hover {
+.chat-members-panel .chat-accord-row {
+  min-height: 32px;
+  border-color: transparent;
+  background: transparent;
+}
+
+.chat-members-panel .chat-accord-row:hover,
+.chat-members-panel .chat-accord-row[aria-pressed="true"] {
   background: var(--app-surface-hover);
 }
 
-.chat-members-row-main {
+.chat-agent-list {
   display: grid;
-  grid-template-columns: auto minmax(0, 1fr) auto;
+  gap: 2px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.chat-agent-row {
+  position: relative;
+  display: flex;
+  align-items: center;
+  height: 32px;
+  border-radius: var(--radius-control);
+}
+
+.chat-agent-row:hover,
+.chat-agent-row:focus-within {
+  background: var(--app-surface-hover);
+}
+
+.chat-agent-row-main {
+  display: flex;
   align-items: center;
   gap: 10px;
-  flex: 1;
+  width: 100%;
   min-width: 0;
-  padding: 8px;
+  height: 100%;
+  padding: 0 10px;
   border: 0;
   border-radius: var(--radius-control);
   background: transparent;
@@ -477,68 +516,242 @@
   cursor: pointer;
 }
 
-.chat-members-row-text {
-  display: grid;
-  gap: 2px;
-  min-width: 0;
+/* The glyph with its state's dot at its lower right, cut out of the row. */
+.chat-agent-glyph {
+  position: relative;
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  height: 16px;
 }
 
-.chat-members-row-name {
-  display: flex;
-  align-items: baseline;
-  gap: 8px;
-  min-width: 0;
+.chat-agent-dot {
+  position: absolute;
+  right: -3px;
+  bottom: -3px;
+  width: 9px;
+  height: 9px;
+  border: 2px solid var(--app-surface);
+  border-radius: 50%;
+  background: var(--app-muted);
 }
 
-.chat-members-row-name strong {
-  color: var(--app-text-strong);
-  font-size: 13px;
-  font-weight: 600;
+.chat-agent-row:hover .chat-agent-dot,
+.chat-agent-row:focus-within .chat-agent-dot {
+  border-color: var(--app-surface-hover);
 }
 
-.chat-members-row-role,
-.chat-members-row-task {
+/* Running: the accent, the dot fading in and out with the app's own pulse
+   (chat-rt-pulse, as a running task's status dot; still for reduced motion). */
+.chat-agent-dot.is-running {
+  background: var(--app-accent);
+  animation: chat-rt-pulse 1.4s ease-in-out infinite;
+}
+
+.chat-agent-dot.is-waiting {
+  background: var(--app-warning);
+}
+
+.chat-agent-title {
+  flex: 1;
   min-width: 0;
   overflow: hidden;
-  color: var(--app-muted);
-  font-size: 12px;
+  color: var(--app-text);
+  font-size: 13px;
+  font-weight: 500;
+  line-height: 16px;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-.chat-members-row-state {
-  display: grid;
-  justify-items: end;
-  gap: 3px;
-}
-
-.chat-members-previous {
-  display: grid;
-  gap: 4px;
-}
-
-.chat-members-previous-toggle {
+.chat-agent-meta {
   display: inline-flex;
+  flex: 0 1 auto;
   align-items: center;
-  gap: 6px;
-  width: fit-content;
-  padding: 4px 6px;
+  gap: 4px;
+  min-width: 0;
+  color: var(--app-muted);
+  font-size: 11.5px;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+/* Stop takes the time's place on hover; the time keeps its room. */
+.chat-agent-row.has-stop .chat-agent-meta {
+  padding-right: 0;
+}
+
+.chat-agent-row.has-stop .chat-agent-time {
+  min-width: 20px;
+  text-align: right;
+}
+
+/* A row without a time (waiting for the User) keeps Stop's place only while
+   Stop shows, so its model lines up with the others at rest. */
+.chat-agent-row.has-stop .chat-agent-time:empty {
+  min-width: 0;
+}
+
+.chat-agent-row.has-stop:hover .chat-agent-time:empty,
+.chat-agent-row.has-stop:focus-within .chat-agent-time:empty {
+  min-width: 20px;
+}
+
+.chat-agent-row.has-stop:hover .chat-agent-time,
+.chat-agent-row.has-stop:focus-within .chat-agent-time {
+  visibility: hidden;
+}
+
+.chat-agent-stop.aa-icon-button {
+  position: absolute;
+  top: 50%;
+  right: 4px;
+  opacity: 0;
+  pointer-events: none;
+  transform: translateY(-50%);
+}
+
+.chat-agent-row:hover .chat-agent-stop.aa-icon-button,
+.chat-agent-row:focus-within .chat-agent-stop.aa-icon-button {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+.chat-agent-stop-icon {
+  width: 10px;
+  height: 10px;
+  fill: currentColor;
+}
+
+/* Without hover (a touch screen): Stop stands after the row's words, always
+   there, and the time and state stay. */
+@media (hover: none) {
+  .chat-agent-stop.aa-icon-button {
+    position: static;
+    flex: 0 0 auto;
+    margin-right: 4px;
+    opacity: 1;
+    pointer-events: auto;
+    transform: none;
+  }
+
+  .chat-agent-row.has-stop .chat-agent-time {
+    visibility: visible;
+  }
+}
+
+/* The hover card, to the row's left (T3 Code's subagent card). */
+.chat-agent-card {
+  z-index: var(--z-popover);
+  display: grid;
+  gap: 2px;
+  width: 280px;
+  padding: 11px 13px 10px;
+  border: 1px solid var(--app-border);
+  border-radius: var(--radius-card);
+  background: var(--app-surface);
+  box-shadow: var(--shadow-md);
+  color: var(--app-text-secondary);
+  font-size: 12.5px;
+  line-height: 18px;
+}
+
+.chat-agent-card-title {
+  margin-bottom: 1px;
+  color: var(--app-text);
+  font-size: 13px;
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+
+.chat-agent-card-line {
+  overflow-wrap: anywhere;
+}
+
+.chat-agent-card-status.is-running {
+  color: var(--app-accent);
+  font-weight: 500;
+}
+
+.chat-agent-card-status.is-waiting {
+  color: var(--app-status-warning-text);
+  font-weight: 500;
+}
+
+.chat-agent-card-status.is-failed {
+  color: var(--app-danger);
+}
+
+.chat-agent-card-now {
+  display: -webkit-box;
+  margin-top: 6px;
+  padding-top: 7px;
+  overflow: hidden;
+  border-top: 1px solid var(--app-hairline);
+  color: var(--app-text);
+  overflow-wrap: anywhere;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 3;
+}
+
+/* A folded group ("Previous agents"): a row of its own. */
+.chat-agents-group-toggle {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  height: 32px;
+  padding: 0 10px;
   border: 0;
   border-radius: var(--radius-control);
   background: transparent;
-  color: var(--app-muted);
-  font-size: 12px;
-  font-weight: 600;
+  color: var(--app-text);
+  font: inherit;
+  font-size: 13px;
+  font-weight: 500;
+  text-align: left;
   cursor: pointer;
 }
 
-.chat-members-previous-toggle:hover {
-  color: var(--app-text-strong);
+.chat-agents-group-toggle:hover {
+  background: var(--app-surface-hover);
 }
 
-.chat-members-previous-count {
+.chat-agents-group-icon,
+.chat-agents-group-chevron {
+  flex: 0 0 auto;
   color: var(--app-muted);
-  font-weight: 500;
+}
+
+.chat-agents-group-chevron {
+  transition: transform 0.15s ease;
+}
+
+.chat-agents-group-chevron.is-folded {
+  transform: rotate(-90deg);
+}
+
+.chat-agents-group-label {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.chat-agents-group-count {
+  color: var(--app-muted);
+  font-size: 11.5px;
+  font-weight: 400;
+  font-variant-numeric: tabular-nums;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .chat-agent-dot.is-running {
+    animation: none;
+  }
 }
 
 /* One member's session */
@@ -998,11 +1211,7 @@
 }
 
 
-/* The main session first in the side panel; a former member's session. */
-.chat-members-row.is-main .chat-members-row-main {
-  cursor: default;
-}
-
+/* A former member's session. */
 .chat-member-session-gone {
   margin: 0;
   padding: 10px 16px 14px;

@@ -2,7 +2,9 @@ import { useCallback, useContext, useEffect, useMemo, useRef, type ComponentProp
 
 import type { DockedAccord } from "../../../shared/accordProgress";
 import { memberSessionMessages } from "../../../shared/mainSession";
-import { SESSIONS_REMOVED_MEMBER_DETAIL, sessionsMemberDetail, sessionsMemberStatus } from "../../../shared/mainSessionView";
+import { isPendingReply } from "../../../shared/chatActiveRuns";
+import { SESSIONS_REMOVED_MEMBER_DETAIL, sessionsMemberDetail, sessionsMemberStatus, sessionsTaskDurationMs, type SessionsMemberRow } from "../../../shared/mainSessionView";
+import { sessionsActivityRow } from "../../../shared/sessionsActivity";
 import type {
   AgentContextUsage,
   AgentRunProgress,
@@ -16,6 +18,7 @@ import type {
 import { AccordLinesContext } from "./chat-accord-closed-line";
 import { ChatAccordPanel } from "./chat-accord-panel";
 import { contextUsageForMessage, sessionIdForMessage } from "./chat-message-metadata";
+import type { ChatAgentDetail } from "./chat-agent-row";
 import { ChatMembersPanel } from "./chat-members-panel";
 import { ChatMemberSessionPanel, type ChatMemberSendRequest } from "./chat-member-session-panel";
 import { chatRoleLabel, participantProviderLabel } from "./chat-mention-directory";
@@ -24,6 +27,8 @@ import type { ChatParticipantRosterStatus } from "./chat-roster-status";
 import { isChatMessageHiddenInChat } from "./chat-thread-data";
 import type { ChatRightPanelState } from "./use-chat-right-panel";
 import type { ChatSessionsView } from "./use-chat-sessions-view";
+import { useMachineList } from "./use-cli-start-defaults";
+import { useMemberModelSummary, type MemberModelSummary } from "./use-member-model-summary";
 
 type ChatMessageItemProps = ComponentProps<typeof ChatMessageItem>;
 
@@ -122,13 +127,37 @@ export function ChatSessionsRightPanel(props: {
     [conversation.messages, memberId, sessions.index]
   );
   const ownCount = useMemo(() => messages.filter((message) => message.participantId === memberId).length, [messages, memberId]);
+  // Each member's reply in progress (its newest), read once per change of the loaded chat.
+  const pendingReplyByMember = useMemo(() => {
+    const pending = new Map<string, ChatMessage>();
+    for (let index = conversation.messages.length - 1; index >= 0; index -= 1) {
+      const message = conversation.messages[index]!;
+      if (message.participantId && !pending.has(message.participantId) && isPendingReply(message)) pending.set(message.participantId, message);
+    }
+    return pending;
+  }, [conversation.messages]);
   const loadOlder = useLoadOlderUntilMember(ownCount, props.hasOlderMessages, props.olderMessagesLoading, props.onLoadOlderMessages);
-  const memberDetail = (member: ChatParticipant): string => sessionsMemberDetail({
+  const memberDetail = (member: ChatParticipant): ChatAgentDetail => (model: MemberModelSummary): string => sessionsMemberDetail({
     provider: participantProviderLabel(member.kind, member.hostLabel),
-    model: member.model,
+    model: model.effort ? `${model.model} · ${model.effort}` : model.model,
     roleLabel: chatRoleLabel(settings.chatRoleConfigs, member),
     roleConfigId: member.roleConfigId
   });
+  // What a running member does now: the newest step of its reply in progress.
+  const currentStep = (participantId: string): string | undefined => {
+    const message = pendingReplyByMember.get(participantId);
+    if (!message) return undefined;
+    const live = messageContext.liveProgressById.get(message.id);
+    const events = live?.activityEvents?.length ? live.activityEvents : message.metadata?.activityEvents;
+    const newest = events?.[events.length - 1];
+    return (newest ? sessionsActivityRow(newest).text : live?.activity)?.trim() || undefined;
+  };
+  const taskResult = (participantId: string): string | undefined => {
+    const task = sessions.tasksByMember.get(participantId);
+    return task ? sessions.taskEntriesByMessageId.get(task.messageId)?.find((entry) => entry.item.targetParticipantId === participantId)?.line : undefined;
+  };
+  const taskDurationMs = (row: { task?: SessionsMemberRow["task"] }): number | undefined =>
+    row.task ? sessionsTaskDurationMs(row.task.item, sessions.messagesById) : undefined;
   if (panel?.kind === "accord") {
     const latest = props.latestAccord;
     return (
@@ -152,6 +181,10 @@ export function ChatSessionsRightPanel(props: {
         runIdsByParticipantId={props.runIdsByParticipantId}
         memberTitle={sessions.memberTitle}
         memberDetail={memberDetail}
+        taskDurationMs={taskDurationMs}
+        waitingSince={sessions.waitingSince}
+        currentStep={currentStep}
+        taskResult={taskResult}
         onOpenMember={rightPanel.openMember}
         onStopRuns={props.onStopRuns}
         onClose={rightPanel.close}
@@ -164,7 +197,7 @@ export function ChatSessionsRightPanel(props: {
   const task = sessions.tasksByMember.get(memberId)?.item;
   const status = former
     ? former.status
-    : sessionsMemberStatus(props.participantStatusById.get(memberId), task, sessions.activity.finishedAt.get(memberId));
+    : sessionsMemberStatus(props.participantStatusById.get(memberId), task, sessions.activity.finishedAt.get(memberId), sessions.waitingForUser.has(memberId));
   return (
     <ChatMemberSessionPanel
       key={memberId}
@@ -172,7 +205,7 @@ export function ChatSessionsRightPanel(props: {
         ? { id: participant.id, kind: participant.kind, hostLabel: participant.hostLabel }
         : { id: memberId, ...(former?.member.kind ? { kind: former.member.kind } : {}) }}
       title={sessions.memberTitle(memberId)}
-      detail={participant ? memberDetail(participant) : SESSIONS_REMOVED_MEMBER_DETAIL}
+      detail={participant ? <MemberSessionDetail member={participant} detail={memberDetail(participant)} /> : SESSIONS_REMOVED_MEMBER_DETAIL}
       readOnly={!participant}
       settings={participant ? props.renderMemberSettings?.(participant.id) : undefined}
       chip={participant ? props.renderMemberChip?.(participant.id) : undefined}
@@ -198,4 +231,12 @@ export function ChatSessionsRightPanel(props: {
       onClose={rightPanel.close}
     />
   );
+}
+
+/** The line under a member's title in its session's header: its CLI, the
+ *  model by its name in the CLI's list and its effort, as its row's card. */
+function MemberSessionDetail(props: { member: ChatParticipant; detail: ChatAgentDetail }): JSX.Element {
+  const machines = useMachineList();
+  const model = useMemberModelSummary(props.member, machines);
+  return <>{props.detail(model)}</>;
 }
