@@ -20748,14 +20748,16 @@ export class ChatService {
       ...message.metadata,
       participantRequest: nextBatch
     };
-    // A task of the main session that a restart ended: the others of its turn
-    // may have ended before, and nothing else would resume it now. Before the
-    // chat's first look since the app started, that look (right after this,
-    // recoverDelegationGroupsOfEndedTurns) weighs its whole turn; after it,
-    // the task's turn is weighed here once its last task has ended.
+    // A task of the main session, or a request made with
+    // app_chat_request_participants, that a restart ended: the others of its
+    // turn may have ended before, and nothing else would resume it now.
+    // Before the chat's first look since the app started, that look (right
+    // after this, recoverDelegationGroupsOfEndedTurns) weighs it; after it,
+    // it is weighed here once its last task has ended.
     const turnId = nextBatch.delegation?.turnId;
-    if (turnId && this.delegationRecoveryLookedChats.has(conversation.id)) {
-      const key = this.turnSegmentKey(conversation.id, turnId);
+    const recoveryKey = this.requesterResumeRecoveryKey(conversation.id, message.id, nextBatch);
+    if (recoveryKey && this.delegationRecoveryLookedChats.has(conversation.id)) {
+      const key = recoveryKey;
       const group = this.delegationTurnGroup(conversation, message, nextBatch);
       if (!this.delegationGroupsRecovered.has(key) && !group.some((entry) => this.participantRequestHasUnfinishedItems(entry.batch))) {
         this.delegationGroupsRecovered.add(key);
@@ -20789,12 +20791,18 @@ export class ChatService {
     // main session runs here: it looks once it does.
     if (this.delegationRecoveryLookedChats.has(conversation.id) || (this.machineRuntime && !this.hostMachineId)) return false;
     this.delegationRecoveryLookedChats.add(conversation.id);
-    const groups = new Map<string, { turnId: string; messages: ChatMessage[] }>();
+    // The main session's tasks by the turn that gave them; a request made
+    // with app_chat_request_participants on its own: a quit or a restart
+    // cuts the wait for its answers short the same way (its resume is
+    // skipped while quitting, and nothing here waits for it after), and
+    // with mention wake-ups off in the sessions view nothing else brings
+    // its requester back to them.
+    const groups = new Map<string, { turnId?: string; messages: ChatMessage[] }>();
     for (const message of conversation.messages) {
       const batch = message.metadata?.participantRequest;
-      const turnId = batch?.delegation?.turnId;
-      if (!batch || !turnId || !batch.resumeRequester || batch.completedInToolCall || batch.autoResumeMessageId) continue;
-      const key = this.turnSegmentKey(conversation.id, turnId);
+      const key = batch ? this.requesterResumeRecoveryKey(conversation.id, message.id, batch) : undefined;
+      if (!batch || !key) continue;
+      const turnId = batch.delegation?.turnId;
       const group = groups.get(key) ?? { turnId, messages: [] };
       group.messages.push(message);
       groups.set(key, group);
@@ -20847,7 +20855,7 @@ export class ChatService {
    */
   private delegationGroupRecoveryVerdict(
     conversation: Conversation,
-    turnId: string,
+    turnId: string | undefined,
     messages: readonly ChatMessage[]
   ): "resume" | "resume-already-made" | "moved-on" | "too-old" {
     const batches = messages.flatMap((message) => message.metadata?.participantRequest ? [message.metadata.participantRequest] : []);
@@ -20862,12 +20870,31 @@ export class ChatService {
     }
     const requesterId = batches[0]?.requesterParticipantId;
     const ownIds = new Set(messages.map((message) => message.id));
+    // The requester's own turn that asked is not "going on": its messages
+    // are the main session's turn (turnSegmentId), or for a request made
+    // with app_chat_request_participants those that answer the message the
+    // request answered (sourceMessageId, as its reply and interim posts do).
+    const requestTrigger = batches[0]?.triggerMessageId;
+    const sameTurn = (message: ChatMessage): boolean => turnId
+      ? message.metadata?.turnSegmentId === turnId
+      : requestTrigger !== undefined && message.metadata?.sourceMessageId === requestTrigger;
     const movedOn = conversation.messages.some((message) => {
       if (ownIds.has(message.id) || !(Date.parse(message.createdAt) > endedAt)) return false;
       return message.role === "user" ||
-        (message.role === "participant" && message.participantId === requesterId && message.metadata?.turnSegmentId !== turnId);
+        (message.role === "participant" && message.participantId === requesterId && !sameTurn(message));
     });
     return movedOn ? "moved-on" : "resume";
+  }
+
+  /** What a restart weighs once to resume a requester (one key a turn of
+   *  the main session's tasks, one a request made with
+   *  app_chat_request_participants); undefined for a request whose answers
+   *  return no other way (inline, inferred, already resumed). */
+  private requesterResumeRecoveryKey(conversationId: string, requestMessageId: string, batch: ChatParticipantRequestBatch): string | undefined {
+    if (!batch.resumeRequester || batch.completedInToolCall || batch.autoResumeMessageId) return undefined;
+    const turnId = batch.delegation?.turnId;
+    if (turnId) return this.turnSegmentKey(conversationId, turnId);
+    return batch.source === "mcp" && !batch.delegation ? `${conversationId}\u0000request\u0000${requestMessageId}` : undefined;
   }
 
   private logDelegationGroupSettled(conversationId: string, requestMessageIds: string[], reason: string, cutShort: boolean): void {

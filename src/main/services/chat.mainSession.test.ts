@@ -1512,3 +1512,136 @@ test("members made before their task's title was kept with them get it once from
   assert.equal(participantsOf(storage.current).find((participant) => participant.id === gera.id)?.taskTitle, undefined);
 });
 
+
+// --- a request made with app_chat_request_participants, cut short by a quit -----
+
+/** A chat whose requester asked one member with app_chat_request_participants
+ *  (resumeRequester) before the app quit; `item`: how the request ended (a
+ *  quit ends a running one "interrupted before completion", the next start
+ *  likewise; one answered just before the quit skipped its resume). */
+function quitRequestChat(
+  item: "interrupted" | "answered" | "running",
+  options: { at?: string; resumeRequester?: boolean; source?: "mcp" | "inferred"; requester?: Partial<ChatParticipant>; resumeLine?: boolean } = {}
+): Conversation {
+  const at = options.at ?? new Date(Date.now() - 5 * 60_000).toISOString();
+  const main = mainSession("codex-cli", { model: undefined, ...options.requester });
+  const helper = member("helper-id", "helper");
+  const conversation = mainSessionChat([main, helper], { participantSessions: [sessionRecord(main, "main-thread")] });
+  conversation.messages[0]!.createdAt = at;
+  // Its own turn's reply, written as the turn began and finished after it asked.
+  conversation.messages.push({ id: "main-reply", role: "participant", participantId: main.id, participantLabel: "@main", content: "asked", createdAt: at, status: "done",
+    metadata: { sourceMessageId: "user-message", threadId: "user-message", runId: "turn-1" } } as ChatMessage);
+  const status = item === "running" ? "running" : item === "answered" ? "completed" : "interrupted";
+  conversation.messages.push({
+    id: "request-1", role: "participant", participantId: main.id, participantLabel: "@main", content: "@helper Run the job.", createdAt: at, status: "done",
+    metadata: { sourceMessageId: "user-message", threadId: "user-message", participantRequest: {
+      id: "batch-1", requesterParticipantId: main.id, requesterHandle: "main", source: options.source ?? "mcp", resumeRequester: options.resumeRequester ?? true,
+      status, depth: 1, requesterDepth: 0, chainRootId: "user-message", createdAt: at, updatedAt: at, triggerMessageId: "user-message",
+      items: [{ targetParticipantId: "helper-id", targetHandle: "helper", prompt: "Run the job.", status: item, createdAt: at, updatedAt: at,
+        ...(item === "interrupted" ? { error: "Request was interrupted before completion." } : {}),
+        ...(item === "answered" ? { replyMessageId: "helper-reply" } : {}) }]
+    } }
+  } as ChatMessage);
+  conversation.messages.push({ id: "helper-reply", role: "participant", participantId: "helper-id", participantLabel: "@helper",
+    content: item === "answered" ? "Job finished: 42." : "Interrupted before completion.", createdAt: at, status: "done",
+    metadata: { sourceMessageId: "request-1", chatThreadRootId: "request-1" } } as ChatMessage);
+  if (options.resumeLine) {
+    conversation.messages.push({ id: "resume-line", role: "system", content: "Auto-resumed @main after member request.\nTarget replies/errors are in the transcript above.", createdAt: at, status: "done",
+      metadata: { sourceMessageId: "request-1", parentMessageId: "request-1" } } as ChatMessage);
+  }
+  return conversation;
+}
+
+const requestBatch = (conversation: Conversation) => conversation.messages.find((message) => message.id === "request-1")!.metadata!.participantRequest!;
+
+test("a request a quit cut short resumes its requester once at the next start, with the interruption", async () => {
+  const { service, storage, runs } = testService({ conversation: quitRequestChat("interrupted") });
+  await (service as any).requireChat("conversation-1");
+  await waitFor(() => Boolean(requestBatch(storage.current).autoResumeMessageId));
+  await new Promise((resolve) => setTimeout(resolve, 50));
+  const resumes = resumesOf(runs, "main-id");
+  assert.equal(resumes.length, 1);
+  assert.match(resumes[0]!.prompt, /Auto-resumed @main after member request\.\nTarget replies\/errors are in the transcript above/);
+  assert.match(resumes[0]!.prompt, /Interrupted before completion\./, "the member's interrupted reply is in what it reads");
+  // The next start again: nothing more.
+  const again = testService({ conversation: storage.current });
+  await (again.service as any).requireChat("conversation-1");
+  await new Promise((resolve) => setTimeout(resolve, 50));
+  assert.equal(resumesOf(again.runs, "main-id").length, 0);
+});
+
+test("a request answered just before the quit (its resume skipped while quitting) resumes its requester once, with the answer", async () => {
+  const { service, storage, runs } = testService({ conversation: quitRequestChat("answered") });
+  await (service as any).requireChat("conversation-1");
+  await waitFor(() => Boolean(requestBatch(storage.current).autoResumeMessageId));
+  await new Promise((resolve) => setTimeout(resolve, 50));
+  const resumes = resumesOf(runs, "main-id");
+  assert.equal(resumes.length, 1);
+  assert.match(resumes[0]!.prompt, /Job finished: 42\./);
+});
+
+test("a request still running at the start ends interrupted and resumes its requester once", async () => {
+  const { service, storage, runs } = testService({ conversation: quitRequestChat("running") });
+  await (service as any).requireChat("conversation-1");
+  await waitFor(() => Boolean(requestBatch(storage.current).autoResumeMessageId));
+  await new Promise((resolve) => setTimeout(resolve, 50));
+  assert.equal(requestBatch(storage.current).items[0]!.status, "interrupted");
+  assert.equal(resumesOf(runs, "main-id").length, 1);
+});
+
+test("a cut-short request is not resumed after the User wrote again, when older than a day, or when its resume line is already there", async () => {
+  const moved = quitRequestChat("interrupted");
+  moved.messages.push({ id: "later", role: "user", content: "Never mind.", createdAt: new Date().toISOString(), status: "done" } as ChatMessage);
+  const old = quitRequestChat("interrupted", { at: new Date(Date.now() - 25 * 60 * 60_000).toISOString() });
+  const made = quitRequestChat("interrupted", { resumeLine: true });
+  for (const [conversation, reason] of [[moved, "moved-on"], [old, "too-old"], [made, "resume-already-made"]] as const) {
+    const { service, runs, debugEvents } = testService({ conversation });
+    await (service as any).requireChat("conversation-1");
+    await waitFor(() => debugEvents.some((event) => event.event === "chat.participant-request.auto-resume.settled" && event.payload.reason === reason));
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    assert.equal(resumesOf(runs, "main-id").length, 0, reason);
+  }
+});
+
+test("its own turn's later messages do not count as going on; another of its turns does", async () => {
+  const sameTurn = quitRequestChat("interrupted");
+  sameTurn.messages.push({ id: "interim", role: "participant", participantId: "main-id", participantLabel: "@main", content: "Still waiting.", createdAt: new Date().toISOString(), status: "done",
+    metadata: { sourceMessageId: "user-message", runId: "turn-1" } } as ChatMessage);
+  let service = testService({ conversation: sameTurn });
+  await (service.service as any).requireChat("conversation-1");
+  await waitFor(() => Boolean(requestBatch(service.storage.current).autoResumeMessageId));
+  assert.equal(resumesOf(service.runs, "main-id").length, 1);
+
+  const otherTurn = quitRequestChat("interrupted");
+  otherTurn.messages.push({ id: "other", role: "participant", participantId: "main-id", participantLabel: "@main", content: "Something else.", createdAt: new Date().toISOString(), status: "done",
+    metadata: { sourceMessageId: "another-trigger", runId: "turn-2" } } as ChatMessage);
+  service = testService({ conversation: otherTurn });
+  await (service.service as any).requireChat("conversation-1");
+  await waitFor(() => service.debugEvents.some((event) => event.payload.reason === "moved-on"));
+  await new Promise((resolve) => setTimeout(resolve, 50));
+  assert.equal(resumesOf(service.runs, "main-id").length, 0);
+});
+
+test("only requests whose answers return to the requester are weighed: not an inline one, not an inferred one", async () => {
+  for (const options of [{ resumeRequester: false }, { source: "inferred" as const }]) {
+    const { service, runs } = testService({ conversation: quitRequestChat("answered", options) });
+    await (service as any).requireChat("conversation-1");
+    await new Promise((resolve) => setTimeout(resolve, 80));
+    assert.equal(resumesOf(runs, "main-id").length, 0, JSON.stringify(options));
+  }
+});
+
+test("a requester on a cloud machine is resumed by its machine, never by the desktop", async () => {
+  const onMachine = { homeMachineId: "machine-1" };
+  const desktop = testService({ conversation: quitRequestChat("interrupted", { requester: onMachine }) });
+  await (desktop.service as any).requireChat("conversation-1");
+  await new Promise((resolve) => setTimeout(resolve, 80));
+  assert.equal(resumesOf(desktop.runs, "main-id").length, 0, "the desktop leaves it to the machine");
+
+  const machine = testService({ conversation: quitRequestChat("interrupted", { requester: onMachine }) });
+  (machine.service as any).machineRuntime = true;
+  (machine.service as any).hostMachineId = "machine-1";
+  await (machine.service as any).requireChat("conversation-1");
+  await waitFor(() => Boolean(requestBatch(machine.storage.current).autoResumeMessageId));
+  assert.equal(resumesOf(machine.runs, "main-id").length, 1);
+});
