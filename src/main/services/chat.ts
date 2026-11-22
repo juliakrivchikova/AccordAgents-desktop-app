@@ -412,11 +412,13 @@ function closedByQuit(error: string | undefined): boolean {
  *  whichever ended it first, the quit or the run itself as its process
  *  closed (which alone would say the member "stopped before it returned a
  *  response", an error). */
-function markStoppedByQuit(message: ChatMessage, recovery: boolean): void {
+function markStoppedByQuit(message: ChatMessage, recovery: boolean, written?: string): void {
   if (recovery) markInterruptedForRecovery(message);
   else {
     message.status = "error";
-    message.content = INTERRUPTED_REPLY_TEXT;
+    // What the member wrote before the quit stays, as the CLI leaves it on
+    // screen when interrupted; only a reply with nothing in it says so.
+    message.content = written?.trim() ? written : INTERRUPTED_REPLY_TEXT;
   }
   message.metadata = { ...message.metadata, terminalReason: "user-stopped" };
 }
@@ -1366,6 +1368,12 @@ export class ChatService {
    *  server asks starts here and no requester is resumed (both wait for the
    *  next start). */
   private quitting = false;
+  /** Requesters a quit kept from resuming: resumed if it does not happen. */
+  private readonly resumesSkippedWhileQuitting = new Map<string, { conversationId: string; options: { groupCheck?: boolean } }>();
+  /** Turns still running when a quit turned out not to happen (endQuit): the
+   *  quit closed their members' processes, and their ends, which come
+   *  seconds later, are the quit's, not failures of the members. */
+  private readonly runsClosedByQuit = new Set<string>();
   /** Each chat's timer for its next waiting choice to expire. */
   private readonly choiceExpiryTimers = new Map<string, { atMs: number; timer: NodeJS.Timeout }>();
   /** The clock choices expire by (tests move it). */
@@ -11786,6 +11794,7 @@ export class ChatService {
       const now = new Date().toISOString();
       session.updatedAt = now;
       this.updateParticipantContextUsage(conversation, participant.id, result.contextUsage);
+      const writtenBeforeEnd = pendingMessage.content;
       pendingMessage.content = result.content;
       if (signal?.aborted) {
         // A Stop that lands as the reply finishes keeps the reply the member
@@ -11793,10 +11802,11 @@ export class ChatService {
         this.markParticipantMessageStoppedByUser(pendingMessage, participant, {
           preserveContent: result.ok && result.content.trim().length > 0
         });
-      } else if (!result.ok && this.quitting && closedByQuit(result.error)) {
+      } else if (!result.ok && this.endsByQuit(runId) && closedByQuit(result.error)) {
         // Its process closed because the User quits: what the quit says of
-        // the turns it ends (endTurnsForQuit), not a failure of the member.
-        markStoppedByQuit(pendingMessage, false);
+        // the turns it ends (endTurnsForQuit), not a failure of the member,
+        // keeping what it had written (in the bubble, else as it streamed).
+        markStoppedByQuit(pendingMessage, false, writtenBeforeEnd.trim() ? writtenBeforeEnd : progressSink.processingTranscript(now)?.content);
       } else {
         pendingMessage.status = result.ok ? "done" : "error";
       }
@@ -11806,7 +11816,7 @@ export class ChatService {
         const { queuedBehind: _queuedBehind, turnQueued: _turnQueued, ...metadata } = pendingMessage.metadata;
         pendingMessage.metadata = metadata;
       }
-      const endedByQuit = !signal?.aborted && !result.ok && this.quitting && closedByQuit(result.error);
+      const endedByQuit = !signal?.aborted && !result.ok && this.endsByQuit(runId) && closedByQuit(result.error);
       const notReady = !signal?.aborted && !result.ok && !endedByQuit && firstTurnHere ? await this.firstTurnProviderProblem(participant) : undefined;
       if (notReady) {
         pendingMessage.content = pendingMessage.content.trim() ? `${notReady}\n\n${pendingMessage.content}` : notReady;
@@ -18866,7 +18876,7 @@ export class ChatService {
           const remoteReplyStillRunning = false;
           // A reply the User's quit ended is interrupted, as the requests the
           // quit itself ends are (endTurnsForQuit), however it ended first.
-          const endedByQuit = this.quitting && reply?.metadata?.terminalReason === "user-stopped";
+          const endedByQuit = this.endsByQuit(reply?.metadata?.runId) && reply?.metadata?.terminalReason === "user-stopped";
           const stoppedByUser = reply?.metadata?.terminalReason === "user-stopped";
           this.updateParticipantRequestBatch(conversation, requestMessageId, (current) => ({
             ...current,
@@ -19270,8 +19280,10 @@ export class ChatService {
     const resumeProgress = progress ?? this.onReviewProgress;
     // Quitting: the requester is resumed at the next start (its recovery,
     // requesterResumeRecoveryKey: the main session's tasks and requests made
-    // with app_chat_request_participants; an inferred request is not).
+    // with app_chat_request_participants; an inferred request is not), or
+    // once the quit turns out not to happen (endQuit).
     if (this.quitting) {
+      this.resumesSkippedWhileQuitting.set(requestMessageId, { conversationId, options });
       void this.logParticipantRequestAutoResumeSkipped(conversationId, requestMessageId, "quitting");
       return;
     }
@@ -27372,6 +27384,33 @@ export class ChatService {
    *  is resumed (its recovery does it at the next start). */
   beginQuit(): void {
     this.quitting = true;
+    this.runsClosedByQuit.clear();
+  }
+
+  /** Whether a run's end is the User's quit's: while she quits, or for a turn
+   *  the quit closed and that ends after the quit did not happen. */
+  private endsByQuit(runId: unknown): boolean {
+    return this.quitting || (typeof runId === "string" && this.runsClosedByQuit.has(runId));
+  }
+
+  /** The quit did not happen after all (main.ts quitWasCancelled): turns
+   *  start and requesters resume again. */
+  endQuit(): void {
+    // The quit's steps have ended (main.ts waits for them): every member's
+    // process it closed belongs to a turn still running now.
+    if (this.quitting) for (const runId of [...this.chatRunMeta.keys(), ...this.activeRunIds]) this.runsClosedByQuit.add(runId);
+    this.quitting = false;
+    const skipped = [...this.resumesSkippedWhileQuitting];
+    this.resumesSkippedWhileQuitting.clear();
+    for (const [requestMessageId, resume] of skipped) {
+      void this.autoResumeParticipantRequest(resume.conversationId, requestMessageId, this.onReviewProgress, resume.options).catch((error) => {
+        void this.debugLogs.write("chat.participant-request.auto-resume.error", {
+          conversationId: resume.conversationId,
+          requestMessageId,
+          message: error instanceof Error ? error.message : String(error)
+        });
+      });
+    }
   }
 
   /** Resolves once no member's turn runs here (each saved how it ended, so
@@ -27417,6 +27456,9 @@ export class ChatService {
             markStoppedByQuit(message, true);
             changed = true;
           }
+          // Its cards (a permission, a plan, a compaction) close with it, as
+          // its own end closes them, so no phone keeps them open.
+          if (this.markPendingAppToolApprovalsForRunTerminal(conversation, run.runId, INTERRUPTED_REPLY_TEXT)) changed = true;
           this.finishServerTurn(run.runId, "interrupted");
           ended += 1;
         }

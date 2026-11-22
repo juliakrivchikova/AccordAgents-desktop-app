@@ -490,3 +490,55 @@ test("a member's handle is its chip only as an exact @handle of a current or for
   assert.deepEqual(pieces(`@${"g".repeat(33)}`), [{ text: `@${"g".repeat(33)}` }], "33 is not");
   assert.deepEqual(pieces(""), []);
 });
+
+test("a member's running reply is the one it works on, not one queued behind it, from when its own turn began", () => {
+  const messages = [
+    message("running", "participant", 10, { participantId: "p-drew", status: "pending", metadata: { turnStartedAt: at(12) } }),
+    message("queued", "participant", 15, { participantId: "p-drew", status: "pending", metadata: { turnQueued: true } }),
+    message("queued-here", "participant", 16, { participantId: "p-drew", status: "pending", metadata: { queuedBehind: { handle: "drew" } } }),
+    message("first", "participant", 20, { participantId: "p-ana", status: "pending" }),
+    message("second", "participant", 21, { participantId: "p-ana", status: "pending" })
+  ];
+  const activity = sessionsMemberActivity(messages);
+  assert.equal(activity.runningReply.get("p-drew")?.id, "running");
+  assert.equal(activity.runningSince.get("p-drew"), at(12), "since its own turn began, not since it was made");
+  assert.equal(activity.runningReply.get("p-ana")?.id, "first", "turns run one after another: the first started");
+  assert.equal(activity.runningSince.get("p-ana"), at(20));
+  // Every place that says since when a member works reads the same reply.
+  assert.equal(memberRunningSince("p-drew", messages), at(12));
+  assert.equal(sessionsTaskRunningSince({ targetParticipantId: "p-drew", createdAt: at(9) }, messages), at(12));
+  assert.equal(sessionsTaskRunningSince({ targetParticipantId: "p-drew", createdAt: at(14) }, messages), at(14),
+    "a task given after the turn in progress waits behind it: since it was given");
+});
+
+test("a reply its member's later turns went past, or of a run no longer live, is not the one it works on", () => {
+  const messages = [
+    message("stale", "participant", 1, { participantId: "p-drew", status: "pending", metadata: { runId: "run-old" } }),
+    message("later-done", "participant", 5, { participantId: "p-drew", status: "done", metadata: { runId: "run-later" } }),
+    message("now", "participant", 8, { participantId: "p-drew", status: "pending", metadata: { runId: "run-now" } }),
+    message("post", "participant", 9, { participantId: "p-ana", status: "pending", metadata: { runId: "run-ana" } }),
+    message("own-post", "participant", 10, { participantId: "p-ana", status: "done", metadata: { runId: "run-ana" } }),
+    message("waiting-status", "participant", 11, { participantId: "p-ben", status: "pending", content: "Awaiting user approval.", metadata: { runId: "run-ben" } })
+  ];
+  const activity = sessionsMemberActivity(messages);
+  assert.equal(activity.runningReply.get("p-drew")?.id, "now", "the member finished a later turn: the old reply is over");
+  assert.equal(activity.runningReply.get("p-ana")?.id, "post", "a post of its own turn does not end it");
+  assert.equal(activity.runningReply.has("p-ben"), false, "hidden from the timeline, as runningMessageForParticipant skips it");
+  // The computer knows which runs are live: a reply of another run is over.
+  const orphan = [
+    message("orphan", "participant", 1, { participantId: "p-drew", status: "pending", metadata: { runId: "run-dead" } }),
+    message("live", "participant", 8, { participantId: "p-drew", status: "pending", metadata: { runId: "run-live" } })
+  ];
+  assert.equal(sessionsMemberActivity(orphan).runningReply.get("p-drew")?.id, "orphan", "without live runs: the first started");
+  assert.equal(sessionsMemberActivity(orphan, new Set(["run-live"])).runningReply.get("p-drew")?.id, "live");
+  assert.equal(sessionsMemberActivity(orphan, new Set(["run-live"])).runningSince.get("p-drew"), at(8));
+});
+
+test("a member's turn on a machine runs from when its run there began, as its bubble counts it", () => {
+  const messages = [
+    message("remote", "participant", 10, { participantId: "p-drew", status: "pending", metadata: {
+      runId: "run-remote", remoteRunStatus: { phase: "launching-session", label: "Starting", startedAt: at(13), updatedAt: at(13) } } })
+  ];
+  assert.equal(sessionsMemberActivity(messages).runningSince.get("p-drew"), at(13));
+  assert.equal(memberRunningSince("p-drew", messages), at(13));
+});

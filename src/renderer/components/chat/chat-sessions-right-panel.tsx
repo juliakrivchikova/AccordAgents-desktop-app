@@ -2,7 +2,6 @@ import { useCallback, useContext, useEffect, useMemo, useRef, type ComponentProp
 
 import type { DockedAccord } from "../../../shared/accordProgress";
 import { memberSessionMessages } from "../../../shared/mainSession";
-import { isPendingReply } from "../../../shared/chatActiveRuns";
 import { SESSIONS_REMOVED_MEMBER_DETAIL, sessionsMemberDetail, sessionsMemberStatus, sessionsTaskDurationMs, type SessionsMemberRow } from "../../../shared/mainSessionView";
 import { sessionsActivityRow } from "../../../shared/sessionsActivity";
 import type {
@@ -127,15 +126,6 @@ export function ChatSessionsRightPanel(props: {
     [conversation.messages, memberId, sessions.index]
   );
   const ownCount = useMemo(() => messages.filter((message) => message.participantId === memberId).length, [messages, memberId]);
-  // Each member's reply in progress (its newest), read once per change of the loaded chat.
-  const pendingReplyByMember = useMemo(() => {
-    const pending = new Map<string, ChatMessage>();
-    for (let index = conversation.messages.length - 1; index >= 0; index -= 1) {
-      const message = conversation.messages[index]!;
-      if (message.participantId && !pending.has(message.participantId) && isPendingReply(message)) pending.set(message.participantId, message);
-    }
-    return pending;
-  }, [conversation.messages]);
   const loadOlder = useLoadOlderUntilMember(ownCount, props.hasOlderMessages, props.olderMessagesLoading, props.onLoadOlderMessages);
   const memberDetail = (member: ChatParticipant): ChatAgentDetail => (model: MemberModelSummary): string => sessionsMemberDetail({
     provider: participantProviderLabel(member.kind, member.hostLabel),
@@ -143,9 +133,10 @@ export function ChatSessionsRightPanel(props: {
     roleLabel: chatRoleLabel(settings.chatRoleConfigs, member),
     roleConfigId: member.roleConfigId
   });
-  // What a running member does now: the newest step of its reply in progress.
+  // What a running member does now: the newest step of the reply it works
+  // on (the first started, never one queued behind it).
   const currentStep = (participantId: string): string | undefined => {
-    const message = pendingReplyByMember.get(participantId);
+    const message = sessions.activity.runningReply.get(participantId);
     if (!message) return undefined;
     const live = messageContext.liveProgressById.get(message.id);
     const events = live?.activityEvents?.length ? live.activityEvents : message.metadata?.activityEvents;

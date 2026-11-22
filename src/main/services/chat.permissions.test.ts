@@ -16964,3 +16964,76 @@ test("a member's own failure in the last seconds of a quit still says what faile
   assert.match(reply.content, /needs authorization/);
   assert.equal(reply.metadata?.terminalReason, undefined, "not stopped by the quit");
 });
+
+test("what a member wrote before the User's quit stays in its reply, stopped", async () => {
+  const participant = chatParticipant("claude-code");
+  const conversation = chatConversation([participant]);
+  const { service, storage, tempRoot } = testService({
+    conversation,
+    run: async (runParticipant: ParticipantConfig, _prompt: string, _path: string, _unused: unknown, _kind: string, _signal: AbortSignal,
+      options: { onOutput?: (event: unknown) => void }) => {
+      options.onOutput?.({ kind: "text", text: "Half of the essay.", cumulative: "Half of the essay." });
+      return { participant: runParticipant, ok: false, content: `${runParticipant.label} stopped before it returned a response.`,
+        error: "claude warm process exited with code 143", durationMs: 1 };
+    }
+  });
+  (service as any).ensureHistoryFiles = async () => tempRoot;
+  service.beginQuit();
+  await (service as any).runParticipantTurnSerialized(storage.current, participant, storage.current.messages[0], "run-quit-partial", undefined, undefined, { warnings: [] })
+    .catch(() => undefined);
+  const reply = storage.current.messages.filter((message: ChatMessage) => message.role === "participant").at(-1)!;
+  assert.equal(reply.content, "Half of the essay.");
+  assert.equal(reply.status, "error");
+  assert.equal(reply.metadata?.terminalReason, "user-stopped");
+});
+
+test("a turn the quit closed that ends after the quit was cancelled is still stopped, keeping its text", async () => {
+  const participant = chatParticipant("claude-code");
+  const conversation = chatConversation([participant]);
+  let service: ChatService;
+  const harness = testService({
+    conversation,
+    run: async (runParticipant: ParticipantConfig, _prompt: string, _path: string, _unused: unknown, _kind: string, _signal: AbortSignal,
+      options: { onOutput?: (event: unknown) => void }) => {
+      options.onOutput?.({ kind: "text", text: "Half of the essay.", cumulative: "Half of the essay." });
+      // The quit closed the process; the window kept its page meanwhile, so
+      // the quit did not happen before this end arrives.
+      service.endQuit();
+      return { participant: runParticipant, ok: false, content: `${runParticipant.label} stopped before it returned a response.`,
+        error: "claude warm process exited with code 143", durationMs: 1 };
+    }
+  });
+  service = harness.service;
+  const { storage, tempRoot } = harness;
+  (service as any).ensureHistoryFiles = async () => tempRoot;
+  (service as any).registerTargetRun("run-quit-cancelled", new AbortController(), {
+    conversationId: conversation.id, participantId: participant.id, participantHandle: participant.handle
+  });
+  service.beginQuit();
+  const warnings: string[] = [];
+  await (service as any).runParticipantTurnSerialized(storage.current, participant, storage.current.messages[0], "run-quit-cancelled", undefined, undefined, { warnings })
+    .catch(() => undefined);
+  const reply = storage.current.messages.filter((message: ChatMessage) => message.role === "participant").at(-1)!;
+  assert.equal(reply.content, "Half of the essay.");
+  assert.equal(reply.metadata?.terminalReason, "user-stopped");
+  assert.equal(warnings.some((warning) => /stopped before it returned/.test(warning)), false, "no failure of the member");
+  // A turn that starts after the cancel and fails the same way is a failure.
+  assert.equal((service as any).endsByQuit("a-later-run"), false);
+});
+
+test("a requester a quit kept from resuming is resumed once the quit turns out not to happen", async () => {
+  const participant = chatParticipant("claude-code");
+  const conversation = chatConversation([participant]);
+  const { service } = testService({ conversation });
+  service.beginQuit();
+  await (service as any).autoResumeParticipantRequest(conversation.id, "request-1", undefined, { groupCheck: true });
+  const resumed: unknown[][] = [];
+  (service as any).autoResumeParticipantRequest = async (...args: unknown[]) => { resumed.push(args); };
+  service.endQuit();
+  assert.equal(resumed.length, 1);
+  assert.equal(resumed[0][0], conversation.id);
+  assert.equal(resumed[0][1], "request-1");
+  assert.deepEqual(resumed[0][3], { groupCheck: true });
+  service.endQuit();
+  assert.equal(resumed.length, 1, "once");
+});

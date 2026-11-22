@@ -1847,6 +1847,8 @@ function createWindow(): void {
     }
     debugLogService.writeNow("app-window.close", { windowId, forUpdate: quittingForUpdate, quitting: quitCleanupStarted });
     if (mainWindow === window) {
+      // Kept for a quit whose window then keeps its page (quitWasCancelled).
+      if (quitCleanupStarted) mainWindowLetGoByQuit = window;
       mainWindow = undefined;
     }
   });
@@ -1863,6 +1865,10 @@ function createWindow(): void {
   });
   window.webContents.on("will-prevent-unload", () => {
     debugLogService.writeNow("app-window.unload-prevented", { windowId });
+    // The page keeps itself open as the quit closes the windows: the quit
+    // does not happen. While its steps run nothing of the quit closes a
+    // window, so a page kept then is another close's (Cmd+W), not the quit's.
+    if (quitCleanupFinished) quitWasCancelled("a window kept its page");
   });
   window.webContents.on("destroyed", () => {
     if (mainWindow === window) {
@@ -3839,6 +3845,57 @@ async function stopMembersThenServerLink(): Promise<void> {
   await membersClosed;
 }
 
+/** How long after its last quit call a quit that ran its steps may take to
+ *  reach will-quit before it counts as cancelled. */
+const QUIT_CANCEL_DETECT_MS = 5_000;
+let quitCancelTimer: NodeJS.Timeout | undefined;
+
+/**
+ * A quit that ran its steps and then did not happen (a window kept its page
+ * from unloading, or the native quit was cancelled): the app goes on as it
+ * was. What the steps stopped starts again, and turns run again: left
+ * quitting, it took no turn the server asked and resumed no requester, with
+ * its link to the server closed (2026-11-22 review).
+ */
+function quitWasCancelled(reason: string): void {
+  if (quitCancelTimer) clearTimeout(quitCancelTimer);
+  quitCancelTimer = undefined;
+  // Only a quit that ran its steps and closes the windows can be cancelled.
+  if (!quitCleanupStarted || !quitCleanupFinished) return;
+  debugLogService.writeNow("app-quit.cancelled", { reason });
+  quitCleanupStarted = false;
+  quitCleanupFinished = false;
+  // The window's close ran before its page kept itself open, and let go of
+  // it as the main window: it is that again, so it gets the chat's updates.
+  if ((!mainWindow || mainWindow.isDestroyed()) && mainWindowLetGoByQuit && !mainWindowLetGoByQuit.isDestroyed()) {
+    mainWindow = mainWindowLetGoByQuit;
+  }
+  mainWindowLetGoByQuit = undefined;
+  // The next quit asks about the terminal's commands again.
+  quitConfirmation.revoke();
+  // Once the quit's own steps have really ended (they may outlast its time
+  // limit): started earlier, their stops would close what starts here.
+  const cleaned = quitCleanupRun ?? Promise.resolve();
+  quitCleanupRun = undefined;
+  void cleaned.then(async () => {
+    // A quit begun again meanwhile owns what runs now.
+    if (quitCleanupStarted) return;
+    chatService.endQuit();
+    const failed = (part: string) => (error: unknown) => {
+      void debugLogService.write("app-quit.cancelled.restart-error", { part, message: error instanceof Error ? error.message : String(error) });
+    };
+    // As the app starts: its local API before the scripts that call it.
+    await appMcpService.start().catch(failed("app tools"));
+    if (quitCleanupStarted) return;
+    void scriptService.start().catch(failed("scripts"));
+    void serverChatLink.start().catch(failed("server link"));
+  });
+}
+/** The quit's steps, until they end (they may outlast QUIT_CLEANUP_MS). */
+let quitCleanupRun: Promise<void> | undefined;
+/** The main window a quit's close let go of, until the quit happens. */
+let mainWindowLetGoByQuit: BrowserWindow | undefined;
+
 app.on("before-quit", (event) => {
   debugLogService.writeNow("app-quit.before-quit", {
     forUpdate: quittingForUpdate,
@@ -3872,6 +3929,7 @@ app.on("before-quit", (event) => {
     stopMembersThenServerLink(),
     scriptService.stop().then(() => appMcpService.stop())
   ]).then(() => { cleanupDone = true; });
+  quitCleanupRun = cleanup;
   const timeout = new Promise<void>((resolve) => setTimeout(resolve, QUIT_CLEANUP_MS));
   void Promise.race([cleanup, timeout]).finally(() => {
     debugLogService.writeNow("app-quit.cleanup-finished", { ms: Date.now() - cleanupStartedAt, timedOut: !cleanupDone });
@@ -3884,12 +3942,27 @@ app.on("before-quit", (event) => {
     // close and the app keeps running with none (2026-10-20, the User's
     // Cmd+Q at 08:45). The immediate runs at the loop's next wakeup, which
     // the quit's own file and network work brings at once (0 ms measured).
-    setImmediate(() => app.quit());
+    setImmediate(() => {
+      app.quit();
+      // Nothing says a quit was cancelled; one that has not reached
+      // will-quit by then was.
+      if (quitCancelTimer) clearTimeout(quitCancelTimer);
+      quitCancelTimer = setTimeout(() => {
+        // Only with a window still open: one whose windows are gone is still
+        // quitting, however slowly, and must not start anything again.
+        const open = BrowserWindow.getAllWindows().some((window) => !window.isDestroyed());
+        if (open) quitWasCancelled("no will-quit");
+        else debugLogService.writeNow("app-quit.slow", { afterMs: QUIT_CANCEL_DETECT_MS });
+      }, QUIT_CANCEL_DETECT_MS);
+      quitCancelTimer.unref?.();
+    });
   });
 });
 
 app.on("will-quit", () => {
   debugLogService.writeNow("app-quit.will-quit", { forUpdate: quittingForUpdate });
+  if (quitCancelTimer) clearTimeout(quitCancelTimer);
+  quitCancelTimer = undefined;
   // Here and not in before-quit, which an update's restart skips: every
   // shell in the terminal panel gets its hangup on any kind of quit.
   terminalService.shutdown();
