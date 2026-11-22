@@ -2248,7 +2248,8 @@ test("Claude Code's plan approval: ExitPlanMode raises the CLI's own card; a Yes
 
   // An answer that is not one of its rows (an older phone's Allow, auto
   // mode the card did not offer) is refused; the card still asks.
-  await assert.rejects(service.respondToAppToolApproval({ conversationId: conversation.id, approvalId: card.id, approve: true }), /This answer is not one this card takes\./);
+  await assert.rejects(service.respondToAppToolApproval({ conversationId: conversation.id, approvalId: card.id, approve: true }), /^Error: Update the phone app to answer this card\.$/,
+    "an older phone's Allow: told why");
   await assert.rejects(service.respondToAppToolApproval({ conversationId: conversation.id, approvalId: card.id, approve: true,
     planDecision: { optionId: "yes-resume-auto-mode" } }), /This answer is not one this card takes\./);
   await service.respondToAppToolApproval({ conversationId: conversation.id, approvalId: card.id, approve: true,
@@ -2288,7 +2289,7 @@ test("Claude Code's plan approval: ExitPlanMode raises the CLI's own card; a Yes
   assert.deepEqual((askedCard.request as { planApproval?: unknown }).planApproval, { plan: "" });
   // A Deny without a row (an older phone's) is refused too; "No, keep
   // planning" with nothing typed is the CLI's rejection that waits for her.
-  await assert.rejects(service.respondToAppToolApproval({ conversationId: conversation.id, approvalId: askedCard.id, approve: false }), /This answer is not one this card takes\./);
+  await assert.rejects(service.respondToAppToolApproval({ conversationId: conversation.id, approvalId: askedCard.id, approve: false }), /Update the phone app to answer this card\./);
   await service.respondToAppToolApproval({ conversationId: conversation.id, approvalId: askedCard.id, approve: false, planDecision: { optionId: "no" } });
   assert.deepEqual(await asked, {
     behavior: "deny",

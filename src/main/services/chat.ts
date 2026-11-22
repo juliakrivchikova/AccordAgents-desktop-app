@@ -639,6 +639,9 @@ interface CompactChatCommand {
 }
 
 const HANDLE_PATTERN = /^[A-Za-z0-9_-]{1,32}$/;
+/** Why a plan approval answered without one of its rows (an older phone
+ *  app's Allow or Deny) is refused. */
+const CLAUDE_PLAN_ANSWER_NEEDS_UPDATE = "Update the phone app to answer this card.";
 
 /** Whether the computer moved a sessions-view chat's members into their
  *  CLI's own mode already: its shared mark, or its own record of it (kept
@@ -8711,6 +8714,10 @@ export class ChatService {
         // the CLI's own dialog does; an answer without one (an older phone's
         // Allow) is refused and the card is asked again.
         const option = claudePlanApprovalOption(plan, request.planDecision?.optionId);
+        if (!request.planDecision) {
+          // An older phone app answers Allow or Deny, which this card has not.
+          throw new Error(CLAUDE_PLAN_ANSWER_NEEDS_UPDATE);
+        }
         if (!option || request.approve !== Boolean(option.mode)) {
           throw new Error("This answer is not one this card takes.");
         }
