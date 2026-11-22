@@ -274,16 +274,42 @@ test("a new main session starts in the mode the User's own config starts its CLI
   assert.equal(codexStartAccess({ approvals_reviewer: "auto_review", approval_policy: "on-request", sandbox_mode: "workspace-write" }), "auto-review");
   assert.equal(codexStartAccess({ sandbox_mode: "read-only" }), "read-only");
   assert.equal(codexStartAccess({ sandbox_mode: "danger-full-access", approval_policy: "never" }), "full-access");
-  // Codex's "Custom permissions": no preset, so the CLI's built-in one.
-  assert.equal(codexStartAccess({ approval_policy: "untrusted" }), undefined);
-  assert.equal(codexStartAccess({ sandbox_mode: "danger-full-access" }), undefined);
+  // A read-only sandbox stays read-only whoever reviews its asks: her own
+  // config with sandbox_mode = "read-only" (config/read answers
+  // approvals_reviewer auto_review, approval_policy null, Codex 0.155.1).
+  assert.equal(codexStartAccess({ sandbox_mode: "read-only", approval_policy: null, approvals_reviewer: "auto_review" }), "read-only");
+  assert.equal(codexStartAccess({ sandbox_mode: "read-only", approvals_reviewer: "guardian_subagent" }), "read-only");
+  assert.equal(codexStartAccess({ sandbox_mode: "read-only", approval_policy: "never" }), "read-only");
+  assert.equal(codexStartAccess({ sandbox_mode: "read-only", approval_policy: "untrusted" }), "read-only");
+  // Codex's "Custom permissions": no preset, so its narrowest, Read Only:
+  // never Ask for approval, which would run what her config does not.
+  assert.equal(codexStartAccess({ approval_policy: "untrusted" }), "read-only");
+  assert.equal(codexStartAccess({ approval_policy: "never" }), "read-only");
+  assert.equal(codexStartAccess({ approval_policy: "on-failure", approvals_reviewer: "auto_review" }), "read-only");
+  assert.equal(codexStartAccess({ approval_policy: { granular: { sandbox_approval: true } } }), "read-only", "a granular policy");
+  assert.equal(codexStartAccess({ sandbox_mode: "danger-full-access" }), "read-only", "Full Access's sandbox that asks");
+  assert.equal(codexStartAccess({ approvals_reviewer: "someone_new" }), "read-only", "a reviewer Codex added later");
+  assert.equal(codexStartAccess({ sandbox_mode: "external-sandbox" }), "read-only", "a sandbox Codex added later");
+  assert.equal(codexStartAccess({ sandbox_mode: 3 }), "read-only", "not text");
+  assert.equal(startChatAccessOption("codex-cli", codexStartAccess({ sandbox_mode: "read-only", approvals_reviewer: "auto_review" })).label, "Read Only");
+  // Not read at all: the CLI's built-in default.
   assert.equal(codexStartAccess(undefined), undefined);
   // Claude Code 2.1.330: its initialize answer's current_permission_mode.
   assert.equal(claudeStartAccess("default"), "manual");
   assert.equal(claudeStartAccess("acceptEdits"), "acceptEdits");
   assert.equal(claudeStartAccess("plan"), "plan");
   assert.equal(claudeStartAccess("auto"), "auto");
-  assert.equal(claudeStartAccess("bypassPermissions"), undefined, "not offered by the composer");
+  // Not offered by the composer: Manual, which asks before anything her
+  // settings do not allow (Claude Code 2.1.330 says these modes as they are).
+  assert.equal(claudeStartAccess("bypassPermissions"), "manual");
+  assert.equal(claudeStartAccess("dontAsk"), "manual");
+  assert.equal(claudeStartAccess("delegate"), "manual", "a mode Claude Code added later");
+  assert.equal(claudeStartAccess(undefined), undefined, "said nothing");
+  assert.equal(claudeStartAccess(""), undefined);
+  for (const said of ["default", "manual", "acceptEdits", "plan", "auto", "bypassPermissions", "dontAsk"]) {
+    const option = startChatAccessOption("claude-code", claudeStartAccess(said));
+    assert.ok(["manual", "acceptEdits", "plan", "auto"].includes(option.id), `${said}: one of the composer's modes`);
+  }
   // agy 1.5.14: settings.json agentMode. None saved: Auto only where the
   // account has it, which the app cannot read, so the built-in Default.
   assert.equal(antigravityStartAccess(undefined), undefined);

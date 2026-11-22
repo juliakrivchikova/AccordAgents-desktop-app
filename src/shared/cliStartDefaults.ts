@@ -39,35 +39,55 @@ function text(value: unknown): string | undefined {
   return typeof value === "string" && value.trim() ? value.trim() : undefined;
 }
 
+/** A config value as Codex says it in `config/read`: its text; `fallback`
+ *  when it is not set (absent or null); none for anything else (an object,
+ *  such as a granular approval policy). */
+function codexSetting(value: unknown, fallback: string): string | undefined {
+  if (value === undefined || value === null) return fallback;
+  return text(value);
+}
+
 /**
  * The preset Codex 0.155.1's `/permissions` picker marks current for the
  * User's effective config (`config/read`), in a folder it trusts: its sandbox
  * (workspace-write when unset), approval policy (on-request when unset) and
  * reviewer (the User when unset; `guardian_subagent` is the old name of
  * `auto_review`). Any other combination is Codex's "Custom permissions",
- * which no preset is: none.
+ * which no preset is: it starts in Read Only, Codex's narrowest preset
+ * (read-only sandbox, the User approving each ask), so a session never
+ * starts wider than her config runs Codex: a read-only sandbox stays
+ * read-only whoever reviews its asks, and a combination the composer has no
+ * entry for (an approval policy such as `untrusted` or `never`, Full
+ * Access's sandbox that asks, a reviewer Codex added later) loses what it
+ * would grant beyond that rather than gaining what Ask for approval grants.
+ * None only when the config could not be read (the CLI's built-in default
+ * then, docs/main-session.md).
  */
 export function codexStartAccess(config: { sandbox_mode?: unknown; approval_policy?: unknown; approvals_reviewer?: unknown } | undefined): string | undefined {
   if (!config) return undefined;
-  const sandbox = text(config.sandbox_mode) ?? "workspace-write";
-  const approval = text(config.approval_policy) ?? "on-request";
-  const reviewer = text(config.approvals_reviewer) ?? "user";
+  const sandbox = codexSetting(config.sandbox_mode, "workspace-write");
+  const approval = codexSetting(config.approval_policy, "on-request");
+  const reviewer = codexSetting(config.approvals_reviewer, "user");
   const autoReview = reviewer === "auto_review" || reviewer === "guardian_subagent";
-  if (sandbox === "danger-full-access") return approval === "never" ? "full-access" : undefined;
-  if (approval !== "on-request") return undefined;
-  if (sandbox === "workspace-write") return autoReview ? "auto-review" : reviewer === "user" ? "workspace-write" : undefined;
-  if (sandbox === "read-only") return reviewer === "user" ? "read-only" : undefined;
-  return undefined;
+  if (sandbox === "danger-full-access" && approval === "never") return "full-access";
+  if (sandbox === "workspace-write" && approval === "on-request" && (autoReview || reviewer === "user")) {
+    return autoReview ? "auto-review" : "workspace-write";
+  }
+  return "read-only";
 }
 
 /** The mode Claude Code 2.1.330 starts in, as its `initialize` answer says
  *  (`current_permission_mode`, from `permissions.defaultMode` in her
- *  settings): Manual for its internal `default`; none for Bypass
- *  Permissions and Don't Ask, which the composer does not offer. */
+ *  settings; a value it does not know reads `default`): Manual for its
+ *  internal `default`. Bypass Permissions, Don't Ask and any mode the
+ *  composer has no entry for start in Manual, which asks the User before
+ *  anything her settings do not allow outright: nothing runs without her
+ *  yes that would not have run in that mode (Don't Ask refuses what Manual
+ *  asks about; Bypass Permissions asks nothing). None when it said nothing. */
 export function claudeStartAccess(permissionMode: unknown): string | undefined {
   const mode = text(permissionMode);
-  if (mode === "default" || mode === "manual") return "manual";
-  return mode === "acceptEdits" || mode === "plan" || mode === "auto" ? mode : undefined;
+  if (!mode) return undefined;
+  return mode === "acceptEdits" || mode === "plan" || mode === "auto" ? mode : "manual";
 }
 
 /** The mode agy 1.5.14 starts in (`-p` runs too) as its settings.json

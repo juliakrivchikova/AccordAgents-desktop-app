@@ -216,12 +216,23 @@ chat without a main session is always `classic`; its switch is disabled.
     screen showed (`newChatMainSessionStartAccess`), never one read again at
     send. A changed config file (Codex's config.toml, Claude Code's
     settings.json, agy's settings.json) is read again the next time a
-    composer shows these (`cliConfigStamp`). When the config names a
-    combination the CLI's own picker has no entry for (Codex's "Custom
-    permissions", Claude Code's Bypass Permissions or Don't Ask), it cannot
-    be read, or a machine's program predates it, the CLI's built-in default
-    applies: Manual, Ask for approval, agy's Default
-    (`defaultChatAccessOption`). A config in the project folder (Claude
+    composer shows these (`cliConfigStamp`). A config the CLI's own picker
+    has no entry for never starts the session wider than the CLI would run:
+    Codex's "Custom permissions" (an approval policy such as `untrusted`,
+    `never` or a granular one, Full Access's sandbox that asks, a sandbox or
+    reviewer the app does not know) starts in Read Only, Codex's narrowest
+    preset, and a read-only sandbox always does, whoever reviews its asks
+    (her config with `sandbox_mode = "read-only"` added: `config/read`
+    answers `approvals_reviewer: auto_review` beside it, and the session
+    started in Ask for approval before, 2026-11-22; `codexStartAccess`);
+    Claude Code's Bypass Permissions, Don't Ask or a mode the app does not
+    know start in Manual, which asks before anything her settings do not
+    allow (Claude Code 2.1.330's `initialize` says `bypassPermissions` and
+    `dontAsk` as they are, an unknown `defaultMode` as `default`;
+    `claudeStartAccess`); agy's unknown `agentMode` starts in Default. When
+    the config cannot be read, or a machine's program predates start
+    defaults, the CLI's built-in default applies: Manual, Ask for approval,
+    agy's Default (`defaultChatAccessOption`). A config in the project folder (Claude
     Code's `.claude/settings.json`, Codex's project `.codex/config.toml`) is
     not read for this (docs/parity-requirements.md, known divergences).
     Starting in Full Access from her own config asks nothing, as Codex does

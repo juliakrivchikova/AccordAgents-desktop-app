@@ -3173,6 +3173,38 @@ readline.createInterface({ input: process.stdin }).on("line", (line) => {
   }
 });
 
+test("a Codex config with a read-only sandbox starts the main session in Read Only, whoever reviews its asks", async () => {
+  // Her config.toml with sandbox_mode = "read-only" added: Codex 0.155.1's
+  // config/read answers it so (approvals_reviewer from guardian_subagent).
+  const fixtureDir = await mkdtemp(path.join(tmpdir(), "accord-codex-start-read-only-"));
+  const originalCwd = process.cwd();
+  const codexPath = await writeCodexAppServerFixture(fixtureDir, `#!/usr/bin/env node
+const readline = require("node:readline");
+const send = (value) => process.stdout.write(JSON.stringify(value) + "\\n");
+readline.createInterface({ input: process.stdin }).on("line", (line) => {
+  const message = JSON.parse(line);
+  if (message.method === "initialize") {
+    send({ id: message.id, result: { userAgent: "fake-codex" } });
+  } else if (message.method === "model/list") {
+    send({ id: message.id, result: { data: [{ id: "gpt-5.6-luna", displayName: "GPT-5.6-Luna", isDefault: true }], nextCursor: null } });
+  } else if (message.method === "config/read") {
+    send({ id: message.id, result: { config: { model: "gpt-5.6-luna", approvals_reviewer: "auto_review", approval_policy: null, sandbox_mode: "read-only" } } });
+  }
+});
+`);
+  process.chdir(fixtureDir);
+  const runner = new CliAgentRunner(undefined, undefined, codexPath);
+  try {
+    const catalog = await runner.listModelCatalog("codex-cli");
+    assert.equal(catalog.authoritative, true, catalog.error);
+    assert.equal(catalog.startDefaults?.access, "read-only", "never Ask for approval, which edits the workspace");
+  } finally {
+    await runner.shutdownWarmAgents();
+    process.chdir(originalCwd);
+    await rm(fixtureDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
+  }
+});
+
 test("Claude Code's catalog names the model, effort and mode her settings start it in", async () => {
   const runner = makeRunner() as any;
   runner.requestClaudeInitializeAnswer = async () => ({
@@ -3183,10 +3215,11 @@ test("Claude Code's catalog names the model, effort and mode her settings start 
   const catalog = await runner.listClaudeModelCatalog("2026-11-22T00:00:00.000Z");
   assert.deepEqual(catalog.models.filter((model: { recommended?: boolean }) => model.recommended).map((model: { id: string }) => model.id), ["sonnet"]);
   assert.deepEqual(catalog.startDefaults, { access: "acceptEdits", model: "sonnet", modelLabel: "Sonnet 5.5", reasoningEffort: "xhigh" });
-  // Bypass Permissions is not a mode the composer offers: no start mode then.
+  // Bypass Permissions is not a mode the composer offers: Manual, which
+  // asks before anything her settings do not allow.
   runner.requestClaudeInitializeAnswer = async () => ({ models: CLAUDE_INITIALIZE_MODELS, current_permission_mode: "bypassPermissions" });
   const bypass = await runner.listClaudeModelCatalog("2026-11-22T00:00:00.000Z");
-  assert.equal(bypass.startDefaults?.access, undefined);
+  assert.equal(bypass.startDefaults?.access, "manual");
 });
 
 test("every non-interactive Codex exec path explicitly disables approvals", () => {
