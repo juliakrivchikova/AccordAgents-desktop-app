@@ -12548,7 +12548,9 @@
         const reply = replies.get(message.id + "\u0000" + item.targetParticipantId);
         if (!reply || reply.message.status === "pending") return item;
         changed = true;
-        if (reply.message.status === "error") return { ...item, status: reply.row && reply.row.stopRequested ? "interrupted" : "failed" };
+        // Stopped (a Stop, the User quitting) is interrupted, as on the computer.
+        const stopped = (reply.row && reply.row.stopRequested) || (reply.message.metadata && reply.message.metadata.terminalReason === "user-stopped");
+        if (reply.message.status === "error") return { ...item, status: stopped ? "interrupted" : "failed" };
         return { ...item, status: "answered", replyMessageId: reply.message.id };
       });
       if (changed) message.metadata = { ...message.metadata, participantRequest: { ...batch, items: items } };
