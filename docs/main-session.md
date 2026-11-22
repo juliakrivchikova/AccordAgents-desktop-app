@@ -158,7 +158,17 @@ switch is disabled.
     as icons; at 1080×720 "Sonnet 5.5" with the effort and mode as icons
     in the main composer, "Sonnet 5.5 · Medium" and the mode's icon in the
     member's, and "GPT-5.6-Luna" without its glyph and three icons in a
-    Codex main composer; every control inside its row, Send beside it. Its own turn running, the controls wait (disabled). The
+    Codex main composer; every control inside its row, Send beside it. Its own turn running, the controls wait (disabled),
+    but for the permission mode where its CLI takes one while it works
+    (the User, 2026-11-22; checked in the CLIs that day): Claude Code
+    2.1.330's Shift+Tab switches the mode mid-turn and it holds for the rest
+    of that turn, which the app does with the CLI's own stream-json control
+    request `set_permission_mode` to the member's live process (a control
+    run refused a Write in default mode; switched mid-turn, the same Write
+    ran); Codex 0.155.1's `/permissions` opens and saves while it works
+    (its Plan mode, Shift+Tab, does not change while it works: that toggle
+    waits); Antigravity's print mode takes its mode when each run starts,
+    so its menu waits (`modeChangesWhileTurnRuns`). The
     access is the CLI's own mode, run as the CLI runs it
     (`src/shared/chatAccessModes.ts`, the permissions' `cliApprovals`: what
     is not granted the CLI asks about instead of the app taking it away;
@@ -312,7 +322,11 @@ switch is disabled.
     scripts) and turns queued for it before the computer first said its
     program; and Codex's Ask for approval and Read Only there take the
     machine's own `approvals_reviewer` (the app names the User from this
-    version on), which the app's setup leaves unset. Settings from the classic controls are no
+    version on), which the app's setup leaves unset. Fork to new chat, a
+    member the main session adds and a new chat's main session always run
+    in their CLI's own mode (`inCliOwnMode`: the mode they were running in,
+    their other rights kept; the User, 2026-11-22: "нахера там вообще этот
+    кастом?"). Settings from the classic controls are no
     mode: the mode control says "Custom", its menu says so, and a classic
     toggle (Read Files, Edit Files, Run Shell, Access Web) ends a mode
     chosen in its menu and Codex's Plan mode with it
