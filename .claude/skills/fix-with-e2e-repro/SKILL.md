@@ -73,6 +73,21 @@ Check for an existing harness before writing a new one:
 For cloud-run defects there is no ready stand; drive a real remote run and read
 `userData/debug-logs/<date>.jsonl` plus the worker's own state.
 
+## Compact when most of the context is no longer needed
+
+Context size alone is not the signal. Compact when most of what your context holds will not be needed for what comes next. Typical cases (the list is not complete):
+
+- A big stage is finished: the implementation with its tests, the review with its fixes, the end-to-end QA, or the whole task.
+- A long investigation or approach turned out to be a dead end.
+- Large outputs have served their purpose: logs, test runs, file dumps, screenshots.
+- You are switching to unrelated work.
+
+Judge any other case by the same question: would a short summary carry everything the next step needs?
+
+- In AccordAgents Chat a compaction you request with `app_chat_request_compaction` runs only after your turn ends. At that point report what is done and what comes next. Request compaction with instructions naming what the next step needs: branch and head, changed files, open findings, how to verify. Then end your turn. Whoever gave you the task sends the next step.
+- Outside AccordAgents, tell the user at that point that it is a good moment for `/compact`.
+- Do not compact while the details in your context are still needed. A question like "is it time to compact?" is not a reason in itself: answer it by the question above.
+
 ## Reporting
 
 Report the repro's before/after honestly. If the fix is partial, say which part
