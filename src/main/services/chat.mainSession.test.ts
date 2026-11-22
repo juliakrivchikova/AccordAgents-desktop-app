@@ -6,7 +6,7 @@ import { ChatService } from "./chat";
 import { accordLaunchCardForMessage } from "../../shared/accordLaunchCard";
 import { chatParticipantRequestReplyRootMap } from "../../shared/chatParticipantRequestThreads";
 import { normalizeChatAgentPermissions } from "../../shared/agentPermissions";
-import { applyChatAccessOptionById } from "../../shared/chatAccessModes";
+import { applyChatAccessOptionById, selectedChatAccessOption } from "../../shared/chatAccessModes";
 import { buildGeminiExecInvocation } from "./geminiExec";
 import { DEFAULT_CHAT_PROMPT_CONTEXT } from "../../shared/chatPromptContext";
 import { CHAT_PARTICIPANT_REQUEST_MAX_CHAIN_BATCHES, CHAT_PARTICIPANT_REQUEST_MAX_DEPTH_DEFAULT, CHAT_PARTICIPANT_REQUEST_PROMPT_MAX_CHARS_DEFAULT } from "../../shared/chatParticipantRequests";
@@ -1028,6 +1028,95 @@ test("the main session adding a member broader than itself through the member to
   });
   assert.equal(within.status, "auto_applied");
   assert.deepEqual(participantsOf(storage.current).map((participant) => participant.handle), ["main", "reader"]);
+});
+
+// "No Custom in the sessions view" (the User, 2026-11-22): every member added
+// to a chat with a main session runs in its CLI's own mode, whoever added it.
+test("every member added to a chat with a main session runs in its CLI's own mode: on her approval card, by a member without a card, or by her from the roster", async () => {
+  const main = mainSession();
+  const { service, storage } = testService({ conversation: mainSessionChat([main]) });
+  (service as any).cliRunner.detectAgents = async () => [
+    { kind: "codex-cli", label: "Codex CLI", installed: true },
+    { kind: "claude-code", label: "Claude Code", installed: true }
+  ];
+  const accessOf = (handle: string) => {
+    const added = participantsOf(storage.current).find((participant) => participant.handle === handle)!;
+    assert.equal(normalizeChatAgentPermissions(added.permissions).cliApprovals, true, `@${handle} in its CLI's own mode`);
+    return selectedChatAccessOption(added.kind, added.agentMode, added.permissions)?.id;
+  };
+  const actor = mainActor(["participants.manage"]);
+  // On her card (a member broader than the main session).
+  const asked = await service.requestParticipantChangeFromTool(actor, {
+    operations: [{ type: "add_new_participant_to_chat", saveAsPreset: false, participant: { handle: "web", roleConfigId: GENERIC_ROLE.id, kind: "codex-cli", permissions: permissions({ webAccess: true }) } }]
+  });
+  assert.equal(asked.status, "pending_user_approval");
+  const card = (storage.current.metadata.pendingAppToolApprovals as Array<{ id: string; status: string }>).find((approval) => approval.status === "pending")!;
+  await service.respondToAppToolApproval({ conversationId: storage.current.id, approvalId: card.id, approve: true });
+  await waitFor(() => participantsOf(storage.current).some((participant) => participant.handle === "web"));
+  assert.equal(accessOf("web"), "read-only", "Codex without file edits: Read Only");
+  // Without a card.
+  const within = await service.requestParticipantChangeFromTool(actor, {
+    operations: [{ type: "add_new_participant_to_chat", saveAsPreset: false, participant: { handle: "reader", roleConfigId: GENERIC_ROLE.id, kind: "claude-code", permissions: permissions() } }]
+  });
+  assert.equal(within.status, "auto_applied");
+  assert.equal(accessOf("reader"), "manual");
+  // By her, from the roster.
+  await service.addParticipant({
+    conversationId: storage.current.id,
+    participant: { handle: "editor", roleConfigId: GENERIC_ROLE.id, kind: "claude-code", agentMode: "default", permissions: permissions({ workspaceWrite: true }) } as any
+  });
+  assert.equal(accessOf("editor"), "acceptEdits");
+  const editor = participantsOf(storage.current).find((participant) => participant.handle === "editor")!;
+  assert.equal(editor.delegatedByParticipantId, undefined, "hers: not held to the main session's rights");
+});
+
+test("a member added to a chat without a main session keeps the rights it was given", async () => {
+  const conversation = { ...mainSessionChat([member("worker-id", "worker")]), metadata: { participants: [member("worker-id", "worker")] } } as Conversation;
+  const { service, storage } = testService({ conversation });
+  (service as any).cliRunner.detectAgents = async () => [{ kind: "codex-cli", label: "Codex CLI", installed: true }];
+  await service.addParticipant({
+    conversationId: conversation.id,
+    participant: { handle: "classic", roleConfigId: GENERIC_ROLE.id, kind: "codex-cli", agentMode: "default", permissions: permissions({ workspaceWrite: true }) } as any
+  });
+  const added = participantsOf(storage.current).find((participant) => participant.handle === "classic")!;
+  assert.equal(normalizeChatAgentPermissions(added.permissions).cliApprovals, undefined);
+});
+
+test("a chat in the sessions view opened on the computer moves its classic-rights members into their CLI's own mode once, and is marked so a later change is not undone", async () => {
+  const main = mainSession("claude-code", { permissions: { ...normalizeChatAgentPermissions(mainSession().permissions), cliApprovals: true } });
+  const classic = member("worker-id", "worker", { kind: "claude-code", permissions: permissions({ workspaceWrite: true }) });
+  const { service, storage } = testService({ conversation: mainSessionChat([main, classic], { chatView: "sessions" }) });
+  await service.hydrateContextUsage(clone(storage.current));
+  await waitFor(() => typeof storage.current.metadata.cliModesConvertedAt === "string");
+  const worker = participantsOf(storage.current).find((participant) => participant.id === "worker-id")!;
+  assert.equal(normalizeChatAgentPermissions(worker.permissions).cliApprovals, true);
+  assert.equal(selectedChatAccessOption(worker.kind, worker.agentMode, worker.permissions)?.id, "acceptEdits", "the mode it ran in");
+  // Something sets classic rights on it later: opening the chat again leaves it.
+  storage.current.metadata.participants = participantsOf(storage.current).map((participant) =>
+    participant.id === "worker-id" ? { ...participant, permissions: permissions({ workspaceWrite: true }) } : participant);
+  const marked = storage.current.metadata.cliModesConvertedAt;
+  await service.hydrateContextUsage(clone(storage.current));
+  const fresh = testService({ conversation: clone(storage.current) });
+  await fresh.service.hydrateContextUsage(clone(fresh.storage.current));
+  await new Promise((resolve) => setTimeout(resolve, 50));
+  assert.equal(normalizeChatAgentPermissions(participantsOf(fresh.storage.current).find((participant) => participant.id === "worker-id")!.permissions).cliApprovals, undefined,
+    "marked: not converted again, also after a restart");
+  assert.equal(fresh.storage.current.metadata.cliModesConvertedAt, marked);
+});
+
+test("a chat shown in the classic view, and any chat on a machine, is not converted when opened", async () => {
+  const main = mainSession();
+  const classic = member("worker-id", "worker", { kind: "claude-code" });
+  const inClassic = testService({ conversation: mainSessionChat([main, classic], { chatView: "classic" }) });
+  await inClassic.service.hydrateContextUsage(clone(inClassic.storage.current));
+  const onMachine = testService({ conversation: mainSessionChat([main, classic], { chatView: "sessions" }) });
+  onMachine.service.setHostMachineId("box");
+  await onMachine.service.hydrateContextUsage(clone(onMachine.storage.current));
+  await new Promise((resolve) => setTimeout(resolve, 50));
+  for (const { storage } of [inClassic, onMachine]) {
+    assert.equal(storage.current.metadata.cliModesConvertedAt, undefined);
+    assert.equal(normalizeChatAgentPermissions(participantsOf(storage.current)[1].permissions).cliApprovals, undefined);
+  }
 });
 
 // --- what other members are told -----------------------------------------------

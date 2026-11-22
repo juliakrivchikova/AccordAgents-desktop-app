@@ -1266,6 +1266,9 @@ export class ChatService {
    *  runs here is in as its chat was last saved on this device, by
    *  `conversationId:participantId` (noteSavedClaudeMemberModes). */
   private readonly savedClaudeMemberModes = new Map<string, ClaudePermissionMode>();
+  /** Chats this computer has checked, as it opened them, for members to move
+   *  into their CLI's own mode (convertMembersForSessionsView). */
+  private readonly sessionsViewConversions = new Set<string>();
   /** A mode Claude Code moved a member to itself (a plan she approved), by
    *  `conversationId:participantId`, until the member's saved mode follows
    *  it (followClaudeCliMode): a save from before does not switch it back. */
@@ -1726,6 +1729,11 @@ export class ChatService {
   async hydrateContextUsage(conversation: Conversation): Promise<Conversation> {
     if (conversation.kind !== "chat") {
       return conversation;
+    }
+    // A chat in the sessions view opened here with members on rights from
+    // the classic view: they move into their CLI's own mode, once.
+    if (!this.machineRuntime && chatViewFor(conversation.metadata) === "sessions" && !conversation.metadata.cliModesConvertedAt) {
+      this.convertMembersForSessionsView(conversation.id, true);
     }
     const participants = new Map(this.chatParticipants(conversation).map((participant) => [participant.id, participant]));
     const existingUsage = this.agentContextUsageByParticipant(conversation);
@@ -2567,24 +2575,38 @@ export class ChatService {
     });
   }
 
-  /** A chat switched to the sessions view on another device (the phone):
-   *  this computer moves its members with rights from the classic view into
-   *  their CLI's own mode, as a switch made here does (setChatView). Only the
-   *  computer writes it, so devices never race on the same change. */
-  private convertMembersForSessionsView(conversationId: string): void {
+  /** A chat switched to the sessions view on another device (the phone), or
+   *  (`once`) a chat in the sessions view this computer opens: this computer
+   *  moves its members with rights from the classic view into their CLI's
+   *  own mode, as a switch made here does (setChatView). Only the computer
+   *  writes it, so devices never race on the same change; it goes to her
+   *  server, the cloud machines and the phone as any change of the members.
+   *  On opening it is done once: the chat is marked (cliModesConvertedAt),
+   *  so a later change of a member is not undone. */
+  private convertMembersForSessionsView(conversationId: string, once = false): void {
     if (this.machineRuntime) return;
+    if (once) {
+      if (this.sessionsViewConversions.has(conversationId)) return;
+      this.sessionsViewConversions.add(conversationId);
+    }
     void (async () => {
       await this.waitForQueuedSave(conversationId);
       const conversation = await this.storage.getConversation(conversationId);
       if (!conversation || conversation.kind !== "chat" || chatViewFor(conversation.metadata) !== "sessions") return;
+      if (once && conversation.metadata.cliModesConvertedAt) return;
       await this.withChatMutation(conversation, async () => {
-        if (chatViewFor(conversation.metadata) !== "sessions") return;
+        if (chatViewFor(conversation.metadata) !== "sessions" || (once && conversation.metadata.cliModesConvertedAt)) return;
         const converted = membersInCliOwnMode(this.chatParticipants(conversation));
-        if (!converted) return;
-        conversation.metadata = { ...conversation.metadata, participants: converted };
+        if (!converted && !once) return;
+        conversation.metadata = {
+          ...conversation.metadata,
+          ...(converted ? { participants: converted } : {}),
+          cliModesConvertedAt: conversation.metadata.cliModesConvertedAt ?? new Date().toISOString()
+        };
         await this.saveConversation(conversation);
       });
     })().catch((error) => {
+      if (once) this.sessionsViewConversions.delete(conversationId);
       void this.debugLogs.write("chat.sessions-view.cli-mode-failed", { conversationId, error: error instanceof Error ? error.message : String(error) }).catch(() => undefined);
     });
   }
@@ -2788,7 +2810,7 @@ export class ChatService {
     this.assertParticipantProvidersReady([request.participant], agents, settings.providers ?? [], settings.cliProviderHosts ?? []);
     return this.withSavedChat(conversation, async () => {
       const participants = this.chatParticipants(conversation);
-      const nextParticipant = (await this.validateParticipants([request.participant], participants))[0];
+      const [nextParticipant] = this.inCliOwnModeInMainSessionChat(conversation, await this.validateParticipants([request.participant], participants));
       conversation.metadata = {
         ...conversation.metadata,
         participants: [...participants, nextParticipant]
@@ -5934,6 +5956,19 @@ export class ChatService {
     } catch (error) {
       return this.delegationRefusal("not_started", error instanceof Error ? error.message : String(error));
     }
+  }
+
+  /** Members added to a chat with a main session, however they were added
+   *  (by her from the roster, on her approval card, by a member without a
+   *  card), run in their CLI's own mode: the sessions view has only the CLIs'
+   *  own modes (inCliOwnMode; the User, 2026-11-22: "no Custom in the
+   *  sessions view"). Elsewhere as they are. */
+  private inCliOwnModeInMainSessionChat(conversation: Conversation, added: ChatParticipant[]): ChatParticipant[] {
+    if (!isMainSessionChat(conversation.metadata)) return added;
+    return added.map((participant) => {
+      if (normalizeChatAgentPermissions(participant.permissions).cliApprovals === true) return participant;
+      return { ...participant, ...inCliOwnMode(participant.kind, participant.agentMode, participant.permissions) };
+    });
   }
 
   /** Members a member added without a card in a chat with a main session
@@ -15809,7 +15844,7 @@ export class ChatService {
 
   private applyPreparedRosterChange(conversation: Conversation, prepared: PreparedRosterChange): ChatParticipant[] {
     const participants = this.chatParticipants(conversation);
-    const added = this.fitRosterAdditions(conversation, prepared.participants);
+    const added = this.inCliOwnModeInMainSessionChat(conversation, this.fitRosterAdditions(conversation, prepared.participants));
     conversation.metadata = {
       ...conversation.metadata,
       participants: [...participants, ...added]

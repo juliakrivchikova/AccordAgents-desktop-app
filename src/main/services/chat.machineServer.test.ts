@@ -443,6 +443,19 @@ test("a chat's view switched on the computer reaches the server and every device
   assert.equal(listed?.updatedAt, before, "the computer's own list keeps its time too");
 });
 
+test("a sessions-view chat opened on the computer moves its classic-rights members into their CLI's own mode once: the server and the machine's copy have it, marked", async (t) => {
+  const base = localChat("chat-own-modes");
+  const main = { ...desk, roleConfigId: "main-session", permissions: { ...normalizeChatAgentPermissions(desk.permissions), cliApprovals: true as const } };
+  const h = await linked(t, { ...base, metadata: { ...base.metadata, participants: [main, remote], mainSessionParticipantId: desk.id, chatView: "sessions" } });
+  const opened = (await h.desktopStorage.getConversation("chat-own-modes"))!;
+  await h.desktopChat.hydrateContextUsage(opened);
+  const ownMode = (participants: unknown): boolean => normalizeChatAgentPermissions((participants as ChatParticipant[] | undefined)?.find((member) => member.id === remote.id)?.permissions).cliApprovals === true;
+  const server = await until(() => h.page("chat-own-modes"), (page) => ownMode(page.conversation?.metadata?.participants));
+  assert.equal(typeof server.conversation.metadata.cliModesConvertedAt, "string", "the chat is marked, on the server");
+  const machine = await until(() => h.machineStorage.getConversation("chat-own-modes"), (chat) => ownMode(chat?.metadata.participants));
+  assert.equal(machine!.metadata.cliModesConvertedAt, server.conversation.metadata.cliModesConvertedAt, "and on the machine's copy");
+});
+
 test("an unpin made while a member's turn holds an older copy of the chat stays unpinned, here and on the server", async (t) => {
   const h = await linked(t, localChat("chat-pin-run"));
   await h.desktopChat.setPinned({ conversationId: "chat-pin-run", pinned: true });

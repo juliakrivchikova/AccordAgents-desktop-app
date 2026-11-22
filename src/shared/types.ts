@@ -2890,6 +2890,11 @@ export type ConversationMetadata = Record<string, unknown> & {
   /** The chat's view, switched by the User any number of times and shared
    *  through her server like the pin. Read it through chatViewFor(). */
   chatView?: ChatViewMode;
+  /** When the computer moved this sessions-view chat's members with rights
+   *  from the classic view into their CLI's own mode as it opened the chat
+   *  (ChatService.convertMembersForSessionsView), so that is done once and a
+   *  later change is not undone. Shared through her server. */
+  cliModesConvertedAt?: string;
   /** This device's own record of the Accords folded into the chat (a line
    *  her server took), worked out from the whole chat, not the loaded page:
    *  their cards are not pinned (accordProgress.ts). Never shared. */
