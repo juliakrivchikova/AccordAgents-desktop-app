@@ -159,7 +159,7 @@ test("a running reply on the phone: Working for, one row per step, the newest sh
   // --- such a part with no words of its own: its steps still show ----------
   await hub.addMessages("conv-work", [{ id: "r0b", role: "participant", participantId: MAIN.id, participantLabel: "@main", content: "", status: "done", createdAt: at(28.5),
     metadata: { runId: "run-r0b", sourceMessageId: "u0", turnContinues: true, activityEvents: WORK } }]);
-  await app.waitFor(`${row("r0b")}?.querySelector(".sessions-worked.is-continued") !== null`, "a part with steps and no words");
+  await app.waitFor(`Boolean(${row("r0b")}?.querySelector(".sessions-worked.is-continued"))`, "a part with steps and no words");
   assert.equal(await app.evaluate(`${row("r0b")}.querySelectorAll(".sessions-activity-row").length`), 6, "its steps, open");
 });
 
@@ -218,10 +218,10 @@ test("a queued reply on the phone says Queued and is taken back from its own ×;
   // --- queued: "Queued", no Working for, a small × to take it back ----------
   const queued = await app.evaluate(`(() => { const node = ${row("q1")}; const cancel = node.querySelector(".message-stop");
     const box = cancel ? cancel.getBoundingClientRect() : { width: 0, height: 0 };
-    return { status: node.querySelector(".message-status").textContent, working: node.querySelectorAll(".sessions-working").length,
+    return { status: node.querySelector(".message-status").textContent, said: (node.innerText.match(/Queued/g) || []).length, working: node.querySelectorAll(".sessions-working").length,
       cancel: cancel ? [cancel.textContent, cancel.getAttribute("aria-label"), cancel.classList.contains("is-queued-cancel")] : null,
       target: box.width >= 32 && box.height >= 32, shown: Boolean(cancel) && getComputedStyle(node.querySelector(".message-meta")).display !== "none" }; })()`);
-  assert.deepEqual(queued, { status: "Queued", working: 0, cancel: ["×", "Cancel this queued reply", true], target: true, shown: true });
+  assert.deepEqual(queued, { status: "Queued", said: 1, working: 0, cancel: ["×", "Cancel this queued reply", true], target: true, shown: true });
   assert.equal(await app.evaluate(`${row("r1")}.querySelectorAll(".message-stop").length`), 0, "the running reply still has no Stop of its own (the composer stops it)");
   await app.evaluate(`${row("q1")}.querySelector(".message-stop").click()`);
   const cancelled = await waitForOp(hub, (op) => op.kind === "turn.stop" && op.messageId === "u2");

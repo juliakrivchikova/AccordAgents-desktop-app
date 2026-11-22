@@ -521,12 +521,6 @@ export const ChatMessageItem = memo(function ChatMessageItem(props: {
               />
             </div>
           )}
-          {/* "Queued", as the CLI says it of a message it holds (Claude Code: "Queued"). */}
-          {queuedBehind && (
-            <div className="chat-queued-badge">
-              <span>Queued</span>
-            </div>
-          )}
           {isStreaming && message.metadata?.cloudRunPreparation && !stopPending && (
             <div className="chat-cloud-preparation" role="status">
               <p title={message.metadata.cloudRunPreparation.message}>{message.metadata.cloudRunPreparation.message}</p>
