@@ -41,7 +41,8 @@ import {
   type HubOpsResponse,
   type HubTurn
 } from "../shared/hubOps";
-import type { ChatMessage, ChatMessageReactions, Conversation } from "../shared/types";
+import type { ChatMessage, ChatMessageReactions, ChatParticipant, Conversation } from "../shared/types";
+import { cliModesTurnRefusal } from "../shared/chatAccessModes";
 import { URGENT_ALERT_SERVER_WRITER } from "../shared/urgentAlerts";
 
 /** Bookkeeping the server keeps on every message it holds: the message's
@@ -128,6 +129,28 @@ export class HubOps {
       return undefined;
     });
     return this.memberRulesCache;
+  }
+
+  /**
+   * Why a turn of one of these members is not asked: its machine's program,
+   * as the computer last said it (HubMemberRules.machineCliModes), would run
+   * its stored mode otherwise than its controls say (cliModesTurnRefusal). A
+   * machine the computer has not said anything of is not held back.
+   */
+  private async cliModesRefusal(conversation: Conversation, participantIds: readonly string[], devices: HubDevice[]): Promise<string | undefined> {
+    if (participantIds.length === 0) return undefined;
+    const programs = (await this.memberRules())?.machineCliModes;
+    if (!programs) return undefined;
+    const members = Array.isArray(conversation.metadata?.participants) ? conversation.metadata.participants as ChatParticipant[] : [];
+    for (const participantId of participantIds) {
+      const member = members.find((item) => item?.id === participantId);
+      const machineId = member?.homeMachineId;
+      if (!member || !machineId || typeof programs[machineId] !== "boolean") continue;
+      const name = devices.find((item) => item.role === "machine" && item.machineId === machineId)?.name;
+      const refusal = cliModesTurnRefusal(member, { name, support: programs[machineId] ? "supported" : "outdated" });
+      if (refusal) return refusal;
+    }
+    return undefined;
   }
 
   onApplied(listener: (applied: HubOpApplied) => void): void {
@@ -371,17 +394,24 @@ export class HubOps {
         const refusal = this.mayWriteMessage(device, conversation, op.message, devices);
         if (refusal) return reject(opId, refusal.rejected);
         const message = storedMessage(op.message, { serverSeq: seq, serverWriter: device.deviceId });
+        // A User's message asks a turn of every member it names: waiting on
+        // the server for the device each member runs on (Д4). Only one the
+        // User wrote: a machine writes the User's words only for its own
+        // members (a choice she answered), and never asks anyone by them.
+        const turns = device.role === "machine" ? [] : requestedTurnsFor(conversation, message, devices, { by: device.deviceId, at: acceptedAt });
+        // From a phone, never of a machine whose program would run a named
+        // member's mode otherwise than its controls say: refused with the
+        // line, as the computer refuses its own (cliModesTurnRefusal).
+        if (device.role === "phone") {
+          const modes = await this.cliModesRefusal(conversation, turns.map((turn) => turn.participantId), devices);
+          if (modes) return reject(opId, modes);
+        }
         conversation.messages.push(message);
         // A closed Accord's line is the User's own view of the chat, not
         // news: the chat keeps its place in her list, as a pin does. The
         // server's copy records it over the whole chat, for the phone's list.
         const closedLaunchId = accordClosedLaunchId(message);
         if (!closedLaunchId) conversation.updatedAt = acceptedAt;
-        // A User's message asks a turn of every member it names: waiting on
-        // the server for the device each member runs on (Д4). Only one the
-        // User wrote: a machine writes the User's words only for its own
-        // members (a choice she answered), and never asks anyone by them.
-        const turns = device.role === "machine" ? [] : requestedTurnsFor(conversation, message, devices, { by: device.deviceId, at: acceptedAt });
         const done = accepted({ kind: "message.create", message, ...(turns.length ? { turns } : {}) });
         await this.save(conversation, done, (condition) => turns.map((turn) => store.turnSql(turn, condition)).join("\n"));
         return { result: done.result, applied: { deviceId: device.deviceId, entry: done.entry, conversation } };
@@ -490,6 +520,13 @@ export class HubOps {
       // the member: never at a machine's or a phone's word.
       if (isMemberSessionExportTurnRequest(op.request) && device.role !== "owner" && device.role !== "desktop") {
         return reject(opId, "Only the computer moves a member with its session.");
+      }
+      // A phone or a machine never asks a turn of a machine whose program
+      // would run the member's mode otherwise than its controls say (the
+      // computer refuses its own: it knows each machine's program first).
+      if ((device.role === "phone" || device.role === "machine") && (!op.request || op.request.kind === "turn")) {
+        const modes = await this.cliModesRefusal(conversation, [op.participantId], devices);
+        if (modes) return reject(opId, modes);
       }
       // A machine asks a member that runs elsewhere as a member asks another
       // through the app: to answer one of its own members' messages, never

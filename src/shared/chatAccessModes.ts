@@ -123,7 +123,10 @@ export const FULL_ACCESS_CONFIRMATION = {
 /** Why a member cannot be given Codex's Full Access or Plan mode where it
  *  runs: a machine whose program is from before they existed (its last
  *  hello says nothing of them) would run Full Access as Ask for approval and
- *  drop Plan mode. None on this computer or where they run. */
+ *  drop Plan mode. None on this computer or where they run. A member waiting
+ *  for its Cloud run machine is judged by the machine on the AWS instance it
+ *  names (`homeMachineId` here); with none yet, this computer sets one up
+ *  with its own program. */
 export function codexModesUnavailableReason(
   member: { kind: ChatProviderKind; homeMachineId?: string },
   machine: { name?: string; lastHello?: { cliModesSupported?: boolean } } | undefined
@@ -131,6 +134,49 @@ export function codexModesUnavailableReason(
   if (member.kind !== "codex-cli" || !member.homeMachineId) return undefined;
   if (machine?.lastHello?.cliModesSupported === true) return undefined;
   return `${machine?.name ?? "Its machine"} runs an older program: Settings → Machines → Upgrade runtime.`;
+}
+
+/** Whether a machine's program runs the CLIs' own modes as the menus set
+ *  them (its last hello's `cliModesSupported`): "unknown" before it ever
+ *  greeted this computer (a machine's program comes only from this
+ *  computer, which set it up with its own). */
+export type CliModesMachineSupport = "supported" | "outdated" | "unknown";
+
+export function cliModesSupportFromHello(hello: { cliModesSupported?: boolean } | undefined): CliModesMachineSupport {
+  if (!hello) return "unknown";
+  return hello.cliModesSupported === true ? "supported" : "outdated";
+}
+
+/** The mode, as its controls name it, that a machine program from before
+ *  the CLIs' own modes would run otherwise than they say: Codex's Full
+ *  Access (its `agentMode` reads as Default there: Ask for approval or Read
+ *  Only, and another CLI's Auto as Manual or Default) and Codex's Plan mode
+ *  (dropped: it would run Default, editing). None when such a program runs
+ *  the member as its controls say. */
+export function modeNeedingCliModes(member: { kind: ChatProviderKind; agentMode?: ChatAgentMode; permissions?: ChatAgentPermissions }): string | undefined {
+  if (normalizeChatAgentMode(member.agentMode) === "full-access") {
+    return selectedChatAccessOption(member.kind, member.agentMode, member.permissions)?.label ?? "Full Access";
+  }
+  return codexPlanModeOn(member.kind, member.agentMode, member.permissions) ? chatAccessModeSet("codex-cli").plan?.label ?? "Plan mode" : undefined;
+}
+
+/**
+ * Why a member's turn is not asked of its machine: its stored mode is one
+ * that machine's program would run wider or narrower than the member's
+ * controls say (modeNeedingCliModes). Refused, as Fork to new chat, Restart
+ * and compaction refuse an older program, never run as something else; the
+ * line says what to do. None when the machine runs it, or has never greeted
+ * this computer (it was set up with this computer's program).
+ */
+export function cliModesTurnRefusal(
+  member: { kind: ChatProviderKind; agentMode?: ChatAgentMode; permissions?: ChatAgentPermissions },
+  machine: { name?: string; support: CliModesMachineSupport }
+): string | undefined {
+  if (machine.support !== "outdated") return undefined;
+  const mode = modeNeedingCliModes(member);
+  return mode
+    ? `${machine.name ?? "Its machine"} runs an older program that cannot run ${mode}: Settings → Machines → Upgrade runtime, or choose another mode.`
+    : undefined;
 }
 
 /** Ids the app stored before a mode was renamed, and the mode they are now

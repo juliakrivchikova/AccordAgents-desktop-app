@@ -381,6 +381,14 @@ export interface HubMemberRules {
     agentMode?: ChatAgentMode;
     permissions?: ChatAgentPermissions;
   }>;
+  /** By machine (its id, as members carry it in `homeMachineId`): whether
+   *  its program runs the CLIs' own modes as the menus set them, by the last
+   *  hello it sent the computer; a machine that never greeted it is not
+   *  listed. The server asks a machine listed false for no turn of a member
+   *  whose mode it would run otherwise (cliModesTurnRefusal) when a phone or
+   *  a machine asks; the computer refuses its own. A computer from before
+   *  lists none. */
+  machineCliModes?: Record<string, boolean>;
 }
 
 export const HUB_MEMBER_RULES_PATH = "/v1/member-rules";

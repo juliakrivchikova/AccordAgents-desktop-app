@@ -13,7 +13,7 @@ import { chipModelLabel, memberDefaultModelName, memberModelName, useMemberModel
 import { latestAndOlderModels } from "./chat-model-groups";
 import { ComposerMenu, ComposerMenuDisclosure, ComposerMenuItem, ComposerMenuNote, ComposerMenuSection } from "./composer-menu";
 import { ChatAccessControl, ChatCodexPlanToggle, ComposerControlIcon, iconTriggerProps, TURN_RUNNING_NOTE } from "./chat-access-controls";
-import { machineOf, useCliStartDefaults, useMachineList } from "./use-cli-start-defaults";
+import { machineIdOf, machineOf, useCliStartDefaults, useMachineList } from "./use-cli-start-defaults";
 import { COMPOSER_DENSITY, useComposerDensity } from "./use-composer-density";
 import { ParticipantRunLocation } from "./participant-run-location";
 
@@ -83,8 +83,10 @@ export function ChatMemberComposerControls(props: {
   const configEffort = !effort && !model && !value.hostId ? shownEffort(start?.reasoningEffort, efforts) : undefined;
   const effortLabel = effort ? labelOf(efforts, effort) : configEffort ? labelOf(efforts, configEffort) : "Default";
   const showRunsOn = Boolean(props.runsOn) && (machines.length > 0 || Boolean(value.homeMachineId || value.cloudRun));
-  // Full Access and Plan mode on a machine whose program is from before them.
-  const modesReason = codexModesUnavailableReason(value, machineOf(machineList, value.homeMachineId));
+  // Full Access and Plan mode on a machine whose program is from before them
+  // (for Cloud run, the machine on the AWS instance it names).
+  const modesMachineId = machineIdOf(value, machineList);
+  const modesReason = codexModesUnavailableReason({ kind: value.kind, homeMachineId: modesMachineId }, machineOf(machineList, modesMachineId));
   // A model chosen without the saved effort: that choice clears it too, so
   // its CLI is never given an effort the model does not have.
   const withEffortFor = (modelId: string | undefined): ChatModelAccessPatch => {

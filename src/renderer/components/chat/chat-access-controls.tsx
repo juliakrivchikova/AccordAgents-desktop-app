@@ -90,7 +90,8 @@ export function ChatAccessMenu(props: {
   value: ChatModelAccessValue;
   mainSession?: ChatParticipant;
   disabled?: boolean;
-  /** Why Codex's Full Access cannot be chosen where it runs. */
+  /** Why Codex's Full Access cannot be chosen where it runs (and, while it
+   *  is the member's own mode, why its turns are refused there). */
   modesReason?: string;
   onSelect: (option: ChatAccessOption) => void;
 }): JSX.Element {
@@ -109,6 +110,11 @@ export function ChatAccessMenu(props: {
   return (
     <ComposerMenuSection label={set.title} testId="chat-access-menu">
       {props.disabled && <ComposerMenuNote testId="chat-access-busy">{TURN_RUNNING_NOTE}</ComposerMenuNote>}
+      {/* Its own Full Access, where the program cannot run it: its turns are
+          refused (cliModesTurnRefusal) until it changes. */}
+      {access?.agentMode === "full-access" && props.modesReason && (
+        <ComposerMenuNote testId="chat-access-machine-outdated">{props.modesReason}</ComposerMenuNote>
+      )}
       {!access && (
         <ComposerMenuNote testId="chat-access-custom">Custom access, set in the classic view. Choose a mode to run in the CLI's own.</ComposerMenuNote>
       )}
@@ -165,7 +171,9 @@ export function ChatCodexPlanToggle(props: {
   if (!plan || !selectedChatAccessOption(value.kind, value.agentMode, value.permissions)) return null;
   const on = codexPlanModeOn(value.kind, value.agentMode, value.permissions);
   const blocked = !on ? props.modesReason : undefined;
-  const title = props.disabled ? `${plan.label}. ${TURN_RUNNING_NOTE}` : blocked ? `${plan.label}. ${blocked}` : plan.label;
+  // On where the program cannot run it, it can be turned off; the reason
+  // stays in its tooltip (its turns are refused until then).
+  const title = props.disabled ? `${plan.label}. ${TURN_RUNNING_NOTE}` : props.modesReason ? `${plan.label}. ${props.modesReason}` : plan.label;
   return (
     <button type="button" className={`chat-model-chip chat-composer-toggle${on ? " is-on" : ""}${props.iconOnly ? " is-icon" : ""}`}
       data-testid={`${props.testId}-plan`} aria-pressed={on} title={title} aria-label={title} disabled={props.disabled || Boolean(blocked)}

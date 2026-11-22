@@ -11,7 +11,12 @@ import type { HubClient } from "./hubClient";
  * the server has them.
  */
 
-export function memberRulesFrom(settings: { chatRoleConfigs: ChatRoleConfig[]; chatParticipantConfigs: ChatParticipantConfig[] }): HubMemberRules {
+export function memberRulesFrom(
+  settings: { chatRoleConfigs: ChatRoleConfig[]; chatParticipantConfigs: ChatParticipantConfig[] },
+  /** Each machine's program, by its last hello: whether it runs the CLIs'
+   *  own modes (MachineLinkService.cliModesByMachine). */
+  machineCliModes?: Record<string, boolean>
+): HubMemberRules {
   const roles: HubMemberRules["roles"] = {};
   for (const role of settings.chatRoleConfigs) {
     const requestParticipants = normalizeOptionalChatParticipantRequestPermission(role.participantDefaults?.requestParticipants);
@@ -32,7 +37,7 @@ export function memberRulesFrom(settings: { chatRoleConfigs: ChatRoleConfig[]; c
       ...(preset.permissions ? { permissions: preset.permissions } : {})
     };
   }
-  return { version: 1, roles, presets };
+  return { version: 1, roles, presets, ...(machineCliModes && Object.keys(machineCliModes).length > 0 ? { machineCliModes } : {}) };
 }
 
 const RETRY_FIRST_MS = 30_000;

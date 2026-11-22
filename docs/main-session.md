@@ -268,9 +268,26 @@ chat without a main session is always `classic`; its switch is disabled.
     goes without it). A machine runs both only when its program says so in
     its hello (`cliModesSupported`): on an older one Full Access and turning
     Plan mode on are disabled with "<machine> runs an older program:
-    Settings → Machines → Upgrade runtime." (`codexModesUnavailableReason`),
+    Settings → Machines → Upgrade runtime." (`codexModesUnavailableReason`;
+    a Cloud run member by the machine on the AWS instance it names, none
+    while that machine is still to be set up with this computer's program),
     and the phone's New chat offers them only from a computer that runs them
-    and for a machine whose program does (`HubNewChatOptions.cliModes`). Settings from the classic controls are no
+    and for a machine whose program does (`HubNewChatOptions.cliModes`). A
+    member already in one of them there (moved to that machine, or a Cloud
+    run member whose machine turned out older) is never run as something
+    else: its turn is refused, as Fork to new chat, Restart and compaction
+    refuse an older program, with "<machine> runs an older program that
+    cannot run Full Access: Settings → Machines → Upgrade runtime, or choose
+    another mode." (or Plan mode; `cliModesTurnRefusal`) on its bubble, and
+    its menu and Plan mode's tooltip say the reason. The computer never asks
+    the server for that turn (the member is left out of the message's
+    `deliveryTargets`, `machineCliModesRefusal`); a phone's message naming
+    it, or a machine asking it, is refused by the server with the same line
+    (`HubOps.cliModesRefusal`), by each machine's program as the computer
+    last said it with her member rules (`HubMemberRules.machineCliModes`,
+    published again at each hello). A machine that never greeted the
+    computer is not held back: its program is the one the computer set it up
+    with. Settings from the classic controls are no
     mode: the mode control says "Custom", its menu says so, and a classic
     toggle (Read Files, Edit Files, Run Shell, Access Web) ends a mode
     chosen in its menu and Codex's Plan mode with it

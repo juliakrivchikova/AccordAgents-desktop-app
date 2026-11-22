@@ -4,6 +4,7 @@ import {
   forkCutFor, forkedChatTitle, forkedMainSessionPermissions, forkOriginFor, forkToNewChatLocalProviders, forkToNewChatReasonInChat, isForkableSessionKind,
   lastMemberTurnEnd, memberAsItRunsNow, memberHasFinishedReply, type ForkToNewChatMachineSupport, type ForkToNewChatOffer
 } from "../../shared/forkToNewChat";
+import { cliModesTurnRefusal, type CliModesMachineSupport } from "../../shared/chatAccessModes";
 import { DEFAULT_CHAT_VIEW, MAIN_SESSION_HANDLE, MAIN_SESSION_ROLE_ID, canSwitchChatView, isChatViewMode, isMainSessionChat, isMainSessionParticipant, isRoleOfferedForNewMembers, mainSessionMemberOf, mainSessionParticipantId } from "../../shared/mainSession";
 import { SESSIONS_TASK_GIVEN_TITLE_MAX_CHARS, firstTextLine, sessionsTaskTitle, shortenAtWord } from "../../shared/mainSessionView";
 import { createHash, randomUUID } from "node:crypto";
@@ -1346,7 +1347,7 @@ export class ChatService {
   /** Desktop side: whether a machine starts a main session from a copy of a
    *  member's session in another chat (Fork to new chat; its last hello). */
   private machineForkToNewChatSupport?: (machineId: string) => ForkToNewChatMachineSupport;
-  private machineCliModesSupport?: (machineId: string) => boolean;
+  private machineCliModesSupport?: (machineId: string) => CliModesMachineSupport;
   private machineCliStartDefaults?: (machineId: string) => CliStartDefaultsByKind | undefined;
   /** Members moving (on the computer) or whose session this machine just
    *  handed over: their turns wait for it (memberMoveGate). */
@@ -1615,9 +1616,21 @@ export class ChatService {
   }
 
   /** Desktop side: whether a machine runs Codex's Full Access and Plan mode
-   *  (its last hello), for the phone's New chat offer. */
-  setMachineCliModesSupport(lookup: ((machineId: string) => boolean) | undefined): void {
+   *  (its last hello), for the phone's New chat offer and before a turn is
+   *  asked of it (machineCliModesRefusal). */
+  setMachineCliModesSupport(lookup: ((machineId: string) => CliModesMachineSupport) | undefined): void {
     this.machineCliModesSupport = lookup;
+  }
+
+  /** Desktop side: why a member's turn is not asked of its machine, whose
+   *  program would run its stored mode otherwise than its controls say
+   *  (cliModesTurnRefusal): refused with a line, never run as something
+   *  else. A machine never asks it of another (the User's server refuses
+   *  that, hubOps.ts). */
+  private machineCliModesRefusal(participant: ChatParticipant): string | undefined {
+    const machineId = participant.homeMachineId;
+    if (!machineId || !this.machineCliModesSupport) return undefined;
+    return cliModesTurnRefusal(participant, { name: this.serverLink?.machineName(machineId), support: this.machineCliModesSupport(machineId) });
   }
 
   /** Desktop side: see beforeRemoteTurn and machineProjectReady. */
@@ -2227,7 +2240,7 @@ export class ChatService {
       ...(fork ? { fork } : {}),
       // This computer runs Codex's Full Access and Plan mode; each machine as
       // its program says.
-      cliModes: { machines: Object.fromEntries(machines.map((machine) => [machine.id, this.machineCliModesSupport?.(machine.id) === true])) },
+      cliModes: { machines: Object.fromEntries(machines.map((machine) => [machine.id, this.machineCliModesSupport?.(machine.id) === "supported"])) },
       // What each machine's CLIs start in with its own config (this
       // computer's are with each provider): a main session the phone starts
       // there starts in it.
@@ -9685,10 +9698,13 @@ export class ChatService {
             // process runs its own members' turns itself, under the same ids.
             // A member whose cloud machine is not chosen yet, or whose machine
             // has not got this chat's project yet, is asked by this device once
-            // that is done (runParticipantTurnRemote), not by the server at once.
+            // that is done (runParticipantTurnRemote), not by the server at once;
+            // one whose machine's program cannot run its mode is refused there,
+            // so the server never asks that machine for it.
             const askedLater = new Set<string>();
             for (const target of dispatch.targets) {
               if (target.cloudRun && !target.homeMachineId) askedLater.add(target.id);
+              else if (this.machineCliModesRefusal(target)) askedLater.add(target.id);
               else if (target.homeMachineId && conversation.repoPath && this.machineProjectReady &&
                   !await this.machineProjectReady(target.homeMachineId, conversation.repoPath).catch(() => false)) askedLater.add(target.id);
             }
@@ -26303,6 +26319,11 @@ export class ChatService {
       }
       if (participant.homeMachineId) {
         const machineId = participant.homeMachineId;
+        // A machine whose program would run its mode otherwise than its
+        // controls say is never asked: the bubble says why, before anything
+        // is copied there.
+        const refusal = this.machineCliModesRefusal(participant);
+        if (refusal) throw new Error(refusal);
         // The chat's project is on the member's machine before its turn is
         // asked there (copied once, never over what is there), and the machine
         // knows where it is: its settings on the server say so.

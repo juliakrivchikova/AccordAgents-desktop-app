@@ -25,6 +25,9 @@ import {
   chatAccessModeSet,
   chatAccessOptions,
   codexModesUnavailableReason,
+  cliModesSupportFromHello,
+  cliModesTurnRefusal,
+  modeNeedingCliModes,
   codexPlanModeOn,
   currentChatAccessId,
   defaultChatAccessOption,
@@ -265,6 +268,36 @@ test("a Codex member on a machine whose program is older is not given Full Acces
   assert.equal(codexModesUnavailableReason(member, { name: "Box", lastHello: { cliModesSupported: true } }), undefined);
   assert.equal(codexModesUnavailableReason({ kind: "codex-cli" }, undefined), undefined, "on this computer");
   assert.equal(codexModesUnavailableReason({ kind: "claude-code", homeMachineId: "m-box" }, undefined), undefined, "only Codex has them");
+});
+
+test("a stored mode a machine's older program would run otherwise refuses its turn there, with what to do", () => {
+  const own = { ...defaultChatAgentPermissions(), workspaceWrite: true, cliApprovals: true as const };
+  assert.equal(cliModesSupportFromHello(undefined), "unknown", "never greeted");
+  assert.equal(cliModesSupportFromHello({}), "outdated", "a program from before the modes");
+  assert.equal(cliModesSupportFromHello({ cliModesSupported: true }), "supported");
+  // What such a program reads otherwise: Full Access (as Default) and Codex's
+  // Plan mode (dropped), the old Plan entry included; nothing else.
+  assert.equal(modeNeedingCliModes({ kind: "codex-cli", agentMode: "full-access", permissions: own }), "Full Access");
+  assert.equal(modeNeedingCliModes({ kind: "codex-cli", agentMode: "default", permissions: { ...own, codexPlanMode: true } }), "Plan mode");
+  assert.equal(modeNeedingCliModes({ kind: "codex-cli", agentMode: "plan", permissions: own }), "Plan mode", "Codex's old Plan entry is Read Only with Plan mode");
+  assert.equal(modeNeedingCliModes({ kind: "claude-code", agentMode: "full-access", permissions: own }), "Auto", "another CLI's Auto, as its controls name it");
+  assert.equal(modeNeedingCliModes({ kind: "codex-cli", agentMode: "full-access", permissions: defaultChatAgentPermissions() }), "Full Access", "the classic controls' Full Access too");
+  for (const option of chatAccessOptions("codex-cli").filter((item) => item.agentMode !== "full-access")) {
+    const applied = applyChatAccessOption(option, own);
+    assert.equal(modeNeedingCliModes({ kind: "codex-cli", ...applied }), undefined, `${option.label} runs there as it says`);
+  }
+  for (const kind of ["claude-code", "gemini-cli"] as const) {
+    for (const option of chatAccessOptions(kind)) {
+      assert.equal(modeNeedingCliModes({ kind, ...applyChatAccessOption(option, own) }), undefined, `${kind} ${option.label} runs there as it says`);
+    }
+  }
+  const member = { kind: "codex-cli" as const, agentMode: "full-access" as const, permissions: own };
+  assert.equal(cliModesTurnRefusal(member, { name: "Box", support: "outdated" }),
+    "Box runs an older program that cannot run Full Access: Settings → Machines → Upgrade runtime, or choose another mode.");
+  assert.equal(cliModesTurnRefusal(member, { name: "Box", support: "supported" }), undefined);
+  assert.equal(cliModesTurnRefusal(member, { name: "Box", support: "unknown" }), undefined, "never greeted: set up by this computer with its own program");
+  assert.equal(cliModesTurnRefusal({ kind: "codex-cli", agentMode: "auto", permissions: own }, { name: "Box", support: "outdated" }), undefined, "Approve for me runs there");
+  assert.match(cliModesTurnRefusal(member, { support: "outdated" }) ?? "", /^Its machine runs an older program/);
 });
 
 test("a new main session starts in the mode the User's own config starts its CLI in, read where it runs", () => {

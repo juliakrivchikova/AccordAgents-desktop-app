@@ -35,8 +35,8 @@ export function machineOf(list: MachineListResult, machineId: string | undefined
 }
 
 /** The machine a member runs on: its own, or for Cloud run the one on the AWS
- *  instance it names. */
-function machineIdOf(place: StartDefaultsPlace, list: MachineListResult): string | undefined {
+ *  instance it names (none while that machine is still to be set up). */
+export function machineIdOf(place: Pick<StartDefaultsPlace, "homeMachineId" | "cloudRun">, list: MachineListResult): string | undefined {
   if (place.homeMachineId) return place.homeMachineId;
   const instanceId = place.cloudRun?.instanceId;
   return instanceId ? list.machines.find((machine) => machine.awsInstanceId === instanceId)?.id : undefined;

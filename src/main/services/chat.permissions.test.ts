@@ -4689,6 +4689,69 @@ test("a machine member's context use after its turn is shown here as a local mem
   await waitFor(() => h.storage.current.metadata.agentContextUsageByParticipant?.[member.id]?.usedTokens === 4200);
 });
 
+test("a member whose machine's program cannot run its Full Access or Plan mode is refused with a line, never asked of that machine", async () => {
+  // A program from before the CLIs' own modes runs Full Access as Ask for
+  // approval and drops Plan mode: it would run the member otherwise than its
+  // controls say, so its turn is refused as Fork, Restart and compaction are.
+  const own = { ...defaultChatAgentPermissions(), workspaceWrite: true, cliApprovals: true as const };
+  const fullAccess = { ...chatParticipant("codex-cli"), id: "full-access-member", handle: "fa", homeMachineId: "box", agentMode: "full-access" as const, permissions: own };
+  const planned = { ...chatParticipant("codex-cli"), id: "plan-member", handle: "planner", homeMachineId: "box", agentMode: "default" as const, permissions: { ...own, codexPlanMode: true as const } };
+  const asking = { ...chatParticipant("codex-cli"), id: "asking-member", handle: "asker", homeMachineId: "box", agentMode: "default" as const, permissions: own };
+  const h = testService({ conversation: chatConversation([fullAccess, planned, asking]) });
+  const support = new Map<string, "supported" | "outdated" | "unknown">([["box", "outdated"]]);
+  h.service.setMachineCliModesSupport((machineId) => support.get(machineId) ?? "unknown");
+  const link = fakeServerLink("desktop-device", { box: "Cloud box" });
+  h.service.setServerLink(link);
+  const asked = () => link.ops.filter((op): op is Extract<HubOp, { kind: "turn.request" }> => op.kind === "turn.request");
+  const conversationId = h.storage.current.id;
+
+  await h.service.sendMessage({ conversationId, content: "@fa hello" });
+  await waitFor(() => h.storage.current.messages.some((item: ChatMessage) => item.participantId === fullAccess.id && item.status === "error"));
+  const refused = h.storage.current.messages.find((item: ChatMessage) => item.participantId === fullAccess.id && item.status === "error");
+  assert.match(`${refused.content} ${refused.metadata?.error ?? ""}`, /Cloud box runs an older program that cannot run Full Access: Settings → Machines → Upgrade runtime, or choose another mode\./);
+  const first = h.storage.current.messages.find((item: ChatMessage) => item.role === "user" && item.content === "@fa hello");
+  assert.deepEqual(first.metadata.deliveryTargets, [], "the server is never asked for it, so the machine never takes it");
+  assert.deepEqual(asked(), [], "nothing asked of the machine");
+
+  await h.service.sendMessage({ conversationId, content: "@planner hello" });
+  await waitFor(() => h.storage.current.messages.some((item: ChatMessage) => item.participantId === planned.id && item.status === "error"));
+  const planRefused = h.storage.current.messages.find((item: ChatMessage) => item.participantId === planned.id && item.status === "error");
+  assert.match(`${planRefused.content} ${planRefused.metadata?.error ?? ""}`, /cannot run Plan mode/);
+  assert.deepEqual(asked(), [], "Plan mode: nothing asked either");
+
+  // A mode that program runs as its controls say is asked of it as before.
+  await h.service.sendMessage({ conversationId, content: "@asker hello" });
+  await waitFor(() => asked().length === 1);
+  assert.equal(asked()[0].participantId, asking.id);
+  await memberDeviceAnswers(h.service, asked()[0], { participant: asking, content: "ASKED_REPLY" });
+  await waitFor(() => h.storage.current.messages.some((item: ChatMessage) => item.content === "ASKED_REPLY"));
+
+  // Once the machine runs a program that runs them, Full Access is asked of it.
+  support.set("box", "supported");
+  await h.service.sendMessage({ conversationId, content: "@fa again" });
+  await waitFor(() => asked().length === 2);
+  assert.equal(asked()[1].participantId, fullAccess.id);
+  const again = h.storage.current.messages.find((item: ChatMessage) => item.role === "user" && item.content === "@fa again");
+  assert.deepEqual(again.metadata.deliveryTargets, [fullAccess.id]);
+  await memberDeviceAnswers(h.service, asked()[1], { participant: fullAccess, content: "FULL_ACCESS_REPLY" });
+  await waitFor(() => h.storage.current.messages.some((item: ChatMessage) => item.content === "FULL_ACCESS_REPLY"));
+});
+
+test("a Cloud run member's Full Access is refused once its machine turns out to run an older program", async () => {
+  const own = { ...defaultChatAgentPermissions(), workspaceWrite: true, cliApprovals: true as const };
+  const member = { ...chatParticipant("codex-cli"), id: "cloud-fa", handle: "cloudfa", cloudRun: {}, agentMode: "full-access" as const, permissions: own };
+  const h = testService({ conversation: chatConversation([member]) });
+  h.service.setMachineCliModesSupport((machineId) => machineId === "old-box" ? "outdated" : "unknown");
+  h.service.setCloudRunPreparation(async () => "old-box");
+  const link = fakeServerLink("desktop-device", { "old-box": "Old box" });
+  h.service.setServerLink(link);
+  await h.service.sendMessage({ conversationId: h.storage.current.id, content: "@cloudfa hello" });
+  await waitFor(() => h.storage.current.messages.some((item: ChatMessage) => item.participantId === member.id && item.status === "error"));
+  const refused = h.storage.current.messages.find((item: ChatMessage) => item.participantId === member.id && item.status === "error");
+  assert.match(`${refused.content} ${refused.metadata?.error ?? ""}`, /Old box runs an older program that cannot run Full Access/);
+  assert.equal(link.ops.some((op) => op.kind === "turn.request"), false, "never asked of that machine");
+});
+
 test("participant reservation is released if turn controller setup fails", async () => {
   const participant = chatParticipant("codex-cli");
   const conversation = chatConversation([participant]);

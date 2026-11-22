@@ -1020,7 +1020,16 @@ function validMemberRules(value: unknown): HubMemberRules {
       ...(entry.permissions !== undefined ? { permissions: entry.permissions as unknown as NonNullable<HubMemberRules["presets"][string]["permissions"]> } : {})
     };
   }
-  return { version: 1, roles, presets };
+  const machineCliModes: Record<string, boolean> = {};
+  const machines = (value as { machineCliModes?: unknown } | undefined)?.machineCliModes;
+  if (machines !== undefined) {
+    if (!isRecord(machines) || Object.keys(machines).length > 500) throw new HubRequestError(400, "Invalid machine programs.");
+    for (const [machineId, runs] of Object.entries(machines)) {
+      if (!id(machineId) || typeof runs !== "boolean") throw new HubRequestError(400, "Invalid machine program.");
+      machineCliModes[machineId] = runs;
+    }
+  }
+  return { version: 1, roles, presets, ...(Object.keys(machineCliModes).length > 0 ? { machineCliModes } : {}) };
 }
 
 function validMachineWake(value: unknown): import("../shared/hubProtocol").HubMachineWakeRequest["machines"] {

@@ -17,6 +17,7 @@ import { normalizeCliStartDefaultsByKind, type CliStartDefaultsByKind } from "..
 import type { MachineMemberRestartSupport } from "../../shared/memberRestart";
 import type { MachineSessionMoveSupport, MachineSessionMoveTarget } from "../../shared/memberSessionMove";
 import { forkToNewChatSupportFromHello, type ForkToNewChatMachineSupport } from "../../shared/forkToNewChat";
+import { cliModesSupportFromHello, type CliModesMachineSupport } from "../../shared/chatAccessModes";
 import { createHash, randomUUID } from "node:crypto";
 import { EventEmitter } from "node:events";
 import {
@@ -433,9 +434,22 @@ export class MachineLinkService {
   }
 
   /** Whether a machine runs Codex's Full Access and Plan mode as the menus
-   *  set them, by the last hello it sent this desktop. */
-  cliModesSupport(machineId: string): boolean {
-    return (this.connections.get(machineId)?.record ?? this.enrolled.get(machineId))?.lastHello?.cliModesSupported === true;
+   *  set them, by the last hello it sent this desktop, connected or not: its
+   *  program changes only through this desktop. */
+  cliModesSupport(machineId: string): CliModesMachineSupport {
+    return cliModesSupportFromHello((this.connections.get(machineId)?.record ?? this.enrolled.get(machineId))?.lastHello);
+  }
+
+  /** cliModesSupport of every machine that has greeted this desktop, for the
+   *  User's server, which holds a phone's or a machine's turns to it. */
+  cliModesByMachine(): Record<string, boolean> {
+    const known = new Map<string, boolean>();
+    for (const record of [...this.enrolled.values(), ...[...this.connections.values()].map((connection) => connection.record)]) {
+      const support = cliModesSupportFromHello(record.lastHello);
+      if (support !== "unknown") known.set(record.id, support === "supported");
+    }
+    // In one order, so an unchanged set reads the same.
+    return Object.fromEntries([...known.entries()].sort(([a], [b]) => a.localeCompare(b)));
   }
 
   /** What each CLI on a machine starts a new session in with that machine's

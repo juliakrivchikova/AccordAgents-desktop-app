@@ -22,6 +22,13 @@ test("her roles and saved members, as the server holds machines to them", () => 
   });
 });
 
+test("each machine's program goes with her rules: the server holds a phone's or a machine's turns to one that cannot run a member's mode", () => {
+  const settings = { chatRoleConfigs: [] as ChatRoleConfig[], chatParticipantConfigs: [] as ChatParticipantConfig[] };
+  assert.deepEqual(memberRulesFrom(settings, { "m-new": true, "m-old": false }).machineCliModes, { "m-new": true, "m-old": false });
+  assert.equal("machineCliModes" in memberRulesFrom(settings, {}), false, "no machine has greeted: nothing said");
+  assert.equal("machineCliModes" in memberRulesFrom(settings), false);
+});
+
 test("published whatever else is paired, once per change, and again until the server has them", async () => {
   const sent: HubMemberRules[] = [];
   let fail = true;

@@ -1008,6 +1008,49 @@ test("the User's rules for members come only from her computer, and a machine ad
   assert.deepEqual(await members(), ["p-lead", "p-helper"], "a member whose role manages members adds one");
 });
 
+test("a phone or a machine never asks a turn of a machine whose program would run the member's Full Access or Plan mode otherwise", async (t) => {
+  const h = await hub(t);
+  const chat = id("chat");
+  const own = { cliApprovals: true, workspaceWrite: true, repoRead: true, webAccess: false, shell: { enabled: false, rules: [] } };
+  const fullAccess = { id: "p-fa", handle: "fa", label: "FA", kind: "codex-cli", homeMachineId: "machine-1", agentMode: "full-access", permissions: own };
+  const planned = { id: "p-plan", handle: "plan", label: "Plan", kind: "codex-cli", homeMachineId: "machine-1", agentMode: "default", permissions: { ...own, codexPlanMode: true } };
+  const asking = { id: "p-ask", handle: "ask", label: "Ask", kind: "codex-cli", homeMachineId: "machine-1", agentMode: "default", permissions: own };
+  await h.write(h.owner, { opId: id("op"), kind: "conversation.create", conversationId: chat,
+    conversation: { title: "Plans", kind: "chat", createdAt: new Date().toISOString(), metadata: { participants: [fullAccess, planned, asking, members[0]] } } } as HubOp);
+  const status = (response: { body: HubOpsResponse }) => response.body.results[0] as { status: string; reason?: string };
+  const fromPhone = (messageId: string, targets: string[]) => h.write(h.phone, { opId: id("op"), kind: "message.create", conversationId: chat, message: userMessage(messageId, "hello", targets) });
+
+  // Her computer has said nothing of the machine's program yet: nothing held back.
+  assert.equal(status(await fromPhone("before", ["p-fa"])).status, "accepted");
+  const rules = (runs: boolean) => ({ version: 1, roles: {}, presets: {}, machineCliModes: { "machine-1": runs } });
+  assert.equal((await h.call(h.owner, "PUT", "/v1/member-rules", { ...rules(false), machineCliModes: { "machine-1": "yes" } })).status, 400, "a program said in its own shape only");
+  assert.equal((await h.call(h.owner, "PUT", "/v1/member-rules", rules(false))).status, 200);
+
+  const refused = status(await fromPhone("u-fa", ["p-fa", "p-desk"]));
+  assert.equal(refused.status, "rejected");
+  assert.equal(refused.reason, "Box runs an older program that cannot run Full Access: Settings → Machines → Upgrade runtime, or choose another mode.");
+  const plan = status(await fromPhone("u-plan", ["p-plan"]));
+  assert.equal(plan.status, "rejected");
+  assert.match(plan.reason ?? "", /cannot run Plan mode/);
+  const turnsFor = async () => (await h.call<{ turns: Array<{ participantId: string; messageId: string }> }>(h.machine, "GET", "/v3/turns")).body.turns
+    .map((turn) => `${turn.messageId}:${turn.participantId}`);
+  assert.deepEqual(await turnsFor(), [`before:p-fa`], "nothing refused waits for the machine");
+  assert.equal(status(await fromPhone("u-ask", ["p-ask"])).status, "accepted", "a mode that program runs as its controls say");
+
+  // A machine asking another member's turn, or its own, is held the same way.
+  await h.write(h.machine, { opId: id("op"), kind: "message.create", conversationId: chat, message: reply("r-ask", "p-ask", "done", "@fa please check") });
+  const asked = status(await h.write(h.machine, { opId: id("op"), kind: "turn.request", conversationId: chat, runId: `turn-${id("x")}`, messageId: "r-ask", participantId: "p-fa", request: { kind: "turn" } }));
+  assert.equal(asked.status, "rejected");
+  assert.match(asked.reason ?? "", /cannot run Full Access/);
+  // Her computer refuses its own (it knows each program first): never held here.
+  assert.equal(status(await h.write(h.owner, { opId: id("op"), kind: "message.create", conversationId: chat, message: userMessage("u-owner", "hello", ["p-fa"]) })).status, "accepted");
+
+  // Updated: asked as before.
+  assert.equal((await h.call(h.owner, "PUT", "/v1/member-rules", rules(true))).status, 200);
+  assert.equal(status(await fromPhone("u-fa-again", ["p-fa"])).status, "accepted");
+  assert.ok((await turnsFor()).includes("u-fa-again:p-fa"));
+});
+
 test("her \"Allow for this chat\" gives a machine's member leave to ask once: taken back, an old copy does not give it again", async (t) => {
   const h = await hub(t);
   const chat = id("chat");

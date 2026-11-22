@@ -89,6 +89,45 @@ test("on a machine whose program is older, Full Access and Plan mode are disable
   }
 });
 
+test("a Cloud run member is held back by the machine on its AWS instance; its own Full Access or Plan mode there says why its turns are refused", async () => {
+  const machines = {
+    listMachines: async () => ({ machines: [{ id: "m-old", name: "Old box", awsInstanceId: "i-0123456789abcdef0" }],
+      status: [{ machineId: "m-old", name: "Old box", connected: false, lastHello: {} }] })
+  };
+  const cloud = await renderControls({ ...CODEX, cloudRun: { instanceId: "i-0123456789abcdef0" } }, noop, machines);
+  try {
+    const plan = cloud.root.find(byTestId("chat-model-plan"));
+    assert.equal(plan.props.disabled, true, "Plan mode cannot be turned on for a member that will run there");
+    assert.match(plan.props.title, /Old box runs an older program: Settings → Machines → Upgrade runtime\./);
+    await act(async () => { cloud.root.find(byTestId("chat-model-mode")).props.onClick(); });
+    const full = cloud.root.findAll(byTestId("chat-access-option")).find((row) => row.props["data-value"] === "full-access")!;
+    assert.equal(full.props.disabled, true, "nor Full Access");
+  } finally {
+    cloud.done();
+  }
+  // A Cloud run machine still to be set up gets this computer's program.
+  const fresh = await renderControls({ ...CODEX, cloudRun: {} }, noop, machines);
+  try {
+    assert.equal(fresh.root.find(byTestId("chat-model-plan")).props.disabled, false);
+  } finally {
+    fresh.done();
+  }
+  // Already in Full Access, with Plan mode on, on the older machine: both
+  // can be left, and both say why its turns are refused there.
+  const own = { ...CODEX, homeMachineId: "m-old", agentMode: "full-access" as ChatAgentMode, permissions: { ...CODEX.permissions, codexPlanMode: true as const } };
+  const stored = await renderControls(own, noop, machines);
+  try {
+    const plan = stored.root.find(byTestId("chat-model-plan"));
+    assert.equal(plan.props.disabled, false, "Plan mode can be turned off");
+    assert.match(plan.props.title, /Old box runs an older program/);
+    await act(async () => { stored.root.find(byTestId("chat-model-mode")).props.onClick(); });
+    assert.match(textOf(stored.root.find(byTestId("chat-access-machine-outdated"))), /Old box runs an older program: Settings → Machines → Upgrade runtime\./);
+    assert.equal(stored.root.findAll(byTestId("chat-access-option")).find((row) => row.props["data-value"] === "auto-review")!.props.disabled, false, "another mode can be chosen");
+  } finally {
+    stored.done();
+  }
+});
+
 test("while its turn runs, a menu says why its choices wait", async () => {
   const host = window as unknown as { consensus?: unknown };
   const previous = host.consensus;
