@@ -289,6 +289,7 @@ test("the main session adds a member without a card, within its own rights, and 
   assert.equal(child.roleConfigId, GENERIC_ROLE.id);
   assert.equal(child.agentMode, "default", "never above the main session's mode");
   const granted = normalizeChatAgentPermissions(child.permissions);
+  assert.equal(granted.cliApprovals, true, "in its CLI's own mode (Accept edits), never Custom in the sessions view");
   assert.equal(granted.webAccess, false, "nothing the main session lacks");
   assert.equal(granted.workspaceWrite, true);
   assert.deepEqual(granted.shell.rules, [

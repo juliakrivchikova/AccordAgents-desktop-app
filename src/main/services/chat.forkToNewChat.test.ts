@@ -6,6 +6,7 @@ import test from "node:test";
 import { ChatService } from "./chat";
 import { StorageService } from "./storage";
 import { normalizeChatAgentPermissions } from "../../shared/agentPermissions";
+import { selectedChatAccessOption } from "../../shared/chatAccessModes";
 import { DEFAULT_CHAT_PROMPT_CONTEXT } from "../../shared/chatPromptContext";
 import { CHAT_PARTICIPANT_REQUEST_MAX_DEPTH_DEFAULT, CHAT_PARTICIPANT_REQUEST_PROMPT_MAX_CHARS_DEFAULT } from "../../shared/chatParticipantRequests";
 import { CHAT_AUTO_WATCH_WAKE_LIMIT_DEFAULT } from "../../shared/chatAutoWatch";
@@ -1089,6 +1090,32 @@ test("a fork keeps the member's own compaction right on the computer and the pho
     assert.deepEqual([desktopMain!.model, desktopMain!.agentMode], ["sonnet", "default"], `${label}: the member's model and mode, not Settings'`);
     const offer = await service.newChatOptions([]);
     assert.equal(offer!.mainSession!.permissions!.requestCompaction, compactWithoutAsking ? "allow" : "ask", `${label}: a new chat's main session follows Settings`);
+    const phoneMain = forkedMainSessionFor({
+      mainSession: offer!.mainSession!, basePermissions: offer!.fork!.basePermissions, member: memberAsItRunsNow(member, undefined),
+      source: { id: source.id, title: source.title }, seen: lastMemberTurnEnd(source.messages, member.id), id: desktopMain!.id
+    });
+    assert.deepEqual(clone(phoneMain), clone(desktopMain), `${label}: the phone makes the same main session`);
+  }
+});
+
+test("a member with rights set in the classic view is forked into its CLI's own mode, the one it was running in, never Custom, on the computer and the phone", async () => {
+  const classic = (patch: Partial<ChatAgentPermissions>) => permissions({ webAccess: true, requestCompaction: "allow", ...patch, cliApprovals: undefined });
+  const cases: Array<[string, Partial<ChatParticipant>, string, string]> = [
+    ["Claude Code running auto", { agentMode: "auto", permissions: classic({ workspaceWrite: true }) }, "auto", "auto"],
+    ["Claude Code editing in its default mode", { agentMode: "default", permissions: classic({ workspaceWrite: true }) }, "default", "acceptEdits"],
+    ["Claude Code read-only", { agentMode: "default", permissions: classic({ workspaceWrite: false }) }, "default", "manual"]
+  ];
+  for (const [label, patch, mode, option] of cases) {
+    const member: ChatParticipant = { ...REVIEWER, ...patch };
+    const source = oldChat([ASSISTANT, member]);
+    const { service } = testService({ conversations: [source], agents: READY_AGENTS });
+    const created = await service.createConversation({ participants: [], forkOf: { conversationId: source.id, participantId: member.id } });
+    const [desktopMain] = participantsOf(created.conversation);
+    assert.equal(desktopMain!.agentMode, mode, `${label}: the mode it ran in`);
+    assert.equal(selectedChatAccessOption(desktopMain!.kind, desktopMain!.agentMode, desktopMain!.permissions)?.id, option, `${label}: its CLI's own mode, not Custom`);
+    const granted = normalizeChatAgentPermissions(desktopMain!.permissions);
+    assert.deepEqual([granted.cliApprovals, granted.webAccess, granted.requestCompaction], [true, true, "allow"], `${label}: its rights and compaction right kept`);
+    const offer = await service.newChatOptions([]);
     const phoneMain = forkedMainSessionFor({
       mainSession: offer!.mainSession!, basePermissions: offer!.fork!.basePermissions, member: memberAsItRunsNow(member, undefined),
       source: { id: source.id, title: source.title }, seen: lastMemberTurnEnd(source.messages, member.id), id: desktopMain!.id

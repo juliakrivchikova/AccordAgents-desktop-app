@@ -346,3 +346,26 @@ export function applyChatAccessOptionById(
   }
   return withCodexPlanMode(applied.agentMode, applied.permissions, plan === true || legacyCodexPlan);
 }
+
+/**
+ * A member's settings in its CLI's own mode (the User, 2026-11-22: "нахера
+ * там вообще этот кастом?" — the sessions view has only the CLIs' own modes):
+ * unchanged when it is in one; else the mode it runs in now (its mode, and
+ * for the ordinary mode its file-edit right: Claude Code's Manual or Accept
+ * edits, Codex's Ask for approval or Read Only, Antigravity's Default or
+ * Accept-edits mode; a Codex member in Plan from before is Read Only with
+ * Plan mode on), every other right kept as it was. Never wider: what it was
+ * not granted its CLI now asks about instead of refusing it silently.
+ */
+export function inCliOwnMode(
+  kind: ChatProviderKind,
+  agentMode: ChatAgentMode | undefined,
+  permissions: ChatAgentPermissions | undefined
+): { agentMode: ChatAgentMode; permissions: ChatAgentPermissions } {
+  const normalized = normalizeChatAgentPermissions(permissions);
+  const mode = chatAgentModeForKind(kind, agentMode);
+  if (normalized.cliApprovals) return { agentMode: mode, permissions: normalized };
+  const legacyCodexPlan = kind === "codex-cli" && mode === "plan";
+  const option = legacyCodexPlan ? undefined : selectedChatAccessOption(kind, mode, { ...normalized, cliApprovals: true });
+  return applyChatAccessOptionById(kind, legacyCodexPlan ? "plan" : option?.id, normalized);
+}

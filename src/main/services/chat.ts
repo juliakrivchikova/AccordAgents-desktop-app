@@ -1,10 +1,10 @@
 import { cloudRunSelection, type CloudRunPreparationProgress, type CloudRunSelection } from "../../shared/cloudRunPreparation";
 import type { CliStartDefaultsByKind } from "../../shared/cliStartDefaults";
 import {
-  forkCutFor, forkedChatTitle, forkedMainSessionPermissions, forkOriginFor, forkToNewChatLocalProviders, forkToNewChatReasonInChat, isForkableSessionKind,
+  forkCutFor, forkedChatTitle, forkedMainSessionAccess, forkOriginFor, forkToNewChatLocalProviders, forkToNewChatReasonInChat, isForkableSessionKind,
   lastMemberTurnEnd, memberAsItRunsNow, memberHasFinishedReply, type ForkToNewChatMachineSupport, type ForkToNewChatOffer
 } from "../../shared/forkToNewChat";
-import { applyChatAccessOptionById, cliModesTurnRefusal, type CliModesMachineSupport } from "../../shared/chatAccessModes";
+import { applyChatAccessOptionById, cliModesTurnRefusal, inCliOwnMode, type CliModesMachineSupport } from "../../shared/chatAccessModes";
 import { newChatMainSessionStart } from "../../shared/newChatDefaults";
 import { DEFAULT_CHAT_VIEW, MAIN_SESSION_HANDLE, MAIN_SESSION_ROLE_ID, canSwitchChatView, isChatViewMode, isMainSessionChat, isMainSessionParticipant, isRoleOfferedForNewMembers, mainSessionMemberOf, mainSessionParticipantId } from "../../shared/mainSession";
 import { SESSIONS_TASK_GIVEN_TITLE_MAX_CHARS, firstTextLine, sessionsTaskTitle, shortenAtWord } from "../../shared/mainSessionView";
@@ -1953,7 +1953,7 @@ export class ChatService {
       // and reach), with the main session's own say over members: it makes
       // and asks them as its role gives.
       const base = this.normalizeParticipantPermissionsForRole(role, newChatMemberPermissions(Boolean(repoPath)), true);
-      const permissions = forkedMainSessionPermissions(base, running.permissions);
+      const { agentMode, permissions } = forkedMainSessionAccess(base, running);
       const [created] = await this.ensureMainSessionParticipant([], running.kind, {
         repoPath,
         requested: {
@@ -1963,7 +1963,7 @@ export class ChatService {
           model: running.model,
           reasoningEffort: running.reasoningEffort,
           hostId: running.hostId,
-          agentMode: normalizeChatAgentMode(running.agentMode),
+          agentMode,
           permissions,
           // Where the member runs: a fork never crosses devices.
           remoteExecution: preservedRemoteExecution(running.remoteExecution),
@@ -5873,8 +5873,10 @@ export class ChatService {
 
   /** Members a member added without a card in a chat with a main session
    *  say who added them, so every device holds them to the main session's
-   *  rights at each turn (participantForRun). Members the User added or
-   *  approved herself say nothing. The members as the chat has them now. */
+   *  rights at each turn (participantForRun), and run in their CLI's own mode
+   *  (inCliOwnMode: the sessions view has only the CLIs' own modes; the User,
+   *  2026-11-22). Members the User added or approved herself say nothing. The
+   *  members as the chat has them now. */
   private markAddedWithoutCard(conversation: Conversation, added: ChatParticipant[], requesterId: string): ChatParticipant[] {
     if (added.length === 0 || !isMainSessionChat(conversation.metadata)) {
       return added;
@@ -5885,7 +5887,7 @@ export class ChatService {
       if (!ids.has(participant.id) || participant.id === requesterId || isMainSessionParticipant(conversation.metadata, participant.id)) {
         return participant;
       }
-      const next = { ...participant, delegatedByParticipantId: requesterId };
+      const next = { ...participant, ...inCliOwnMode(participant.kind, participant.agentMode, participant.permissions), delegatedByParticipantId: requesterId };
       marked.set(participant.id, next);
       return next;
     });
@@ -15125,6 +15127,12 @@ export class ChatService {
           ...(start.homeMachineId ? { homeMachineId: start.homeMachineId } : {})
         };
       }
+      // A new chat's main session always runs in its CLI's own mode (the
+      // sessions view has no other; the User, 2026-11-22): a row from a screen
+      // that gave none runs in the CLI mode its settings amount to. The
+      // phone's offer (no row) is left as it is: the phone applies the mode
+      // for where its chat runs (newChatMainSessionFor).
+      if (requested) ({ agentMode, permissions } = inCliOwnMode(kind, agentMode, permissions));
       permissions = { ...permissions, requestCompaction: start.requestCompaction };
     }
     const [mainSession] = await this.validateParticipants([
