@@ -1811,7 +1811,16 @@ test("codex app-server stream keeps raw tool output out of agent text and comple
   });
   send({
     method: "item/completed",
-    params: { threadId: "thread-1", turnId: "turn-1", item: { id: "mcp-app", type: "mcpToolCall", result: { content: [{ type: "text", text: "APP_MESSAGES_TEXT" }] } } }
+    params: { threadId: "thread-1", turnId: "turn-1", item: { id: "mcp-app", type: "mcpToolCall", result: { content: [{ type: "text", text: JSON.stringify({ messages: [{ content: "APP_MESSAGES_TEXT ".repeat(30) }] }) }] } } }
+  });
+  send({
+    method: "item/started",
+    params: { threadId: "thread-1", turnId: "turn-1", item: { id: "mcp-app-refused", type: "mcpToolCall", server: "accord_agents", tool: "app_chat_request_compaction", arguments: {} } }
+  });
+  send({
+    method: "item/completed",
+    params: { threadId: "thread-1", turnId: "turn-1", item: { id: "mcp-app-refused", type: "mcpToolCall", result: { content: [{ type: "text",
+      text: JSON.stringify({ ok: false, status: "rejected", error: `APP_TOOL_REFUSED ${"because ".repeat(40)}` }) }] } } }
   });
   send({
     method: "item/started",
@@ -1870,6 +1879,8 @@ test("codex app-server stream keeps raw tool output out of agent text and comple
   const failed = outputs.filter((event) => event.activityItemId === "mcp-app-failed").at(-1);
   assert.equal(failed?.activityStatus, "failed");
   assert.match(failed?.activityDetail ?? "", /Output tail:\nAPP_TOOL_FAILED/, "an app tool's failure keeps its reason");
+  assert.match(outputs.filter((event) => event.activityItemId === "mcp-app-refused").at(-1)?.activityDetail ?? "", /APP_TOOL_REFUSED/,
+    "and so does a refusal it answers with");
 
   const visibleTranscript = outputs.filter((event) => event.kind === "text").at(-1)?.cumulative ?? "";
   assert.equal(visibleTranscript, "I’ll inspect it.\n\nDone.");

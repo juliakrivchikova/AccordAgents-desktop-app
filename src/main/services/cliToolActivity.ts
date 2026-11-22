@@ -129,6 +129,28 @@ function stringInput(input: Record<string, unknown> | undefined, key: string): s
 export const APP_MCP_SERVER = "accord_agents";
 const APP_TOOL_DETAIL_MAX_CHARS = 200;
 
+const APP_TOOL_REFUSAL_STATUS = /^(error|rejected|denied|unsupported|failed)$/i;
+/** A refusal is never longer than this; a longer answer is not parsed. */
+const APP_TOOL_REFUSAL_MAX_CHARS = 20_000;
+
+/** Whether a step of the app's own tools keeps what the tool answered: a
+ *  refusal (its reason: "ok": false, a status of error, rejected, denied,
+ *  unsupported or failed, or an MCP error result) and a short answer stay;
+ *  a long answer is what the app keeps itself (the messages read, a
+ *  document). */
+export function appToolOutputKept(output: string, isError: boolean): boolean {
+  if (isError || output.length <= APP_TOOL_DETAIL_MAX_CHARS) return true;
+  if (output.length > APP_TOOL_REFUSAL_MAX_CHARS || !output.trimStart().startsWith("{")) return false;
+  try {
+    const parsed = JSON.parse(output) as unknown;
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return false;
+    const { ok, status } = parsed as { ok?: unknown; status?: unknown };
+    return ok === false || (typeof status === "string" && APP_TOOL_REFUSAL_STATUS.test(status));
+  } catch {
+    return false;
+  }
+}
+
 /** Claude Code tools that get no row: the CLI draws nothing when they are
  *  called. ExitPlanMode is its "Exit plan mode?" dialog, which is the plan
  *  card here; EnterPlanMode's "Entered plan mode" comes only with its result

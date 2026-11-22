@@ -39,6 +39,19 @@ function detailLine(detail: string | undefined): string {
   return oneLine(first);
 }
 
+/** Whether a step's row says its detail rather than its label (a label that
+ *  says only what kind of step it is, or "Thinking"): when a reply's details
+ *  are cut, such a step keeps the line its row shows (sessionsRowDetailLine). */
+export function sessionsRowShowsDetail(label: string): boolean {
+  const line = oneLine(label);
+  return THINKING_LABEL.test(line) || KIND_ONLY_LABEL.test(line);
+}
+
+/** What a row shows of a detail: its first line, PHONE_ACTIVITY_ROW_CHARS at most. */
+export function sessionsRowDetailLine(detail: string | undefined): string {
+  return detailLine(detail).slice(0, PHONE_ACTIVITY_ROW_CHARS);
+}
+
 /** One step of a reply as its row shows it: its label when that is in the
  *  CLI's own words ("Running npm test"); else the detail (the command, the
  *  query, the path) when the CLI gave one; else the label ("Using Bash"). */

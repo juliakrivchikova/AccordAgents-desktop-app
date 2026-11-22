@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { claudeRunningTitle } from "./claudeRunningTitle";
 import {
+  appToolOutputKept,
   CLAUDE_TOOLS_WITHOUT_ROW,
   CLI_ACTIVITY_DETAIL_MAX_CHARS,
   CLI_ACTIVITY_LABEL_MAX_CHARS,
@@ -94,6 +95,16 @@ test("a step keeps its arguments compact, and none of a body the app keeps itsel
   assert.equal(claudeToolActivity("mcp__accord_agents__app_artifact_read", sized(201)).detail, undefined);
   assert.equal(codexMcpActivity("accord_agents", "app_artifact_read", sized(200), false).detail, JSON.stringify(sized(200)));
   assert.equal(codexMcpActivity("accord_agents", "app_artifact_read", sized(201), false).detail, undefined);
+});
+
+test("a step of the app's own tools keeps a refusal's reason and a short answer, not a body the app keeps", () => {
+  const long = "text ".repeat(300);
+  assert.equal(appToolOutputKept('{"ok":true,"messageId":"m1"}', false), true, "a short answer stays");
+  assert.equal(appToolOutputKept(JSON.stringify({ messages: [{ content: long }] }), false), false, "the messages read do not");
+  assert.equal(appToolOutputKept(JSON.stringify({ ok: false, status: "rejected", error: `Context compaction requests are disabled. ${long}` }), false), true);
+  assert.equal(appToolOutputKept(JSON.stringify({ status: "unsupported", message: long }), false), true);
+  assert.equal(appToolOutputKept(long, true), true, "an MCP error result stays");
+  assert.equal(appToolOutputKept(long, false), false);
 });
 
 test("ExitPlanMode and EnterPlanMode get no row: the CLI draws nothing at the call; the plan card is its dialog", () => {

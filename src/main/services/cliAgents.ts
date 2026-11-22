@@ -119,6 +119,7 @@ import {
 import type { ParticipantRunResult } from "./providers";
 import {
   APP_MCP_SERVER,
+  appToolOutputKept,
   CLAUDE_TOOLS_WITHOUT_ROW,
   claudeToolActivity,
   codexCommandActivity,
@@ -5970,13 +5971,15 @@ export class CliAgentRunner {
       if (error) {
         return this.stringField(error, "message");
       }
+      const result = this.asRecord(item.result);
+      const output = result ? this.codexAppServerOutputContent(result.content) : undefined;
       // The app's own tools answer with what the app keeps itself (messages,
-      // requests, documents): the step keeps no copy of it.
-      if (this.stringField(item, "server") === APP_MCP_SERVER) {
+      // requests, documents): the step keeps no copy of it, but a refusal
+      // keeps its reason.
+      if (output && this.stringField(item, "server") === APP_MCP_SERVER && !appToolOutputKept(output, result?.isError === true)) {
         return undefined;
       }
-      const result = this.asRecord(item.result);
-      return result ? this.codexAppServerOutputContent(result.content) : undefined;
+      return output;
     }
     return undefined;
   }

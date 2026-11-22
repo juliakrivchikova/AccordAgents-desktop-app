@@ -610,6 +610,9 @@ test("agent progress sink: a step's words change as it ends, a label stays one b
   assert.equal(long.label.length, 1_000);
   assert.ok(long.label.endsWith("…"));
 
+  // Rows whose label only names the kind of step show their detail's line.
+  sink.emit({ kind: "tool", text: "Viewing image", activityKind: "tool", activityDetail: `/tmp/shot.png\n${"meta ".repeat(300)}`, activityItemId: "image-1" });
+  sink.emit({ kind: "tool", text: "Thinking", activityKind: "status", activityDetail: `I need the rate first.\n${"more ".repeat(300)}`, activityItemId: "think-1" });
   for (let index = 0; index < 150; index += 1) {
     sink.emit({ kind: "tool", text: `Running step ${index}`, activityKind: "command", activityDetail: `${index}:${"z".repeat(1_795)}`, activityItemId: `step-${index}` });
   }
@@ -619,6 +622,17 @@ test("agent progress sink: a step's words change as it ends, a label stays one b
   assert.ok(events.find((event) => event.itemId === "step-149")?.detail?.startsWith("149:"), "the newest steps keep their details");
   assert.equal(events.find((event) => event.itemId === "step-0")?.detail, undefined, "the oldest lose theirs first");
   assert.equal(events.find((event) => event.itemId === "step-0")?.label, "Running step 0", "and keep their words");
+  assert.ok(events.find((event) => event.itemId === "image-1")?.detail?.startsWith("/tmp/shot.png\n"), "a row that shows its detail keeps it while others can go");
+  assert.ok(events.find((event) => event.itemId === "think-1")?.detail?.startsWith("I need the rate first.\n"));
+  // Past that, such rows are cut down to the line they show, oldest first.
+  for (let index = 0; index < 40; index += 1) {
+    sink.emit({ kind: "tool", text: "Viewing image", activityKind: "tool", activityDetail: `/tmp/shot-${index}.png\n${"meta ".repeat(300)}`, activityItemId: `image-${index + 2}` });
+  }
+  const later: ChatAgentActivityEvent[] = sink.activityEvents();
+  assert.ok(later.reduce((sum, event) => sum + (event.detail?.length ?? 0), 0) <= 24_000);
+  assert.equal(later.find((event) => event.itemId === "image-1")?.detail, "/tmp/shot.png", "the oldest keeps the line its row shows");
+  assert.equal(later.find((event) => event.itemId === "think-1")?.detail, "I need the rate first.");
+  assert.ok(later.find((event) => event.itemId === "image-41")?.detail?.startsWith("/tmp/shot-39.png\n"), "the newest keeps all of it");
   assert.ok(mostDetailsInOneUpdate > 24_000 - 1_800 && mostDetailsInOneUpdate <= 24_000,
     `a full update is trimmed to the budget, and none carries more (${mostDetailsInOneUpdate})`);
 });
