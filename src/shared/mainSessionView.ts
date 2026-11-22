@@ -86,24 +86,50 @@ export function sessionsMemberStatus(
   return task ? sessionsTaskStatus(task, memberStatus, memberFinishedAt) : "idle";
 }
 
-/** What every member's messages say about it, read in one pass per change
- *  of the loaded chat: its reply in progress (newest) and when its newest
- *  finished message was written. */
+/** What each member is doing, as far as the loaded chat says: its reply in
+ *  progress, from when it started, and when its newest finished message was
+ *  written. */
 export interface SessionsMemberActivity {
   runningSince: ReadonlyMap<string, string>;
   finishedAt: ReadonlyMap<string, string>;
+  /** The reply each member is working on now (its steps, its "since"). */
+  runningReply: ReadonlyMap<string, ChatMessage>;
 }
 
+/** A member's turns run one after another: the reply in progress is the
+ *  first started of its pending ones, never one waiting behind it (as
+ *  runningMessageForParticipant picks it), and it runs from when its own
+ *  turn began, not from when it was queued. */
 export function sessionsMemberActivity(messages: readonly ChatMessage[]): SessionsMemberActivity {
-  const runningSince = new Map<string, string>();
+  const runningReply = new Map<string, ChatMessage>();
   const finishedAt = new Map<string, string>();
   for (let index = messages.length - 1; index >= 0; index -= 1) {
     const message = messages[index]!;
     if (message.role !== "participant" || !message.participantId) continue;
-    const target = isPendingReply(message) ? runningSince : finishedAt;
-    if (!target.has(message.participantId)) target.set(message.participantId, message.createdAt);
+    if (!isPendingReply(message)) {
+      if (!finishedAt.has(message.participantId)) finishedAt.set(message.participantId, message.createdAt);
+      continue;
+    }
+    if (message.metadata?.queuedBehind || message.metadata?.turnQueued) continue;
+    const current = runningReply.get(message.participantId);
+    // Read newest first: a reply earlier in the chat started no later.
+    if (!current || startedNoLater(message, current)) runningReply.set(message.participantId, message);
   }
-  return { runningSince, finishedAt };
+  const runningSince = new Map<string, string>();
+  for (const [participantId, message] of runningReply) {
+    const started = message.metadata?.turnStartedAt;
+    runningSince.set(participantId, typeof started === "string" && started ? started : message.createdAt);
+  }
+  return { runningSince, finishedAt, runningReply };
+}
+
+/** An unknown start time cannot claim to be first; on a tie the one earlier
+ *  in the chat (the candidate, read newest first) started first. */
+function startedNoLater(candidate: ChatMessage, current: ChatMessage): boolean {
+  const candidateTime = Date.parse(candidate.createdAt);
+  const currentTime = Date.parse(current.createdAt);
+  if (!Number.isFinite(candidateTime)) return false;
+  return !Number.isFinite(currentTime) || candidateTime <= currentTime;
 }
 
 /** The first line of a text worth showing in one row: control blocks (a

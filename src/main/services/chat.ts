@@ -411,11 +411,13 @@ function closedByQuit(error: string | undefined): boolean {
  *  whichever ended it first, the quit or the run itself as its process
  *  closed (which alone would say the member "stopped before it returned a
  *  response", an error). */
-function markStoppedByQuit(message: ChatMessage, recovery: boolean): void {
+function markStoppedByQuit(message: ChatMessage, recovery: boolean, written?: string): void {
   if (recovery) markInterruptedForRecovery(message);
   else {
     message.status = "error";
-    message.content = INTERRUPTED_REPLY_TEXT;
+    // What the member wrote before the quit stays, as the CLI leaves it on
+    // screen when interrupted; only a reply with nothing in it says so.
+    message.content = written?.trim() ? written : INTERRUPTED_REPLY_TEXT;
   }
   message.metadata = { ...message.metadata, terminalReason: "user-stopped" };
 }
@@ -11692,6 +11694,7 @@ export class ChatService {
       const now = new Date().toISOString();
       session.updatedAt = now;
       this.updateParticipantContextUsage(conversation, participant.id, result.contextUsage);
+      const writtenBeforeEnd = pendingMessage.content;
       pendingMessage.content = result.content;
       if (signal?.aborted) {
         // A Stop that lands as the reply finishes keeps the reply the member
@@ -11701,8 +11704,9 @@ export class ChatService {
         });
       } else if (!result.ok && this.quitting && closedByQuit(result.error)) {
         // Its process closed because the User quits: what the quit says of
-        // the turns it ends (endTurnsForQuit), not a failure of the member.
-        markStoppedByQuit(pendingMessage, false);
+        // the turns it ends (endTurnsForQuit), not a failure of the member,
+        // keeping what it had written (in the bubble, else as it streamed).
+        markStoppedByQuit(pendingMessage, false, writtenBeforeEnd.trim() ? writtenBeforeEnd : progressSink.processingTranscript(now)?.content);
       } else {
         pendingMessage.status = result.ok ? "done" : "error";
       }
@@ -27049,6 +27053,12 @@ export class ChatService {
     this.quitting = true;
   }
 
+  /** The quit did not happen after all (main.ts quitWasCancelled): turns
+   *  start and requesters resume again. */
+  endQuit(): void {
+    this.quitting = false;
+  }
+
   /** Resolves once no member's turn runs here (each saved how it ended, so
    *  its end is queued for the server), or after `timeoutMs`. A requester
    *  still collecting answers is not waited for (liveRunIds counts it): it
@@ -27092,6 +27102,9 @@ export class ChatService {
             markStoppedByQuit(message, true);
             changed = true;
           }
+          // Its cards (a permission, a plan, a compaction) close with it, as
+          // its own end closes them, so no phone keeps them open.
+          if (this.markPendingAppToolApprovalsForRunTerminal(conversation, run.runId, INTERRUPTED_REPLY_TEXT)) changed = true;
           this.finishServerTurn(run.runId, "interrupted");
           ended += 1;
         }

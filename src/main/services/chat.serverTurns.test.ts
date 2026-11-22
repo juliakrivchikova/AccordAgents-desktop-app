@@ -485,3 +485,34 @@ test("quitting ends the requests whose tasks it ended, as the next start would",
   const batch = stored.messages.find((message) => message.id === "task-1")?.metadata?.participantRequest;
   assert.equal(batch?.items[0].status, "interrupted", "no phone shows it waiting on that task");
 });
+
+test("quitting closes the cards of the turns it ends, so no phone keeps them open", async (t) => {
+  const h = await setup(t);
+  const at = new Date().toISOString();
+  const chat = localChat("chat-cards", [{ id: "card-reply", role: "participant", participantId: desk.id, participantLabel: "@taylor", content: "", createdAt: at,
+    status: "pending", metadata: { runId: "run-card" } } as ChatMessage]);
+  chat.metadata = { ...chat.metadata, pendingAppToolApprovals: [{ id: "approval-1", conversationId: "chat-cards", requesterParticipantId: desk.id, requesterHandle: "taylor",
+    requesterRoleConfigId: "software-engineer", toolName: "codex_auto_review_approval", capability: "permissions.request", status: "pending",
+    request: { kind: "codexApproval", method: "item/commandExecution/requestApproval", requestId: 9, threadId: "thread-1", turnId: "turn-1", itemId: "item-1",
+      action: "command", command: "git push origin main", options: [{ id: "accept", label: "Allow once", outcome: "approve" }, { id: "decline", label: "Deny", outcome: "deny" }] },
+    summary: "Run git push", createdAt: at, updatedAt: at, resumeContext: { runId: "run-card", triggerMessageId: "chat-cards-start" } }] } as unknown as Conversation["metadata"];
+  await save(h.chat, chat);
+  (h.chat as unknown as { chatRunMeta: Map<string, unknown> }).chatRunMeta.set("run-card", { conversationId: "chat-cards", participantId: desk.id, participantHandle: "taylor" });
+  h.chat.beginQuit();
+  assert.equal(await h.chat.endTurnsForQuit(), 1);
+  const approval = ((await h.storage.getConversation("chat-cards"))!.metadata.pendingAppToolApprovals as Array<{ id: string; status: string }>).find((item) => item.id === "approval-1");
+  assert.notEqual(approval?.status, "pending");
+});
+
+test("a quit that did not happen lets the server's asks start the member again", async (t) => {
+  const h = await setup(t);
+  await save(h.chat, localChat("chat-back"));
+  await h.link.start();
+  await until(async () => (await h.link.status())?.ready ?? false, (ready) => ready);
+  h.chat.beginQuit();
+  h.chat.endQuit();
+  await h.phoneWrite({ opId: "op-phone-back", kind: "message.create", conversationId: "chat-back",
+    message: { id: "phone-back", role: "user", content: "@taylor still there?", createdAt: new Date().toISOString(), metadata: { deliveryTargets: [desk.id] } } as ChatMessage });
+  await until(() => h.page("chat-back"), (page) => page.messages.some((message) => message.role === "participant" && message.status === "done"));
+  assert.equal(h.turns.length, 1);
+});

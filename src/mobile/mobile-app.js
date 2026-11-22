@@ -8279,9 +8279,10 @@
     const open = lastSessionsState && lastSessionsState.conversationId === conversationId ? lastSessionsState : undefined;
     // Worked out once per chat list and drawing of the open chat, not per
     // label: Activity and a chat's cards ask for every row.
-    // A chat not open now names its members by the tasks it had when it was
-    // last open here (titles are read from its messages, which only an open
-    // chat has); a member it had no task for, by its handle as a plain word.
+    // A chat not open now names its members by the title each keeps, else
+    // by the tasks it had when it was last open here (titles are read from
+    // its messages, which only an open chat has); a member with neither is
+    // "Agent", never its handle.
     const titled = open ? undefined : sessionsTitledNames.get(conversationId);
     const known = sessionsNamesCache.get(conversationId);
     if (known && cachedChatList && known.list === cachedChatList && known.state === open && known.titled === titled) return known.names;
@@ -8308,7 +8309,13 @@
     }
     members.forEach(function (member) {
       if (member === main || !member.handle) return;
-      const title = state ? sessionsMemberTitleOf(state, member) : (titled && titled.titleOf(member.handle)) || String(member.handle).replace(/^@/, "");
+      // As the computer names it (sessionsViewNamesOf): the title kept with
+      // the member first, then one read while the chat was open, else
+      // "Agent"; never a handle.
+      const kept = typeof member.taskTitle === "string" && member.taskTitle.trim().length > 0;
+      const title = state ? sessionsMemberTitleOf(state, member)
+        : kept ? shared.sessionsMemberTitle(member, undefined)
+          : (titled && titled.titleOf(member.handle)) || shared.sessionsMemberTitle(member, undefined);
       titles.push([member.handle, title]);
       if (member.mentionHandle && member.mentionHandle !== member.handle) titles.push([member.mentionHandle, title]);
     });
@@ -12749,7 +12756,11 @@
         ...(role !== "user" && row.sourceMessageId ? { sourceMessageId: row.sourceMessageId } : {}),
         ...(role === "system" && row.finishedNote ? { appMessageSource: "app_turn_finished_note", turnFinishedNote: row.finishedNote } : {}),
         ...(row.accordLaunchByMainSession ? { accordLaunchByMainSession: true } : {}),
-        ...(typeof row.workedMs === "number" ? { workedMs: row.workedMs } : {})
+        ...(typeof row.workedMs === "number" ? { workedMs: row.workedMs } : {}),
+        // A reply waiting behind its member's turn, and when a reply's own
+        // turn began: which reply runs, and from when (sessionsMemberActivity).
+        ...(row.queued ? { turnQueued: true } : {}),
+        ...(typeof row.startedAt === "string" && row.startedAt ? { turnStartedAt: row.startedAt } : {})
       }
     };
   }

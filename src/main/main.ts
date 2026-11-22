@@ -1863,6 +1863,8 @@ function createWindow(): void {
   });
   window.webContents.on("will-prevent-unload", () => {
     debugLogService.writeNow("app-window.unload-prevented", { windowId });
+    // The page keeps itself open: a quit under way does not happen.
+    if (quitCleanupStarted) quitWasCancelled("a window kept its page");
   });
   window.webContents.on("destroyed", () => {
     if (mainWindow === window) {
@@ -3834,6 +3836,46 @@ async function stopMembersThenServerLink(): Promise<void> {
   await membersClosed;
 }
 
+/** How long after its last quit call a quit that ran its steps may take to
+ *  reach will-quit before it counts as cancelled. */
+const QUIT_CANCEL_DETECT_MS = 5_000;
+let quitCancelTimer: NodeJS.Timeout | undefined;
+
+/**
+ * A quit that ran its steps and then did not happen (a window kept its page
+ * from unloading, or the native quit was cancelled): the app goes on as it
+ * was. What the steps stopped starts again, and turns run again: left
+ * quitting, it took no turn the server asked and resumed no requester, with
+ * its link to the server closed (2026-11-22 review).
+ */
+function quitWasCancelled(reason: string): void {
+  if (quitCancelTimer) clearTimeout(quitCancelTimer);
+  quitCancelTimer = undefined;
+  if (!quitCleanupStarted) return;
+  debugLogService.writeNow("app-quit.cancelled", { reason, cleanupFinished: quitCleanupFinished });
+  // A quit still running its steps is cancelled once they end (below).
+  if (!quitCleanupFinished) {
+    quitCancelledWhileCleaning = true;
+    return;
+  }
+  quitCleanupStarted = false;
+  quitCleanupFinished = false;
+  quitCancelledWhileCleaning = false;
+  // The next quit asks about the terminal's commands again.
+  quitConfirmation.revoke();
+  chatService.endQuit();
+  void appMcpService.start().catch((error: unknown) => {
+    void debugLogService.write("app-quit.cancelled.restart-error", { part: "app tools", message: error instanceof Error ? error.message : String(error) });
+  });
+  void scriptService.start().catch((error: unknown) => {
+    void debugLogService.write("app-quit.cancelled.restart-error", { part: "scripts", message: error instanceof Error ? error.message : String(error) });
+  });
+  void serverChatLink.start().catch((error: unknown) => {
+    void debugLogService.write("app-quit.cancelled.restart-error", { part: "server link", message: error instanceof Error ? error.message : String(error) });
+  });
+}
+let quitCancelledWhileCleaning = false;
+
 app.on("before-quit", (event) => {
   debugLogService.writeNow("app-quit.before-quit", {
     forUpdate: quittingForUpdate,
@@ -3871,6 +3913,10 @@ app.on("before-quit", (event) => {
   void Promise.race([cleanup, timeout]).finally(() => {
     debugLogService.writeNow("app-quit.cleanup-finished", { ms: Date.now() - cleanupStartedAt, timedOut: !cleanupDone });
     quitCleanupFinished = true;
+    if (quitCancelledWhileCleaning) {
+      quitWasCancelled("cancelled while its steps ran");
+      return;
+    }
     // Quit again only after Electron's own quit call has returned. A quit
     // from the Quit menu (Cmd+Q), the Dock or a signal starts in native code,
     // so this promise can settle while that call is still emitting
@@ -3879,12 +3925,21 @@ app.on("before-quit", (event) => {
     // close and the app keeps running with none (2026-10-20, the User's
     // Cmd+Q at 08:45). The immediate runs at the loop's next wakeup, which
     // the quit's own file and network work brings at once (0 ms measured).
-    setImmediate(() => app.quit());
+    setImmediate(() => {
+      app.quit();
+      // Nothing says a quit was cancelled; one that has not reached
+      // will-quit by then was.
+      if (quitCancelTimer) clearTimeout(quitCancelTimer);
+      quitCancelTimer = setTimeout(() => quitWasCancelled("no will-quit"), QUIT_CANCEL_DETECT_MS);
+      quitCancelTimer.unref?.();
+    });
   });
 });
 
 app.on("will-quit", () => {
   debugLogService.writeNow("app-quit.will-quit", { forUpdate: quittingForUpdate });
+  if (quitCancelTimer) clearTimeout(quitCancelTimer);
+  quitCancelTimer = undefined;
   // Here and not in before-quit, which an update's restart skips: every
   // shell in the terminal panel gets its hangup on any kind of quit.
   terminalService.shutdown();

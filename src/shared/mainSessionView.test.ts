@@ -490,3 +490,18 @@ test("a member's handle is its chip only as an exact @handle of a current or for
   assert.deepEqual(pieces(`@${"g".repeat(33)}`), [{ text: `@${"g".repeat(33)}` }], "33 is not");
   assert.deepEqual(pieces(""), []);
 });
+
+test("a member's running reply is the one it works on, not one queued behind it, from when its own turn began", () => {
+  const messages = [
+    message("running", "participant", 10, { participantId: "p-drew", status: "pending", metadata: { turnStartedAt: at(12) } }),
+    message("queued", "participant", 15, { participantId: "p-drew", status: "pending", metadata: { turnQueued: true } }),
+    message("queued-here", "participant", 16, { participantId: "p-drew", status: "pending", metadata: { queuedBehind: { handle: "drew" } } }),
+    message("first", "participant", 20, { participantId: "p-ana", status: "pending" }),
+    message("second", "participant", 21, { participantId: "p-ana", status: "pending" })
+  ];
+  const activity = sessionsMemberActivity(messages);
+  assert.equal(activity.runningReply.get("p-drew")?.id, "running");
+  assert.equal(activity.runningSince.get("p-drew"), at(12), "since its own turn began, not since it was made");
+  assert.equal(activity.runningReply.get("p-ana")?.id, "first", "turns run one after another: the first started");
+  assert.equal(activity.runningSince.get("p-ana"), at(20));
+});

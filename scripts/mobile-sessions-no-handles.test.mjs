@@ -155,3 +155,38 @@ test("a sessions-view chat names nobody by handle on the phone (failed replies, 
   const classic = await app.evaluate(`document.getElementById("message-list").innerText`);
   assert.match(classic, /@main stopped before it returned a response\./);
 });
+
+test("a sessions-view chat the phone has not opened names its members by their kept task title, else Agent, never by handle", { timeout: 240_000 }, async (t) => {
+  const hub = await startMobileHub();
+  const site = await serveMobileShell({ port: 8403, hubOrigins: [hub.base] });
+  const profile = await tempProfile("aa-mobile-closed-names-");
+  const chrome = launchChrome({ port: 9553, profile, url: `${site.origin}/` });
+  let app;
+  t.after(async () => {
+    app?.close();
+    chrome.kill("SIGKILL");
+    await site.close();
+    await hub.close();
+    await rm(profile, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
+  });
+  const titled = member("drew", { id: "p-drew", kind: "codex-cli", taskTitle: "Fix the footer" });
+  const untitled = member("ana", { id: "p-ana" });
+  await hub.createChat("conv-closed", { title: "Footer", participants: [MAIN, titled, untitled], createdAt: at(31),
+    metadata: { mainSessionParticipantId: MAIN.id, chatView: "sessions" }, messages: [
+      { id: "c-u", role: "user", content: "Fix the footer", status: "done", createdAt: at(30), metadata: { deliveryTargets: [MAIN.id] } }
+    ] });
+  await hub.raiseApproval("conv-closed", permission("conv-closed", titled, "card-titled"), { participantId: titled.id });
+  await hub.raiseApproval("conv-closed", permission("conv-closed", untitled, "card-untitled"), { participantId: untitled.id });
+  app = await attachApp({ port: 9553 });
+  await pairPage(app, { hub, siteOrigin: site.origin, query: "qa=1" });
+  // Activity, with the chat never opened on this phone.
+  await app.waitFor(`(() => { const dock = document.getElementById("home-dock"); return Boolean(dock && !dock.hidden); })()`, "the bottom bar");
+  await app.evaluate(`document.querySelector('[data-home-tab="activity"]').click()`);
+  await app.evaluate(`document.querySelector('[data-activity-tab="pending"]')?.click()`);
+  await app.waitFor(`document.querySelectorAll("#activity-list .act-row[data-card-id]").length >= 2`, "the Pending list");
+  const rows = await app.evaluate(`Object.fromEntries([...document.querySelectorAll("#activity-list .act-row[data-card-id]")].map((row) => [row.dataset.cardId, row.innerText.replace(/\\s+/g, " ").trim()]))`);
+  t.diagnostic(`pending rows: ${JSON.stringify(rows)}`);
+  assert.match(rows["card-titled"], /Fix the footer/, rows["card-titled"]);
+  assert.match(rows["card-untitled"], /\bAgent\b/, rows["card-untitled"]);
+  for (const text of Object.values(rows)) assert.doesNotMatch(text, /(^|[^A-Za-z0-9_@./-])@?(drew|ana)\b/i, text);
+});

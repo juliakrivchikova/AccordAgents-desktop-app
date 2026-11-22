@@ -16823,3 +16823,25 @@ test("a member's own failure in the last seconds of a quit still says what faile
   assert.match(reply.content, /needs authorization/);
   assert.equal(reply.metadata?.terminalReason, undefined, "not stopped by the quit");
 });
+
+test("what a member wrote before the User's quit stays in its reply, stopped", async () => {
+  const participant = chatParticipant("claude-code");
+  const conversation = chatConversation([participant]);
+  const { service, storage, tempRoot } = testService({
+    conversation,
+    run: async (runParticipant: ParticipantConfig, _prompt: string, _path: string, _unused: unknown, _kind: string, _signal: AbortSignal,
+      options: { onOutput?: (event: unknown) => void }) => {
+      options.onOutput?.({ kind: "text", text: "Half of the essay.", cumulative: "Half of the essay." });
+      return { participant: runParticipant, ok: false, content: `${runParticipant.label} stopped before it returned a response.`,
+        error: "claude warm process exited with code 143", durationMs: 1 };
+    }
+  });
+  (service as any).ensureHistoryFiles = async () => tempRoot;
+  service.beginQuit();
+  await (service as any).runParticipantTurnSerialized(storage.current, participant, storage.current.messages[0], "run-quit-partial", undefined, undefined, { warnings: [] })
+    .catch(() => undefined);
+  const reply = storage.current.messages.filter((message: ChatMessage) => message.role === "participant").at(-1)!;
+  assert.equal(reply.content, "Half of the essay.");
+  assert.equal(reply.status, "error");
+  assert.equal(reply.metadata?.terminalReason, "user-stopped");
+});
