@@ -12,6 +12,21 @@ export interface ParticipantRunResult {
   contextUsage?: AgentContextUsage;
   warnings?: string[];
   appMcpClientFailed?: boolean;
+  /** Where the CLI session stood when this turn ended (Claude Code: its last
+   *  assistant message's uuid; Codex: the turn's id), for Fork to new chat. */
+  sessionCut?: string;
+  /** A fork asked to end at a point (CliAgentRunOptions.forkCut) copied the
+   *  whole session instead: why. */
+  forkCutMissed?: string;
+  /** A fork's first turn (CliAgentRunOptions.forkFromSessionId) failed while
+   *  the CLI made the copy, before it took the message: no session of the
+   *  member's own exists. Whether the CLI said why in its own words (the
+   *  source is gone) is isForkSourceMissingError(error). */
+  forkCopyFailed?: boolean;
+  /** A run that was to start a new session (a fork's copy, or a clean one)
+   *  failed before the CLI took the message: no session was made, although
+   *  the id it was given may have been reported. */
+  sessionNotStarted?: boolean;
 }
 
 export class ProviderRunner {

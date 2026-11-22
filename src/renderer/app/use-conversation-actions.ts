@@ -24,6 +24,7 @@ import { persistLastViewedAt } from "./storage";
 import { activityItemsWithStoredPreferences } from "./activity-item-state";
 import { focusConversationMessage } from "./focus-conversation-message";
 import { visibleTimelineAnchor } from "./activity-timeline-anchor";
+import { dropComposerFocusRequestsExcept } from "./composer-focus-request";
 
 const ACTIVITY_MESSAGE_MISSING_ERROR = "The selected activity message is no longer available.";
 
@@ -171,6 +172,8 @@ export function useConversationActions(state: AppState): ConversationActions {
     const previous = state.conversation;
     const requestId = state.openConversationRequestRef.current + 1;
     state.openConversationRequestRef.current = requestId;
+    state.openConversationTargetRef.current = id;
+    dropComposerFocusRequestsExcept(id);
     state.setError(undefined);
     if (state.conversation?.id !== id) {
       state.setWarnings([]);
@@ -661,6 +664,8 @@ export function useConversationActions(state: AppState): ConversationActions {
     // A chat still loading (for example the Activity detail) must not land on
     // top of what replaces it once its load finishes.
     state.openConversationRequestRef.current += 1;
+    state.openConversationTargetRef.current = undefined;
+    dropComposerFocusRequestsExcept(undefined);
     state.setOpeningConversationId(undefined);
     state.setConversation(undefined);
     state.setMessagePage(undefined);

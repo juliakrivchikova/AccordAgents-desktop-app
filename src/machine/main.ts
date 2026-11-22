@@ -432,6 +432,9 @@ export async function startMachine(args: MachineArgs): Promise<() => Promise<voi
       catch { return false; }
     },
     detectProviders: () => cliAgentRunner.detectAgents(),
+    // The mode, model and effort its CLIs start in with this machine's own
+    // config: a main session that runs here starts in them.
+    readCliStartDefaults: () => cliAgentRunner.cliStartDefaults(),
     onNativeActivitySettled: () => idlePower?.noteActivity() ?? Promise.resolve(),
     idleStopWarning: () => presenceWarning || idlePower?.warning(),
     autoStopEnabled: () => autoStopEnabled,

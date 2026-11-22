@@ -132,7 +132,8 @@ export function ChatSearchResults({
                         data-message-id={match.messageId}
                       >
                         <span className="aa-sr-snip">
-                          <span className="aa-sr-author">{shortAuthor(match.authorLabel)}: </span>
+                          {/* The sessions view names no member: a member's words alone. */}
+                          {!(match.sessionsView && match.role === "participant") && <span className="aa-sr-author">{shortAuthor(match.authorLabel)}: </span>}
                           <HighlightedText
                             text={match.snippetText}
                             ranges={match.highlightRanges}

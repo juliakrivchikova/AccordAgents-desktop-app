@@ -217,8 +217,8 @@ export function assistantSubstituteNote(options: {
   agents: AgentHealth[];
   providers: Array<Pick<ProviderSettings, "kind" | "enabled">>;
   explicitKind?: ChatProviderKind;
-  /** Who takes the CLI: "The Assistant" by default; a new chat's main
-   *  session (shared/mainSession.ts) is named as such. */
+  /** Who takes the CLI when it is named ("The Assistant"); a new chat's main
+   *  session is named by nothing: the CLI runs the chat. */
   subject?: string;
 }): string | undefined {
   const saved = options.explicitKind;
@@ -228,7 +228,9 @@ export function assistantSubstituteNote(options: {
   }
   const state = readinessForProvider(saved, options.agents, options.providers);
   const why = state === "ready" ? "is not ready" : SUBSTITUTE_REASON[state];
-  return `${options.subject ?? "The main session"} uses ${CLI_PROVIDER_SETUP[used].label} in this chat: ${CLI_PROVIDER_SETUP[saved].label}, your saved choice, ${why}.`;
+  return options.subject
+    ? `${options.subject} uses ${CLI_PROVIDER_SETUP[used].label} in this chat: ${CLI_PROVIDER_SETUP[saved].label}, your saved choice, ${why}.`
+    : `${CLI_PROVIDER_SETUP[used].label} runs this chat: ${CLI_PROVIDER_SETUP[saved].label}, your saved choice, ${why}.`;
 }
 
 export function isAgentSnapshotStale(agents: AgentHealth[], now = Date.now()): boolean {

@@ -723,7 +723,9 @@ let lastNewChatOptions: import("../shared/hubProtocol").HubNewChatOptions | unde
 // holds the cloud machines' changes to a chat's members to them.
 const hubMemberRulesPublisher = new HubMemberRulesPublisher({
   client: () => (hubOwnerConfirmed ? hubClient : undefined),
-  rules: async () => memberRulesFrom(await settingsService.getPublicSettings()),
+  // With each machine's program by its last hello: the server holds a
+  // phone's or a machine's turns to a machine that cannot run a member's mode.
+  rules: async () => memberRulesFrom(await settingsService.getPublicSettings(), machineLinkService?.cliModesByMachine()),
   log: (event, payload) => { void debugLogService.write(event, payload); }
 });
 
@@ -3427,6 +3429,9 @@ void app.whenReady().then(async () => {
     chatService.setMachineWaitReason((machineId) => machineLink.turnWaitReason(machineId));
     chatService.setMachineMemberRestartSupport((machineId) => machineLink.memberRestartSupport(machineId));
     chatService.setMachineSessionMove((target) => machineLink.sessionMoveTarget(target));
+    chatService.setMachineForkToNewChatSupport((machineId) => machineLink.forkToNewChatSupport(machineId));
+    chatService.setMachineCliModesSupport((machineId) => machineLink.cliModesSupport(machineId));
+    chatService.setMachineCliStartDefaults((machineId) => machineLink.cliStartDefaults(machineId));
     // The machines are read before the link to the server starts, so their
     // keys are on the server's roster before anything is written for them;
     // a passing failure to read is tried again first.
@@ -3479,6 +3484,15 @@ void app.whenReady().then(async () => {
     // requests are refused, so it is asked again once it has.
     machineLinkService.onHello((event) => broadcastScripts([event.machineId]));
     machineLinkService.onHello(() => usageMilestones?.reach("first_cloud_machine"));
+    // A machine's program said what it runs (an update, a first hello): the
+    // server is told, unless nothing changed (an unchanged set is not sent).
+    let machinePrograms = "";
+    machineLinkService.onHello(() => {
+      const said = JSON.stringify(machineLinkService?.cliModesByMachine() ?? {});
+      if (said === machinePrograms) return;
+      machinePrograms = said;
+      hubMemberRulesPublisher.publish(500);
+    });
     machineLinkService.onMemberBackgroundTasks((event) => {
       if (event.member) {
         chatService.applyMachineBackgroundTasks(event.machineId, event.member);

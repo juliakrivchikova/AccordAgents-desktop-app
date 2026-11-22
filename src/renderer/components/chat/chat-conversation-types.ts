@@ -64,11 +64,15 @@ export interface ChatConversationViewProps {
   ) => Promise<boolean>;
   /** A member's session panel (the sessions view): to that member only. */
   onSendToMember?: (request: ChatMemberSendRequest) => Promise<boolean>;
-  /** The sessions view: a member's settings (a gear opening its model,
-   *  effort, mode, rights, where it runs, remove), and its model chip in a
-   *  composer opening the same. */
+  /** The sessions view: a member's … actions (Restart, Fork to new chat,
+   *  Remove from chat) for its session's header, and its controls (model,
+   *  effort, permission mode, Codex's Plan mode, where it runs) for under
+   *  its composer. */
   renderMemberSettings?: (participantId: string) => ReactNode;
   renderMemberChip?: (participantId: string) => ReactNode;
+  /** The main session's … actions (Restart, Fork to new chat), shown in the
+   *  chat title's menu in the sessions view. */
+  mainSessionActions?: import("./chat-view-switch").MainSessionActions;
   /** The chat's view as her server saved it, and a switch that failed. */
   onChatViewSaved?: (saved: ChatViewState) => void;
   onChatViewError?: (message: string) => void;

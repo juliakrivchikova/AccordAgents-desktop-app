@@ -1,4 +1,5 @@
 import type { CreateTerminalRequest, TerminalHostStateEvent, TerminalListResult, TerminalSummary } from "./terminal";
+import type { CliStartDefaults } from "./cliStartDefaults";
 import type { ChatScriptChangeRequest } from "./scripts";
 import type { ChatParticipantRosterStatus } from "./chatParticipantStatus";
 import type { DeviceEventBlobReference } from "./deviceEventBlobs";
@@ -910,7 +911,10 @@ export interface AgentContextUsage {
   model?: string;
 }
 
-export type ChatAgentMode = "default" | "plan" | "auto";
+/** A member's mode. "full-access" is Codex's Full Access preset (its
+ *  danger-full-access sandbox that never asks); only Codex has it, a member
+ *  on another CLI runs Auto instead (chatAgentModeForKind). */
+export type ChatAgentMode = "default" | "plan" | "auto" | "full-access";
 
 export type ChatReasoningEffort = "none" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max" | "ultra";
 
@@ -951,6 +955,13 @@ export interface ChatAgentPermissions {
    * controls), the app refuses what is not granted.
    */
   cliApprovals?: true;
+  /**
+   * Codex's Plan mode (its collaboration mode, `/plan` or Shift+Tab in its
+   * terminal) on top of its permissions preset; read only with
+   * `cliApprovals`, and only for Codex: Claude Code's and Antigravity's Plan
+   * is one of their permission modes (`agentMode: "plan"`).
+   */
+  codexPlanMode?: true;
 }
 
 export interface ChatParticipant {
@@ -992,15 +1003,80 @@ export interface ChatParticipant {
    *  at each turn (docs/main-session.md). Absent for members the User added
    *  or approved herself. Set once, when the member is added. */
   delegatedByParticipantId?: string;
+  /** The main session of a chat made by Fork to new chat (src/shared/
+   *  forkToNewChat.ts): the member of another chat whose CLI session it
+   *  starts from. Written once, by the computer, when the chat is made; the
+   *  device the main session runs on copies that member's session (which it
+   *  holds: a fork never crosses devices) at its first turn. */
+  forkOrigin?: ChatParticipantForkOrigin;
+}
+
+/** Where a forked main session comes from: a member of another chat. */
+export interface ChatParticipantForkOrigin {
+  conversationId: string;
+  participantId: string;
+  /** Its handle and its chat's title when it was forked, for the note the
+   *  main session is given and the chat's lines about its copy. */
+  handle: string;
+  conversationTitle: string;
+  kind: ChatProviderKind;
+  /** What the User saw when she tapped Fork: the member's last reply that
+   *  ended a turn of its CLI (lastMemberTurnEnd). The copy ends with that
+   *  turn (the User, 2026-11-21: "When you tap Fork"). Absent when it had
+   *  none. */
+  seen?: ChatForkSeenReply;
+}
+
+/** A member's reply that ended a turn, as Fork to new chat cuts the copy at
+ *  it (forkSeenReplyOf): the same fields on the computer and the phone. */
+export interface ChatForkSeenReply {
+  messageId: string;
+  /** Where its CLI session stood when that turn ended, as the device that
+   *  ran it recorded (ChatMessageMetadata.sessionCut). */
+  sessionCut?: ChatMessageSessionCut;
+  /** When the reply finished, on the clock of the device that ran its turn
+   *  (its turn's start plus workedMs): a reply from before sessionCut is
+   *  matched to its session by time. */
+  finishedAt?: string;
+}
+
+/** Where a member's CLI session stood when one of its turns ended. */
+export interface ChatMessageSessionCut {
+  sessionId: string;
+  /** Claude Code: the uuid of the turn's last assistant message (what
+   *  `--resume-session-at` takes); Codex: the turn's id (thread/fork
+   *  `lastTurnId`). */
+  at: string;
+}
+
+/** Where a fork's copy ends (a forked main session's first turn), as the
+ *  device that holds the source session reads it (forkCutFor). */
+export interface ChatSessionForkCut {
+  /** The CLI's own point: the copy ends there. */
+  at?: string;
+  /** The session that point is in, when it is not the member's session now
+   *  (its session changed after the reply): that one is copied, when it is
+   *  still on this device. */
+  sessionId?: string;
+  /** The reply's finish on the clock of the device that ran it: the copy ends
+   *  with the last turn that finished by then. */
+  finishedBy?: string;
+  /** Why no point can be named: the whole session is copied and the chat
+   *  says so. */
+  unknown?: string;
 }
 
 export interface ChatSessionForkSource {
   participantId: string;
   sessionId: string;
   kind: ChatProviderKind;
-  /** Turns whose fork failed because the source session could not be read.
-   *  After the retry fails too, the member starts a clean session instead. */
-  failedAttempts?: number;
+  /** The chat the source member is in, when it is not this one (Fork to new
+   *  chat): the copy becomes this chat's main session. */
+  conversationId?: string;
+  /** Fork to new chat: where the copy ends (what the User saw when she
+   *  tapped Fork). A delegated fork has none: it copies the session as it
+   *  is. */
+  cut?: ChatSessionForkCut;
 }
 
 export interface ChatParticipantSession {
@@ -1762,6 +1838,11 @@ export interface ChatMessageMetadata {
    *  made: the machine lets the member's held turns go. */
   memberMoveCancelled?: { participantId: string; runId: string };
   workedMs?: number;
+  /** A member's reply that ended a turn: where its CLI session stood then,
+   *  so Fork to new chat copies the session up to it. Written by the device
+   *  that ran the turn, when its CLI said (Claude Code's stream, Codex's
+   *  turn). */
+  sessionCut?: ChatMessageSessionCut;
   queuedBehind?: { handle: string };
   /** The reply waits behind its member's turn before it: the shared word
    *  of `queuedBehind` (which stays on the device), so the phone shows it
@@ -2006,6 +2087,15 @@ export interface CreateChatConversationRequest {
   repoPath?: string;
   skipDefaultParticipants?: boolean;
   participants: ChatParticipantInput[];
+  /** Fork to new chat (src/shared/forkToNewChat.ts): the chat is made with
+   *  one main session, a copy of this member's CLI session, in its chat's
+   *  project; the title, folder and members given are not used. */
+  forkOf?: ChatForkToNewChatSource;
+}
+
+export interface ChatForkToNewChatSource {
+  conversationId: string;
+  participantId: string;
 }
 
 export interface AddChatParticipantRequest {
@@ -2264,10 +2354,15 @@ export interface ProviderModel {
 
 export interface ProviderModelCatalog {
   kind: ProviderKind;
+  /** A CLI's list: `recommended` marks the model it runs when none is
+   *  chosen, the one the User's own config names (else the CLI's default). */
   models: ProviderModel[];
   authoritative: boolean;
   fetchedAt: string;
   error?: string;
+  /** What the CLI starts a new session in with the User's own config on this
+   *  device (src/shared/cliStartDefaults.ts); none when it could not say. */
+  startDefaults?: CliStartDefaults;
 }
 
 export interface ParticipantConfig {
@@ -2850,6 +2945,9 @@ export interface ChatSearchMessageMatch extends ChatSearchMatchBase {
   threadRootId?: string;
   role: "user" | "participant";
   authorLabel: string;
+  /** The chat is shown in the sessions view, which names no member: the
+   *  result shows no author for a member's message. */
+  sessionsView?: boolean;
   createdAt: string;
   snippetText: string;
   highlightRanges: ChatSearchHighlightRange[];
@@ -2912,6 +3010,10 @@ export type ChatActivityKind =
 export interface ChatActivityParticipantSummary {
   id: string;
   handle: string;
+  /** How the chat's view names it, when that is not its handle: in the
+   *  sessions view a member's task title, "" for the main session (named by
+   *  nothing there). */
+  displayName?: string;
   kind: ChatProviderKind;
   roleConfigId?: string;
   avatarId?: string;

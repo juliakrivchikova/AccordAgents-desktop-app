@@ -127,6 +127,9 @@ test("a member is added as the app adds one: by a member that manages members, o
   const lead = { ...boxR, roleConfigId: "lead" };
   scoped = scopeMachineConversationUpdate(chatWith([deskR, lead]), { metadata: { participants: [deskR, lead, added] } }, "machine-1", { rules });
   assert.equal(members(scoped).has("p-new"), true);
+  // ...never one in Codex's Full Access, which only the User chooses (a card).
+  scoped = scopeMachineConversationUpdate(chatWith([deskR, lead]), { metadata: { participants: [deskR, lead, { ...added, kind: "codex-cli", agentMode: "full-access" }] } }, "machine-1", { rules });
+  assert.equal(members(scoped).has("p-new"), false, "Full Access without her card");
   // ...but not one that would manage members beyond its role (a card).
   scoped = scopeMachineConversationUpdate(chatWith([deskR, lead]), { metadata: { participants: [deskR, lead, { ...added, permissions: { manageRolesParticipants: "allow" } }] } }, "machine-1", { rules });
   assert.equal(members(scoped).has("p-new"), false);
@@ -156,6 +159,13 @@ test("an approved addition adds the member the User saw: its name, role, place, 
   assert.equal(add({ ...added, roleConfigId: "lead" }), false, "another role");
   assert.equal(add({ ...added, homeMachineId: "machine-1" }), false, "another place");
   assert.equal(add({ ...added, agentMode: "auto" }), false, "full access");
+  // Codex's Full Access: only as far as she approved it.
+  const asked = (agentMode: string) => [approved("p-box", "app_participants_request_change",
+    { operations: [{ type: "add_new_participant_to_chat", participant: { handle: "helper", roleConfigId: "r", kind: "codex-cli", agentMode } }] })];
+  assert.equal(add({ ...added, agentMode: "full-access" }), false, "Codex's Full Access she did not approve");
+  assert.equal(add({ ...added, agentMode: "full-access" }, asked("auto")), false, "above the Auto she approved");
+  assert.equal(add({ ...added, agentMode: "full-access" }, asked("full-access")), true, "as she approved it");
+  assert.equal(add({ ...added, agentMode: "auto" }, asked("full-access")), true, "less than she approved");
   assert.equal(add({ ...added, permissions: { workspaceWrite: true } }), false, "a right it was not given");
   assert.equal(add({ ...added, permissions: { requestParticipants: "allow" } }), false, "leave to ask it was not given");
   assert.equal(add({ ...added, permissions: { repoRead: false } }), true, "less is fine");
@@ -433,6 +443,31 @@ test("a member a machine adds comes without a session handed to it", () => {
   if (member) assert.equal(member.sessionHandoff, undefined);
 });
 
+test("a machine never writes the member of another chat a forked main session copies, for its own members, others or ones it adds", () => {
+  // Fork to new chat (src/shared/forkToNewChat.ts): only the computer names it.
+  const origin = { conversationId: "c-old", participantId: "p-old", handle: "old", conversationTitle: "Old", kind: "claude-code" };
+  const forked = chat();
+  forked.metadata.participants = [desk, { ...box, forkOrigin: origin }] as never;
+  const kept = scopeMachineConversationUpdate(forked, { metadata: { participants: [desk, box] } }, "machine-1");
+  assert.deepEqual((kept.update.metadata?.participants as Array<{ id: string; forkOrigin?: unknown }>)?.find((member) => member.id === "p-box")?.forkOrigin, origin,
+    "its own member keeps what the computer wrote");
+  const other = { ...origin, conversationId: "c-secret", participantId: "p-secret" };
+  const written = scopeMachineConversationUpdate(chat(), { metadata: { participants: [{ ...desk, forkOrigin: other }, { ...box, forkOrigin: other }] } }, "machine-1");
+  assert.ok(written.update.metadata?.participants, "its members' write still goes through");
+  const members = written.update.metadata!.participants as Array<{ id: string; forkOrigin?: unknown }>;
+  assert.ok(members.every((member) => member.forkOrigin === undefined), "nor one it makes up");
+  const manager = { ...box, permissions: { manageRolesParticipants: "allow" } };
+  const managed = chat();
+  managed.metadata.participants = [desk, manager];
+  const added = { id: "p-new", handle: "new", label: "New", roleConfigId: "r", kind: "claude-code", forkOrigin: other };
+  const scoped = scopeMachineConversationUpdate(managed, { metadata: { participants: [desk, manager, added] } }, "machine-1");
+  const member = (scoped.update.metadata?.participants as Array<{ id: string; forkOrigin?: unknown }>)?.find((item) => item.id === "p-new");
+  assert.ok(member, "the member is added");
+  assert.equal(member!.forkOrigin, undefined, "a member it adds copies nobody");
+  assert.ok(scoped.refused.includes("participants.p-new.forkOrigin"), "the server's log names what it left out");
+  assert.equal(scoped.refused.includes("participants.p-new.sessionHandoff"), false, "and only that");
+});
+
 // --- a chat with a main session (docs/main-session.md) ---------------------------
 
 const mainRules: HubMemberRules = { ...rules, roles: { ...rules.roles, "main-session": { manageRolesParticipants: "allow", requestParticipants: "allow" } } };
@@ -462,6 +497,11 @@ test("the main session on a machine adds the member it gives a task to without a
   assert.equal(add(delegated), true, "as the app adds it");
   assert.equal(add({ ...delegated, permissions: { ...delegated.permissions, webAccess: true } }), false, "web the main session does not have");
   assert.equal(add({ ...delegated, agentMode: "auto" }), false, "a mode above the main session's");
+  assert.equal(add({ ...delegated, kind: "codex-cli", agentMode: "full-access" }), false, "Codex's Full Access above the main session's mode");
+  const fullMain = { ...mainOnMachine, kind: "codex-cli", agentMode: "full-access", permissions: { ...mainOnMachine.permissions, cliApprovals: true } };
+  const codexChild = { ...delegated, kind: "codex-cli", agentMode: "full-access", permissions: { ...delegated.permissions, webAccess: true, cliApprovals: true } };
+  assert.equal(members(scopeMachineConversationUpdate(mainSessionChatWith([deskR, fullMain]), { metadata: { participants: [deskR, fullMain, codexChild] } }, "machine-1", { rules: mainRules })).has("p-child"), true,
+    "a main session in Full Access hands its mode to the member it makes, as the app does");
   assert.equal(add({ ...delegated, permissions: { ...delegated.permissions, shell: { enabled: true, rules: [{ action: "allow", match: "prefix", pattern: "rm" }] } } }), false, "a command the main session may not run");
   assert.equal(add({ ...delegated, permissions: { ...delegated.permissions, workspaceWrite: false, shell: { enabled: false, rules: [] } } }), true, "less is fine");
   // In plan mode the main session has no edits: neither may its member.

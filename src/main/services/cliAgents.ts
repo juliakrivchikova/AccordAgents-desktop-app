@@ -3,7 +3,12 @@ import { execFileSync } from "node:child_process";
 import type { ChildProcessWithoutNullStreams } from "node:child_process";
 import { constants, type Dirent } from "node:fs";
 import { access, lstat, mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
-import { claudeProjectsDir } from "./memberSessionFiles";
+import { claudeProjectsDir, findClaudeTranscript } from "./memberSessionFiles";
+import {
+  claudeForkCut, codexForkCut, FORK_CUT_COMPACTED, FORK_CUT_NOT_IN_SESSION, FORK_CUT_SESSION_GONE, readClaudeTranscriptRows, FORK_CUT_TRANSCRIPT_UNREADABLE, FORK_CUT_TURNS_UNLISTED, FORK_CUT_UNSUPPORTED, isForkCutMissingError,
+  isForkCutUnsupportedError
+} from "./forkCut";
+import type { CodexTurnSummary, ForkCutDecision, ForkCutRequest } from "./forkCut";
 import { homedir, tmpdir } from "node:os";
 import path from "node:path";
 import { readCliHelpText } from "./cliHelpText";
@@ -29,7 +34,9 @@ import type {
   ProviderReasoningEffortOption,
   ProviderModelCatalog
 } from "../../shared/types";
-import { effectiveChatAgentPermissionsForProvider, normalizeChatAgentMode, normalizeChatAgentPermissions } from "../../shared/agentPermissions";
+import { chatAgentModeForKind, effectiveChatAgentPermissionsForProvider, normalizeChatAgentMode, normalizeChatAgentPermissions } from "../../shared/agentPermissions";
+import { codexPlanModeOn, withCodexPlanMode } from "../../shared/chatAccessModes";
+import { antigravityStartAccessFromText, claudeStartAccess, codexStartAccess, modelNameWithoutId, type CliStartDefaults, type CliStartDefaultsByKind } from "../../shared/cliStartDefaults";
 import { buildAgentContextUsage, contextWindowForModel } from "../../shared/agentContext";
 import { agentEnvironmentKeyValidationError, filterAllowedAgentEnvironment } from "../../shared/agentEnvironment";
 import { GEMINI_API_KEY_SETTINGS, geminiApiKeyEnv } from "../../shared/cliProviderHosts";
@@ -137,10 +144,19 @@ const CLAUDE_WARM_LEGACY_FLUSH_QUIET_MS = 400;
 // step of its own within milliseconds; until it does, the process is not idle.
 const CLAUDE_WARM_SELF_RESUME_EXPECTED_MS = 30_000;
 const CLAUDE_WARM_CANCELLED_MESSAGE = "claude warm process was cancelled";
+// Fork to new chat from a reply from before its turn id was recorded: the
+// source thread's turns are read newest first, a page at a time (the reply
+// is usually among the newest), at most this many.
+const CODEX_FORK_CUT_PAGE_SIZE = 50;
+const CODEX_FORK_CUT_MAX_PAGES = 40;
 const SESSION_LOG_RETRY_MS = 80;
 const SESSION_LOG_RETRIES = 4;
 const MODEL_CATALOG_CACHE_MS = 5 * 60_000;
 const MODEL_CATALOG_TIMEOUT_MS = 12_000;
+/** How long Codex gets to say its config beside its model list. */
+const CODEX_CONFIG_READ_TIMEOUT_MS = 4_000;
+/** How long Claude Code gets to say its settings after its model list. */
+const CLAUDE_SETTINGS_READ_TIMEOUT_MS = 4_000;
 const CLAUDE_MODEL_PROBE_TIMEOUT_MS = 8_000;
 const CLAUDE_WINDOWS_MODEL_PROBE_TIMEOUT_MS = 12_000;
 const CLAUDE_MODEL_PROBE_MAX_OUTPUT_BYTES = 256 * 1024;
@@ -201,6 +217,12 @@ export const CLAUDE_CODE_COMMAND_ENV_OPTIONS: CommandEnvironmentOptions = {
   dropProcessEnvKeysAbsentFromLoginShell: CLAUDE_CODE_LOGIN_SHELL_AUTH_ENV_KEYS
 };
 const CODEX_AUTO_APPROVALS_REVIEWER = "auto_review";
+
+/** Codex refusing `turn/start`'s collaboration mode (a Codex from before it,
+ *  or one that does not know the field). */
+export function isCodexCollaborationModeRefusal(text: string): boolean {
+  return /collaboration[_ ]?mode/i.test(text) && /unknown|invalid|unsupported|not supported|experimental|unexpected/i.test(text);
+}
 // Gemini 3.x models served through Antigravity share a 1M-token context window;
 // used when no model is configured so the context indicator still renders.
 const GEMINI_DEFAULT_CONTEXT_WINDOW_TOKENS = 1_048_576;
@@ -234,6 +256,48 @@ export const COMPACTION_CANCELLED_BEFORE_START = "Compaction was cancelled befor
 /** A compaction Stop ended once it had started (in the member's process or
  *  while it waited there for a reply in progress). */
 export const COMPACTION_CANCELLED = "Compaction was cancelled.";
+
+/** The User's own config file of a CLI (where its start defaults come
+ *  from), as its size and change time: Codex's config.toml, Claude Code's
+ *  settings.json, agy's settings.json. */
+async function cliConfigStamp(kind: ChatProviderKind): Promise<string> {
+  const env = commandEnvironment();
+  const file = kind === "codex-cli"
+    ? path.join(env.CODEX_HOME?.trim() || path.join(homedir(), ".codex"), "config.toml")
+    : kind === "claude-code"
+      ? path.join(env.CLAUDE_CONFIG_DIR?.trim() || path.join(homedir(), ".claude"), "settings.json")
+      : geminiUserSettingsPath(homedir());
+  try {
+    const info = await stat(file);
+    return `${info.size}:${info.mtimeMs}`;
+  } catch {
+    return "none";
+  }
+}
+
+function textField(value: unknown): string | undefined {
+  return typeof value === "string" && value.trim() ? value.trim() : undefined;
+}
+
+/**
+ * A CLI's model list with the model it runs when none is chosen marked
+ * (`recommended`): the one the User's own config names (Codex's
+ * config.toml `model`, the model Claude Code says it applies), listed or not
+ * (a model the list leaves out is put first by its id); the list as the CLI
+ * marked it when the config names none.
+ */
+export function withCliStartModel(models: readonly ProviderModel[], startModel: string | undefined, matches?: (model: ProviderModel) => boolean): ProviderModel[] {
+  const id = startModel?.trim();
+  if (!id) return [...models];
+  const isStart = matches ?? ((model: ProviderModel) => model.id === id);
+  const index = models.findIndex((model) => isStart(model));
+  if (index < 0) {
+    return [{ id, label: id, source: "cli", recommended: true }, ...models.map((model) => model.recommended ? { ...model, recommended: false } : model)];
+  }
+  return models.map((model, position) => position === index
+    ? (model.recommended ? model : { ...model, recommended: true })
+    : (model.recommended ? { ...model, recommended: false } : model));
+}
 
 /** `agy models` prints `<id>\t<label>` per line (seen on agy 1.5.11;
  *  earlier versions printed the label alone). `--model` takes the id. */
@@ -337,6 +401,12 @@ export function isForkSourceMissingError(text: string | undefined): boolean {
   return /no conversation found|no rollout found for thread id/i.test(text ?? "");
 }
 
+/** Whether a fork's run failed with no copy made: the CLI said the source is
+ *  gone, or failed while it made the copy (ParticipantRunResult.forkCopyFailed). */
+export function forkCopyNotMade(result: Pick<ParticipantRunResult, "error" | "forkCopyFailed">): boolean {
+  return isForkSourceMissingError(result.error) || result.forkCopyFailed === true;
+}
+
 export interface CliAgentRunOptions {
   persistSession?: boolean;
   sessionId?: string;
@@ -348,6 +418,19 @@ export interface CliAgentRunOptions {
    *  developer instructions in the copy (verified on Claude Code 2.1.329 and
    *  Codex 0.155.1), so the caller tells the member who it is in the prompt. */
   forkFromSessionId?: string;
+  /** Fork to new chat: the copy ends with the turn of the reply the User saw
+   *  last (forkCut.ts). Claude Code reads the point from the source's
+   *  transcript and forks with `--resume-session-at`; Codex forks with
+   *  `lastTurnId`. When the point cannot be found the whole session is
+   *  copied and the result says why (forkCutMissed). */
+  forkCut?: ForkCutRequest;
+  /** Claude Code: the assistant message the fork's copy ends at, read from
+   *  forkCut (runClaude); not set by callers. */
+  forkResumeAt?: string;
+  /** Called as soon as a fork asked to end at a point (forkCut) is to copy
+   *  the whole session instead, with why: before the turn runs, so the chat
+   *  says it even if the app stops during the turn. */
+  onForkCutMissed?: (reason: string) => void;
   compactInstructions?: string;
   clearCompactPrompt?: boolean;
   extraReadableDirs?: string[];
@@ -537,6 +620,9 @@ interface WarmAgentEntry {
   /** Claude only: no reply is waiting, running or about to start on its own;
    *  background tasks may still be running. */
   isReplyIdle?: () => boolean;
+  /** Claude only: whether the CLI ever started a step in this process (it
+   *  loaded its session, or made a fork's copy). */
+  everStartedStep?: () => boolean;
   /** Claude only: settles once no reply is waiting, running or about to
    *  start on its own (or the process is gone); background tasks may still
    *  be running. */
@@ -618,6 +704,9 @@ interface ClaudeWarmReply {
   streamedText: string;
   nextTextBlockStartsBlock: boolean;
   resultEvents: unknown[];
+  /** The uuid of the reply's last assistant message in the session (not a
+   *  subagent's): where its session stood when it ended (sessionCut). */
+  lastAssistantUuid?: string;
   sessionId?: string;
   model?: string;
   usedTokens?: number;
@@ -646,6 +735,8 @@ interface ClaudeWarmReply {
 interface ClaudeWarmProcessState {
   /** Unsettled replies in the order they were submitted or started. */
   replies: ClaudeWarmReply[];
+  /** Set at the first step this process starts. */
+  everStartedStep?: boolean;
   /** The reply receiving the running model step's output. */
   active?: ClaudeWarmReply;
   /** True from a step's start (`system/init`, a command `started`, or any of
@@ -720,6 +811,7 @@ interface ClaudeOneShotStreamState {
   buffer: string;
   streamedText: string;
   messages: string[];
+  lastAssistantUuid?: string;
   nextTextBlockStartsBlock: boolean;
   resultEvent?: unknown;
   error?: string;
@@ -757,12 +849,18 @@ interface CodexAppServerPendingGuardianApproval {
 interface CachedModelCatalog {
   catalog: ProviderModelCatalog;
   expiresAt: number;
+  /** The User's CLI config file as it was when the list was read (its start
+   *  defaults come from it): another one reads the list again. */
+  configStamp?: string;
 }
 
 interface CodexAppServerPendingTurn {
   startedAt: number;
   threadId: string;
   turnId?: string;
+  /** The last of its turns that completed (a goal runs several): where the
+   *  thread stands when the reply ends (sessionCut). */
+  lastCompletedTurnId?: string;
   acceptedByProvider?: boolean;
   messages: string[];
   streamedText: string;
@@ -833,6 +931,9 @@ interface CodexAppServerThreadStartResult {
     sessionId?: string;
   };
   model?: string;
+  /** The effort the thread runs at (the User's config.toml when the member
+   *  sets none). */
+  reasoningEffort?: string | null;
 }
 
 interface CodexAppServerTurnStartResult {
@@ -1066,7 +1167,7 @@ async function prepareOwnProbeFolder(ownFolder: string): Promise<void> {
  *  "More models"), from the `models` field of its answer to an SDK
  *  `initialize` request. "Default" is the inherited setting, so it is not a
  *  model to pick; the model it resolves to is marked recommended. */
-export function parseClaudeInitializeModels(value: unknown): ProviderModel[] {
+export function parseClaudeInitializeModels(value: unknown, appliedModel?: string): ProviderModel[] {
   if (!Array.isArray(value)) {
     return [];
   }
@@ -1079,12 +1180,15 @@ export function parseClaudeInitializeModels(value: unknown): ProviderModel[] {
   const recommendedModel = defaultModel ? text(defaultModel, "resolvedModel") : undefined;
   let recommendedMarked = false;
   const models: ProviderModel[] = [];
+  const resolved = new Map<string, string>();
   for (const record of records) {
     const id = text(record, "value");
     if (!id || id === "default") {
       continue;
     }
-    const recommended: boolean = !recommendedMarked && recommendedModel !== undefined && text(record, "resolvedModel") === recommendedModel;
+    const resolvedModel = text(record, "resolvedModel");
+    if (resolvedModel && !resolved.has(id)) resolved.set(id, resolvedModel);
+    const recommended: boolean = !recommendedMarked && recommendedModel !== undefined && resolvedModel === recommendedModel;
     recommendedMarked ||= recommended;
     models.push({
       id,
@@ -1094,7 +1198,22 @@ export function parseClaudeInitializeModels(value: unknown): ProviderModel[] {
       recommended
     });
   }
-  return dedupeProviderModels(models);
+  const listed = dedupeProviderModels(models);
+  // The model Claude Code says it applies (her settings' `model`, or
+  // ANTHROPIC_MODEL), by the first entry that resolves to it: what a member
+  // without a model of its own runs.
+  const applied = appliedModel?.trim();
+  return applied ? withCliStartModel(listed, applied, (model) => model.id === applied || resolved.get(model.id) === applied) : listed;
+}
+
+/** The model and effort Claude Code says it applies (its `get_settings`
+ *  answer's `applied`), from the settings it read. */
+export function claudeAppliedSettings(value: unknown): { model?: string; effort?: string } {
+  const record = value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : undefined;
+  const applied = record?.applied && typeof record.applied === "object" && !Array.isArray(record.applied) ? record.applied as Record<string, unknown> : undefined;
+  const model = textField(applied?.model);
+  const effort = textField(applied?.effort);
+  return { ...(model ? { model } : {}), ...(effort ? { effort } : {}) };
 }
 
 export class ClaudeModelListTimeoutError extends Error {
@@ -1118,7 +1237,8 @@ export function runClaudeModelListProbe({
   timeoutMs = CLAUDE_MODEL_LIST_TIMEOUT_MS,
   maxOutputBytes = CLAUDE_MODEL_LIST_MAX_OUTPUT_BYTES,
   exitGraceMs = CLAUDE_MODEL_LIST_EXIT_GRACE_MS,
-  killGraceMs = CLAUDE_MODEL_LIST_KILL_GRACE_MS
+  killGraceMs = CLAUDE_MODEL_LIST_KILL_GRACE_MS,
+  settingsTimeoutMs = CLAUDE_SETTINGS_READ_TIMEOUT_MS
 }: {
   executable: string;
   env: NodeJS.ProcessEnv;
@@ -1128,9 +1248,17 @@ export function runClaudeModelListProbe({
   maxOutputBytes?: number;
   exitGraceMs?: number;
   killGraceMs?: number;
+  /** How long the CLI gets to answer `get_settings` once its models are in. */
+  settingsTimeoutMs?: number;
 }): Promise<Record<string, unknown>> {
   return new Promise((resolve, reject) => {
     const requestId = `accordagents-models-${randomUUID()}`;
+    const settingsRequestId = `accordagents-settings-${randomUUID()}`;
+    // The initialize answer, once in: then its settings are asked (the model
+    // and effort it applies), and a CLI that does not say gives the answer
+    // alone.
+    let initialized: Record<string, unknown> | undefined;
+    let settingsTimer: NodeJS.Timeout | undefined;
     const child = spawnClaude(
       executable,
       ["-p", "--safe-mode", "--no-chrome", "--input-format", "stream-json", "--output-format", "stream-json", "--verbose"],
@@ -1175,6 +1303,7 @@ export function runClaudeModelListProbe({
       }
       finished = true;
       clearTimeout(timeout);
+      if (settingsTimer) clearTimeout(settingsTimer);
       retire();
       if (error) {
         reject(error);
@@ -1194,14 +1323,26 @@ export function runClaudeModelListProbe({
       const response = message?.type === "control_response" && message.response && typeof message.response === "object"
         ? message.response as Record<string, unknown>
         : undefined;
-      if (!response || response.request_id !== requestId) {
+      if (!response) {
+        return;
+      }
+      if (initialized && response.request_id === settingsRequestId) {
+        const settings = response.subtype === "success" && response.response && typeof response.response === "object" ? response.response as Record<string, unknown> : undefined;
+        finish(undefined, settings ? { ...initialized, appliedSettings: settings } : initialized);
+        return;
+      }
+      if (response.request_id !== requestId || initialized) {
         return;
       }
       if (response.subtype !== "success") {
         finish(new Error(`Claude Code did not list its models: ${typeof response.error === "string" ? response.error : "initialize failed"}.`));
         return;
       }
-      finish(undefined, response.response && typeof response.response === "object" ? response.response as Record<string, unknown> : {});
+      initialized = response.response && typeof response.response === "object" ? response.response as Record<string, unknown> : {};
+      clearTimeout(timeout);
+      settingsTimer = setTimeout(() => finish(undefined, initialized), settingsTimeoutMs);
+      settingsTimer.unref?.();
+      child.stdin?.write(`${JSON.stringify({ type: "control_request", request_id: settingsRequestId, request: { subtype: "get_settings" } })}\n`);
     };
     const timeout = setTimeout(() => finish(new ClaudeModelListTimeoutError(stderrDetail())), timeoutMs);
     timeout.unref();
@@ -1235,6 +1376,10 @@ export function runClaudeModelListProbe({
       if (pending.trim()) {
         readLine(pending.trim());
         pending = "";
+      }
+      if (initialized) {
+        finish(undefined, initialized);
+        return;
       }
       const detail = stderrDetail();
       finish(new Error(`Claude Code exited with code ${code ?? "unknown"} before listing its models${detail ? `: ${detail}` : "."}`));
@@ -1683,7 +1828,16 @@ export class CliAgentRunner {
   }
 
   async detectAgents(request?: AgentDetectionRequest): Promise<AgentHealth[]> {
-    const agents = await this.readiness.refresh(request);
+    return this.afterDetection(await this.readiness.refresh(request));
+  }
+
+  /** Readiness with only these CLIs checked (each one's fresh result reused,
+   *  CliReadinessService.refreshKinds); every CLI is in the result. */
+  async detectAgentKinds(kinds: readonly ChatProviderKind[], request?: AgentDetectionRequest): Promise<AgentHealth[]> {
+    return this.afterDetection(await this.readiness.refreshKinds(kinds, request));
+  }
+
+  private afterDetection(agents: AgentHealth[]): AgentHealth[] {
     if (agents.some((agent) => agent.kind === "gemini-cli" && agent.installed)) {
       void this.ensureGeminiMcpConfig().catch(() => undefined);
     }
@@ -1695,7 +1849,8 @@ export class CliAgentRunner {
     return agents;
   }
 
-  /** Told every result of `detectAgents` (the computer's usage signals). */
+  /** Told every readiness result, of every CLI or of some (the computer's
+   *  usage signals). */
   setAgentsDetectedObserver(observer: ((agents: AgentHealth[]) => void) | undefined): void {
     this.agentsDetected = observer;
   }
@@ -1704,9 +1859,25 @@ export class CliAgentRunner {
     return this.readiness.invalidate();
   }
 
+  /** What each CLI installed here starts a new session in with the User's
+   *  own config (a machine says it in its hello): read with its model list. */
+  async cliStartDefaults(): Promise<CliStartDefaultsByKind | undefined> {
+    const agents = await this.detectAgents().catch(() => [] as AgentHealth[]);
+    const result: CliStartDefaultsByKind = {};
+    for (const agent of agents) {
+      if (!agent.installed || (agent.kind !== "claude-code" && agent.kind !== "codex-cli" && agent.kind !== "gemini-cli")) continue;
+      const catalog = await this.listModelCatalog(agent.kind).catch(() => undefined);
+      if (catalog?.startDefaults) result[agent.kind] = catalog.startDefaults;
+    }
+    return Object.keys(result).length > 0 ? result : undefined;
+  }
+
   async listModelCatalog(kind: ChatProviderKind, configuredModel?: string, probeCwd?: string): Promise<ProviderModelCatalog> {
     const cached = this.modelCatalogs.get(kind);
-    if (cached && cached.expiresAt > Date.now()) {
+    // Her CLI config changed since the list was read: what a new session
+    // starts in (and its model) may have changed with it.
+    const configStamp = await cliConfigStamp(kind);
+    if (cached && cached.expiresAt > Date.now() && cached.configStamp === configStamp) {
       return kind === "claude-code" && process.platform === "win32"
         ? cached.catalog
         : this.withConfiguredModel(cached.catalog, configuredModel);
@@ -1728,7 +1899,8 @@ export class CliAgentRunner {
       if (!(kind === "claude-code" && !catalog.authoritative)) {
         this.modelCatalogs.set(kind, {
           catalog: normalized,
-          expiresAt: Date.now() + MODEL_CATALOG_CACHE_MS
+          expiresAt: Date.now() + MODEL_CATALOG_CACHE_MS,
+          configStamp
         });
       }
       return normalized;
@@ -2180,11 +2352,26 @@ export class CliAgentRunner {
       if (models.length === 0) {
         throw new Error(`codex app-server returned no models${stderr.trim() ? `: ${this.errorText(stderr)}` : ""}`);
       }
+      // What Codex starts a session in with the User's own config: a member
+      // without a model of its own runs the one config.toml names, not the
+      // one model/list marks default (GPT-6-Luna listed default while her
+      // config ran gpt-5.6-luna, 2026-11-22).
+      const config = await this.readCodexStartConfig(sendRequest);
+      const listed = withCliStartModel(models, config ? textField(config.model) : undefined);
+      const startModel = listed.find((model) => model.recommended);
+      const reasoningEffort = config ? normalizeChatReasoningEffort(textField(config.model_reasoning_effort) as ChatReasoningEffort | undefined, "codex-cli") : undefined;
+      const access = codexStartAccess(config);
+      const startDefaults: CliStartDefaults | undefined = config ? {
+        ...(access ? { access } : {}),
+        ...(startModel ? { model: startModel.id, modelLabel: modelNameWithoutId(startModel.label, startModel.id) } : {}),
+        ...(reasoningEffort ? { reasoningEffort } : {})
+      } : undefined;
       return {
         kind: "codex-cli",
-        models,
+        models: listed,
         authoritative: true,
-        fetchedAt
+        fetchedAt,
+        ...(startDefaults ? { startDefaults } : {})
       };
     } finally {
       clearTimeout(timeout);
@@ -2192,15 +2379,52 @@ export class CliAgentRunner {
     }
   }
 
+  /** The User's effective Codex config as Codex reads it (`config/read`:
+   *  config.toml and what overrides it), or none when this Codex cannot say
+   *  in time (an older one, a config it refuses). */
+  private async readCodexStartConfig(sendRequest: (method: string, params: unknown) => Promise<unknown>): Promise<Record<string, unknown> | undefined> {
+    let timer: NodeJS.Timeout | undefined;
+    try {
+      const late = Symbol("late");
+      const answer = await Promise.race([
+        sendRequest("config/read", {}),
+        new Promise<typeof late>((resolve) => { timer = setTimeout(() => resolve(late), CODEX_CONFIG_READ_TIMEOUT_MS); })
+      ]);
+      if (answer === late) {
+        await this.debugLogs?.write("cli.model-catalog.codex-config-timeout", { timeoutMs: CODEX_CONFIG_READ_TIMEOUT_MS });
+        return undefined;
+      }
+      return this.asRecord(this.asRecord(answer)?.config);
+    } catch (error) {
+      await this.debugLogs?.write("cli.model-catalog.codex-config-unread", { message: error instanceof Error ? error.message : String(error) });
+      return undefined;
+    } finally {
+      if (timer) clearTimeout(timer);
+    }
+  }
+
   private async listClaudeModelCatalog(fetchedAt: string, probeCwd?: string): Promise<ProviderModelCatalog> {
     let models: ProviderModel[] = [];
     let signedOut = false;
     let listError: unknown;
+    let startDefaults: CliStartDefaults | undefined;
     try {
       const answer = await this.requestClaudeInitializeAnswer();
-      models = parseClaudeInitializeModels(answer.models);
+      // The model and effort it applies with the User's settings, and the
+      // mode it starts in (`permissions.defaultMode`).
+      const applied = claudeAppliedSettings(answer.appliedSettings);
+      models = parseClaudeInitializeModels(answer.models, applied.model);
       const account = answer.account && typeof answer.account === "object" ? answer.account as Record<string, unknown> : undefined;
       signedOut = account?.tokenSource === "none";
+      const startModel = models.length > 0 && (applied.model || answer.appliedSettings) ? models.find((model) => model.recommended) : undefined;
+      const access = claudeStartAccess(answer.current_permission_mode);
+      const reasoningEffort = normalizeChatReasoningEffort(applied.effort as ChatReasoningEffort | undefined, "claude-code");
+      const known: CliStartDefaults = {
+        ...(access ? { access } : {}),
+        ...(startModel ? { model: startModel.id, modelLabel: startModel.label } : {}),
+        ...(reasoningEffort ? { reasoningEffort } : {})
+      };
+      startDefaults = Object.keys(known).length > 0 ? known : undefined;
     } catch (error) {
       listError = error;
       await this.debugLogs?.write("cli.model-catalog.initialize-error", { message: error instanceof Error ? error.message : String(error) });
@@ -2223,7 +2447,8 @@ export class CliAgentRunner {
       // Signed out, Claude Code lists only its generic models: show them, but
       // read again next time so signing in brings the account's own list.
       authoritative: !signedOut,
-      fetchedAt
+      fetchedAt,
+      ...(startDefaults ? { startDefaults } : {})
     };
   }
 
@@ -2444,7 +2669,23 @@ export class CliAgentRunner {
     if (models.length === 0) {
       throw new Error("`agy models` returned no models.");
     }
-    return { kind: "gemini-cli", models, authoritative: true, fetchedAt };
+    // `agy models` lists the selected default first; the mode it starts in
+    // is its settings.json `agentMode`.
+    const access = await this.antigravityStartAccess();
+    const first = models[0];
+    const startDefaults: CliStartDefaults = { ...(access ? { access } : {}), ...(first && !apiKey ? { model: first.id, modelLabel: first.label } : {}) };
+    return { kind: "gemini-cli", models, authoritative: true, fetchedAt, ...(Object.keys(startDefaults).length > 0 ? { startDefaults } : {}) };
+  }
+
+  /** The mode agy starts in as the User's settings.json saves it (its
+   *  `agentMode`); none when nothing is saved or the file cannot be read. */
+  private async antigravityStartAccess(): Promise<string | undefined> {
+    try {
+      return antigravityStartAccessFromText(await readFile(geminiUserSettingsPath(homedir()), "utf8"));
+    } catch {
+      // No file, or one that cannot be read: nothing saved that the app can see.
+      return undefined;
+    }
   }
 
   private async runGemini(
@@ -3472,8 +3713,18 @@ export class CliAgentRunner {
       } catch (error) {
         this.warmAgents.delete(key);
         await this.closeWarmAgent(entry as WarmAgentEntry, signal?.aborted ? "aborted" : "failed");
+        // A fork this turn made whole although it was to end earlier says
+        // so even when the turn itself failed.
+        const forkCutMissed = (error as { forkCutMissed?: unknown } | undefined)?.forkCutMissed;
+        // A fork whose copy Codex did not make (thread/fork failed).
+        const forkCopyFailed = (error as { forkCopyFailed?: unknown } | undefined)?.forkCopyFailed === true && !signal?.aborted;
+        const failed = (): ParticipantRunResult => ({
+          ...this.failed(participant, error),
+          ...(typeof forkCutMissed === "string" ? { forkCutMissed } : {}),
+          ...(forkCopyFailed ? { forkCopyFailed: true } : {})
+        });
         if (signal?.aborted) {
-          return this.failed(participant, error);
+          return failed();
         }
         if (error instanceof CodexAppServerRunError && error.turnAccepted) {
           void this.writeDebugLog("cli-agent-warm-terminal-after-turn-accepted", {
@@ -3483,7 +3734,7 @@ export class CliAgentRunner {
             runtime: "codex-app-server",
             error: this.errorText(error)
           });
-          return this.failed(participant, error);
+          return failed();
         }
         void this.writeDebugLog("cli-agent-warm-failed-without-replay", {
           providerKind: participant.kind,
@@ -3492,7 +3743,7 @@ export class CliAgentRunner {
           runtime: "codex-app-server",
           error: this.errorText(error)
         });
-        return this.failed(participant, error);
+        return failed();
       }
     });
   }
@@ -3552,6 +3803,18 @@ export class CliAgentRunner {
     let threadLoaded = false;
     let initialized = false;
     let activeModel = participant.model;
+    // The effort the thread runs at as Codex says (her config's when the
+    // member sets none): a collaboration mode said on a turn keeps it.
+    let activeEffort: ChatReasoningEffort | undefined;
+    // The model and effort the thread runs at, as Codex said on start,
+    // resume or fork.
+    const takeThread = (result: CodexAppServerThreadStartResult): void => {
+      activeModel = result.model ?? activeModel;
+      activeEffort = this.codexReasoningEffort((result.reasoningEffort ?? undefined) as ChatReasoningEffort | undefined) ?? activeEffort;
+    };
+    // Fork to new chat: why the fork just made copied the whole thread
+    // instead of ending where it was asked to (the next run reports it).
+    let forkCutMissed: string | undefined;
     const pendingRequests = new Map<number, CodexAppServerPendingRequest>();
     const pendingInboundRequests = new Map<string, CodexAppServerPendingInboundRequest>();
     const pendingGuardianApprovals = new Map<string, CodexAppServerPendingGuardianApproval>();
@@ -3671,6 +3934,67 @@ export class CliAgentRunner {
       initialized = true;
     };
 
+    // Said once the copy is made (thread/fork answered, still before the
+    // turn runs): a source that is gone gets no copy, and its fork says only
+    // that it starts clean.
+    let forkCutMissedPending: string | undefined;
+    const missedCut = (reason: string): void => {
+      forkCutMissedPending = reason;
+    };
+    /** Where a Fork to new chat's copy ends (options.forkCut): the turn its
+     *  reply recorded, or, for a reply from before that, the last turn that
+     *  ended by the reply's finish, read from the thread's turns newest
+     *  first; undefined for all of it (nothing came after, or no point can
+     *  be named: forkCutMissed says why). */
+    const codexForkLastTurnId = async (sourceThreadId: string, timeoutMs?: number): Promise<string | undefined> => {
+      const cut = options.forkCut;
+      if (!cut) return undefined;
+      if (cut.unknown) {
+        missedCut(cut.unknown);
+        return undefined;
+      }
+      if (cut.at) return cut.at;
+      if (!cut.finishedBy) return undefined;
+      let decision: ForkCutDecision | undefined;
+      try {
+        const turns: CodexTurnSummary[] = [];
+        let cursor: string | undefined;
+        for (let page = 0; page < CODEX_FORK_CUT_MAX_PAGES && !decision; page += 1) {
+          const listed = this.asRecord(await sendRequest("thread/turns/list", {
+            threadId: sourceThreadId,
+            sortDirection: "desc",
+            limit: CODEX_FORK_CUT_PAGE_SIZE,
+            itemsView: "notLoaded",
+            ...(cursor ? { cursor } : {})
+          }, timeoutMs)) ?? {};
+          for (const item of Array.isArray(listed.data) ? listed.data : []) {
+            const turn = this.asRecord(item);
+            const id = turn ? this.stringField(turn, "id") : undefined;
+            if (!turn || !id) continue;
+            turns.push({
+              id,
+              status: this.stringField(turn, "status"),
+              startedAt: typeof turn.startedAt === "number" ? turn.startedAt : null,
+              completedAt: typeof turn.completedAt === "number" ? turn.completedAt : null
+            });
+          }
+          cursor = typeof listed.nextCursor === "string" && listed.nextCursor ? listed.nextCursor : undefined;
+          decision = codexForkCut(turns, cut.finishedBy, !cursor);
+          if (!cursor) break;
+        }
+      } catch (error) {
+        void this.writeDebugLog("cli-agent-codex-fork-cut-unlisted", { participantId: participant.id, error: this.errorText(error) });
+      }
+      const resolved: ForkCutDecision = decision ?? { kind: "missed", reason: FORK_CUT_TURNS_UNLISTED };
+      void this.writeDebugLog("cli-agent-codex-fork-cut", {
+        participantId: participant.id,
+        decision: resolved.kind,
+        ...(resolved.kind === "missed" ? { reason: resolved.reason } : {})
+      });
+      if (resolved.kind === "missed") missedCut(resolved.reason);
+      return resolved.kind === "cut" ? resolved.at : undefined;
+    };
+
     const ensureThread = async (timeoutMs?: number): Promise<string> => {
       await initialize(timeoutMs);
       if (threadId && threadLoaded) {
@@ -3681,21 +4005,55 @@ export class CliAgentRunner {
         // starts as a copy (Codex 0.155.1 forks a thread another process is
         // still running a turn on). Never the source's id: the member must
         // not write to the session it was copied from.
-        const result = await sendRequest("thread/fork", this.codexAppServerThreadForkParams(options.forkFromSessionId, participant, repoPath, kind, options), timeoutMs) as CodexAppServerThreadStartResult;
-        const forkedThreadId = result.thread?.id ?? result.thread?.sessionId;
-        if (!forkedThreadId || forkedThreadId === options.forkFromSessionId) {
-          throw new Error("codex app-server did not return a thread id for the fork");
+        const sourceThreadId = options.forkFromSessionId;
+        forkCutMissed = undefined;
+        forkCutMissedPending = undefined;
+        const forkParams = this.codexAppServerThreadForkParams(sourceThreadId, participant, repoPath, kind, options);
+        let forkedThreadId: string | undefined;
+        let result: CodexAppServerThreadStartResult;
+        try {
+          // Fork to new chat: only through the turn of the reply the User saw
+          // last (Codex 0.155.1 `lastTurnId`, inclusive), in the thread that
+          // reply was in (the member's own now, unless it changed after it).
+          const lastTurnId = await codexForkLastTurnId(sourceThreadId, timeoutMs);
+          const replyThreadId = lastTurnId && options.forkCut?.sessionId?.trim() ? options.forkCut.sessionId.trim() : sourceThreadId;
+          try {
+            result = await sendRequest("thread/fork", lastTurnId ? { ...forkParams, threadId: replyThreadId, lastTurnId } : forkParams, timeoutMs) as CodexAppServerThreadStartResult;
+          } catch (error) {
+            const text = this.errorText(error);
+            const earlierGone = replyThreadId !== sourceThreadId && (isForkSourceMissingError(text) || /thread not (?:found|loaded)/i.test(text));
+            if (!lastTurnId || (!earlierGone && !isForkCutMissingError(text))) throw error;
+            // Codex does not know that turn, or the thread it was in is gone:
+            // the whole of the member's thread, and the chat says so.
+            void this.writeDebugLog("cli-agent-codex-fork-cut-refused", { participantId: participant.id, earlierGone });
+            missedCut(earlierGone ? FORK_CUT_SESSION_GONE : FORK_CUT_NOT_IN_SESSION);
+            result = await sendRequest("thread/fork", forkParams, timeoutMs) as CodexAppServerThreadStartResult;
+          }
+          forkedThreadId = result.thread?.id ?? result.thread?.sessionId;
+          if (!forkedThreadId || forkedThreadId === options.forkFromSessionId) {
+            throw new Error("codex app-server did not return a thread id for the fork");
+          }
+        } catch (error) {
+          // No copy was made: the caller may try again or start clean
+          // (ParticipantRunResult.forkCopyFailed).
+          forkCutMissedPending = undefined;
+          throw Object.assign(error instanceof Error ? error : new Error(String(error)), { forkCopyFailed: true });
+        }
+        if (forkCutMissedPending) {
+          forkCutMissed = forkCutMissedPending;
+          forkCutMissedPending = undefined;
+          options.onForkCutMissed?.(forkCutMissed);
         }
         threadId = forkedThreadId;
         threadLoaded = true;
-        activeModel = result.model ?? activeModel;
+        takeThread(result);
         return forkedThreadId;
       }
       if (threadId) {
         if (options.sessionId && threadId === options.sessionId) {
           const result = await sendRequest("thread/resume", this.codexAppServerThreadResumeParams(options.sessionId, participant, repoPath, kind, options), timeoutMs) as CodexAppServerThreadStartResult;
           threadId = result.thread?.id ?? options.sessionId;
-          activeModel = result.model ?? activeModel;
+          takeThread(result);
         }
         threadLoaded = true;
         return threadId;
@@ -3707,7 +4065,7 @@ export class CliAgentRunner {
       }
       threadId = nextThreadId;
       threadLoaded = true;
-      activeModel = result.model ?? activeModel;
+      takeThread(result);
       return nextThreadId;
     };
 
@@ -4353,7 +4711,7 @@ export class CliAgentRunner {
         const compactThreadId = resumeResult.thread?.id ?? currentThreadId;
         threadId = compactThreadId;
         threadLoaded = true;
-        activeModel = resumeResult.model ?? activeModel;
+        takeThread(resumeResult);
         this.reportSessionId(onSessionId, compactThreadId);
         if (pendingCompact) {
           return { participant, ok: false, error: "codex app-server already has an active compact operation" };
@@ -4436,6 +4794,9 @@ export class CliAgentRunner {
         const timeoutMs = nativeGoal ? 0 : (timeoutMsOverride ?? this.runTimeoutMs);
         const currentThreadId = await ensureThread(timeoutMs);
         this.reportSessionId(onSessionId, currentThreadId);
+        // A fork this turn made that copied the whole thread says why.
+        const cutMissed = forkCutMissed;
+        forkCutMissed = undefined;
         const startedAt = Date.now();
         let aborting = false;
         const abort = (): void => {
@@ -4485,12 +4846,22 @@ export class CliAgentRunner {
             reject
           };
         });
+        // Said with the reply, and with a turn that failed or was stopped
+        // (the copy is made either way).
+        const reported = cutMissed
+          ? resultPromise.then(
+            (result) => ({ ...result, forkCutMissed: cutMissed }),
+            (error: unknown) => {
+              throw Object.assign(error instanceof Error ? error : new Error(String(error)), { forkCutMissed: cutMissed });
+            }
+          )
+          : resultPromise;
         if (pendingTurn && timeoutMs > 0) {
           armPendingTurnTimer(pendingTurn, timeoutMs);
         }
         if (signal?.aborted) {
           abort();
-          return resultPromise;
+          return reported;
         }
         signal?.addEventListener("abort", abort, { once: true });
         const codexTurnPrompt = this.codexPrompt(turnPrompt, repoPath, diffMode, kind, options);
@@ -4503,7 +4874,8 @@ export class CliAgentRunner {
               tokenBudget: null
             });
           }
-          const turn = await sendRequest("turn/start", {
+          const collaborationMode = this.codexCollaborationMode(participant, kind, options, activeModel, activeEffort);
+          const turnParams = {
             threadId: currentThreadId,
             effort: this.codexReasoningEffort(participant.reasoningEffort) ?? null,
             input: [
@@ -4513,7 +4885,20 @@ export class CliAgentRunner {
                 text_elements: []
               }
             ]
-          }, timeoutMs) as CodexAppServerTurnStartResult;
+          };
+          let turn: CodexAppServerTurnStartResult;
+          try {
+            turn = await sendRequest("turn/start", collaborationMode ? { ...turnParams, collaborationMode } : turnParams, timeoutMs) as CodexAppServerTurnStartResult;
+          } catch (error) {
+            // A Codex that does not take the collaboration mode: its Default
+            // is what it runs anyway, so the turn goes without it; Plan mode
+            // never runs as something else, it fails and says why.
+            if (!collaborationMode || !isCodexCollaborationModeRefusal(this.errorText(error))) throw error;
+            if (collaborationMode.mode === "plan") {
+              throw new Error("This Codex does not take Plan mode from the app. Update Codex, or turn Plan mode off.");
+            }
+            turn = await sendRequest("turn/start", turnParams, timeoutMs) as CodexAppServerTurnStartResult;
+          }
           if (pendingTurn) {
             pendingTurn.acceptedByProvider = true;
             if (!pendingTurn.turnId) {
@@ -4523,7 +4908,7 @@ export class CliAgentRunner {
         } catch (error) {
           rejectPendingTurn(error instanceof Error ? error : new Error(String(error)));
         }
-        return resultPromise;
+        return reported;
       }
     };
   }
@@ -4534,14 +4919,13 @@ export class CliAgentRunner {
     kind: ConversationKind,
     options: CliAgentRunOptions
   ): Record<string, unknown> {
-    const mode = this.agentModeForRun(kind, options);
-    const permissions = this.permissionsForRun("codex-cli", mode, options);
+    const { mode, permissions } = this.codexRunAccess(kind, options);
     return {
       model: participant.model ?? null,
       cwd: repoPath ?? null,
       approvalPolicy: this.codexAppServerApprovalPolicy(mode, permissions),
-      approvalsReviewer: mode === "auto" ? CODEX_AUTO_APPROVALS_REVIEWER : null,
-      sandbox: permissions.workspaceWrite ? "workspace-write" : "read-only",
+      approvalsReviewer: this.codexAppServerApprovalsReviewer(mode, permissions),
+      sandbox: this.codexAppServerSandbox(mode, permissions),
       config: this.codexAppServerConfig(participant, permissions, options),
       developerInstructions: options.role?.instructions ?? null,
       ephemeral: !options.persistSession,
@@ -4557,15 +4941,14 @@ export class CliAgentRunner {
     kind: ConversationKind,
     options: CliAgentRunOptions
   ): Record<string, unknown> {
-    const mode = this.agentModeForRun(kind, options);
-    const permissions = this.permissionsForRun("codex-cli", mode, options);
+    const { mode, permissions } = this.codexRunAccess(kind, options);
     return {
       threadId: sessionId,
       model: participant.model ?? null,
       cwd: repoPath ?? null,
       approvalPolicy: this.codexAppServerApprovalPolicy(mode, permissions),
-      approvalsReviewer: mode === "auto" ? CODEX_AUTO_APPROVALS_REVIEWER : null,
-      sandbox: permissions.workspaceWrite ? "workspace-write" : "read-only",
+      approvalsReviewer: this.codexAppServerApprovalsReviewer(mode, permissions),
+      sandbox: this.codexAppServerSandbox(mode, permissions),
       config: this.codexAppServerConfig(participant, permissions, options),
       developerInstructions: options.role?.instructions ?? null,
       excludeTurns: true,
@@ -4587,13 +4970,90 @@ export class CliAgentRunner {
     };
   }
 
+  /**
+   * A Codex member's mode and rights as Codex runs them, and whether its
+   * Plan mode is on (src/shared/chatAccessModes.ts). A member stored in Plan
+   * from before Plan was a toggle of its own (its mode "plan" in its own
+   * mode) runs Codex's Read Only preset with Plan mode on, as its menu shows.
+   */
+  private codexRunAccess(kind: ConversationKind, options: CliAgentRunOptions): { mode: ChatAgentMode; permissions: ChatAgentPermissions; plan: boolean } {
+    const raw = this.agentModeForRun(kind, options);
+    const stored = normalizeChatAgentPermissions(options.permissions);
+    if (kind !== "chat" || stored.cliApprovals !== true) {
+      // Full Access is a mode of Codex's own, chosen in the User's menu (with
+      // `cliApprovals`); anywhere else it is no wider than Auto.
+      const mode: ChatAgentMode = raw === "full-access" ? "auto" : raw;
+      return { mode, permissions: this.permissionsForRun("codex-cli", mode, options), plan: false };
+    }
+    const plan = codexPlanModeOn("codex-cli", raw, stored);
+    const own = withCodexPlanMode(raw, stored, plan);
+    return { mode: own.agentMode, permissions: this.permissionsForRun("codex-cli", own.agentMode, { ...options, permissions: own.permissions }), plan };
+  }
+
   /** Codex asks (approval policy on-request, each ask an approval card) in
-   *  Auto-review, where Codex reviews the asks itself, and in its own Read
-   *  only and Default presets (the sessions view's access, `cliApprovals`);
-   *  Plan mode and the classic controls never ask: what the sandbox does not
-   *  allow fails. */
+   *  Approve for me, where Codex reviews the asks itself first, and in its
+   *  own Ask for approval and Read Only presets (the sessions view's access,
+   *  `cliApprovals`); Full Access never asks (Codex 0.155.1's preset), nor do
+   *  the classic controls and their Plan: what the sandbox does not allow
+   *  fails. */
   private codexAppServerApprovalPolicy(mode: ChatAgentMode, permissions?: ChatAgentPermissions): string {
     return mode === "auto" || (mode === "default" && permissions?.cliApprovals === true) ? "on-request" : "never";
+  }
+
+  /** Who reviews Codex's asks: Codex itself in Approve for me; the User in
+   *  Ask for approval and Read Only, said explicitly so a reviewer set in the
+   *  User's own Codex config (`approvals_reviewer`) does not turn the mode
+   *  her menu shows into another one. */
+  private codexAppServerApprovalsReviewer(mode: ChatAgentMode, permissions: ChatAgentPermissions): string | null {
+    if (mode === "auto") return CODEX_AUTO_APPROVALS_REVIEWER;
+    return mode === "default" && permissions.cliApprovals === true ? "user" : null;
+  }
+
+  /** Codex's sandbox for the mode: Full Access's danger-full-access, else
+   *  workspace-write with the file-edit right, read-only without it. */
+  private codexAppServerSandbox(mode: ChatAgentMode, permissions: ChatAgentPermissions): string {
+    if (mode === "full-access") return "danger-full-access";
+    return permissions.workspaceWrite ? "workspace-write" : "read-only";
+  }
+
+  /** Codex's collaboration mode for a chat turn: its Plan mode when the
+   *  member has it on, else its Default mode, said on every turn because a
+   *  thread stays in the last one it was given (Codex 0.155.1). Plan takes
+   *  Codex's own effort for it, as its terminal does ("Model changed to …
+   *  medium for Plan mode"); Default keeps the member's. Needs the model the
+   *  thread runs on; none known, nothing is said. */
+  private codexCollaborationMode(
+    participant: ParticipantConfig,
+    kind: ConversationKind,
+    options: CliAgentRunOptions,
+    threadModel: string | undefined,
+    threadEffort?: ChatReasoningEffort
+  ): { mode: "plan" | "default"; settings: Record<string, unknown> } | undefined {
+    const model = participant.model ?? threadModel;
+    if (kind !== "chat" || !model) return undefined;
+    const { plan } = this.codexRunAccess(kind, options);
+    // Her config's effort goes with her config's model only (a model of the
+    // member's own, or an added provider's, takes the thread's: Codex's own
+    // choice for it).
+    const runsConfigModel = !participant.model && !(participant.codexConfigOverrides?.length);
+    return {
+      mode: plan ? "plan" : "default",
+      settings: {
+        model,
+        // Default keeps the member's effort, else her config.toml's (what her
+        // terminal's Default runs at, also after a turn in Plan mode), else
+        // the thread's: a null here would reset it to the model's own.
+        reasoning_effort: plan ? null : this.codexReasoningEffort(participant.reasoningEffort) ??
+          (runsConfigModel ? this.codexConfigEffort() : undefined) ?? threadEffort ?? null,
+        developer_instructions: null
+      }
+    };
+  }
+
+  /** The effort the User's own config.toml sets, as Codex said it with its
+   *  model list here (none until that list was read). */
+  private codexConfigEffort(): ChatReasoningEffort | undefined {
+    return this.modelCatalogs.get("codex-cli")?.catalog.startDefaults?.reasoningEffort;
   }
 
   private codexReasoningEffort(value: ChatReasoningEffort | undefined): ChatReasoningEffort | undefined {
@@ -5045,6 +5505,8 @@ export class CliAgentRunner {
     }
     const status = this.stringField(turn ?? {}, "status");
     this.flushCodexAppServerAgentText(pending);
+    // Where the thread stands when the reply ends (a goal's last turn).
+    if (completedTurnId) pending.lastCompletedTurnId = completedTurnId;
     if (status !== "completed") {
       rejectPendingGuardianApprovals(new Error(`Codex Guardian approval expired because the provider turn ${status ?? "failed"}.`));
       const current = cleanupPending();
@@ -5074,7 +5536,8 @@ export class CliAgentRunner {
       durationMs: Date.now() - current.startedAt,
       sessionId: current.threadId,
       roleRuntime: undefined,
-      contextUsage: current.contextUsage
+      contextUsage: current.contextUsage,
+      ...(current.lastCompletedTurnId ? { sessionCut: current.lastCompletedTurnId } : {})
     });
   }
 
@@ -5117,7 +5580,8 @@ export class CliAgentRunner {
         durationMs: Date.now() - current.startedAt,
         sessionId: current.threadId,
         roleRuntime: undefined,
-        contextUsage: current.contextUsage
+        contextUsage: current.contextUsage,
+        ...(current.lastCompletedTurnId ? { sessionCut: current.lastCompletedTurnId } : {})
       });
       return;
     }
@@ -5643,6 +6107,89 @@ export class CliAgentRunner {
     signal?: AbortSignal,
     options: CliAgentRunOptions = {}
   ): Promise<ParticipantRunResult> {
+    const { forkCut, onForkCutMissed, ...rest } = options;
+    if (!forkCut || !options.forkFromSessionId || options.sessionId) {
+      return this.runClaudeTurn(participant, prompt, repoPath, kind, signal, rest);
+    }
+    // Fork to new chat: the copy ends with the reply the User saw last, in
+    // the session that reply was in (the member's own now, unless its
+    // session changed after it).
+    const member = options.forkFromSessionId;
+    const replySession = forkCut.sessionId?.trim() || member;
+    const cut = forkCut.unknown
+      ? await this.claudeForkSourceHere(member) ? { kind: "missed" as const, reason: forkCut.unknown } : { kind: "gone" as const, reason: forkCut.unknown }
+      : await this.claudeForkCutFor(replySession, forkCut, member);
+    void this.writeDebugLog("cli-agent-claude-fork-cut", {
+      participantId: participant.id,
+      decision: cut.kind,
+      otherSession: replySession !== member,
+      ...(cut.kind !== "cut" ? { reason: cut.reason } : cut.afterCompaction ? { afterCompaction: true } : {})
+    });
+    // The whole of the member's session, said in the chat at once (before a
+    // turn that may last hours, and an app that may stop during it).
+    const whole = async (reason: string): Promise<ParticipantRunResult> => {
+      onForkCutMissed?.(reason);
+      const result = await this.runClaudeTurn(participant, prompt, repoPath, kind, signal, rest);
+      return { ...result, forkCutMissed: reason };
+    };
+    if (cut.kind === "gone") {
+      // Its transcript is nowhere on this device, so the CLI cannot copy it
+      // either ("No conversation found") and the member starts clean: no
+      // word that the copy may hold more. Made after all, it says so with
+      // the turn.
+      const result = await this.runClaudeTurn(participant, prompt, repoPath, kind, signal, rest);
+      return result.ok || !forkCopyNotMade(result) ? { ...result, forkCutMissed: cut.reason } : result;
+    }
+    if (cut.kind === "missed") return whole(cut.reason);
+    const result = await this.runClaudeTurn(participant, prompt, repoPath, kind, signal, { ...rest, forkFromSessionId: replySession, forkResumeAt: cut.at });
+    const unsupported = isForkCutUnsupportedError(result.error);
+    if (result.ok || signal?.aborted || (!unsupported && !isForkCutMissingError(result.error))) {
+      return result;
+    }
+    // The CLI did not load that message (one its transcript holds on a branch
+    // it does not follow, or one a later compaction kept that this CLI does
+    // not load after all), or no longer knows the flag.
+    void this.writeDebugLog("cli-agent-claude-fork-cut-refused", { participantId: participant.id, unsupported, afterCompaction: Boolean(cut.afterCompaction) });
+    return whole(unsupported ? FORK_CUT_UNSUPPORTED : cut.afterCompaction ? FORK_CUT_COMPACTED : FORK_CUT_NOT_IN_SESSION);
+  }
+
+  /** Whether the member's session is on this device for Claude Code to copy. */
+  private async claudeForkSourceHere(sessionId: string): Promise<boolean> {
+    try {
+      return Boolean(await findClaudeTranscript(await this.claudeProjectsDirectory(), sessionId));
+    } catch {
+      return true;
+    }
+  }
+
+  /** Where a Claude Code fork of `sessionId` ends, read from its transcript
+   *  on this device (forkCut.ts); `sessionId` other than `memberSessionId`:
+   *  the session the member's reply was in, not its own now. "gone": the
+   *  member's own session is not on this device either, so there is nothing
+   *  to copy. */
+  private async claudeForkCutFor(sessionId: string, request: ForkCutRequest, memberSessionId: string): Promise<ForkCutDecision | { kind: "gone"; reason: string }> {
+    const earlier = sessionId !== memberSessionId;
+    try {
+      const projects = await this.claudeProjectsDirectory();
+      const file = await findClaudeTranscript(projects, sessionId);
+      if (!file) {
+        if (earlier && await findClaudeTranscript(projects, memberSessionId)) return { kind: "missed", reason: FORK_CUT_SESSION_GONE };
+        return { kind: "gone", reason: earlier ? FORK_CUT_SESSION_GONE : FORK_CUT_TRANSCRIPT_UNREADABLE };
+      }
+      return claudeForkCut(await readClaudeTranscriptRows(file), request);
+    } catch {
+      return { kind: "missed", reason: FORK_CUT_TRANSCRIPT_UNREADABLE };
+    }
+  }
+
+  private async runClaudeTurn(
+    participant: ParticipantConfig,
+    prompt: string,
+    repoPath: string | undefined,
+    kind: ConversationKind,
+    signal?: AbortSignal,
+    options: CliAgentRunOptions = {}
+  ): Promise<ParticipantRunResult> {
     if (options.nativeGoal) {
       // The goal runs in its own process on the same session; the member's
       // warm process must not be writing to that session at the same time.
@@ -5902,6 +6449,7 @@ export class CliAgentRunner {
         content,
         durationMs: Date.now() - startedAt,
         sessionId,
+        ...(streamState?.lastAssistantUuid ? { sessionCut: streamState.lastAssistantUuid } : {}),
         roleRuntime: options.role && !options.sessionId && !options.forkFromSessionId ? "claude-agent" : undefined,
         contextUsage:
           (streamState
@@ -5915,7 +6463,7 @@ export class CliAgentRunner {
           await this.extractClaudeSessionLogContextUsageWithRetry(sessionId, participant)
       }, participant, options), streamState?.resultEvent ?? result.stdout, participant, options.nativeGoal ? "one-shot-stream" : "one-shot");
     } catch (error) {
-      if (this.agentModeForRun(kind, options) === "auto" && this.isClaudePermissionModeUnsupported(error)) {
+      if (chatAgentModeForKind("claude-code", this.agentModeForRun(kind, options)) === "auto" && this.isClaudePermissionModeUnsupported(error)) {
         // Fail loudly instead of silently downgrading: Auto-review must run as native
         // Claude auto, not a different mode under the same label.
         return this.failed(
@@ -6010,6 +6558,9 @@ export class CliAgentRunner {
 
     const claudeEntry = entry;
     claudeEntry.idleTimeoutMs = warm.idleTimeoutMs;
+    // Whether the CLI took this message into a step: a fork's process that
+    // ended before it did never made the copy (forkCopyFailed below).
+    let replyStarted = false;
     // Messages are not serialized here: the CLI queues them itself and hands a
     // message sent mid-step to the running step, as the dedicated CLI does.
     return this.trackWarmRun(claudeEntry, async () => {
@@ -6020,7 +6571,10 @@ export class CliAgentRunner {
             origin: warm.origin,
             onSelfResumedTurn: warm.onSelfResumedTurn,
             onBackgroundTasksChanged: warm.onBackgroundTasksChanged,
-            onReplyStarted: freshProcess ? undefined : warm.onReplyStarted,
+            onReplyStarted: () => {
+              replyStarted = true;
+              if (!freshProcess) warm.onReplyStarted?.();
+            },
             onMessageWritten: warm.onMessageWritten,
             onPromptSuggestion: warm.onPromptSuggestion,
             allowEmptyContent: options.allowEmptyContent,
@@ -6067,7 +6621,17 @@ export class CliAgentRunner {
           conversationId: warm.conversationId,
           error: this.errorText(error)
         });
-        return this.failed(participant, error);
+        // A new session (a fork's copy, or a clean one) whose CLI exited
+        // before it started any step: no session was made (Claude Code exits
+        // at once when it cannot load the session it forks), although the
+        // id it was given has been reported. A process that never started is
+        // not that; nor is one that took another message first (two sent at
+        // once share the process: that one made the session).
+        const notStarted = !options.sessionId && !replyStarted && claudeEntry.everStartedStep?.() !== true &&
+          typeof claudeEntry.process.exitCode === "number";
+        return notStarted
+          ? { ...this.failed(participant, error), sessionNotStarted: true, ...(options.forkFromSessionId ? { forkCopyFailed: true } : {}) }
+          : this.failed(participant, error);
       }
     });
   }
@@ -6506,6 +7070,7 @@ export class CliAgentRunner {
       whenIdle: (signal?: AbortSignal) => waitUntil(isIdle, signal),
       whenReplyIdle: (signal?: AbortSignal) => waitUntil(isReplyIdle, signal),
       isReplyIdle,
+      everStartedStep: () => state.everStartedStep === true,
       capturedBackgroundProcesses: () => Array.from(capturedBackgroundProcesses.values()),
       refreshCapturedBackgroundProcesses: captureBackgroundProcesses,
       contextUsage: async (signal?: AbortSignal) => {
@@ -6691,6 +7256,11 @@ export class CliAgentRunner {
       // 2.1.329 reports it on every event); the source session is not
       // written to.
       args.push("--resume", options.forkFromSessionId, "--fork-session");
+      // Fork to new chat: only up to the reply the User saw last (Claude
+      // Code 2.1.329 keeps the session through this assistant message).
+      if (options.forkResumeAt) {
+        args.push("--resume-session-at", options.forkResumeAt);
+      }
       if (newSessionId) {
         args.push("--session-id", newSessionId);
       }
@@ -6852,6 +7422,17 @@ export class CliAgentRunner {
     if (assistantText) {
       reply.messages.push(assistantText);
     }
+    reply.lastAssistantUuid = this.claudeAssistantMessageUuid(event) ?? reply.lastAssistantUuid;
+  }
+
+  /** The session's uuid of a top-level assistant message on the stream (the
+   *  one Claude Code writes to the transcript and `--resume-session-at`
+   *  takes); none for a subagent's. */
+  private claudeAssistantMessageUuid(event: unknown): string | undefined {
+    const record = this.asRecord(event);
+    if (!record || this.stringField(record, "type") !== "assistant") return undefined;
+    if (record.parent_tool_use_id !== undefined && record.parent_tool_use_id !== null) return undefined;
+    return this.stringField(record, "uuid");
   }
 
   private claudeWarmReplyOutput(reply: ClaudeWarmReply): CliAgentOutputCallback | undefined {
@@ -6880,6 +7461,7 @@ export class CliAgentRunner {
    *  with none the CLI started this step on its own. */
   private startClaudeWarmStep(state: ClaudeWarmProcessState, participant: ParticipantConfig, hooks: ClaudeWarmProcessHooks): void {
     state.stepActive = true;
+    state.everStartedStep = true;
     state.promptSuggestionTarget = undefined;
     if (state.active && !state.active.settled) {
       return;
@@ -7299,7 +7881,8 @@ export class CliAgentRunner {
       durationMs: Date.now() - reply.startedAt,
       sessionId,
       roleRuntime: reply.roleRuntime,
-      contextUsage
+      contextUsage,
+      ...(reply.lastAssistantUuid ? { sessionCut: reply.lastAssistantUuid } : {})
     };
     for (const raw of reply.resultEvents) {
       result = this.withClaudePermissionDenialWarning(result, raw, participant, "warm");
@@ -7373,6 +7956,7 @@ export class CliAgentRunner {
     if (assistantText) {
       state.messages.push(assistantText);
     }
+    state.lastAssistantUuid = this.claudeAssistantMessageUuid(event) ?? state.lastAssistantUuid;
     if (this.isClaudeWarmResult(event)) {
       state.resultEvent = event;
     }
@@ -8477,7 +9061,7 @@ export class CliAgentRunner {
   }
 
   private shouldPassClaudeAllowedTools(kind: ConversationKind, options: CliAgentRunOptions): boolean {
-    return !(kind === "chat" && this.agentModeForRun(kind, options) === "auto");
+    return !(kind === "chat" && chatAgentModeForKind("claude-code", this.agentModeForRun(kind, options)) === "auto");
   }
 
   private claudeAllowedToolsArgs(kind: ConversationKind, options: CliAgentRunOptions, toolConfig: ClaudeToolConfig): string[] {
@@ -8488,7 +9072,7 @@ export class CliAgentRunner {
   }
 
   private claudeAutoAllowedAppMcpTools(kind: ConversationKind, options: CliAgentRunOptions, toolConfig: ClaudeToolConfig): string[] {
-    if (kind !== "chat" || this.agentModeForRun(kind, options) !== "auto") {
+    if (kind !== "chat" || chatAgentModeForKind("claude-code", this.agentModeForRun(kind, options)) !== "auto") {
       return [];
     }
     const exposedAppTools = new Set(options.appMcp?.toolNames ?? []);
@@ -8522,7 +9106,7 @@ export class CliAgentRunner {
   }
 
   private claudePermissionPromptTool(kind: ConversationKind, options: CliAgentRunOptions): string | undefined {
-    const agentMode = this.agentModeForRun(kind, options);
+    const agentMode = chatAgentModeForKind("claude-code", this.agentModeForRun(kind, options));
     if (
       kind !== "chat" ||
       (agentMode !== "default" && agentMode !== "auto") ||
@@ -8822,7 +9406,9 @@ export class CliAgentRunner {
   }
 
   private claudePermissionMode(kind: ConversationKind, options: CliAgentRunOptions): ClaudePermissionMode {
-    const agentMode = this.agentModeForRun(kind, options);
+    // Codex's Full Access is not a Claude Code mode: Auto, the broadest one
+    // Claude Code offers without extra flags.
+    const agentMode = chatAgentModeForKind("claude-code", this.agentModeForRun(kind, options));
     if (agentMode === "plan") {
       return "plan";
     }
@@ -8843,7 +9429,7 @@ export class CliAgentRunner {
     extraReadableDirs: string[],
     options: CliAgentRunOptions
   ): ClaudeToolConfig {
-    const agentMode = this.agentModeForRun(kind, options);
+    const agentMode = chatAgentModeForKind("claude-code", this.agentModeForRun(kind, options));
     const permissionMode = this.claudePermissionMode(kind, options);
     const permissions = this.permissionsForRun("claude-code", agentMode, options);
     const tools = new Set<string>();

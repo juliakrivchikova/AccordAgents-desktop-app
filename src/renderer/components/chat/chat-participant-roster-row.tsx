@@ -1,8 +1,9 @@
 import { useContext, useState } from "react";
 import type React from "react";
-import { AtSign, Check, ChevronDown, Minimize2, RotateCcw, Trash2 } from "lucide-react";
+import { AtSign, Check, ChevronDown, GitFork, Minimize2, RotateCcw, Trash2 } from "lucide-react";
 
 import { canCompactParticipant, canRestartParticipant, memberProcessRestartable } from "../../../shared/chatParticipantStatus";
+import { FORK_TO_NEW_CHAT_DETAIL, FORK_TO_NEW_CHAT_LABEL } from "../../../shared/forkToNewChat";
 import type {
   ChatParticipant,
   ChatParticipantConfig,
@@ -50,14 +51,19 @@ export function ChatParticipantRosterRow(props: {
   /** Its restart has not ended (also after this row closed and opened again). */
   restartStatus?: MemberRestartInProgress;
   onRemoveParticipant: (participantId: string) => void;
+  /** Makes a new chat whose main session is a copy of it (Fork to new chat). */
+  onForkToNewChat?: (participantId: string) => void;
+  /** Why it cannot be forked to a new chat now. */
+  forkToNewChatDisabledReason?: string;
   /** Opened at its settings (one member's settings, the sessions view). */
   defaultExpanded?: boolean;
 }): JSX.Element {
-  // The sessions view names no handles: the main session, or the member's task title.
+  // The sessions view names no handles and no label for the main session: a
+  // member by its task's title, the main session by its CLI ("Claude Code").
   const sessionsLinks = useChatSessionsLinks();
   const displayName = (sessionsLinks
     ? props.participant.id === sessionsLinks.mainSessionId
-      ? "Main session"
+      ? chatCliProviderLabel(props.participant.kind)
       : sessionsLinks.byHandle.get(props.participant.handle.toLowerCase())?.title
     : undefined) || chatParticipantDisplayName(props.participant);
   const roleLabel = props.participantRoleLabel(props.participant);
@@ -157,6 +163,17 @@ export function ChatParticipantRosterRow(props: {
                 disabled={restartDisabled}
                 aria-expanded={confirmingRestart || undefined}
                 onClick={onRestartButton}
+              />
+            )}
+            {props.onForkToNewChat && (
+              <IconButton
+                size="xs"
+                icon={GitFork}
+                label={`${FORK_TO_NEW_CHAT_LABEL}: ${displayName}`}
+                tooltip={`${FORK_TO_NEW_CHAT_LABEL}. ${props.forkToNewChatDisabledReason ?? `${FORK_TO_NEW_CHAT_DETAIL}.`}`}
+                disabled={Boolean(props.forkToNewChatDisabledReason)}
+                data-testid="chat-participant-fork"
+                onClick={() => props.onForkToNewChat?.(props.participant.id)}
               />
             )}
             <IconButton

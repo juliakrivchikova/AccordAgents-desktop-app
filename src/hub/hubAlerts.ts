@@ -39,6 +39,8 @@ import {
   type AlertFetch,
   type TelegramUpdate
 } from "./alertChannels";
+import { chatViewFor, isChatViewMode } from "../shared/mainSession";
+import { latestTaskByMember, sessionsMemberTitle } from "../shared/mainSessionView";
 import { homeDeviceId, type HubOps } from "./hubOps";
 import { scopeCovers } from "./hubPhoneState";
 
@@ -140,6 +142,10 @@ interface AlertRecord {
   messageId: string;
   participantId: string;
   requester: string;
+  /** How Telegram and the call name who raised it, when that is not its
+   *  handle: a chat in the sessions view names a member by its task and the
+   *  main session by nothing (""). */
+  announcedAs?: string;
   chatTitle: string;
   text: string;
   requestKey: string;
@@ -335,6 +341,7 @@ export class HubAlerts {
         messageId: randomUUID(),
         participantId: member.participant.id,
         requester: `@${member.participant.handle}`,
+        ...(member.announcedAs !== undefined ? { announcedAs: member.announcedAs } : {}),
         chatTitle: member.chatTitle,
         text,
         requestKey,
@@ -370,7 +377,7 @@ export class HubAlerts {
     };
   }
 
-  private async member(device: HubDevice, conversationId: unknown, participantId: unknown): Promise<{ participant: ChatParticipant; chatTitle: string } | UrgentAlertError> {
+  private async member(device: HubDevice, conversationId: unknown, participantId: unknown): Promise<{ participant: ChatParticipant; chatTitle: string; announcedAs?: string } | UrgentAlertError> {
     if (typeof conversationId !== "string" || typeof participantId !== "string" || !conversationId || !participantId) {
       return { code: "invalid_request", message: "An alert names the chat and the member that raises it." };
     }
@@ -384,7 +391,24 @@ export class HubAlerts {
       return { code: "access_denied", message: `@${participant.handle} runs on another device; only that device raises its alerts.` };
     }
     const titles = await this.options.storage.conversationTitles([conversationId]).catch(() => ({} as Record<string, string>));
-    return { participant, chatTitle: titles[conversationId] ?? "" };
+    const announcedAs = await this.announcedAs(conversationId, chat, participant).catch(() => undefined);
+    return { participant, chatTitle: titles[conversationId] ?? "", ...(announcedAs !== undefined ? { announcedAs } : {}) };
+  }
+
+  /** How the alert's outside channels name the member: undefined (its
+   *  handle) in the classic view; in the sessions view (docs/main-session.md)
+   *  the main session by nothing and a member by its task's title. */
+  private async announcedAs(
+    conversationId: string,
+    chat: { participants: unknown[]; mainSessionParticipantId?: string; chatView?: string },
+    participant: ChatParticipant
+  ): Promise<string | undefined> {
+    const metadata = { participants: chat.participants as ChatParticipant[], mainSessionParticipantId: chat.mainSessionParticipantId,
+      chatView: isChatViewMode(chat.chatView) ? chat.chatView : undefined };
+    if (chatViewFor(metadata) !== "sessions") return undefined;
+    if (participant.id === metadata.mainSessionParticipantId) return "";
+    const messages = await this.options.storage.memberTaskMessages(conversationId, participant.id);
+    return sessionsMemberTitle(participant, latestTaskByMember(messages).get(participant.id)?.item);
   }
 
   /** The User closes the card in the app: an alert still waiting counts as
@@ -565,7 +589,7 @@ export class HubAlerts {
       }
       const mode = this.callMode(settings);
       record.view.callMode = mode;
-      const twiml = callTwiml(mode, spokenAlert(record.requester, record.chatTitle, record.text), this.keypadUrl(settings, record));
+      const twiml = callTwiml(mode, spokenAlert(record.announcedAs ?? record.requester, record.chatTitle, record.text), this.keypadUrl(settings, record));
       try {
         const call = await this.twilio(settings.phone).createCall({ to: settings.phone.to, from: settings.phone.from, twiml, ringSeconds: URGENT_ALERT_RING_SECONDS });
         record.callSid = call.sid;
@@ -739,7 +763,7 @@ export class HubAlerts {
       await Promise.race([acknowledged, new Promise((resolve) => setTimeout(resolve, 4_000).unref?.())]);
       return { status: 200, twiml: confirmedTwiml() };
     }
-    return { status: 200, twiml: callTwiml("keypad", spokenAlert(record.requester, record.chatTitle, record.text), this.keypadUrl(settings, record)) };
+    return { status: 200, twiml: callTwiml("keypad", spokenAlert(record.announcedAs ?? record.requester, record.chatTitle, record.text), this.keypadUrl(settings, record)) };
   }
 
   // --- test calls -----------------------------------------------------------------
@@ -1385,10 +1409,11 @@ export class HubAlerts {
 }
 
 /** What Telegram shows for an alert as it stands. */
-export function telegramText(record: Pick<AlertRecord, "view" | "requester" | "chatTitle" | "text">, settings: Pick<StoredSettings, "waitMinutes">): string {
+export function telegramText(record: Pick<AlertRecord, "view" | "requester" | "chatTitle" | "text"> & Pick<Partial<AlertRecord>, "announcedAs">, settings: Pick<StoredSettings, "waitMinutes">): string {
   const view = record.view;
   const done = view.state === "acknowledged";
-  const head = `${done ? "✅" : "🔴"} Urgent alert · ${record.requester}${record.chatTitle ? ` · ${record.chatTitle}` : ""}`;
+  const who = record.announcedAs ?? record.requester;
+  const head = `${done ? "✅" : "🔴"} Urgent alert${who ? ` · ${who}` : ""}${record.chatTitle ? ` · ${record.chatTitle}` : ""}`;
   const calls = view.calls.length;
   let footer = "";
   if (done) {

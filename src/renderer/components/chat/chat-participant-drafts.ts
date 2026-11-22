@@ -94,6 +94,9 @@ export function chatAgentModeLabel(mode: ChatAgentMode | undefined): string {
       return "Plan only";
     case "auto":
       return "Auto-run";
+    case "full-access":
+      // Set from the sessions view's Codex menu; the classic controls do not offer it.
+      return "Full Access";
     case "default":
     default:
       return "Custom access";

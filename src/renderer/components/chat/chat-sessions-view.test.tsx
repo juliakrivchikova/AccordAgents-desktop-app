@@ -334,9 +334,10 @@ test("a finished message shows no member state, only its time among its hover co
   assert.equal(textOf(queuedRow.find(hasClass("chat-rt-status"))), "Queued");
   assert.equal(queuedRow.findAll((node) => node.props?.["data-testid"] === "chat-sessions-working").length, 0, "not working yet");
 
-  // In a member's session the main session's answer keeps its name only.
-  const named = renderSessionsRow(reply, sessions, { authorLabel: "Main session" } as Partial<Parameters<typeof ChatMessageItem>[0]>);
-  assert.equal(textOf(named.find(hasClass("message-meta"))), "Main session");
+  // An author the view must tell apart keeps only that (a member's open card
+  // by its task).
+  const named = renderSessionsRow(reply, sessions, { authorLabel: "Fix the logout" } as Partial<Parameters<typeof ChatMessageItem>[0]>);
+  assert.equal(textOf(named.find(hasClass("message-meta"))), "Fix the logout");
 });
 
 test("every finished reply of the sessions view says how long it worked the quiet way: muted text and a chevron, no pill; the classic view keeps its pill", () => {

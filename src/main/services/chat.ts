@@ -1,4 +1,10 @@
 import { cloudRunSelection, type CloudRunPreparationProgress, type CloudRunSelection } from "../../shared/cloudRunPreparation";
+import type { CliStartDefaultsByKind } from "../../shared/cliStartDefaults";
+import {
+  forkCutFor, forkedChatTitle, forkedMainSessionPermissions, forkOriginFor, forkToNewChatLocalProviders, forkToNewChatReasonInChat, isForkableSessionKind,
+  lastMemberTurnEnd, memberAsItRunsNow, memberHasFinishedReply, type ForkToNewChatMachineSupport, type ForkToNewChatOffer
+} from "../../shared/forkToNewChat";
+import { cliModesTurnRefusal, type CliModesMachineSupport } from "../../shared/chatAccessModes";
 import { DEFAULT_CHAT_VIEW, MAIN_SESSION_HANDLE, MAIN_SESSION_ROLE_ID, canSwitchChatView, isChatViewMode, isMainSessionChat, isMainSessionParticipant, isRoleOfferedForNewMembers, mainSessionMemberOf, mainSessionParticipantId } from "../../shared/mainSession";
 import { SESSIONS_TASK_GIVEN_TITLE_MAX_CHARS, firstTextLine, sessionsTaskTitle, shortenAtWord } from "../../shared/mainSessionView";
 import { createHash, randomUUID } from "node:crypto";
@@ -114,6 +120,9 @@ import type {
   ChatParticipantRequestStatus,
   ChatParticipantCompactionState,
   ChatParticipantSession,
+  ChatForkSeenReply,
+  ChatForkToNewChatSource,
+  ChatParticipantForkOrigin,
   ChatSessionForkSource,
   ChatPromptContextParticipantPointers,
   ChatPromptContextPointerAdvance,
@@ -236,7 +245,6 @@ import {
   CHAT_PROVIDER_NATIVE_ALLOWED_TOOL_MAX_LENGTH,
   CHAT_SHELL_RULE_PATTERN_MAX_LENGTH,
   chatAgentModeWithin,
-  chatAgentPermissionsEqual,
   chatAgentPermissionsWithin,
   chatParticipantRequestPermissionRank,
   clampChatAgentAccess,
@@ -249,7 +257,9 @@ import {
   normalizeChatRoleManagementPermission,
   normalizeOptionalChatParticipantRequestPermission,
   chatParticipantRequestPermissionExceeds,
-  resolveChatManageRolesParticipantsPermission
+  resolveChatManageRolesParticipantsPermission,
+  chatAgentModeFromAgent,
+  chatAgentModeForKind
 } from "../../shared/agentPermissions";
 import { normalizeAgentContextUsage } from "../../shared/agentContext";
 import { nativeGoalObjective, parseNativeGoalCommand } from "../../shared/nativeGoalCommand";
@@ -271,7 +281,7 @@ import {
 } from "../../shared/chatDeliveryPolicy";
 import { isDeviceEventBlobReference, type DeviceEventBlobReference } from "../../shared/deviceEventBlobs";
 import { CHAT_PROMPT_SUGGESTION_LOCAL_SOURCE, ChatPromptSuggestionStore, type ChatMemberPromptSuggestion } from "./chatPromptSuggestions";
-import { CliAgentRunner, COMPACTION_CANCELLED_BEFORE_START, isForkSourceMissingError, type CliAgentBackgroundTask, type CliAgentCodexServerRequest, type CliAgentCompactResult, type CliAgentOutputEvent, type CliAgentReplyOrigin, type CliAgentRoleOptions, type CliAgentRunOptions, type CliAgentSelfResumedTurn } from "./cliAgents";
+import { CliAgentRunner, COMPACTION_CANCELLED_BEFORE_START, forkCopyNotMade, isForkSourceMissingError, type CliAgentBackgroundTask, type CliAgentCodexServerRequest, type CliAgentCompactResult, type CliAgentOutputEvent, type CliAgentReplyOrigin, type CliAgentRoleOptions, type CliAgentRunOptions, type CliAgentSelfResumedTurn } from "./cliAgents";
 import { cloudRunWorkerTargetFromSettings, normalizeCloudRunWorkerSettings } from "./cloudRunWorkers";
 import { emitCodexLiveOutput } from "./codexExec";
 import {
@@ -381,6 +391,9 @@ const MEMBER_ADDITION_RETRY_DELAYS_MS = [5_000, 30_000, 120_000];
  *  again. */
 const MAIN_SESSION_CATALOG_FRESH_MS = 10 * 60_000;
 const MAIN_SESSION_CATALOG_RETRY_MS = 60_000;
+/** The newest messages of a chat a member is forked from that are read:
+ *  its metadata says the rest (forkSourceChat). */
+const FORK_SOURCE_MESSAGES = 40;
 
 /** Whether this desktop can confirm the User's answer behind a machine
  *  member's approved roster change (see ChatService.machineRosterDecision). */
@@ -434,9 +447,21 @@ interface ParticipantMoveApplied {
   line: string;
 }
 
+/** What a fork says about its copy, once per member (postForkNotice). */
+type ForkNoticeKind = "origin-unavailable" | "cut-missed" | "started-clean";
+
+/** The id of a fork's line: one per member and kind. */
+function forkNoticeMessageId(participantId: string, kind: ForkNoticeKind): string {
+  return `fork-notice-${kind}-${participantId}`;
+}
+
 interface ChatParticipantSessionState {
   session: ChatParticipantSession;
   instructionsRefreshed: boolean;
+  /** A main session made by Fork to new chat whose member's session is not
+   *  on this device: it starts clean, and the chat says so when its turn
+   *  runs (postForkNotice). */
+  forkOriginUnavailable?: string;
 }
 
 interface ResolvedChatParticipantRole {
@@ -1319,6 +1344,11 @@ export class ChatService {
   /** Desktop side: whether a machine takes and hands over members' sessions
    *  (its last hello), and its name; by machine id or AWS instance id. */
   private machineSessionMove?: (target: { machineId?: string; instanceId?: string }) => MachineSessionMoveTarget;
+  /** Desktop side: whether a machine starts a main session from a copy of a
+   *  member's session in another chat (Fork to new chat; its last hello). */
+  private machineForkToNewChatSupport?: (machineId: string) => ForkToNewChatMachineSupport;
+  private machineCliModesSupport?: (machineId: string) => CliModesMachineSupport;
+  private machineCliStartDefaults?: (machineId: string) => CliStartDefaultsByKind | undefined;
   /** Members moving (on the computer) or whose session this machine just
    *  handed over: their turns wait for it (memberMoveGate). */
   private readonly memberMoveGates = new Map<string, { done: Promise<void>; release: () => void }>();
@@ -1573,6 +1603,40 @@ export class ChatService {
     this.machineSessionMove = lookup;
   }
 
+  /** Desktop side: see machineForkToNewChatSupport. */
+  setMachineForkToNewChatSupport(lookup: ((machineId: string) => ForkToNewChatMachineSupport) | undefined): void {
+    this.machineForkToNewChatSupport = lookup;
+  }
+
+  /** What each CLI on a machine starts a new session in with that machine's
+   *  own config (its last hello): the phone's New chat starts a main session
+   *  that runs there in it. */
+  setMachineCliStartDefaults(lookup: ((machineId: string) => CliStartDefaultsByKind | undefined) | undefined): void {
+    this.machineCliStartDefaults = lookup;
+  }
+
+  /** Desktop side: whether a machine runs Codex's Full Access and Plan mode
+   *  (its last hello), for the phone's New chat offer and before a turn is
+   *  asked of it (machineCliModesRefusal). */
+  setMachineCliModesSupport(lookup: ((machineId: string) => CliModesMachineSupport) | undefined): void {
+    this.machineCliModesSupport = lookup;
+  }
+
+  /** Desktop side: why a member's turn is not asked of its machine, whose
+   *  program would run its stored mode otherwise than its controls say
+   *  (cliModesTurnRefusal): refused with a line, never run as something
+   *  else. A machine never asks it of another (the User's server refuses
+   *  that, hubOps.ts). */
+  private machineCliModesRefusal(conversation: Conversation, participant: ChatParticipant): string | undefined {
+    const machineId = participant.homeMachineId;
+    if (!machineId || !this.machineCliModesSupport) return undefined;
+    // As it runs this turn: one held to its main session's mode by that.
+    return cliModesTurnRefusal(this.participantForRun(conversation, participant), {
+      name: this.serverLink?.machineName(machineId),
+      support: this.machineCliModesSupport(machineId)
+    });
+  }
+
   /** Desktop side: see beforeRemoteTurn and machineProjectReady. */
   setRemoteTurnPreparation(preparation: {
     beforeRemoteTurn?: (machineId: string) => Promise<void>;
@@ -1733,6 +1797,9 @@ export class ChatService {
     const report = (message: string): void => {
       if (request.runId && !signal?.aborted) this.emitProgress(request.runId, progress, "initial", message);
     };
+    if (request.forkOf) {
+      return this.createForkedConversation(request.forkOf, signal);
+    }
     report("Checking participants…");
     const now = new Date().toISOString();
     const requestedTitle = request.title ?? "";
@@ -1833,6 +1900,199 @@ export class ChatService {
       }).catch(() => undefined);
       throw error;
     }
+  }
+
+  /**
+   * Fork to new chat (src/shared/forkToNewChat.ts): a new chat whose one
+   * member is its main session, a copy of a member of another chat: that
+   * member's provider, model, effort, access and place it runs (as it runs
+   * now: a member the main session made never above it), in its chat's
+   * project, marked with where it comes from (forkOrigin). Nothing runs yet:
+   * the chat opens empty, and the device the main session runs on copies the
+   * member's CLI session at its first turn (startFromForkOrigin). The member
+   * and its chat are not touched. Saved, and so put on the User's server,
+   * like every new chat.
+   */
+  private async createForkedConversation(forkOf: ChatForkToNewChatSource, signal: AbortSignal | undefined): Promise<StartReviewResult> {
+    await this.debugLogs.write("chat.fork-to-new-chat.requested", {
+      sourceConversationId: forkOf.conversationId,
+      sourceParticipantId: forkOf.participantId
+    }).catch(() => undefined);
+    let conversation: Conversation | undefined;
+    let stage = "initializing";
+    try {
+      if (this.machineRuntime) {
+        throw new Error("A new chat is started from the User's computer.");
+      }
+      await this.waitForQueuedSave(forkOf.conversationId);
+      const source = await this.forkSourceChat(forkOf.conversationId);
+      const member = this.chatParticipants(source).find((participant) => participant.id === forkOf.participantId);
+      if (!member) {
+        throw new Error("That member is no longer in its chat.");
+      }
+      // What the User sees of the member now (the User, 2026-11-21: the
+      // copy is what she saw when she tapped Fork): its last reply that
+      // ended a turn; the copy ends with that turn. Read first, before the
+      // checks below take their time.
+      const seen = await this.forkSeenReply(source, member.id);
+      const running = this.participantForRun(source, member);
+      const agents = await this.forkReadiness(running);
+      signal?.throwIfAborted();
+      const settings = await this.settings.getPublicSettings();
+      const refusal = this.forkToNewChatRefusal(source, running, agents, settings);
+      if (refusal) {
+        throw new Error(`@${member.handle} cannot be forked to a new chat: ${refusal}`);
+      }
+      const role = settings.chatRoleConfigs.find((candidate) => candidate.id === MAIN_SESSION_ROLE_ID);
+      if (!role) {
+        throw new Error("The main session's role is missing from Settings. Restart the app and try again.");
+      }
+      const repoPath = source.repoPath?.trim() || undefined;
+      // Its access as it is (its CLI's mode and what it may read, edit, run
+      // and reach), with the main session's own say over members: it makes
+      // and asks them as its role gives.
+      const base = this.normalizeParticipantPermissionsForRole(role, newChatMemberPermissions(Boolean(repoPath)), true);
+      const permissions = forkedMainSessionPermissions(base, running.permissions);
+      const [created] = await this.ensureMainSessionParticipant([], running.kind, {
+        repoPath,
+        requested: {
+          handle: MAIN_SESSION_HANDLE,
+          roleConfigId: MAIN_SESSION_ROLE_ID,
+          kind: running.kind,
+          model: running.model,
+          reasoningEffort: running.reasoningEffort,
+          hostId: running.hostId,
+          agentMode: normalizeChatAgentMode(running.agentMode),
+          permissions,
+          // Where the member runs: a fork never crosses devices.
+          remoteExecution: preservedRemoteExecution(running.remoteExecution),
+          homeMachineId: running.homeMachineId,
+          cloudRun: running.cloudRun
+        }
+      });
+      if (!created) {
+        throw new Error("Could not make the new chat's main session.");
+      }
+      const mainSession: ChatParticipant = { ...created, forkOrigin: forkOriginFor(source, member, seen) };
+      signal?.throwIfAborted();
+      const now = new Date().toISOString();
+      conversation = {
+        id: randomUUID(),
+        title: forkedChatTitle(source.title),
+        kind: "chat",
+        createdAt: now,
+        updatedAt: now,
+        repoPath,
+        messages: [
+          this.message("system", this.chatIntro([mainSession]), undefined, {
+            threadId: "system"
+          })
+        ],
+        findings: [],
+        metadata: {
+          participants: [mainSession],
+          participantSessions: [],
+          warnings: [],
+          running: false,
+          mainSessionParticipantId: mainSession.id,
+          chatView: isChatViewMode(settings.defaultChatView) ? settings.defaultChatView : DEFAULT_CHAT_VIEW
+        }
+      };
+      this.rebuildLastMessagesByParticipant(conversation);
+      const logPayload = {
+        ...this.chatCreateLogPayload(conversation),
+        sourceConversationId: source.id,
+        sourceParticipantId: member.id,
+        homeMachineId: mainSession.homeMachineId
+      };
+      stage = "saving";
+      await this.debugLogs.write("chat.create.save-started", logPayload).catch(() => undefined);
+      signal?.throwIfAborted();
+      await this.saveConversation(conversation);
+      stage = "saved";
+      await this.debugLogs.write("chat.fork-to-new-chat.saved", logPayload).catch(() => undefined);
+      return { conversation, warnings: [] };
+    } catch (error) {
+      await this.debugLogs.write("chat.fork-to-new-chat.failed", {
+        conversationId: conversation?.id,
+        stage,
+        sourceConversationId: forkOf.conversationId,
+        sourceParticipantId: forkOf.participantId,
+        error: error instanceof Error ? error.message : String(error)
+      }).catch(() => undefined);
+      throw error;
+    }
+  }
+
+  /**
+   * The CLI readiness a fork is judged by: only what its main session will
+   * run on. A member on this computer needs its own CLI here (its fresh
+   * result reused, else that CLI alone checked); a member on a machine runs
+   * on that machine's CLI, and Antigravity or a member with no place to run
+   * is refused without any (forkToNewChatUnavailableReason). So Fork opens at
+   * once instead of waiting for every CLI's check.
+   */
+  private async forkReadiness(running: ChatParticipant): Promise<AgentHealth[]> {
+    if (chatParticipantHome(running).kind !== "this-machine" || !isForkableSessionKind(running.kind)) {
+      return [];
+    }
+    return this.detectAgentsForReadiness("submit", [running.kind]);
+  }
+
+  /** Why this member (as it runs now) cannot be forked to a new chat, in the
+   *  words the menus show (forkToNewChatUnavailableReason). */
+  private forkToNewChatRefusal(
+    source: Conversation,
+    running: ChatParticipant,
+    agents: AgentHealth[],
+    settings: Pick<AppSettings, "providers" | "cliProviderHosts">
+  ): string | undefined {
+    return forkToNewChatReasonInChat({
+      participant: running,
+      conversation: source,
+      agents,
+      providers: settings.providers ?? [],
+      hosts: settings.cliProviderHosts ?? [],
+      machineSupport: (machineId) => this.machineForkToNewChatSupport?.(machineId) ?? "unknown"
+    });
+  }
+
+  /** The member's last reply that ended a turn of its CLI in its chat, read
+   *  as her server reads it for the phone (StorageService.
+   *  conversationLastTurnEnd); the newest messages held when that read
+   *  fails. */
+  private async forkSeenReply(source: Conversation, participantId: string): Promise<ChatForkSeenReply | undefined> {
+    if (typeof this.storage.conversationLastTurnEnd === "function") {
+      try {
+        return await this.storage.conversationLastTurnEnd(source.id, participantId);
+      } catch (error) {
+        void this.debugLogs.write("chat.fork-to-new-chat.seen-read-failed", {
+          sourceConversationId: source.id,
+          sourceParticipantId: participantId,
+          error: error instanceof Error ? error.message : String(error)
+        });
+      }
+    }
+    return lastMemberTurnEnd(source.messages, participantId);
+  }
+
+  /**
+   * The chat a member is forked from, without reading all of its messages
+   * (a chat can be thousands of them): its metadata (members, their session
+   * records, the pointers to their last messages) and its newest messages,
+   * as saved. Nothing in it is changed.
+   */
+  private async forkSourceChat(conversationId: string): Promise<Conversation> {
+    if (this.deletedConversationIds.has(conversationId) || await this.storage.conversationTombstones?.().isDeleted(conversationId)) {
+      throw new Error("Chat was permanently deleted.");
+    }
+    const conversation = typeof this.storage.openConversation === "function"
+      ? (await this.storage.openConversation(conversationId, FORK_SOURCE_MESSAGES))?.conversation
+      : await this.storage.getConversation(conversationId);
+    if (!conversation || conversation.kind !== "chat") {
+      throw new Error("Chat conversation was not found.");
+    }
+    return conversation;
   }
 
   private chatCreateLogPayload(conversation: Conversation): Record<string, unknown> {
@@ -1970,6 +2230,7 @@ export class ChatService {
     // main session there too, and so makes a main-session chat.
     const offeredMainSession = { ...mainSession, id: MAIN_SESSION_ROLE_ID };
     const mainSessionProviders = unavailable ? [] : await this.newChatProviderOffers(agents, settings);
+    const fork = this.forkToNewChatOffer(agents, settings, machines);
     return {
       projects,
       ...(defaultProject ? { defaultProject } : {}),
@@ -1979,7 +2240,37 @@ export class ChatService {
       ...(mainSessionProviders.length > 0 ? { mainSessionProviders } : {}),
       members,
       ...(unavailable ? { unavailable } : {}),
-      ...(assistantNote ? { assistantNote } : {})
+      ...(assistantNote ? { assistantNote } : {}),
+      ...(fork ? { fork } : {}),
+      // This computer runs Codex's Full Access and Plan mode; each machine as
+      // its program says.
+      cliModes: { machines: Object.fromEntries(machines.map((machine) => [machine.id, this.machineCliModesSupport?.(machine.id) === "supported"])) },
+      // What each machine's CLIs start in with its own config (this
+      // computer's are with each provider): a main session the phone starts
+      // there starts in it.
+      ...this.newChatMachineStartDefaults(machines)
+    };
+  }
+
+  private newChatMachineStartDefaults(machines: ReadonlyArray<{ id: string }>): Pick<HubNewChatOptions, "cliStart"> {
+    const known = machines.map((machine) => [machine.id, this.machineCliStartDefaults?.(machine.id)] as const)
+      .filter((entry): entry is readonly [string, CliStartDefaultsByKind] => Boolean(entry[1]));
+    return known.length > 0 ? { cliStart: { machines: Object.fromEntries(known) } } : {};
+  }
+
+  /**
+   * What the phone needs to fork a member to a new chat as this computer
+   * does (src/shared/forkToNewChat.ts): why each CLI here cannot run a
+   * member now, each machine's program by its last hello, and what the main
+   * session's role gives a new main session. Nothing without that role.
+   */
+  private forkToNewChatOffer(agents: AgentHealth[], settings: AppSettings, machines: ReadonlyArray<{ id: string }>): ForkToNewChatOffer | undefined {
+    const role = settings.chatRoleConfigs.find((candidate) => candidate.id === MAIN_SESSION_ROLE_ID);
+    if (!role) return undefined;
+    return {
+      ...forkToNewChatLocalProviders(agents, settings.providers ?? [], settings.cliProviderHosts ?? []),
+      machines: Object.fromEntries(machines.map((machine) => [machine.id, this.machineForkToNewChatSupport?.(machine.id) ?? "unknown"])),
+      basePermissions: this.normalizeParticipantPermissionsForRole(role, newChatMemberPermissions(true), true)
     };
   }
 
@@ -1996,12 +2287,19 @@ export class ChatService {
     // it last had (none yet: its default model only), and a list that is
     // due is read in the background; one that changed publishes the offer
     // again (onNewChatOffersChanged).
-    return options.map((option) => newChatProviderOffer({
-      ...option,
-      vendorDefaultModelLabel: option.hostVendor ? cliProviderHostDefaultModelLabel({ vendor: option.hostVendor }) : undefined,
-      catalog: this.cachedMainSessionModelCatalog(option, settings),
-      providerEfforts: reasoningEffortOptionsForProvider(option.kind)
-    }));
+    return options.map((option) => {
+      const catalog = this.cachedMainSessionModelCatalog(option, settings);
+      // An added provider runs its CLI with the User's own config too: the
+      // mode that CLI starts in is the one its own list says.
+      const start = option.hostId ? this.cachedMainSessionModelCatalog({ kind: option.kind, label: option.label }, settings)?.startDefaults : catalog?.startDefaults;
+      return newChatProviderOffer({
+        ...option,
+        vendorDefaultModelLabel: option.hostVendor ? cliProviderHostDefaultModelLabel({ vendor: option.hostVendor }) : undefined,
+        catalog,
+        providerEfforts: reasoningEffortOptionsForProvider(option.kind),
+        ...(start ? { start } : {})
+      });
+    });
   }
 
   /** Told when a provider's model list read in the background changed what
@@ -2020,7 +2318,9 @@ export class ChatService {
       ? now - entry.failedAt >= MAIN_SESSION_CATALOG_RETRY_MS
       : now - entry.readAt >= MAIN_SESSION_CATALOG_FRESH_MS;
     if (due && !entry.reading) {
-      const before = JSON.stringify(entry.catalog?.models ?? null);
+      // What the phone is told of it: its models and its start defaults.
+      const offered = (catalog: ProviderModelCatalog | undefined): string => JSON.stringify([catalog?.models ?? null, catalog?.startDefaults ?? null]);
+      const before = offered(entry.catalog);
       entry.reading = this.mainSessionModelCatalog(option, settings)
         .catch(() => undefined)
         .then((catalog) => {
@@ -2031,7 +2331,7 @@ export class ChatService {
           } else {
             entry.failedAt = Date.now();
           }
-          if (JSON.stringify(entry.catalog?.models ?? null) !== before) this.onNewChatOffersChanged?.();
+          if (offered(entry.catalog) !== before) this.onNewChatOffersChanged?.();
         })
         .finally(() => { entry.reading = undefined; });
     }
@@ -2529,7 +2829,7 @@ export class ChatService {
         reasoningEffort: Object.prototype.hasOwnProperty.call(request, "reasoningEffort")
           ? normalizeChatReasoningEffort(request.reasoningEffort, target.kind)
           : target.reasoningEffort,
-        agentMode: normalizeChatAgentMode(request.agentMode ?? target.agentMode),
+        agentMode: chatAgentModeForKind(target.kind, request.agentMode ?? target.agentMode),
         permissions: request.permissions !== undefined
           ? normalizeChatAgentPermissions(request.permissions)
           : target.permissions,
@@ -4353,7 +4653,8 @@ export class ChatService {
 
     const runPermissions = actor.runPermissions ? normalizeChatAgentPermissions(actor.runPermissions) : undefined;
     const prepared = this.preparePermissionChange(requester, this.normalizePermissionChangeRequest(rawRequest), runPermissions);
-    if (normalizeChatAgentMode(requester.agentMode) === "auto" && prepared.request.kind === "shellRules") {
+    const requesterMode = normalizeChatAgentMode(requester.agentMode);
+    if ((requesterMode === "auto" || requesterMode === "full-access") && prepared.request.kind === "shellRules") {
       // In Auto-review the provider's native auto classifier decides each shell command,
       // so an agent shellRules request needs no User approval and stored app rules are
       // not forwarded as a second hard gate.
@@ -5428,7 +5729,9 @@ export class ChatService {
    *  (it may always ask the main session, as far as the main session itself
    *  may ask), and managing members only when named. Clamped afterwards. */
   private delegationRequestedPermissions(given: Record<string, unknown> | undefined, ceiling: ChatAgentPermissions): ChatAgentPermissions {
-    const { manageRolesParticipants: _ownManage, ...inherited } = ceiling;
+    // Codex's Plan mode is the main session's own way of working, not a
+    // right: a member it makes starts without it.
+    const { manageRolesParticipants: _ownManage, codexPlanMode: _plan, ...inherited } = ceiling;
     const merged: Record<string, unknown> = { ...inherited, requestParticipants: "allow" };
     if (given) {
       for (const key of ["repoRead", "workspaceWrite", "webAccess"] as const) {
@@ -5613,19 +5916,9 @@ export class ChatService {
    *  they are now (its right to manage members is held where it adds one,
    *  requireParticipantManager); every other member as it is. Never saved. */
   private participantForRun(conversation: Conversation, participant: ChatParticipant): ChatParticipant {
-    const ceiling = this.delegatedMemberCeiling(conversation, participant);
-    if (!ceiling) {
-      return participant;
-    }
-    const own = normalizeChatAgentPermissions(participant.permissions);
-    const access = clampChatAgentAccess(participant.kind, { agentMode: participant.agentMode, permissions: own }, { agentMode: ceiling.mode, permissions: ceiling.permissions });
-    const { manageRolesParticipants: _manage, ...clamped } = access.permissions;
-    const permissions: ChatAgentPermissions = own.manageRolesParticipants ? { ...clamped, manageRolesParticipants: own.manageRolesParticipants } : clamped;
-    const agentMode = access.agentMode;
-    if (agentMode === normalizeChatAgentMode(participant.agentMode) && chatAgentPermissionsEqual(permissions, own)) {
-      return participant;
-    }
-    return { ...participant, agentMode, permissions };
+    // The rule is shared (memberAsItRunsNow): the phone forks a member as it
+    // runs here.
+    return memberAsItRunsNow(participant, this.delegatedMemberCeiling(conversation, participant)?.mainSession);
   }
 
   /** In a chat with a main session, a member any member adds without a card
@@ -9409,10 +9702,13 @@ export class ChatService {
             // process runs its own members' turns itself, under the same ids.
             // A member whose cloud machine is not chosen yet, or whose machine
             // has not got this chat's project yet, is asked by this device once
-            // that is done (runParticipantTurnRemote), not by the server at once.
+            // that is done (runParticipantTurnRemote), not by the server at once;
+            // one whose machine's program cannot run its mode is refused there,
+            // so the server never asks that machine for it.
             const askedLater = new Set<string>();
             for (const target of dispatch.targets) {
               if (target.cloudRun && !target.homeMachineId) askedLater.add(target.id);
+              else if (this.machineCliModesRefusal(conversation, target)) askedLater.add(target.id);
               else if (target.homeMachineId && conversation.repoPath && this.machineProjectReady &&
                   !await this.machineProjectReady(target.homeMachineId, conversation.repoPath).catch(() => false)) askedLater.add(target.id);
             }
@@ -10714,7 +11010,11 @@ export class ChatService {
     });
     const agentEnvironment = await this.agentEnvironmentForParticipant(participant, cliParticipant.model);
     cliParticipant = this.cliParticipantWithHost(cliParticipant, agentEnvironment);
+    // The last session id this turn's CLI reported (a fork's copy, or one
+    // Claude Code was given before it made it).
+    let reportedHere: string | undefined;
     const persistSessionId = (sessionId: string): void => {
+      reportedHere = sessionId.trim() || reportedHere;
       this.persistParticipantSessionId(conversation, session, sessionId);
     };
     let executionLease: ChatExecutionLeaseMetadata | undefined;
@@ -10766,10 +11066,20 @@ export class ChatService {
       if (options.writeGate) {
         await this.waitForEarlierClaudeMessages(options.writeGate, signal);
       }
-      let result = await this.cliRunner.run(cliParticipant, prompt, runPath, undefined, "chat", signal, {
+      // A main session made by Fork to new chat whose member's session is
+      // not here starts clean: the chat says so before the turn runs, as the
+      // fork's other notices are said (postForkNotice).
+      if (sessionState.forkOriginUnavailable) {
+        this.postForkNotice(conversation, participant, "origin-unavailable", sessionState.forkOriginUnavailable);
+      }
+      // `clean`: a fork whose copy could not be made starts a session of its
+      // own from the saved chat context, in this same turn (below).
+      const runCli = (clean = false): Promise<ParticipantRunResult> => this.cliRunner.run(cliParticipant, clean ? resumeFallbackPrompt ?? prompt : prompt, runPath, undefined, "chat", signal, {
         persistSession: true,
-        sessionId: session.sessionId,
-        ...(forkSource ? { forkFromSessionId: forkSource.sessionId } : {}),
+        ...(clean ? {} : {
+          sessionId: session.sessionId,
+          ...(forkSource ? { forkFromSessionId: forkSource.sessionId, ...this.forkCutRunOption(conversation, participant, forkSource) } : {})
+        }),
         extraReadableDirs: [workspacePath],
         resumeFallbackPrompt,
         role,
@@ -10821,6 +11131,7 @@ export class ChatService {
           })
         }
       });
+      let result = await runCli();
       if (!this.machineRuntime) {
         this.promptSuggestions.replyEnded(conversation.id, participant.id, runId);
       }
@@ -10828,9 +11139,11 @@ export class ChatService {
       // instead of the process error that reads as a missing CLI. Only the
       // project folder can go away under the member: the chat's own workspace
       // is created for every run.
+      let missingRunFolderSaid = false;
       if (!result.ok && !signal?.aborted && runPath !== workspacePath && startFailedOnMissingPath(result)) {
         const missing = await this.missingRunFolder(conversation, runPath);
         if (missing) {
+          missingRunFolderSaid = true;
           result = { ...result, content: missingRunFolderText(participant.handle, missing), error: missing.reason };
           // The computer that made the copy forgets it when it reads this,
           // so the next message copies the project again.
@@ -10839,51 +11152,120 @@ export class ChatService {
           }
         }
       }
+      // The CLI could not make the copy: her message still gets its reply in
+      // this turn. When the CLI says the source session is gone, the member
+      // starts clean at once; any other failure of the copy is tried once
+      // more first. Never a failure that is not the copy's (a project folder
+      // gone, a Stop, a turn that failed after the copy was made).
+      let forkStartedCleanThisTurn = false;
+      if (forkSource && !missingRunFolderSaid && this.forkCopyFailed(result, signal)) {
+        const sourceGone = isForkSourceMissingError(result.error);
+        void this.debugLogs.write("chat.session.fork-failed", {
+          conversationId: conversation.id,
+          participantId: participant.id,
+          sourceParticipantId: forkSource.participantId,
+          sourceGone,
+          error: result.error
+        });
+        // The id this turn's CLI was given (or reported) is no session; one
+        // another turn of the member made meanwhile stays.
+        const forgetOwnId = (): void => {
+          if (session.sessionId === reportedHere) session.sessionId = "";
+        };
+        // Two messages sent at once share the member's first turn: the other
+        // one may have made its session (the copy, or a clean one) meanwhile.
+        const madeMeanwhile = (): boolean => Boolean(session.sessionId?.trim()) && !session.forkFrom && session.sessionId !== forkSource.sessionId;
+        forgetOwnId();
+        if (!sourceGone && !madeMeanwhile()) {
+          progressSink.beginAttempt();
+          result = await runCli();
+          if (this.forkCopyFailed(result, signal)) forgetOwnId();
+        }
+        if (this.forkCopyFailed(result, signal) && madeMeanwhile()) {
+          // This message goes into the session the other one made.
+          progressSink.beginAttempt();
+          result = await runCli();
+        } else if (this.forkCopyFailed(result, signal)) {
+          // The retry may be the one that says the source is gone.
+          const gone = sourceGone || isForkSourceMissingError(result.error);
+          const copyFailure = result;
+          const forkedFromParticipantId = session.forkedFromParticipantId;
+          delete session.forkFrom;
+          delete session.forkedFromParticipantId;
+          forkStartedCleanThisTurn = true;
+          void this.debugLogs.write("chat.session.fork-starts-clean", {
+            conversationId: conversation.id,
+            participantId: participant.id,
+            sourceParticipantId: forkSource.participantId,
+            sourceGone: gone
+          });
+          // Said before the clean turn runs (it may last hours, and the app
+          // may stop during it) when the CLI said the copy cannot be made.
+          if (gone) this.postForkNotice(conversation, participant, "started-clean", this.forkStartedCleanNotice(conversation, participant, forkSource, "turn"));
+          const reportedBeforeClean = reportedHere;
+          progressSink.beginAttempt();
+          result = await runCli(true);
+          // No session started: the CLI exited before it took the message,
+          // or nothing reported a session at all (a thread that could not
+          // be started, a process that could not be had).
+          if (!result.ok && !signal?.aborted && (result.sessionNotStarted === true || reportedHere === reportedBeforeClean)) {
+            // The id the clean session was given is no session, and its next
+            // turn must not resume it.
+            forgetOwnId();
+            if (!gone) {
+              // Nor was the copy what failed: the member stays a fork, its
+              // next turn makes the copy, and the reply says what went wrong.
+              session.forkFrom = forkSource;
+              if (forkedFromParticipantId) session.forkedFromParticipantId = forkedFromParticipantId;
+              forkStartedCleanThisTurn = false;
+              result = copyFailure;
+            }
+          }
+        }
+      }
       // The CLI could not copy the source session and started the member
       // clean from the saved chat context instead (Claude Code's resume-miss
-      // fallback): it is a member of its own from now on, and the chat says so.
-      const forkStartedClean = forkSource && result.sessionRestarted
-        ? this.forkStartedCleanWarning(conversation, participant, forkSource, "now")
-        : undefined;
-      this.applyCliRunMetadata(session, result, participant, options.warnings, forkStartedClean);
+      // fallback, or the clean start above): it is a member of its own from
+      // now on, and the chat says so, once. A fork's notices are lines in
+      // the chat as well as warnings here: a warning stays on the device that
+      // raised it, and a fork may run on a cloud machine, or have been asked
+      // from the phone (postForkNotice).
+      const forkStartedClean = forkSource && forkStartedCleanThisTurn
+        ? this.forkStartedCleanNotice(conversation, participant, forkSource, "turn")
+        : forkSource && result.sessionRestarted
+          ? this.forkStartedCleanNotice(conversation, participant, forkSource, "now")
+          : undefined;
+      this.applyCliRunMetadata(session, result, participant, options.warnings, Boolean(forkStartedClean));
+      // Its copy was made whole although it was to end where the User
+      // tapped Fork: a line in the chat says why, once.
+      const forkCutNote = forkSource && !forkStartedClean ? this.forkCutMissedNote(participant, forkSource, session, result) : undefined;
+      if (forkCutNote) {
+        this.postForkNotice(conversation, participant, "cut-missed", forkCutNote);
+      }
       if (forkStartedClean) {
         delete session.forkFrom;
         delete session.forkedFromParticipantId;
         // In the chat, whoever asked for the turn (a member's request keeps
         // no run warnings of its own).
-        this.addConversationWarning(conversation, forkStartedClean);
+        this.postForkNotice(conversation, participant, "started-clean", forkStartedClean);
         void this.debugLogs.write("chat.session.fork-started-clean", {
           conversationId: conversation.id,
           participantId: participant.id,
-          sourceParticipantId: forkSource!.participantId
+          sourceParticipantId: forkSource!.participantId,
+          ok: result.ok
         });
-      } else if (forkSource && !result.ok && !signal?.aborted && isForkSourceMissingError(result.error)) {
-        // The copy was never made (the source session could not be read):
-        // the id the CLI was given is no session. The next turn tries the
-        // fork once more; when that fails too, the member starts clean.
-        session.sessionId = "";
-        const failedAttempts = (forkSource.failedAttempts ?? 0) + 1;
-        if (failedAttempts < 2) {
-          session.forkFrom = { ...forkSource, failedAttempts };
-        } else {
-          delete session.forkFrom;
-          delete session.forkedFromParticipantId;
-          // Its chat context started where the source's did; a clean
-          // session has seen none of it.
+        if (forkStartedCleanThisTurn && !result.ok) {
+          // Its clean start failed too, or was stopped: its next turn starts
+          // as a new session's first, with the chat context from where the
+          // source's started (a clean session has seen none of it).
           this.forgetPromptContextPointers(conversation, participant.id);
-          const warning = this.forkStartedCleanWarning(conversation, participant, forkSource, "next");
-          options.warnings.push(warning);
-          this.addConversationWarning(conversation, warning);
-          // The member that gave the task reads it in this failed reply.
-          result = { ...result, content: [result.content.trim(), warning].filter(Boolean).join("\n\n") };
+          // The member that gave the task reads it in this failed reply (a
+          // main session made by Fork to new chat was asked by the User,
+          // whose notice it is: its reply does not say it twice).
+          if (!signal?.aborted && !this.otherChatForkOrigin(conversation, participant, forkSource!.participantId)) {
+            result = { ...result, content: [result.content.trim(), forkStartedClean].filter(Boolean).join("\n\n") };
+          }
         }
-        void this.debugLogs.write("chat.session.fork-failed", {
-          conversationId: conversation.id,
-          participantId: participant.id,
-          sourceParticipantId: forkSource.participantId,
-          failedAttempts,
-          startsClean: failedAttempts >= 2
-        });
       }
       if (!signal?.aborted) {
         this.consumeOneTimePermissionApprovals(conversation, participant, appliedOneTimePermissionApprovalIds);
@@ -10922,6 +11304,7 @@ export class ChatService {
       if (Number.isFinite(workedMs) && workedMs >= 0) {
         pendingMessage.metadata = { ...pendingMessage.metadata, workedMs };
       }
+      this.recordReplySessionCut(pendingMessage, result);
       const activityEvents = progressSink.activityEvents();
       if (activityEvents.length > 0) {
         pendingMessage.metadata = { ...pendingMessage.metadata, activityEvents };
@@ -11246,6 +11629,7 @@ export class ChatService {
       if (Number.isFinite(workedMs) && workedMs >= 0) {
         pendingMessage.metadata = { ...pendingMessage.metadata, workedMs };
       }
+      this.recordReplySessionCut(pendingMessage, result);
       const pendingChoice = !controller.signal.aborted && result.ok && result.content.trim()
         ? this.pendingChoiceFromAgentReply(result.content)
         : undefined;
@@ -11855,6 +12239,10 @@ export class ChatService {
     if (!sourceId || (!firstTurn && !session.forkedFromParticipantId)) {
       return undefined;
     }
+    const origin = this.otherChatForkOrigin(conversation, participant, sourceId);
+    if (origin) {
+      return this.forkedMainSessionIdentityNote(conversation, participant, session, origin, firstTurn);
+    }
     const source = this.chatParticipants(conversation).find((item) => item.id === sourceId);
     const sourceName = source ? `@${source.handle}` : "the main session";
     const mainSessionHandle = this.mainSessionHandleForMember(conversation, participant);
@@ -11873,12 +12261,56 @@ export class ChatService {
     ].join("\n");
   }
 
+  /** The main session of a chat made by Fork to new chat, when its session
+   *  was (or is to be) copied from this member of another chat. */
+  private otherChatForkOrigin(conversation: Conversation, participant: ChatParticipant, sourceId: string | undefined): ChatParticipantForkOrigin | undefined {
+    const origin = participant.forkOrigin;
+    return origin && sourceId && origin.participantId === sourceId && origin.conversationId !== conversation.id ? origin : undefined;
+  }
+
+  /**
+   * What the main session of a chat made by Fork to new chat is told: it
+   * keeps what the member it was copied from knew, but it is this chat's
+   * main session now, with the main session's role (both CLIs keep the
+   * source's system and developer instructions in a fork). The first turn
+   * gets the whole note with its role's instructions; every later turn a
+   * short reminder.
+   */
+  private forkedMainSessionIdentityNote(
+    conversation: Conversation,
+    participant: ChatParticipant,
+    session: ChatParticipantSession,
+    origin: ChatParticipantForkOrigin,
+    firstTurn: boolean
+  ): string {
+    const sourceName = this.forkOriginSessionName(origin);
+    if (!firstTurn) {
+      return `Reminder: you are @${participant.handle} (role: ${session.roleLabel}), the main session of this chat, forked from ${sourceName}; the instructions that session started with do not apply to you.`;
+    }
+    return [
+      `You were forked from ${sourceName}: you keep everything it knew, but from now on you are the main session of a new chat, "${conversation.title}".`,
+      `- You are @${participant.handle}, role: ${session.roleLabel}. The instructions this session started with for @${origin.handle} no longer apply to you; your role instructions are below.`,
+      "- The earlier chat is not this one: its members are not here, and the app's chat tools read and write this chat only.",
+      "- User talks to you here: a message without an addressee comes to you, and you create members and give them tasks as your role instructions say.",
+      "",
+      "Your role instructions:",
+      session.roleInstructions
+    ].join("\n");
+  }
+
   /** What a member made as a fork is told when the CLI could not copy the
    *  source session and starts it clean from the saved chat context: who it
    *  is and what it does, as the fork would have been told, without saying
    *  it knows what the source knew. Its role's instructions come with it. */
   private forkStartedCleanIdentityNote(conversation: Conversation, participant: ChatParticipant, session: ChatParticipantSession): string {
     const sourceId = session.forkFrom?.participantId ?? session.forkedFromParticipantId;
+    const origin = this.otherChatForkOrigin(conversation, participant, sourceId);
+    if (origin) {
+      return [
+        `You were to start from a copy of ${this.forkOriginSessionName(origin)}, but it could not be copied: you start a new session with the chat context below.`,
+        `- You are @${participant.handle}, role: ${session.roleLabel}: the main session of this chat. User talks to you here; you create members and give them tasks as your role instructions say.`
+      ].join("\n");
+    }
     const source = sourceId ? this.chatParticipants(conversation).find((item) => item.id === sourceId) : undefined;
     const sourceName = source ? `@${source.handle}'s` : "the main session's";
     const mainSessionHandle = this.mainSessionHandleForMember(conversation, participant);
@@ -11891,15 +12323,25 @@ export class ChatService {
     ].join("\n");
   }
 
-  /** The chat's word that a fork could not copy its source's session and
-   *  started (or starts at its next turn) a clean session. */
-  private forkStartedCleanWarning(conversation: Conversation, participant: ChatParticipant, forkSource: ChatSessionForkSource, when: "now" | "next"): string {
-    const source = this.chatParticipants(conversation).find((item) => item.id === forkSource.participantId);
-    const sourceName = source ? `@${source.handle}'s` : "the main session's";
+  /** The chat's line that a fork could not copy its source's session and
+   *  started a clean session in that turn ("now": the CLI started it clean
+   *  itself, Claude Code's one-shot start). */
+  private forkStartedCleanNotice(conversation: Conversation, participant: ChatParticipant, forkSource: ChatSessionForkSource, when: "now" | "turn"): string {
+    const origin = this.otherChatForkOrigin(conversation, participant, forkSource.participantId);
+    const source = origin ? undefined : this.chatParticipants(conversation).find((item) => item.id === forkSource.participantId);
+    const sessionName = origin ? this.forkOriginSessionName(origin) : `${source ? `@${source.handle}'s` : "the main session's"} session`;
     return when === "now"
-      ? `@${participant.handle} could not start from a copy of ${sourceName} session, so it started a clean session from the saved chat context.`
-      : `@${participant.handle} could not start from a copy of ${sourceName} session, so its next turn starts a clean session.`;
+      ? `@${participant.handle} could not start from a copy of ${sessionName}, so it started a clean session from the saved chat context.`
+      : `@${participant.handle} could not start from a copy of ${sessionName}, so this turn started a clean session.`;
   }
+
+  /** A fork's run that failed while its CLI made the copy (no session of its
+   *  own exists): the CLI said the source is gone, or failed before it took
+   *  the message. Not a Stop, nor a start the CLI already made clean. */
+  private forkCopyFailed(result: ParticipantRunResult, signal: AbortSignal | undefined): boolean {
+    return !signal?.aborted && !result.ok && !result.sessionRestarted && forkCopyNotMade(result);
+  }
+
 
   /** The member's chat context starts over: its next turn is given the chat
    *  as a new session's first turn is. */
@@ -12049,10 +12491,10 @@ export class ChatService {
             "Permission MCP tool: `app_permissions_request_change` is available when Chat Assistant needs approval for web access or another explicitly user-requested non-default capability.",
             "Do not use permission requests for repository access, file editing, or shell commands by default. For code or repository tasks, first suggest adding a generic participant; proceed only if User explicitly asks Chat Assistant to handle it and enables the needed participant permissions."
           ]
-        : agentMode === "auto"
+        : agentMode === "auto" || agentMode === "full-access"
         ? [
             "Permission MCP tool: `app_permissions_request_change` is available when this participant needs approval for blocked capabilities.",
-            "In Auto-review mode, repo read, workspace write, web, and shell commands all run under the provider's native auto review. Do not call `app_permissions_request_change` for these, and do not request shellRules; shell decisions are handled by native auto. Portable repo/web/edit requests return already_granted if called anyway. Only genuinely out-of-preset capabilities need a request, for example `{ \"kind\": \"providerNative\", \"provider\": \"claude-code\", \"allowedTools\": [\"mcp__server__tool\"], \"reason\": \"Need this Claude Code tool.\" }` for Claude-native tool grants or `{ \"kind\": \"githubApp\", \"repository_full_name\": \"owner/repo\", \"permissions\": [\"contents:write\", \"pull_requests:write\"], \"reason\": \"Need to push a branch and open a PR.\" }` for GitHub App repository permissions. After a permission MCP call, inspect the status: pending_user_approval means it is awaiting User approval; already_granted means the capability is available."
+            "In Auto-review and Full Access modes, repo read, workspace write, web, and shell commands all run under the provider's native auto review (in Codex's Full Access, without any review or asking). Do not call `app_permissions_request_change` for these, and do not request shellRules; shell decisions are handled by native auto. Portable repo/web/edit requests return already_granted if called anyway. Only genuinely out-of-preset capabilities need a request, for example `{ \"kind\": \"providerNative\", \"provider\": \"claude-code\", \"allowedTools\": [\"mcp__server__tool\"], \"reason\": \"Need this Claude Code tool.\" }` for Claude-native tool grants or `{ \"kind\": \"githubApp\", \"repository_full_name\": \"owner/repo\", \"permissions\": [\"contents:write\", \"pull_requests:write\"], \"reason\": \"Need to push a branch and open a PR.\" }` for GitHub App repository permissions. After a permission MCP call, inspect the status: pending_user_approval means it is awaiting User approval; already_granted means the capability is available."
           ]
         : [
             "Permission MCP tool: `app_permissions_request_change` is available when this participant needs approval for blocked capabilities.",
@@ -12260,8 +12702,9 @@ export class ChatService {
     result: ParticipantRunResult,
     participant: ChatParticipant,
     warnings: string[],
-    /** What the chat says instead when the session was started anew. */
-    restartWarning?: string
+    /** The chat says it another way when the session was started anew (a
+     *  fork's line): no warning then. */
+    restartSaid = false
   ): void {
     if (this.isKnownRoleRuntime(result.roleRuntime)) {
       session.roleRuntime = result.roleRuntime;
@@ -12278,8 +12721,8 @@ export class ChatService {
       session.sessionId = result.sessionId;
       delete session.forkFrom;
     }
-    if (result.sessionRestarted) {
-      const warning = restartWarning ?? `@${participant.handle}: previous CLI session was unavailable, so a new session was started from saved chat context.`;
+    if (result.sessionRestarted && !restartSaid) {
+      const warning = `@${participant.handle}: previous CLI session was unavailable, so a new session was started from saved chat context.`;
       if (!warnings.includes(warning)) {
         warnings.push(warning);
       }
@@ -12347,10 +12790,244 @@ export class ChatService {
       };
     }
     const role = await this.resolvedRoleForParticipant(participant);
+    const session = await this.newSessionForParticipant(participant, role, runtimeConfigVersion);
+    const forkOriginUnavailable = await this.startFromForkOrigin(conversation, participant, session);
     return {
-      session: await this.newSessionForParticipant(participant, role, runtimeConfigVersion),
-      instructionsRefreshed: false
+      session,
+      instructionsRefreshed: false,
+      ...(forkOriginUnavailable ? { forkOriginUnavailable } : {})
     };
+  }
+
+  /**
+   * A chat's main session made by Fork to new chat (participant.forkOrigin)
+   * starts from a copy of the member it was forked from: this device runs it,
+   * so it holds that member's session (a fork never crosses devices), read
+   * from the member's own chat here. Only while the main session has no
+   * session here and never answered in this chat, so a session it loses later
+   * (a move) never becomes a copy again; the record is kept at once, so a
+   * first turn cut short still forks at the next. When the member's session
+   * is not here (its chat deleted, the member moved), the main session starts
+   * clean and this returns the chat's line about it (said when its turn
+   * runs, so a compaction asked first does not say it).
+   */
+  private async startFromForkOrigin(conversation: Conversation, participant: ChatParticipant, session: ChatParticipantSession): Promise<string | undefined> {
+    const origin = participant.forkOrigin;
+    if (!origin || origin.conversationId === conversation.id || !isMainSessionParticipant(conversation.metadata, participant.id)) {
+      return undefined;
+    }
+    if (this.participantHasAnswered(conversation, participant.id)) {
+      return undefined;
+    }
+    const forkable = origin.kind === participant.kind && (participant.kind === "claude-code" || participant.kind === "codex-cli");
+    let read = await this.forkOriginSessionId(origin);
+    // A member that moved here whose session still waits on her server (a
+    // move hands it over at the member's next turn): taken now, as that
+    // turn would take it, so the copy starts from it.
+    if (!read.sessionId && forkable && await this.takeForkOriginHandoff(origin)) {
+      read = await this.forkOriginSessionId(origin);
+    }
+    const sessionId = read.sessionId;
+    const sourceSessions = read.sessions;
+    if (!sessionId || !forkable) {
+      void this.debugLogs.write("chat.session.fork-to-new-chat.source-missing", {
+        conversationId: conversation.id,
+        participantId: participant.id,
+        sourceConversationId: origin.conversationId,
+        sourceParticipantId: origin.participantId,
+        sourceChatHere: Boolean(sourceSessions),
+        forkable
+      });
+      // Read on every device (a line in the chat): the place is named, not "this".
+      const place = this.machineRuntime ? `the cloud machine @${participant.handle} runs on` : "your computer";
+      const label = (kind: ChatProviderKind): string => cliProviderMetadata(kind).label;
+      const why = origin.kind !== participant.kind
+        ? `@${participant.handle} now runs on ${label(participant.kind)}, not ${label(origin.kind)}`
+        : !forkable ? `${label(participant.kind)} has no session fork` : `that session is not on ${place}`;
+      return `@${participant.handle} could not start from a copy of ${this.forkOriginSessionName(origin)}: ${why}, so it starts a clean session.`;
+    }
+    // The copy ends with the turn of the reply the User saw last, at the
+    // point that reply recorded in this session, or by its finish.
+    const cut = forkCutFor(origin.seen, sessionId);
+    session.forkFrom = { participantId: origin.participantId, sessionId, kind: origin.kind, conversationId: origin.conversationId, cut };
+    session.forkedFromParticipantId = origin.participantId;
+    void this.debugLogs.write("chat.session.fork-to-new-chat", {
+      conversationId: conversation.id,
+      participantId: participant.id,
+      sourceConversationId: origin.conversationId,
+      sourceParticipantId: origin.participantId,
+      cut: cut.at ? "recorded" : cut.finishedBy ? "by-time" : "none",
+      ...(cut.unknown ? { cutUnknown: cut.unknown } : {})
+    });
+    void this.withChatMutation(conversation, async () => {
+      if (this.chatSessions(conversation).some((item) => item.participantId === participant.id)) return;
+      this.upsertSession(conversation, session);
+      this.queueSnapshot(conversation);
+    }).catch((error) => {
+      void this.debugLogs.write("chat.session.persist-failed", {
+        conversationId: conversation.id,
+        participantId: participant.id,
+        error: error instanceof Error ? error.message : String(error)
+      });
+    });
+    return undefined;
+  }
+
+  /** The CLI session id of the member a forked main session copies, from
+   *  the session records of the member's chat on this device (only those:
+   *  that chat can be long); `sessions` is undefined when the chat is not
+   *  here. */
+  private async forkOriginSessionId(origin: ChatParticipantForkOrigin): Promise<{ sessionId?: string; sessions?: unknown[] }> {
+    const sessions: unknown[] | undefined = this.storage.conversationParticipantSessions
+      ? await this.storage.conversationParticipantSessions(origin.conversationId).catch(() => undefined)
+      : await this.storage.getConversation(origin.conversationId)
+        .then((source) => source?.kind === "chat" ? this.chatSessions(source) : undefined)
+        .catch(() => undefined);
+    const record = (sessions ?? []).find((item): item is ChatParticipantSession =>
+      Boolean(item) && typeof item === "object" && (item as { participantId?: unknown }).participantId === origin.participantId);
+    const sessionId = typeof record?.sessionId === "string" && record.sessionId.trim() ? record.sessionId.trim() : undefined;
+    return { ...(sessionId ? { sessionId } : {}), ...(sessions ? { sessions } : {}) };
+  }
+
+  /** The member a forked main session copies moved to this device and its
+   *  session waits here on her server: taken (takeSessionHandoff, the same
+   *  step its own next turn takes). True when there was one to take. */
+  private async takeForkOriginHandoff(origin: ChatParticipantForkOrigin): Promise<boolean> {
+    const listed: unknown = typeof this.storage.conversationAccess === "function"
+      ? (await this.storage.conversationAccess(origin.conversationId).catch(() => undefined))?.participants
+      : (await this.storage.getConversation(origin.conversationId).catch(() => undefined))?.metadata.participants;
+    const participants: unknown[] = Array.isArray(listed) ? listed : [];
+    const member = participants.find((item): item is ChatParticipant =>
+      Boolean(item) && typeof item === "object" && (item as { id?: unknown }).id === origin.participantId);
+    if (!member?.sessionHandoff || !this.runsHere(member)) return false;
+    const source = await this.requireChat(origin.conversationId).catch(() => undefined);
+    if (!source) return false;
+    await this.takeSessionHandoff(source, member).catch((error: unknown) => {
+      void this.debugLogs.write("chat.session.fork-to-new-chat.handoff-failed", {
+        sourceConversationId: origin.conversationId,
+        sourceParticipantId: origin.participantId,
+        error: error instanceof Error ? error.message : String(error)
+      });
+    });
+    return true;
+  }
+
+  /** Whether the member has a finished reply in this chat (a reply still
+   *  being written, or a placeholder for one, does not count). The chat's
+   *  messages can be a window: its newest message outside it was finished. */
+  private participantHasAnswered(conversation: Conversation, participantId: string): boolean {
+    return memberHasFinishedReply(this.normalizedLastMessageByParticipant(conversation.metadata.lastMessageByParticipant), participantId, conversation.messages);
+  }
+
+  /** The session a main session made by Fork to new chat was copied from,
+   *  as the chat and the main session are told: "@x's session in the chat
+   *  "Title"". */
+  private forkOriginSessionName(origin: ChatParticipantForkOrigin): string {
+    return `@${origin.handle}'s session in the chat "${origin.conversationTitle}"`;
+  }
+
+  /** Where a fork's copy ends, for the CLI (Fork to new chat): the point its
+   *  reply recorded (and the session it is in), or the reply's finish; none
+   *  for a delegated fork. When no point can be named, or the CLI cannot
+   *  stop there, a line in the chat says so before the turn's reply (it may
+   *  last hours, and the app may stop during it): Codex once its copy is
+   *  made, Claude Code once it has read the member's transcript. A source
+   *  that is gone gets no copy and no such line. */
+  private forkCutRunOption(
+    conversation: Conversation,
+    participant: ChatParticipant,
+    forkSource: ChatSessionForkSource
+  ): { forkCut?: { at?: string; sessionId?: string; finishedBy?: string; unknown?: string }; onForkCutMissed?: (reason: string) => void } {
+    const cut = forkSource.cut;
+    if (!cut) return {};
+    const note = (reason: string): void => {
+      const text = this.forkCutNoteText(participant, reason);
+      if (text) this.postForkNotice(conversation, participant, "cut-missed", text);
+    };
+    // No point to give the CLI: it copies the whole session and says why
+    // once it knows there is a copy to make.
+    if (cut.unknown) return { forkCut: { unknown: cut.unknown }, onForkCutMissed: note };
+    const forkCut = cut.at
+      ? { at: cut.at, ...(cut.sessionId ? { sessionId: cut.sessionId } : {}) }
+      : cut.finishedBy ? { finishedBy: cut.finishedBy } : undefined;
+    return forkCut ? { forkCut, onForkCutMissed: note } : {};
+  }
+
+  /** The line: "@main's copy of @x's session may include what @x did after
+   *  you tapped Fork: <why>." Short enough for any chat's notices whatever
+   *  the source chat's title (the new chat is named after it). */
+  private forkCutNoteText(participant: ChatParticipant, reason: string): string | undefined {
+    const origin = participant.forkOrigin;
+    return origin ? `@${participant.handle}'s copy of @${origin.handle}'s session may include what @${origin.handle} did after you tapped Fork: ${reason}.` : undefined;
+  }
+
+  /** The chat's word when a forked main session's copy holds the member's
+   *  whole session although it was to end with the reply the User saw last:
+   *  only once the copy was made (not when it started clean instead). */
+  private forkCutMissedNote(
+    participant: ChatParticipant,
+    forkSource: ChatSessionForkSource,
+    session: ChatParticipantSession,
+    result: Pick<ParticipantRunResult, "forkCutMissed" | "error">
+  ): string | undefined {
+    const origin = participant.forkOrigin;
+    // Said at once through onForkCutMissed; this is the safety net for a
+    // runner that only reported it with the turn (the line is written once).
+    const reason = result.forkCutMissed;
+    // The copy has its own id now, and it is not a fork that could not read
+    // its source (that one is made again, or starts clean, and says so).
+    const copied = Boolean(session.sessionId?.trim()) && session.sessionId !== forkSource.sessionId && !session.forkFrom &&
+      !isForkSourceMissingError(result.error);
+    if (!origin || !forkSource.cut || !reason || !copied) return undefined;
+    void this.debugLogs.write("chat.session.fork-to-new-chat.cut-missed", {
+      participantId: participant.id,
+      sourceConversationId: origin.conversationId,
+      sourceParticipantId: origin.participantId,
+      reason
+    });
+    return this.forkCutNoteText(participant, reason);
+  }
+
+  /**
+   * What a fork says about its copy (Fork to new chat, a delegated fork):
+   * a line in the chat, which goes to her server with the chat, so a fork
+   * run on a cloud machine or asked from the phone has it on every device;
+   * and, as before, a chat warning on the device that ran it. Both, because
+   * the chat's timeline does not show a system line on any device yet: the
+   * warning is what the User sees on the device that ran the fork until the
+   * line has a look of its own. Once per member and kind (the line's id says
+   * which; her server refuses a second line with it), so a turn run again
+   * after a restart or handed over again says nothing more. The warning is
+   * kept in this copy of the chat at once, as it was, and saved with the
+   * next save even when the line's own write fails.
+   */
+  private postForkNotice(conversation: Conversation, participant: ChatParticipant, kind: ForkNoticeKind, text: string): void {
+    this.addConversationWarning(conversation, text);
+    const id = forkNoticeMessageId(participant.id, kind);
+    void this.withChatMutation(conversation, async () => {
+      this.addConversationWarning(conversation, text);
+      if (!conversation.messages.some((message) => message.id === id)) {
+        conversation.messages.push({ ...this.message("system", text, undefined, { threadId: "system" }), id });
+      }
+      this.queueSnapshot(conversation);
+    }).catch((error) => {
+      void this.debugLogs.write("chat.fork-notice.persist-failed", {
+        conversationId: conversation.id,
+        participantId: participant.id,
+        kind,
+        error: error instanceof Error ? error.message : String(error)
+      });
+    });
+  }
+
+  /** A reply that ended a turn records where its CLI session stood then
+   *  (ChatMessageMetadata.sessionCut), so Fork to new chat can copy the
+   *  session up to it. */
+  private recordReplySessionCut(message: ChatMessage, result: Pick<ParticipantRunResult, "sessionId" | "sessionCut">): void {
+    const sessionId = result.sessionId?.trim();
+    const at = result.sessionCut?.trim();
+    if (!sessionId || !at) return;
+    message.metadata = { ...message.metadata, sessionCut: { sessionId, at } };
   }
 
   private async newSessionForParticipant(
@@ -14337,7 +15014,8 @@ export class ChatService {
         reasoningEffort: normalizeChatReasoningEffort(item.reasoningEffort, item.kind as ChatProviderKind),
         avatarId: item.avatarId?.trim() || undefined,
         ...this.participantHostFields(item.kind as ChatProviderKind, item.hostId, hosts),
-        agentMode: normalizeChatAgentMode(item.agentMode),
+        // Codex's Full Access is Codex's alone: another CLI stores Auto.
+        agentMode: chatAgentModeForKind(item.kind as ChatProviderKind, item.agentMode),
         permissions: this.normalizeParticipantPermissionsForRole(role, item.permissions, item.permissions === undefined),
         remoteExecution: preservedRemoteExecution(item.remoteExecution),
         homeMachineId: item.homeMachineId || undefined,
@@ -14701,11 +15379,15 @@ export class ChatService {
     return `@${participant.handle} cannot start on this computer: ${reason} Fix it in Settings → Local CLI setup, or start the chat on another provider.`;
   }
 
+  /** Every CLI's readiness, or with `kinds` only those CLIs checked (each
+   *  one's fresh result reused; the rest as last read). */
   private async detectAgentsForReadiness(
-    trigger?: "submit"
+    trigger?: "submit",
+    kinds?: readonly ChatProviderKind[]
   ): Promise<AgentHealth[]> {
     try {
-      return await this.cliRunner.detectAgents(trigger ? { trigger } : undefined);
+      const request = trigger ? { trigger } : undefined;
+      return kinds ? await this.cliRunner.detectAgentKinds(kinds, request) : await this.cliRunner.detectAgents(request);
     } catch {
       throw new Error("Could not verify CLI readiness. Check again and retry.");
     }
@@ -14919,7 +15601,8 @@ export class ChatService {
             reasoningEffort: normalizeChatReasoningEffort(participantRecord.reasoningEffort, kind),
             avatarId: typeof participantRecord.avatarId === "string" ? participantRecord.avatarId.trim() || undefined : undefined,
             hostId: typeof participantRecord.hostId === "string" ? participantRecord.hostId.trim() || undefined : undefined,
-            agentMode: normalizeChatAgentMode(participantRecord.agentMode),
+            // Full Access only by the User's own choice, never by a tool's input.
+            agentMode: chatAgentModeFromAgent(participantRecord.agentMode),
             permissions: normalizeChatAgentPermissions(participantRecord.permissions),
             remoteExecution: preservedRemoteExecution(participantRecord.remoteExecution),
             skipToolchainPreflight: participantRecord.skipToolchainPreflight === true,
@@ -15414,7 +16097,8 @@ export class ChatService {
             reasoningEffort: normalizeChatReasoningEffort(participantRecord.reasoningEffort, kind),
             avatarId: typeof participantRecord.avatarId === "string" ? participantRecord.avatarId.trim() || undefined : undefined,
             hostId: typeof participantRecord.hostId === "string" ? participantRecord.hostId.trim() || undefined : undefined,
-            agentMode: normalizeChatAgentMode(participantRecord.agentMode),
+            // Full Access only by the User's own choice, never by a tool's input.
+            agentMode: chatAgentModeFromAgent(participantRecord.agentMode),
             permissions: permissionsProvided
               ? normalizeChatAgentPermissions(participantRecord.permissions)
               : undefined,
@@ -15445,7 +16129,7 @@ export class ChatService {
       overrides.reasoningEffort = normalizeChatReasoningEffort(record.reasoningEffort);
     }
     if ("agentMode" in record) {
-      overrides.agentMode = normalizeChatAgentMode(record.agentMode);
+      overrides.agentMode = chatAgentModeFromAgent(record.agentMode);
     }
     if ("permissions" in record) {
       overrides.permissions = normalizeChatAgentPermissions(record.permissions);
@@ -25569,6 +26253,19 @@ export class ChatService {
   ): Promise<ChatMessage[]> {
     const link = this.serverLink!;
     const serverRunId = opened.serverRunId;
+    // A machine whose program would run its mode otherwise than its controls
+    // say is never asked: refused before a bubble is shown for it here (one
+    // made for it already says why; a member's request says why in its card).
+    const refused = this.machineCliModesRefusal(conversation, participant);
+    if (refused) {
+      // A turn the server holds for it already (its machine changed, or the
+      // machine greeted again, after the message named it) is stopped there,
+      // so that machine never takes it.
+      if (opened.canonical) {
+        await link.enqueue([{ opId: newOpId(), kind: "turn.stop", conversationId: conversation.id, runId: serverRunId, messageId: triggerMessage.id, participantId: participant.id }]).catch(() => undefined);
+      }
+      throw new RemoteTurnNotStartedError(refused);
+    }
     let placeholder = options.existingPendingMessage;
     if (!placeholder) {
       placeholder = this.message(
@@ -25639,6 +26336,15 @@ export class ChatService {
       }
       if (participant.homeMachineId) {
         const machineId = participant.homeMachineId;
+        // A Cloud run machine whose program turned out to run its mode
+        // otherwise than its controls say is never asked either, before
+        // anything is copied there; a bubble shown only here goes (a bubble
+        // made for it already says why).
+        const refusal = this.machineCliModesRefusal(conversation, participant);
+        if (refusal) {
+          if (!options.existingPendingMessage) await this.dropServerPlaceholder(conversation, bubble.id);
+          throw new Error(refusal);
+        }
         // The chat's project is on the member's machine before its turn is
         // asked there (copied once, never over what is there), and the machine
         // knows where it is: its settings on the server say so.
@@ -25685,7 +26391,12 @@ export class ChatService {
       ...(bubble.metadata?.serverPlaceholder ? { pendingMessageId: bubble.id } : {}),
       request: { kind: "turn", ...(options.continuation ? { continuation: true } : {}) } }]);
     const asked = await link.opAnswered(opId);
-    if (asked.status === "rejected") throw new Error(`@${participant.handle} could not be started on ${machineName}: ${asked.reason}`);
+    if (asked.status === "rejected") {
+      // Refused by the server (a machine whose program cannot run its mode,
+      // say): a bubble shown only here goes, as a refused turn has none.
+      if (!options.existingPendingMessage) await this.dropServerPlaceholder(conversation, bubble.id);
+      throw new Error(`@${participant.handle} could not be started on ${machineName}: ${asked.reason}`);
+    }
     let turn: HubTurn | undefined = asked.turn;
     try {
       if (!turn || !placed(turn)) turn = await this.waitForServerTurn(serverRunId, placed, signal);

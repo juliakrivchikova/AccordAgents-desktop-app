@@ -31,7 +31,7 @@ export { nativeGoalObjective, parseNativeGoalCommand } from "./nativeGoalCommand
 // title (the User, 2026-10-29).
 // The sessions view's access, in each CLI's own terms: the same modes and
 // words in the phone's New chat sheet as in the computer's picker.
-export { applyChatAccessOptionById, chatAccessOptions, defaultChatAccessOption, selectedChatAccessOption } from "./chatAccessModes";
+export { applyChatAccessOptionById, chatAccessModeSet, chatAccessOptions, currentChatAccessId, defaultChatAccessOption, FULL_ACCESS_CONFIRMATION, selectedChatAccessOption, startChatAccessOption } from "./chatAccessModes";
 export { newChatIntro, newChatMainSessionFor, newChatMemberFitsProject, newChatMetadata, newChatParticipants, newChatPickedMembers, newChatTitle } from "./newChat";
 // The list row of a chat the phone started, as the server will list it.
 export { mobileChatGroupLabel, mobileSnippet } from "./mobileChatRow";
@@ -78,3 +78,13 @@ export { sessionsMentionPieces } from "./mainSessionView";
 // Which message is an Accord launch card: the User's own launch, and the
 // main session's (accordLaunchByMainSession), by the desktop's rule.
 export { accordLaunchCardForMessage } from "./accordLaunchCard";
+// Fork to new chat from the phone: the same reasons the computer refuses a
+// member with, its rights as it runs now, and the new chat's main session
+// and title as the computer makes them.
+export {
+  FORK_TO_NEW_CHAT_DETAIL, FORK_TO_NEW_CHAT_LABEL, FORK_TO_NEW_CHAT_SESSIONS_DETAIL, forkToNewChatReasonFromOffer, forkedChatTitle, forkedMainSessionFor, memberAsItRunsNow
+} from "./forkToNewChat";
+// What the app wrote (cards, failures, statuses, Activity rows), as a
+// sessions-view chat shows it: no handles, a member by its task, the main
+// session by nothing; by the desktop's rule.
+export { sessionsMentionText, sessionsViewLabel, sessionsViewNames, sessionsViewReplyText, sessionsViewSummaryText, sessionsViewText } from "./sessionsViewText";

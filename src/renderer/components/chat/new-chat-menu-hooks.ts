@@ -26,7 +26,7 @@ export function useCloseOnOutside<T extends HTMLElement>(open: boolean, onClose:
 
 /** The tallest a New chat menu can be and still fit above its button. The
  *  members menu overlaps its button by NEW_CHAT_PARTICIPANT_MENU_OVERLAP; a
- *  menu that opens right above its button (the model chip's) passes 0. */
+ *  menu that opens right above its button passes 0. */
 export function useNewChatMenuMaxHeight<T extends HTMLElement>(
   rootRef: RefObject<T>,
   open: boolean,

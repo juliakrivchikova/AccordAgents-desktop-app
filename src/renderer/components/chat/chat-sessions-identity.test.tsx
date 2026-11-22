@@ -15,8 +15,9 @@ import { ChatMemberMark, ChatSessionsPresentationContext, renderComposerMemberMa
 import { ChatComposerSendButton } from "./chat-composer-send-button";
 import { memberDefaultModelName, resetMemberModelCatalogs } from "./chat-member-model-name";
 import { ChatParticipantRosterRow } from "./chat-participant-roster-row";
-import { SESSIONS_COMPOSER_PLACEHOLDER, mainComposerTargetIds, memberModelChip, sessionsComposerProps } from "./chat-sessions-composer";
-import { ChatSessionsLinksContext, type ChatSessionsLinks } from "./chat-sessions-links";
+import { SESSIONS_COMPOSER_PLACEHOLDER, mainComposerTargetIds, sessionsComposerProps } from "./chat-sessions-composer";
+import { ChatMemberComposerControls } from "./chat-model-access-picker";
+import { ChatSessionsLinksContext, ChatSessionsNamesContext, sessionsViewNamesFromLinks, type ChatSessionsLinks } from "./chat-sessions-links";
 import { ChatTurnFinishedNote } from "./chat-turn-finished-note";
 import { DREW, MAIN, PARTICIPANTS, TAYLOR } from "./chat-sessions-fixtures.test";
 
@@ -71,12 +72,21 @@ test("a member's mark: its avatar in the classic view; its provider's bare glyph
   composer.unmount();
 });
 
-test("an Accord's launch card names its members by handle with the provider's logo in the sessions view; avatars stay in the classic view", () => {
+test("an Accord's launch card names its members by their task with the provider's logo in the sessions view, the main session by its logo alone; avatars and handles stay in the classic view", () => {
   const card = { facilitator: "main", members: ["drew", "gone"], subject: "Ship on Monday?" };
-  const sessions = renderIn(true, <ChatAccordLaunchCard card={card} participants={PARTICIPANTS} />);
+  const links: ChatSessionsLinks = {
+    mainSessionId: MAIN.id, mainHandle: "main",
+    byHandle: new Map([["drew", { id: DREW.id, title: "Fix the logout" }]]), openMember: () => undefined
+  };
+  const sessions = renderIn(true, (
+    <ChatSessionsLinksContext.Provider value={links}>
+      <ChatSessionsNamesContext.Provider value={sessionsViewNamesFromLinks(links)}><ChatAccordLaunchCard card={card} participants={PARTICIPANTS} /></ChatSessionsNamesContext.Provider>
+    </ChatSessionsLinksContext.Provider>
+  ));
   assert.equal(sessions.root.findAll(hasClass("chat-accord-launch-avatar")).length, 0, "no avatar pictures");
-  assert.deepEqual(providerKinds(sessions.root), [MAIN.kind, DREW.kind], "led by @main (Claude), with @drew (Codex); @gone has no mark");
-  assert.match(textOf(sessions.root), /Accordled by @mainwith @drew, @gone/);
+  assert.deepEqual(providerKinds(sessions.root), [MAIN.kind, DREW.kind], "led by the main session (Claude), with drew's task (Codex); gone has no mark");
+  assert.match(textOf(sessions.root), /Accordled by with Fix the logout, gone/);
+  assert.doesNotMatch(textOf(sessions.root), /@/, "no handles");
   sessions.unmount();
 
   const classic = renderIn(false, <ChatAccordLaunchCard card={card} participants={PARTICIPANTS} />);
@@ -126,18 +136,22 @@ test("the New chat screen shows the main session by its provider's logo, not an 
   member.unmount();
 });
 
-test("the sessions view's composer writes to the main session: no members to mention, its own placeholder, the main session's model chip", () => {
+/** A member's controls under a composer (model, effort, mode). */
+const controls = (participant: typeof MAIN): ReactElement => <ChatMemberComposerControls value={participant} onChange={() => undefined} />;
+const controlText = (root: ReactTestInstance, part: string): string => textOf(root.find((node) => node.type === "button" && node.props["data-testid"] === `chat-model-${part}`));
+
+test("the sessions view's composer writes to the main session: no members to mention, its own placeholder, the main session's controls", () => {
   assert.deepEqual(sessionsComposerProps(undefined), {}, "the classic composer is as before");
   const props = sessionsComposerProps(MAIN.id, (id) => <span data-testid="chip">{id}</span>);
   assert.deepEqual(props.participants, []);
   assert.equal(props.placeholder, SESSIONS_COMPOSER_PLACEHOLDER);
-  const chip = renderIn(true, <>{memberModelChip(PARTICIPANTS, MAIN.id)}</>);
-  assert.deepEqual(providerKinds(chip.root), [MAIN.kind]);
-  assert.equal(textOf(chip.root), "Claude Code", "no model of its own and no list of its CLI's: the CLI's name, never 'Default model'");
+  const chip = renderIn(true, controls(MAIN));
+  assert.deepEqual(providerKinds(chip.root.find((node) => node.type === "button" && node.props["data-testid"] === "chat-model-model")), [MAIN.kind]);
+  assert.equal(controlText(chip.root, "model"), "Claude Code", "no model of its own and no list of its CLI's: the CLI's name, never 'Default model'");
   chip.unmount();
-  const tuned = renderIn(true, <>{memberModelChip([{ ...MAIN, model: "Haiku 5.5", reasoningEffort: "low" }], MAIN.id)}</>);
-  assert.match(textOf(tuned.root), /Haiku 5\.5/);
-  assert.match(textOf(tuned.root), /Low/);
+  const tuned = renderIn(true, controls({ ...MAIN, model: "Haiku 5.5", reasoningEffort: "low" }));
+  assert.equal(controlText(tuned.root, "model"), "Haiku 5.5");
+  assert.equal(controlText(tuned.root, "effort"), "Low", "the effort, a control of its own");
   tuned.unmount();
 });
 
@@ -148,7 +162,7 @@ test("the sessions view's main composer has no active-runs pill; its button stop
   assert.ok("onStopAllRuns" in idle && idle.onStopAllRuns === undefined);
   assert.equal(idle.stop, undefined, "nothing to stop while the main session is idle");
   const busy = sessionsComposerProps(MAIN.id, undefined, { runIds: ["run-main", "run-main-queued"], onStopRun: (runId) => stopped.push(runId) });
-  assert.equal(busy.stop?.label, "Stop the main session");
+  assert.equal(busy.stop?.label, "Stop");
   busy.stop?.onStop();
   assert.deepEqual(stopped, ["run-main", "run-main-queued"], "the main session's runs only");
 
@@ -157,12 +171,12 @@ test("the sessions view's main composer has no active-runs pill; its button stop
   const empty = button(false);
   const stop = empty.root.find((node) => node.type === "button");
   assert.equal(stop.props["data-testid"], "chat-composer-stop");
-  assert.equal(stop.props["aria-label"], "Stop the main session");
+  assert.equal(stop.props["aria-label"], "Stop");
   assert.equal(stop.props.disabled, undefined, "enabled with nothing typed");
   empty.unmount();
   const typed = button(true);
   const buttons = typed.root.findAll((node) => node.type === "button");
-  assert.deepEqual(buttons.map((node) => node.props["aria-label"]), ["Stop the main session", "Send message"],
+  assert.deepEqual(buttons.map((node) => node.props["aria-label"]), ["Stop", "Send message"],
     "typing keeps a way to stop, as a CLI interrupts whatever is in its prompt; Send stays the main button");
   assert.ok(buttons[0]!.props.className.includes("is-beside-send"), "the secondary Stop");
   act(() => buttons[1]!.props.onClick());
@@ -181,7 +195,7 @@ test("the sessions view's main composer has no active-runs pill; its button stop
   classic.unmount();
 });
 
-test("a member's settings card names it by its task in the sessions view, the main session as Main session; the classic view keeps the handle", () => {
+test("a member's settings card names it by its task in the sessions view, the main session by its CLI (no label for it); the classic view keeps the handle", () => {
   const links: ChatSessionsLinks = {
     mainSessionId: MAIN.id, mainHandle: "main",
     byHandle: new Map([["drew", { id: DREW.id, title: "Fix the logout" }]]), openMember: () => undefined
@@ -199,7 +213,7 @@ test("a member's settings card names it by its task in the sessions view, the ma
   assert.equal(name(drew.root), "Fix the logout");
   drew.unmount();
   const main = renderIn(true, <ChatSessionsLinksContext.Provider value={links}>{row(MAIN)}</ChatSessionsLinksContext.Provider>);
-  assert.equal(name(main.root), "Main session");
+  assert.equal(name(main.root), "Claude Code");
   main.unmount();
   const classic = renderIn(false, row(DREW));
   assert.match(name(classic.root), /drew/);
@@ -223,7 +237,7 @@ test("a member without a model of its own: its chip names the model its CLI runs
   // A member on an added provider: the vendor's default model.
   assert.equal(memberDefaultModelName({ ...MAIN, hostVendor: "zai", hostLabel: "Z.ai" }, undefined), "GLM-5.3");
 
-  // The chip asks the CLI's list once and shows its default, with the effort after it.
+  // The controls ask the CLI's list once and show its default, and the effort beside it.
   resetMemberModelCatalogs();
   const asked: string[] = [];
   // The window the renderer tests run in, or one of its own.
@@ -236,12 +250,12 @@ test("a member without a model of its own: its chip names the model its CLI runs
     return catalog([{ id: "opus", label: "Opus", recommended: true, source: "cli" }]);
   } };
   try {
-    const chip = renderIn(true, <>{memberModelChip([{ ...MAIN, reasoningEffort: "high" }], MAIN.id)}</>);
+    const chip = renderIn(true, controls({ ...MAIN, reasoningEffort: "high" }));
     await act(async () => { await new Promise((resolve) => setTimeout(resolve, 0)); });
-    assert.equal(textOf(chip.root), "OpusHigh");
+    assert.deepEqual([controlText(chip.root, "model"), controlText(chip.root, "effort")], ["Opus", "High"]);
     chip.unmount();
-    const again = renderIn(true, <>{memberModelChip(PARTICIPANTS, MAIN.id)}</>);
-    assert.equal(textOf(again.root), "Opus", "known at once the next time");
+    const again = renderIn(true, controls(MAIN));
+    assert.equal(controlText(again.root, "model"), "Opus", "known at once the next time");
     again.unmount();
     assert.deepEqual(asked, ["claude-code"], "asked once");
   } finally {
@@ -266,7 +280,8 @@ test("a turn-finished note names the main session and members without handles in
     </ChatSessionsLinksContext.Provider>
   );
   const main = renderIn(true, note(MAIN));
-  assert.match(textOf(main.root), /Main session finished answering/);
+  assert.match(textOf(main.root), /^Finished answering/);
+  assert.doesNotMatch(textOf(main.root), /main session/i);
   main.unmount();
   const drew = renderIn(true, note(DREW));
   assert.match(textOf(drew.root), /Fix the logout finished answering/);

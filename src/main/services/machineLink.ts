@@ -13,8 +13,11 @@
  * settings on the server, sealed for that machine alone.
  */
 
+import { normalizeCliStartDefaultsByKind, type CliStartDefaultsByKind } from "../../shared/cliStartDefaults";
 import type { MachineMemberRestartSupport } from "../../shared/memberRestart";
 import type { MachineSessionMoveSupport, MachineSessionMoveTarget } from "../../shared/memberSessionMove";
+import { forkToNewChatSupportFromHello, type ForkToNewChatMachineSupport } from "../../shared/forkToNewChat";
+import { cliModesSupportFromHello, type CliModesMachineSupport } from "../../shared/chatAccessModes";
 import { createHash, randomUUID } from "node:crypto";
 import { EventEmitter } from "node:events";
 import {
@@ -420,6 +423,39 @@ export class MachineLinkService {
     const hello = connection.record.lastHello;
     const support: MachineSessionMoveSupport = !hello ? "unknown" : hello.sessionMoveSupported === true ? "supported" : "outdated";
     return { support, name: connection.record.name, machineId: connection.record.id, ...(connection.record.deviceId ? { deviceId: connection.record.deviceId } : {}) };
+  }
+
+  /** Whether a machine starts a main session from a copy of a member's
+   *  session in another chat (Fork to new chat), by the last hello it sent
+   *  this desktop, connected or not: its program changes only through this
+   *  desktop. */
+  forkToNewChatSupport(machineId: string): ForkToNewChatMachineSupport {
+    return forkToNewChatSupportFromHello((this.connections.get(machineId)?.record ?? this.enrolled.get(machineId))?.lastHello);
+  }
+
+  /** Whether a machine runs Codex's Full Access and Plan mode as the menus
+   *  set them, by the last hello it sent this desktop, connected or not: its
+   *  program changes only through this desktop. */
+  cliModesSupport(machineId: string): CliModesMachineSupport {
+    return cliModesSupportFromHello((this.connections.get(machineId)?.record ?? this.enrolled.get(machineId))?.lastHello);
+  }
+
+  /** cliModesSupport of every machine that has greeted this desktop, for the
+   *  User's server, which holds a phone's or a machine's turns to it. */
+  cliModesByMachine(): Record<string, boolean> {
+    const known = new Map<string, boolean>();
+    for (const record of [...this.enrolled.values(), ...[...this.connections.values()].map((connection) => connection.record)]) {
+      const support = cliModesSupportFromHello(record.lastHello);
+      if (support !== "unknown") known.set(record.id, support === "supported");
+    }
+    // In one order, so an unchanged set reads the same.
+    return Object.fromEntries([...known.entries()].sort(([a], [b]) => a.localeCompare(b)));
+  }
+
+  /** What each CLI on a machine starts a new session in with that machine's
+   *  own config, by the last hello it sent this desktop. */
+  cliStartDefaults(machineId: string): CliStartDefaultsByKind | undefined {
+    return normalizeCliStartDefaultsByKind((this.connections.get(machineId)?.record ?? this.enrolled.get(machineId))?.lastHello?.cliStartDefaults);
   }
 
   /** Ask a machine to do something with its scheduled scripts and wait for
@@ -908,11 +944,14 @@ export class MachineLinkService {
       connection.helloRequestTimer = undefined;
     }
     const { type: _type, ...rest } = hello;
+    // A runtime that just started greets before its CLIs have said what they
+    // start in: what it said before stays until it says it again.
+    const previousStart = connection.record.lastHello?.cliStartDefaults;
     connection.record = {
       ...connection.record,
       deviceId: hello.deviceId,
       lastSeenAt: this.now().toISOString(),
-      lastHello: rest
+      lastHello: rest.cliStartDefaults || !previousStart || rest.cliModesSupported !== true ? rest : { ...rest, cliStartDefaults: previousStart }
     };
     await this.persistRecord(connection, true);
     if (this.options.desktopDeviceId === connection.pairing.issuer.originId) {

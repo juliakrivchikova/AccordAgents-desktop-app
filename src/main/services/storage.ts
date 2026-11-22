@@ -4,6 +4,7 @@ import path from "node:path";
 import { userDataPath } from "../platform";
 import { SqliteSession } from "./sqliteSession";
 import type {
+  ChatForkSeenReply,
   ChatMessage,
   ChatParticipant,
   ChatRunningMessageTarget,
@@ -27,9 +28,12 @@ import {
   sortChatActivityItems
 } from "../../shared/chatActivity";
 import { clearChatRunMetadata, clearParticipantCompactions, readParticipantCompactions } from "../../shared/chatRunState";
+import { latestTaskByMember, sessionsTaskTitle } from "../../shared/mainSessionView";
 import { normalizeInferredParticipantRequestThreads as normalizeInferredParticipantRequestThreadMetadata } from "../../shared/chatParticipantRequestThreads";
 import { normalizeConversationSummaryChatParticipants } from "../../shared/conversationSummary";
 import { sanitizeConversationWarnings } from "../../shared/warnings";
+import { forkSeenReplyOf, isMemberTurnEnd } from "../../shared/forkToNewChat";
+import type { ForkReplyView } from "../../shared/forkToNewChat";
 import { DeviceEventBlobStorage } from "./deviceEventBlobStorage";
 import { HubStorage } from "./hubStorage";
 import { HubOpsStore } from "./hubOpsStore";
@@ -287,6 +291,10 @@ export interface ChatSearchConversationSnapshot {
   oldestMessageAt?: string;
   newestMessageAt?: string;
   participants: ChatParticipant[];
+  /** The chat's main session and view, for how its results name authors
+   *  (the sessions view names none). */
+  mainSessionParticipantId?: string;
+  chatView?: string;
   sourceReadable?: boolean;
 }
 
@@ -555,12 +563,16 @@ export class StorageService {
   }
 
   /** A chat's kind, project folder and members, without its messages or
-   *  the rest of its body (members' memory asks this on every request). */
-  async conversationAccess(id: string): Promise<{ kind: string; repoPath?: string; participants: unknown[] } | undefined> {
+   *  the rest of its body (members' memory asks this on every request); its
+   *  main session and view, for how the server words what it sends outside
+   *  (an urgent alert names nobody by handle in the sessions view). */
+  async conversationAccess(id: string): Promise<{ kind: string; repoPath?: string; participants: unknown[]; mainSessionParticipantId?: string; chatView?: string } | undefined> {
     await this.init();
-    const rows = await this.queryJson<{ kind: string; repoPath: string | null; participantsJson: string | null }>(
+    const rows = await this.queryJson<{ kind: string; repoPath: string | null; participantsJson: string | null; mainSessionParticipantId: string | null; chatView: string | null }>(
       `select kind, repo_path as repoPath,
-         json_extract(coalesce(nullif(body_json, ''), payload_json), '$.metadata.participants') as participantsJson
+         json_extract(coalesce(nullif(body_json, ''), payload_json), '$.metadata.participants') as participantsJson,
+         json_extract(coalesce(nullif(body_json, ''), payload_json), '$.metadata.mainSessionParticipantId') as mainSessionParticipantId,
+         json_extract(coalesce(nullif(body_json, ''), payload_json), '$.metadata.chatView') as chatView
        from conversations where id = ${sqlString(id)};`
     );
     const row = rows[0];
@@ -572,7 +584,58 @@ export class StorageService {
     } catch {
       participants = [];
     }
-    return { kind: row.kind, ...(row.repoPath ? { repoPath: row.repoPath } : {}), participants };
+    return {
+      kind: row.kind,
+      ...(row.repoPath ? { repoPath: row.repoPath } : {}),
+      participants,
+      ...(typeof row.mainSessionParticipantId === "string" && row.mainSessionParticipantId ? { mainSessionParticipantId: row.mainSessionParticipantId } : {}),
+      ...(typeof row.chatView === "string" && row.chatView ? { chatView: row.chatView } : {})
+    };
+  }
+
+  /** The chat's newest messages that give a member a task (a request item
+   *  naming it as its target; not the requests it sent itself), read without
+   *  the rest of the chat: how the sessions view titles that member
+   *  (sessionsMemberTitle). */
+  async memberTaskMessages(conversationId: string, participantId: string, limit = 5): Promise<ChatMessage[]> {
+    await this.init();
+    const target = `${JSON.stringify("targetParticipantId")}:${JSON.stringify(participantId)}`;
+    const rows = await this.queryJson<{ payloadJson: string }>(
+      `select payload_json as payloadJson from conversation_messages
+       where conversation_id = ${sqlString(conversationId)}
+         and instr(payload_json, '"participantRequest"') > 0
+         and instr(payload_json, ${sqlString(target)}) > 0
+       order by sequence desc limit ${Math.max(1, Math.floor(limit))};`
+    );
+    return rows.flatMap((row) => {
+      try {
+        const message = JSON.parse(row.payloadJson) as ChatMessage;
+        return message && typeof message === "object" ? [message] : [];
+      } catch {
+        return [];
+      }
+    }).reverse();
+  }
+
+  /** A chat's member session records (this device's own), without its
+   *  messages: a main session made by Fork to new chat reads the session of
+   *  the member it copies from that member's chat, which can be thousands of
+   *  messages long. `undefined` when no such chat is stored. */
+  async conversationParticipantSessions(id: string): Promise<unknown[] | undefined> {
+    await this.init();
+    const rows = await this.queryJson<{ kind: string; sessionsJson: string | null }>(
+      `select kind,
+         json_extract(coalesce(nullif(body_json, ''), payload_json), '$.metadata.participantSessions') as sessionsJson
+       from conversations where id = ${sqlString(id)};`
+    );
+    const row = rows[0];
+    if (!row || row.kind !== "chat") return undefined;
+    try {
+      const parsed = row.sessionsJson ? JSON.parse(row.sessionsJson) as unknown : [];
+      return Array.isArray(parsed) ? parsed : [];
+    } catch {
+      return [];
+    }
   }
 
   /** The titles of the chats named (those this device still has). */
@@ -880,11 +943,13 @@ export class StorageService {
       ...(request.clearedRecentThroughByGroup ? { clearedRecentThroughByGroup: request.clearedRecentThroughByGroup } : {}),
       ...(request.clearedRecentThroughBefore ? { clearedRecentThroughBefore: request.clearedRecentThroughBefore } : {})
     };
+    const knownTitles = await this.activitySessionsTitles([...conversationsById.values()]);
     const items = [...conversationsById.values()].flatMap((conversation) =>
       buildChatActivityItems(conversation, {
         recentWindowDays,
         lastViewedAt: request.lastViewedAtByConversationId?.[conversation.id],
-        preferences
+        preferences,
+        ...(knownTitles.has(conversation.id) ? { knownTitles: knownTitles.get(conversation.id) } : {})
       })
     );
     return {
@@ -1072,6 +1137,79 @@ export class StorageService {
     };
   }
 
+  /** Whether a member has a finished reply in a chat (the rule of
+   *  isFinishedMemberReply): it ran there, so its device holds a session to
+   *  fork (Fork to new chat from the phone). Read newest first, stopping at
+   *  the first; a member that never answered reads the chat's messages once
+   *  (when the phone's menu opens, never per list). */
+  async conversationParticipantAnswered(conversationId: string, participantId: string): Promise<boolean> {
+    await this.init();
+    const rows = await this.queryJson<{ found: number }>(
+      `select 1 as found from conversation_messages
+        where conversation_id = ${sqlString(conversationId)}
+          and json_extract(payload_json, '$.role') = 'participant'
+          and json_extract(payload_json, '$.participantId') = ${sqlString(participantId)}
+          and coalesce(json_extract(payload_json, '$.status'), '') <> 'pending'
+          and coalesce(json_extract(payload_json, '$.metadata.serverPlaceholder'), 0) <> 1
+        order by sequence desc limit 1;`
+    );
+    return rows.length > 0;
+  }
+
+  /** The member's newest reply that ended a turn of its CLI (the rule of
+   *  isMemberTurnEnd), as Fork to new chat keeps it (forkSeenReplyOf): where
+   *  the copy ends. Read newest first, stopping at the first, and only the
+   *  fields the cut needs (a reply can carry a long transcript). */
+  async conversationLastTurnEnd(conversationId: string, participantId: string): Promise<ChatForkSeenReply | undefined> {
+    await this.init();
+    const rows = await this.queryJson<{ id: string; createdAt?: string; turnStartedAt?: string; workedMs?: number; sessionCut?: string }>(
+      `select message_id as id,
+              json_extract(payload_json, '$.createdAt') as createdAt,
+              json_extract(payload_json, '$.metadata.turnStartedAt') as turnStartedAt,
+              json_extract(payload_json, '$.metadata.workedMs') as workedMs,
+              json_extract(payload_json, '$.metadata.sessionCut') as sessionCut
+         from conversation_messages
+        where conversation_id = ${sqlString(conversationId)}
+          and json_extract(payload_json, '$.role') = 'participant'
+          and json_extract(payload_json, '$.participantId') = ${sqlString(participantId)}
+          and coalesce(json_extract(payload_json, '$.status'), '') <> 'pending'
+          and coalesce(json_extract(payload_json, '$.metadata.serverPlaceholder'), 0) <> 1
+          and (json_type(payload_json, '$.metadata.workedMs') in ('integer', 'real')
+            or (json_type(payload_json, '$.metadata.sessionCut.sessionId') = 'text'
+              and json_type(payload_json, '$.metadata.sessionCut.at') = 'text'))
+        order by sequence desc limit 20;`
+    );
+    // The first that ends a turn by the shared rule (the query narrows to
+    // the same, but a cut it cannot use is skipped, as on the phone's view).
+    for (const row of rows) {
+      const seen = this.lastTurnEndRow(row, participantId);
+      if (seen) return seen;
+    }
+    return undefined;
+  }
+
+  private lastTurnEndRow(row: { id: string; createdAt?: string; turnStartedAt?: string; workedMs?: number; sessionCut?: string }, participantId: string): ChatForkSeenReply | undefined {
+    if (!row || typeof row.id !== "string") return undefined;
+    let sessionCut: unknown;
+    try {
+      sessionCut = typeof row.sessionCut === "string" ? JSON.parse(row.sessionCut) : undefined;
+    } catch {
+      sessionCut = undefined;
+    }
+    const view: ForkReplyView = {
+      id: row.id,
+      role: "participant",
+      participantId,
+      ...(typeof row.createdAt === "string" ? { createdAt: row.createdAt } : {}),
+      metadata: {
+        ...(typeof row.turnStartedAt === "string" ? { turnStartedAt: row.turnStartedAt } : {}),
+        ...(typeof row.workedMs === "number" ? { workedMs: row.workedMs } : {}),
+        ...(sessionCut !== undefined ? { sessionCut } : {})
+      }
+    };
+    return isMemberTurnEnd(view, participantId) ? forkSeenReplyOf(view) : undefined;
+  }
+
   /** One message of a chat by its id: a single read through the chat's
    *  message-id index, for readers that need nothing around it. */
   async conversationMessageById(conversationId: string, messageId: string): Promise<ChatMessage | undefined> {
@@ -1204,6 +1342,8 @@ export class StorageService {
       oldestMessageAt?: string | null;
       newestMessageAt?: string | null;
       participantsHex?: string;
+      mainSessionParticipantId?: string | null;
+      chatView?: string | null;
       payloadValid: number | string;
     }>(`
       with chat_bodies as (
@@ -1236,6 +1376,8 @@ export class StorageService {
         ${includeParticipants
           ? "case when json_valid(c.source_json) then hex(coalesce(json_extract(c.source_json, '$.metadata.participants'), '[]')) end"
           : "NULL"} as participantsHex,
+        case when json_valid(c.source_json) then json_extract(c.source_json, '$.metadata.mainSessionParticipantId') end as mainSessionParticipantId,
+        case when json_valid(c.source_json) then json_extract(c.source_json, '$.metadata.chatView') end as chatView,
         json_valid(c.source_json) as payloadValid
       from chat_bodies c
       left join message_stats s on s.conversation_id = c.id
@@ -1257,6 +1399,8 @@ export class StorageService {
             ? parseHexJson<unknown[]>(row.participantsHex, `chat search participants ${row.conversationId}`)
               .filter(isStoredChatParticipant)
             : [],
+          ...(typeof row.mainSessionParticipantId === "string" && row.mainSessionParticipantId ? { mainSessionParticipantId: row.mainSessionParticipantId } : {}),
+          ...(typeof row.chatView === "string" && row.chatView ? { chatView: row.chatView } : {}),
           sourceReadable
         };
       } catch (error) {
@@ -2463,6 +2607,50 @@ export class StorageService {
   private async queryConversationIds(whereSql: string): Promise<string[]> {
     const rows = await this.queryJson<{ id: string }>(`select id from conversations where ${whereSql};`);
     return rows.flatMap((row) => typeof row.id === "string" && row.id.trim() ? [row.id] : []);
+  }
+
+  /** The task titles of the members of chats shown in the sessions view, by
+   *  chat and member: Activity names a member by its task there, and the
+   *  rows it reads hold only recent messages. Each chat's newest 40 task
+   *  messages (request messages) are read, nothing else. */
+  private async activitySessionsTitles(conversations: Conversation[]): Promise<Map<string, Map<string, string>>> {
+    const sessionsChats = conversations.filter((conversation) =>
+      Boolean(conversation.metadata?.mainSessionParticipantId) && (conversation.metadata?.chatView ?? "sessions") === "sessions");
+    const result = new Map<string, Map<string, string>>();
+    if (sessionsChats.length === 0) return result;
+    // Only the request of each message is read, not its whole payload.
+    const rows = await this.queryJson<{ conversationId: string; requestHex: string | null }>(
+      `select conversationId, hex(requestJson) as requestHex from (
+         select conversation_id as conversationId, json_extract(payload_json, '$.metadata.participantRequest') as requestJson,
+           row_number() over (partition by conversation_id order by sequence desc) as rank
+         from conversation_messages
+         where conversation_id in ${sqlStringList(sessionsChats.map((conversation) => conversation.id))}
+           and instr(payload_json, '"participantRequest"') > 0
+       ) where rank <= 40 and requestJson is not null;`
+    ).catch((error: unknown) => {
+      console.warn(`[StorageService] Activity task titles could not be read: ${error instanceof Error ? error.message : String(error)}`);
+      return [];
+    });
+    const messagesByChat = new Map<string, ChatMessage[]>();
+    for (const row of rows) {
+      if (!row.requestHex) continue;
+      try {
+        const participantRequest = parseHexJson<NonNullable<NonNullable<ChatMessage["metadata"]>["participantRequest"]>>(row.requestHex, `activity task ${row.conversationId}`);
+        const list = messagesByChat.get(row.conversationId) ?? [];
+        list.push({ id: participantRequest.id, role: "participant", content: "", createdAt: participantRequest.createdAt, status: "done", metadata: { participantRequest } } as ChatMessage);
+        messagesByChat.set(row.conversationId, list);
+      } catch {
+        // A request that does not read names nobody.
+      }
+    }
+    for (const conversation of sessionsChats) {
+      const tasks = latestTaskByMember(messagesByChat.get(conversation.id) ?? []);
+      const titles = new Map<string, string>();
+      for (const [participantId, task] of tasks) titles.set(participantId, sessionsTaskTitle(task.item) || "");
+      for (const [participantId, title] of titles) if (!title) titles.delete(participantId);
+      if (titles.size > 0) result.set(conversation.id, titles);
+    }
+    return result;
   }
 
   private async activityMessageRows(

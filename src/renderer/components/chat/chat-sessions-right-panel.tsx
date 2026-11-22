@@ -102,10 +102,10 @@ export function ChatSessionsRightPanel(props: {
   onLoadOlderMessages: () => void;
   onSendToMember: (request: ChatMemberSendRequest) => Promise<boolean>;
   onStopRuns?: (runIds: readonly string[]) => void;
-  /** A member's settings (model, effort, mode, rights, where it runs, remove),
-   *  opened from its session's header. */
+  /** A member's … actions (Restart, Fork to new chat, Remove from chat) in
+   *  its session's header. */
   renderMemberSettings?: (participantId: string) => ReactNode;
-  /** Its model chip in its session's composer. */
+  /** Its controls under its session's composer. */
   renderMemberChip?: (participantId: string) => ReactNode;
 }): JSX.Element | null {
   const { rightPanel, sessions, conversation, messageContext } = props;

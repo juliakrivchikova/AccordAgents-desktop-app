@@ -59,7 +59,7 @@ import { useChatViewMode } from "./use-chat-view-mode";
 import { ChatViewHeaderContext } from "./chat-view-switch";
 import type { ChatPanelMessageContext } from "./chat-sessions-right-panel";
 import { ChatSessionsWaitingLine } from "./chat-sessions-timeline-row";
-import { ChatSessionsLinksContext, useStableMap } from "./chat-sessions-links";
+import { ChatSessionsLinksContext, ChatSessionsNamesContext, useStableMap, useStableSessionsViewNames } from "./chat-sessions-links";
 import { mainComposerTargetIds, sessionsComposerProps } from "./chat-sessions-composer";
 import { ChatViewRightPanels } from "./chat-view-right-panels";
 
@@ -232,6 +232,14 @@ export function ChatConversationView(props: ChatConversationViewProps): JSX.Elem
   const sessionsChrome = useChatSessionsChrome({
     sessions, viewMode, rightPanel, participantsById, closeArtifacts: artifacts.closePanel, accordOpen: Boolean(dockedAccord)
   });
+  // The names the app's own words use in the sessions view, the same object
+  // while no name changes (rows that read them are not drawn again per token).
+  const sessionsNames = useStableSessionsViewNames(sessionsChrome.links);
+  // The main session's … actions go into the chat title's menu.
+  const mainSessionActions = props.mainSessionActions;
+  const headerState = useMemo(() => sessions && mainSessionActions
+    ? { ...sessionsChrome.header, mainSession: { id: sessions.mainSessionId, actions: mainSessionActions } }
+    : sessionsChrome.header, [mainSessionActions, sessions, sessionsChrome.header]);
   const viewport = useChatConversationViewport({
     conversationId: props.conversation.id,
     messages: props.conversation.messages,
@@ -377,7 +385,7 @@ export function ChatConversationView(props: ChatConversationViewProps): JSX.Elem
   };
 
   return (
-    <ChatSessionsPresentationContext.Provider value={Boolean(sessions)}><ChatSessionsLinksContext.Provider value={sessionsChrome.links}>
+    <ChatSessionsPresentationContext.Provider value={Boolean(sessions)}><ChatSessionsLinksContext.Provider value={sessionsChrome.links}><ChatSessionsNamesContext.Provider value={sessionsNames}>
     <MentionDirectoryContext.Provider value={mentionDirectory}>
     <MessageLinkContext.Provider value={viewport.focusChatMessage}>
       <ArtifactsContext.Provider value={artifacts.context}>
@@ -403,7 +411,7 @@ export function ChatConversationView(props: ChatConversationViewProps): JSX.Elem
             }
           }}
         >
-          <ChatViewHeaderContext.Provider value={sessionsChrome.header}>{props.topBar}</ChatViewHeaderContext.Provider>
+          <ChatViewHeaderContext.Provider value={headerState}>{props.topBar}</ChatViewHeaderContext.Provider>
           <div className="chat-main">
             <ChatConversationTimeline
               activityDisclosure={activityDisclosure}
@@ -489,6 +497,7 @@ export function ChatConversationView(props: ChatConversationViewProps): JSX.Elem
                 { runIds: activeRunSummary.runIdsByParticipantId.get(sessions?.mainSessionId ?? "") ?? [], onStopRun: props.onStopRun })}
               status={props.isRunning && !hasPendingParticipantMessage && latestComposerProgress ? <RunStatusLine progress={latestComposerProgress} /> : undefined}
               testId="chat-main-composer"
+              takesFocusRequests
               renderParticipantAvatar={renderComposerMemberMark}
               participantRoleLabel={(participant) => chatRoleLabel(props.settings.chatRoleConfigs, participant)}
             />
@@ -546,7 +555,7 @@ export function ChatConversationView(props: ChatConversationViewProps): JSX.Elem
       </ArtifactsContext.Provider>
     </MessageLinkContext.Provider>
     </MentionDirectoryContext.Provider>
-    </ChatSessionsLinksContext.Provider></ChatSessionsPresentationContext.Provider>
+    </ChatSessionsNamesContext.Provider></ChatSessionsLinksContext.Provider></ChatSessionsPresentationContext.Provider>
   );
 }
 

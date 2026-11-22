@@ -1016,11 +1016,20 @@ function validMemberRules(value: unknown): HubMemberRules {
       handle: entry.handle as string,
       roleConfigId: entry.roleConfigId as string,
       ...(entry.homeMachineId !== undefined ? { homeMachineId: entry.homeMachineId as string } : {}),
-      ...(entry.agentMode === "auto" || entry.agentMode === "plan" || entry.agentMode === "default" ? { agentMode: entry.agentMode } : {}),
+      ...(entry.agentMode === "auto" || entry.agentMode === "plan" || entry.agentMode === "default" || entry.agentMode === "full-access" ? { agentMode: entry.agentMode } : {}),
       ...(entry.permissions !== undefined ? { permissions: entry.permissions as unknown as NonNullable<HubMemberRules["presets"][string]["permissions"]> } : {})
     };
   }
-  return { version: 1, roles, presets };
+  // Each machine's program as the computer knows it: advisory, so an entry
+  // in another shape is left out rather than refusing her rules with it.
+  const machineCliModes: Record<string, boolean> = {};
+  const machines = (value as { machineCliModes?: unknown } | undefined)?.machineCliModes;
+  if (isRecord(machines)) {
+    for (const [machineId, runs] of Object.entries(machines).slice(0, 500)) {
+      if (id(machineId) && typeof runs === "boolean") machineCliModes[machineId] = runs;
+    }
+  }
+  return { version: 1, roles, presets, ...(Object.keys(machineCliModes).length > 0 ? { machineCliModes } : {}) };
 }
 
 function validMachineWake(value: unknown): import("../shared/hubProtocol").HubMachineWakeRequest["machines"] {

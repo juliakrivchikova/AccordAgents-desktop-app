@@ -271,7 +271,7 @@ test("a card published by the desktop is answered on the phone and survives a re
   }
 });
 
-test("in a sessions-view chat a card names the main session without its handle, cut with an ellipsis, never off the screen", { timeout: 180_000 }, async (t) => {
+test("in a sessions-view chat a card names the main session by nothing and a member by its task, cut with an ellipsis, never off the screen", { timeout: 180_000 }, async (t) => {
   const chatChanges = require("../dist/main/main/services/chatChanges.js");
   for (const key of ["mainSessionParticipantId", "chatView"]) {
     if (!chatChanges.SHARED_CONVERSATION_METADATA_KEYS.includes(key)) chatChanges.SHARED_CONVERSATION_METADATA_KEYS.push(key);
@@ -291,27 +291,46 @@ test("in a sessions-view chat a card names the main session without its handle, 
     await hub.close();
     await rm(profile, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
   });
-  await hub.createChat(sessionsChat, { title: "Sessions cards", participants: [main], metadata: { mainSessionParticipantId: main.id, chatView: "sessions" },
-    messages: [{ id: "u1", role: "user", content: "Run the tests", status: "done", createdAt: new Date(Date.now() - 60_000).toISOString(), metadata: { deliveryTargets: [main.id] } }] });
-  await hub.raiseApproval(sessionsChat, {
-    ...approval, id: "card-sessions-1", conversationId: sessionsChat, requesterParticipantId: main.id, requesterHandle: "main", requesterRoleConfigId: "main-session",
-    toolName: "app_tool_permission", capability: "permissions.request", machineName: undefined, codexDecisionId: undefined,
+  const longTitle = "Check that the login page keeps the session after a reload on every browser";
+  const now = Date.now();
+  await hub.createChat(sessionsChat, { title: "Sessions cards", participants: [main, DREW], metadata: { mainSessionParticipantId: main.id, chatView: "sessions" },
+    messages: [
+      { id: "u1", role: "user", content: "Run the tests", status: "done", createdAt: new Date(now - 60_000).toISOString(), metadata: { deliveryTargets: [main.id] } },
+      { id: "req", role: "participant", participantId: main.id, participantLabel: "@main", content: "@drew check it", status: "done", createdAt: new Date(now - 50_000).toISOString(),
+        metadata: { sourceMessageId: "u1", participantRequest: { id: "b", requesterParticipantId: main.id, requesterHandle: "main", source: "mcp", resumeRequester: true,
+          status: "running", depth: 1, createdAt: new Date(now - 50_000).toISOString(), updatedAt: new Date(now - 50_000).toISOString(),
+          items: [{ targetParticipantId: DREW.id, targetHandle: "drew", prompt: "Check it", title: longTitle, status: "running", createdAt: new Date(now - 50_000).toISOString() }] } } }
+    ] });
+  const bash = {
+    ...approval, conversationId: sessionsChat, toolName: "app_tool_permission", capability: "permissions.request", machineName: undefined, codexDecisionId: undefined,
     request: { kind: "toolPermission", toolName: "Bash", toolInput: { command: "npm test -- --grep 'the login page keeps the session after a reload'" } },
     summary: "Use Bash: npm test -- --grep 'the login page keeps the session after a reload'"
-  }, { participantId: main.id });
+  };
+  await hub.raiseApproval(sessionsChat, { ...bash, id: "card-sessions-1", requesterParticipantId: main.id, requesterHandle: "main", requesterRoleConfigId: "main-session" },
+    { participantId: main.id });
+  await hub.raiseApproval(sessionsChat, { ...bash, id: "card-sessions-2", requesterParticipantId: DREW.id, requesterHandle: "drew", requesterRoleConfigId: DREW.roleConfigId },
+    { participantId: DREW.id });
   app = await attachApp({ port: 9356 });
   await pairPage(app, { hub, siteOrigin: site.origin, query: "qa=1" });
   await openChat(app, sessionsChat);
-  await app.waitFor(`Boolean(document.querySelector('[data-card-id="card-sessions-1"] .control-card-who'))`, "the card with who raised it");
+  await app.waitFor(`Boolean(document.querySelector('[data-card-id="card-sessions-1"]')) && Boolean(document.querySelector('[data-card-id="card-sessions-2"] .control-card-who'))`,
+    "both cards, the member's with who raised it");
+  // Its task is known once the chat's messages are read.
+  await app.waitFor(`document.querySelector('[data-card-id="card-sessions-2"] .control-card-who')?.textContent === ${JSON.stringify(longTitle)}`, "the member named by its task");
+  // The main session is named by nothing: no who line, no handle, no label.
+  const mainCard = await app.evaluate(`(() => { const card = document.querySelector('[data-card-id="card-sessions-1"]');
+    return { who: card.querySelectorAll(".control-card-who").length, head: card.querySelector(".control-card-head").textContent }; })()`);
+  assert.equal(mainCard.who, 0, "no who for the main session");
+  assert.doesNotMatch(mainCard.head, /@main|Main session/);
   const who = await app.evaluate(`(() => {
-    const node = document.querySelector('[data-card-id="card-sessions-1"] .control-card-who');
+    const node = document.querySelector('[data-card-id="card-sessions-2"] .control-card-who');
     const style = getComputedStyle(node);
     const box = node.getBoundingClientRect();
     return { text: node.textContent, overflow: style.textOverflow, wrap: style.whiteSpace, hidden: style.overflow,
       inside: box.right <= document.documentElement.clientWidth + 0.5 && box.left >= 0,
       cardInside: node.closest(".control-card").getBoundingClientRect().right <= document.documentElement.clientWidth + 0.5 };
   })()`);
-  assert.deepEqual(who, { text: "Main session", overflow: "ellipsis", wrap: "nowrap", hidden: "hidden", inside: true, cardInside: true },
-    "no handle in the sessions view; cut with an ellipsis rather than pushed off the screen");
-  assert.doesNotMatch(await app.evaluate(`document.querySelector('[data-card-id="card-sessions-1"] .control-card-head').textContent`), /@main/);
+  assert.deepEqual(who, { text: longTitle, overflow: "ellipsis", wrap: "nowrap", hidden: "hidden", inside: true, cardInside: true },
+    "a member by its task, no handle; cut with an ellipsis rather than pushed off the screen");
+  assert.doesNotMatch(await app.evaluate(`document.querySelector('[data-card-id="card-sessions-2"] .control-card-head').textContent`), /@drew/);
 });

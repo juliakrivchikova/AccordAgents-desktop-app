@@ -997,9 +997,6 @@
   white-space: nowrap;
 }
 
-.chat-model-chip-effort {
-  color: var(--app-muted);
-}
 
 /* The main session first in the side panel; a former member's session. */
 .chat-members-row.is-main .chat-members-row-main {

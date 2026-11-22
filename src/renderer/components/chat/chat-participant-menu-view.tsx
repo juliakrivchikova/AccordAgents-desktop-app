@@ -53,6 +53,10 @@ export interface ChatParticipantMenuViewProps {
   /** Members whose restart has not ended. */
   restartingById?: ReadonlyMap<string, MemberRestartInProgress>;
   onRemoveParticipant: (participantId: string) => void;
+  /** Fork to new chat: a new chat whose main session is a copy of the member. */
+  onForkToNewChat?: (participantId: string) => void;
+  /** Why a member cannot be forked to a new chat now. */
+  forkToNewChatReason?: (participant: ChatParticipant) => string | undefined;
   onJumpToParticipantLastMessage: (participantId: string) => void;
   onManageInSettings: () => void;
   /** One member's settings only (the sessions view, from its session or its
@@ -138,6 +142,8 @@ export function ChatParticipantMenuView(props: ChatParticipantMenuViewProps): JS
         onStopRestart={props.onStopRestart}
         restartStatus={props.restartingById?.get(participant.id)}
         onRemoveParticipant={props.onRemoveParticipant}
+        onForkToNewChat={props.onForkToNewChat}
+        forkToNewChatDisabledReason={props.onForkToNewChat ? props.forkToNewChatReason?.(participant) : undefined}
       />
     );
   }

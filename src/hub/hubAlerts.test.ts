@@ -899,3 +899,52 @@ test("settings refuse what cannot work: wait bounds, a plain-http address, malfo
   assert.equal((await h.alerts(h.owner, { action: "telegram.test" })).error?.code, "not_set_up");
   assert.equal((await h.alerts(h.owner, { action: "nonsense" })).error?.code, "invalid_request");
 });
+
+test("in a chat shown in the sessions view Telegram and the call name a member by its task and the main session by nothing; a classic chat keeps the handle", async (t) => {
+  const h = await hub(t, { publicUrl: true });
+  const main: ChatParticipant = { id: "p-main", handle: "main", roleConfigId: "main-session", kind: "claude-code" };
+  const create: HubOp = { opId: `op-${randomBytes(4).toString("hex")}`, kind: "conversation.create", conversationId: "chat-1",
+    conversation: { title: "Deploy monitoring", kind: "chat", createdAt: new Date().toISOString(),
+      metadata: { participants: [main, member], mainSessionParticipantId: main.id, chatView: "sessions" } } };
+  assert.equal((await h.call(h.owner, "POST", "/v3/ops", { ops: [create] })).status, 200);
+  const now = new Date().toISOString();
+  const task: ChatMessage = {
+    id: "task-1", role: "participant", participantId: main.id, participantLabel: "@main", content: "@taylor Watch the deploy", status: "done", createdAt: now,
+    metadata: { participantRequest: { id: "b-1", requesterParticipantId: main.id, requesterHandle: "main", source: "mcp", resumeRequester: true, status: "running", depth: 1,
+      createdAt: now, updatedAt: now, items: [{ targetParticipantId: member.id, targetHandle: "taylor", prompt: "Watch the deploy and say when it breaks.", title: "Watch the deploy",
+        status: "running", createdAt: now, updatedAt: now }] } }
+  } as unknown as ChatMessage;
+  assert.equal((await h.call(h.owner, "POST", "/v3/ops", { ops: [{ opId: `op-${randomBytes(4).toString("hex")}`, kind: "message.create", conversationId: "chat-1", message: task }] })).status, 200);
+  // The member then asks the main session several times: its own requests
+  // never hide the task it was given.
+  for (let index = 0; index < 6; index += 1) {
+    const asked = new Date(Date.now() + index + 1).toISOString();
+    const question = {
+      id: `q-${index}`, role: "participant", participantId: member.id, participantLabel: "@taylor", content: `@main question ${index}`, status: "done", createdAt: asked,
+      metadata: { participantRequest: { id: `bq-${index}`, requesterParticipantId: member.id, requesterHandle: "taylor", source: "mcp", resumeRequester: true, status: "running", depth: 1,
+        createdAt: asked, updatedAt: asked, items: [{ targetParticipantId: main.id, targetHandle: "main", prompt: `Question ${index}?`, status: "running", createdAt: asked, updatedAt: asked }] } }
+    } as unknown as ChatMessage;
+    assert.equal((await h.call(h.owner, "POST", "/v3/ops", { ops: [{ opId: `op-${randomBytes(4).toString("hex")}`, kind: "message.create", conversationId: "chat-1", message: question }] })).status, 200);
+  }
+  await connectTelegram(h);
+
+  const byMember = await raise(h, h.owner, "Production deploy failed.");
+  const memberText = await until(() => h.world.sent.find((item) => item.buttons.includes(`ack:${byMember.value!.alertId}`)), "the member's alert in Telegram");
+  assert.match(memberText.text, /^🔴 Urgent alert · Watch the deploy · Deploy monitoring/);
+  assert.doesNotMatch(memberText.text, /@taylor|@main/);
+  const byMain = await raise(h, h.owner, "Disk almost full.", main.id);
+  const mainText = await until(() => h.world.sent.find((item) => item.buttons.includes(`ack:${byMain.value!.alertId}`)), "the main session's alert in Telegram");
+  assert.match(mainText.text, /^🔴 Urgent alert · Deploy monitoring/);
+  assert.doesNotMatch(mainText.text, /@main|main session/i);
+  // The card in the chat keeps the handle as stored; the app words it by the view.
+  assert.equal((await card(h, byMain.value!.alertId))?.participantLabel, "@main");
+  assert.equal(spokenAlert("", "Deploy monitoring", "Disk almost full."), "Urgent alert in the chat Deploy monitoring. Disk almost full.");
+  assert.equal(spokenAlert("Watch the deploy", "Deploy monitoring", "Down."), "Urgent alert from Watch the deploy in the chat Deploy monitoring. Down.");
+
+  // Switched to the classic view: a new alert names the handle as before.
+  const classic: HubOp = { opId: `op-${randomBytes(4).toString("hex")}`, kind: "conversation.update", conversationId: "chat-1", metadata: { chatView: "classic" } } as unknown as HubOp;
+  assert.equal((await h.call(h.owner, "POST", "/v3/ops", { ops: [classic] })).status, 200);
+  const later = await raise(h, h.owner, "Deploy failed again.");
+  const laterText = await until(() => h.world.sent.find((item) => item.buttons.includes(`ack:${later.value!.alertId}`)), "the classic chat's alert in Telegram");
+  assert.match(laterText.text, /^🔴 Urgent alert · @taylor · Deploy monitoring/);
+});

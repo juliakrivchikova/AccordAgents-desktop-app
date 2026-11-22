@@ -98,54 +98,247 @@ chat without a main session is always `classic`; its switch is disabled.
   - the main composer always writes to the main session
     (`targetParticipantIds=[main]`, `deliveryTargets=[main]` on the phone),
     offers no members to mention (`/` and `#` stay), and carries the main
-    session's model chip, which opens its settings; a member's composer
-    the same for that member. The settings are a compact picker, T3 Code's
-    (`ChatModelAccessPanel`): the model (the CLI's default first), the
-    effort, the access in the CLI's own terms and, once a machine exists,
-    where it runs (the effort a model lacks reads as Default; nothing is
-    saved until a choice is made; Default sends the explicit reset; only
-    the chosen setting is sent). The access is the CLI's own mode, run as
-    the CLI runs it (`src/shared/chatAccessModes.ts`, the permissions'
-    `cliApprovals`: what is not granted the CLI asks about instead of the
-    app taking it away; the classic controls keep refusing it):
-    - Claude Code (`--permission-mode`): Default reads freely and asks
-      before each edit, command and web use, every ask an approval card
-      (`--permission-prompt-tool`; deny rules stay hard stops); Accept
-      edits edits without asking and asks before commands and web; Plan
-      mode reads and plans; Auto mode is Claude's classifier.
-    - Codex (its 0.155 presets): Read only (read-only sandbox) and Default
-      (workspace-write), both asking (approval policy `on-request`, every
-      ask an approval card) to go further; Auto-review, where Codex reviews
-      its own asks; Plan mode, the read-only sandbox that never asks.
-    - Antigravity (`agy --mode`; its Default is `agentMode: ""`, which
-      `--mode` does not take): print mode cannot ask, so what a mode would
-      ask about is refused (agy 1.5.14, 2026-11-21): Default reads and
-      refuses edits and commands, Accept edits edits in the workspace and
-      refuses commands, Auto mode edits and runs safe commands where the
-      account has it (elsewhere agy says so and stays in Default), Plan
-      mode reads and plans. No agy mode is called Read only.
-    A main session starts in its CLI's own default: Claude Code's Default,
-    Codex's Default, agy's Default. Settings from the classic controls are
-    no mode: the picker marks none and says so, and a classic toggle (Read
-    Files, Edit Files, Run Shell, Access Web) ends a mode chosen in the
-    picker (`withClassicChatPermissions`), so what it turns off is refused,
-    not asked about. A member held to a main session without the CLI's own
-    mode loses its own mode too; an Antigravity member then runs Default with
-    no edits (`--sandbox`), never with its confirmations skipped
-    (`clampChatAgentAccess`). Its … menu has Restart
-    (picks up changed connectors, idle only, naming background work it
-    stops; not Antigravity) and, for a member, Remove from chat. Its
-    provider stays the one it was made with. No name, status,
-    member rights or auto-watch: the main session's chat behaviour is fixed
-    (it creates and asks members, request and manage are allowed as its role
-    gives them, and it is told when its tasks end). A member other than the
-    main session is removed from the picker's … menu; the gear in its
-    session's header opens the same picker. The chip names the member's own model, else
-    the one its CLI runs on by default (the CLI's model list: Claude Code's
-    initialize answer, Codex's model/list, `agy models`; an added
-    provider's vendor default), else the CLI ("Claude Code"), with the
-    effort after it (`memberDefaultModelName`; desktop only, the phone has
-    no chip). The main composer has no "N active runs" pill (the Waiting
+    session's settings as separate quiet controls; a member's composer the
+    same for that member. They are laid out as Claude's desktop app
+    ("Opus 5.5 · Extra · Auto"), Codex and T3 Code lay theirs out (the User,
+    2026-11-21: "please make a normal UI, look at how Claude Code, Codex and
+    T3 do it"): one control each for the model (with the provider's glyph),
+    the effort, the permission mode, Codex's Plan mode (a toggle beside the
+    permissions) and, once a machine exists, where it runs ("Local", the
+    machine's name, "Cloud run"); each opens its own small menu
+    (`ChatMemberComposerControls`, `composer-menu.tsx`): a muted title (the
+    vendor's: "Permission mode", "Permissions", "Agent Mode", "Model",
+    "Effort"), each choice's name with the vendor's description wrapped
+    under it and a check on the chosen one. A menu is laid over the window,
+    never inside the composer or the side panel: above its control when
+    there is more room there, never taller than that room nor wider than
+    the window less 8px, pushed inside its edges. A long model list is
+    split as Claude's desktop app splits it: the CLI's default first, the
+    newest model of each family, the rest under "More models" (opened in
+    place; open when the chosen model is there; `latestAndOlderModels`).
+    The model control names the model that runs: for a member without a
+    model of its own, the one the User's own CLI config starts the CLI on
+    where it runs (Codex's `config.toml` `model`, the model Claude Code
+    says it applies, `agy models`' first), never the one the CLI's list
+    marks default (the chip read "GPT-6-Luna", model/list's default, while
+    turns ran her config's gpt-5.6-luna, 2026-11-22). The main process
+    marks that model `recommended` in the CLI's list
+    (`withCliStartModel`); a member on a machine is named by that
+    machine's own config (its hello's `cliStartDefaults`). With no effort
+    chosen and no model of its own, the effort control names the effort her
+    config sets ("Low"; its menu's Default row says it under "Default").
+    The effort a model lacks reads as Default; nothing is saved until a
+    choice is made; Default sends the explicit reset; only the chosen
+    setting is sent. Codex's Default collaboration mode said on a turn
+    carries the member's effort, else her config's, else the thread's
+    (`codexCollaborationMode`): a null there resets Codex to the model's
+    own effort (seen 2026-11-22: turns went at no effort while her terminal
+    ran `low`).
+    In a narrow composer (the main column or the side panel at the smallest
+    window, both panels open) the controls turn into icons one by one, as
+    T3 Code's composer footer does: where it runs, Codex's Plan mode, the
+    mode (a lock for asking before changes, a pen for edits without asking,
+    a list for planning, a checked shield for the CLI deciding, a crossed
+    one for Full Access, an eye for Read Only), the effort (a gauge); then
+    the model loses its glyph and last its name shortens, never under six
+    letters (`useComposerDensity`, measured before paint only when the
+    row's width or what the controls say changes, from the fullest form,
+    and when their own box narrows because something beside them took
+    width (a running turn's chip, the hint under a reply, a long folder
+    name), from where they are: never on a render that changes none of
+    these, such as one per streamed token; reading the controls' size
+    forces a layout of the whole window. Measured 2026-11-22 in the app
+    during a Sonnet 5.5 turn: 133 such reads before, none after). An
+    icon's value is its tooltip, its accessible name and its
+    menu; no control is ever a one-letter stub. Checked 2026-11-22 in the
+    app with both panels open: at 1280×820 "Sonnet 5.5 · Medium · Manual"
+    in both composers and "GPT-5.6-Luna · Low" with the mode and Plan mode
+    as icons; at 1080×720 "Sonnet 5.5" with the effort and mode as icons
+    in the main composer, "Sonnet 5.5 · Medium" and the mode's icon in the
+    member's, and "GPT-5.6-Luna" without its glyph and three icons in a
+    Codex main composer; every control inside its row, Send beside it. Its own turn running, the controls wait (disabled). The
+    access is the CLI's own mode, run as the CLI runs it
+    (`src/shared/chatAccessModes.ts`, the permissions' `cliApprovals`: what
+    is not granted the CLI asks about instead of the app taking it away;
+    the classic controls keep refusing it). Each table is the set the CLI
+    offers by default, in its own order, in the vendor's words (verified
+    2026-11-22, evidence below):
+    - Claude Code 2.1.330 (`--permission-mode`): Manual ("Always ask before
+      making changes"; `--permission-mode default`, which 2.1.330 still
+      takes beside `manual`; every ask an approval card through
+      `--permission-prompt-tool`, deny rules stay hard stops), Accept edits
+      ("Automatically accept all file edits"), Plan ("Create a plan before
+      making changes"), Auto ("Claude handles permission decisions",
+      Claude's classifier).
+    - Codex 0.155.1 (its `/permissions` picker): Ask for approval ("Codex
+      can read and edit files in the current workspace, and run commands.
+      Approval is required to access the internet or edit other files.";
+      workspace-write, `on-request`, reviewer the User), Approve for me
+      ("Only ask for actions detected as potentially unsafe."; reviewer
+      `auto_review`), Full Access ("Codex can edit files outside this
+      workspace and access the internet without asking for approval.
+      Exercise caution when using."; `danger-full-access`, `never`). Plan
+      mode is Codex's collaboration mode on top of any of them: the app
+      says the collaboration mode on every turn (`turn/start`
+      `collaborationMode`, plan or default, with the thread's model; a
+      thread keeps the last one it was given), Plan with Codex's own effort
+      for it, Default with the member's. Read Only is still one of Codex's
+      presets but not in its picker: it shows only while a member is in it.
+      Ask for approval and Read Only name the User as reviewer explicitly,
+      so `approvals_reviewer` in the User's own Codex config does not turn
+      the mode her menu shows into another one.
+    - Antigravity 1.5.14 (`agy --mode`; its Default is `agentMode: ""`,
+      which `--mode` does not take): Default ("Standard behavior."),
+      Accept-edits mode ("Auto-approve file edits, prompt for commands."),
+      Auto mode ("Auto-approve edits and safe commands, prompt on
+      irreversible actions."), Plan mode ("Research and plan without making
+      changes."). Print mode cannot ask, so what a mode would ask about is
+      refused (agy 1.5.14, 2026-11-21: Default refuses edits and commands,
+      Accept-edits mode refuses commands); the menu says so under the list
+      ("Antigravity cannot ask for approval here, …").
+    A new main session starts in the mode its CLI starts in with the
+    User's own config on the device that runs it (the User, 2026-11-22:
+    "a new session must start in the mode, model and effort its CLI would
+    start in with her config"; `CliStartDefaults`,
+    `src/shared/cliStartDefaults.ts`, `startChatAccessOption`), read from
+    the CLI itself with its model list: Codex's `config/read` (the preset
+    its `/permissions` marks current: sandbox, approval policy and reviewer,
+    `guardian_subagent` being `auto_review`; her config starts it in
+    Approve for me), Claude Code's `initialize` answer
+    (`current_permission_mode`, from `permissions.defaultMode`) and its
+    `get_settings` answer (`applied.model`, `applied.effort`), agy's
+    settings.json `agentMode` (`""`: Default; none saved: agy starts in Auto
+    only where the account has Auto mode, which the app cannot read, so
+    Default). A machine reads its own and says them in its hello
+    (`cliStartDefaults`, re-sent when a read changes them; a hello without
+    them keeps what the machine said before); the
+    phone gets this computer's with each provider
+    (`NewChatProviderOffer.start`) and each machine's
+    (`HubNewChatOptions.cliStart`). The mode follows where it runs until
+    one is chosen; a mode chosen stays. The chat is made in the mode the
+    screen showed (`newChatMainSessionStartAccess`), never one read again at
+    send. A changed config file (Codex's config.toml, Claude Code's
+    settings.json, agy's settings.json) is read again the next time a
+    composer shows these (`cliConfigStamp`). A config the CLI's own picker
+    has no entry for never starts the session wider than the CLI would run:
+    it starts in the closest mode that runs nothing without her yes that her
+    config would not run without it (asking her is never wider; a wider
+    sandbox, or Codex's own reviewer deciding for her, is). A read-only
+    sandbox always starts in Read Only, whoever reviews its asks (her config
+    with `sandbox_mode = "read-only"` added: `config/read` answers
+    `approvals_reviewer: auto_review` beside it, and the session started in
+    Ask for approval before, 2026-11-22). Codex's "Custom permissions":
+    `never` starts in Ask for approval (it asks her for what `never`
+    refuses); `on-failure` like `on-request` (Approve for me under Codex's
+    reviewer, else Ask for approval); Full Access's sandbox that asks starts
+    in the workspace sandbox the same way; `untrusted` (it asks before
+    commands Ask for approval runs), a granular policy, or a sandbox or
+    reviewer the app cannot read start in Read Only, Codex's narrowest
+    preset (`codexStartAccess`);
+    Claude Code's Bypass Permissions, Don't Ask or a mode the app does not
+    know start in Manual, which asks before anything her settings do not
+    allow (Claude Code 2.1.330's `initialize` says `bypassPermissions` and
+    `dontAsk` as they are, an unknown `defaultMode` as `default`;
+    `claudeStartAccess`); agy's unknown `agentMode` starts in Default. When
+    the config cannot be read, or a machine's program predates start
+    defaults, the CLI's built-in default applies: Manual, Ask for approval,
+    agy's Default (`defaultChatAccessOption`). A config in the project folder (Claude
+    Code's `.claude/settings.json`, Codex's project `.codex/config.toml`) is
+    not read for this (docs/parity-requirements.md, known divergences).
+    Starting in Full Access from her own config asks nothing, as Codex does
+    not; choosing it in the menu asks Codex's own question first, in place
+    of the list (`FULL_ACCESS_CONFIRMATION`, Codex 0.155.1's `/permissions`
+    in a terminal, 2026-11-22): "Enable full access?" "When Codex runs with
+    full access, it can edit any file on your computer and run commands
+    with network, without your approval. Exercise caution when enabling
+    full access. This significantly increases the risk of data loss, leaks,
+    or unexpected behavior." with "Yes, continue anyway" ("Apply full
+    access for this session") and "Cancel" ("Go back without enabling full
+    access"), which goes back to the list; the phone's sheet asks the same,
+    drawn as its question before a pairing code is used: the question, then
+    "Yes, continue anyway" as its filled button and "Cancel" as its
+    outlined one, each with Codex's line under it.
+    Codex 0.155.1 asks it even with `notice.hide_full_access_warning` set.
+    Stored choices keep working: a member saved
+    with Claude Code's old Default is Manual (same mode), a phone sending
+    the old id `default` gets Manual, and a Codex member saved in the old
+    Plan entry (Plan as a permission) is Read Only with Plan mode on. Codex's
+    Full Access is Codex's alone: a member on another CLI handed it (a Codex
+    main session's mode for a member it makes) runs Auto
+    (`chatAgentModeForKind`), and only the User chooses it: a mode a member
+    or a machine names (a tool's input, a member it adds) is Auto at most
+    (`chatAgentModeFromAgent`); her server adds a member in Full Access
+    without a card only for a main session in it, which hands its mode to
+    the members it makes; and it runs only in the CLI's own mode
+    (`cliApprovals`), else as Auto. Codex's Plan mode exists only in the
+    CLI's own mode (normalising drops it otherwise), stays as it is when a
+    preset is chosen (a member saved in Plan from before too), is not handed
+    to a member the main session makes, and fails a turn rather than running
+    without it on a Codex that refuses the collaboration mode (Default then
+    goes without it). A machine runs both only when its program says so in
+    its hello (`cliModesSupported`): on an older one Full Access and turning
+    Plan mode on are disabled with "<machine> runs an older program:
+    Settings → Machines → Upgrade runtime." (`codexModesUnavailableReason`;
+    a Cloud run member by the machine on the AWS instance it names, none
+    while that machine is still to be set up with this computer's program),
+    and the phone's New chat offers them only from a computer that runs them
+    and for a machine whose program does (`HubNewChatOptions.cliModes`). A
+    Codex member already in one of them there (moved to that machine, or a
+    Cloud run member whose machine turned out older), judged as it runs (one
+    held to its main session's mode by that mode, `memberAsItRunsNow`), is
+    never run as something else: its turn is refused, as Fork to new chat,
+    Restart and compaction refuse an older program, with "<machine> runs an
+    older program that cannot run Full Access: Settings → Machines → Upgrade
+    runtime, or choose another mode." (or Plan mode; `cliModesTurnRefusal`)
+    on its bubble (a member's request to it fails with the line in its card;
+    no bubble is left waiting), and its menu and Plan mode's tooltip say the
+    reason. The computer never asks the server for that turn (the member is
+    left out of the message's `deliveryTargets`, `machineCliModesRefusal`;
+    a turn the server already held for it is stopped there); a phone's
+    message naming it is refused whole by the server with the same line
+    (the phone shows it under the message; the computer posts the message
+    and refuses that member alone), and a phone or machine asking it any
+    turn but a compaction, a restart or a move is refused too
+    (`HubOps.cliModesRefusal`), by each machine's program as the computer
+    last said it with her member rules (`HubMemberRules.machineCliModes`,
+    published again when a hello changes it; an entry in another shape is
+    left out). A machine that never greeted the computer is not held back:
+    its program is the one the computer set it up with. Not held back,
+    because the older program cannot be changed and nothing asks the server
+    for them: turns that machine starts itself (an answered card of its own
+    member, a request between its own members, auto-watch, its scheduled
+    scripts) and turns queued for it before the computer first said its
+    program; and Codex's Ask for approval and Read Only there take the
+    machine's own `approvals_reviewer` (the app names the User from this
+    version on), which the app's setup leaves unset. Settings from the classic controls are no
+    mode: the mode control says "Custom", its menu says so, and a classic
+    toggle (Read Files, Edit Files, Run Shell, Access Web) ends a mode
+    chosen in its menu and Codex's Plan mode with it
+    (`withClassicChatPermissions`), so what it turns off is refused, not
+    asked about. A member the main session made is held to the main
+    session's mode: a mode above it is shown disabled with "Not above the
+    chat's mode (<its mode>)." (the main composer's mode; the view names no
+    main session) (`accessHeldReason`, by the same
+    rule its turns run by, `memberAsItRunsNow`), never granted. A member held
+    to a main session without the CLI's own mode loses its own mode too; an
+    Antigravity member then runs Default with no edits (`--sandbox`), never
+    with its confirmations skipped (`clampChatAgentAccess`). Its … actions
+    (Restart: picks up changed connectors, idle only, naming background
+    work it stops, not Antigravity; Fork to new chat; and, for a member,
+    Remove from chat) are in the … menu of its session's header; the main
+    session's (Restart, Fork to new chat) are in the chat title's menu under
+    the view switch, after a hairline and with no label (no label names the
+    main session); Fork's line there and in a member's … menu reads "A new
+    chat that starts from a copy of this session" (the classic view's keeps
+    its own words). Its provider stays the one it was made with. No name,
+    status, member rights or auto-watch: the main session's chat behaviour
+    is fixed (it creates and asks members, request and manage are allowed
+    as its role gives them, and it is told when its tasks end). The model
+    control names the member's own model, else the one its CLI runs on by
+    default (the CLI's model list: Claude Code's initialize answer, Codex's
+    model/list, `agy models`; an added provider's vendor default), else the
+    CLI ("Claude Code") (`memberModelName`; desktop only, the phone has
+    no controls in a chat). The main composer has no "N active runs" pill (the Waiting
     line and the side panel name and stop the members); while the main
     session itself runs and nothing is typed, its send button is Stop for
     the main session's run, as in T3 Code and Claude; with something typed
@@ -198,11 +391,11 @@ chat without a main session is always `classic`; its switch is disabled.
     only its close button, as Claude desktop's right panel (the User,
     2026-11-21); it lists the chat's latest Accord and the sessions the main
     session delegated (provider, task, status, elapsed time, Stop) with Stop
-    all, never the main session itself (its settings are its composer chip);
+    all, never the main session itself (its settings are its composer's controls);
     while one runs or waits for the User the ended ones are under
     "Previous"; those no longer in the chat are under "Removed"
     (`sessionsFormerMembers`). With nothing delegated it says nothing. A member opens its **whole session** in the
-    same panel (Back to the list) with its settings (gear) and a composer
+    same panel (Back to the list) with its … menu in its header and a composer
     that writes to it only; a removed member's session is read-only;
   - the word "members" is never shown (desktop and phone): "Waiting on N
     tasks", "Side panel", "Back", "Close";
@@ -217,6 +410,29 @@ chat without a main session is always `classic`; its switch is disabled.
   - no turn-finished note ("<X> finished answering"), the main session's
     own included (`isSessionsHiddenTurnFinishedNote`); the classic view
     keeps them;
+  - what the app itself writes names nobody by handle (the User,
+    2026-11-21: "so that I never see this crap '@main' anywhere in the
+    UI"): the notices, a failed or stopped reply's own lines, the cards
+    (approvals, choices, removals, sign-ins, scheduled tasks), the status
+    line, task rows, Accord and document notes, reactions, Activity rows and,
+    on the phone, its cards, alerts, stream view and chat list name a member
+    by its task's title (in quotes inside a sentence) and the main session by
+    nothing: a sentence about it loses its subject ("Stopped before it
+    returned a response.", "The copy may include what was done after you
+    tapped Fork: …"), a "who" line shows no name, a list leaves it out. The
+    words are stored as members read them and worded when shown, by one rule
+    on the desktop and the phone (`sessionsViewText`, `sessionsViewReplyText`,
+    `sessionsViewSummaryText` in `src/shared/sessionsViewText.ts`), so the
+    classic view keeps every handle; what a member wrote, a tool's request
+    (a command) and anything quoted stay as written. The same holds for search
+    results (a member's message shows no author), Activity rows (no avatar:
+    the member's provider logo), an add-member card (no handle field or
+    avatar picker; the handle is still made underneath) and the urgent
+    alert's Telegram message and call (her server names a member by its task
+    and the main session by nothing). No label names the main session
+    either: in a member's session its task is "Task" and its answers carry
+    its provider's logo; Stop is "Stop"; the New chat note says which CLI
+    runs the chat;
   - the Accord: above the composer one quiet line (Accord · its name ·
     where it stands) that opens the whole card in the side panel; the
     classic view keeps the pinned card;
@@ -231,13 +447,13 @@ A new chat opens in the view Settings → General names (`newChatViewFor`).
 
 - **Sessions view** (the User, 2026-11-21: "как в T3, выбираешь просто
   провайдера и модель"): no members picker, no avatars, handles or
-  "members" on the screen. The composer's chip at its bottom right shows
-  the main session's provider glyph, model and effort ("✳ Opus 5.5 High")
-  and opens the compact picker with the provider choosable: every ready CLI
-  and every added provider whose CLI is ready and which has its key
-  (`mainSessionProviderOptions`). The default provider is Settings →
+  "members" on the screen. Its composer has the main composer's controls
+  (model with the provider's glyph, effort, permission mode, Codex's Plan
+  mode, where it runs once a machine exists); the model's menu lists the
+  providers first: every ready CLI and every added provider whose CLI is
+  ready and which has its key (`mainSessionProviderOptions`). The default provider is Settings →
   General's "Main session provider" (`resolveMainSessionProvider`); the
-  chip's choice is for that one chat and never changes the setting, and
+  controls' choice is for that one chat and never changes the setting, and
   is forgotten when the User leaves New chat without sending. What was set
   for one provider (model, effort, access, where it runs) is dropped when
   another is in effect, also between visits. A chosen or shown provider
@@ -249,10 +465,12 @@ A new chat opens in the view Settings → General names (`newChatViewFor`).
 - **The phone** gets the same from the New chat offer
   (`HubNewChatOptions.mainSessionProviders`: each provider with its
   default model's name, its models, at most 24, and efforts;
-  `newChatProviderOffer`), shows the same chip and sheet (with the same
-  Access, and Runs on where a machine exists), and makes the chat with the
-  offered main session on the chosen provider, model, effort and access
-  (`newChatMainSessionFor`). An offer from a computer from before has no
+  `newChatProviderOffer`), shows a chip and sheet with the same choices
+  (the permission modes under the CLI's own title, with the same names and
+  descriptions from the one shared table, Codex's Plan mode as a toggle
+  row, Antigravity's note, and Runs on where a machine exists), and makes
+  the chat with the offered main session on the chosen provider, model,
+  effort, mode and Plan mode (`newChatMainSessionFor`). An offer from a computer from before has no
   list: the chip shows the offered main session's CLI. The offer never
   waits for a model list: each provider goes with the list it last had,
   read again in the background (a good one after 10 minutes, a failed one
@@ -263,6 +481,299 @@ A new chat opens in the view Settings → General names (`newChatViewFor`).
 
 The placement rules are in `src/shared/mainSession.ts` and are the same on
 the desktop and on the phone (bundled through `mobileSharedRules.ts`).
+
+## Fork to new chat
+
+The User, 2026-11-21 ("форкнуть любого участника в качестве оркестратора
+нового чата"): any member of any chat (a main session, a member it made, a
+member of a chat from before with its Assistant) can be copied into a new
+chat as that chat's main session, with everything it knew
+(`src/shared/forkToNewChat.ts`).
+
+- Offered as "Fork to new chat" in the sessions view in a member's … menu
+  (its session's header) and, for the main session, in the chat title's
+  menu, and as a fork button on its card in the classic roster. Disabled,
+  with the reason, for Antigravity (no fork), a member that never ran (no
+  session), one waiting for a machine, one on an added provider Settings no
+  longer has (its copy would run on another provider), one on a machine
+  whose program is older (Upgrade runtime) or has never greeted this
+  computer, and one on this computer whose CLI is not ready.
+- On the phone, in the sessions view it is in the title's menu: for the main
+  session on the main timeline (under the chat's view), for a member on its
+  own screen (the title opens that menu there; the side panel stays on its
+  icon). In the classic view (a chat from before with its Assistant) it is a
+  small fork action at the end of each member's row in the members sheet, as
+  on the computer's roster card; a tap opens the same item under that member
+  (what it makes, or why not; a phone has no tooltip) and a tap on the item
+  makes the chat. Opening the menu or the item reads `GET /v1/phone/new-chat?forkOf=<chat>&
+  participantId=<member>`: the server adds the member and the chat's main
+  session as it holds them (never a session a move hands over) and whether
+  the member has a finished reply there; the computer's New chat offer
+  carries `fork` (why each of its CLIs cannot run a member now, each
+  machine's program by its last hello, the main session's role's rights).
+  The phone judges with the same `forkToNewChatUnavailableReason` and
+  words, the member as it runs (`memberAsItRunsNow`), and makes the main
+  session with `forkedMainSessionFor` (the computer's own result, checked by
+  a test), then queues `conversation.create` and the intro line like its New
+  chat and opens the chat at once (unless she left the chat while it was
+  made: below). A server or computer from before says it
+  must update. "Ran" for a member on a machine is one rule everywhere
+  (`isFinishedMemberReply`: a finished reply, an error too; never one still
+  being written nor a placeholder shown for a turn elsewhere), and the
+  server reads its copy of the chat by it. One narrow difference: the phone
+  cannot see a member's session record, so it applies that rule to a member
+  on the computer too; one whose session was dropped since is offered, and
+  its fork starts clean and says so (below).
+- The new chat is made through the same path as every new chat
+  (`createConversation` with `forkOf`, saved and so put on the User's server):
+  titled "<chat> (fork)" until its first reply names it, in the member's
+  project, in Settings → General's view, with one member: its main session on
+  the member's provider, model, effort, access (its CLI's mode and what it
+  may read, edit, run and reach, as it runs now) and place (this computer or
+  the same machine: a fork never crosses devices), with the main session's
+  role and its say over members, marked `ChatParticipant.forkOrigin`
+  (written only by the computer; her server keeps a machine from writing
+  it). The chat opens at once with its composer focused (unless she has gone
+  elsewhere by then: below); the member and its
+  chat are not touched. Making it checks only the CLI its main session runs
+  on: a member on this computer has its own CLI checked (a check less than
+  30 s old reused, otherwise that CLI alone, never every CLI); a member on a
+  machine none (`forkReadiness`, `CliReadinessService.refreshKinds`). When
+  the check still takes a moment (reading the computer's environment first),
+  a "Forking to a new chat…" notice shows after 150 ms until the chat is made.
+  When she has gone to another chat or screen by the time it is made (a
+  chat opened from the sidebar, search, Activity or a notice; New chat;
+  Activity; Settings), that stays on screen and keeps the keyboard: the new
+  chat is listed and a notice says "Forked to a new chat: <title>" with Open
+  (`stillHere` in `forkChatParticipantToNewChat`; told by what the latest
+  open request was for, `openConversationTargetRef`, since Back from Activity
+  and a click on the open chat count as requests too); a refusal is then a
+  notice too, not the error banner of the chat she opened. Open takes the
+  keyboard to the fork's composer (at once when it is already on screen);
+  opening any other chat first drops that request, so it never fires on a
+  later visit (`composer-focus-request.ts`). The fork frees New chat as soon
+  as its chat is made or refused. On the phone,
+  where the tap waits on her server for up to 4 s, the same: gone from the
+  chat, she stays where she is and the new chat is in her list
+  (`stillInForkedChat`; the phone has no notices).
+- Its first turn (on the device it runs on) reads the member's session from
+  the member's chat there (`startFromForkOrigin`; only that chat's session
+  records) and forks it as a delegated fork does (`forkFrom` with the source
+  chat's id). It is told it is the new chat's main session, not a member,
+  with the main session's role instructions, and reminded on later turns. A
+  main session that already answered never becomes a copy again. A member
+  that moved to that device and whose session still waits on her server is
+  taken first, as its own next turn would take it. When the member's session
+  is not on that device, it starts clean and says so before its turn runs
+  ("@main could not start from a copy of @x's session in the chat "T":
+  that session is not on your computer / the cloud machine @main runs on,
+  so it starts a clean session."; when its provider was changed since,
+  "@main now runs on Codex, not Claude Code"); when the CLI cannot copy it,
+  the turn starts clean as a delegated fork's does (below: her message
+  still gets its reply), said the same way. Every notice of
+  a fork (this one, a clean start, the "may
+  include" line below; a delegated fork's too) is said by `postForkNotice`
+  twice over: as a line in the chat (a system message on the "system"
+  thread, id `fork-notice-<kind>-<member id>`), which goes to her server
+  with the chat and so reaches every device, a fork run on a cloud machine
+  or asked from the phone too; and, as before, as a chat warning on the
+  device that ran it, which stays there. Open: the chat's timeline shows no
+  system line on any device (`isChatMessageHiddenFromTimeline`, and the
+  phone's timeline by the same rule), so today the User sees only that
+  warning, on the device that ran the fork; showing the line on the
+  computer and the phone needs a look of its own (and her server holding
+  its writer to the member's device). Each is written once per member and
+  kind (her server refuses a second line with that id), so a turn run again
+  after a restart or handed over again says nothing more. The member's chat
+  is read without its messages (its metadata and newest messages).
+- The copy is what she saw when she tapped Fork. The User, 2026-11-21, on
+  her card "When should a fork copy the member?": "When you tap Fork — Like
+  the CLI: the copy is exactly what you saw at that moment; beta.3 comes out
+  a little later." So the copy ends with the turn of the member's last reply
+  that ended a turn of its CLI, and whatever the member did after the tap is
+  not in it:
+  - Every reply that ends a turn records where its CLI session stood then
+    (`ChatMessageMetadata.sessionCut` `{ sessionId, at }`, written by the
+    device that ran the turn): Claude Code, the uuid of the turn's last
+    assistant message on its stream (not a subagent's); Codex, the turn's
+    id (a goal's last turn).
+  - At the tap the device making the chat records that reply in
+    `forkOrigin.seen` (`{ messageId, sessionCut?, finishedAt? }`,
+    `forkSeenReplyOf`): the member's newest reply that ended a turn
+    (`isMemberTurnEnd`: a finished reply with `workedMs` or `sessionCut`,
+    which only a turn's end sets; never a post, a request or an Accord
+    launch written during a turn, so a turn still running at the tap is
+    left out with what it posted). The computer and her server read it by
+    the same query (`StorageService.conversationLastTurnEnd`); the computer
+    reads it first, before its checks. The phone takes her server's
+    (`HubPhoneForkSource.seen`), read again when she taps (a reply that
+    finished while the item was open counts; out of reach within 4 s, the
+    read from when the item opened), and writes the same field through
+    `forkedMainSessionFor`.
+  - At the first turn the device that holds the session names the point
+    (`forkCutFor`): the recorded one, in the session the reply was in (when
+    the member's session changed after the reply, that earlier session is
+    copied up to it, if it is still on that device); for a reply from
+    before `sessionCut`, by time on the clock of
+    the device that ran it (`finishedAt`, its turn's start plus `workedMs`):
+    Claude Code, its last assistant message written by then; Codex, its last
+    finished turn that started before then (Codex's turn ids are UUIDv7),
+    or, for an id that does not say, completed by then to the second.
+  - Claude Code forks with `--resume <member's session> --fork-session
+    --resume-session-at <uuid> --session-id <new>`, after reading the
+    transcript a line at a time (`claudeForkCut`; her longest, 113 MB,
+    reads in about 0.4 s with no pause of the app over 12 ms); a compaction
+    after the point, no point (the CLI does not load a message before a
+    later compaction and refuses it), unless nothing but `/compact`s came
+    after it (their boundaries, summaries and the command's own lines) and
+    the last of them kept it as it was (`compactMetadata.preservedMessages`,
+    which holds the last message before a `/compact`): the CLI loads that
+    message after the compaction's summary, so the point is given and the
+    copy is what she saw, compacted, with no line; refused after all, the
+    whole session and the line, which names the compaction. A compaction the
+    CLI made itself (`trigger` "auto", or one naming the turn it ran in)
+    never counts: it ran during a later turn, whose prompt it may sum up. Codex forks with `thread/fork`
+    `lastTurnId` (inclusive; a later compaction does not stop it), reading
+    the thread's turns newest first (`thread/turns/list`, no items) for a
+    reply from before. The point is given even when nothing follows it yet:
+    the copy is then all of it, as before this rule, and a turn the member
+    starts while the copy is made stays out. A point on a tool call whose
+    result never came (a stopped turn) is fine: Claude Code fills it in as
+    missing (checked). Antigravity has no fork.
+  - When no point can be named (no reply that ended a turn, it is not in
+    the session on that device, the earlier session it was in is gone,
+    Claude Code compacted the session after it, Codex could not list the
+    turns, the CLI refused the point or does not know the flag), the whole of the
+    member's session is copied, as before this rule, and a line in the chat
+    says so before the turn's reply (Codex once its copy is made, Claude Code
+    once it has read the transcript; the turn may last hours, and the app may
+    stop during it): "@main's copy of @x's session
+    may include what @x did after you tapped Fork: <why>." (`postForkNotice`,
+    above: a line in the chat and a warning on the device that ran it).
+    Never a clean start: the copy keeps what she saw, the line says what may
+    be more. A `/compact` after her last reply that kept it (above) gives
+    no line; a compaction the CLI made itself during a later turn does. A
+    source that is gone gets no copy and no such line, only the clean
+    start's (a Claude Code session whose transcript is on no folder of
+    this device is not said to be copied whole; Codex's "could not list the
+    turns" waits for `thread/fork` to answer).
+  - Checked 2026-11-21 on throwaway sessions: Claude Code 2.1.329 forked at
+    the first of two turns ("remember APPLE", "remember BANANA") answers
+    APPLE only, in one-shot and in stream-json (warm) mode, the source
+    untouched; an unknown uuid and a uuid before a later `/compact` are
+    refused ("No message found with message.uuid of: …"). Codex 0.155.1
+    `thread/fork` with `lastTurnId` of the first turn answers APPLE, also
+    after a later compaction; an unknown turn is refused ("turn not found").
+    Through the app's own runner (`CliAgentRunner.run` with `forkCut`) on
+    the same sessions: the recorded point and the reply's finish both give
+    APPLE for Claude Code and Codex; an unknown point gives "APPLE and
+    BANANA" and the reason. A Claude Code fork at a tool call with no
+    result answers that the result is missing. Claude Code 2.1.329 forked
+    at the last assistant message before a `/compact` (which that
+    compaction kept) answers both words from the compacted session: its
+    copy is the compaction's summary, that message and the new prompt, the
+    `/compact` lines after it dropped.
+- Claude Code 2.1.329 forks a session from another folder as well as from
+  its own (checked 2026-11-21); the new chat keeps the member's project so
+  the copy works in the folder it knew.
+- A machine says it can do this in its hello (`forkToNewChatSupported`).
+  The flag is new with this feature (no released runtime carries it), and
+  the program that sends it also cuts the copy, so no machine forks without
+  the cut.
+
+## The CLIs' modes: evidence (2026-11-22)
+
+Verified in the installed CLIs, the way the User sees them:
+
+- Claude Code 2.1.330: `claude --help` lists `--permission-mode` choices
+  acceptEdits, auto, bypassPermissions, manual, dontAsk, plan; the binary's
+  mode table titles them Manual, Plan, Accept edits, Bypass Permissions,
+  Don't Ask, Auto, maps `manual` to its internal `default`, and its
+  Shift+Tab cycle goes Manual → Accept edits → Plan → (Bypass, only when
+  started with `--allow-dangerously-skip-permissions`) → (Auto, where the
+  account has it) → Manual; Don't Ask is not in the cycle. `claude -p
+  --permission-mode default` and `… manual` both run (Sonnet). The Claude
+  desktop app (6.28899.6) lists Code sessions' modes as Manual ("Always ask
+  before making changes"), Accept edits ("Automatically accept all file
+  edits"), Plan ("Create a plan before making changes"), Auto ("Claude
+  handles permission decisions"), and Don't ask / Bypass permissions only
+  when switched on; its chats (her screenshot) word Manual and Auto
+  differently ("Claude asks before using new tools or opening new sites.",
+  "Claude runs on its own and pauses to ask if anything looks unsafe."). Its
+  model menu shows the newest of each family first and the rest under
+  "More models".
+- Codex 0.155.1, its TUI in a pseudo-terminal: `/permissions` ("Update Model
+  Permissions") lists 1. Ask for approval, 2. Approve for me, 3. Full Access,
+  with the descriptions above, with or without `-s read-only` (Read Only
+  stays in its binary's presets). `/plan` "switch to Plan mode"; Shift+Tab
+  toggles "Plan mode (shift+tab to cycle)" and back ("Model changed to …
+  medium for Plan mode"). Through `codex app-server`: `turn/start`
+  `collaborationMode` plan produced a plan and no file, kept the thread's
+  developer instructions, and stayed on for the next turn until Default
+  was sent; `sandbox: danger-full-access`, `approvalPolicy: never` wrote a
+  file outside the workspace without asking. The User's own config
+  (`approvals_reviewer = "guardian_subagent"`) marks Approve for me current
+  in her terminal.
+- Antigravity 1.5.14, its TUI: Shift+Tab cycles Auto mode ("Auto mode:
+  edits & safe commands auto-approved") → Plan mode ("Plan mode: research &
+  plan only") → Default (no line) → Accept-edits mode ("Accept-edits mode:
+  file edits auto-approved") → Auto mode; `/config` → Agent Mode describes
+  them ("'default': standard behavior. 'accept-edits': auto-approve file
+  edits, prompt for commands. 'auto': auto-approve edits and safe commands,
+  prompt on irreversible actions. 'plan': research and plan without making
+  changes"). Her config starts it in auto.
+
+## Start defaults, Full Access and Plan members: evidence (2026-11-22)
+
+- Codex 0.155.1 `codex app-server`: `model/list` marks `gpt-6-luna`
+  (GPT-6-Luna) `isDefault`; `config/read` on her config answers
+  `model: gpt-5.6-luna`, `model_reasoning_effort: low`,
+  `approvals_reviewer: auto_review`, no approval policy or sandbox; her
+  terminal (`codex`, update check off) shows "gpt-5.6-luna low" and its
+  `/permissions` marks "2. Approve for me (current)". `config/read` takes
+  a `cwd` for project layers; a `profile = …` key in config.toml is
+  refused ("legacy `profile` config is no longer supported; use
+  `--profile`"), so a profile applies only with `--profile`, which neither
+  her plain `codex` nor the app passes. A turn's `turn_context` (its
+  rollout) shows `model: gpt-5.6-luna`, `approvals_reviewer: auto_review`
+  and, with a collaboration mode that carries `reasoning_effort: null`, no
+  effort at all; with her config's `low` sent, `low`, as her terminal's
+  turns show.
+- Codex's terminal, `/permissions` → Full Access, shows "Enable full
+  access?", the body above, "1. Yes, continue anyway  Apply full access for
+  this session", "2. Cancel  Go back without enabling full access", "Press
+  enter to confirm or esc to go back"; with `-c
+  notice.hide_full_access_warning=true` it asks the same.
+- Claude Code 2.1.330 in stream-json: `initialize` answers
+  `current_permission_mode` (`acceptEdits` with `permissions.defaultMode:
+  acceptEdits` in the settings it reads); `get_settings` answers
+  `applied: { model: "claude-sonnet-5-5", effort: … }` for `model:
+  "sonnet"` or `ANTHROPIC_MODEL=sonnet`, while `initialize`'s "Default
+  (recommended)" row still resolves to Opus 5.5.
+- agy 1.5.14's changelog: "Changed the default `Agent Mode` from Default to
+  Auto: sessions with no saved mode, including headless `-p` runs, now
+  start in Auto wherever Auto mode is available and in Default elsewhere
+  … choose Default for `Agent Mode` in `/config`, which saves
+  `"agentMode": ""` to `settings.json`." Auto mode is available on Linux
+  and macOS.
+- Subagents of a session in Plan, both CLIs' own: Claude Code's docs
+  (code.claude.com/docs/en/sub-agents): "When the main conversation is in
+  `plan` mode, the subagent stays in plan mode whichever `permissionMode`
+  you set, unless it runs as an agent team teammate." Seen with `claude -p
+  --model sonnet --permission-mode plan`: the Agent tool is offered, its
+  general-purpose subagent's Write is refused "Cannot write to …/sub.txt
+  while in plan mode" (`decision_reason_type: "mode"`), and a custom agent
+  with `permissionMode: acceptEdits` is refused the same. Codex 0.155.1:
+  `multi_agent` is on by default and `spawn_agent` is offered in Plan
+  mode; the spawned child's rollout runs `collaboration_mode.mode:
+  "default"` with the parent's sandbox and approvals ("Subagents inherit
+  the parent turn's current sandbox and approval settings", its docs) and
+  wrote a file while the parent was in Plan. So a member the main session
+  makes runs as its main session's CLI runs a subagent: under a Claude
+  Code (or agy) main session in Plan it is held to Plan whatever it asks
+  for (`memberAsItRunsNow`, Plan ranks lowest); under a Codex main session
+  with Plan mode on it runs Codex's Default with the main session's preset,
+  Plan mode not handed down. Both checked in `chatAccessModes.test.ts`.
 
 ## Contract (src/shared)
 
@@ -277,19 +788,35 @@ the desktop and on the phone (bundled through `mobileSharedRules.ts`).
   members, no @-parsing for addressees, no fallback.
 - `ChatParticipantSession.forkFrom?: { participantId, sessionId, kind }`: the
   member's first turn forks that session; cleared once it has its own id.
+  Fork to new chat adds `cut` (`{ at? | finishedBy? | unknown? }`, where
+  the copy ends); a delegated fork has none and copies the session as it
+  is.
   `ChatParticipantSession.forkedFromParticipantId` stays: both CLIs keep the
   source's system/developer instructions in a fork (verified on Claude Code
   2.1.329 and Codex 0.155.1), so the member is told who it is on its first
   turn and reminded on later ones. When the source session is gone (only
   the CLIs' own words: Claude Code "No conversation found", Codex "no
-  rollout found for thread id", `isForkSourceMissingError`): Claude Code's
-  one-shot start falls back to a clean session at once, from a prompt that
-  still carries the member's identity note and its role's instructions;
-  otherwise the next turn tries the fork once more
-  (`forkFrom.failedAttempts`), and when that fails too the member becomes a
-  clean member (fork and its chat-context pointer dropped). Either way the
-  chat gets a warning ("@x could not start from a copy of @main's session,
-  …"), and the failed reply the main session reads says it too.
+  rollout found for thread id", `isForkSourceMissingError`), the member
+  starts a clean session in that same turn, from a prompt that still
+  carries its identity note and its role's instructions (Claude Code's
+  one-shot start does it itself), so the message that asked it (the User's,
+  or the main session's task) gets its reply and never fails for the copy.
+  Any other failure of the copy (the CLI exited before it took the message,
+  `thread/fork` failed: `ParticipantRunResult.forkCopyFailed`) is tried once
+  more in that turn, then the turn starts clean. A failure that is not the
+  copy's (a Stop, a project folder gone, a turn that failed after the copy
+  was made, a second message whose process already made the copy) never
+  does. Either way the member is a clean member from then on (fork dropped)
+  and the chat says so, once ("@x could not start from a copy of @main's
+  session, so this turn started a clean session."; `postForkNotice`, above;
+  said before the clean turn runs when the CLI said the source is gone).
+  When the clean start fails too, its chat-context pointer is dropped as
+  well, the id its session was given is not kept when the CLI never took
+  the message, and the failed reply the main session reads says it (a
+  forked main session's own failed reply does not: the User asked it, and
+  the notice is hers). When the clean session cannot start either after an
+  unknown failure, the copy was not the cause: the member stays a fork, its
+  next turn makes the copy, and nothing says it started clean.
 - `ChatParticipantRequestItem.title?`: the main session's short title for
   its task (`app_chat_delegate_task`'s `title`, at most 80 characters).
 - `ChatParticipantRequestBatch.delegation.turnId?`: the main-session turn (its `turnSegmentId`) that gave the task while that

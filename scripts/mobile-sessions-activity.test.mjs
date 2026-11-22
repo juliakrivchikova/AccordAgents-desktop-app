@@ -96,7 +96,7 @@ test("a running reply on the phone: Working for, one row per step, the newest sh
   assert.equal(fresh.stop, 0, "no Stop on the reply: the composer's button is Stop");
   assert.equal(fresh.order[0], "sessions-working", "nothing above it (no meta line)");
   assert.equal(fresh.rule, "1px", "the hairline under the header");
-  assert.equal(await app.evaluate(`document.getElementById("send-button").getAttribute("aria-label")`), "Stop the main session");
+  assert.equal(await app.evaluate(`document.getElementById("send-button").getAttribute("aria-label")`), "Stop");
 
   // --- the classic view is as it was: its Thinking and its status, no sessions rows
   await app.evaluate(`document.getElementById("chat-members-toggle").click()`);

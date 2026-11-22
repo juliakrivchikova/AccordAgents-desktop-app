@@ -5,7 +5,8 @@ import type { ChatMessage, ChatParticipant, ChatSavedPromptConfig, Conversation,
 import { CHAT_DELIVERY_POLICY_OPTIONS, resolveChatDeliveryTargets } from "../shared/chatDeliveryPolicy";
 import { matchingChatSavedPrompts } from "../shared/chatSavedPrompts";
 import { isDeviceEventBlobReference, type DeviceEventBlobReference } from "../shared/deviceEventBlobs";
-import type { HubComposerCatalog, HubDevice, HubPhoneScope } from "../shared/hubProtocol";
+import type { HubComposerCatalog, HubDevice, HubPhoneForkSource, HubPhoneScope } from "../shared/hubProtocol";
+import { mainSessionParticipantId } from "../shared/mainSession";
 import type { HubCard } from "../shared/hubOps";
 import { controlCardFromChoiceMessage, controlCardFromHubCard, type MobileControlCard } from "../shared/mobileControlCards";
 import { buildMobileChatList, buildMobileTimelinePage, mobileChatMembers, mobileListedChats } from "../main/services/mobileChatCatalog";
@@ -27,6 +28,13 @@ export const HUB_PHONE_PATHS = new Set([
   "/v1/phone/attachment", "/v1/phone/avatar", "/v1/phone/notices", "/v1/phone/seen", "/v1/phone/machines", "/v1/phone/wake",
   "/v1/phone/new-chat"
 ]);
+
+/** An id a phone names in its query (a chat's, a member's): present, of a
+ *  sane length, without control characters; undefined otherwise. */
+function idParam(query: URLSearchParams, name: string): string | undefined {
+  const value = query.get(name) ?? "";
+  return value && value.length <= 200 && !/[\u0000-\u001f\u007f]/.test(value) ? value : undefined;
+}
 
 export const PHONE_ERROR_NO_SCOPE = "phone_scope_missing";
 export const PHONE_ERROR_CHAT_NOT_FOUND = "chat_not_found";
@@ -210,7 +218,7 @@ export class HubPhoneApi {
       case "/v1/phone/changes": return this.changes(scope, device.deviceId, url.searchParams, response);
       case "/v1/phone/progress": return this.liveProgress(scope, url.searchParams);
       case "/v1/phone/composer": return this.composer(scope, url.searchParams);
-      case "/v1/phone/new-chat": return this.newChat(scope);
+      case "/v1/phone/new-chat": return this.newChat(scope, url.searchParams);
       case "/v1/phone/attachment": return this.attachment(scope, url.searchParams);
       case "/v1/phone/avatar": return this.avatar(scope, url.searchParams);
       case "/v1/phone/notices": return this.notices(scope, device.deviceId, url.searchParams);
@@ -357,11 +365,9 @@ export class HubPhoneApi {
     };
   }
 
-  private conversationParam(scope: HubPhoneScope, query: URLSearchParams): string | Answer {
-    const conversationId = query.get("conversationId") ?? "";
-    if (!conversationId || conversationId.length > 200 || /[\u0000-\u001f\u007f]/.test(conversationId)) {
-      return { status: 400, body: { ok: false, error: "conversationId required" } };
-    }
+  private conversationParam(scope: HubPhoneScope, query: URLSearchParams, name = "conversationId"): string | Answer {
+    const conversationId = idParam(query, name);
+    if (conversationId === undefined) return { status: 400, body: { ok: false, error: `${name} required` } };
     if (!scopeCovers(scope, conversationId)) return { status: 404, body: { ok: false, error: PHONE_ERROR_CHAT_NOT_FOUND } };
     return conversationId;
   }
@@ -504,19 +510,66 @@ export class HubPhoneApi {
   }
 
   /** What the phone's New chat offers, as the computer published it. A
-   *  phone paired for one chat starts no other. */
-  private async newChat(scope: HubPhoneScope): Promise<Answer> {
+   *  phone paired for one chat starts no other. With `forkOf` and
+   *  `participantId` (Fork to new chat), the member and its chat too. */
+  private async newChat(scope: HubPhoneScope, query: URLSearchParams): Promise<Answer> {
     if (scope.scope !== "device") {
       return { status: 200, body: { ok: true, type: "mobile.new-chat", unavailable: "This phone was paired for one chat, so it does not start new ones." } };
+    }
+    let fork: HubPhoneForkSource | undefined;
+    if (query.has("forkOf")) {
+      const source = await this.forkSource(scope, query);
+      if (!("conversationId" in source)) return source;
+      fork = source;
     }
     const catalog = await this.catalog();
     const options = catalog?.newChat;
     if (!options) {
-      return { status: 200, body: { ok: true, type: "mobile.new-chat", unavailable: "Your computer has not told your server about its projects and members yet. Open AccordAgents on your computer, or update it." } };
+      return { status: 200, body: { ok: true, type: "mobile.new-chat", unavailable: "Your computer has not told your server about its projects and members yet. Open AccordAgents on your computer, or update it.",
+        ...(fork ? { fork } : {}) } };
     }
     // The names the panel shows: each role's, and each machine's a member runs on.
     const machines = await this.options.machineNames().catch(() => new Map<string, string>());
-    return { status: 200, body: { ok: true, type: "mobile.new-chat", options, roles: catalog.roles, machines: Object.fromEntries(machines) } };
+    return { status: 200, body: { ok: true, type: "mobile.new-chat", options, roles: catalog.roles, machines: Object.fromEntries(machines), ...(fork ? { fork } : {}) } };
+  }
+
+  /** The member a phone forks to a new chat, and its chat, as the server
+   *  holds them: the member and the chat's main session (not the rest of
+   *  the chat), and whether the member ever answered there. */
+  private async forkSource(scope: HubPhoneScope, query: URLSearchParams): Promise<HubPhoneForkSource | Answer> {
+    // Only a phone paired for every chat gets here (newChat); the chat is
+    // still checked against its pairing, as every read of a chat is.
+    const forkOf = this.conversationParam(scope, query, "forkOf");
+    if (typeof forkOf !== "string") return forkOf;
+    const participantId = idParam(query, "participantId");
+    if (participantId === undefined) return { status: 400, body: { ok: false, error: "participantId required" } };
+    const opened = await this.openedRecent(forkOf, 1);
+    const conversation = opened?.conversation;
+    if (!conversation || conversation.kind !== "chat" || conversation.metadata.archived === true) {
+      return { status: 404, body: { ok: false, error: PHONE_ERROR_CHAT_NOT_FOUND } };
+    }
+    const members = mobileChatMembers(conversation);
+    const mainId = mainSessionParticipantId(conversation.metadata);
+    // A session a move hands over is the device's business, and can be large.
+    const shown = (participant: ChatParticipant | undefined): ChatParticipant | undefined => {
+      if (!participant) return undefined;
+      const { sessionHandoff: _handoff, ...rest } = participant;
+      return rest;
+    };
+    const member = shown(members.find((participant) => participant.id === participantId));
+    const mainSession = mainId && mainId !== participantId ? shown(members.find((participant) => participant.id === mainId)) : undefined;
+    const seen = member ? await this.options.store.conversationLastTurnEnd(forkOf, participantId) : undefined;
+    return {
+      conversationId: forkOf,
+      title: conversation.title,
+      ...(conversation.repoPath ? { repoPath: conversation.repoPath } : {}),
+      ...(member ? { member } : {}),
+      ...(mainSession ? { mainSession } : {}),
+      // A read that fails is the server's error, not a member that never ran.
+      answered: member ? await this.options.store.conversationParticipantAnswered(forkOf, participantId) : false,
+      // What the User sees of it now: the copy ends with that turn.
+      ...(seen ? { seen } : {})
+    };
   }
 
   /** What the composer offers after `/`, as the desktop's composer would for

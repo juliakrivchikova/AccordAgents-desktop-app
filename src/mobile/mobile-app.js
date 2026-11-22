@@ -41,6 +41,9 @@
   // and the number on the app icon both read from here; the service worker
   // adds to its IndexedDB mirror when a push lands while the app is closed.
   const UNREAD_KEY = "accordagents.mobile.unreadConversationIds.v1";
+  // Chats she started on this phone (New chat, a fork) while her server lists
+  // nothing in them she did not make: their moving in the list is no news.
+  const OWN_CHATS_KEY = "accordagents.mobile.ownChats.v1";
   const UNREAD_META_KEY = "unreadConversations";
   const CHAT_TITLES_META_KEY = "chatTitles";
   // Where the history of each chat stops on this phone: whether the desktop
@@ -1320,6 +1323,8 @@
    *  nothing was queued): out of the list, as the computer lists no chat its
    *  New chat failed to make. Why stays in the send log and in the chat. */
   function forgetStartedChat(conversationId) {
+    const own = loadStoredStringArray(OWN_CHATS_KEY);
+    if (own.indexOf(conversationId) >= 0) saveStoredStringArray(OWN_CHATS_KEY, own.filter(function (id) { return id !== conversationId; }));
     const started = loadStartedChats();
     const kept = started.filter(function (chat) { return chat.id !== conversationId; });
     if (kept.length === started.length) return;
@@ -1394,14 +1399,28 @@
       return !normalized.some(function (known) { return known.id === chat.id; });
     });
     if (stillStarted.length !== started.length) saveStartedChats(stillStarted);
+    // A chat she started here stays hers until it holds something she did
+    // not make: a member at work, a question for her, a line not hers. One
+    // her server no longer lists (and that is not still on its way) goes.
+    const ownIds = loadStoredStringArray(OWN_CHATS_KEY);
+    const stillOwn = ownIds.filter(function (id) {
+      const listed = normalized.find(function (chat) { return chat.id === id; });
+      if (!listed) return started.some(function (chat) { return chat.id === id; });
+      return listed.running !== true && listed.waitingChoice !== true && (!listed.who || listed.who === "you:");
+    });
+    if (stillOwn.length !== ownIds.length) saveStoredStringArray(OWN_CHATS_KEY, stillOwn);
     // Same rule as the desktop sidebar: a chat that moved while it was not the
     // one on screen is unread. The list this phone held before is the "seen"
-    // baseline, so the first list after an update marks nothing.
+    // baseline, so the first list after an update marks nothing. A chat she
+    // made herself (New chat, a fork) is no news to her, wherever she is by
+    // the time her server lists it: it moves as her server takes what she
+    // made, until something else is in it.
     const activeId = selectedConversationId();
     const viewingActive = Boolean(activeId) && !document.hidden;
     const newlyActive = normalized.filter(function (chat) {
       const previous = previousById.get(chat.id);
       return Boolean(previous) &&
+        stillOwn.indexOf(chat.id) < 0 &&
         chat.updatedAt > previous.updatedAt &&
         !(viewingActive && chat.id === activeId);
     }).map(function (chat) {
@@ -1412,6 +1431,13 @@
     }
     void mirrorChatTitlesForWorker(normalized);
     return normalized;
+  }
+
+  /** A chat she starts here is hers (OWN_CHATS_KEY) until it holds
+   *  something she did not make. */
+  function noteOwnChat(conversationId) {
+    const own = loadStoredStringArray(OWN_CHATS_KEY);
+    if (own.indexOf(conversationId) < 0) saveStoredStringArray(OWN_CHATS_KEY, own.concat(conversationId));
   }
 
   function loadUnreadConversationIds() {
@@ -2458,7 +2484,7 @@
         tx.remove(META_STORE, UNREAD_META_KEY), tx.remove(META_STORE, CHAT_TITLES_META_KEY)
       ]);
     });
-    const keys = [CHAT_LIST_KEY, CHAT_LIST_AT_KEY, CONTROL_CARDS_KEY, CONTROL_CARD_SENT_KEY, UNREAD_KEY, TIMELINE_PAGES_KEY,
+    const keys = [CHAT_LIST_KEY, CHAT_LIST_AT_KEY, CONTROL_CARDS_KEY, CONTROL_CARD_SENT_KEY, UNREAD_KEY, OWN_CHATS_KEY, TIMELINE_PAGES_KEY,
       ACTIVE_CONVERSATION_KEY, OPEN_THREAD_KEY, OPEN_STREAM_KEY, STARTED_CHATS_KEY, VIEWED_AT_KEY, LIST_ACTIVITY_SEEN_KEY,
       ACTIVITY_CLEARED_KEY, TERMINAL_RUNS_KEY, SYNC_WAIT_KEY, SEND_LOG_SEEN_KEY, SETTLE_TURNS_KEY, ACCORD_DOCK_STORAGE_KEY];
     for (const key of keys) {
@@ -3090,10 +3116,14 @@
   const SEND_FAILURES_KEPT = 200;
   const SEND_FAILURE_TEXT_CHARS = 80;
   // When the User last opened the log: the header points at it while a send
-  // is failing, or after a refusal she has not seen.
+  // is failing, or after a refusal (or a chat this phone could not start)
+  // she has not seen.
   const SEND_LOG_SEEN_KEY = "accordagents.mobile.sendLogSeenAt.v1";
   let sendLogNewestAt = "";
   let sendLogNewestRefusalAt = "";
+  // Whether that newest one is a chat this phone could not start (a fork
+  // that failed after she left its screen), not a refusal by her server.
+  let sendLogNewestNotStarted = false;
   let sendLogCount = 0;
 
   /** What an entry is, for the log: its kind, its chat and a little of it. */
@@ -3132,6 +3162,12 @@
     };
   }
 
+  /** What the header points at until she has looked: her server's refusal,
+   *  or a chat this phone could not start once she had left its screen. */
+  function sendLogNeedsLook(record) {
+    return Boolean(record) && (record.cause === "refused" || record.notStarted === true);
+  }
+
   /** Writes one failed attempt, and lets go of the oldest past the bound. A
    *  log that cannot be written never stops the sending it describes. */
   function recordSendFailure(record) {
@@ -3139,7 +3175,10 @@
     const chat = loadChats().find(function (item) { return item.id === record.conversationId; });
     const stored = { ...record, at: at, ...(chat && chat.title ? { chatTitle: chat.title } : {}) };
     sendLogNewestAt = at;
-    if (record.cause === "refused") sendLogNewestRefusalAt = at;
+    if (sendLogNeedsLook(record)) {
+      sendLogNewestRefusalAt = at;
+      sendLogNewestNotStarted = record.notStarted === true;
+    }
     recordRelayDebug({ event: "send-failure", kind: record.kind, cause: record.cause, reason: record.reason });
     return withNamedStore(SEND_FAILURES_STORE, "readwrite", function (store) {
       store.add(stored);
@@ -3171,8 +3210,11 @@
       const list = Array.isArray(rows) ? rows.slice().reverse() : [];
       sendLogCount = list.length;
       if (list[0] && list[0].at > sendLogNewestAt) sendLogNewestAt = list[0].at;
-      const refusal = list.find(function (row) { return row.cause === "refused"; });
-      if (refusal && refusal.at > sendLogNewestRefusalAt) sendLogNewestRefusalAt = refusal.at;
+      const refusal = list.find(sendLogNeedsLook);
+      if (refusal && refusal.at > sendLogNewestRefusalAt) {
+        sendLogNewestRefusalAt = refusal.at;
+        sendLogNewestNotStarted = refusal.notStarted === true;
+      }
       return list;
     }).catch(function () { return []; });
   }
@@ -3200,8 +3242,8 @@
 
   /** The way to the log from the chat's header, beside where it says whether
    *  the phone is connected: there while a send is failing, and after a
-   *  refusal the User has not looked at. It sits before the members button
-   *  at the header's end. */
+   *  refusal (or a chat this phone could not start) the User has not looked
+   *  at. It sits before the members button at the header's end. */
   function renderSendLogButton() {
     const button = document.getElementById("send-log-button");
     if (!button) return;
@@ -3212,7 +3254,9 @@
     syncHeaderSpacer();
     button.setAttribute("aria-label", summary.failing > 0
       ? "Send log: " + (summary.failing === 1 ? "something you sent has" : summary.failing + " things you sent have") + " not reached your server yet"
-      : "Send log: your server did not take something you sent");
+      : sendLogNewestNotStarted
+        ? "Send log: a chat you started did not start"
+        : "Send log: your server did not take something you sent");
   }
 
   function sendLogKindLabel(record) {
@@ -3655,16 +3699,61 @@
     const effort = chosen && newChatMainChoice.reasoningEffort && efforts.some(function (item) { return item.id === newChatMainChoice.reasoningEffort; }) ? newChatMainChoice.reasoningEffort : undefined;
     // Its CLI's mode in the CLI's own terms, the computer's picker's modes and
     // words (chatAccessModes): the one its CLI starts in until one is chosen.
-    const accessOptions = newChatAccessOptions(provider.kind);
-    const defaultAccess = accessOptions.length > 0 ? newChatDefaultAccess(provider.kind) : undefined;
-    const access = chosen && newChatMainChoice.access && accessOptions.some(function (item) { return item.id === newChatMainChoice.access; })
-      ? newChatMainChoice.access : defaultAccess;
     // Where it runs: one of the machines, once there is one; else this computer.
     const homeMachineId = chosen && newChatMainChoice.homeMachineId && newChatMachineList().some(function (item) { return item.id === newChatMainChoice.homeMachineId; })
       ? newChatMainChoice.homeMachineId : undefined;
-    return { provider: provider, model: model, modelLabel: modelEntry ? modelEntry.label : provider.defaultModelLabel, efforts: efforts,
-      effort: effort, effortLabel: effort ? (efforts.find(function (item) { return item.id === effort; }) || {}).label : undefined,
-      accessOptions: accessOptions, access: access, homeMachineId: homeMachineId };
+    // Codex's Full Access and Plan mode only where they run: a computer that
+    // offers them, and a machine whose program does (the computer's offer).
+    const modes = offer && offer.cliModes;
+    const modesHere = Boolean(modes) && (!homeMachineId || Boolean(modes.machines && modes.machines[homeMachineId]));
+    const accessSet = newChatAccessSet(provider.kind);
+    // What the User's own config starts the CLI in where it runs: this
+    // computer's (with its provider), or the machine's (it reads its own).
+    const start = newChatStartDefaults(offer, provider, homeMachineId);
+    // The modes the computer's picker lists, and one it lists only while it
+    // is the mode (Codex's Read Only) when her config starts the CLI in it.
+    const shared = mobileSharedRules();
+    const startOption = start && start.access && shared && typeof shared.startChatAccessOption === "function" ? shared.startChatAccessOption(provider.kind, start.access) : undefined;
+    const startHidden = startOption && startOption.hidden ? startOption : undefined;
+    const accessOptions = newChatAccessOptions(provider.kind).concat(startHidden ? [startHidden] : [])
+      .filter(function (item) { return modesHere || item.agentMode !== "full-access"; });
+    const defaultAccess = accessOptions.length > 0 ? newChatDefaultAccess(provider.kind, start && start.access, accessOptions) : undefined;
+    // A mode she chose; none: the one her config starts the CLI in there,
+    // which follows where it runs until she chooses one.
+    const accessChosen = chosen && newChatMainChoice.access && accessOptions.some(function (item) { return item.id === newChatMainChoice.access; })
+      ? newChatMainChoice.access : undefined;
+    const access = accessChosen || defaultAccess;
+    // Codex's Plan mode: its own toggle beside the permissions, as on the computer.
+    const planOffered = Boolean(accessSet && accessSet.plan && modesHere);
+    const plan = Boolean(chosen && newChatMainChoice.plan && planOffered);
+    // None chosen: the model and effort her config starts it on there.
+    const startModelLabel = !model && !provider.hostId && homeMachineId && start && start.modelLabel ? start.modelLabel : undefined;
+    const startEffort = !effort && !model && !provider.hostId && start && start.reasoningEffort &&
+      efforts.some(function (item) { return item.id === start.reasoningEffort; }) ? start.reasoningEffort : undefined;
+    const shownEffort = effort || startEffort;
+    return { provider: provider, model: model, modelLabel: modelEntry ? modelEntry.label : startModelLabel || provider.defaultModelLabel, efforts: efforts,
+      effort: effort, effortLabel: shownEffort ? (efforts.find(function (item) { return item.id === shownEffort; }) || {}).label : undefined,
+      startEffortLabel: startEffort ? (efforts.find(function (item) { return item.id === startEffort; }) || {}).label : undefined,
+      accessOptions: accessOptions, access: access, accessChosen: accessChosen, accessSet: accessSet, planOffered: planOffered, plan: plan, homeMachineId: homeMachineId };
+  }
+
+  /** What the User's own config starts a provider's CLI in where the main
+   *  session runs (src/shared/cliStartDefaults.ts): the computer's, said
+   *  with each provider; a machine's, said by its last hello. */
+  function newChatStartDefaults(offer, provider, homeMachineId) {
+    if (homeMachineId) {
+      const machines = offer && offer.cliStart && offer.cliStart.machines;
+      const ofMachine = machines && machines[homeMachineId];
+      return ofMachine && ofMachine[provider.kind] ? ofMachine[provider.kind] : undefined;
+    }
+    return provider && provider.start ? provider.start : undefined;
+  }
+
+  /** A CLI's modes as its own menu titles them (and Codex's Plan mode, and
+   *  what Antigravity cannot do here), one shared table with the computer. */
+  function newChatAccessSet(kind) {
+    const shared = mobileSharedRules();
+    return shared && typeof shared.chatAccessModeSet === "function" ? shared.chatAccessModeSet(kind) : undefined;
   }
 
   /** The modes the computer's picker lists for this CLI (one shared list). */
@@ -3673,10 +3762,16 @@
     return shared && typeof shared.chatAccessOptions === "function" ? shared.chatAccessOptions(kind) : [];
   }
 
-  function newChatDefaultAccess(kind) {
+  /** The mode a new main session starts in: the one the User's config starts
+   *  its CLI in where it runs, when offered; else the CLI's built-in one. */
+  function newChatDefaultAccess(kind, startAccess, offered) {
     const shared = mobileSharedRules();
-    const option = shared && typeof shared.defaultChatAccessOption === "function" ? shared.defaultChatAccessOption(kind) : undefined;
-    return option ? option.id : undefined;
+    const option = shared && typeof shared.startChatAccessOption === "function"
+      ? shared.startChatAccessOption(kind, startAccess)
+      : shared && typeof shared.defaultChatAccessOption === "function" ? shared.defaultChatAccessOption(kind) : undefined;
+    if (option && (!offered || offered.some(function (item) { return item.id === option.id; }))) return option.id;
+    const fallback = shared && typeof shared.defaultChatAccessOption === "function" ? shared.defaultChatAccessOption(kind) : undefined;
+    return fallback ? fallback.id : undefined;
   }
 
   /** The machines the server knows, by name: where a main session can run
@@ -3743,7 +3838,7 @@
     };
     const choose = function (patch) {
       const current = { kind: selection.provider.kind, hostId: selection.provider.hostId, model: selection.model, reasoningEffort: selection.effort,
-        access: selection.access, homeMachineId: selection.homeMachineId };
+        access: selection.accessChosen, plan: selection.plan, homeMachineId: selection.homeMachineId };
       newChatMainChoice = Object.assign(current, patch);
       renderNewChat("");
     };
@@ -3756,7 +3851,7 @@
         // computer drops what was chosen for the one before.
         onClick: function () {
           if (chosen) return;
-          choose({ kind: provider.kind, hostId: provider.hostId, model: undefined, reasoningEffort: undefined, access: undefined, homeMachineId: undefined });
+          choose({ kind: provider.kind, hostId: provider.hostId, model: undefined, reasoningEffort: undefined, access: undefined, plan: undefined, homeMachineId: undefined });
         } }));
     }
     section("Model");
@@ -3767,16 +3862,37 @@
         onClick: function () { choose({ model: model.id }); } }));
     }
     section("Effort");
-    list.append(newChatOptionRow({ label: "Default", chosen: !selection.effort, data: { effort: "" }, onClick: function () { choose({ reasoningEffort: undefined }); } }));
+    list.append(newChatOptionRow({ label: "Default", detail: selection.startEffortLabel, chosen: !selection.effort, data: { effort: "" },
+      onClick: function () { choose({ reasoningEffort: undefined }); } }));
     for (const effort of selection.efforts) {
       list.append(newChatOptionRow({ label: effort.label, chosen: selection.effort === effort.id, data: { effort: effort.id },
         onClick: function () { choose({ reasoningEffort: effort.id }); } }));
     }
     if (selection.accessOptions.length > 0) {
-      section("Access");
+      // Under the CLI's own title ("Permission mode", "Permissions", "Agent Mode").
+      section(selection.accessSet && selection.accessSet.title ? selection.accessSet.title : "Access");
       for (const option of selection.accessOptions) {
         list.append(newChatOptionRow({ label: option.label, detail: option.detail, chosen: selection.access === option.id, data: { access: option.id },
-          onClick: function () { choose({ access: option.id }); } }));
+          onClick: function () {
+            // Codex asks before it switches to Full Access, in its own words.
+            if (option.agentMode === "full-access" && selection.access !== option.id) {
+              renderNewChatFullAccessConfirm(list, function () { choose({ access: option.id }); }, function () { renderNewChatModelOptions(offer); });
+              return;
+            }
+            choose({ access: option.id });
+          } }));
+      }
+      if (selection.accessSet && selection.accessSet.note) {
+        const note = document.createElement("p");
+        note.className = "members-sheet-note new-chat-access-note";
+        note.textContent = selection.accessSet.note;
+        list.append(note);
+      }
+      // Codex's Plan mode, a choice of its own beside the permissions.
+      if (selection.planOffered) {
+        section(selection.accessSet.plan.label);
+        list.append(newChatOptionRow({ label: "Off", chosen: !selection.plan, data: { plan: "off" }, onClick: function () { choose({ plan: false }); } }));
+        list.append(newChatOptionRow({ label: "On", chosen: selection.plan, data: { plan: "on" }, onClick: function () { choose({ plan: true }); } }));
       }
     }
     const machines = newChatMachineList();
@@ -3790,6 +3906,49 @@
           onClick: function () { choose({ homeMachineId: machine.id }); } }));
       }
     }
+  }
+
+  /** Codex's own question before Full Access (Codex 0.155.1's `/permissions`,
+   *  shared with the computer: FULL_ACCESS_CONFIRMATION), in place of the
+   *  choices until it is answered. */
+  function renderNewChatFullAccessConfirm(list, confirm, back) {
+    const shared = mobileSharedRules();
+    const words = shared && shared.FULL_ACCESS_CONFIRMATION;
+    if (!words) {
+      confirm();
+      return;
+    }
+    list.replaceChildren();
+    // Laid out as the phone's other question before a step that matters (a
+    // pairing code's): the question, then the step as the filled button and
+    // going back as the outlined one, each with Codex's line under it.
+    const box = document.createElement("div");
+    box.className = "new-chat-confirm";
+    const title = document.createElement("div");
+    title.className = "new-chat-confirm-title";
+    title.textContent = words.title;
+    const body = document.createElement("p");
+    body.className = "new-chat-confirm-body";
+    body.textContent = words.body;
+    const actions = document.createElement("div");
+    actions.className = "pairing-form new-chat-confirm-actions";
+    const action = function (className, choice, which, onClick) {
+      const button = document.createElement("button");
+      button.type = "button";
+      button.className = className + " new-chat-confirm-action";
+      button.dataset.confirm = which;
+      const label = document.createElement("span");
+      label.textContent = choice.label;
+      const detail = document.createElement("span");
+      detail.className = "new-chat-confirm-detail";
+      detail.textContent = choice.detail;
+      button.append(label, detail);
+      button.addEventListener("click", onClick);
+      return button;
+    };
+    actions.append(action("pairing-submit", words.confirm, "yes", confirm), action("pairing-cancel", words.cancel, "cancel", back));
+    box.append(title, body, actions);
+    list.append(box);
   }
 
   function newChatMemberName(participant) {
@@ -4073,7 +4232,7 @@
       const selection = sessionsView ? newChatMainSelection(offer) : undefined;
       const lead = selection && typeof shared.newChatMainSessionFor === "function"
         ? shared.newChatMainSessionFor(offeredLead, offer.mainSessionProviders, { kind: selection.provider.kind, hostId: selection.provider.hostId,
-          model: selection.model, reasoningEffort: selection.effort, access: selection.access, homeMachineId: selection.homeMachineId })
+          model: selection.model, reasoningEffort: selection.effort, access: selection.access, plan: selection.plan, homeMachineId: selection.homeMachineId })
         : offeredLead;
       const participants = shared.newChatParticipants({
         assistant: lead, mainSession: lead, members: sessionsView ? [] : offer.members, chosenConfigIds: sessionsView ? [] : Array.from(newChatChosen),
@@ -4092,6 +4251,7 @@
       // In the list at once, as the computer's sidebar shows a chat it made
       // (the first message finds its members there).
       listed = true;
+      noteOwnChat(conversationId);
       saveStartedChats([{
         id: conversationId, title: title, group: shared.mobileChatGroupLabel(repoPath), snippet: shared.mobileSnippet(text), who: "you:", updatedAt: createdAt,
         running: false, startedHere: true, deviceId: (loadPairing() || {}).deviceId,
@@ -6561,6 +6721,35 @@
     }, 700);
   }
 
+  /** Who wrote a chat's newest message, before its snippet: a chat shown in
+   *  the sessions view names no member there (no handles in that view, and a
+   *  member's task is not known without the chat's messages). */
+  function chatRowWho(chat) {
+    const who = typeof chat.who === "string" ? chat.who : "";
+    if (!who || /^(you|system):$/i.test(who.trim())) return who;
+    return chatViewOf(chat) === "sessions" ? "" : who;
+  }
+
+  const ARTIFACT_NOTE_SNIPPET = /^@[A-Za-z0-9][A-Za-z0-9_-]* (?:created|revised|renamed|signed|archived|restored|submitted|withdrew|published) /;
+
+  /** A sessions-view chat's subtitle: when its newest message is a reply the
+   *  app ended (its lines start with its member's own handle: "@main stopped
+   *  before it returned a response."), those words name nobody by handle, as
+   *  in the chat (sessionsViewReplyText); a member's own words stay. */
+  function sessionsViewSnippet(chat, text) {
+    const who = typeof chat.who === "string" ? chat.who.trim().replace(/:$/, "") : "";
+    if (typeof text !== "string" || text.indexOf("@") < 0) return text;
+    // A document's note ("@drew revised Plan · v3") is the app's line too.
+    if (/^system$/i.test(who) && ARTIFACT_NOTE_SNIPPET.test(text)) return sessionsViewTextFor(chat.id, text);
+    if (!who || /^(you|system)$/i.test(who)) return text;
+    const shared = sessionsRules();
+    const names = sessionsViewNamesFor(chat.id);
+    if (!names || !shared || typeof shared.sessionsViewReplyText !== "function") return text;
+    // The app's line without handles; a member's words by the mention rule.
+    const worded = shared.sessionsViewReplyText(text, who, names);
+    return typeof shared.sessionsMentionText === "function" ? shared.sessionsMentionText(worded, names) : worded;
+  }
+
   /** The chat list's subtitle is the desktop's 84-character cut of the last
    *  message with its line breaks already collapsed, so the line-based rule
    *  cannot find the block inside it: what follows the marker on that one line
@@ -6825,13 +7014,13 @@
     }
     const snippet = document.createElement("div");
     snippet.className = "mobile-chat-snippet";
-    if (chat.who) {
+    if (chatRowWho(chat)) {
       const who = document.createElement("b");
-      who.textContent = chat.who;
+      who.textContent = chatRowWho(chat);
       snippet.append(who);
     }
     const snippetText = document.createElement("span");
-    snippetText.textContent = snippetDisplayText(chat);
+    snippetText.textContent = sessionsViewSnippet(chat, snippetDisplayText(chat));
     snippet.append(snippetText);
     copy.append(titleLine, snippet);
     const when = document.createElement("div");
@@ -7079,7 +7268,7 @@
     if (!back) {
       return;
     }
-    const label = memberSession || accordScreen ? "Back to the main session" : "Back to the chat";
+    const label = memberSession || accordScreen ? "Back" : "Back to the chat";
     if (back.getAttribute("aria-label") !== label) back.setAttribute("aria-label", label);
     const shouldShow = Boolean(openThreadRoot || memberSession || accordScreen);
     if (back.classList.contains("is-visible") !== shouldShow) {
@@ -7972,8 +8161,9 @@
 
   /** Who raised a card, beside its title: the member's handle, except in a
    *  sessions-view chat, where no handle is shown (docs/main-session.md): the
-   *  main session reads "Main session", a member its task's title. The label
-   *  is cut with an ellipsis rather than pushed off the screen. */
+   *  main session gets no who line, a member its task's title (its handle as
+   *  a plain word while this phone has no task for it). The label is cut
+   *  with an ellipsis rather than pushed off the screen. */
   function appendCardWho(head, card) {
     const requester = cardRequesterLabel(card);
     if (!requester && !card.machineName) return;
@@ -7985,19 +8175,98 @@
   }
 
   function cardRequesterLabel(card) {
-    const label = card.requesterLabel;
-    if (!label) return label;
-    const chat = loadChats().find(function (item) { return item.id === card.conversationId; });
-    if (!chat || chatViewOf(chat) !== "sessions") return label;
-    const handle = String(label).replace(/^@/, "").toLowerCase();
-    const member = chatMembers(chat).find(function (item) {
-      return String(item.mentionHandle || item.handle || "").replace(/^@/, "").toLowerCase() === handle;
+    // The main session is named by nothing; a member by its task's title, or
+    // its handle as a plain word while this phone has no task for it.
+    return sessionsViewLabelFor(card.conversationId, card.requesterLabel);
+  }
+
+  /** A "who" label as the chat's view shows it: a handle ("@drew") becomes
+   *  the member's task's title in the sessions view, "" for the main
+   *  session; any other label ("Chat Assistant", "A member") stays. */
+  function sessionsViewLabelFor(conversationId, label) {
+    if (typeof label !== "string" || !/^\s*@/.test(label)) return label;
+    const names = sessionsViewNamesFor(conversationId);
+    return names ? sessionsRules().sessionsViewLabel(label, names) : label;
+  }
+
+  /** How a chat shown in the sessions view names its members (the shared
+   *  sessionsViewText rule, one with the desktop): the main session by
+   *  nothing, a member by its task's title (by its handle as a plain word
+   *  while this phone has no task for it). Undefined in the classic view. */
+  function sessionsViewNamesFor(conversationId) {
+    const shared = sessionsRules();
+    if (!shared || typeof shared.sessionsViewNames !== "function" || !conversationId) return undefined;
+    const open = lastSessionsState && lastSessionsState.conversationId === conversationId ? lastSessionsState : undefined;
+    // Worked out once per chat list and drawing of the open chat, not per
+    // label: Activity and a chat's cards ask for every row.
+    // A chat not open now names its members by the tasks it had when it was
+    // last open here (titles are read from its messages, which only an open
+    // chat has); a member it had no task for, by its handle as a plain word.
+    const titled = open ? undefined : sessionsTitledNames.get(conversationId);
+    const known = sessionsNamesCache.get(conversationId);
+    if (known && cachedChatList && known.list === cachedChatList && known.state === open && known.titled === titled) return known.names;
+    const names = sessionsViewNamesUncached(shared, conversationId, titled);
+    if (cachedChatList) sessionsNamesCache.set(conversationId, { list: cachedChatList, state: open, titled: titled, names: names });
+    if (open && names) sessionsTitledNames.set(conversationId, names);
+    return names;
+  }
+
+  const sessionsNamesCache = new Map();
+  const sessionsTitledNames = new Map();
+
+  function sessionsViewNamesUncached(shared, conversationId, titled) {
+    const chat = loadChats().find(function (item) { return item.id === conversationId; });
+    if (!chat || chatViewOf(chat) !== "sessions") return undefined;
+    const members = chatMembers(chat);
+    const mainId = shared.mainSessionParticipantId(chatViewMetadata(chat));
+    const main = members.find(function (member) { return member.id === mainId; }) ||
+      members.find(function (member) { return member.roleConfigId === MAIN_SESSION_ROLE; });
+    const state = lastSessionsState && lastSessionsState.conversationId === conversationId ? lastSessionsState : undefined;
+    const titles = [];
+    if (state) {
+      state.formerMembers.forEach(function (former) { if (former.handle) titles.push([former.handle, sessionsMemberTitleOf(state, former.id)]); });
+    }
+    members.forEach(function (member) {
+      if (member === main || !member.handle) return;
+      const title = state ? sessionsMemberTitleOf(state, member) : (titled && titled.titleOf(member.handle)) || String(member.handle).replace(/^@/, "");
+      titles.push([member.handle, title]);
+      if (member.mentionHandle && member.mentionHandle !== member.handle) titles.push([member.mentionHandle, title]);
     });
-    if (member && (member.id === chat.mainSessionParticipantId || member.roleConfigId === MAIN_SESSION_ROLE)) return "Main session";
-    const state = lastSessionsState && lastSessionsState.conversationId === card.conversationId ? lastSessionsState : undefined;
-    if (member && state) return sessionsMemberTitleOf(state, member.id);
-    // A member this phone has no task for yet: its handle as a plain word.
-    return handle || label;
+    return shared.sessionsViewNames(main ? main.mentionHandle || main.handle : undefined, titles);
+  }
+
+  /** A card's words as the chat's view shows them: a permission card's are
+   *  the app's (sessionsViewTextFor), its title and summary the approval's
+   *  summary, whose tool request (a command, a reason) stays exactly as
+   *  written (sessionsViewSummaryText); a choice's are its member's own. */
+  function cardAppText(card, text, summary) {
+    if (!card || card.kind === "choice") return text;
+    return summary ? sessionsViewSummaryTextFor(card.conversationId, text) : sessionsViewTextFor(card.conversationId, text);
+  }
+
+  /** A member's own words in one plain line (an Activity preview, the chat
+   *  list's subtitle), by the sessions view's mention rule. */
+  function sessionsMentionTextFor(conversationId, text) {
+    if (typeof text !== "string" || text.indexOf("@") < 0) return text;
+    const shared = sessionsRules();
+    const names = sessionsViewNamesFor(conversationId);
+    return names && typeof shared.sessionsMentionText === "function" ? shared.sessionsMentionText(text, names) : text;
+  }
+
+  function sessionsViewSummaryTextFor(conversationId, text) {
+    if (typeof text !== "string" || text.indexOf("@") < 0) return text;
+    const shared = sessionsRules();
+    const names = sessionsViewNamesFor(conversationId);
+    return names && typeof shared.sessionsViewSummaryText === "function" ? shared.sessionsViewSummaryText(text, names) : text;
+  }
+
+  /** Text the app wrote (a card's title, options, outcome; a failure; a
+   *  status), as the chat's view shows it: without handles in the sessions
+   *  view, as written in the classic view. */
+  function sessionsViewTextFor(conversationId, text) {
+    if (typeof text !== "string" || text.indexOf("@") < 0) return text;
+    const names = sessionsViewNamesFor(conversationId);
+    return names ? sessionsRules().sessionsViewText(text, names) : text;
   }
 
   function controlCardElement(card) {
@@ -8023,7 +8292,7 @@
     head.className = "control-card-head";
     const title = document.createElement("span");
     title.className = "control-card-title";
-    title.textContent = card.title || (card.kind === "permission" ? "Permission request" : "Choice");
+    title.textContent = cardAppText(card, card.title, true) || (card.kind === "permission" ? "Permission request" : "Choice");
     head.append(title);
     appendCardWho(head, card);
     wrap.append(head);
@@ -8031,7 +8300,7 @@
     if (card.summary) {
       const summary = document.createElement("p");
       summary.className = "control-card-summary";
-      summary.textContent = card.summary;
+      summary.textContent = cardAppText(card, card.summary, true);
       wrap.append(summary);
     }
 
@@ -8059,7 +8328,7 @@
       button.type = "button";
       button.className = "control-card-option";
       button.dataset.optionId = option.id;
-      button.textContent = option.label || option.id;
+      button.textContent = cardAppText(card, option.label) || option.id;
       button.disabled = sent;
       button.addEventListener("click", function () {
         void answerControlCard(card, { optionId: option.id });
@@ -8387,11 +8656,12 @@
     if (side) {
       side.hidden = empty || (!canStop && !stopping);
       side.disabled = !canStop;
-      side.setAttribute("aria-label", stopping ? "Stopping" : ids[0] && state && ids[0] === state.mainId ? "Stop the main session" : "Stop this member");
+      side.setAttribute("aria-label", stopping ? "Stopping" : ids[0] && state && ids[0] === state.mainId ? "Stop" : "Stop this member");
     }
     const mode = empty && canStop ? "stop" : empty && stopping ? "stopping" : "send";
-    const whose = ids[0] && state && ids[0] === state.mainId ? "the main session" : "this member";
-    button.setAttribute("aria-label", mode === "send" ? "Send message" : mode === "stop" ? "Stop " + whose : "Stopping " + whose);
+    // The main session is named by nothing in the sessions view.
+    const whose = ids[0] && state && ids[0] === state.mainId ? "" : " this member";
+    button.setAttribute("aria-label", mode === "send" ? "Send message" : mode === "stop" ? "Stop" + whose : "Stopping" + whose);
     if ((button.dataset.mode || "send") === mode) return;
     button.dataset.mode = mode;
     button.classList.toggle("is-stop", mode !== "send");
@@ -8643,10 +8913,40 @@
     return avatarForLabel(conversationMembers(conversationId), handle || "Agent");
   }
 
+  /** The provider of the member an Activity row is about, by its handle. */
+  function activityMemberKind(conversationId, handle) {
+    const chat = loadChats().find(function (item) { return item.id === conversationId; });
+    const key = String(handle || "").trim().replace(/^@/, "").toLowerCase();
+    const member = chat && key ? chatMembers(chat).find(function (item) {
+      return [item.handle, item.mentionHandle].some(function (name) { return String(name || "").replace(/^@/, "").toLowerCase() === key; });
+    }) : undefined;
+    return member && member.kind ? member.kind : "";
+  }
+
+  /** Who an Activity row is about, as its chat's view names it: its handle,
+   *  or in the sessions view a member's task ("" for the main session). */
+  function activityRowWho(row) {
+    return sessionsViewLabelFor(row.conversationId, row.handle);
+  }
+
   function activityRowAvatar(conversationId, handle) {
+    // A sessions-view chat has no avatars: the member's provider logo.
+    if (sessionsViewNamesFor(conversationId)) {
+      const glyph = document.createElement("span");
+      glyph.className = "act-avatar act-avatar-glyph";
+      glyph.setAttribute("aria-hidden", "true");
+      glyph.append(providerLogoElement(activityMemberKind(conversationId, handle), ""));
+      return glyph;
+    }
     const avatar = document.createElement("span");
     avatar.className = "mobile-chat-avatar act-avatar";
     paintAvatar(avatar, activityAvatarFor(conversationId, handle), conversationId);
+    // Its name is read out as the row names it: no handle in the sessions view.
+    const who = sessionsViewLabelFor(conversationId, handle);
+    if (who !== handle && avatar.hasAttribute("aria-label")) {
+      if (who) avatar.setAttribute("aria-label", who);
+      else avatar.removeAttribute("aria-label");
+    }
     return avatar;
   }
 
@@ -8662,9 +8962,11 @@
     title.className = "act-chat-title";
     title.textContent = row.chatTitle;
     // "by @drew · Office Mac": who asks, and where it would run. A machine is
-    // never named as the author.
-    const byText = row.handle
-      ? " by " + [row.handle, row.machineName].filter(Boolean).join(" · ")
+    // never named as the author. A chat in the sessions view names a member
+    // by its task and the main session by nothing.
+    const who = activityRowWho(row);
+    const byText = who
+      ? " by " + [who, row.machineName].filter(Boolean).join(" · ")
       : row.machineName ? " · " + row.machineName : "";
     if (byText) {
       const by = document.createElement("span");
@@ -8676,7 +8978,7 @@
     for (const node of stamp) top.append(node);
     const preview = document.createElement("span");
     preview.className = "act-preview" + (row.kind === "permission" ? " act-preview-full" : "");
-    preview.textContent = row.preview || (row.kind === "run" ? "Thinking…" : "");
+    preview.textContent = (row.kind === "permission" ? sessionsViewSummaryTextFor(row.conversationId, row.preview) : sessionsMentionTextFor(row.conversationId, row.preview)) || (row.kind === "run" ? "Thinking…" : "");
     main.append(top, preview);
     return main;
   }
@@ -8991,7 +9293,7 @@
       stop.className = "act-stop";
       stop.dataset.runId = row.runId;
       stop.disabled = stopping;
-      stop.setAttribute("aria-label", stopping ? "Stopping" : "Stop " + (row.handle || "this run"));
+      stop.setAttribute("aria-label", stopping ? "Stopping" : "Stop " + (activityRowWho(row) || "this run"));
       const ring = document.createElement("span");
       ring.className = "act-stop-ring";
       const square = document.createElement("span");
@@ -9088,7 +9390,7 @@
       minute: Math.floor(Date.now() / 60_000),
       rows: rows.map(function (row) {
         return [row.key, row.chatTitle, row.handle, row.machineName, row.preview, row.at, row.count, row.read,
-          row.cancellable, row.stopping, avatarSignature(activityAvatarFor(row.conversationId, row.handle)),
+          row.cancellable, row.stopping, avatarSignature(activityAvatarFor(row.conversationId, row.handle)), activityRowWho(row), Boolean(sessionsViewNamesFor(row.conversationId)),
           row.card ? [isCardLocked(row.card.id), cardSentText(row.card.id), controlCardAnswering.has(row.card.id), controlCardErrors.get(row.card.id) || ""] : 0,
           row.runId ? stopRequestedRunIds.has(row.runId) : 0];
       })
@@ -9165,7 +9467,7 @@
     const titleNode = document.getElementById("activity-item-title");
     const subNode = document.getElementById("activity-item-sub");
     if (titleNode) titleNode.textContent = row.chatTitle;
-    if (subNode) subNode.textContent = "Waiting for you" + (row.handle ? " · asked by " + row.handle : "");
+    if (subNode) subNode.textContent = "Waiting for you" + (activityRowWho(row) ? " · asked by " + activityRowWho(row) : "");
     view.hidden = false;
     view.dataset.conversationId = row.conversationId;
     const signature = JSON.stringify([card, isCardLocked(card.id), cardSentText(card.id), controlCardAnswering.has(card.id), controlCardErrors.get(card.id) || ""]);
@@ -9184,7 +9486,7 @@
       head.append(activityRowAvatar(row.conversationId, source.participantLabel || row.handle));
       const who = document.createElement("span");
       who.className = "message-handle";
-      who.textContent = source.participantLabel || row.handle || "";
+      who.textContent = activityRowWho({ conversationId: row.conversationId, handle: source.participantLabel || row.handle }) || "";
       const when = document.createElement("span");
       when.className = "message-status";
       when.textContent = formatClockTime(source.createdAt);
@@ -9926,14 +10228,18 @@
       return;
     }
     view.hidden = false;
-    label.textContent = row.participantLabel || "Agent";
+    // The open chat's view names the member (sessions: by its task; the main
+    // session by nothing).
+    const streamChatId = row.conversationId || (lastSessionsState && lastSessionsState.conversationId);
+    const streamWho = sessionsViewLabelFor(streamChatId, row.participantLabel);
+    label.textContent = streamWho || (row.participantLabel ? "" : "Agent");
     stop.hidden = !isCancellableMobileRow(row);
     stop.disabled = row.stopRequested === true;
     stop.dataset.runId = row.runId || "";
     stop.dataset.turnMessageId = row.sourceMessageId || "";
     stop.dataset.participantId = row.participantId || "";
     stop.textContent = row.stopRequested ? "Stopping…" : "Stop";
-    stop.setAttribute("aria-label", "Stop response from " + (row.participantLabel || "Agent"));
+    stop.setAttribute("aria-label", streamWho || !row.participantLabel ? "Stop response from " + (streamWho || "Agent") : "Stop response");
     // (e) When the run finishes the view stays and shows the finished answer;
     // leaving is the reader's decision, not ours.
     state.textContent = row.status === "Running"
@@ -10128,6 +10434,7 @@
       // one must be told apart (the main session in a member's session).
       presentation: entry.presentation,
       authorLabel: entry.authorLabel,
+      authorKind: entry.authorKind,
       worked: sessionsView ? entry.workedMs : undefined,
       // Its steps (a running reply's rows; what its Worked for opens to, and
       // whether it is open).
@@ -10272,6 +10579,20 @@
       return formatClockTime(entry.createdAt) || entry.status;
     }
     return entry.status;
+  }
+
+  /** A row's author: its name, or in the sessions view the main session's
+   *  provider logo where an author must be told apart (a member's session). */
+  function fillRowHandle(handle, entry) {
+    if (entry.authorKind) {
+      if (handle.dataset.authorKind !== entry.authorKind) {
+        handle.dataset.authorKind = entry.authorKind;
+        handle.replaceChildren(providerLogoElement(entry.authorKind === "unknown" ? "" : entry.authorKind, "is-chip"));
+      }
+      return;
+    }
+    delete handle.dataset.authorKind;
+    handle.textContent = rowHandleText(entry);
   }
 
   function rowHandleText(entry) {
@@ -10505,8 +10826,13 @@
     title.className = "artifact-note-title";
     const actor = document.createElement("span");
     actor.className = card.actor === "user" ? "artifact-note-actor" : "artifact-note-actor is-member";
-    actor.textContent = shared.artifactNoteActorLabel(card.actor);
-    title.append(actor, document.createTextNode(" " + shared.artifactNoteVerb(card.action)));
+    // The sessions view names a member by its task and the main session by
+    // nothing ("Revised v3").
+    const actorName = sessionsViewLabelFor(entry.conversationId, shared.artifactNoteActorLabel(card.actor));
+    const verb = shared.artifactNoteVerb(card.action);
+    actor.textContent = actorName;
+    if (actorName) title.append(actor, document.createTextNode(" " + verb));
+    else title.append(document.createTextNode(verb.charAt(0).toUpperCase() + verb.slice(1)));
     const version = card.action === "published" || card.action === "revised"
       ? card.details.find(function (detail) { return /^v\d+$/.test(detail); })
       : undefined;
@@ -10625,11 +10951,15 @@
     const name = document.createElement("span");
     name.className = "accord-launch-handle";
     name.textContent = "@" + handle;
-    // The sessions view names a member by its logo and task, no avatar or handle.
+    // The sessions view names a member by its logo and task, no avatar or
+    // handle; the main session by its logo alone, as on the desktop.
     if (entry.presentation === "sessions") {
       const member = sessionsMemberByHandle(handle);
-      name.textContent = member ? member.title : handle;
-      wrap.append(providerLogoElement(member ? member.kind : "", "is-chip"), name);
+      const main = sessionsMentionScope && String(handle).toLowerCase() === sessionsMentionScope.mainHandle;
+      const mainKind = main && lastSessionsState && lastSessionsState.mainMember ? lastSessionsState.mainMember.kind : "";
+      name.textContent = member ? member.title : main ? "" : handle;
+      wrap.append(providerLogoElement(member ? member.kind : mainKind || "", "is-chip"));
+      if (name.textContent) wrap.append(name);
       return wrap;
     }
     const avatar = document.createElement("span");
@@ -10700,10 +11030,11 @@
     name.className = "accord-progress-label";
     name.textContent = stage.label;
     text.append(name);
-    if (stage.detail) {
+    const detail = sessionsViewTextFor(entry && entry.conversationId, stage.detail);
+    if (detail) {
       const line = document.createElement("span");
       line.className = "accord-progress-detail";
-      line.textContent = stage.detail;
+      line.textContent = detail;
       text.append(line);
     }
     if (stage.members.length > 0) {
@@ -10893,14 +11224,16 @@
       const kind = document.createElement("span");
       kind.className = "accord-dock-kind";
       kind.textContent = "Accord";
-      // The sessions view names members by their tasks, not their handles.
+      // The sessions view names members by their tasks, not their handles,
+      // and the main session by nothing (left out, as on the desktop).
       const named = function (handle) {
         if (!sessionsMentionScope) return "@" + handle;
         const member = sessionsMemberByHandle(handle);
-        return member ? member.title : String(handle).toLowerCase() === sessionsMentionScope.mainHandle ? "the main session" : handle;
+        return member ? member.title : String(handle).toLowerCase() === sessionsMentionScope.mainHandle ? "" : handle;
       };
-      meta.append(kind, document.createTextNode(" · led by " + named(docked.card.facilitator) + " · with " +
-        docked.card.members.map(named).join(", ")));
+      const lead = named(docked.card.facilitator);
+      const others = docked.card.members.map(named).filter(Boolean);
+      meta.append(kind, document.createTextNode((lead ? " · led by " + lead : "") + (others.length ? " · with " + others.join(", ") : "")));
       heading.append(meta);
     }
     const status = document.createElement("span");
@@ -10932,7 +11265,7 @@
       note.className = "accord-progress-note";
       const noteHead = document.createElement("span");
       noteHead.className = "accord-progress-note-head";
-      noteHead.textContent = shared.accordProgressNoteHead(version);
+      noteHead.textContent = sessionsViewTextFor(entry && entry.conversationId, shared.accordProgressNoteHead(version));
       note.append(noteHead);
       if (version.note) {
         const body = document.createElement("span");
@@ -10986,7 +11319,10 @@
     const alert = urgentAlertOfEntry(entry);
     const shared = mobileSharedRules();
     const awaiting = Boolean(shared && typeof shared.urgentAlertAwaitsGotIt === "function" && shared.urgentAlertAwaitsGotIt(alert));
-    const label = entry.participantLabel || "A member";
+    // The sessions view names a member by its task and the main session by
+    // nothing (its line then says only when).
+    const rawLabel = entry.participantLabel || "A member";
+    const label = sessionsViewLabelFor(entry.conversationId, rawLabel);
     const wrap = document.createElement("div");
     wrap.className = "urgent-alert-card";
     if (alert.closedAt && !awaiting && !expandedUrgentAlerts.has(alert.id)) {
@@ -11013,7 +11349,7 @@
       end.textContent = outcome.short || outcome.text;
       const who = document.createElement("span");
       who.className = "sr-only";
-      who.textContent = " from " + label + ": " + outcome.text;
+      who.textContent = (label ? " from " + label : "") + ": " + outcome.text;
       const chevron = lineIcon(URGENT_ALERT_CHEVRON_PATHS, 14);
       chevron.classList.add("urgent-alert-folded-chevron");
       end.setAttribute("aria-hidden", "true");
@@ -11024,7 +11360,7 @@
     const panel = document.createElement("div");
     panel.className = "urgent-alert-panel";
     panel.setAttribute("role", "group");
-    panel.setAttribute("aria-label", "Urgent alert from " + label);
+    panel.setAttribute("aria-label", label ? "Urgent alert from " + label : "Urgent alert");
     const head = document.createElement("div");
     head.className = "urgent-alert-head";
     const headTitle = document.createElement("span");
@@ -11050,12 +11386,12 @@
     const from = document.createElement("div");
     from.className = "urgent-alert-from";
     const when = formatClockTime(entry.createdAt);
-    from.textContent = label + (when ? " · " + when : "");
+    from.textContent = [label, when].filter(Boolean).join(" · ");
     const text = document.createElement("div");
     text.className = "urgent-alert-text";
     text.textContent = entry.content || "";
     panel.append(head, from, text);
-    const status = shared && typeof shared.urgentAlertStatus === "function" ? shared.urgentAlertStatus(alert, label, Date.now()) : undefined;
+    const status = shared && typeof shared.urgentAlertStatus === "function" ? shared.urgentAlertStatus(alert, rawLabel, Date.now()) : undefined;
     if (status) {
       const band = document.createElement("div");
       band.className = "urgent-alert-status is-" + status.tone;
@@ -11079,7 +11415,7 @@
       if (status.detail) {
         const detail = document.createElement("div");
         detail.className = "urgent-alert-status-detail";
-        detail.textContent = status.detail;
+        detail.textContent = sessionsViewTextFor(entry.conversationId, status.detail);
         words.append(detail);
       }
       // A failed Got it holds while the alert still waits for one (a call
@@ -11228,14 +11564,14 @@
     const open = document.createElement("button");
     open.type = "button";
     open.className = "finished-note-open";
-    // The sessions view names the main session by what it is, with its
-    // provider's logo: no handle and no avatar there.
+    // The sessions view names a member by its task with its provider's logo,
+    // the main session by nothing: no handle, label or avatar there.
     const sessionsView = entry.presentation === "sessions";
     const sessionsState = sessionsView && lastSessionsState ? lastSessionsState : undefined;
-    const label = sessionsState && note.participantId === sessionsState.mainId ? "Main session"
+    const label = sessionsState && note.participantId === sessionsState.mainId ? ""
       : sessionsState ? sessionsMemberTitleOf(sessionsState, note.participantId) : note.participantLabel || "A member";
     // Its name is what it says (who, the time, the reply's first words).
-    open.title = "Go to " + label + "'s reply";
+    open.title = label ? "Go to " + label + "'s reply" : "Go to the reply";
     open.dataset.finishedNoteTarget = note.messageId;
     let avatar;
     if (sessionsState) {
@@ -11255,7 +11591,8 @@
     who.className = "finished-note-actor";
     who.textContent = label;
     const when = formatClockTime(entry.createdAt);
-    title.append(who, document.createTextNode(" finished answering" + (when ? " · " + when : "")));
+    if (label) title.append(who, document.createTextNode(" finished answering" + (when ? " · " + when : "")));
+    else title.append(document.createTextNode("Finished answering" + (when ? " · " + when : "")));
     const preview = document.createElement("div");
     preview.className = "finished-note-preview";
     preview.textContent = entry.content || "";
@@ -11344,7 +11681,7 @@
       meta.className = "message-meta";
       const handle = document.createElement("span");
       handle.className = "message-handle";
-      handle.textContent = rowHandleText(entry);
+      fillRowHandle(handle, entry);
       const status = document.createElement("span");
       status.className = "message-status";
       status.textContent = messageStatusLabel(entry);
@@ -11356,7 +11693,7 @@
       } else if (isThinkingEntry(entry)) {
         renderThinkingInto(content, entry);
       } else {
-        renderMessageContentIfChanged(content, entry.content, entry.author);
+        renderMessageContentIfChanged(content, entryShownContent(entry), entry.author);
       }
       meta.append(handle, status);
       syncMessageStopButton(meta, entry);
@@ -11668,7 +12005,7 @@
    *  urgent alert (the User, 2026-11-16) -- what was asked, then who asked
    *  and how it ended. It opens nothing. */
   function answeredCardElement(card) {
-    const outcome = card.outcome || "Answered";
+    const outcome = cardAppText(card, card.outcome) || "Answered";
     const when = card.decidedAt ? formatClockTime(card.decidedAt) : "";
     const row = cardRowElement("article", lineIcon(CHOICE_ROW_PATHS, 14), card.title || "Choice",
       [cardRequesterLabel(card), outcome + (when ? " " + when : "")].filter(Boolean).join(" · "), false);
@@ -11692,18 +12029,19 @@
     const title = document.createElement("span");
     title.className = "control-card-title";
     // Headed as the live card is, now that a permission folds as well.
-    title.textContent = card.title || (card.kind === "permission" ? "Permission request" : "Choice");
+    title.textContent = cardAppText(card, card.title, true) || (card.kind === "permission" ? "Permission request" : "Choice");
     head.append(title);
     appendCardWho(head, card);
     wrap.append(head);
     if (card.summary) {
       const summary = document.createElement("p");
       summary.className = "control-card-summary";
-      summary.textContent = card.summary;
+      summary.textContent = cardAppText(card, card.summary, true);
       wrap.append(summary);
     }
     const state = document.createElement("p");
     state.className = "control-card-state";
+    outcome = cardAppText(card, outcome);
     state.textContent = outcome === "Cancelled" || outcome === "Expired" ? outcome : outcome ? label + outcome : "";
     state.hidden = !state.textContent;
     wrap.append(state);
@@ -11832,7 +12170,7 @@
         return false;
       }
       applyRowIdentity(avatar, entry);
-      handle.textContent = rowHandleText(entry);
+      fillRowHandle(handle, entry);
       status.textContent = messageStatusLabel(entry);
       const meta = status.parentElement;
       if (!meta) {
@@ -11847,7 +12185,7 @@
         renderThinkingInto(content, entry);
       } else {
         delete content.dataset.thinking;
-        renderMessageContentIfChanged(content, isSessionsRunningEntry(entry) ? sessionsRunningText(entry) : entry.content, entry.author);
+        renderMessageContentIfChanged(content, isSessionsRunningEntry(entry) ? sessionsRunningText(entry) : entryShownContent(entry), entry.author);
       }
       if (content.parentElement) syncInterimPosts(content.parentElement, content, entry);
       if (content.parentElement) syncSessionsWorking(content.parentElement, meta, entry);
@@ -11869,10 +12207,24 @@
     item.classList.toggle("is-on-its-way", Boolean(entry.onItsWay));
     item.classList.toggle("is-refused", Boolean(entry.refused));
     status.textContent = messageStatusLabel(entry);
-    renderMessageContentIfChanged(content, entry.content, entry.author);
+    renderMessageContentIfChanged(content, entryShownContent(entry), entry.author);
     renderAttachmentsInto(attachmentsNodeFor(content.parentElement || item), entry);
     syncThreadChip(item, entry);
     return true;
+  }
+
+  /** A row's text as the open chat's view shows it: a failed or stopped
+   *  reply's words are the app's (the CLI's failure), so the sessions view
+   *  names nobody by handle in them; a member's own words stay its own. */
+  function entryShownContent(entry) {
+    const content = entry.content;
+    const names = lastSessionsState && lastSessionsState.viewNames;
+    if (!names || entry.author !== "agent" || (entry.status !== "error" && entry.status !== "Error") || typeof content !== "string" || content.indexOf("@") < 0) return content;
+    const shared = sessionsRules();
+    if (!shared || typeof shared.sessionsViewReplyText !== "function") return content;
+    const member = lastSessionsState.members.find(function (item) { return item.id === entry.participantId; });
+    const author = (member && member.handle) || entry.participantLabel;
+    return shared.sessionsViewReplyText(content, author, names);
   }
 
   // Nodes are consumed, not looked up by key. The old sweep asked "is this
@@ -12243,6 +12595,12 @@
       }
     };
     state.mentions = sessionsMentionsOf(state);
+    // How the app's own words name members here (shared sessionsViewText).
+    state.viewNames = typeof shared.sessionsViewNames === "function"
+      ? shared.sessionsViewNames(state.mainHandle, [...state.mentions.byHandle].map(function (pair) { return [pair[0], pair[1].title]; }))
+      : undefined;
+    // Remembered for Activity and the chat list once the chat is closed.
+    if (state.viewNames) sessionsTitledNames.set(conversationId, state.viewNames);
     return state;
   }
 
@@ -12280,7 +12638,7 @@
   function sessionsMemberName(member, fallback) {
     const state = lastSessionsState;
     if (member && state && member.id !== state.mainId) return sessionsMemberTitleOf(state, member);
-    return member ? (member.id && state && member.id === state.mainId ? "Main session" : member.handle) : fallback || "A member";
+    return member ? (member.id && state && member.id === state.mainId ? "" : member.handle) : fallback || "A member";
   }
 
   /** The members a mention in a message names, for its link chip: each
@@ -12347,7 +12705,10 @@
     const shared = sessionsRules();
     const batch = message.metadata.participantRequest;
     if (!batch) return [];
-    return shared.sessionsTaskEntries(message, batch, state.statusById, state.activity, state.messagesById).map(function (entry) {
+    const names = state.viewNames;
+    const appText = function (text) { return names ? shared.sessionsViewText(text, names) : text; };
+    const wordsText = function (text) { return names && typeof shared.sessionsMentionText === "function" ? shared.sessionsMentionText(text, names) : text; };
+    return shared.sessionsTaskEntries(message, batch, state.statusById, state.activity, state.messagesById, appText, wordsText).map(function (entry) {
       const member = state.members.find(function (candidate) { return candidate.id === entry.item.targetParticipantId; });
       return {
         participantId: entry.item.targetParticipantId,
@@ -12453,17 +12814,25 @@
       const given = batch && batch.requesterParticipantId !== participantId
         ? batch.items.find(function (item) { return item.targetParticipantId === participantId; })
         : undefined;
-      const base = { ...drawn, presentation: "sessions", replyCount: undefined };
+      // A question this member asked the main session reads alone, as on the
+      // desktop: the main session is named by nothing.
+      const asksMain = batch && batch.requesterParticipantId === participantId && typeof shared.withoutLeadingMention === "function";
+      const base = { ...drawn, presentation: "sessions", replyCount: undefined,
+        ...(asksMain ? { content: shared.withoutLeadingMention(String(drawn.content || ""), state.mainHandle) } : {}) };
       if (given) {
         const key = drawn.rowKey || drawn.id;
         rows.push({ ...base, taskFold: {
-          label: batch.requesterParticipantId === state.mainId ? "Task from the main session" : "Task from " + sessionsMemberTitleOf(state, batch.requesterParticipantId),
-          preview: shared.firstTextLine(given.prompt),
+          label: batch.requesterParticipantId === state.mainId ? "Task" : "Task from " + sessionsMemberTitleOf(state, batch.requesterParticipantId),
+          // The main session's words, by the view's mention rule.
+          preview: state.viewNames && typeof shared.sessionsMentionText === "function"
+            ? shared.sessionsMentionText(shared.firstTextLine(given.prompt), state.viewNames) : shared.firstTextLine(given.prompt),
           open: openTaskFolds.has(key)
         } });
         return;
       }
-      rows.push(drawn.author === "agent" && drawn.participantId === state.mainId ? { ...base, authorLabel: "Main session" } : base);
+      // The main session's answer here is told apart by its provider's logo,
+      // named by nothing.
+      rows.push(drawn.author === "agent" && drawn.participantId === state.mainId ? { ...base, authorKind: state.mainMember ? state.mainMember.kind || "unknown" : "unknown" } : base);
     });
     if (shown === 0) {
       rows.push({ rowKey: "member-session-empty", id: "member-session-empty", conversationId: state.conversationId, author: "system",
@@ -12911,7 +13280,7 @@
     text.className = "sessions-waiting-text";
     text.textContent = waiting.text;
     wrap.append(spinner, text);
-    if (waiting.canStop || waiting.stopping) wrap.append(sessionsStopButton(waiting.memberIds, waiting.canStop, waiting.stopping, "Stop the tasks the main session waits on"));
+    if (waiting.canStop || waiting.stopping) wrap.append(sessionsStopButton(waiting.memberIds, waiting.canStop, waiting.stopping, "Stop the tasks"));
     return wrap;
   }
 
@@ -13067,7 +13436,7 @@
     // The sessions view keeps no text buttons in its header: its view is
     // picked in the menu under the title (renderChatTitleMenu).
     const sessionsView = Boolean(conversationId) && view === "sessions";
-    renderChatTitleMenu(sessionsView && !onSubscreen, view);
+    renderChatTitleMenu(conversationId ? chat : undefined);
     const shown = Boolean(conversationId) && !onSubscreen && !sessionsView;
     if (group.hidden === shown) group.hidden = !shown;
     if (!shown) {
@@ -13090,9 +13459,28 @@
 
   let chatTitleMenuOpen = false;
 
+  /** What the title's menu holds in the sessions view: on the main timeline
+   *  the chat's view and Fork to new chat for the main session; on a
+   *  member's own screen Fork to new chat for that member, as the computer
+   *  offers it in the member's … menu (a removed member's session reads
+   *  only; an Accord's screen has no menu). */
+  function chatTitleMenuState(chat) {
+    if (!chat || chatViewOf(chat) !== "sessions" || openAccordLaunchId) return { available: false, views: false, forkId: undefined };
+    const open = openMemberSessionId();
+    if (open && open !== chat.mainSessionParticipantId) {
+      const member = chatMembers(chat).find(function (item) { return item.id === open; });
+      return { available: Boolean(member), views: false, forkId: member ? member.id : undefined };
+    }
+    return { available: true, views: true, forkId: sessionsMainSessionIdOf(chat) };
+  }
+
   /** The title's menu in the sessions view: the chat's view, with a check
-   *  by the one it is in. The chevron by the title says it is there. */
-  function renderChatTitleMenu(available, view) {
+   *  by the one it is in, and Fork to new chat. The chevron by the title
+   *  says it is there. */
+  function renderChatTitleMenu(chat) {
+    const state = chatTitleMenuState(chat);
+    const available = state.available;
+    const view = chat ? chatViewOf(chat) : undefined;
     const chevron = document.getElementById("chat-title-chevron");
     const menu = document.getElementById("chat-title-menu");
     const toggle = document.getElementById("chat-members-toggle");
@@ -13105,16 +13493,263 @@
     }
     if (!menu) return;
     menu.hidden = !(available && chatTitleMenuOpen);
+    const label = state.views ? "Chat view" : "Session";
+    if (menu.getAttribute("aria-label") !== label) menu.setAttribute("aria-label", label);
     for (const item of menu.querySelectorAll("[data-title-view]")) {
+      if (item.hidden === state.views) item.hidden = !state.views;
       const checked = item.dataset.titleView === view ? "true" : "false";
       if (item.getAttribute("aria-checked") !== checked) item.setAttribute("aria-checked", checked);
     }
+    // Open for a member it has not read yet (the screen under it changed
+    // without a tap: the chat's main session changed, say): read now.
+    if (chatTitleMenuOpen && available && state.forkId && (!forkMenu || forkMenu.key !== forkMenuKey(chat.id, state.forkId))) {
+      void readForkPlan(chat, state.forkId);
+    }
+    renderTitleMenuFork(chat, state.forkId);
   }
 
   function toggleChatTitleMenu(open) {
+    const was = chatTitleMenuOpen;
     chatTitleMenuOpen = open === undefined ? !chatTitleMenuOpen : open;
     const chat = activeChatRecord();
-    renderChatTitleMenu(Boolean(chat) && chatViewOf(chat) === "sessions" && !openMemberSessionId() && !openAccordLaunchId, chatViewOf(chat));
+    // Opened: whether the member can be forked now is read again.
+    const state = chatTitleMenuState(chat);
+    // Opened: read again, whatever it said before.
+    if (chatTitleMenuOpen && !was && state.available && state.forkId) forkMenu = undefined;
+    renderChatTitleMenu(chat);
+  }
+
+  // --- Fork to new chat ---------------------------------------------------
+  // A member (the main session, or one it made, or any member of a classic
+  // chat) copied into a new chat as that chat's main session, as the
+  // computer's member menus and roster cards make it
+  // (src/shared/forkToNewChat.ts): read from the server when its item opens
+  // (the member and its chat as the server holds them, with what the
+  // computer offers), refused with the computer's words, and made through
+  // the same queue as every new chat from the phone. The device that runs
+  // the new main session copies the member's session at its first turn.
+  // Its item is in the title's menu in the sessions view, and under the
+  // member in the classic view's members sheet (renderMembersSheetFork).
+
+  const FORK_SERVER_OUTDATED = "Your server does not fork chats from the phone yet. It will once AccordAgents on your computer has updated.";
+  // How long a tap on Fork waits for her server to say which reply the copy
+  // ends with before it goes by what the item read when it opened.
+  const FORK_SEEN_READ_TIMEOUT_MS = 4000;
+  const FORK_COMPUTER_OUTDATED = "Your computer does not fork chats from the phone yet. Update AccordAgents on your computer.";
+  // What the item says for the member it was last opened for:
+  // { key, status: "checking" | "ready", reason?, plan? }.
+  let forkMenu;
+  let forkMenuToken = 0;
+  let forkStarting = false;
+
+  function forkMenuKey(conversationId, participantId) {
+    return conversationId + "\u0000" + participantId;
+  }
+
+  /** Whether this phone's shared rules can fork (a page from before cannot). */
+  function forkOffered() {
+    const shared = mobileSharedRules();
+    return Boolean(shared && typeof shared.forkToNewChatReasonFromOffer === "function");
+  }
+
+  /** The Fork to new chat item for a member: what it makes, "Checking…",
+   *  or why not, and whether a tap makes it. In the sessions view (the
+   *  title's menu) what it makes names no main session, as the computer's
+   *  menus there say it. */
+  function paintForkItem(button, detail, chat, participantId, sessionsView) {
+    const shared = mobileSharedRules();
+    const state = forkMenu && forkMenu.key === forkMenuKey(chat.id, participantId) ? forkMenu : undefined;
+    const checking = !state || state.status === "checking";
+    const ready = !checking && !state.reason && Boolean(state.plan) && !forkStarting;
+    const makes = (sessionsView && shared.FORK_TO_NEW_CHAT_SESSIONS_DETAIL) || shared.FORK_TO_NEW_CHAT_DETAIL;
+    const text = forkStarting ? "Starting the new chat…" : checking ? "Checking…" : state.reason || makes;
+    const disabled = ready ? "false" : "true";
+    if (button.getAttribute("aria-disabled") !== disabled) button.setAttribute("aria-disabled", disabled);
+    button.dataset.forkParticipant = participantId;
+    if (detail.textContent !== text) detail.textContent = text;
+  }
+
+  function renderTitleMenuFork(chat, participantId) {
+    const button = document.getElementById("chat-title-fork");
+    const detail = document.getElementById("chat-title-fork-detail");
+    if (!button || !detail) return;
+    const shown = Boolean(chat && participantId && forkOffered());
+    if (button.hidden === shown) button.hidden = !shown;
+    if (!shown) return;
+    // The title's menu is the sessions view's alone (chatTitleMenuState).
+    paintForkItem(button, detail, chat, participantId, true);
+  }
+
+  /** Both places the item is: what it says changed (read, starting, failed). */
+  function renderForkItems() {
+    const chat = activeChatRecord();
+    renderChatTitleMenu(chat);
+    renderMembersSheetFork(chat);
+  }
+
+  /** A tap on the item: made only when it was read ready for this member;
+   *  disabled, it stays where it is, its line saying why. */
+  function forkFromItem(button) {
+    const chat = activeChatRecord();
+    const state = forkMenu && chat ? forkMenu : undefined;
+    if (button.getAttribute("aria-disabled") === "true" || !state || state.key !== forkMenuKey(chat.id, button.dataset.forkParticipant || "") || !state.plan) return;
+    void forkMemberToNewChat(state.plan);
+  }
+
+  /** Reads whether the member can be forked now, and what the new chat is
+   *  made of, from the server: the member and its chat, and what the
+   *  computer last told the server it offers. */
+  async function readForkPlan(chat, participantId) {
+    const key = forkMenuKey(chat.id, participantId);
+    const token = ++forkMenuToken;
+    forkMenu = { key: key, status: "checking" };
+    let answer;
+    let failure;
+    try {
+      answer = await serverPhoneGet("/v1/phone/new-chat", { forkOf: chat.id, participantId: participantId });
+    } catch (error) {
+      failure = error;
+    }
+    if (token !== forkMenuToken) return;
+    forkMenu = { key: key, status: "ready", ...forkPlanFrom(answer, failure) };
+    renderForkItems();
+  }
+
+  /** Why the member cannot be forked now, by the computer's rule and words,
+   *  or what the new chat is made of. */
+  function forkPlanFrom(answer, failure) {
+    const shared = mobileSharedRules();
+    if (failure) {
+      if (failure.serverStatus === 404 && String(failure.serverBody || failure.message || "").indexOf("chat_not_found") >= 0) return { reason: "This chat is not on your server." };
+      if (failure.serverStatus === 404) return { reason: FORK_SERVER_OUTDATED };
+      return { reason: "Could not reach your server: " + unreachableDetail(failure) };
+    }
+    const source = answer && answer.fork;
+    if (!source) return { reason: answer && answer.unavailable && !answer.options ? answer.unavailable : FORK_SERVER_OUTDATED };
+    if (!source.member) return { reason: "That member is no longer in its chat." };
+    const offer = answer.options;
+    if (!offer) return { reason: answer.unavailable || FORK_COMPUTER_OUTDATED };
+    if (!offer.fork || !(offer.mainSession || offer.assistant)) return { reason: FORK_COMPUTER_OUTDATED };
+    // As it runs now: a member the main session made never above it.
+    const running = shared.memberAsItRunsNow(source.member, source.mainSession);
+    const reason = shared.forkToNewChatReasonFromOffer({ running: running, answered: source.answered === true, offer: offer.fork });
+    return reason ? { reason: reason } : { plan: { source: source, running: running, offer: offer, machines: answer.machines || {} } };
+  }
+
+  /** The member's last reply that ended a turn, read again from her server
+   *  when she taps Fork; what the item read when it opened if that fails. */
+  async function forkSeenAtTap(plan) {
+    try {
+      const answer = await serverPhoneGet("/v1/phone/new-chat", { forkOf: plan.source.conversationId, participantId: plan.running.id }, { timeoutMs: FORK_SEEN_READ_TIMEOUT_MS });
+      const fresh = answer && answer.fork;
+      if (fresh && fresh.member) return fresh.seen || undefined;
+    } catch (error) {
+      // Out of reach: the read from when the item opened.
+    }
+    return plan.source.seen || undefined;
+  }
+
+  /** Makes the new chat on the server as the computer makes it ("<chat>
+   *  (fork)", the member's project, the computer's view for a new chat, one
+   *  main session on the member's provider, model, effort, access and place,
+   *  marked with where it comes from), lists it, and opens it with nothing
+   *  in it: the first message makes the copy. Gone from the chat it was
+   *  forked from by then, she stays where she is; it is only listed. */
+  async function forkMemberToNewChat(plan) {
+    const shared = mobileSharedRules();
+    if (forkStarting || !shared) return;
+    forkStarting = true;
+    const startedFor = forkMenu && forkMenu.plan === plan ? forkMenu.key : undefined;
+    renderForkItems();
+    const conversationId = createEventId();
+    const title = shared.forkedChatTitle(plan.source.title);
+    let listed = false;
+    try {
+      // The copy ends with the member's last reply that ended a turn as her
+      // server has it now, at the tap (the User, 2026-11-21: "When you tap
+      // Fork"): a reply that finished while the item was open counts. Out of
+      // reach, what it read when the item opened.
+      const seen = await forkSeenAtTap(plan);
+      const createdAt = nowIso();
+      const offer = plan.offer;
+      const mainSession = shared.forkedMainSessionFor({
+        mainSession: offer.mainSession || offer.assistant, basePermissions: offer.fork.basePermissions, member: plan.running,
+        source: { id: plan.source.conversationId, title: plan.source.title }, seen: seen, id: createEventId()
+      });
+      const repoPath = plan.source.repoPath || undefined;
+      const chatView = offer.defaultChatView === "classic" || offer.defaultChatView === "sessions" ? offer.defaultChatView : "sessions";
+      const sessionsFields = { mainSessionParticipantId: mainSession.id, chatView: chatView };
+      listed = true;
+      noteOwnChat(conversationId);
+      saveStartedChats([{
+        id: conversationId, title: title, group: shared.mobileChatGroupLabel(repoPath), snippet: shared.mobileSnippet(""), who: "", updatedAt: createdAt,
+        running: false, startedHere: true, deviceId: (loadPairing() || {}).deviceId, ...sessionsFields, canSwitchView: true,
+        participants: ["@" + mainSession.handle],
+        members: [normalizeMobileMember({ id: mainSession.id, handle: mainSession.handle, mentionHandle: mainSession.handle, displayName: "@" + mainSession.handle,
+          roleLabel: "", roleConfigId: mainSession.roleConfigId, kind: mainSession.kind, homeMachineId: mainSession.homeMachineId,
+          cloudRun: mainSession.cloudRun, participant: mainSession.homeMachineId ? mainSession : undefined,
+          homeMachineName: mainSession.homeMachineId ? plan.machines[mainSession.homeMachineId] : undefined })].filter(Boolean)
+      }].concat(loadStartedChats()));
+      const create = await createOutboxEvent({
+        conversationId: conversationId, kind: "conversation.create", createdAt: createdAt,
+        payload: { conversation: { title: title, kind: "chat", createdAt: createdAt, ...(repoPath ? { repoPath: repoPath } : {}),
+          metadata: { participants: [mainSession], ...sessionsFields } } }
+      });
+      const introId = createEventId();
+      const intro = await createOutboxEvent({
+        eventId: introId, conversationId: conversationId, kind: "message.system", createdAt: createdAt, dependsOn: create.eventId,
+        payload: { message: { id: introId, role: "system", content: shared.newChatIntro([mainSession.handle]),
+          createdAt: createdAt, status: "done", metadata: { threadId: "system" } } }
+      });
+      await putOutboxEntries([create, intro]);
+      listed = false;
+    } catch (error) {
+      if (listed) forgetStartedChat(conversationId);
+      forkStarting = false;
+      const reason = "Could not start the chat: " + (error && error.message ? error.message : String(error));
+      const menuShowsThisFork = Boolean(forkMenu) && forkMenu.key === startedFor;
+      if (menuShowsThisFork) forkMenu = { ...forkMenu, reason: reason, plan: undefined };
+      // Gone from where she tapped it (another chat or screen, or its menu
+      // closed): said where the phone says a New chat that did not go
+      // through, in the send log ("New chat: <title>"), the header pointing
+      // at it until she has looked.
+      if (!(menuShowsThisFork && stillInForkedChat(plan.source.conversationId) && (chatTitleMenuOpen || membersSheetOpen))) {
+        void recordSendFailure({ ...sendFailureRecord({ eventId: conversationId, kind: "conversation.create", conversationId: conversationId,
+          payload: { conversation: { title: title } } }, { cause: "phone", reason: reason }), notStarted: true });
+        renderSendLogButton();
+      }
+      renderForkItems();
+      return;
+    }
+    forkStarting = false;
+    const menuShowsThisFork = Boolean(forkMenu) && forkMenu.key === startedFor;
+    if (!forkMenu || menuShowsThisFork) forkMenu = undefined;
+    // Making it waits on her server (up to FORK_SEEN_READ_TIMEOUT_MS): gone
+    // to another chat or screen by then, she stays there, keyboard and all;
+    // the new chat is in her list.
+    if (!stillInForkedChat(plan.source.conversationId)) {
+      // The menu it was tapped in closes (she may have left by a
+      // notification, not a tap that closes it); a menu she opened since
+      // stays, its Fork item no longer "Starting the new chat…".
+      if (menuShowsThisFork) chatTitleMenuOpen = false;
+      renderForkItems();
+      void sendNow();
+      return;
+    }
+    chatTitleMenuOpen = false;
+    // The new chat, open at once with its composer ready, as on the computer.
+    leaveOpenChat();
+    openAccordLaunchId = undefined;
+    await openConversation(conversationId);
+    document.getElementById("composer-input")?.focus();
+    void sendNow();
+  }
+
+  /** Whether the chat she forked from is still what is on screen: open, on
+   *  its timeline (a thread or member of it too), with New chat not over it. */
+  function stillInForkedChat(sourceConversationId) {
+    const newChat = document.getElementById("new-chat-screen");
+    return selectedConversationId() === sourceConversationId && screenOnShow() === "timeline" && !(newChat && !newChat.hidden);
   }
 
   function wireChatTitleMenu() {
@@ -13122,7 +13757,14 @@
     if (!menu || menu.dataset.wired === "1") return;
     menu.dataset.wired = "1";
     menu.addEventListener("click", function (event) {
-      const item = event.target instanceof Element ? event.target.closest("[data-title-view]") : null;
+      const target = event.target instanceof Element ? event.target : null;
+      const fork = target ? target.closest("#chat-title-fork") : null;
+      if (fork) {
+        // Disabled, it stays open: its line says why.
+        forkFromItem(fork);
+        return;
+      }
+      const item = target ? target.closest("[data-title-view]") : null;
       const conversationId = selectedConversationId();
       toggleChatTitleMenu(false);
       if (item && conversationId) void setChatViewFromPhone(conversationId, item.dataset.titleView);
@@ -13165,6 +13807,13 @@
   // member's role and home machine. Nothing is asked of the desktop.
 
   let membersSheetOpen = false;
+  // The member whose Fork to new chat item is open in the classic view's
+  // members sheet; one at a time, closed with the sheet.
+  let membersSheetForkId;
+  // Lucide's git-fork, the computer's roster card icon.
+  const FORK_ICON_PATHS = ["M9 18a3 3 0 1 0 6 0a3 3 0 1 0 -6 0", "M3 6a3 3 0 1 0 6 0a3 3 0 1 0 -6 0", "M15 6a3 3 0 1 0 6 0a3 3 0 1 0 -6 0",
+    "M18 9v2c0 .6-.4 1-1 1H7c-.6 0-1-.4-1-1V9", "M12 12v3"];
+
   // Where a tap on a member in the open chat's members sheet lands: a
   // running member's turn in progress (the rule Activity's Running rows use),
   // any other member's last message. Worked out from the rows the chat's
@@ -13435,6 +14084,8 @@
     const conversationId = selectedConversationId();
     const stopAll = document.getElementById("members-sheet-stop-all");
     if (chat && chatViewOf(chat) === "sessions") {
+      // The classic view's fork item does not stay open across a switch.
+      membersSheetForkId = undefined;
       // Drawn from the chat's last drawing; until it is in, the sheet keeps
       // what it shows.
       if (lastSessionsState && lastSessionsState.conversationId === conversationId) renderSessionsMembersSheet(lastSessionsState, list, title);
@@ -13445,11 +14096,15 @@
     const targets = membersSheetTargets.conversationId === conversationId ? membersSheetTargets : undefined;
     // Redrawn only when what it shows changed: a member streaming redraws the
     // chat every second or so, and a row replaced under the finger loses the tap.
-    const signature = JSON.stringify([conversationId, members.map(function (member) {
-      return [member.handle, member.displayName, member.roleLabel, member.kind, memberLocationLabel(member), member.avatarId || "",
-        Boolean(targets && targets.running.has(memberHandleKey(member.handle))), Boolean(memberSheetTarget(member))];
+    // Members known only by handle (a chat listed without its members) are
+    // not offered: the server finds a member by its id.
+    const forkable = forkOffered() && Boolean(chat) && Array.isArray(chat.members) && chat.members.length > 0;
+    const signature = JSON.stringify([conversationId, forkable, members.map(function (member) {
+      return [member.id, member.handle, member.displayName, member.roleLabel, member.kind, memberLocationLabel(member), member.avatarId || "",
+        Boolean(targets && targets.running.has(memberHandleKey(member.handle))), Boolean(memberSheetTarget(member)), membersSheetForkId === member.id];
     })]);
     if (signature === lastMembersSheetSignature && list.childElementCount > 0) {
+      renderMembersSheetFork(chat);
       return;
     }
     lastMembersSheetSignature = signature;
@@ -13498,14 +14153,90 @@
       location.className = "members-sheet-location";
       location.textContent = memberLocationLabel(member);
       copy.append(nameLine, role, location);
-      row.append(avatar, copy);
+      // What a tap opens (its last message) is its own element beside the
+      // fork action: a button inside a role=button would be out of a screen
+      // reader's reach. A tap anywhere else on the row opens it too.
+      const open = document.createElement("span");
+      open.className = "members-sheet-open";
+      open.append(avatar, copy);
+      row.append(open);
       if (memberSheetTarget(member)) {
         row.classList.add("is-openable");
-        row.setAttribute("role", "button");
-        row.tabIndex = 0;
+        open.setAttribute("role", "button");
+        open.tabIndex = 0;
       }
+      // Fork to new chat: a small action on the member, as on the computer's
+      // roster card. A tap opens its item under the member (what it makes,
+      // or why not, read from the server as the sessions view's title menu
+      // reads it); a tap on the item makes the chat.
+      const forkOpen = membersSheetForkId === member.id;
+      if (forkable) row.append(membersSheetForkToggle(member, forkOpen));
       list.append(row);
+      if (forkable && forkOpen) list.append(membersSheetForkItem());
     });
+    renderMembersSheetFork(chat);
+  }
+
+  function membersSheetForkToggle(member, open) {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "mobile-icon-button is-muted members-sheet-fork-toggle";
+    button.dataset.memberFork = member.id;
+    button.setAttribute("aria-label", mobileSharedRules().FORK_TO_NEW_CHAT_LABEL + ": " + member.displayName);
+    button.setAttribute("aria-expanded", open ? "true" : "false");
+    if (open) button.setAttribute("aria-controls", "members-sheet-fork");
+    button.append(lineIcon(FORK_ICON_PATHS, 18));
+    return button;
+  }
+
+  /** The item itself, as the title's menu draws it; painted by
+   *  renderMembersSheetFork. */
+  function membersSheetForkItem() {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.id = "members-sheet-fork";
+    button.className = "chat-title-menu-item chat-title-menu-fork members-sheet-fork-item";
+    button.setAttribute("aria-disabled", "true");
+    button.setAttribute("aria-describedby", "members-sheet-fork-detail");
+    const copy = document.createElement("span");
+    copy.className = "chat-title-menu-copy";
+    const label = document.createElement("span");
+    label.className = "chat-title-menu-label";
+    label.textContent = mobileSharedRules().FORK_TO_NEW_CHAT_LABEL;
+    const detail = document.createElement("span");
+    detail.id = "members-sheet-fork-detail";
+    detail.className = "chat-title-menu-detail";
+    detail.setAttribute("aria-live", "polite");
+    copy.append(label, detail);
+    button.append(copy);
+    return button;
+  }
+
+  function renderMembersSheetFork(chat) {
+    const button = document.getElementById("members-sheet-fork");
+    const detail = document.getElementById("members-sheet-fork-detail");
+    if (!button || !detail || !chat || !membersSheetForkId || !forkOffered()) return;
+    paintForkItem(button, detail, chat, membersSheetForkId);
+  }
+
+  /** A tap on a member's fork action: its item opens under it and is read
+   *  again from the server, whatever it said before; a second tap closes it. */
+  function toggleMembersSheetFork(participantId) {
+    const chat = activeChatRecord();
+    // While a fork is being made its item says so; another opens after.
+    if (!chat || !participantId || forkStarting) return;
+    const focused = document.activeElement instanceof Element && document.activeElement.closest("[data-member-fork]") !== null;
+    membersSheetForkId = membersSheetForkId === participantId ? undefined : participantId;
+    if (membersSheetForkId) {
+      forkMenu = undefined;
+      void readForkPlan(chat, membersSheetForkId);
+    }
+    renderMembersSheet(chat);
+    // The list is drawn again: the toggle tapped keeps the focus, and the
+    // item it opened is brought into view on a long list.
+    const toggle = [...document.querySelectorAll("#members-sheet-list [data-member-fork]")].find(function (button) { return button.dataset.memberFork === participantId; });
+    if (focused && toggle) toggle.focus();
+    if (membersSheetForkId) document.getElementById("members-sheet-fork")?.scrollIntoView({ block: "nearest" });
   }
 
   function renderMembersSheetIfOpen(chat) {
@@ -13536,6 +14267,7 @@
 
   function closeMembersSheet() {
     membersSheetOpen = false;
+    membersSheetForkId = undefined;
     lastMembersSheetSignature = "";
     renderMembersSheet(undefined);
   }
@@ -13561,8 +14293,7 @@
     // The title: the members in the classic view; in the sessions view (one
     // way to the members, the icon at the header's end) the view's menu.
     function titleTapped() {
-      const chat = activeChatRecord();
-      if (chat && chatViewOf(chat) === "sessions" && !openMemberSessionId() && !openAccordLaunchId) {
+      if (chatTitleMenuState(activeChatRecord()).available) {
         toggleChatTitleMenu();
         return;
       }
@@ -13574,6 +14305,17 @@
     // One handler on the list: rows are redrawn as members start and stop.
     document.getElementById("members-sheet-list")?.addEventListener("click", function (event) {
       const target = event.target instanceof Element ? event.target : null;
+      // The classic view's list: a member's Fork to new chat, and its item.
+      const forkToggle = target ? target.closest("[data-member-fork]") : null;
+      if (forkToggle) {
+        toggleMembersSheetFork(forkToggle.dataset.memberFork);
+        return;
+      }
+      const forkItem = target ? target.closest("#members-sheet-fork") : null;
+      if (forkItem) {
+        forkFromItem(forkItem);
+        return;
+      }
       // The sessions view's list: Stop a member, show the members that
       // ended, or open a member's session.
       const stop = target ? target.closest("[data-stop-members]") : null;

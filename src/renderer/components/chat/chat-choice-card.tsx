@@ -7,6 +7,7 @@ import type { ChatPendingChoice } from "../../../shared/types";
 import { choiceOutcome } from "../../../shared/usedCards";
 import { CHAT_CUSTOM_CHOICE_OPTION_ID } from "./chat-conversation-data";
 import { formatChatTime } from "./chat-format";
+import { useSessionsViewLabel, useSessionsViewText } from "./chat-sessions-links";
 
 export function ChatChoiceCard(props: {
   choice: ChatPendingChoice;
@@ -14,14 +15,18 @@ export function ChatChoiceCard(props: {
   submitting: boolean;
   onConfirm: (response: { cancel?: boolean; selectedOptionId?: string; customAnswer?: string; note?: string }) => void;
 }): JSX.Element {
-  const { choice, requesterLabel, submitting, onConfirm } = props;
+  const { choice, submitting, onConfirm } = props;
+  // The sessions view names the main session by nothing and a member by its
+  // task: the "who" and every sentence about it follow.
+  const appText = useSessionsViewText();
+  const requesterLabel = useSessionsViewLabel()(props.requesterLabel);
   const [draftSelection, setDraftSelection] = useState(choice.selectedOptionId ?? choice.recommendedOptionId ?? "");
   const [customAnswer, setCustomAnswer] = useState(choice.customAnswer ?? "");
   const [note, setNote] = useState(choice.note ?? "");
   const selectedOptionId = draftSelection;
   const isCustomSelected = selectedOptionId === CHAT_CUSTOM_CHOICE_OPTION_ID;
   const selectedOption = choice.options.find((option) => option.id === selectedOptionId);
-  const requesterMention = requesterLabel.startsWith("@") ? requesterLabel : requesterLabel === "You" ? "User" : requesterLabel;
+  const requesterMention = props.requesterLabel.startsWith("@") ? props.requesterLabel : props.requesterLabel === "You" ? "User" : props.requesterLabel;
   const canCancel = !submitting;
   const canConfirm = !submitting && (isCustomSelected ? Boolean(customAnswer.trim()) : Boolean(selectedOption));
 
@@ -41,7 +46,7 @@ export function ChatChoiceCard(props: {
           <ListChecks className="chat-card-row-icon" size={14} aria-hidden="true" />
           <span className="chat-card-row-preview">{choice.title}</span>
           <span className="chat-card-row-outcome" title={outcome.text}>
-            {requesterLabel} · {outcome.text}{outcome.at ? ` ${formatChatTime(outcome.at)}` : ""}
+            {requesterLabel ? `${requesterLabel} · ` : ""}{outcome.text}{outcome.at ? ` ${formatChatTime(outcome.at)}` : ""}
           </span>
         </div>
       </section>
@@ -120,7 +125,7 @@ export function ChatChoiceCard(props: {
             <span className="chat-choice-option-title">
               <strong>Write your own answer</strong>
             </span>
-            <span className="chat-choice-option-description">None of the suggestions fit — type your own direction for {requesterMention}.</span>
+            <span className="chat-choice-option-description">{appText(`None of the suggestions fit — type your own direction for ${requesterMention}.`)}</span>
           </span>
         </label>
       </div>
@@ -128,7 +133,7 @@ export function ChatChoiceCard(props: {
         <label className="chat-choice-text-panel">
           <span>
             <strong>Your answer</strong>
-            <small>required · sent verbatim to {requesterMention}</small>
+            <small>{appText(`required · sent verbatim to ${requesterMention}`)}</small>
           </span>
           <Textarea
             value={customAnswer}
@@ -143,12 +148,12 @@ export function ChatChoiceCard(props: {
         <label className="chat-choice-text-panel">
           <span>
             <strong>Add a note</strong>
-            <small>optional · {requesterMention} will see it alongside your pick</small>
+            <small>{appText(`optional · ${requesterMention} will see it alongside your pick`)}</small>
           </span>
           <Textarea
             value={note}
             onChange={(event) => setNote(event.target.value)}
-            placeholder={`Constraints, caveats, or follow-up questions for ${requesterMention}...`}
+            placeholder={appText(`Constraints, caveats, or follow-up questions for ${requesterMention}...`)}
             rows={2}
             disabled={submitting}
           />

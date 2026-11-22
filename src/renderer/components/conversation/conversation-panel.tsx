@@ -1,4 +1,5 @@
 import { ChatConversationView } from "../chat/chat-conversation-view";
+import type { MainSessionActions } from "../chat/chat-view-switch";
 import { ChatCreationState } from "../chat/chat-creation-state";
 import { SlackView } from "../review/review-view";
 import { AppLoadingState } from "../loading-states";
@@ -26,9 +27,12 @@ export interface ConversationPanelProps {
   openingConversationDescription: string;
   accordDisabledReason?: string;
   onOpenAccord: () => void;
-  /** The sessions view: a member's settings, and its model chip. */
+  /** The sessions view: a member's … actions (its session's header), and
+   *  its controls under its composer. */
   renderMemberSettings?: (participantId: string) => React.ReactNode;
   renderMemberChip?: (participantId: string) => React.ReactNode;
+  /** The main session's … actions, in the chat title's menu. */
+  mainSessionActions?: MainSessionActions;
   topBar?: React.ReactNode;
   artifacts: ArtifactsState;
 }
@@ -46,6 +50,7 @@ export function ConversationPanel({
   onOpenAccord,
   renderMemberSettings,
   renderMemberChip,
+  mainSessionActions,
   topBar,
   artifacts
 }: ConversationPanelProps): JSX.Element | null {
@@ -95,6 +100,7 @@ export function ConversationPanel({
           onOpenAccord={onOpenAccord}
           renderMemberSettings={renderMemberSettings}
           renderMemberChip={renderMemberChip}
+          mainSessionActions={mainSessionActions}
           onSendThread={(rootMessage, content, repoFileMentions, imageAttachments, skillMentions) => chatActions.sendChatMessage({
             content,
             skillMentions,

@@ -552,3 +552,33 @@ function participantMessage(
     }
   };
 }
+
+test("listChatActivity names a sessions-view chat's member by its task even when its task message is older than the rows it reads", async () => {
+  const directory = await mkdtemp(path.join(tmpdir(), "accordagents-activity-sessions-"));
+  const storage = new StorageService({ dbPath: path.join(directory, "accordagents.sqlite3"), sqliteExecutable: SQLITE_EXECUTABLE });
+  try {
+    await storage.init();
+    const main = { id: "p-main", handle: "main", roleConfigId: "main-session", kind: "claude-code" as const };
+    const member = { id: "p-claude", handle: "claude", roleConfigId: "generic-participant", kind: "claude-code" as const };
+    const at = (minute: number) => new Date(Date.UTC(2026, 0, 8, 10, minute)).toISOString();
+    const task = participantMessage("task", { createdAt: at(0), content: "@claude Reply PING", metadata: { participantRequest: {
+      id: "b", requesterParticipantId: main.id, requesterHandle: "main", source: "mcp", resumeRequester: true, status: "running", depth: 1, createdAt: at(0), updatedAt: at(0),
+      items: [{ targetParticipantId: member.id, targetHandle: "claude", prompt: "Reply PING.", title: "Say ping", status: "answered", createdAt: at(0), updatedAt: at(1) }]
+    } } as never }, main);
+    const reply = participantMessage("ping", { createdAt: at(1), content: "PING" }, member);
+    // The main session's many replies since push its task message out of the rows Activity reads.
+    const later = Array.from({ length: 30 }, (_, index) => participantMessage(`later-${index}`, { createdAt: at(2 + index), content: `Reply ${index}` }, main));
+    await storage.saveConversation({
+      ...conversation("chat-sessions", "Sessions chat"), updatedAt: at(40), messages: [task, reply, ...later],
+      metadata: { participants: [main, member], mainSessionParticipantId: main.id, chatView: "sessions" }
+    } as Conversation);
+    const result = await storage.listChatActivity({ limit: 50, recentWindowDays: 4000 });
+    const memberRow = result.items.find((item) => item.participant?.id === member.id);
+    assert.ok(memberRow, "the member's finished reply is listed");
+    assert.equal(memberRow.participant?.displayName, "Say ping");
+    const mainRow = result.items.find((item) => item.participant?.id === main.id);
+    assert.equal(mainRow?.participant?.displayName, "", "the main session is named by nothing");
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});

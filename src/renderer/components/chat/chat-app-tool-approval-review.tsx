@@ -20,6 +20,8 @@ import { chatToolPermissionAllowsChatScope } from "./chat-app-tool-data";
 import { chatToolPermissionScopeOptionLabel } from "../../../shared/toolPermissionScope";
 import { reviewResultPreview } from "./chat-app-tool-review-preview";
 import { ChatUsedApprovalLine } from "./chat-used-card-row";
+import { useSessionsViewText } from "./chat-sessions-links";
+import { useChatSessionsPresentation } from "./chat-member-mark";
 
 export function roleReviewChipLabel(request: ChatRoleChangeRequest): string {
   if (request.operations.length !== 1) {
@@ -90,6 +92,7 @@ export function approvalReason(
 }
 
 export function ChatAppToolReviewStatus({ approval }: { approval: ChatAppToolApproval }): JSX.Element {
+  const appText = useSessionsViewText();
   const label = approval.memberAdditionQueuedAt
     ? "Approved, waiting to be applied"
     : approval.status === "approved"
@@ -105,7 +108,7 @@ export function ChatAppToolReviewStatus({ approval }: { approval: ChatAppToolApp
             : "Pending";
   return (
     <div className={`chat-app-tool-review-status is-${approval.status}`}>
-      {label}{approval.error ? `: ${approval.error}` : ""}
+      {label}{approval.error ? `: ${appText(approval.error)}` : ""}
     </div>
   );
 }
@@ -117,13 +120,15 @@ export function ChatAppToolReviewResult(props: {
   combinedRequest: ChatRoleParticipantChangeRequest | undefined;
   savedParticipants: ChatParticipantConfig[];
 }): JSX.Element {
+  const sessions = useChatSessionsPresentation();
   const summary = reviewResultSummary(props.approval, props.roleRequest, props.participantChange, props.combinedRequest, props.savedParticipants);
   return (
     <ChatUsedApprovalLine
       approval={props.approval}
       kind={props.participantChange || props.combinedRequest ? "Member change" : "Role change"}
       icon={props.participantChange || props.combinedRequest ? UserPlus : Sparkles}
-      preview={reviewResultPreview(props.approval, props.roleRequest, props.participantChange)}
+      preview={reviewResultPreview(props.approval, props.roleRequest, props.participantChange, sessions)}
+      appPreview
       ended={summary.title}
       detail={props.approval.error ? `${summary.detail.replace(/\.$/, "")}: ${props.approval.error}` : summary.detail}
     />

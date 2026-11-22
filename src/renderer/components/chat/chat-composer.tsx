@@ -1,4 +1,4 @@
-import React, { useLayoutEffect, useMemo, useRef } from "react";
+import React, { useEffect, useLayoutEffect, useMemo, useRef } from "react";
 import { ImagePlus } from "lucide-react";
 
 import { IconButton, ResizableTextarea } from "@/renderer/components/primitives";
@@ -31,6 +31,7 @@ import { useChatComposerSuggestions, type ChatComposerSuggestion } from "./use-c
 import { useComposerNoticeClearance } from "./use-composer-notice-clearance";
 import { SpeechToTextButton } from "./speech-to-text-button";
 import { DICTATION_SESSION_ATTRIBUTE } from "./dictation-target";
+import { onComposerFocusRequest, takeComposerFocusRequest } from "../../app/composer-focus-request";
 
 /**
  * Skills, plugins and files picked for the draft's tokens. When the owner
@@ -81,11 +82,15 @@ export interface ChatComposerProps {
   /** What a dictation belongs to (a chat, or a thread in it); changing it
    *  drops a dictation in progress. Defaults to the chat. */
   dictationSession?: string;
-  /** The sessions view: the member's model chip, opening its settings. */
+  /** The sessions view: the member's controls (model, effort, permission
+   *  mode, Codex's Plan mode, where it runs), each with its own menu. */
   footerChip?: React.ReactNode;
   /** The sessions view: Stop for the main session's run, in the send
    *  button's place while there is nothing to send. */
   stop?: ChatComposerStop;
+  /** The chat's main composer: it takes the keyboard when its chat asked
+   *  for it before it was opened (composer-focus-request.ts). */
+  takesFocusRequests?: boolean;
 }
 
 export function ChatComposer(props: ChatComposerProps): JSX.Element {
@@ -129,6 +134,16 @@ export function ChatComposer(props: ChatComposerProps): JSX.Element {
   const accordTooltip = props.accordDisabledReason ?? "Start an Accord: reach agreement among chat members";
   const activeRunCount = props.activeRunCount ?? 0;
   const activeRunParticipantRows = props.activeRunParticipantRows ?? [];
+
+  useEffect(() => {
+    if (!props.takesFocusRequests) return undefined;
+    const take = (): void => {
+      if (takeComposerFocusRequest(props.conversationId)) textareaRef.current?.focus();
+    };
+    take();
+    // Asked while this chat is already on screen (its fork's notice: Open).
+    return onComposerFocusRequest(take);
+  }, [props.conversationId, props.takesFocusRequests]);
 
   useLayoutEffect(() => {
     const pendingCaret = mentions.pendingCaretRef.current;

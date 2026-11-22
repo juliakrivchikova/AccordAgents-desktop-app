@@ -223,7 +223,7 @@ test("the sessions view (T3 Code's way): tasks inside the turn's Worked fold, ch
   const head = await app.evaluate(`(() => { const head = document.querySelector(".member-session-head");
     return [head.querySelector(".provider-logo").dataset.providerKind, head.querySelector(".member-session-provider").textContent, head.querySelector(".sessions-status").textContent,
       document.querySelector(".member-task-label").textContent, document.querySelector(".member-task-preview").textContent]; })()`);
-  assert.deepEqual(head, ["claude-code", "Claude Code · Software Engineer · Local · desktop", "Running", "Task from the main session", "Restyle the login button"]);
+  assert.deepEqual(head, ["claude-code", "Claude Code · Software Engineer · Local · desktop", "Running", "Task", "Restyle the login button"]);
   await app.evaluate(`(() => { const input = document.getElementById("composer-input"); input.value = "Please also check dark mode"; input.dispatchEvent(new Event("input", { bubbles: true }));
     document.getElementById("composer-form").requestSubmit(); })()`);
   const toDrew = await waitForOp(hub, (op) => op.kind === "message.create" && op.message && op.message.content === "Please also check dark mode");
@@ -305,6 +305,14 @@ test("the sessions view (T3 Code's way): tasks inside the turn's Worked fold, ch
   ]);
   await app.evaluate(`document.querySelector('#message-list .sessions-member-chip[data-open-member="p-drew"]').click()`);
   await app.waitFor(`${title} === "Restyle the login button" && document.querySelector('#message-list .message-row[data-thread-root="main-answer"]') !== null`, "in drew's session");
+  // The main session's answer is told apart by its provider's logo, named by
+  // nothing (no label for it in this view).
+  assert.deepEqual(await app.evaluate(`(() => { const row = document.querySelector('#message-list .message-row[data-thread-root="main-answer"]');
+    const handle = row.querySelector(".message-handle");
+    return { logo: handle.querySelector(".provider-logo")?.dataset.providerKind ?? "", text: handle.textContent }; })()`), { logo: "claude-code", text: "" });
+  assert.doesNotMatch(await app.evaluate(`document.getElementById("message-list").innerText`), /main session/i);
+  // Its question to the main session reads alone, as on the desktop.
+  assert.equal(await app.evaluate(`document.querySelector('#message-list .message-row[data-thread-root="drew-q"] .message-content')?.textContent.trim()`), "which shade?");
   await app.evaluate(`document.getElementById("back-to-timeline").click()`);
   await app.waitFor(mainShown, "back");
   assert.equal(await app.evaluate(`document.querySelector('#message-list .message-row[data-thread-root="main-answer"]') === null`), true, "not on the main timeline while it is written");
@@ -315,13 +323,13 @@ test("the sessions view (T3 Code's way): tasks inside the turn's Worked fold, ch
   const typeIn = (text) => app.evaluate(`(() => { const input = document.getElementById("composer-input"); input.value = ${JSON.stringify(text)};
     input.dispatchEvent(new Event("input", { bubbles: true })); })()`);
   await app.waitFor(`${sendMode} === "stop"`, "the composer's Stop");
-  assert.equal(await app.evaluate(`document.getElementById("send-button").getAttribute("aria-label")`), "Stop the main session");
+  assert.equal(await app.evaluate(`document.getElementById("send-button").getAttribute("aria-label")`), "Stop");
   const sideStop = `(() => { const node = document.getElementById("composer-stop-button");
     return { shown: !node.hidden && getComputedStyle(node).display !== "none", label: node.getAttribute("aria-label"), disabled: node.disabled }; })()`;
   assert.equal((await app.evaluate(sideStop)).shown, false, "nothing typed: the send button itself is Stop, nothing beside it");
   await typeIn("one more thing");
   assert.equal(await app.evaluate(sendMode), "send", "typing turns it back into Send");
-  assert.deepEqual(await app.evaluate(sideStop), { shown: true, label: "Stop the main session", disabled: false },
+  assert.deepEqual(await app.evaluate(sideStop), { shown: true, label: "Stop", disabled: false },
     "with something typed Stop stands beside Send: the CLI interrupts whatever is in the prompt");
   await typeIn("");
   assert.equal(await app.evaluate(sendMode), "stop");

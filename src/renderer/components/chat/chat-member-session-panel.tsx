@@ -8,6 +8,8 @@ import { TimelineLoadMoreRow } from "../conversation/timeline-primitives";
 import { IconButton } from "../primitives";
 import { ChatComposer } from "./chat-composer";
 import { ChatProviderMark, renderComposerMemberMark } from "./chat-member-mark";
+import { useSessionsViewNames } from "./chat-sessions-links";
+import { sessionsMentionText } from "../../../shared/sessionsViewText";
 import { ChatMessageItem } from "./chat-message-item";
 import { ChatElapsed, ChatWorkStatusLabel } from "./chat-task-card";
 
@@ -53,10 +55,11 @@ export function ChatMemberSessionPanel(props: {
   messages: readonly ChatMessage[];
   messageProps: (message: ChatMessage) => ChatMessageItemProps;
   appSettings: AppSettings;
-  /** Its settings control (a gear opening its model, effort, mode, rights,
-   *  where it runs, remove). */
+  /** Its … actions menu in the header (Restart, Fork to new chat, Remove
+   *  from chat). */
   settings?: ReactNode;
-  /** Its model chip in the composer (opens the same settings). */
+  /** Its controls under the composer (model, effort, permission mode,
+   *  Codex's Plan mode, where it runs). */
   chip?: ReactNode;
   conversationId: string;
   repoPath?: string;
@@ -156,12 +159,17 @@ export function ChatMemberSessionPanel(props: {
             return <ChatMemberTaskFold key={message.id} message={message} prompt={task.prompt} fromMain={task.requester === props.mainSessionId} />;
           }
           const itemProps = props.messageProps(message);
+          // The main session's answer here is told apart by its provider's
+          // logo, named by nothing (no label for it in this view).
+          const mainSession = message.role === "participant" && message.participantId === props.mainSessionId
+            ? itemProps.participants?.find((participant) => participant.id === props.mainSessionId)
+            : undefined;
           return (
             <ChatMessageItem
               key={message.id}
               {...itemProps}
               presentation="sessions"
-              authorLabel={message.role === "participant" && message.participantId === props.mainSessionId ? "Main session" : undefined}
+              authorMark={mainSession ? mainSessionMark(mainSession) : undefined}
               onOpenThread={undefined}
             />
           );
@@ -192,6 +200,20 @@ export function ChatMemberSessionPanel(props: {
   );
 }
 
+/** The main session's logo in a member's session, one element per provider
+ *  (and host), so the memoized rows of its answers are not drawn again on
+ *  every update of the panel. */
+const mainSessionMarks = new Map<string, JSX.Element>();
+function mainSessionMark(member: Pick<ChatParticipant, "kind" | "hostLabel">): JSX.Element {
+  const key = `${member.kind}\u0000${member.hostLabel ?? ""}`;
+  let mark = mainSessionMarks.get(key);
+  if (!mark) {
+    mark = <ChatProviderMark member={{ kind: member.kind, ...(member.hostLabel ? { hostLabel: member.hostLabel } : {}) }} />;
+    mainSessionMarks.set(key, mark);
+  }
+  return mark;
+}
+
 /** The task a request message gives this member, unless the member asked it. */
 function taskFor(message: ChatMessage, participantId: string): { prompt: string; requester: string } | undefined {
   const batch = message.metadata?.participantRequest;
@@ -203,8 +225,12 @@ function taskFor(message: ChatMessage, participantId: string): { prompt: string;
 /** The task the member was given, folded to one line; opens to the whole. */
 export const ChatMemberTaskFold = memo(function ChatMemberTaskFold(props: { message: ChatMessage; prompt: string; fromMain: boolean }): JSX.Element {
   const [open, setOpen] = useState(false);
-  const label = props.fromMain ? "Task from the main session" : "Task from another session";
-  const preview = useMemo(() => firstTextLine(props.prompt), [props.prompt]);
+  // The main session is named by nothing in the sessions view: its task is
+  // the task.
+  const label = props.fromMain ? "Task" : "Task from another session";
+  // The task is the main session's words: read by the view's mention rule.
+  const names = useSessionsViewNames();
+  const preview = useMemo(() => sessionsMentionText(firstTextLine(props.prompt), names), [props.prompt, names]);
   return (
     <div className={`chat-member-task ${open ? "is-open" : ""}`} data-message-id={props.message.id} data-testid="chat-member-task">
       <button type="button" className="chat-member-task-toggle" aria-expanded={open} onClick={() => setOpen((current) => !current)}>

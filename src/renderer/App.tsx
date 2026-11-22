@@ -3,12 +3,13 @@ import { createRoot } from "react-dom/client";
 import { startRendererCrashReporting } from "./app/crash-reporting";
 import type {
   ChatActivityItem,
+  ChatParticipant,
   ChatSkillMention,
   Conversation,
   PluginCatalogItem,
   StartReviewResult
 } from "../shared/types";
-import { ArrowLeft, ArrowRight, FileBox, RefreshCw, Settings2, SquareTerminal, XCircle } from "lucide-react";
+import { ArrowLeft, ArrowRight, FileBox, RefreshCw, SquareTerminal, XCircle } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { Toaster } from "@/components/ui/sonner";
@@ -29,11 +30,11 @@ import { NewChatScreen } from "./components/chat/new-chat-screen";
 import { ChatSearchModal } from "./components/search/chat-search-modal";
 import { ChatTopBarTitle } from "./components/chat/chat-top-bar-title";
 import { ChatClassicOnly, ChatViewHeaderControls } from "./components/chat/chat-view-switch";
-import { memberModelChip } from "./components/chat/chat-sessions-composer";
-import { ChatMemberModelAccess } from "./components/chat/chat-member-model-access";
-import { memberSessionMoves } from "../shared/memberSessionMove";
+import { sessionsViewNamesOf } from "../shared/sessionsViewText";
+import { sessionsMemberSettings } from "./app/sessions-member-settings";
+import { forkToNewChatReasonFor, useMachineForkSupport } from "./components/chat/use-fork-to-new-chat";
 import { renderNewChatMemberMark } from "./components/chat/chat-member-mark";
-import { chatViewFor, mainSessionParticipantId } from "../shared/mainSession";
+import { chatViewFor } from "../shared/mainSession";
 import { chatRoleLabel } from "./components/chat/chat-conversation-data";
 import { defaultChatParticipantDraft } from "./components/chat/chat-participant-drafts";
 import type { DraftPluginMention } from "./components/chat/chat-composer-draft-utils";
@@ -86,6 +87,7 @@ function App(): JSX.Element {
     conversationActions.refreshActivity
   );
   const view = useAppViewModel(state);
+  const machineForkSupport = useMachineForkSupport();
   const artifacts = useArtifacts(state.conversation?.id);
   // A new terminal opens in the project of the chat in view, or of the new
   // chat being set up; with neither, in the home folder.
@@ -97,6 +99,12 @@ function App(): JSX.Element {
     0
   );
   const [accordDialogOpen, setAccordDialogOpen] = React.useState(false);
+  // The Accord dialog's names in the sessions view, read while it is open.
+  const accordChat = view.activeChatConversation;
+  const accordDialogNames = React.useMemo(
+    () => (accordDialogOpen && accordChat ? sessionsViewNamesOf(accordChat, state.settings.defaultChatView) : undefined),
+    [accordDialogOpen, accordChat?.messages, accordChat?.metadata, state.settings.defaultChatView]
+  );
   const [newChatPrefill, setNewChatPrefill] = React.useState<{
     key: number;
     prompt: string;
@@ -106,6 +114,14 @@ function App(): JSX.Element {
 
   const navigation = useAppNavigation(state, conversationActions);
   useFileEditLifecycle({ conversationId: state.conversation?.id, artifacts, openChat: navigation.openChat });
+  // Fork to new chat: a fork made after she went to another chat or screen
+  // is opened from its notice as the sidebar opens a chat, as navigation
+  // stands when she clicks it.
+  const openChatRef = React.useRef(navigation.openChat);
+  openChatRef.current = navigation.openChat;
+  const forkToNewChat = (participantId: string): void => {
+    void chatActions.forkChatParticipantToNewChat(participantId, { openChat: (conversationId) => openChatRef.current(conversationId) });
+  };
   const { openSettingsSection } = navigation;
   const urgentAlertActions = React.useMemo(() => ({
     openAlertSettings: () => openSettingsSection("alerts"),
@@ -297,9 +313,14 @@ function App(): JSX.Element {
       tooltip="Terminal (Ctrl+`)"
     />
   );
+  // Fork to new chat (src/shared/forkToNewChat.ts): why a member of the open
+  // chat cannot be copied into a new chat's main session now.
+  const forkToNewChatReason = (participant: ChatParticipant): string | undefined => view.activeChatConversation
+    ? forkToNewChatReasonFor(participant, view.activeChatConversation, state.agents, state.settings, machineForkSupport)
+    : "Open its chat first.";
   // The chat's members and their settings: the roster in the classic view's
-  // header; in the sessions view one member's settings, from its session or
-  // its model chip in a composer.
+  // header (the sessions view has a member's controls under its composer and
+  // its … actions instead: sessionsMemberSettings).
   const rosterMenu = (memberId?: string, trigger?: React.ReactNode): JSX.Element | null => view.activeChatConversation ? (
     <ChatParticipantMenu
       participants={view.activeChatParticipants}
@@ -321,38 +342,17 @@ function App(): JSX.Element {
       onStopRestart={(runId) => void window.consensus.cancelReview(runId)}
       restartingById={restartingMembers(state.progressLog)}
       onRemoveParticipant={(participantId) => void chatActions.removeChatParticipant(participantId)}
+      onForkToNewChat={forkToNewChat}
+      forkToNewChatReason={forkToNewChatReason}
       onJumpToParticipantLastMessage={conversationActions.jumpToParticipantLastMessage}
       onManageInSettings={() => openSettingsSection("participants")}
       memberId={memberId}
       trigger={trigger}
     />
   ) : null;
-  // The sessions view's settings of one member (the main session's from its
-  // composer chip, a member's from its chip or its session's gear): the
-  // compact picker, not the classic roster (the User, 2026-11-21).
-  const sessionsMemberSettings = (memberId: string, trigger?: React.ReactNode): JSX.Element | null => {
-    const participant = view.activeChatParticipants.find((candidate) => candidate.id === memberId);
-    if (!view.activeChatConversation || !participant) return null;
-    const status = view.participantStatusById.get(memberId);
-    const hasRun = view.participantHasRunById.get(memberId) === true;
-    const isMain = mainSessionParticipantId(view.activeChatConversation.metadata) === memberId;
-    return (
-      <ChatMemberModelAccess
-        participant={participant}
-        trigger={trigger ?? <IconButton label="Settings" icon={Settings2} tooltip="Settings" data-testid="chat-member-settings-trigger" />}
-        working={status === "running" || status === "compacting"}
-        status={status}
-        runLocationLocked={hasRun && !memberSessionMoves(participant)}
-        runLocationMoves={hasRun && memberSessionMoves(participant)}
-        onUpdate={(participantId, patch) => chatActions.updateChatParticipantRuntime(participantId, patch)}
-        onRestart={(participantId, stopBackgroundTasks) => chatActions.restartChatParticipant(participantId, stopBackgroundTasks)}
-        onStopRestart={(runId) => void window.consensus.cancelReview(runId)}
-        restartStatus={restartingMembers(state.progressLog).get(memberId)}
-        onRemove={isMain ? undefined : () => void chatActions.removeChatParticipant(memberId)}
-        removeDisabledReason={view.busyParticipantIds.has(memberId) ? "busy" : undefined}
-      />
-    );
-  };
+  // The sessions view's settings of one member: controls under its composer,
+  // its … actions in its session's header, the main session's in the title's menu.
+  const sessionsMember = sessionsMemberSettings({ view, progressLog: state.progressLog, chatActions, forkToNewChat, forkToNewChatReason });
   const topBarActions = isNewChatScreen ? terminalToggle : (
     <>
       {/* The open chat's view switch and members button (its chat view provides them). */}
@@ -417,8 +417,9 @@ function App(): JSX.Element {
       openingConversationDescription={openingConversationDescription}
       accordDisabledReason={accordDisabledReason}
       onOpenAccord={() => setAccordDialogOpen(true)}
-      renderMemberSettings={(participantId) => sessionsMemberSettings(participantId)}
-      renderMemberChip={(participantId) => sessionsMemberSettings(participantId, memberModelChip(view.activeChatParticipants, participantId))}
+      renderMemberSettings={sessionsMember.actions}
+      renderMemberChip={sessionsMember.controls}
+      mainSessionActions={sessionsMember.mainSessionActions}
       topBar={chatUsesInlineTopBar ? chatTopBar : activityTopBar}
       artifacts={artifacts}
     />
@@ -494,6 +495,7 @@ function App(): JSX.Element {
         error={state.error}
         warnings={view.visibleWarnings}
         warningScope={view.warningScope}
+        noticeText={view.noticeText}
         conversationId={state.conversation?.id}
         setError={(value) => state.setError(value)}
         setWarnings={state.setWarnings}
@@ -523,6 +525,7 @@ function App(): JSX.Element {
           onOpenChange={setAccordDialogOpen}
           onStart={chatActions.startChatAccord}
           sessions={chatViewFor(view.activeChatConversation.metadata, state.settings.defaultChatView) === "sessions"}
+          sessionsNames={accordDialogNames}
         />
       )}
 
@@ -633,6 +636,7 @@ function App(): JSX.Element {
                 onMainSessionProviderChange={state.setNewChatMainSessionProvider}
                 mainSessionOverrideFor={state.newChatMainSessionOverrideFor}
                 onMainSessionOverrideForChange={state.setNewChatMainSessionOverrideFor}
+                onMainSessionStartAccessChange={state.setNewChatMainSessionStartAccess}
                 settings={state.settings}
                 summaries={state.summaries}
                 agents={state.agents}

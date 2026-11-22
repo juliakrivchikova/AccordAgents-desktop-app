@@ -15,6 +15,8 @@ export function AppNotices(props: {
   warnings: WarningNoticeEntry[];
   warningScope: string;
   conversationId?: string;
+  /** How the open chat's view words a notice (warningNoticeEntries). */
+  noticeText?: (text: string) => string;
   setError: (value: string | undefined) => void;
   setWarnings: React.Dispatch<React.SetStateAction<string[]>>;
   setDismissedWarningKeysByScope: React.Dispatch<React.SetStateAction<DismissedWarningMap>>;
@@ -72,7 +74,7 @@ export function AppNotices(props: {
             role="alert"
             action={<IconButton label="Dismiss error" icon={X} size="xs" onClick={() => props.setError(undefined)} />}
           >
-            {displayNoticeText(props.error)}
+            {props.noticeText ? props.noticeText(displayNoticeText(props.error)) : displayNoticeText(props.error)}
           </Notice>
         </div>
       )}

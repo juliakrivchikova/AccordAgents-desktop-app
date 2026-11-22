@@ -94,11 +94,11 @@ test("assistant resolution uses Codex, Claude, then Antigravity without using di
       providers: PROVIDERS.map((provider) => provider.kind === "claude-code" ? { ...provider, enabled: false } : provider),
       explicitKind: "claude-code"
     }) ?? "",
-    /^The main session uses Codex in this chat: Claude Code, your saved choice, is turned off\.$/
+    /^Codex runs this chat: Claude Code, your saved choice, is turned off\.$/
   );
   const failed = readyAgents(["codex-cli"]).concat({ ...readyAgents(["claude-code"])[0], runnable: "failed" });
   assert.match(assistantSubstituteNote({ agents: failed, providers: PROVIDERS, explicitKind: "claude-code" }) ?? "", /Claude Code, your saved choice, is not ready\.$/);
-  assert.match(assistantSubstituteNote({ agents: readyAgents(["codex-cli"]), providers: PROVIDERS, explicitKind: "claude-code" }) ?? "", /^The main session uses Codex in this chat: Claude Code, your saved choice, is (not installed|not ready)\.$/);
+  assert.match(assistantSubstituteNote({ agents: readyAgents(["codex-cli"]), providers: PROVIDERS, explicitKind: "claude-code" }) ?? "", /^Codex runs this chat: Claude Code, your saved choice, is (not installed|not ready)\.$/);
   assert.equal(resolveAssistantProviderKind({ agents: readyAgents(["claude-code"]), providers: PROVIDERS }), "claude-code");
   assert.equal(resolveAssistantProviderKind({
     agents,
@@ -462,6 +462,153 @@ test("invalidated in-flight generation cannot overwrite a newer refresh", async 
   assert.ok(olderResult.every((health) => health.generation === 2));
   assert.ok(newerResult.every((health) => health.generation === 2));
   assert.ok(service.currentSnapshot().every((health) => health.generation === 2));
+});
+
+test("checking one CLI reuses its fresh result, else probes that CLI alone, and never waits for the others", async () => {
+  // Staleness is read on the service's own clock.
+  let clock = Date.parse("2026-11-21T12:00:00.000Z");
+  const commands: string[] = [];
+  let environmentCalls = 0;
+  const service = new CliReadinessService(undefined, fakeDependencies({
+    refreshEnvironment: async () => { environmentCalls += 1; return { ok: true, env: { PATH: "/fixture/bin" } }; },
+    run: async (command, args) => { commands.push(`${command.replace(/^.*\//, "")} ${args.join(" ")}`); return successfulCommand(command, args); },
+    now: () => new Date(clock)
+  }));
+
+  // No snapshot of every CLI yet: the whole batch, so callers get every CLI.
+  const first = await service.refreshKinds(["claude-code"], { trigger: "submit" });
+  assert.deepEqual(first.map((health) => health.kind).sort(), ["claude-code", "codex-cli", "gemini-cli"]);
+  assert.equal(commands.length, 6);
+  const old = new Date(clock).toISOString();
+
+  // Fresh: reused, nothing runs.
+  commands.length = 0;
+  clock += 20_000;
+  await service.refreshKinds(["claude-code"], { trigger: "submit" });
+  assert.deepEqual(commands, [], "a fresh result is reused");
+  assert.equal(environmentCalls, 1);
+
+  // Stale: that CLI alone.
+  clock += 20_000;
+  const later = await service.refreshKinds(["claude-code"], { trigger: "submit" });
+  assert.deepEqual(commands, ["claude --version", "claude auth status"], "only the CLI asked for");
+  assert.equal(environmentCalls, 2);
+  const byKind = new Map(later.map((health) => [health.kind, health]));
+  assert.equal(byKind.get("claude-code")?.lastCheckedAt, new Date(clock).toISOString(), "its new result is in the snapshot");
+  assert.equal(byKind.get("gemini-cli")?.lastCheckedAt, old, "the others stay as they were");
+  assert.equal(byKind.get("codex-cli")?.lastCheckedAt, old);
+  assert.equal(service.currentSnapshot().find((health) => health.kind === "claude-code")?.lastCheckedAt, new Date(clock).toISOString());
+
+  // Asked to, it checks a fresh one again.
+  commands.length = 0;
+  await service.refreshKinds(["claude-code"], { force: true, trigger: "manual" });
+  assert.deepEqual(commands, ["claude --version", "claude auth status"], "force checks a fresh result again");
+});
+
+test("checking one CLI while a batch runs waits for that CLI's probe in it, not for the slowest CLI, and starts no second probe", async () => {
+  let clock = Date.parse("2026-11-21T12:00:00.000Z");
+  let held: { claude: ReturnType<typeof deferred<CommandResult>>; agy: ReturnType<typeof deferred<CommandResult>> } | undefined;
+  const commands: string[] = [];
+  let environmentCalls = 0;
+  const service = new CliReadinessService(undefined, fakeDependencies({
+    refreshEnvironment: async () => { environmentCalls += 1; return { ok: true, env: { PATH: "/fixture/bin" } }; },
+    run: async (command, args) => {
+      commands.push(`${command.replace(/^.*\//, "")} ${args.join(" ")}`);
+      if (held && command.endsWith("claude") && args[0] === "auth") return held.claude.promise;
+      if (held && command.endsWith("agy") && args[0] === "models") return held.agy.promise;
+      return successfulCommand(command, args);
+    },
+    now: () => new Date(clock)
+  }));
+  await service.refresh({ force: true });
+
+  // The next batch (the window got focus): Claude's and Antigravity's checks are still running.
+  held = { claude: deferred<CommandResult>(), agy: deferred<CommandResult>() };
+  commands.length = 0;
+  clock += 60_000;
+  const batch = service.refresh({ force: true, trigger: "focus" });
+  for (let turn = 0; turn < 5 && !commands.includes("claude auth status"); turn += 1) {
+    await new Promise((resolve) => setImmediate(resolve));
+  }
+  assert.ok(commands.includes("claude auth status"), "the batch's Claude probe is running");
+  let settled = false;
+  const claudeOnly = service.refreshKinds(["claude-code"], { trigger: "submit" }).then((agents) => { settled = true; return agents; });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(settled, false, "it waits for the batch's Claude probe");
+  held.claude.resolve({ ...successfulCommand("claude", ["auth", "status"]) });
+  const agents = await claudeOnly;
+  assert.equal(agents.find((health) => health.kind === "claude-code")?.lastCheckedAt, new Date(clock).toISOString(),
+    "Claude's result from the batch, while Antigravity has not answered");
+  assert.equal(commands.filter((command) => command.startsWith("claude")).length, 2, "one Claude probe: the batch's");
+  assert.equal(environmentCalls, 2, "no login shell of its own: the first batch's and this batch's only");
+  held.agy.resolve(successfulCommand("agy", ["models"]));
+  const all = await batch;
+  assert.ok(all.every((health) => health.lastCheckedAt === new Date(clock).toISOString()));
+});
+
+test("checking one CLI never reuses a result read before readiness was invalidated, and checks again when it is invalidated meanwhile", async () => {
+  let clock = Date.parse("2026-11-21T12:00:00.000Z");
+  let signedIn = false;
+  let heldAuth: ReturnType<typeof deferred<CommandResult>> | undefined;
+  const commands: string[] = [];
+  const claudeAuth = (args: string[]): CommandResult => ({ ...successfulCommand("claude", args), stdout: JSON.stringify({ loggedIn: signedIn }) });
+  const service = new CliReadinessService(undefined, fakeDependencies({
+    run: async (command, args) => {
+      commands.push(`${command.replace(/^.*\//, "")} ${args.join(" ")}`);
+      if (command.endsWith("claude") && args[0] === "auth") {
+        if (heldAuth) { const wait = heldAuth; heldAuth = undefined; await wait.promise; }
+        return claudeAuth(args);
+      }
+      return successfulCommand(command, args);
+    },
+    now: () => new Date(clock)
+  }));
+  await service.refresh({ force: true });
+  const claude = (agents: AgentHealth[]) => agents.find((health) => health.kind === "claude-code")!;
+  assert.equal(claude(service.currentSnapshot()).authentication, "required");
+
+  // She signs in (the sign-in invalidates readiness): the fresh "sign-in required" is not reused.
+  signedIn = true;
+  service.invalidate();
+  clock += 1_000;
+  commands.length = 0;
+  assert.equal(claude(await service.refreshKinds(["claude-code"])).authentication, "ready");
+  assert.deepEqual(commands, ["claude --version", "claude auth status"]);
+
+  // Invalidated while its own probe runs: checked again in the new generation.
+  signedIn = false;
+  heldAuth = deferred<CommandResult>();
+  const release = heldAuth;
+  service.invalidate();
+  commands.length = 0;
+  const checking = service.refreshKinds(["claude-code"]);
+  for (let turn = 0; turn < 5 && !commands.includes("claude auth status"); turn += 1) {
+    await new Promise((resolve) => setImmediate(resolve));
+  }
+  service.invalidate();
+  release.resolve(claudeAuth(["auth", "status"]));
+  const after = await checking;
+  assert.equal(commands.filter((command) => command === "claude auth status").length, 2, "checked again after the second invalidation");
+  assert.equal(claude(after).authentication, "required");
+  assert.equal(claude(after).generation, claude(service.currentSnapshot()).generation);
+});
+
+test("checking one CLI when the computer's environment cannot be read keeps its last result and runs nothing", async () => {
+  let clock = Date.parse("2026-11-21T12:00:00.000Z");
+  let environmentOk = true;
+  const commands: string[] = [];
+  const service = new CliReadinessService(undefined, fakeDependencies({
+    refreshEnvironment: async () => environmentOk ? { ok: true, env: { PATH: "/fixture/bin" } } : { ok: false, env: {} },
+    run: async (command, args) => { commands.push(command); return successfulCommand(command, args); },
+    now: () => new Date(clock)
+  }));
+  const before = await service.refresh({ force: true });
+  environmentOk = false;
+  clock += 60_000;
+  commands.length = 0;
+  const after = await service.refreshKinds(["codex-cli"], { trigger: "submit" });
+  assert.deepEqual(commands, [], "no CLI runs without the environment");
+  assert.deepEqual(after.find((health) => health.kind === "codex-cli"), before.find((health) => health.kind === "codex-cli"), "its last result stays");
 });
 
 function fakeDependencies(overrides: Partial<CliReadinessDependencies> = {}): Partial<CliReadinessDependencies> {

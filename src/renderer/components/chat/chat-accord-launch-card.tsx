@@ -5,6 +5,7 @@ import { avatarForParticipant } from "../avatar/avatar";
 import { AccordMergeIcon } from "./accord-merge-icon";
 import { avatarForChatParticipant } from "./chat-avatars";
 import { ChatMemberMark } from "./chat-member-mark";
+import { useSessionsViewLabel } from "./chat-sessions-links";
 
 // Read the same way by the desktop, the phone and the main process.
 export { accordLaunchCardForMessage };
@@ -15,6 +16,9 @@ function AccordMember(props: { handle: string; participants?: ChatParticipant[] 
   // A member removed since keeps its handle, on the stand-in picture.
   const participant = props.participants?.find((item) => item.handle.toLowerCase() === wanted);
   const avatar = participant ? avatarForChatParticipant(participant, label) : avatarForParticipant(label);
+  // The sessions view names a member by its task, the main session by
+  // nothing (its logo alone).
+  const name = useSessionsViewLabel()(label);
   return (
     <span className="chat-accord-launch-member">
       {/* The handle beside it names the member; the picture is not read out
@@ -22,7 +26,7 @@ function AccordMember(props: { handle: string; participants?: ChatParticipant[] 
       <span aria-hidden="true" className="chat-accord-launch-avatar-slot">
         <ChatMemberMark className="chat-accord-launch-avatar" markClassName="is-chip" avatar={avatar} member={participant} tooltip={null} />
       </span>
-      <span className="chat-mention">{label}</span>
+      {name && <span className="chat-mention">{name}</span>}
     </span>
   );
 }

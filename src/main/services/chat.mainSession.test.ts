@@ -410,9 +410,9 @@ test("a fork starts from a copy of the main session's CLI session and then keeps
   assert.equal(mainSessionAfter.sessionId, "main-cli-session", "the main session's own session is untouched");
 });
 
-test("a fork the CLI could not make is tried once more, then the member starts clean and the chat says so", async () => {
+test("a fork the CLI could not make starts clean in the same turn: the main session's task does not fail, and the chat says so once", async () => {
   for (const [kind, error] of [
-    ["claude-code", "No conversation found with session ID: main-cli-session"],
+    ["claude-code", "claude warm process exited with code 1: No conversation found with session ID: main-cli-session"],
     ["codex-cli", "no rollout found for thread id main-cli-session"]
   ] as const) {
     const main = mainSession(kind, kind === "codex-cli" ? { model: undefined } : {});
@@ -425,9 +425,7 @@ test("a fork the CLI could not make is tried once more, then the member starts c
           runOptions.onSessionId?.("clean-session");
           return { participant, ok: true, content: "Done clean.", durationMs: 1, sessionId: "clean-session" };
         }
-        // Claude Code reports some id even when the source is gone.
-        runOptions.onSessionId?.("never-made");
-        return { participant, ok: false, content: "", error, durationMs: 1, sessionId: "never-made" };
+        return { participant, ok: false, content: `${participant.label} stopped before it returned a response.`, error, durationMs: 1, forkCopyFailed: true };
       }
     });
     const result = await service.delegateTaskFromTool(mainActor(), { task: "Continue.", start: "fork" });
@@ -435,33 +433,71 @@ test("a fork the CLI could not make is tried once more, then the member starts c
     const childId = String(result.participantId);
     const sessionOf = () => (storage.current.metadata.participantSessions as ChatParticipantSession[]).find((item) => item.participantId === childId)!;
     const childRuns = () => runs.filter((run) => run.participant.id === childId);
-    await waitFor(() => delegationBatches(storage.current)[0]?.items[0]?.status === "failed");
-    await waitFor(() => sessionOf().forkFrom?.failedAttempts === 1);
-    // The first failure: tried again at the next turn, never resumed from an id that is no session.
-    assert.equal(sessionOf().sessionId, "", kind);
-    assert.deepEqual(sessionOf().forkFrom, { participantId: main.id, sessionId: "main-cli-session", kind, failedAttempts: 1 }, kind);
-
-    const ask = async (prompt: string) => {
-      const asked = await service.requestParticipantsFromTool(mainActor(undefined, { triggerMessageId: `trigger-${prompt}` }), { requests: [{ target: String(result.handle), prompt }] });
-      assert.equal(asked.ok, true, JSON.stringify(asked));
-    };
-    await ask("Try again.");
-    await waitFor(() => childRuns().length === 2);
-    await waitFor(() => sessionOf().forkFrom === undefined);
-    assert.equal(childRuns()[1].options.forkFromSessionId, "main-cli-session", `${kind}: the retry forks again`);
-    // The retry failed too: it is a member of its own now, and the chat says so.
+    await waitFor(() => delegationBatches(storage.current)[0]?.items[0]?.status === "answered");
+    // One turn: the copy, then (its source gone) a clean session at once.
+    assert.deepEqual(childRuns().map((run) => run.options.forkFromSessionId ?? null), ["main-cli-session", null], kind);
+    assert.match(childRuns()[1].prompt, /^You were to start from a copy of @main's session, but it could not be copied/, `${kind}: told who it is`);
+    await waitFor(() => sessionOf().sessionId === "clean-session");
+    assert.equal(sessionOf().forkFrom, undefined, kind);
     assert.equal(sessionOf().forkedFromParticipantId, undefined, kind);
-    await waitFor(() => ((storage.current.metadata.warnings ?? []) as string[]).some((warning) => warning.includes("could not start from a copy of @main's session")));
-    assert.ok((storage.current.metadata.warnings as string[]).includes(`@${String(result.handle).slice(1)} could not start from a copy of @main's session, so its next turn starts a clean session.`), kind);
+    const replies = storage.current.messages.filter((message: ChatMessage) => message.participantId === childId && message.role === "participant");
+    assert.deepEqual(replies.map((message: ChatMessage) => [message.status, message.content]), [["done", "Done clean."]], `${kind}: the task's answer`);
+    // A line in the chat (every device shows it; a warning stays on one).
+    const notice = `@${String(result.handle).slice(1)} could not start from a copy of @main's session, so this turn started a clean session.`;
+    const lines = () => storage.current.messages.filter((message: ChatMessage) => message.role === "system" && message.content === notice);
+    await waitFor(() => lines().length > 0);
+    assert.equal(lines()[0].metadata?.threadId, "system", kind);
+    assert.equal(lines()[0].id, `fork-notice-started-clean-${childId}`, kind);
+    assert.ok(((storage.current.metadata.warnings ?? []) as string[]).includes(notice), kind);
 
-    await ask("Once more, clean.");
+    const asked = await service.requestParticipantsFromTool(mainActor(undefined, { triggerMessageId: "trigger-again" }), { requests: [{ target: String(result.handle), prompt: "Once more." }] });
+    assert.equal(asked.ok, true, JSON.stringify(asked));
     await waitFor(() => childRuns().length === 3);
+    assert.equal(childRuns()[2].options.sessionId, "clean-session", `${kind}: its own session`);
     assert.equal(childRuns()[2].options.forkFromSessionId, undefined, `${kind}: no fork any more`);
     assert.doesNotMatch(childRuns()[2].prompt, /You were forked from/, kind);
-    await waitFor(() => sessionOf().sessionId === "clean-session");
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    assert.equal(lines().length, 1, `${kind}: once`);
   }
 });
 
+test("a delegated fork whose clean start fails too: the main session reads why in the failed reply, and the member's next turn starts as a new session", async () => {
+  const main = mainSession("codex-cli", { model: undefined });
+  // The main session has read the chat through its first message: a fork's copy starts there.
+  const conversation = mainSessionChat([main], { participantSessions: [sessionRecord(main, "main-cli-session")],
+    promptContextPointers: { [main.id]: { timeline: { messageId: "user-message", sequence: 0, createdAt: NOW } } } });
+  let overloaded = true;
+  const { service, storage, runs } = testService({
+    conversation,
+    run: async (participant, _prompt, runOptions) => {
+      if (participant.id === main.id) return { participant, ok: true, content: "Noted.", durationMs: 1 };
+      if (runOptions.forkFromSessionId) return { participant, ok: false, content: "", error: "no rollout found for thread id main-cli-session", durationMs: 1, forkCopyFailed: true };
+      return overloaded
+        ? { participant, ok: false, content: "Codex failed before it returned a response.", error: "The model is overloaded.", durationMs: 1 }
+        : { participant, ok: true, content: "Done.", durationMs: 1, sessionId: "clean-session" };
+    }
+  });
+  const result = await service.delegateTaskFromTool(mainActor(), { task: "Continue.", start: "fork" });
+  assert.equal(result.ok, true, JSON.stringify(result));
+  const childId = String(result.participantId);
+  assert.ok(((storage.current.metadata.promptContextPointers ?? {}) as Record<string, unknown>)[childId], "the copy's chat context starts where the main session's did");
+  await waitFor(() => delegationBatches(storage.current)[0]?.items[0]?.status === "failed");
+  assert.equal(runs.filter((run) => run.participant.id === childId).length, 2, "the copy, then the clean start");
+  const notice = `@${String(result.handle).slice(1)} could not start from a copy of @main's session, so this turn started a clean session.`;
+  const failed = storage.current.messages.find((message: ChatMessage) => message.participantId === childId && message.status === "error");
+  assert.ok(failed?.content.includes(notice), failed?.content);
+  const pointers = (storage.current.metadata.promptContextPointers ?? {}) as Record<string, unknown>;
+  assert.equal(pointers[childId], undefined, "its chat context starts over");
+  // Its next turn: a new session's first, given the chat from its start.
+  overloaded = false;
+  const asked = await service.requestParticipantsFromTool(mainActor(undefined, { triggerMessageId: "trigger-next" }), { requests: [{ target: String(result.handle), prompt: "Try again." }] });
+  assert.equal(asked.ok, true, JSON.stringify(asked));
+  await waitFor(() => runs.filter((run) => run.participant.id === childId).length === 3);
+  const next = runs.filter((run) => run.participant.id === childId)[2]!;
+  assert.equal(next.options.forkFromSessionId, undefined);
+  assert.ok(!next.options.sessionId, "no session of its own yet");
+  assert.doesNotMatch(next.prompt, /You were forked from/);
+});
 test("a failure that is not a missing source does not count as a failed fork", async () => {
   const main = mainSession("codex-cli", { model: undefined });
   const conversation = mainSessionChat([main], { participantSessions: [sessionRecord(main, "main-cli-session")] });
@@ -504,8 +540,11 @@ test("a fork the CLI starts clean (its source is gone) is still told who it is, 
   const session = (storage.current.metadata.participantSessions as ChatParticipantSession[]).find((item) => item.participantId === result.participantId)!;
   assert.equal(session.forkFrom, undefined);
   assert.equal(session.forkedFromParticipantId, undefined, "not reminded later that it is a fork");
-  await waitFor(() => ((storage.current.metadata.warnings ?? []) as string[]).length > 0);
-  assert.deepEqual(storage.current.metadata.warnings, ["@refactor could not start from a copy of @main's session, so it started a clean session from the saved chat context."]);
+  const notice = "@refactor could not start from a copy of @main's session, so it started a clean session from the saved chat context.";
+  await waitFor(() => storage.current.messages.some((message: ChatMessage) => message.role === "system" && message.content === notice));
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  assert.equal(storage.current.messages.filter((message: ChatMessage) => message.role === "system" && message.content === notice).length, 1, "once");
+  assert.deepEqual(storage.current.metadata.warnings ?? [], [notice], "the warning the device that ran it shows, not the CLI's own restart warning");
 });
 
 test("a fork never takes the source's session id as its own", () => {

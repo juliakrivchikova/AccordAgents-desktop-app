@@ -2744,8 +2744,19 @@ button.mobile-chat-group-title:active {
   cursor: pointer;
 }
 
-.members-sheet-row.is-openable:active {
+/* Not a press on the member's fork action: that opens its item, not the member. */
+.members-sheet-row.is-openable:active:not(:has(.members-sheet-fork-toggle:active)) {
   background: var(--press);
+}
+
+/* What a tap on a classic member opens: its picture and words, beside its
+   fork action. */
+.members-sheet-open {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 12px;
 }
 
 .members-sheet-name-line {
@@ -2787,6 +2798,52 @@ button.mobile-chat-group-title:active {
   padding: 18px;
   color: var(--mut);
   font: 400 14px var(--sans);
+}
+
+/* What a CLI's modes cannot do here (Antigravity cannot ask), under them. */
+.new-chat-access-note {
+  margin: 0;
+  padding: 4px 12px 8px;
+  color: var(--mut);
+  font: 400 12.5px var(--sans);
+}
+
+/* Codex's question before Full Access, in place of the sheet's choices: as
+   the phone asks before a pairing code is used (.pairing-confirm and
+   .pairing-form): the question, then the filled and the outlined button. */
+.new-chat-confirm {
+  padding: 8px 8px 4px;
+}
+
+.new-chat-confirm-title {
+  color: var(--fg1);
+  font: 600 17px var(--disp);
+  letter-spacing: -0.012em;
+}
+
+.new-chat-confirm-body {
+  margin: 8px 0 0;
+  color: var(--mut);
+  font: 400 14px var(--sans);
+  line-height: 1.45;
+}
+
+.new-chat-confirm-actions {
+  margin: 16px 0 0;
+}
+
+.new-chat-confirm-action {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 2px;
+  width: 100%;
+  text-align: center;
+}
+
+.new-chat-confirm-detail {
+  font: 400 12.5px var(--sans);
+  opacity: 0.72;
 }
 
 /* --- New chat ------------------------------------------------------------- */
@@ -3704,6 +3761,15 @@ button.mobile-chat-group-title:active {
 
 .act-avatar {
   flex-shrink: 0;
+}
+
+/* A sessions-view chat's row: its provider's logo, no avatar picture. */
+.act-avatar-glyph {
+  width: 38px;
+  height: 38px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
 }
 
 .act-col {
@@ -4996,6 +5062,68 @@ button.card-row:focus-visible {
 
 .chat-title-menu-item:active {
   background: var(--press);
+}
+
+.chat-title-menu-item[hidden] {
+  display: none;
+}
+
+/* Fork to new chat: its line under it says what it makes, or why not. */
+.chat-title-menu-fork {
+  align-items: flex-start;
+  max-width: min(300px, calc(100vw - 72px));
+}
+
+.chat-title-menu-item[data-title-view]:not([hidden]) ~ .chat-title-menu-fork:not([hidden]) {
+  margin-top: 4px;
+  border-top: 1px solid var(--bd);
+  border-radius: 0 0 8px 8px;
+}
+
+.chat-title-menu-copy {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.chat-title-menu-detail {
+  color: var(--mut);
+  font: 400 12.5px/1.35 var(--sans);
+  white-space: normal;
+}
+
+.chat-title-menu-fork[aria-disabled="true"] .chat-title-menu-label {
+  color: var(--mut);
+}
+
+.chat-title-menu-fork[aria-disabled="true"]:active {
+  background: transparent;
+}
+
+/* Fork to new chat in the classic view's members sheet: a small action at
+   the member's row end, as on the computer's roster card; its item (the
+   title menu's) opens under the member, its words lined up with the name. */
+.members-sheet-fork-toggle {
+  margin-left: auto;
+  border-radius: 12px;
+}
+
+.members-sheet-fork-toggle:active,
+.members-sheet-fork-toggle[aria-expanded="true"] {
+  background: var(--press);
+}
+
+.members-sheet-fork-item {
+  width: calc(100% - 46px);
+  max-width: none;
+  margin: -2px 0 6px 46px;
+  border: 1px solid var(--bd);
+  border-radius: 12px;
+}
+
+.members-sheet-fork-item::before {
+  display: none;
 }
 
 .chat-members-button[data-view="sessions"] .chat-members-pill {

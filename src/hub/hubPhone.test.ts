@@ -12,6 +12,7 @@ import { createHubDeviceClient, enrollHubPhone, createHubDeviceIdentity, hubTurn
 import type { HubOp, HubOpsResponse } from "../shared/hubOps";
 import { hubPhoneInviteSigningText, verifyHubPhoneCertificate, verifyHubPhoneEnrollment, type HubPhoneCertificate, type HubPhoneInvite, type HubRosterResponse } from "../shared/hubProtocol";
 import { encodeMachineProgress } from "../shared/machineProgress";
+import { lastMemberTurnEnd } from "../shared/forkToNewChat";
 import type { ChatAppToolApproval, ChatMessage, ChatParticipant, ReviewProgress } from "../shared/types";
 import { composeHub } from "./main";
 import { HubWaker } from "./hubPhoneState";
@@ -736,6 +737,91 @@ test("the phone starts a new chat from what the computer published, as the compu
   assert.deepEqual(listed?.members.map((member) => member.handle), ["assistant", "mac"]);
   const turns = await h.storage.hubOps().requested();
   assert.ok(turns.some((turn) => turn.conversationId === conversationId && turn.participantId === participants[1].id), "the computer's member is asked to answer");
+});
+
+test("a phone forking a member reads the member and its chat from the server, and makes the new chat as the computer would", async (t) => {
+  const h = await hub(t);
+  const machine = createDeviceIdentity(new Date().toISOString());
+  const ops = await seedChat(h, machine);
+  const createdAt = new Date().toISOString();
+  // A chat with its main session and a member it made, which answered once;
+  // the main session's only reply is still being written.
+  const main: ChatParticipant = { id: "p-main", handle: "main", roleConfigId: "main-session", kind: "codex-cli", agentMode: "default" };
+  const made: ChatParticipant = { id: "p-made", handle: "made", roleConfigId: "software-engineer", kind: "claude-code", delegatedByParticipantId: "p-main",
+    sessionHandoff: { provider: "claude-code", sessionId: "s-1", blob: { blobHash: "a".repeat(64), byteLength: 10 } as never, at: createdAt } };
+  await ops.write(h.owner, { opId: ops.opId(), kind: "conversation.create", conversationId: "chat-main",
+    conversation: { title: "Login page", kind: "chat", createdAt, repoPath: "/Users/u/site", metadata: { participants: [main, made], mainSessionParticipantId: "p-main", chatView: "sessions" } } });
+  await ops.write(h.owner,
+    // Its reply ended a turn and recorded where its session stood; a post it
+    // wrote during a later turn is not the reply the copy ends with.
+    { opId: ops.opId(), kind: "message.create", conversationId: "chat-main", message: { id: "r-made", role: "participant", participantId: "p-made", content: "Done.", createdAt, status: "done",
+      metadata: { workedMs: 4_000, sessionCut: { sessionId: "s-1", at: "assistant-uuid-1" } } } as ChatMessage },
+    { opId: ops.opId(), kind: "message.create", conversationId: "chat-main", message: { id: "post-made", role: "participant", participantId: "p-made", content: "Working on more.", createdAt, status: "done",
+      metadata: { appMessageSource: "app_chat_send_message" } } as ChatMessage },
+    { opId: ops.opId(), kind: "message.create", conversationId: "chat-main", message: { id: "r-main", role: "participant", participantId: "p-main", content: "", createdAt, status: "pending" } as ChatMessage });
+  const { client } = await pairPhone(h);
+  type Answer = { options?: { fork?: unknown }; unavailable?: string; fork?: { conversationId: string; title: string; repoPath?: string; member?: ChatParticipant; mainSession?: ChatParticipant; answered: boolean; seen?: unknown } };
+  const read = (forkOf: string, participantId: string) => client.getJson<Answer>("/v1/phone/new-chat", { forkOf, participantId });
+
+  const forMade = await read("chat-main", "p-made");
+  const seen = { messageId: "r-made", sessionCut: { sessionId: "s-1", at: "assistant-uuid-1" }, finishedAt: new Date(Date.parse(createdAt) + 4_000).toISOString() };
+  assert.deepEqual({ ...forMade.fork, member: undefined, mainSession: undefined },
+    { conversationId: "chat-main", title: "Login page", repoPath: "/Users/u/site", member: undefined, mainSession: undefined, answered: true, seen },
+    "with the reply the User sees last, by the computer's rule");
+  const stored = await h.storage.getConversation("chat-main");
+  assert.deepEqual(forMade.fork?.seen, lastMemberTurnEnd(stored!.messages, "p-made"));
+  assert.equal(forMade.fork?.member?.id, "p-made");
+  assert.equal(forMade.fork?.member?.delegatedByParticipantId, "p-main", "what its rights are judged by");
+  assert.equal("sessionHandoff" in (forMade.fork?.member ?? {}), false, "a session a move hands over stays with the devices");
+  assert.equal(forMade.fork?.mainSession?.id, "p-main", "the main session whose rights it never goes above");
+  assert.equal((await read("chat-main", "p-main")).fork?.answered, false, "a reply still being written is not a session");
+  assert.equal((await read("chat-main", "p-main")).fork?.seen, undefined);
+  assert.equal((await read("chat-main", "p-main")).fork?.mainSession, undefined);
+  assert.equal((await read("chat-main", "p-gone")).fork?.member, undefined, "a member the chat no longer has");
+  await assert.rejects(read("no-such-chat", "p-made"), /404|chat_not_found/);
+  await assert.rejects(client.getJson("/v1/phone/new-chat", { forkOf: "chat-main" }), /400|participantId/);
+  await assert.rejects(read("x".repeat(201), "p-made"), /400|forkOf/, "an id no chat has");
+  await assert.rejects(read("chat-main", "p-\u0001made"), /400|participantId/, "nor a member");
+  // Nothing published yet: the offer says so, the chat's part still comes.
+  assert.match(forMade.unavailable ?? "", /has not told your server/);
+
+  // What the computer offers for a fork reaches the phone as it published it.
+  const fork = { judged: true, localProviders: [{ kind: "claude-code" }, { kind: "codex-cli", unavailable: "Codex CLI requires sign-in." }], machines: { "m-1": "supported" },
+    basePermissions: { repoRead: true, workspaceWrite: false, webAccess: false, requestParticipants: "allow", requestCompaction: "ask", shell: { enabled: false, rules: [] } } };
+  const catalog = { version: 1, publishedAt: createdAt, roles: {}, prompts: [], skills: [], avatars: {},
+    newChat: { projects: [], assistant: main, mainSession: main, members: [], fork } };
+  assert.equal((await h.call(h.owner, "PUT", "/v1/catalog", { catalog })).status, 200);
+  assert.deepEqual((await read("chat-main", "p-made")).options?.fork, fork);
+
+  // The phone's new chat, with the copy as its main session, is taken as any
+  // new chat from the phone, its origin with it.
+  const conversationId = crypto.randomUUID();
+  const forked: ChatParticipant = { id: crypto.randomUUID(), handle: "main", roleConfigId: "main-session", kind: "claude-code", agentMode: "default",
+    forkOrigin: { conversationId: "chat-main", participantId: "p-made", handle: "made", conversationTitle: "Login page", kind: "claude-code", seen: seen as never } };
+  const written = await client.postOps([{ opId: `op-${crypto.randomUUID()}`, kind: "conversation.create", conversationId,
+    conversation: { title: "Login page (fork)", kind: "chat", createdAt, repoPath: "/Users/u/site", metadata: { participants: [forked], mainSessionParticipantId: forked.id, chatView: "sessions" } } }]);
+  assert.deepEqual(written.results.map((result) => result.status), ["accepted"]);
+  const created = await h.storage.getConversation(conversationId);
+  assert.deepEqual((created?.metadata.participants as ChatParticipant[])[0]?.forkOrigin, forked.forkOrigin, "with the reply its copy ends at");
+  assert.equal(created?.metadata.mainSessionParticipantId, forked.id);
+  // An archived chat is not the phone's to read, nor to fork from.
+  await ops.write(h.owner, { opId: ops.opId(), kind: "conversation.update", conversationId: "chat-main", metadata: { archived: true } });
+  await assert.rejects(read("chat-main", "p-made"), /404|chat_not_found/);
+});
+
+test("a reply still being written is not a member that ran on the server; an error is", async (t) => {
+  const h = await hub(t);
+  const machine = createDeviceIdentity(new Date().toISOString());
+  const ops = await seedChat(h, machine);
+  const at = new Date().toISOString();
+  const reply = (id: string, status: ChatMessage["status"], metadata?: Record<string, unknown>) =>
+    ({ opId: ops.opId(), kind: "message.create", conversationId: "chat-1", message: { id, role: "participant", participantId: localMember.id, content: "", createdAt: at, status, ...(metadata ? { metadata } : {}) } as ChatMessage }) as HubOp;
+  await ops.write(h.owner, reply("pending-1", "pending"));
+  assert.equal(await h.storage.conversationParticipantAnswered("chat-1", localMember.id), false);
+  await ops.write(h.owner, reply("error-1", "error"));
+  assert.equal(await h.storage.conversationParticipantAnswered("chat-1", localMember.id), true, "its CLI ran");
+  assert.equal(await h.storage.conversationParticipantAnswered("chat-1", machineMember.id), false);
+  assert.equal(await h.storage.conversationParticipantAnswered("no-chat", localMember.id), false);
 });
 
 test("only turns taken by a device that still exists count as running for the phone's chat list", async () => {

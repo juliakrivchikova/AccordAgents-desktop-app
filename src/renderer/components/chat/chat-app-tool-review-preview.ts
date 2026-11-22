@@ -14,11 +14,13 @@ import { handleListText } from "./chat-app-tool-member-removal";
 export function reviewResultPreview(
   approval: ChatAppToolApproval,
   roleRequest: ChatRoleChangeRequest | undefined,
-  participantChange: ChatParticipantChangeRequest | undefined
+  participantChange: ChatParticipantChangeRequest | undefined,
+  /** The sessions view names no handles: members added are counted. */
+  sessions = false
 ): string {
   const parts = [
     roleRequest ? rolePreview(roleRequest) : null,
-    participantChange ? participantPreview(participantChange) : null
+    participantChange ? (sessions ? `Add ${participantChange.operations.length === 1 ? "a member" : `${participantChange.operations.length} members`}` : participantPreview(participantChange)) : null
   ].filter((part) => part !== null);
   return parts.length > 0 && parts.every(Boolean) ? parts.join("; ") : approval.summary;
 }

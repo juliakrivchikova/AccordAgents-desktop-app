@@ -32,6 +32,7 @@ import { ChatCodexApprovalOperation } from "./chat-codex-approval-operation";
 import { ChatScriptApprovalCard } from "./chat-script-approval-card";
 import { chatConnectorSignInRequest, chatParticipantRemovalRequest, chatScriptChangeRequest, chatToolPermissionAllowsChatScope } from "./chat-app-tool-data";
 import { ChatConnectorSignInCard } from "./chat-connector-sign-in-card";
+import { useSessionsViewLabel, useSessionsViewText } from "./chat-sessions-links";
 import { chatToolPermissionScopeSummary } from "../../../shared/toolPermissionScope";
 import { ChatAppToolMemberRemovalOperation, ChatAppToolMemberRemovalResult, memberRemovalOptions, memberRemovalQuestion } from "./chat-app-tool-member-removal";
 
@@ -83,6 +84,10 @@ function GenericChatAppToolApprovalCard(props: {
     ? props.approval.request.operations.filter((operation) => operation.type === "add")
     : [];
   const rosterApproval = !permissionRequest && !combinedRequest && !roleRequest && !participantChange && !participantRequest && !selfCompactionRequest && added.length > 0;
+  // The sessions view names the asking member by its task and the main
+  // session by nothing, in its "who" and in every sentence of the card.
+  const appText = useSessionsViewText();
+  const nameOf = useSessionsViewLabel();
   const [combinedDraft, setCombinedDraft] = useState<ChatRoleParticipantChangeRequest | undefined>(combinedRequest);
   const [roleDraft, setRoleDraft] = useState<ChatRoleChangeRequest | undefined>(combinedRequest?.roleRequest ?? roleRequest);
   const [participantDraft, setParticipantDraft] = useState<ChatParticipantChangeRequest | undefined>(combinedRequest?.participantRequest ?? participantChange);
@@ -136,7 +141,8 @@ function GenericChatAppToolApprovalCard(props: {
     : effectiveCombinedRequest
       ? `${chatParticipantReference(props.approval.requesterHandle)} wants to create a role and add a member`
       : memberRemoval ? memberRemovalQuestion(props.approval, memberRemoval) : approvalQuestion(props.approval, permissionRequest, effectiveRoleRequest, effectiveParticipantChange, participantRequest, selfCompactionRequest, toolPermissionRequest);
-  const displayPrompt = rosterApproval ? rosterApprovalQuestion(props.approval, added) : approvalPrompt;
+  const displayPrompt = appText(rosterApproval ? rosterApprovalQuestion(props.approval, added) : approvalPrompt);
+  const requesterName = nameOf(requesterLabel);
 
   // A removal its member's setting allowed asked nobody: no decision to
   // confirm, it waits like a local member's (memberRemovalResultSummary).
@@ -227,7 +233,7 @@ function GenericChatAppToolApprovalCard(props: {
       <ChatMemberMark className="message-avatar chat-app-tool-approval-avatar" markClassName="is-large" avatar={requesterAvatar} member={requester} />
       <div className="chat-app-tool-approval-body">
         <div className="chat-app-tool-approval-meta">
-          <strong>{requesterLabel}</strong>
+          {requesterName && <strong>{requesterName}</strong>}
           {requester && <span className="message-provider">{reviewChange ? "Proposes changes for your approval" : participantProviderLabel(requester.kind, requester.hostLabel)}</span>}
           <span className="message-when">{formatChatTime(props.approval.createdAt)}</span>
         </div>
@@ -242,7 +248,7 @@ function GenericChatAppToolApprovalCard(props: {
             </div>
           )}
           {!reviewChange && <h3>{rosterApproval ? <RosterApprovalTitle requesterHandle={props.approval.requesterHandle} added={added} /> : displayPrompt}</h3>}
-          {lastRefusal && <div className="chat-app-tool-approval-reason">Your earlier answer was not applied: {lastRefusal.reason}</div>}
+          {lastRefusal && <div className="chat-app-tool-approval-reason">Your earlier answer was not applied: {appText(lastRefusal.reason)}</div>}
           {readOnly && <ChatAppToolReviewStatus approval={props.approval} />}
           <fieldset className="chat-app-tool-review-fieldset" disabled={props.submitting}>
           {codexRequest ? (
@@ -322,28 +328,28 @@ function GenericChatAppToolApprovalCard(props: {
           {rosterApproval && <ChatAppToolRosterPermissionEnvelope operations={added} />}
           {permissionRequest && (
             <p className="chat-app-tool-scope-note">
-              Applies only to {requesterLabel}. Allow once expires after the next run; chat grants stay enabled for this member in this chat.
+              {appText(`Applies only to ${requesterLabel}. Allow once expires after the next run; chat grants stay enabled for this member in this chat.`)}
             </p>
           )}
           {toolPermissionRequest && (
             <p className="chat-app-tool-scope-note">
-              {toolPermissionRequest.agentMode === "auto"
+              {appText(toolPermissionRequest.agentMode === "auto"
                 ? `Applies only to ${requesterLabel}. Claude Auto approvals are per occurrence and do not grant future calls.`
                 : toolPermissionRequest.chatScope
                   ? `Applies only to ${requesterLabel}. Allow once approves this blocked call; the chat grant lets it ${chatToolPermissionScopeSummary(toolPermissionRequest.chatScope)} in this chat without asking.`
                   : !chatToolPermissionAllowsChatScope(toolPermissionRequest)
                     ? `Applies only to ${requesterLabel}. Allow once approves this blocked call; the next one asks again.`
-                    : `Applies only to ${requesterLabel}. Allow once approves this blocked call; chat grants apply to future ${toolPermissionRequest.toolName} calls from this member in this chat.`}
+                    : `Applies only to ${requesterLabel}. Allow once approves this blocked call; chat grants apply to future ${toolPermissionRequest.toolName} calls from this member in this chat.`)}
             </p>
           )}
           {participantRequest && (
             <p className="chat-app-tool-scope-note">
-              Approval runs the requested member{participantRequest.requests.length === 1 ? "" : "s"} and then returns to {requesterLabel} after replies or errors. {inferredParticipantRequest ? "Inferred requests are approved one time." : "Chat grants apply only to this requester and target set."}
+              {appText(`Approval runs the requested member${participantRequest.requests.length === 1 ? "" : "s"} and then returns to ${requesterLabel} after replies or errors. ${inferredParticipantRequest ? "Inferred requests are approved one time." : "Chat grants apply only to this requester and target set."}`)}
             </p>
           )}
           {selfCompactionRequest && (
             <p className="chat-app-tool-scope-note">
-              Allow once queues this compaction only. Chat approval allows future compaction requests from {requesterLabel} without another approval.
+              {appText(`Allow once queues this compaction only. Chat approval allows future compaction requests from ${requesterLabel} without another approval.`)}
             </p>
           )}
           {codexRequest && (
@@ -379,7 +385,7 @@ function GenericChatAppToolApprovalCard(props: {
               >
                 <span className="chat-approval-option-num">{index + 1}.</span>
                 <span className="chat-approval-option-copy">
-                  <span className="chat-approval-option-label">{option.label}</span>
+                  <span className="chat-approval-option-label">{appText(option.label)}</span>
                   {option.detail && <span className="chat-approval-option-detail">{option.detail}</span>}
                 </span>
                 {index === selectedIndex && (
