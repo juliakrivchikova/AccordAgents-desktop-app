@@ -44,13 +44,11 @@ test("the chats with a User message that week, counted by their view", async () 
 
     const active = await storage.listChatViewsWithUserMessagesSince("2026-11-13T00:00:00.000Z");
     assert.equal(active.length, 5);
-    const views = usageActiveChatViews(active, undefined).sort();
+    const views = usageActiveChatViews(active).sort();
     assert.deepEqual(views, ["classic", "classic", "classic", "sessions", "sessions"],
       "sessions, and unset (sessions by default); the switched one, the Assistant's and the one whose main session is gone are classic");
-    assert.deepEqual(usageActiveChatViews(active, "classic").sort(), ["classic", "classic", "classic", "classic", "sessions"],
-      "a chat whose view is unset opens in the view Settings names");
 
-    const snapshot = usageWeeklySnapshot("2026-W47", [], 0, usageActiveChatViews(active, undefined));
+    const snapshot = usageWeeklySnapshot("2026-W47", [], 0, usageActiveChatViews(active));
     assert.deepEqual([snapshot.chats_sessions_view_active, snapshot.chats_classic_view_active], ["2", "3-5"]);
   } finally {
     await rm(directory, { recursive: true, force: true });

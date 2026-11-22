@@ -275,9 +275,9 @@ test("the phone forks a member to a new chat from the title's menu as the comput
     agentMode: forked.agentMode, homeMachineId: forked.homeMachineId, avatarId: forked.avatarId },
   { handle: "main", roleConfigId: "main-session", kind: "claude-code", model: "sonnet", reasoningEffort: "high", agentMode: "default", homeMachineId: undefined, avatarId: undefined },
   "the member's provider, model and effort, in its mode as it runs under the main session, here on the computer");
-  assert.deepEqual(forked.permissions, rights({ webAccess: true, requestParticipants: "allow",
-    shell: { enabled: false, rules: [{ action: "deny", match: "prefix", pattern: "git push" }] } }),
-  "what it may do as it runs (no edits, commands or CLI mode above the main session), with the main session's say over members");
+  assert.deepEqual(forked.permissions, { ...rights({ webAccess: true, requestParticipants: "allow",
+    shell: { enabled: false, rules: [{ action: "deny", match: "prefix", pattern: "git push" }] } }), cliApprovals: true },
+  "what it may do as it runs (no edits or commands above the main session), in Claude Code's own mode (Manual: what it may not do it asks about; the User, 2026-11-22: no Custom in the sessions view), with the main session's say over members");
   const drewReply = (await hub.storage.getConversation("conv-main"))?.messages.find((message) => message.id === "drew-reply");
   assert.deepEqual(forked.forkOrigin, { conversationId: "conv-main", participantId: DREW.id, handle: "drew", conversationTitle: "Login page", kind: "claude-code",
     seen: { messageId: "drew-reply", sessionCut: { sessionId: "s-drew", at: "drew-assistant-1" }, finishedAt: new Date(Date.parse(drewReply.createdAt) + 60_000).toISOString() } },

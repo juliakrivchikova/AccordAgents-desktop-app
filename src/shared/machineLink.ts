@@ -105,6 +105,11 @@ export interface MachineHelloBody {
    *  view's menus set them (src/shared/chatAccessModes.ts); absent before,
    *  when Full Access ran as Ask for approval and Plan mode was dropped. */
   cliModesSupported?: boolean;
+  /** This runtime sets a Claude Code member's new permission mode in its live
+   *  process while its turn runs (`set_permission_mode`, as Shift+Tab does);
+   *  absent before, when the mode applied only to the member's next turn, in
+   *  a new process that loses its background work. */
+  liveModeChangeSupported?: boolean;
   /** What each CLI here starts a new session in with this machine's own
    *  config (src/shared/cliStartDefaults.ts): a new main session that runs
    *  here starts in it, and its composer names its model. Absent from a

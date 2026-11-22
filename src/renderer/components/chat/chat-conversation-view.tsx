@@ -4,6 +4,7 @@ import { ArrowDown } from "lucide-react";
 
 import type {
   ChatAppToolApprovalRequest,
+  ChatClaudePlanDecision,
   ChatAppToolApprovalScope,
   ChatImageInput,
   ChatSkillMention,
@@ -108,7 +109,6 @@ export function ChatConversationView(props: ChatConversationViewProps): JSX.Elem
   ]);
   const viewMode = useChatViewMode({
     conversation: props.conversation,
-    defaultView: props.settings.defaultChatView,
     onSaved: props.onChatViewSaved,
     onError: props.onChatViewError
   });
@@ -302,11 +302,12 @@ export function ChatConversationView(props: ChatConversationViewProps): JSX.Elem
     approve: boolean,
     scope?: ChatAppToolApprovalScope,
     draftOverride?: ChatAppToolApprovalRequest,
-    codexDecisionId?: string
+    codexDecisionId?: string,
+    planDecision?: ChatClaudePlanDecision
   ): Promise<void> {
     return approvalSubmission.runWithSubmittingId(
       approvalId,
-      () => props.onRespondToAppToolApproval(approvalId, approve, scope, draftOverride, codexDecisionId)
+      () => props.onRespondToAppToolApproval(approvalId, approve, scope, draftOverride, codexDecisionId, planDecision)
     );
   }
 

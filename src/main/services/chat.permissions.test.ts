@@ -47,12 +47,14 @@ import { DEFAULT_CHAT_PROMPT_CONTEXT } from "../../shared/chatPromptContext";
 import { EMPTY_MOBILE_CONTROL_SETTINGS } from "../../shared/mobilePairing";
 import { preferredReadyAssistantProviderKind } from "../../shared/cliReadiness";
 import { MAIN_SESSION_ROLE_ID } from "../../shared/mainSession";
+import { selectedChatAccessOption } from "../../shared/chatAccessModes";
 import { CHAT_INTERIM_POSTS_MAX_CHARS } from "../../shared/interimPosts";
 import type {
   AgentHealth,
   ReviewProgress,
   AppSettings,
   ChatAgentActivityEvent,
+  ChatAgentPermissions,
   ChatAppToolApproval,
   ChatAppToolApprovalPolicy,
   ChatBehaviorRuleConfig,
@@ -1891,6 +1893,401 @@ test("switching an existing session to auto adopts the mode on the next resumed 
   const effective = effectiveChatAgentPermissionsForProvider("codex-cli", runs[1].options.agentMode, runs[1].options.permissions);
   assert.equal(effective.workspaceWrite, true);
   assert.equal(effective.webAccess, true);
+});
+
+/** The member's live Claude Code process as ChatService's mode changes reach
+ *  it (CliAgentRunner.memberClaudeControl). */
+function liveClaudeProcess(service: ChatService) {
+  const process = {
+    live: true,
+    refuse: undefined as string | undefined,
+    /** The CLI switches to this mode instead of the one asked. */
+    answer: undefined as string | undefined,
+    mode: "default",
+    sent: [] as Array<Record<string, unknown>>
+  };
+  (service as any).cliRunner.memberClaudeControl = async (_conversationId: string, _participantId: string, request: Record<string, unknown>) => {
+    if (!process.live) return undefined;
+    process.sent.push(request);
+    if (process.refuse) throw new Error(process.refuse);
+    process.mode = process.answer ?? String(request.mode);
+    return { mode: process.mode };
+  };
+  (service as any).cliRunner.memberClaudePermissionMode = () => process.live ? process.mode : undefined;
+  return process;
+}
+
+test("Claude Code's own modes: a mode change keeps the member's live process, is set in it at once, and a turn that read the member earlier goes in with the new mode", async () => {
+  const runs: Array<{ options: any }> = [];
+  const drew = { ...chatParticipant("claude-code", { repoRead: true }), permissions: { ...normalizeChatAgentPermissions({ ...defaultChatAgentPermissions(), repoRead: true }), cliApprovals: true as const } };
+  const conversation = chatConversation([drew]);
+  const { service, storage, tempRoot, debugEvents } = testService({
+    conversation,
+    run: async (runParticipant, _prompt, _repoPath, _diffMode, _kind, _signal, options) => {
+      runs.push({ options });
+      return { participant: runParticipant, ok: true, content: "ok", durationMs: 1, sessionId: "session-drew" };
+    }
+  });
+  (service as any).ensureHistoryFiles = async () => tempRoot;
+  const process = liveClaudeProcess(service);
+  const own = { ...drew.permissions };
+  const turn = async (runId: string) => {
+    await service.sendMessage({ conversationId: conversation.id, runId, content: "@drew go on" });
+    await waitFor(() => runs.length === Number(runId.split("-")[1]));
+    return runs.at(-1)!.options;
+  };
+
+  const manual = await turn("run-1");
+  assert.equal(manual.warm.permissionMode(), "default");
+  const steps: Array<[string, Record<string, unknown>, string]> = [
+    ["Accept edits", { permissions: { ...own, workspaceWrite: true } }, "acceptEdits"],
+    ["Plan", { agentMode: "plan" }, "plan"],
+    ["Auto", { agentMode: "auto" }, "auto"],
+    ["Manual", { agentMode: "default", permissions: own }, "default"]
+  ];
+  for (const [index, [name, patch, mode]] of steps.entries()) {
+    await service.updateParticipantRuntime({ conversationId: conversation.id, participantId: drew.id, ...patch });
+    await waitFor(() => process.sent.length === index + 1);
+    assert.deepEqual(process.sent.at(-1), { subtype: "set_permission_mode", mode }, `${name}: set in the live process at once`);
+    const next = await turn(`run-${runs.length + 1}`);
+    assert.equal(next.warm.contextKey, manual.warm.contextKey, `${name}: the same live process`);
+    assert.equal(next.warm.permissionMode(), mode, `${name}: its message goes in with that mode`);
+  }
+  assert.equal(debugEvents.filter((entry) => entry.event === "chat.member-mode.applied").length, steps.length);
+
+  // A turn that read the member as Manual before she picked Accept edits
+  // goes in with Accept edits; a change of something else sends nothing.
+  await service.updateParticipantRuntime({ conversationId: conversation.id, participantId: drew.id, permissions: { ...own, workspaceWrite: true } });
+  assert.equal(manual.warm.permissionMode(), "acceptEdits");
+  const sent = process.sent.length;
+  await service.updateParticipantRuntime({ conversationId: conversation.id, participantId: drew.id, model: "sonnet" });
+  await flushMicrotasks();
+  assert.equal(process.sent.length, sent, "not a mode change");
+
+  // Its other rights are still the process's: a new one for web access.
+  await service.updateParticipantRuntime({ conversationId: conversation.id, participantId: drew.id, model: "", permissions: { ...own, workspaceWrite: true, webAccess: true } });
+  const web = await turn(`run-${runs.length + 1}`);
+  assert.notEqual(web.warm.contextKey, manual.warm.contextKey);
+
+  // No live process: nothing set (its next turn starts in the saved mode).
+  process.live = false;
+  const sentBefore = process.sent.length;
+  await service.updateParticipantRuntime({ conversationId: conversation.id, participantId: drew.id, agentMode: "plan" });
+  await flushMicrotasks();
+  assert.equal(process.sent.length, sentBefore);
+  assert.equal(storage.current.metadata.warnings?.length ?? 0, 0, "nothing to say");
+  // Not switched: the chat says so in the CLI's words, and the member's mode
+  // is the one its CLI still runs (its menu shows that).
+  process.live = true;
+  process.mode = "acceptEdits";
+  process.refuse = "Claude Code refused set_permission_mode.";
+  await service.updateParticipantRuntime({ conversationId: conversation.id, participantId: drew.id, agentMode: "auto" });
+  const refusedLine = "Claude Code did not switch @drew to Auto: Claude Code refused set_permission_mode. @drew stays in Accept edits.";
+  await waitFor(() => (storage.current.metadata.warnings ?? []).includes(refusedLine));
+  assert.ok(storage.current.messages.some((message: ChatMessage) => message.role === "system" && message.content === refusedLine), "a line every device has");
+  await waitFor(() => {
+    const member = (storage.current.metadata.participants as ChatParticipant[])[0];
+    return member.agentMode === "default" && normalizeChatAgentPermissions(member.permissions).workspaceWrite === true;
+  });
+  // The CLI switched to another mode: said, and followed.
+  process.refuse = undefined;
+  process.answer = "plan";
+  await service.updateParticipantRuntime({ conversationId: conversation.id, participantId: drew.id, agentMode: "default", permissions: own });
+  await waitFor(() => (storage.current.metadata.warnings ?? []).includes("Claude Code switched @drew to Plan instead of Manual."));
+  await waitFor(() => (storage.current.metadata.participants as ChatParticipant[])[0].agentMode === "plan");
+  assert.ok(debugEvents.some((entry) => entry.event === "chat.member-mode.apply-failed"));
+});
+
+function fakeAppMcp() {
+  const grants: any[] = [];
+  return {
+    grants,
+    issueToken(grant: any) { grants.push(grant); return { url: "http://127.0.0.1:1/mcp", token: `token-${grants.length}` }; },
+    updateToken(token: string, grant: any) { grants.push(grant); return { url: "http://127.0.0.1:1/mcp", token }; },
+    clientStatus() { return undefined; }
+  };
+}
+
+function ownModeClaude(patch: Partial<ChatAgentPermissions> = {}): ChatParticipant {
+  return { ...chatParticipant("claude-code"), permissions: { ...normalizeChatAgentPermissions({ ...defaultChatAgentPermissions(), repoRead: true, ...patch }), cliApprovals: true as const } };
+}
+
+test("Claude Code's own modes: the app tool grant issued as the CLI takes a message goes by a mode she picked after the turn read the member", async () => {
+  const drew = ownModeClaude();
+  const conversation = chatConversation([drew]);
+  const appMcp = fakeAppMcp();
+  let service!: ChatService;
+  let turns = 0;
+  const built = testService({
+    conversation,
+    appMcp: appMcp as never,
+    run: async (runParticipant, _prompt, _repoPath, _diffMode, _kind, _signal, options) => {
+      turns += 1;
+      if (turns === 2) {
+        // She picks Auto while the message waits for the CLI to take it.
+        await service.updateParticipantRuntime({ conversationId: conversation.id, participantId: drew.id, agentMode: "auto" });
+        options.warm.onReplyStarted?.();
+      }
+      return { participant: runParticipant, ok: true, content: "ok", durationMs: 1, sessionId: "session-drew" };
+    }
+  });
+  service = built.service;
+  (service as any).ensureHistoryFiles = async () => built.tempRoot;
+  liveClaudeProcess(service);
+  await service.sendMessage({ conversationId: conversation.id, runId: "run-1", content: "@drew one" });
+  await waitFor(() => turns === 1 && appMcp.grants.length > 0);
+  assert.equal(appMcp.grants.at(-1).agentMode, "default");
+  await service.sendMessage({ conversationId: conversation.id, runId: "run-2", content: "@drew two" });
+  const firstRun = appMcp.grants[0].runId;
+  await waitFor(() => turns === 2 && appMcp.grants.at(-1)?.runId !== firstRun);
+  assert.equal(appMcp.grants.some((grant) => grant.runId === firstRun && grant.agentMode === "auto"), true, "her pick reached the live grant at once");
+  const grant = appMcp.grants.at(-1);
+  assert.equal(grant.agentMode, "auto", "not the Manual the turn read");
+  assert.equal(normalizeChatAgentPermissions(grant.runPermissions).workspaceWrite, true, "Auto's rights");
+});
+
+test("Claude Code's own modes: after a turn that ran in Accept edits by a once-only grant, the member's live process goes back to its own mode", async () => {
+  const drew = ownModeClaude();
+  const approval = permissionApproval(drew, { kind: "portable", permissions: ["workspaceWrite"] }, { status: "approved", approvalScope: "once" });
+  const conversation = chatConversation([drew], { pendingAppToolApprovals: [approval] });
+  let process!: ReturnType<typeof liveClaudeProcess>;
+  const runs: any[] = [];
+  const { service, tempRoot } = testService({
+    conversation,
+    run: async (runParticipant, _prompt, _repoPath, _diffMode, _kind, _signal, options) => {
+      runs.push(options);
+      // The runner switched the process before the message (alignment).
+      process.mode = options.warm.permissionMode?.() ?? "default";
+      return { participant: runParticipant, ok: true, content: "ok", durationMs: 1, sessionId: "session-drew" };
+    }
+  });
+  (service as any).ensureHistoryFiles = async () => tempRoot;
+  process = liveClaudeProcess(service);
+  await service.sendMessage({ conversationId: conversation.id, runId: "run-once", content: "@drew edit it" });
+  await waitFor(() => runs.length === 1);
+  assert.equal(runs[0].warm.permissionMode(), "acceptEdits", "the once-only grant: Accept edits for this turn");
+  await waitFor(() => process.sent.some((request) => request.mode === "default"));
+  assert.equal(process.mode, "default", "back in Manual for what it does on its own afterwards");
+});
+
+test("Claude Code's own modes: a command the CLI asks about is never answered by the app from a stored shell rule (its rules are the CLI's own)", async () => {
+  const drew = ownModeClaude({ shell: { enabled: true, rules: [{ action: "allow", match: "prefix", pattern: "git status" }] } });
+  const conversation = chatConversation([drew]);
+  const { service, storage } = testService({ conversation });
+  const pending = service.requestToolPermissionFromTool({
+    conversationId: conversation.id, participantId: drew.id, roleConfigId: drew.roleConfigId, roleConfigVersion: 0,
+    capabilities: ["permissions.request" as const], runId: "run-shell", triggerMessageId: "user-message", agentMode: "default"
+  } as never, { tool_name: "Bash", input: { command: "git status --short" }, tool_use_id: "t1" });
+  await waitFor(() => ((storage.current.metadata.pendingAppToolApprovals ?? []) as ChatAppToolApproval[]).some((approval) => approval.status === "pending"));
+  const card = ((storage.current.metadata.pendingAppToolApprovals ?? []) as ChatAppToolApproval[]).find((approval) => approval.status === "pending")!;
+  await service.respondToAppToolApproval({ conversationId: conversation.id, approvalId: card.id, approve: false });
+  assert.equal((await pending).behavior, "deny", "a card, not an answer from the rule");
+});
+
+test("Claude Code's own modes: the app tool policy given once for the CLI session does not depend on the mode", () => {
+  const { service } = testService({ conversation: chatConversation([ownModeClaude()]), appMcp: fakeAppMcp() as never });
+  const policy = (agentMode: string, cliApprovals: boolean) => (service as any).appToolPromptPolicy({
+    participantId: "claude-participant", sessionId: "s", roleConfigId: ROLE.id, roleConfigVersion: 1, roleLabel: ROLE.label, roleInstructions: ROLE.instructions,
+    updatedAt: NOW, participantKind: "claude-code", participantAgentMode: agentMode,
+    participantPermissions: { ...defaultChatAgentPermissions(), ...(cliApprovals ? { cliApprovals: true } : {}) },
+    roleAppToolCapabilities: ["permissions.request"]
+  }) as string;
+  assert.equal(policy("auto", true), policy("default", true));
+  assert.equal(policy("plan", true), policy("default", true));
+  assert.notEqual(policy("auto", false), policy("default", false), "a classic member's Auto says its own");
+});
+
+test("a classic Claude Code member's mode is its process's: a new one, and nothing set in a live one", async () => {
+  const runs: Array<{ options: any }> = [];
+  const drew = chatParticipant("claude-code", { repoRead: true });
+  const conversation = chatConversation([drew]);
+  const { service, tempRoot } = testService({
+    conversation,
+    run: async (runParticipant, _prompt, _repoPath, _diffMode, _kind, _signal, options) => {
+      runs.push({ options });
+      return { participant: runParticipant, ok: true, content: "ok", durationMs: 1, sessionId: "session-drew" };
+    }
+  });
+  (service as any).ensureHistoryFiles = async () => tempRoot;
+  const process = liveClaudeProcess(service);
+  await service.sendMessage({ conversationId: conversation.id, runId: "run-1", content: "@drew go on" });
+  await waitFor(() => runs.length === 1);
+  await service.updateParticipantRuntime({ conversationId: conversation.id, participantId: drew.id, agentMode: "plan" });
+  await service.sendMessage({ conversationId: conversation.id, runId: "run-2", content: "@drew go on" });
+  await waitFor(() => runs.length === 2);
+  assert.notEqual(runs[1].options.warm.contextKey, runs[0].options.warm.contextKey);
+  assert.equal(runs[1].options.warm.permissionMode, undefined);
+  assert.deepEqual(process.sent, []);
+});
+
+test("Claude Code's own modes on a machine: a mode changed on another device is set in the member's live process there; the computer sets nothing for it", async () => {
+  const drew = {
+    ...chatParticipant("claude-code", { repoRead: true }),
+    homeMachineId: "machine-1",
+    permissions: { ...normalizeChatAgentPermissions({ ...defaultChatAgentPermissions(), repoRead: true }), cliApprovals: true as const }
+  };
+  const conversation = chatConversation([drew]);
+  // On the computer: the member runs on its machine.
+  const desktop = testService({ conversation });
+  const desktopProcess = liveClaudeProcess(desktop.service);
+  await desktop.service.updateParticipantRuntime({ conversationId: conversation.id, participantId: drew.id, agentMode: "auto" });
+  await desktop.service.updateParticipantRuntime({ conversationId: conversation.id, participantId: drew.id, agentMode: "plan" });
+  await flushMicrotasks();
+  assert.deepEqual(desktopProcess.sent, [], "not this device's member");
+
+  // On its machine, the change arrives through the User's server.
+  const machine = testService({ conversation });
+  machine.service.setHostMachineId("machine-1");
+  const machineProcess = liveClaudeProcess(machine.service);
+  await machine.service.applyServerEntries([fromServer(conversation.id, "desktop-device", { kind: "conversation.update", conversationId: conversation.id, title: "Renamed", updatedAt: new Date().toISOString() } as any)]);
+  await machine.service.applyServerEntries([fromServer(conversation.id, "desktop-device", { kind: "conversation.update", conversationId: conversation.id,
+    metadata: { participants: [{ ...drew, agentMode: "plan" }] }, updatedAt: new Date().toISOString() } as any)]);
+  await waitFor(() => machineProcess.sent.length === 1);
+  assert.deepEqual(machineProcess.sent, [{ subtype: "set_permission_mode", mode: "plan" }]);
+});
+
+/** A Claude Code member in its CLI's own Plan mode (the sessions view). */
+function planMember() {
+  return {
+    ...chatParticipant("claude-code", { repoRead: true }),
+    agentMode: "plan" as const,
+    permissions: { ...normalizeChatAgentPermissions({ ...defaultChatAgentPermissions(), repoRead: true }), cliApprovals: true as const }
+  };
+}
+
+test("Claude Code's plan approval: ExitPlanMode raises the CLI's own card; a Yes carries its setMode back, No sends her words", async () => {
+  const drew = planMember();
+  const conversation = chatConversation([drew]);
+  const { service, storage } = testService({ conversation });
+  const actor = { ...toolPermissionActor(drew, conversation), agentMode: "plan" as const };
+  const plan = "# Plan\n\n1. Write hello.txt with hi.";
+  const input = { plan, planFilePath: "/home/user/.claude/plans/plan.md" };
+
+  const first = service.requestToolPermissionFromTool(actor, { tool_name: "ExitPlanMode", input, tool_use_id: "toolu_plan_1" });
+  const card = await pendingToolPermission(storage, "ExitPlanMode");
+  assert.equal(card.summary, "Ready to code?");
+  assert.deepEqual(card.request, {
+    kind: "toolPermission",
+    agentMode: "plan",
+    nativeOccurrenceId: "toolu_plan_1",
+    toolName: "ExitPlanMode",
+    planApproval: { plan, planFilePath: "/home/user/.claude/plans/plan.md" }
+  }, "the plan, not a tool input preview; no \"for this chat\"");
+
+  // An answer that is not one of its rows (an older phone's Allow, auto
+  // mode the card did not offer) is refused; the card still asks.
+  await assert.rejects(service.respondToAppToolApproval({ conversationId: conversation.id, approvalId: card.id, approve: true }), /This answer is not one this card takes\./);
+  await assert.rejects(service.respondToAppToolApproval({ conversationId: conversation.id, approvalId: card.id, approve: true,
+    planDecision: { optionId: "yes-resume-auto-mode" } }), /This answer is not one this card takes\./);
+  await service.respondToAppToolApproval({ conversationId: conversation.id, approvalId: card.id, approve: true,
+    planDecision: { optionId: "yes-accept-edits-keep-context" } });
+  assert.deepEqual(await first, {
+    behavior: "allow",
+    updatedInput: input,
+    updatedPermissions: [{ type: "setMode", mode: "acceptEdits", destination: "session" }]
+  });
+  const answered = ((storage.current.metadata.pendingAppToolApprovals ?? []) as ChatAppToolApproval[]).find((item) => item.id === card.id)!;
+  assert.equal(answered.status, "approved");
+  assert.deepEqual(answered.planDecision, { optionId: "yes-accept-edits-keep-context" });
+  assert.deepEqual((answered.request as { planApproval?: unknown }).planApproval, { planFilePath: "/home/user/.claude/plans/plan.md" }, "the answered card keeps no plan");
+  assert.ok(storage.current.messages.some((message: ChatMessage) => message.content === "@drew: Yes, auto-accept edits."));
+
+  // Manual: setMode default.
+  const manual = service.requestToolPermissionFromTool({ ...actor, runId: "run-43" }, { tool_name: "ExitPlanMode", input, tool_use_id: "toolu_plan_2" });
+  const manualCard = await pendingToolPermission(storage, "ExitPlanMode");
+  await service.respondToAppToolApproval({ conversationId: conversation.id, approvalId: manualCard.id, approve: true, planDecision: { optionId: "yes-default-keep-context" } });
+  assert.deepEqual((await manual).updatedPermissions, [{ type: "setMode", mode: "default", destination: "session" }]);
+
+  // No, keep planning: her words, as the CLI's rejection with feedback.
+  const keep = service.requestToolPermissionFromTool({ ...actor, runId: "run-44" }, { tool_name: "ExitPlanMode", input, tool_use_id: "toolu_plan_3" });
+  const keepCard = await pendingToolPermission(storage, "ExitPlanMode");
+  await service.respondToAppToolApproval({ conversationId: conversation.id, approvalId: keepCard.id, approve: false,
+    planDecision: { optionId: "no", feedback: "  Use a fixture instead.  " } });
+  assert.deepEqual(await keep, {
+    behavior: "deny",
+    message: "The user doesn't want to proceed with this tool use. The tool use was rejected (eg. if it was a file edit, the new_string was NOT written to the file). To tell you how to proceed, the user said:\nUse a fixture instead."
+  });
+
+  // A plan approval is never answered by a rule, even one "for this chat".
+  (storage.current.metadata as any).appToolApprovalPolicies = [{ id: "p1", participantId: drew.id, roleConfigId: drew.roleConfigId, toolName: APP_TOOL_PERMISSION_TOOL,
+    capability: "permissions.request", targetToolName: "ExitPlanMode", scope: "chat", createdAt: "", updatedAt: "" }];
+  const asked = service.requestToolPermissionFromTool({ ...actor, runId: "run-45" }, { tool_name: "ExitPlanMode", input: { plan: "" }, tool_use_id: "toolu_plan_4" });
+  const askedCard = await pendingToolPermission(storage, "ExitPlanMode");
+  assert.deepEqual((askedCard.request as { planApproval?: unknown }).planApproval, { plan: "" });
+  // A Deny without a row (an older phone's) is refused too; "No, keep
+  // planning" with nothing typed is the CLI's rejection that waits for her.
+  await assert.rejects(service.respondToAppToolApproval({ conversationId: conversation.id, approvalId: askedCard.id, approve: false }), /This answer is not one this card takes\./);
+  await service.respondToAppToolApproval({ conversationId: conversation.id, approvalId: askedCard.id, approve: false, planDecision: { optionId: "no" } });
+  assert.deepEqual(await asked, {
+    behavior: "deny",
+    message: "The user doesn't want to proceed with this tool use. The tool use was rejected (eg. if it was a file edit, the new_string was NOT written to the file). STOP what you are doing and wait for the user to tell you how to proceed."
+  });
+});
+
+test("Claude Code's plan approval offers auto mode once the member's CLI ran in it, and a classic member's ExitPlanMode stays a tool card", async () => {
+  const drew = planMember();
+  const conversation = chatConversation([drew]);
+  const { service, storage } = testService({ conversation });
+  (service as any).cliRunner.memberClaudeAutoModeAvailable = () => true;
+  const pending = service.requestToolPermissionFromTool({ ...toolPermissionActor(drew, conversation), agentMode: "plan" as const }, {
+    tool_name: "ExitPlanMode", input: { plan: "Do it." }, tool_use_id: "toolu_auto"
+  });
+  const card = await pendingToolPermission(storage, "ExitPlanMode");
+  assert.deepEqual((card.request as { planApproval?: unknown }).planApproval, { plan: "Do it.", autoModeAvailable: true });
+  await assert.rejects(service.respondToAppToolApproval({ conversationId: conversation.id, approvalId: card.id, approve: true,
+    planDecision: { optionId: "yes-accept-edits-keep-context" } }), /This answer is not one this card takes\./, "the CLI offers auto mode in its place");
+  await service.respondToAppToolApproval({ conversationId: conversation.id, approvalId: card.id, approve: true, planDecision: { optionId: "yes-resume-auto-mode" } });
+  assert.deepEqual((await pending).updatedPermissions, [{ type: "setMode", mode: "auto", destination: "session" }]);
+
+  const classic = chatParticipant("claude-code", { repoRead: true });
+  const classicChat = chatConversation([classic]);
+  const other = testService({ conversation: classicChat });
+  void other.service.requestToolPermissionFromTool(toolPermissionActor(classic, classicChat), { tool_name: "ExitPlanMode", input: { plan: "x" } });
+  const toolCard = await pendingToolPermission(other.storage, "ExitPlanMode");
+  assert.equal((toolCard.request as { planApproval?: unknown }).planApproval, undefined);
+});
+
+test("Claude Code's plan approval: after a Yes the member's mode follows the CLI and is not switched back to Plan", async () => {
+  const runs: Array<{ options: any }> = [];
+  const drew = planMember();
+  const conversation = chatConversation([drew]);
+  const { service, storage, tempRoot, debugEvents } = testService({
+    conversation,
+    run: async (runParticipant, _prompt, _repoPath, _diffMode, _kind, _signal, options) => {
+      runs.push({ options });
+      return { participant: runParticipant, ok: true, content: "ok", durationMs: 1, sessionId: "session-drew" };
+    }
+  });
+  (service as any).ensureHistoryFiles = async () => tempRoot;
+  const process = liveClaudeProcess(service);
+  await service.sendMessage({ conversationId: conversation.id, runId: "run-1", content: "@drew plan it" });
+  await waitFor(() => runs.length === 1);
+  const warm = runs[0].options.warm;
+  assert.equal(warm.permissionMode(), "plan");
+  assert.equal(typeof warm.onCliPermissionMode, "function");
+
+  // The CLI moved itself on her "Yes, auto-accept edits".
+  warm.onCliPermissionMode("acceptEdits");
+  assert.equal(warm.permissionMode(), "acceptEdits", "a message sent before the save lands goes in as it is");
+  await waitFor(() => debugEvents.some((entry) => entry.event === "chat.member-mode.followed-cli"));
+  const member = (storage.current.metadata.participants as ChatParticipant[])[0];
+  assert.equal(member.agentMode, "default");
+  assert.equal(member.permissions?.workspaceWrite, true);
+  assert.equal(member.permissions?.cliApprovals, true);
+  assert.equal(member.permissions?.repoRead, true, "every other right kept");
+  assert.equal(selectedChatAccessOption("claude-code", member.agentMode, member.permissions)?.id, "acceptEdits", "the chip says Accept edits");
+  await flushMicrotasks();
+  assert.deepEqual(process.sent, [], "the process is not switched (back) for it");
+
+  await service.sendMessage({ conversationId: conversation.id, runId: "run-2", content: "@drew go" });
+  await waitFor(() => runs.length === 2);
+  assert.equal(runs[1].options.warm.permissionMode(), "acceptEdits", "the next message runs in it, not in Plan");
+  assert.equal(runs[1].options.warm.contextKey, warm.contextKey, "the same live process");
+
+  // Her own change afterwards is set in the process as before.
+  await service.updateParticipantRuntime({ conversationId: conversation.id, participantId: drew.id, agentMode: "plan" });
+  await waitFor(() => process.sent.length === 1);
+  assert.deepEqual(process.sent, [{ subtype: "set_permission_mode", mode: "plan" }]);
 });
 
 test("chat native /goal preserves the posted message while enabling the provider-native run", async () => {
@@ -5766,9 +6163,51 @@ test("a new chat gets a main session instead of the Chat Assistant: an ordinary 
   assert.deepEqual(alone.map((item) => item.roleConfigId), [MAIN_SESSION_ROLE_ID]);
   assert.equal(alone[0].permissions?.repoRead, false, "no project to read, as for an ordinary member");
 
-  const classic = testService({ agents, settings: { chatRoleConfigs: [ADMIN_ROLE, ROLE], defaultChatView: "classic" } });
+  // The view Settings once named for new chats is gone: a stored "classic"
+  // no longer makes a new chat open classic (the User, 2026-11-22).
+  const classic = testService({ agents, settings: { chatRoleConfigs: [ADMIN_ROLE, ROLE], legacyDefaultChatView: "classic" } });
   const classicChat = await classic.service.createConversation({ title: "Fresh chat", participants: [], skipDefaultParticipants: true });
-  assert.equal(classicChat.conversation.metadata.chatView, "classic", "Settings → General picks the view a new chat opens in");
+  assert.equal(classicChat.conversation.metadata.chatView, "sessions", "every new chat opens in the sessions view");
+});
+
+test("Settings → General → New chats: a new chat's main session compacts without asking unless turned off, made on the computer or offered to the phone", { timeout: 10_000 }, async () => {
+  const agents = installedChatAgents();
+  const row = { handle: "main", roleConfigId: MAIN_SESSION_ROLE_ID, kind: "claude-code" as const, permissions: { ...defaultChatAgentPermissions(), requestCompaction: "ask" as const } };
+  for (const [label, newChatDefaults, right] of [
+    ["unset", undefined, "allow"],
+    ["on", { compactWithoutAsking: true }, "allow"],
+    ["off", { compactWithoutAsking: false }, "ask"]
+  ] as const) {
+    const { service } = testService({ agents, settings: { chatRoleConfigs: [ADMIN_ROLE, ROLE], assistantProviderKind: "claude-code", newChatDefaults } });
+    const alone = await service.createConversation({ title: "Fresh chat", participants: [], skipDefaultParticipants: true });
+    assert.equal((alone.conversation.metadata.participants as ChatParticipant[])[0].permissions?.requestCompaction, right, `${label}: made without a row from the screen`);
+    // The screen has no control for it: Settings decides.
+    const fromScreen = await service.createConversation({ title: "Fresh chat", participants: [row] });
+    assert.equal((fromScreen.conversation.metadata.participants as ChatParticipant[])[0].permissions?.requestCompaction, right, `${label}: made from the screen's row`);
+    const offered = await service.newChatOptions([]);
+    assert.equal(offered?.mainSession?.permissions?.requestCompaction, right, `${label}: the phone's new chat`);
+  }
+});
+
+test("the phone's New chat offers the main session as Settings → General → New chats starts it: model, effort, mode and machine for its CLI", { timeout: 10_000 }, async () => {
+  const agents = installedChatAgents();
+  const newChatDefaults = { kind: "claude-code" as const, model: "claude-opus-5-5", reasoningEffort: "high" as const, access: "acceptEdits", homeMachineId: "m-hand", compactWithoutAsking: true };
+  const { service } = testService({ agents, settings: { chatRoleConfigs: [ADMIN_ROLE, ROLE], assistantProviderKind: "claude-code", newChatDefaults },
+    machines: [{ id: "m-hand", name: "Studio", deviceId: "device-hand" }] });
+  const offered = (await service.newChatOptions([]))!.mainSession!;
+  assert.deepEqual([offered.kind, offered.model, offered.reasoningEffort, offered.agentMode, offered.homeMachineId], ["claude-code", "claude-opus-5-5", "high", "default", "m-hand"]);
+  assert.deepEqual([offered.permissions?.cliApprovals, offered.permissions?.workspaceWrite], [true, true], "Claude Code's Accept edits");
+  assert.deepEqual([offered.permissions?.requestParticipants, offered.permissions?.manageRolesParticipants], ["allow", undefined],
+    "it asks members without a card, and adds them as its role always lets it (inherited)");
+
+  // Chosen for another CLI than new chats run on: that CLI's own; a machine
+  // no longer set up: this computer.
+  const other = testService({ agents, settings: { chatRoleConfigs: [ADMIN_ROLE, ROLE], assistantProviderKind: "codex-cli", newChatDefaults: { ...newChatDefaults, homeMachineId: "m-gone" } },
+    machines: [{ id: "m-hand", name: "Studio", deviceId: "device-hand" }] });
+  const codex = (await other.service.newChatOptions([]))!.mainSession!;
+  assert.deepEqual([codex.kind, codex.model, codex.reasoningEffort, codex.agentMode, codex.homeMachineId, codex.permissions?.cliApprovals],
+    ["codex-cli", undefined, undefined, "default", undefined, undefined]);
+  assert.equal(codex.permissions?.requestCompaction, "allow");
 });
 
 test("the New chat screen's own row is the main session as the User set it; a chat has one, and no other member gets its role", async () => {
@@ -5876,6 +6315,26 @@ test("the chat's view switches only in a chat with a main session", async () => 
   const old = testService({ conversation: oldChat });
   await assert.rejects(() => old.service.setChatView({ conversationId: oldChat.id, view: "sessions" }), /one view only/);
   assert.equal(old.storage.current.metadata.chatView, undefined);
+});
+
+test("switched to the sessions view, members with rights from the classic view run in their CLI's own mode from then on, here and when the phone switched it", async () => {
+  const classicRights = { ...defaultChatAgentPermissions(), workspaceWrite: true, webAccess: true };
+  const main = { ...chatParticipant("claude-code"), id: "main-participant", handle: "main", roleConfigId: MAIN_SESSION_ROLE_ID, agentMode: "auto" as const, permissions: classicRights };
+  const helper = { ...chatParticipant("codex-cli"), id: "helper", handle: "helper", agentMode: "default" as const, permissions: { ...classicRights, workspaceWrite: false } };
+  const mainChat = chatConversation([main, helper], { mainSessionParticipantId: main.id, chatView: "classic" });
+  const { service, storage } = testService({ conversation: mainChat });
+  await service.setChatView({ conversationId: mainChat.id, view: "sessions" });
+  const modes = () => (storage.current.metadata.participants as ChatParticipant[]).map((member) =>
+    [member.handle, member.agentMode, selectedChatAccessOption(member.kind, member.agentMode, member.permissions)?.id, normalizeChatAgentPermissions(member.permissions).webAccess]);
+  assert.deepEqual(modes(), [["main", "auto", "auto", true], ["helper", "default", "read-only", true]], "the CLI mode each ran in, its other rights kept");
+  await service.setChatView({ conversationId: mainChat.id, view: "classic" });
+  assert.deepEqual(modes(), [["main", "auto", "auto", true], ["helper", "default", "read-only", true]], "for good: back in the classic view they stay in it");
+
+  // Switched on the phone: the computer moves them when the switch reaches it.
+  const phoneChat = chatConversation([main, helper], { mainSessionParticipantId: main.id, chatView: "sessions" });
+  const phone = testService({ conversation: phoneChat });
+  (phone.service as any).convertMembersForSessionsView(phoneChat.id);
+  await waitFor(() => (phone.storage.current.metadata.participants as ChatParticipant[]).every((member) => normalizeChatAgentPermissions(member.permissions).cliApprovals === true));
 });
 
 test("static chat instructions include structured participant request and reply guidance", () => {
@@ -15308,7 +15767,9 @@ function testService(options: {
     providers?: ProviderSettings[];
     assistantProviderKind?: ChatProviderKind;
     lastSuccessfulChatProviderKind?: ChatProviderKind;
-    defaultChatView?: AppSettings["defaultChatView"];
+    newChatDefaults?: AppSettings["newChatDefaults"];
+    /** A field a settings file from before may still hold (ignored). */
+    legacyDefaultChatView?: string;
   };
   machines?: Array<{ id: string; name: string; awsInstanceId?: string; deviceId?: string; lastHello?: { providers: Array<{ kind: string; installed: boolean }> } }>;
   machineInstalls?: Array<{ machineId: string; projects?: Record<string, string>; target?: { hostKeyAlias?: string } }>;
@@ -15399,7 +15860,8 @@ function testService(options: {
     cliProviderHosts: [],
     assistantProviderKind,
     lastSuccessfulChatProviderKind: options.settings?.lastSuccessfulChatProviderKind,
-    ...(options.settings?.defaultChatView ? { defaultChatView: options.settings.defaultChatView } : {})
+    ...(options.settings?.newChatDefaults ? { newChatDefaults: options.settings.newChatDefaults } : {}),
+    ...(options.settings?.legacyDefaultChatView ? { defaultChatView: options.settings.legacyDefaultChatView } : {})
   });
   const roleIdFromLabel = (label: string): string =>
     `custom-${label.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 40) || "role"}-test`;

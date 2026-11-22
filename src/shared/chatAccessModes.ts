@@ -14,7 +14,9 @@ import type { ChatAgentMode, ChatAgentPermissions, ChatProviderKind } from "./ty
  *   cycle): names and descriptions as the Claude desktop app's Code sessions
  *   list them.
  * - Codex 0.155.1 (its `/permissions` picker): Ask for approval, Approve for
- *   me (auto-review), Full Access, with the picker's descriptions. Read Only
+ *   me (auto-review), Full Access, with the picker's descriptions; rechecked
+ *   in Codex 0.171.0's own strings (2026-11-22), whose Approve for me line
+ *   lost its full stop. Read Only
  *   is still one of its presets but not in the picker: it shows only while a
  *   member is in it. Plan mode is Codex's collaboration mode (`/plan`,
  *   Shift+Tab), on top of any of these, not one of them.
@@ -76,7 +78,7 @@ const CODEX_ACCESS: ChatAccessModeSet = {
       agentMode: "default",
       workspaceWrite: true
     },
-    { id: "auto-review", label: "Approve for me", detail: "Only ask for actions detected as potentially unsafe.", agentMode: "auto" },
+    { id: "auto-review", label: "Approve for me", detail: "Only ask for actions detected as potentially unsafe", agentMode: "auto" },
     {
       id: "full-access",
       label: "Full Access",
@@ -134,6 +136,20 @@ export function codexModesUnavailableReason(
   if (member.kind !== "codex-cli" || !member.homeMachineId) return undefined;
   if (machine?.lastHello?.cliModesSupported === true) return undefined;
   return `${machine?.name ?? "Its machine"} runs an older program: Settings → Machines → Upgrade runtime.`;
+}
+
+/** Whether a member's new permission mode reaches it while its turn runs
+ *  where it runs: on this computer, or on a machine whose program sets it in
+ *  the member's live process (its last hello's `liveModeChangeSupported`).
+ *  A member on a machine whose program is from before (or one not heard
+ *  from, or a Cloud run member whose machine is not known here) would take
+ *  it only at its next turn, in a new process: its menu waits for the turn. */
+export function liveModeChangeReaches(
+  member: { homeMachineId?: string; cloudRun?: unknown },
+  machine: { lastHello?: { liveModeChangeSupported?: boolean } } | undefined
+): boolean {
+  if (!member.homeMachineId && !member.cloudRun) return true;
+  return machine?.lastHello?.liveModeChangeSupported === true;
 }
 
 /** Whether a machine's program runs the CLIs' own modes as the menus set
@@ -345,4 +361,42 @@ export function applyChatAccessOptionById(
     return { agentMode: applied.agentMode, permissions: rest };
   }
   return withCodexPlanMode(applied.agentMode, applied.permissions, plan === true || legacyCodexPlan);
+}
+
+/**
+ * A member's settings in its CLI's own mode (the User, 2026-11-22: "нахера
+ * там вообще этот кастом?" — the sessions view has only the CLIs' own modes):
+ * unchanged when it is in one; else the mode it runs in now (its mode, and
+ * for the ordinary mode its file-edit right: Claude Code's Manual or Accept
+ * edits, Codex's Ask for approval or Read Only, Antigravity's Default or
+ * Accept-edits mode), every other right kept as it was. Without its own mode
+ * Codex runs a stored Full Access as Approve for me and a stored Plan as Read
+ * Only with Plan mode off (CliAgentRunner.codexRunAccess): those are the
+ * modes it gets, never Full Access or Plan mode. Never wider: what it was not
+ * granted its CLI now asks about instead of refusing it silently.
+ */
+export function inCliOwnMode(
+  kind: ChatProviderKind,
+  agentMode: ChatAgentMode | undefined,
+  permissions: ChatAgentPermissions | undefined
+): { agentMode: ChatAgentMode; permissions: ChatAgentPermissions } {
+  const normalized = normalizeChatAgentPermissions(permissions);
+  const mode = chatAgentModeForKind(kind, agentMode);
+  if (normalized.cliApprovals) return { agentMode: mode, permissions: normalized };
+  if (kind === "codex-cli" && mode === "plan") return applyChatAccessOptionById(kind, "read-only", normalized, false);
+  const ran = kind === "codex-cli" && mode === "full-access" ? "auto" : mode;
+  const option = selectedChatAccessOption(kind, ran, { ...normalized, cliApprovals: true });
+  return applyChatAccessOptionById(kind, option?.id, normalized);
+}
+
+/** A chat's members in their CLI's own mode (inCliOwnMode), for a chat shown
+ *  in the sessions view: undefined when every member already is in one. */
+export function membersInCliOwnMode<T extends { kind: ChatProviderKind; agentMode?: ChatAgentMode; permissions?: ChatAgentPermissions }>(members: readonly T[]): T[] | undefined {
+  let changed = false;
+  const next = members.map((member) => {
+    if (normalizeChatAgentPermissions(member.permissions).cliApprovals) return member;
+    changed = true;
+    return { ...member, ...inCliOwnMode(member.kind, member.agentMode, member.permissions) };
+  });
+  return changed ? next : undefined;
 }

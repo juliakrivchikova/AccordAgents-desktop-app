@@ -79,16 +79,17 @@ const SETTINGS: AppSettings = {
   cliProviderHosts: [],
 };
 
-// The classic view's New chat: the members picker, as before the sessions view.
-const CLASSIC: AppSettings = { ...SETTINGS, defaultChatView: "classic" };
+// A settings file from before may still name the classic view for new
+// chats: it is ignored (the User, 2026-11-22: every new chat opens in the
+// sessions view).
+const LEGACY_CLASSIC = { ...SETTINGS, defaultChatView: "classic" } as unknown as AppSettings;
 
 test("multiple ready providers silently use Codex without rendering a chooser", () => {
   installWindowBridge();
-  const renderer = create(<NewChatScreen {...baseProps(readyAgents(), { settings: CLASSIC })} />);
+  const renderer = create(<NewChatScreen {...baseProps(readyAgents(), { settings: SETTINGS })} />);
 
   assert.doesNotMatch(textOf(renderer.root), /Choose the Assistant provider/);
   assert.equal(renderer.root.findAllByProps({ "data-testid": "new-chat-provider-choice" }).length, 0);
-  assert.match(textOf(renderer.root), /1 member/);
   assert.equal(renderer.root.findByProps({ "data-testid": "new-chat-prompt" }).props.value, "Draft");
   renderer.unmount();
 });
@@ -429,13 +430,39 @@ test("the chip's picker chooses this chat's provider, model and effort, with acc
   renderer.unmount();
 });
 
-test("a new chat that opens in the classic view keeps its members picker, and has no model chip", async () => {
+test("New chat's controls start from Settings → General → New chats; another provider on the chip starts from its own", async () => {
   installModelBridge();
-  const renderer = create(<NewChatScreen {...baseProps(readyAgents(), { settings: { ...CLASSIC, chatParticipantConfigs: [savedMember()] } })} />);
+  installWindowBridge({
+    listProviderModels: async (kind: string) => CATALOGS[kind],
+    listMachines: async () => ({ machines: [{ id: "m-1", name: "Studio" }], status: [] })
+  });
+  const settings: AppSettings = { ...SETTINGS, assistantProviderKind: "codex-cli",
+    newChatDefaults: { kind: "codex-cli", model: "gpt-5.5-mini", reasoningEffort: "low", access: "auto-review", homeMachineId: "m-1", compactWithoutAsking: true } };
+  const renderer = create(<NewChatScreen {...baseProps(readyAgents(), { settings })} />);
   await settle();
-  assert.match(textOf(renderer.root), /1 member/);
-  assert.equal(renderer.root.findAll(hasClass("new-chat-participant-trigger")).length, 1);
-  assert.equal(renderer.root.findAllByProps({ "data-testid": "new-chat-controls-model" }).length, 0);
+  assert.equal(textOf(control(renderer.root, "model")), "GPT-5.5 mini");
+  assert.equal(textOf(control(renderer.root, "effort")), "Low");
+  assert.equal(textOf(control(renderer.root, "mode")), "Approve for me", "Codex's own name for the mode");
+  assert.equal(textOf(control(renderer.root, "runs-on")), "Studio", "the machine Settings names");
+  renderer.unmount();
+
+  // The chip chose Claude Code for this chat: its own model and mode; where
+  // it runs stays as Settings says.
+  const claude = create(<NewChatScreen {...baseProps(readyAgents(), { settings, mainSessionProvider: { kind: "claude-code" } })} />);
+  await settle();
+  assert.equal(textOf(control(claude.root, "model")), "Opus 5.5");
+  assert.equal(textOf(control(claude.root, "mode")), "Manual", "Claude Code's built-in mode");
+  assert.equal(textOf(control(claude.root, "runs-on")), "Studio");
+  claude.unmount();
+});
+
+test("a classic view stored for new chats from before no longer brings back the members picker: New chat has its controls", async () => {
+  installModelBridge();
+  const renderer = create(<NewChatScreen {...baseProps(readyAgents(), { settings: { ...LEGACY_CLASSIC, chatParticipantConfigs: [savedMember()] } })} />);
+  await settle();
+  assert.doesNotMatch(textOf(renderer.root), /1 member/);
+  assert.equal(renderer.root.findAll(hasClass("new-chat-participant-trigger")).length, 0);
+  assert.equal(renderer.root.findAllByProps({ "data-testid": "new-chat-controls-model" }).length, 1);
   renderer.unmount();
 });
 
@@ -550,25 +577,6 @@ test("a new chat's main session in the sessions view starts in its CLI's own def
   assert.equal(textOf(control(renderer.root, "model")), "GPT-5.5", "the Claude model is never shown or sent for Codex");
   assert.equal(state.overrides["__new-chat-main-session__"], undefined);
   act(() => renderer.unmount());
-});
-
-test("the classic New chat clears the main session's settings, access included, when its CLI changes, and keeps them when you leave", async () => {
-  installModelBridge();
-  let agents = readyAgents();
-  const { state, Harness } = trackedHarness(() => ({ ...CLASSIC, assistantProviderKind: "claude-code" }), () => agents);
-  state.overrides = { "__new-chat-main-session__": { agentMode: "plan", permissions: { ...defaultChatAgentPermissions(), workspaceWrite: true } } };
-  const renderer = create(<Harness />);
-  await settle();
-  assert.ok(state.overrides["__new-chat-main-session__"], "kept while its CLI is the same");
-  // Claude Code signs out: the main session moves to a ready CLI.
-  agents = [readyAgent("gemini-cli"), { ...readyAgent("claude-code"), authentication: "required" }, readyAgent("codex-cli")];
-  act(() => renderer.update(<Harness />));
-  await settle();
-  assert.equal(state.overrides["__new-chat-main-session__"], undefined, "as before the sessions view: its settings were for the other CLI");
-  state.overrides = { "__new-chat-main-session__": { agentMode: "plan" } };
-  act(() => renderer.update(<Harness />));
-  act(() => renderer.unmount());
-  assert.ok(state.overrides["__new-chat-main-session__"], "the classic New chat keeps its settings when you leave");
 });
 
 test("a provider chosen on the chip that stops being ready is said on the screen, never taken over silently", async () => {

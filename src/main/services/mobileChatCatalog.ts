@@ -1,4 +1,4 @@
-import type { ChatMessage, ChatParticipant, ChatViewMode, Conversation, ConversationSummary } from "../../shared/types";
+import type { ChatMessage, ChatParticipant, Conversation, ConversationSummary } from "../../shared/types";
 import { chatViewFor, mainSessionParticipantId } from "../../shared/mainSession";
 import { chatMessageHiddenFromTimeline } from "../../shared/chatParticipantRequestThreads";
 import { turnFinishedNoteOf } from "../../shared/turnFinishedNoteSource";
@@ -47,9 +47,6 @@ export interface MobileChatListOptions {
    *  can be all posts and replies that came after a turn started: without
    *  this the turn looked over to the phone while it was still going. */
   pendingMessagesFor?: (conversationId: string) => Promise<ChatMessage[] | undefined>;
-  /** The view a chat with a main session opens in when it has none of its
-   *  own (the computer's Settings → General); the shared default otherwise. */
-  defaultChatView?: ChatViewMode;
 }
 
 /** The chats the phone lists: the newest ones, and every pinned one however
@@ -110,7 +107,7 @@ export async function buildMobileChatList(store: MobileCatalogStore, options: Mo
       ...((pendingCards ? pendingCards.some((card) => card.kind === "choice") : summary.waitingChoice === true) ? { waitingChoice: true } : {}),
       ...(activity.length ? { activity } : {}),
       ...(mainId && conversation
-        ? { mainSessionParticipantId: mainId, chatView: chatViewFor(conversation.metadata, options.defaultChatView), canSwitchView: true as const }
+        ? { mainSessionParticipantId: mainId, chatView: chatViewFor(conversation.metadata), canSwitchView: true as const }
         : {}),
       members: members.map((participant) => ({
         id: participant.id,

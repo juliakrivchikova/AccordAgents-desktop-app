@@ -613,8 +613,6 @@ test("the phone's chat list says which chats have a main session and the view ea
     assert.deepEqual([row?.mainSessionParticipantId, row?.chatView, row?.canSwitchView], [undefined, undefined, undefined],
       `${id}: one view only, and nothing travels for it`);
   }
-  const fallback = new Map((await buildMobileChatList(store, { ...options, defaultChatView: "classic" })).map((row) => [row.id, row]));
-  assert.equal(fallback.get("sessions")?.chatView, "classic", "a chat without a view of its own opens in the default");
 });
 
 test("a reply's step rows travel to the phone only for a chat in the sessions view; a classic chat's reply carries none", () => {

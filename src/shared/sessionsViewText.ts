@@ -13,7 +13,7 @@
 
 import { chatViewFor, mainSessionParticipantId, sessionsFormerMembers } from "./mainSession";
 import { sessionsMemberTitle, sessionsMentionPieces, titleTaskByMember } from "./mainSessionView";
-import type { ChatMessage, ChatParticipant, ChatViewMode, ConversationMetadata } from "./types";
+import type { ChatMessage, ChatParticipant, ConversationMetadata } from "./types";
 
 /** How the sessions view names a chat's members. */
 export interface SessionsViewNames {
@@ -54,12 +54,11 @@ type ChatLike = {
  *  shown in the classic view. */
 export function sessionsViewNamesOf(
   chat: ChatLike | undefined,
-  fallbackView?: ChatViewMode,
   /** A member's task title read elsewhere (its task message is not among
    *  the loaded ones), by its id. */
   knownTitles?: ReadonlyMap<string, string>
 ): SessionsViewNames | undefined {
-  if (!chat || chatViewFor(chat.metadata, fallbackView) !== "sessions") return undefined;
+  if (!chat || chatViewFor(chat.metadata) !== "sessions") return undefined;
   const mainId = mainSessionParticipantId(chat.metadata);
   if (!mainId) return undefined;
   const participants = (Array.isArray(chat.metadata?.participants) ? chat.metadata.participants : [])

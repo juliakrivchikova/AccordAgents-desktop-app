@@ -51,18 +51,42 @@ test("an install from before gets the main session's role, and its rights to ask
   });
 });
 
-test("the view a new chat opens in is one of the two views, unset meaning sessions", async () => {
+test("Settings → General → New chats: compaction without asking by default, the CLI's own model, effort and mode, kept across launches", async () => {
   await withSettings(async (make, file) => {
-    assert.equal((await make().getPublicSettings()).defaultChatView, undefined, "unset: new chats open in the sessions view");
-    const saved = await make().setDefaultChatView("classic");
-    assert.equal(saved.defaultChatView, "classic");
-    assert.equal(JSON.parse(await readFile(file, "utf8")).defaultChatView, "classic");
-    assert.equal((await make().getPublicSettings()).defaultChatView, "classic", "kept across launches");
-    await assert.rejects(make().setDefaultChatView("grid" as never), /Unknown chat view/);
-    assert.equal((await make().getPublicSettings()).defaultChatView, "classic");
+    assert.deepEqual((await make().getPublicSettings()).newChatDefaults, { compactWithoutAsking: true }, "unset: the CLI's own, compaction without asking");
 
-    await writeFile(file, JSON.stringify({ ...JSON.parse(await readFile(file, "utf8")), defaultChatView: "tiles" }));
-    assert.equal((await make().getPublicSettings()).defaultChatView, undefined, "anything else read back is the default");
+    await make().setAssistantProviderKind("claude-code");
+    const chosen = await make().setNewChatDefaults({ kind: "claude-code", model: "claude-opus-5-5", reasoningEffort: "high", access: "auto" });
+    assert.deepEqual(chosen.newChatDefaults, { kind: "claude-code", model: "claude-opus-5-5", reasoningEffort: "high", access: "auto", compactWithoutAsking: true });
+    const off = await make().setNewChatDefaults({ compactWithoutAsking: false, homeMachineId: "machine-1" });
+    assert.deepEqual(off.newChatDefaults, { kind: "claude-code", model: "claude-opus-5-5", reasoningEffort: "high", access: "auto", homeMachineId: "machine-1", compactWithoutAsking: false });
+    assert.deepEqual((await make().getPublicSettings()).newChatDefaults, off.newChatDefaults, "kept across launches");
+
+    // Back to the CLI's own model; this computer again.
+    const reset = await make().setNewChatDefaults({ kind: "claude-code", model: null, homeMachineId: null });
+    assert.deepEqual(reset.newChatDefaults, { kind: "claude-code", reasoningEffort: "high", access: "auto", compactWithoutAsking: false });
+
+    // Another provider: its model, effort and mode go back to its own; where
+    // it runs and compaction stay.
+    await make().setNewChatDefaults({ homeMachineId: "machine-2" });
+    const codex = await make().setAssistantProviderKind("codex-cli");
+    assert.equal(codex.assistantProviderKind, "codex-cli");
+    assert.deepEqual(codex.newChatDefaults, { homeMachineId: "machine-2", compactWithoutAsking: false });
+
+    // A mode the CLI does not have, an unknown provider: refused or dropped.
+    const wrongMode = await make().setNewChatDefaults({ kind: "codex-cli", access: "acceptEdits" });
+    assert.deepEqual(wrongMode.newChatDefaults, { homeMachineId: "machine-2", compactWithoutAsking: false }, "Claude Code's mode is not Codex's");
+    await assert.rejects(make().setNewChatDefaults({ kind: "grid" as never, model: "x" }), /Unknown provider/);
+
+    // Whatever a file holds is read as the CLI's own; a view from before is dropped.
+    await writeFile(file, JSON.stringify({
+      ...JSON.parse(await readFile(file, "utf8")),
+      defaultChatView: "classic",
+      newChatDefaults: { kind: "codex-cli", model: 42, reasoningEffort: "loud", access: "full-access", compactWithoutAsking: "no" }
+    }));
+    const reread = await make().getPublicSettings();
+    assert.deepEqual(reread.newChatDefaults, { kind: "codex-cli", access: "full-access", compactWithoutAsking: true });
+    assert.equal((reread as unknown as { defaultChatView?: unknown }).defaultChatView, undefined, "every new chat opens in the sessions view");
   });
 });
 

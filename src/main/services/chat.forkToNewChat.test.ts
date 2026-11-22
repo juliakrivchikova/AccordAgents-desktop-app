@@ -6,6 +6,7 @@ import test from "node:test";
 import { ChatService } from "./chat";
 import { StorageService } from "./storage";
 import { normalizeChatAgentPermissions } from "../../shared/agentPermissions";
+import { selectedChatAccessOption } from "../../shared/chatAccessModes";
 import { DEFAULT_CHAT_PROMPT_CONTEXT } from "../../shared/chatPromptContext";
 import { CHAT_PARTICIPANT_REQUEST_MAX_DEPTH_DEFAULT, CHAT_PARTICIPANT_REQUEST_PROMPT_MAX_CHARS_DEFAULT } from "../../shared/chatParticipantRequests";
 import { CHAT_AUTO_WATCH_WAKE_LIMIT_DEFAULT } from "../../shared/chatAutoWatch";
@@ -140,6 +141,8 @@ function testService(options: {
   run?: (participant: ParticipantConfig, prompt: string, options: any) => Promise<any>;
   /** The readiness check itself fails (it could not run). */
   readinessFails?: boolean;
+  /** Settings → General → New chats. */
+  newChatDefaults?: AppSettings["newChatDefaults"];
 }) {
   const tempRoot = path.join(tmpdir(), "accordagents-fork-to-new-chat-test");
   const store = new Map(options.conversations.map((conversation) => [conversation.id, clone(conversation)]));
@@ -190,7 +193,9 @@ function testService(options: {
     chatParticipantConfigs: [],
     chatParticipantSeedState: {},
     cliProviderHosts: [],
-    defaultChatView: "sessions"
+    // A view Settings once named for new chats: never read any more.
+    defaultChatView: "classic",
+    ...(options.newChatDefaults ? { newChatDefaults: options.newChatDefaults } : {})
   } as unknown as AppSettings);
   const settings = {
     async getPublicSettings() { return publicSettings(); },
@@ -350,7 +355,7 @@ test("a member of a chat from before becomes the main session of a new sessions-
   const chat = created.conversation;
   assert.equal(chat.title, "Old chat (fork)");
   assert.equal(chat.repoPath, "/projects/app", "the member's project: its CLI session belongs to that folder");
-  assert.equal(chat.metadata.chatView, "sessions", "the view Settings names for a new chat");
+  assert.equal(chat.metadata.chatView, "sessions", "every new chat opens in the sessions view, a view stored from before notwithstanding");
   const [main, ...others] = participantsOf(chat);
   assert.equal(others.length, 0, "the main session alone");
   assert.equal(chat.metadata.mainSessionParticipantId, main!.id);
@@ -1068,6 +1073,56 @@ test("the computer's offer says why each of its CLIs cannot run a forked member,
   const unjudged = forkToNewChatLocalProviders([], providers, []);
   assert.equal(forkLocalProviderUnavailable({ kind: "claude-code", hostId: "gone" }, unjudged), localProviderUnavailableReason({ kind: "claude-code", hostId: "gone" }, [], providers, []));
   assert.equal(offer!.fork!.basePermissions.requestParticipants, "allow", "the main session's role's say over members");
+});
+
+test("a fork keeps the member's own compaction right on the computer and the phone, never Settings' default for new chats", async () => {
+  const cases = [
+    ["allowed to compact, Settings asking", "allow", false],
+    ["asking, Settings compacting without asking", "ask", true],
+    ["never compacting", "deny", true]
+  ] as const;
+  for (const [label, right, compactWithoutAsking] of cases) {
+    const member: ChatParticipant = { ...REVIEWER, permissions: { ...REVIEWER.permissions!, requestCompaction: right } };
+    const source = oldChat([ASSISTANT, member]);
+    const { service } = testService({ conversations: [source], agents: READY_AGENTS, newChatDefaults: { compactWithoutAsking, model: "opus", kind: "claude-code", access: "plan" } });
+    const created = await service.createConversation({ participants: [], forkOf: { conversationId: source.id, participantId: member.id } });
+    const [desktopMain] = participantsOf(created.conversation);
+    assert.equal(normalizeChatAgentPermissions(desktopMain!.permissions).requestCompaction, right, `${label}: the member's own on the computer`);
+    assert.deepEqual([desktopMain!.model, desktopMain!.agentMode], ["sonnet", "default"], `${label}: the member's model and mode, not Settings'`);
+    const offer = await service.newChatOptions([]);
+    assert.equal(offer!.mainSession!.permissions!.requestCompaction, compactWithoutAsking ? "allow" : "ask", `${label}: a new chat's main session follows Settings`);
+    const phoneMain = forkedMainSessionFor({
+      mainSession: offer!.mainSession!, basePermissions: offer!.fork!.basePermissions, member: memberAsItRunsNow(member, undefined),
+      source: { id: source.id, title: source.title }, seen: lastMemberTurnEnd(source.messages, member.id), id: desktopMain!.id
+    });
+    assert.deepEqual(clone(phoneMain), clone(desktopMain), `${label}: the phone makes the same main session`);
+  }
+});
+
+test("a member with rights set in the classic view is forked into its CLI's own mode, the one it was running in, never Custom, on the computer and the phone", async () => {
+  const classic = (patch: Partial<ChatAgentPermissions>) => permissions({ webAccess: true, requestCompaction: "allow", ...patch, cliApprovals: undefined });
+  const cases: Array<[string, Partial<ChatParticipant>, string, string]> = [
+    ["Claude Code running auto", { agentMode: "auto", permissions: classic({ workspaceWrite: true }) }, "auto", "auto"],
+    ["Claude Code editing in its default mode", { agentMode: "default", permissions: classic({ workspaceWrite: true }) }, "default", "acceptEdits"],
+    ["Claude Code read-only", { agentMode: "default", permissions: classic({ workspaceWrite: false }) }, "default", "manual"]
+  ];
+  for (const [label, patch, mode, option] of cases) {
+    const member: ChatParticipant = { ...REVIEWER, ...patch };
+    const source = oldChat([ASSISTANT, member]);
+    const { service } = testService({ conversations: [source], agents: READY_AGENTS });
+    const created = await service.createConversation({ participants: [], forkOf: { conversationId: source.id, participantId: member.id } });
+    const [desktopMain] = participantsOf(created.conversation);
+    assert.equal(desktopMain!.agentMode, mode, `${label}: the mode it ran in`);
+    assert.equal(selectedChatAccessOption(desktopMain!.kind, desktopMain!.agentMode, desktopMain!.permissions)?.id, option, `${label}: its CLI's own mode, not Custom`);
+    const granted = normalizeChatAgentPermissions(desktopMain!.permissions);
+    assert.deepEqual([granted.cliApprovals, granted.webAccess, granted.requestCompaction], [true, true, "allow"], `${label}: its rights and compaction right kept`);
+    const offer = await service.newChatOptions([]);
+    const phoneMain = forkedMainSessionFor({
+      mainSession: offer!.mainSession!, basePermissions: offer!.fork!.basePermissions, member: memberAsItRunsNow(member, undefined),
+      source: { id: source.id, title: source.title }, seen: lastMemberTurnEnd(source.messages, member.id), id: desktopMain!.id
+    });
+    assert.deepEqual(clone(phoneMain), clone(desktopMain), `${label}: the phone makes the same main session`);
+  }
 });
 
 test("a forked main session never gets more than the member had, besides the main session's say over members", () => {

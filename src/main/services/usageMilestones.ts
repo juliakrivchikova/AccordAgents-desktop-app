@@ -1,7 +1,7 @@
 import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { deriveAgentReadiness } from "../../shared/cliReadiness";
-import type { AgentHealth, ChatMessage, ChatViewMode, Conversation } from "../../shared/types";
+import type { AgentHealth, ChatMessage, Conversation } from "../../shared/types";
 import { chatViewFor, isChatViewMode } from "../../shared/mainSession";
 import {
   USAGE_EXISTING_INSTALL,
@@ -149,17 +149,16 @@ function addedMemberFamilies(members: ReadonlyArray<UsageMember | null | undefin
 
 /** The view each active chat is shown in (StorageService
  *  .listChatViewsWithUserMessagesSince), read as the chat's own switch reads
- *  it: a chat without a main session is classic, one whose view is unset
- *  opens in the view Settings names for new chats. */
+ *  it: a chat without a main session is classic, one whose view is unset is
+ *  in the sessions view (every new chat opens there). */
 export function usageActiveChatViews(
-  chats: ReadonlyArray<{ mainSessionParticipantId?: string; chatView?: string }>,
-  defaultChatView: ChatViewMode | undefined
+  chats: ReadonlyArray<{ mainSessionParticipantId?: string; chatView?: string }>
 ): UsageChatView[] {
   return chats.map((chat) => chatViewFor({
     mainSessionParticipantId: chat.mainSessionParticipantId,
     chatView: isChatViewMode(chat.chatView) ? chat.chatView : undefined,
     participants: chat.mainSessionParticipantId ? [{ id: chat.mainSessionParticipantId }] : []
-  }, defaultChatView));
+  }));
 }
 
 /** How far before an installation's first launch a chat or message made on

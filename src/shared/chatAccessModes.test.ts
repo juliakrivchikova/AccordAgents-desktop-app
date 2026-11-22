@@ -32,6 +32,7 @@ import {
   currentChatAccessId,
   defaultChatAccessOption,
   FULL_ACCESS_CONFIRMATION,
+  inCliOwnMode,
   selectedChatAccessOption,
   startChatAccessOption,
   withClassicChatPermissions,
@@ -41,7 +42,7 @@ import { antigravityStartAccess, antigravityStartAccessFromText, claudeStartAcce
 import { forkedMainSessionPermissions, memberAsItRunsNow } from "./forkToNewChat";
 import { newChatMainSessionFor } from "./newChat";
 import { chatPermissionPromptLines, chatPermissionSummaryLine } from "./permissionPrompt";
-import type { ChatParticipant } from "./types";
+import type { ChatAgentMode, ChatAgentPermissions, ChatParticipant } from "./types";
 
 test("each CLI's modes by its own names and in its own order, described in the vendor's words, and the one it starts in", () => {
   // Claude Code 2.1.330's Shift+Tab cycle and the Claude desktop app's Code sessions.
@@ -55,7 +56,7 @@ test("each CLI's modes by its own names and in its own order, described in the v
   assert.equal(chatAccessModeSet("claude-code").title, "Permission mode");
   // Codex 0.155.1's /permissions picker; Read Only is a preset it no longer offers.
   assert.deepEqual(chatAccessOptions("codex-cli").map((option) => option.label), ["Ask for approval", "Approve for me", "Full Access"]);
-  assert.equal(chatAccessOptions("codex-cli")[1]!.detail, "Only ask for actions detected as potentially unsafe.");
+  assert.equal(chatAccessOptions("codex-cli")[1]!.detail, "Only ask for actions detected as potentially unsafe");
   assert.match(chatAccessOptions("codex-cli")[2]!.detail ?? "", /^Codex can edit files outside this workspace and access the internet without asking for approval\. Exercise caution when using\.$/);
   assert.ok(!chatAccessOptions("codex-cli").some((option) => /plan/i.test(option.label)), "Plan mode is not one of Codex's permissions");
   assert.equal(chatAccessModeSet("codex-cli").plan?.label, "Plan mode");
@@ -421,4 +422,32 @@ test("a member the main session made in Plan runs as each CLI runs a subagent th
   const codexMember = memberAsItRunsNow(member("codex-cli", "default"), codexMain);
   assert.equal(codexPlanModeOn(codexMember.kind, codexMember.agentMode, codexMember.permissions), false, "not in Plan mode");
   assert.equal(selectedChatAccessOption(codexMember.kind, codexMember.agentMode, codexMember.permissions)?.label, "Ask for approval", "the main session's preset");
+});
+
+test("a member with rights set in the classic view runs in its CLI's own mode, the one it was running in, never wider (no Custom in the sessions view)", () => {
+  const classic = (patch: Partial<ChatAgentPermissions> = {}) => ({ ...defaultChatAgentPermissions(), webAccess: true, ...patch }) as ChatAgentPermissions;
+  const cases: Array<[string, ChatParticipant["kind"], ChatAgentMode, ChatAgentPermissions, string, boolean?]> = [
+    ["Claude Code running auto", "claude-code", "auto", classic(), "auto"],
+    ["Claude Code editing", "claude-code", "default", classic({ workspaceWrite: true }), "acceptEdits"],
+    ["Claude Code read-only", "claude-code", "default", classic({ workspaceWrite: false }), "manual"],
+    ["Claude Code planning", "claude-code", "plan", classic(), "plan"],
+    ["Claude Code stored with Codex's Full Access", "claude-code", "full-access", classic(), "auto"],
+    ["Codex editing", "codex-cli", "default", classic({ workspaceWrite: true }), "workspace-write"],
+    ["Codex read-only", "codex-cli", "default", classic({ workspaceWrite: false }), "read-only"],
+    // Without its own mode Codex ran these as Approve for me and Read Only
+    // (codexRunAccess): never Full Access or Plan mode.
+    ["Codex stored with Full Access in the classic view", "codex-cli", "full-access", classic(), "auto-review"],
+    ["Codex stored in Plan in the classic view", "codex-cli", "plan", classic(), "read-only", false],
+    ["Antigravity editing", "gemini-cli", "default", classic({ workspaceWrite: true }), "accept-edits"]
+  ];
+  for (const [label, kind, mode, permissions, expected, plan] of cases) {
+    const access = inCliOwnMode(kind, mode, permissions);
+    assert.equal(selectedChatAccessOption(kind, access.agentMode, access.permissions)?.id, expected, label);
+    assert.equal(codexPlanModeOn(kind, access.agentMode, access.permissions), plan === true, `${label}: Plan mode`);
+    assert.equal(access.permissions.webAccess, true, `${label}: its other rights stay`);
+    assert.equal(access.permissions.repoRead, permissions.repoRead, `${label}: reading stays`);
+  }
+  // Already in its CLI's own mode: as it is.
+  const own = { ...defaultChatAgentPermissions(), cliApprovals: true as const, workspaceWrite: true };
+  assert.deepEqual(inCliOwnMode("claude-code", "default", own), { agentMode: "default", permissions: normalizeChatAgentPermissions(own) });
 });

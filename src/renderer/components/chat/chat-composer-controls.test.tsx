@@ -128,6 +128,71 @@ test("a Cloud run member is held back by the machine on its AWS instance; its ow
   }
 });
 
+test("while its turn runs, its permission mode changes where its CLI takes one then (Claude Code); Codex's modes and Plan mode and Antigravity's mode wait", async () => {
+  const host = window as unknown as { consensus?: unknown };
+  const previous = host.consensus;
+  resetMemberModelCatalogs();
+  host.consensus = { listProviderModels: async () => undefined, listMachines: async () => ({ machines: [], status: [] }) };
+  const claude: ChatParticipant = { ...CODEX, id: "claude-1", handle: "claude", kind: "claude-code", agentMode: "default",
+    permissions: { ...CODEX.permissions!, cliApprovals: true, codexPlanMode: undefined, workspaceWrite: false } };
+  const agy: ChatParticipant = { ...claude, id: "agy-1", handle: "agy", kind: "gemini-cli" };
+  try {
+    for (const [member, changes] of [[claude, true], [CODEX, false], [agy, false]] as const) {
+      const patches: unknown[] = [];
+      let renderer: ReturnType<typeof create> | undefined;
+      await act(async () => {
+        renderer = create(<TooltipProvider><ChatMemberComposerControls value={member} onChange={(patch) => { patches.push(patch); }} disabled /></TooltipProvider>);
+        await new Promise((resolve) => setTimeout(resolve, 0));
+      });
+      await act(async () => { renderer!.root.find(byTestId("chat-model-mode")).props.onClick(); });
+      const rows = renderer!.root.findAll(byTestId("chat-access-option"));
+      assert.equal(rows.every((row) => row.props.disabled), !changes, `${member.kind}: ${changes ? "its modes can be chosen" : "its modes wait"}`);
+      assert.equal(renderer!.root.findAll(byTestId("chat-access-busy")).length, changes ? 0 : 1);
+      if (member.kind === "codex-cli") {
+        assert.equal(renderer!.root.find(byTestId("chat-model-plan")).props.disabled, true, "Codex's Plan mode waits (Shift+Tab does nothing while Codex works)");
+      }
+      if (changes) {
+        const wanted = "acceptEdits";
+        const target = rows.find((row) => row.props["data-value"] === wanted && typeof row.props.onClick === "function")!;
+        await act(async () => { target.props.onClick(); });
+        assert.equal(patches.length, 1, `${member.kind}: the choice is saved at once`);
+      }
+      act(() => renderer!.unmount());
+    }
+  } finally {
+    host.consensus = previous;
+  }
+});
+
+test("while its turn runs, a Claude Code member on a machine changes its mode only where the machine's program sets it in the live process; an older program waits", async () => {
+  const host = window as unknown as { consensus?: unknown };
+  const previous = host.consensus;
+  const claude: ChatParticipant = { ...CODEX, id: "claude-box", handle: "claude", kind: "claude-code", agentMode: "default", homeMachineId: "m-box",
+    permissions: { ...CODEX.permissions!, cliApprovals: true, codexPlanMode: undefined, workspaceWrite: false } };
+  try {
+    for (const live of [false, true]) {
+      resetMemberModelCatalogs();
+      host.consensus = {
+        listProviderModels: async () => undefined,
+        listMachines: async () => ({ machines: [{ id: "m-box", name: "Box" }], status: [{ machineId: "m-box", name: "Box", connected: true,
+          lastHello: live ? { cliModesSupported: true, liveModeChangeSupported: true } : { cliModesSupported: true } }] })
+      };
+      let renderer: ReturnType<typeof create> | undefined;
+      await act(async () => {
+        renderer = create(<TooltipProvider><ChatMemberComposerControls value={claude} onChange={noop} disabled /></TooltipProvider>);
+        await new Promise((resolve) => setTimeout(resolve, 0));
+      });
+      await act(async () => { renderer!.root.find(byTestId("chat-model-mode")).props.onClick(); });
+      const rows = renderer!.root.findAll(byTestId("chat-access-option"));
+      assert.equal(rows.every((row) => row.props.disabled), !live, live ? "its program sets it now" : "an older program: the mode waits for the turn");
+      assert.equal(renderer!.root.findAll(byTestId("chat-access-busy")).length, live ? 0 : 1);
+      act(() => renderer!.unmount());
+    }
+  } finally {
+    host.consensus = previous;
+  }
+});
+
 test("while its turn runs, a menu says why its choices wait", async () => {
   const host = window as unknown as { consensus?: unknown };
   const previous = host.consensus;
@@ -136,7 +201,7 @@ test("while its turn runs, a menu says why its choices wait", async () => {
   let renderer: ReturnType<typeof create> | undefined;
   try {
     await act(async () => {
-      renderer = create(<TooltipProvider><ChatMemberComposerControls value={CODEX} onChange={noop} disabled /></TooltipProvider>);
+      renderer = create(<TooltipProvider><ChatMemberComposerControls value={{ ...CODEX, kind: "gemini-cli" }} onChange={noop} disabled /></TooltipProvider>);
       await new Promise((resolve) => setTimeout(resolve, 0));
     });
     await act(async () => { renderer!.root.find(byTestId("chat-model-mode")).props.onClick(); });

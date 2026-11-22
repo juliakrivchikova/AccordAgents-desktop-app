@@ -496,6 +496,38 @@ test("any device asks a turn of a member elsewhere, naming the bubble it will ta
   assert.equal((late.body.results[0] as { claim?: string }).claim, "stopped");
 });
 
+test("in the sessions view no device starts a turn for a request inferred from a member's reply; the classic view and real requests as before", async (t) => {
+  const h = await hub(t);
+  const main = { id: "p-main", handle: "main", label: "Main", roleConfigId: "main-session" };
+  const carrier = (messageId: string, source: "inferred" | "mcp"): ChatMessage => ({
+    ...reply(messageId, "p-desk", "done", "@box please check"),
+    metadata: { participantRequest: { id: `b-${messageId}`, requesterParticipantId: "p-desk", requesterHandle: "desk", source, resumeRequester: true, status: "running",
+      depth: 1, createdAt: "t", updatedAt: "t", items: [{ targetParticipantId: "p-box", targetHandle: "box", prompt: "please check", status: "running", createdAt: "t", updatedAt: "t" }] } }
+  } as ChatMessage);
+  const chatIn = async (chatView?: string) => {
+    const chat = id("chat");
+    await h.write(h.owner, { opId: id("op"), kind: "conversation.create", conversationId: chat,
+      conversation: { title: "Plans", kind: "chat", createdAt: new Date().toISOString(),
+        metadata: { participants: [...members, main], mainSessionParticipantId: "p-main", ...(chatView ? { chatView } : {}) } } });
+    await h.write(h.owner, { opId: id("op"), kind: "message.create", conversationId: chat, message: carrier("inferred-1", "inferred") });
+    await h.write(h.owner, { opId: id("op"), kind: "message.create", conversationId: chat, message: carrier("asked-1", "mcp") });
+    return chat;
+  };
+  const turn = (chat: string, kind: "turn.request" | "turn.claim", messageId: string) =>
+    ({ opId: id("op"), kind, conversationId: chat, runId: `turn-${id("x")}`, messageId, participantId: "p-box" }) as HubOp;
+  for (const view of [undefined, "sessions"]) {
+    const chat = await chatIn(view);
+    const asked = await h.write(h.owner, turn(chat, "turn.request", "inferred-1"));
+    assert.equal(asked.body.results[0].status, "rejected", `${view ?? "default"}: asked for`);
+    const taken = await h.write(h.machine, turn(chat, "turn.claim", "inferred-1"));
+    assert.equal(taken.body.results[0].status, "rejected", `${view ?? "default"}: taken by its machine (an older program)`);
+    const real = await h.write(h.owner, turn(chat, "turn.request", "asked-1"));
+    assert.equal(real.body.results[0].status, "accepted", "a request made with the app tool runs");
+  }
+  const classic = await chatIn("classic");
+  assert.equal((await h.write(h.owner, turn(classic, "turn.request", "inferred-1"))).body.results[0].status, "accepted", "the classic view as before");
+});
+
 test("the computer moves its chats to the server once: its order wins, and messages only the server had keep their place", async (t) => {
   const h = await hub(t);
   const chat = id("chat");

@@ -36,6 +36,23 @@ verbatim there). Modelled on T3 Code (`~/reference/t3code`,
   Approvals of members' commands still reach the User on the main timeline.
 - **Only the main session can start an Accord** (`app_chat_start_accord`); a
   member that needs one asks the main session. The User still can, as today.
+- **In the sessions view an @handle in a member's reply starts nobody**
+  (the User, 2026-11-22), as a mention in text wakes nobody in Claude Code:
+  no turn, no task row, whoever wrote it (the main session included) and
+  wherever it runs (`ChatService.createImplicitParticipantRequestApproval`,
+  the same code on this computer and on a cloud machine). Its posts
+  (`app_chat_send_message`) are the same; a main session's "@x /accord"
+  starts no Accord and no warning. Members are asked with
+  `app_chat_request_participants` or `app_chat_delegate_task` (a member's
+  answer to such a task goes back to the main session), an Accord with
+  `app_chat_start_accord`; what the User writes to a member (its session's
+  composer) still reaches it. The member prompt says so instead of "an
+  @handle is a request". The User's server holds to it too: it refuses a new
+  turn for a request inferred from a reply in a sessions-view chat (a cloud
+  machine on an older program), and gives a facilitator leave to ask only
+  from the main session's `app_chat_start_accord` launch, not from an
+  "@x /accord" in its reply. The classic view of the same chat keeps reading
+  such a mention as a request, as before.
 - **The Chat Assistant and the Workflow Manager role are not in new chats.**
   Chats made before stay exactly as they are (with their Assistant).
 
@@ -66,12 +83,17 @@ full).
   read automatically; the reader saw only the posts, and reads the reply
   with `app_chat_read_messages`.
 
-## The two views (a view only)
+## The two views (a view only, but for one rule)
 
 Switched per chat by the User any number of times (the chat header), shared
-through her server like the pin (`metadata.chatView`); Settings → General
-sets the view a new chat opens in (`defaultChatView`, default `sessions`). A
-chat without a main session is always `classic`; its switch is disabled.
+through her server like the pin (`metadata.chatView`). The chat works the
+same in both views but for one rule: in `sessions` an @handle in a member's
+reply starts nobody (see the rule above), in `classic` it asks that member
+as before. Every new chat opens
+in `sessions`, on the computer and from the phone (the User, 2026-11-22:
+Settings no longer names a view for new chats; a `defaultChatView` stored
+before is dropped). A chat without a main session is always `classic`; its
+switch is disabled.
 
 - `classic`: today's timeline: avatars, every member's reply on it.
 - `sessions` (like T3 Code / Claude desktop):
@@ -95,7 +117,17 @@ chat without a main session is always `classic`; its switch is disabled.
     your task …") never renames it, while its state follows its latest task
     (`titleTaskByMember`, `sessionsTaskTitle`, `sessionsMemberTitle`; tasks
     travel to the phone saying whether the main session gave their title,
-    `MobileTaskItem.titled`), with its
+    `MobileTaskItem.titled`). The sessions view makes no task from a
+    mention in a reply (see the rule above); one made in the classic view
+    or before that rule (an inferred request) is titled by the reply's
+    first sentence that mentions the member, its words as written (inline
+    code as its text) with no @-names and nothing they leave empty, "Agent"
+    when no words remain (`sessionsMentionSentenceTitle`, the User,
+    2026-11-22). That title is the app's, not the main session's: it names
+    the member only as a first task would. One made before such tasks were titled is read from the reply's words its
+    text quotes, which may start inside a sentence, so its title can differ
+    a little. The phone never receives such tasks (their carrier is
+    hidden). With its
     CLI, its model by its name in the CLI's list ("Opus 5.5", never the id
     "opus"; `useMemberModelSummary`, as its composer chip), its effort and a
     non-generic role in its hover card and its session's header
@@ -172,7 +204,18 @@ chat without a main session is always `classic`; its switch is disabled.
     as icons; at 1080×720 "Sonnet 5.5" with the effort and mode as icons
     in the main composer, "Sonnet 5.5 · Medium" and the mode's icon in the
     member's, and "GPT-5.6-Luna" without its glyph and three icons in a
-    Codex main composer; every control inside its row, Send beside it. Its own turn running, the controls wait (disabled). The
+    Codex main composer; every control inside its row, Send beside it. Its own turn running, the controls wait (disabled),
+    but for the permission mode where its CLI takes one while it works
+    (the User, 2026-11-22; checked in the CLIs that day): Claude Code
+    2.1.330's Shift+Tab switches the mode mid-turn and it holds for the rest
+    of that turn, which the app does with the CLI's own stream-json control
+    request `set_permission_mode` to the member's live process (a control
+    run refused a Write in default mode; switched mid-turn, the same Write
+    ran). Codex refuses it while a task runs (0.171.0's own words: "Cannot
+    change: a task is running."; 0.155.1 had "Wait for the current turn to
+    finish before changing permissions.", and its Plan mode, Shift+Tab, did
+    not change mid-turn), and Antigravity's print mode takes its mode when
+    each run starts: their menus wait (`modeChangesWhileTurnRuns`). The
     access is the CLI's own mode, run as the CLI runs it
     (`src/shared/chatAccessModes.ts`, the permissions' `cliApprovals`: what
     is not granted the CLI asks about instead of the app taking it away;
@@ -185,7 +228,19 @@ chat without a main session is always `classic`; its switch is disabled.
       `--permission-prompt-tool`, deny rules stay hard stops), Accept edits
       ("Automatically accept all file edits"), Plan ("Create a plan before
       making changes"), Auto ("Claude handles permission decisions",
-      Claude's classifier).
+      Claude's classifier). The member's process is the same in all four
+      (only `--permission-mode` differs), so its stored rules are Claude
+      Code's own rules in every mode, as if they were in her own Claude
+      settings: shell allow rules and provider-native allow rules in
+      `--allowedTools`, ask rules in `--settings permissions.ask`, deny rules
+      in `--disallowedTools`; Claude Code applies its parsing, deny > ask >
+      allow, what its Auto strips from allow rules, and its Plan mode. In
+      Plan a command a stored allow rule covers is treated as Claude Code
+      treats a settings allow rule in plan mode (2.1.330 matches a
+      `Bash(...)` rule inside the Bash tool's own check, ahead of its
+      plan-mode ask; edits stay refused in Plan whatever the rules say). The
+      app answers none of them itself. Of the app's own tools only those
+      its Auto pre-authorizes are allowed; the rest are asked by card.
     - Codex 0.155.1 (its `/permissions` picker): Ask for approval ("Codex
       can read and edit files in the current workspace, and run commands.
       Approval is required to access the internet or edit other files.";
@@ -326,7 +381,17 @@ chat without a main session is always `classic`; its switch is disabled.
     scripts) and turns queued for it before the computer first said its
     program; and Codex's Ask for approval and Read Only there take the
     machine's own `approvals_reviewer` (the app names the User from this
-    version on), which the app's setup leaves unset. Settings from the classic controls are no
+    version on), which the app's setup leaves unset. Fork to new chat, a
+    member the main session adds and a new chat's main session always run
+    in their CLI's own mode (`inCliOwnMode`: the mode they were running in,
+    their other rights kept; the User, 2026-11-22: "нахера там вообще этот
+    кастом?"). A chat switched to the sessions view moves its members with
+    rights from the classic view into the CLI mode each was running in, for
+    good (back in the classic view they stay in it); a switch made on the
+    phone is written by the computer when it reaches it
+    (`membersInCliOwnMode`, `convertMembersForSessionsView`; the User,
+    2026-11-22: what was refused silently, the CLI now asks about). Settings
+    from the classic controls are no
     mode: the mode control says "Custom", its menu says so, and a classic
     toggle (Read Files, Edit Files, Run Shell, Access Web) ends a mode
     chosen in its menu and Codex's Plan mode with it
@@ -504,7 +569,62 @@ chat without a main session is always `classic`; its switch is disabled.
 
 ## New chat
 
-A new chat opens in the view Settings → General names (`newChatViewFor`).
+A new chat opens in the sessions view (`newChatViewFor`).
+
+**Settings → General → New chats** (the User, 2026-11-22: "для нового режима
+— это просто должна быть секция в settings с дефолтными значениями
+провайдера, модели и вещей типа этой"; mockup `general-new-chats`): a section
+of the General page between Local CLI setup and General, one card. Its words
+name no main session.
+
+- **Provider**, "The CLI a new chat runs on." (`assistantProviderKind`, the
+  setting the Chat Assistant used; the provider's glyph in the select).
+- **Model**, "From <CLI>'s own model list.": the model the CLI runs by
+  default first, named (the composer's model menu's list:
+  `defaultModelOf`/`explicitModels`), then the others.
+- **Effort**: "Default" (with the effort her config sets, when it sets one)
+  and the model's efforts; a model without the chosen effort takes the CLI's
+  own.
+- **Mode**: exactly that CLI's own permission modes as the composer's mode
+  control lists them (`chatAccessModes.ts`), its description naming them
+  ("Claude Code's modes: Manual, Accept edits, Plan, Auto.", and
+  Antigravity's note); none chosen, the one her config starts the CLI in
+  where a new chat runs. Codex's Full Access asks Codex's own "Enable full
+  access?" first. Codex's Plan mode stays a New chat toggle.
+- **Runs on**: This Mac (This computer elsewhere) or one of her machines
+  (Settings → Machines' list); a machine no longer set up is this computer,
+  and so is any added provider chosen on New chat (its key is this
+  computer's: members on one run here only). Codex's Full Access is not
+  started on a machine whose program cannot run it (the mode its CLI starts
+  in there instead, on the computer and the phone alike).
+  The computer's New chat sets it as its Runs on control sets that machine
+  when chosen there (`newChatDesktopStart`): a machine on her AWS instance
+  as Cloud run on that instance (its first turn makes it ready and copies
+  the project), another machine as its own; the phone puts the main session
+  on the machine, as its Runs on does.
+- **Compact without asking**, a switch, on by default: the main session's
+  right to compact its context without a card (`requestCompaction` `allow`;
+  off: `ask`).
+
+Changing the provider takes model, effort and mode back to that CLI's own
+(`newChatDefaultsForProvider`); where it runs and compaction stay. Model,
+effort and mode apply only while a new chat runs on the CLI they were
+chosen for, on its own sign-in (`newChatMainSessionStart`); an added
+provider or another CLI chosen on New chat starts from its own. The rights
+to ask and add members are not settings: the main session's role always
+gives them. Stored as `AppSettings.newChatDefaults`
+(`src/shared/newChatDefaults.ts`, normalized on read: anything missing or
+invalid is the CLI's own); existing chats keep their own settings.
+
+New chat's controls start from these (`newChatMainSessionParticipantConfig`
+with `newChatMainSessionStart`); a choice there is that chat's only and
+never changes Settings. The computer's `createConversation` gives the main
+session the compaction right Settings names (the screen has no control for
+it). The phone's New chat offer carries the same main session
+(`ensureMainSessionParticipant` with `newChatDefaults`): its model, effort,
+mode, machine and compaction right; the phone's controls start from it
+(`newChatLeadStart`) the way the computer's start from Settings, another
+provider from its own, and a choice made there wins for that chat.
 
 - **Sessions view** (the User, 2026-11-21: "как в T3, выбираешь просто
   провайдера и модель"): no members picker, no avatars, handles or
@@ -513,7 +633,7 @@ A new chat opens in the view Settings → General names (`newChatViewFor`).
   mode, where it runs once a machine exists); the model's menu lists the
   providers first: every ready CLI and every added provider whose CLI is
   ready and which has its key (`mainSessionProviderOptions`). The default provider is Settings →
-  General's "Default provider for new chats" (`resolveMainSessionProvider`); the
+  General → New chats' Provider (`resolveMainSessionProvider`); the
   controls' choice is for that one chat and never changes the setting, and
   is forgotten when the User leaves New chat without sending. What was set
   for one provider (model, effort, access, where it runs) is dropped when
@@ -522,7 +642,8 @@ A new chat opens in the view Settings → General names (`newChatViewFor`).
   never made on another one silently. The
   chat is made with that main session alone; an @handle in the first
   message picks nobody. Folder and attach stay.
-- **Classic view**: today's New chat, with its members picker.
+- The classic New chat with its members picker is no longer reached
+  (every new chat opens in the sessions view since 2026-11-22).
 - **The phone** gets the same from the New chat offer
   (`HubNewChatOptions.mainSessionProviders`: each provider with its
   default model's name, its models, at most 24, and efforts;
@@ -588,9 +709,11 @@ chat as that chat's main session, with everything it knew
 - The new chat is made through the same path as every new chat
   (`createConversation` with `forkOf`, saved and so put on the User's server):
   titled "<chat> (fork)" until its first reply names it, in the member's
-  project, in Settings → General's view, with one member: its main session on
+  project, in the sessions view, with one member: its main session on
   the member's provider, model, effort, access (its CLI's mode and what it
-  may read, edit, run and reach, as it runs now) and place (this computer or
+  may read, edit, run and reach, and whether it compacts without asking, as
+  it runs now; never Settings → General → New chats: the User, 2026-11-22, a fork
+  of a member allowed to compact is not asked) and place (this computer or
   the same machine: a fork never crosses devices), with the main session's
   role and its say over members, marked `ChatParticipant.forkOrigin`
   (written only by the computer; her server keeps a machine from writing
@@ -838,6 +961,57 @@ Verified in the installed CLIs, the way the User sees them:
   with Plan mode on it runs Codex's Default with the main session's preset,
   Plan mode not handed down. Both checked in `chatAccessModes.test.ts`.
 
+## Claude Code's plan approval (2026-11-22)
+
+A Claude Code member in its CLI's own Plan mode that finishes its plan calls
+ExitPlanMode, which reaches the app's permission prompt tool. The User decided
+(2026-11-22) that it is answered on the CLI's own dialog, on the desktop and
+the phone alike, and that the member's mode then follows the CLI.
+
+- The card (`src/shared/claudePlanApproval.ts`) is Claude Code 2.1.330's
+  dialog, read from its binary: "Ready to code?", "Here is Claude's plan:",
+  the plan, "Claude has written up a plan and is ready to execute. Would you
+  like to proceed?", then its rows: "Yes, auto-accept edits"
+  (`yes-accept-edits-keep-context`, mode `acceptEdits`), or "Yes, and use
+  auto mode" (`yes-resume-auto-mode`, `auto`) in its place where the account
+  has auto mode; "Yes, manually approve edits" (`yes-default-keep-context`,
+  `default`); "No, keep planning" (`no`) with its field "Tell Claude what to
+  change". A plan over 200,000 characters is not shown ("(the plan is too
+  large to be shown in full, so it can only be declined)") and only "No, keep
+  planning" is offered; an empty one shows "No plan found. Please write your
+  plan to the plan file first.". The app knows auto mode is on the account
+  only once the member's live CLI reported auto mode itself; until then it
+  offers "Yes, auto-accept edits" (an open divergence,
+  docs/parity-requirements.md).
+- A Yes answers the permission prompt tool with `{ behavior: "allow",
+  updatedInput, updatedPermissions: [{ type: "setMode", mode, destination:
+  "session" }] }`, as the CLI's own dialog applies it. "No, keep planning"
+  denies with her words in the CLI's rejection ("The user doesn't want to
+  proceed with this tool use. … To tell you how to proceed, the user
+  said:" and her words; with nothing typed, its rejection that stops and
+  waits for her). An answer that is not one of the card's rows (an older
+  phone's Allow) is refused and the card asks again. No rule answers it, not
+  even one "for this chat".
+- Verified in the app with Claude Code 2.1.330 (Sonnet, an isolated
+  instance): ExitPlanMode's input carries `plan` and `planFilePath`; after
+  "Yes, auto-accept edits" the CLI said `system/status` `permissionMode:
+  acceptEdits` 22 ms after the answer, wrote the file without a card, and the
+  next message ran in Accept edits; after "Yes, manually approve edits" it
+  said `default` and the next Write asked on a card; "No, keep planning" with
+  words brought a revised plan that followed them.
+- The member's mode follows the CLI: a `system/status` mode the app did not
+  ask for (not its start, not a `set_permission_mode` waiting for its answer)
+  is saved as the member's mode through the member settings' save
+  (`applyChatAccessOptionById`, its other rights kept), so every device shows
+  it and its next message runs in it; the process is not switched back to
+  Plan by the turn-start alignment, and a save from before the switch does
+  not switch it back. A mode the User picked meanwhile wins. On a cloud
+  machine her server lets the machine write that mode once for the plan she
+  approved (`hubMachineScope.ts`, `planModeGrants`).
+- An answered card keeps only what it offered and the row she picked: the
+  plan stays in the CLI's session, so answered plans do not pile up in the
+  chat.
+
 ## Contract (src/shared)
 
 - `MAIN_SESSION_ROLE_ID = "main-session"`, handle base `main`.
@@ -845,8 +1019,10 @@ Verified in the installed CLIs, the way the User sees them:
   never changed. `isMainSessionChat()` reads it (and checks the member is
   still there).
 - `ConversationMetadata.chatView?: ChatViewMode` (`"classic" | "sessions"`),
-  read through `chatViewFor(metadata, settings.defaultChatView)`.
-- `AppSettings.defaultChatView?: ChatViewMode`.
+  read through `chatViewFor(metadata)` (unset: `sessions`).
+- `AppSettings.newChatDefaults?: NewChatDefaults` (`src/shared/newChatDefaults.ts`),
+  changed with `setNewChatDefaults(NewChatDefaultsUpdate)`
+  (`settings:set-new-chat-defaults`).
 - `SendChatMessageRequest.targetParticipantIds?: string[]`: exactly these
   members, no @-parsing for addressees, no fallback.
 - `ChatParticipantSession.forkFrom?: { participantId, sessionId, kind }`: the
@@ -882,7 +1058,9 @@ Verified in the installed CLIs, the way the User sees them:
   unknown failure, the copy was not the cause: the member stays a fork, its
   next turn makes the copy, and nothing says it started clean.
 - `ChatParticipantRequestItem.title?`: the main session's short title for
-  its task (`app_chat_delegate_task`'s `title`, at most 80 characters).
+  its task (`app_chat_delegate_task`'s `title`, at most 80 characters), or
+  the app's for an inferred request (`sessionsMentionSentenceTitle`, at
+  most 40); a member's MCP request cannot set one.
 - `ChatParticipantRequestBatch.delegation.turnId?`: the main-session turn (its `turnSegmentId`) that gave the task while that
   turn ran on this device. `autoResumeParticipantRequest` resumes the tasks
   of one `turnId` once: not while the turn runs (`liveTurnSegments`; its end

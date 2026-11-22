@@ -23,7 +23,9 @@ export type ChatMemberRuntimePatch = Partial<Pick<ChatParticipant,
  */
 export function ChatMemberComposerSettings(props: {
   participant: ChatParticipant;
-  /** Its own turn or compaction runs. */
+  /** Its own turn or compaction runs: its settings wait, as a CLI's apply to
+   *  its next turn, but for its permission mode where its CLI takes one
+   *  while it works (modeChangesWhileTurnRuns). */
   working: boolean;
   runLocationLocked: boolean;
   runLocationMoves: boolean;

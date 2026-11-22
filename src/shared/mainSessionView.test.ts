@@ -35,7 +35,9 @@ import {
   sessionsMentionPieces,
   approvalHoldsTurn,
   sessionsMembersWaitingForUser,
-  titleTaskByMember
+  titleTaskByMember,
+  sessionsMentionSentenceTitle,
+  SESSIONS_UNNAMED_TASK_TITLE
 } from "./mainSessionView";
 import type { ChatMessage, ChatParticipant, ChatParticipantRequestBatch, ChatParticipantRequestItem } from "./types";
 
@@ -335,6 +337,21 @@ test("a member keeps the title its delegation gave it: a later task without one 
   assert.equal(titleTaskByMember([]).size, 0);
 });
 
+test("a task the app made from a reply's mention is titled by that sentence, but never renames a member the main session titled", () => {
+  const delegated = { ...item("p-drew", "answered", 3), prompt: "Implement new chats in General.", title: "Новые чаты в General" };
+  const mentioned = { ...item("p-drew", "running", 20), prompt: "@gera appeared to request your input in this chat reply.\nRelevant excerpt: Could @drew check the release notes?", title: "Could check the release notes?" };
+  const messages = [
+    message("delegate", "participant", 3, { participantId: "p-main", metadata: { participantRequest: batch("d1", "p-main", [delegated], { delegation: { start: "clean" } }) } }),
+    message("reply", "participant", 20, { participantId: "p-gera", metadata: { participantRequest: batch("i1", "p-gera", [mentioned], { source: "inferred" }) } })
+  ];
+  const drew = participants[1]!;
+  assert.equal(sessionsMemberTitle(drew, titleTaskByMember(messages).get("p-drew")?.item), "Новые чаты в General", "the delegation still names it");
+  assert.equal(sessionsTaskTitle(mentioned), "Could check the release notes?", "the task row reads the sentence, no @-names");
+  // A member whose only task is such a one is named by it, as by a first task.
+  const only = [message("reply", "participant", 20, { participantId: "p-gera", metadata: { participantRequest: batch("i1", "p-gera", [mentioned], { source: "inferred" }) } })];
+  assert.equal(sessionsMemberTitle(drew, titleTaskByMember(only).get("p-drew")?.item), "Could check the release notes?");
+});
+
 test("a member held up by the User waits for her even while its run is live; a request that does not hold its turn, or a card its newer turn went past, does not", () => {
   const messages = chat();
   const approvals = [
@@ -369,6 +386,59 @@ test("a member is named by the title kept with it before any task read on this d
   assert.equal(sessionsMemberTitle(kept, followUp), "Новые чаты в General", "the delegation is not among the loaded messages");
   assert.equal(sessionsMemberTitle(kept), "Новые чаты в General");
   assert.equal(sessionsMemberTitle({ ...kept, taskTitle: "" }, followUp), 'Two additions to your task "Новые чаты…', "none kept: the loaded task names it");
+});
+
+test("a task the app made from a reply that mentions a member is named by that sentence, with no @-names (the User, 2026-11-22)", () => {
+  const title = (reply: string, handle?: string, options?: Parameters<typeof sessionsMentionSentenceTitle>[2]) => sessionsMentionSentenceTitle(reply, handle, options);
+  const reply = "I checked the logs first. @claude is now in the chat, added from its saved preset with nothing asked of it. Nothing else changed.";
+  assert.equal(title(reply, "claude"), "is now in the chat, added from its…", "its words as written");
+  assert.equal(title("Done. Could @gera check the release notes?", "@gera"), "Could check the release notes?");
+  assert.equal(title("Ask @drew and @gera, then tell me.", "gera"), "Ask and, then tell me", "every @-name goes, the sentence of the member asked");
+  assert.equal(title("First line\n- @drew: review the plan\nMore", "drew"), "review the plan", "a line ends a sentence; list marks and the colon go");
+  assert.equal(title("Mail me at me@example.com. Then @drew reads `@types/node` docs.", "drew"), "Then reads @types/node docs", "an address or a package is no @-name");
+  assert.equal(title("@codex please run `npm test` and report the failures.", "codex"), "please run npm test and report the…", "inline code stays as its text");
+  // A known member's handle goes wherever it stands; what it leaves empty goes too.
+  const members = { handles: ["codex", "claude", "bob", "main"] };
+  assert.equal(title("@codex/@claude, please both check the diff.", "codex", members), "please both check the diff");
+  assert.equal(title("Thanks...@codex please check.", "codex", members), "Thanks... please check");
+  assert.equal(title("Done.@codex please check.", "codex", members), "Done. please check");
+  assert.equal(title("Owner: -@codex", "codex", members), "Owner");
+  assert.equal(title("(@bob) please look", "bob", members), "please look");
+  assert.equal(title("Waiting on @bob's review.", "bob", members), "Waiting on review");
+  assert.equal(title("I asked @codex (and @claude) to check.", "codex", members), "I asked (and) to check");
+  assert.equal(title("*@codex please check*", "codex", members), "please check");
+  assert.equal(title("~~@codex~~ @claude please check", "claude", members), "please check");
+  assert.equal(title("| @codex | run tests |", "codex", members), "run tests");
+  assert.equal(title("<b>@codex</b> please check", "codex", members), "please check");
+  assert.equal(title("@codex\u200B please check", "codex", members), "please check");
+  assert.equal(title("me@claude.com wrote. @bob look", "bob", members), "look", "an address is not the member's handle");
+  // Where the request was made from, when known.
+  assert.equal(title("@bob first. Then @bob second.", "bob", { at: 17 }), "Then second");
+  assert.equal(title("@claude", "claude"), SESSIONS_UNNAMED_TASK_TITLE);
+  assert.equal(title("@claude @gera.", "claude", members), "Agent", "nothing but @-names: Agent");
+  assert.equal(title("Version 1.5 is out. @drew please ship it.", "nobody"), "please ship it", "member not found: the sentence of the first @-name");
+  assert.equal(title("", "drew"), "Agent");
+  // A very long line costs the same as a short one.
+  const long = `@codex ${"- ".repeat(50_000)}done`;
+  const started = Date.now();
+  assert.equal(title(long, "codex", members), "Agent");
+  assert.ok(Date.now() - started < 200, "a long line is read only as far as a title needs");
+  // A task kept from before such tasks were titled: from the words its text
+  // quotes, on the desktop and the phone (the same shared rule).
+  const prompt = [
+    "@main appeared to request your input in this chat reply.",
+    "Relevant excerpt: I checked the logs first. @claude is now in the chat, added from its saved preset.",
+    "",
+    "First determine whether you are the primary/direct addressee of this request."
+  ].join("\n");
+  assert.equal(sessionsTaskTitle({ prompt, targetHandle: "claude" }), "is now in the chat, added from its…");
+  assert.equal(sessionsMemberTitle({ handle: "claude" }, { prompt, targetHandle: "claude" }), "is now in the chat, added from its…");
+  assert.equal(sessionsTaskTitle({ prompt, targetHandle: "claude", title: "is now in the chat" }), "is now in the chat", "its own title, when made with one");
+  // A quote cut inside a word drops that word.
+  const cut = `@main appeared to request your input in this chat reply.\nRelevant excerpt: rom the previous run we saw that the config loader fails whenever it starts cold and the cache is empty, so @bob runs it again.`;
+  assert.equal(sessionsTaskTitle({ prompt: cut, targetHandle: "bob" }), "the previous run we saw that the…");
+  assert.equal(sessionsTaskTitle({ prompt: "@main appeared to request your input in this chat reply. Then more." }), "@main appeared to request your input…",
+    "only the app's own two lines are read as such a task");
 });
 
 test("a task entry carries its title, its state, its time and one line of its result", () => {

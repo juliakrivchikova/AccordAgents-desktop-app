@@ -7,8 +7,10 @@
 // not in such a chat. A chat made before keeps its Assistant and is always
 // shown the old way.
 //
-// The view is only how the chat is shown, switched by the User any number of
-// times; the chat works the same in both:
+// The view is how the chat is shown, switched by the User any number of
+// times; the chat works the same in both, except that in "sessions" an
+// @handle in a member's reply starts nobody (ChatService
+// createImplicitParticipantRequestApproval; the User, 2026-11-22):
 //   - "classic": today's timeline, every member's reply on it, with avatars;
 //   - "sessions": the main timeline holds the User and the main session only
 //     (plus the cards the User must answer and a card for every task the main
@@ -93,18 +95,19 @@ export function canSwitchChatView(metadata: ChatMetadataLike | undefined): boole
   return isMainSessionChat(metadata);
 }
 
-/** The view a new chat opens in: Settings → General's choice, else the
- *  sessions view. The New chat screen follows it (members picker or model
- *  chip). */
-export function newChatViewFor(defaultChatView: unknown): ChatViewMode {
-  return isChatViewMode(defaultChatView) ? defaultChatView : DEFAULT_CHAT_VIEW;
+/** The view a new chat opens in: always the sessions view (the User,
+ *  2026-11-22: Settings no longer names one; each chat's header switches
+ *  it). The New chat screen follows it (its controls choose the main
+ *  session's provider, model, effort, mode and machine); its classic
+ *  branches (the members picker) are no longer reached. */
+export function newChatViewFor(): ChatViewMode {
+  return DEFAULT_CHAT_VIEW;
 }
 
-/** The view the chat is shown in. */
-export function chatViewFor(metadata: ChatMetadataLike | undefined, fallback?: ChatViewMode): ChatViewMode {
+/** The view the chat is shown in: its own, else the sessions view. */
+export function chatViewFor(metadata: ChatMetadataLike | undefined): ChatViewMode {
   if (!isMainSessionChat(metadata)) return "classic";
-  if (isChatViewMode(metadata?.chatView)) return metadata.chatView;
-  return isChatViewMode(fallback) ? fallback : DEFAULT_CHAT_VIEW;
+  return isChatViewMode(metadata?.chatView) ? metadata.chatView : DEFAULT_CHAT_VIEW;
 }
 
 /** The members a User's message was addressed to, as resolved where it was

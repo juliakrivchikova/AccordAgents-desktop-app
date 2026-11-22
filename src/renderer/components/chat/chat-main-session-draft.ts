@@ -1,7 +1,11 @@
 import { MAIN_SESSION_HANDLE, MAIN_SESSION_ROLE_ID } from "../../../shared/mainSession";
 import type { ChatParticipantConfig, ChatProviderKind } from "../../../shared/types";
 import { newChatMemberPermissions } from "../../../shared/agentPermissions";
-import { applyChatAccessOption, startChatAccessOption } from "../../../shared/chatAccessModes";
+import { applyChatAccessOption, codexModesUnavailableReason, startChatAccessOption } from "../../../shared/chatAccessModes";
+import { newChatMainSessionStart, type NewChatMainSessionStart } from "../../../shared/newChatDefaults";
+import type { CloudRunSelection } from "../../../shared/cloudRunPreparation";
+import type { MachineListResult } from "../../../shared/machineLink";
+import { machineOf } from "./use-cli-start-defaults";
 import { isChatAssistantParticipant } from "../conversation/conversation-display";
 import {
   type ChatParticipantDraft,
@@ -25,10 +29,21 @@ export function newChatMainSessionParticipantConfig(
   sessionsView = false,
   /** That mode by the CLI's name, as the User's own config sets it where the
    *  main session runs (CliStartDefaults.access); none: the CLI's built-in. */
-  startAccess?: string
+  startAccess?: string,
+  /** How Settings → General → New chats starts it on this provider
+   *  (newChatDesktopStart): its model, effort, mode (over the one her
+   *  config starts the CLI in), where it runs and compaction right. */
+  start?: NewChatDesktopStart
 ): ChatParticipantConfig {
-  const permissions = { ...newChatMemberPermissions(hasProject), requestParticipants: "allow" as const, manageRolesParticipants: "allow" as const };
-  const access = sessionsView ? applyChatAccessOption(startChatAccessOption(kind, startAccess), permissions) : { agentMode: "default" as const, permissions };
+  const permissions = {
+    ...newChatMemberPermissions(hasProject),
+    requestParticipants: "allow" as const,
+    manageRolesParticipants: "allow" as const,
+    ...(start ? { requestCompaction: start.requestCompaction } : {})
+  };
+  const access = sessionsView
+    ? applyChatAccessOption(startChatAccessOption(kind, start?.access ?? startAccess), permissions)
+    : { agentMode: "default" as const, permissions };
   return {
     id: NEW_CHAT_MAIN_SESSION_PARTICIPANT_ID,
     handle: MAIN_SESSION_HANDLE,
@@ -37,6 +52,10 @@ export function newChatMainSessionParticipantConfig(
     kind,
     // An added provider the New chat chip chose for it (sessions view).
     ...(hostId ? { hostId } : {}),
+    ...(start?.model ? { model: start.model } : {}),
+    ...(start?.reasoningEffort ? { reasoningEffort: start.reasoningEffort } : {}),
+    ...(start?.homeMachineId ? { homeMachineId: start.homeMachineId } : {}),
+    ...(start?.cloudRun ? { cloudRun: start.cloudRun } : {}),
     // The rights an ordinary member starts with in this chat (reading its
     // project when it has one), asking members without a card as its role
     // does; the app makes the same one (ChatService.ensureMainSessionParticipant).
@@ -58,10 +77,11 @@ export function newChatMainSessionParticipantDraft(
   hasProject = true,
   hostId?: string,
   sessionsView = false,
-  startAccess?: string
+  startAccess?: string,
+  start?: NewChatDesktopStart
 ): ChatParticipantDraft {
   const draft = chatParticipantConfigToDraftWithRuntimeOverrides(
-    newChatMainSessionParticipantConfig(kind, hasProject, hostId, sessionsView, startAccess),
+    newChatMainSessionParticipantConfig(kind, hasProject, hostId, sessionsView, startAccess, start),
     runtimeOverride ? { [NEW_CHAT_MAIN_SESSION_PARTICIPANT_ID]: runtimeOverride } : {}
   );
   // The sessions view's picker has no repository switch: the main session
@@ -77,4 +97,46 @@ export function isNewChatMainSessionOption(participant: Pick<ChatParticipantConf
   return participant.id === NEW_CHAT_MAIN_SESSION_PARTICIPANT_ID ||
     participant.roleConfigId === MAIN_SESSION_ROLE_ID ||
     isChatAssistantParticipant(participant);
+}
+
+/** How Settings → General → New chats starts a new chat on this computer's
+ *  New chat (the screen and the send read it alike): newChatMainSessionStart
+ *  over the machines set up now (none known: this computer), with its machine
+ *  set as New chat's Runs on control sets that machine when it is chosen
+ *  there (ParticipantRunLocation): a machine on an AWS instance as Cloud run
+ *  on that instance, whose first turn makes it ready and copies the chat's
+ *  project there; any other machine as its own. Codex's Full Access is not
+ *  started on a machine whose program cannot run it: the mode its CLI starts
+ *  in there instead, as the phone's New chat does (its menus do not offer it
+ *  there either). */
+export type NewChatDesktopStart = Omit<NewChatMainSessionStart, "homeMachineId"> & { homeMachineId?: string; cloudRun?: CloudRunSelection };
+
+export function newChatDesktopStartFor(
+  defaults: unknown,
+  provider: { kind: ChatProviderKind; hostId?: string },
+  machines: MachineListResult
+): NewChatDesktopStart {
+  const start = newChatMainSessionStart(defaults, provider, machines.machines.map((machine) => machine.id));
+  const machineId = start.homeMachineId;
+  const { access, homeMachineId: _machine, ...rest } = start;
+  const fullAccess = provider.kind === "codex-cli" && startChatAccessOption(provider.kind, access).agentMode === "full-access";
+  const keepAccess = access && !(fullAccess && codexModesUnavailableReason({ kind: provider.kind, homeMachineId: machineId }, machineOf(machines, machineId)));
+  const instanceId = machineId ? machines.machines.find((machine) => machine.id === machineId)?.awsInstanceId : undefined;
+  // Cloud run is Claude Code's and Codex's: the control sets a machine on
+  // the AWS instance for them only, so Antigravity stays on this computer.
+  const cloudCli = provider.kind === "claude-code" || provider.kind === "codex-cli";
+  const place = !machineId ? {} : !instanceId ? { homeMachineId: machineId } : cloudCli ? { cloudRun: { instanceId } } : {};
+  return { ...rest, ...(keepAccess ? { access } : {}), ...place };
+}
+
+/** Where the New chat screen's main session runs: what its controls chose
+ *  (Local included), else where Settings → General → New chats puts it. */
+export function newChatMainSessionPlace(
+  runtimeOverride: ChatParticipantRuntimeOverride | undefined,
+  start: Pick<NewChatDesktopStart, "homeMachineId" | "cloudRun"> | undefined
+): Pick<ChatParticipantRuntimeOverride, "homeMachineId" | "cloudRun"> {
+  const chose = Boolean(runtimeOverride) && ("homeMachineId" in runtimeOverride! || "cloudRun" in runtimeOverride!);
+  return chose
+    ? { homeMachineId: runtimeOverride!.homeMachineId, cloudRun: runtimeOverride!.cloudRun }
+    : { homeMachineId: start?.homeMachineId, cloudRun: start?.cloudRun };
 }

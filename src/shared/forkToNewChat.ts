@@ -17,6 +17,7 @@
 // new chat's main session as the computer does (bundled for the phone through
 // mobileSharedRules.ts).
 
+import { inCliOwnMode } from "./chatAccessModes";
 import {
   clampChatAgentAccess,
   chatAgentPermissionsEqual,
@@ -29,6 +30,7 @@ import { cliProviderHostForParticipant } from "./cliProviderHosts";
 import { agentReadinessReason, cliProviderMetadata, readinessForParticipant } from "./cliReadiness";
 import type {
   AgentHealth,
+  ChatAgentMode,
   ChatAgentPermissions,
   ChatForkSeenReply,
   ChatMessageSessionCut,
@@ -341,11 +343,26 @@ export function memberAsItRunsNow(participant: ChatParticipant, mainSession: Cha
 }
 
 /**
- * The new chat's main session's rights: the member's access as it runs now
- * (what it may read, edit, run and reach, and its CLI's own mode) with the
- * main session's own say over members (`base`: what its role gives a new
- * main session). Never more than the member has, besides that say.
+ * The new chat's main session's mode and rights: the member's access as it
+ * runs now (what it may read, edit, run and reach, and whether it compacts
+ * its context without asking) in its CLI's own mode, the one it was running
+ * in (inCliOwnMode: the sessions view has only the CLIs' own modes, never
+ * "Custom"; the User, 2026-11-22), with the main session's own say over
+ * members (`base`: what its role gives a new main session). Never more than
+ * the member has, besides that say. Settings → General's defaults for new
+ * chats are not used: the fork is the member as it is (the User, 2026-11-22:
+ * a forked member allowed to compact must not be asked).
  */
+export function forkedMainSessionAccess(
+  base: ChatAgentPermissions,
+  member: Pick<ChatParticipant, "kind" | "agentMode" | "permissions">
+): { agentMode: ChatAgentMode; permissions: ChatAgentPermissions } {
+  const access = inCliOwnMode(member.kind, member.agentMode, member.permissions);
+  return { agentMode: access.agentMode, permissions: forkedMainSessionPermissions(base, access.permissions) };
+}
+
+/** forkedMainSessionAccess's rights for a member already in its CLI's own
+ *  mode (its rights as they are, with the main session's say over members). */
 export function forkedMainSessionPermissions(base: ChatAgentPermissions, memberPermissions: ChatAgentPermissions | undefined): ChatAgentPermissions {
   const own = normalizeChatAgentPermissions(memberPermissions);
   const { providerNative: _baseNative, cliApprovals: _baseApprovals, codexPlanMode: _basePlan, ...rest } = normalizeChatAgentPermissions(base);
@@ -354,6 +371,7 @@ export function forkedMainSessionPermissions(base: ChatAgentPermissions, memberP
     repoRead: own.repoRead,
     workspaceWrite: own.workspaceWrite,
     webAccess: own.webAccess,
+    requestCompaction: own.requestCompaction,
     shell: { enabled: own.shell.enabled, rules: own.shell.rules.map((rule) => ({ ...rule })) },
     ...(own.providerNative ? { providerNative: own.providerNative } : {}),
     ...(own.cliApprovals ? { cliApprovals: true as const } : {}),
@@ -478,8 +496,7 @@ export function forkedMainSessionFor(input: {
     ...(member.model ? { model: member.model } : {}),
     ...(member.reasoningEffort ? { reasoningEffort: member.reasoningEffort } : {}),
     ...(member.hostId ? { hostId: member.hostId, hostLabel: member.hostLabel, hostVendor: member.hostVendor } : {}),
-    agentMode: normalizeChatAgentMode(member.agentMode),
-    permissions: forkedMainSessionPermissions(input.basePermissions, member.permissions),
+    ...forkedMainSessionAccess(input.basePermissions, member),
     remoteExecution: preservedRemoteExecution(member.remoteExecution),
     ...(member.homeMachineId ? { homeMachineId: member.homeMachineId } : {}),
     ...(member.cloudRun ? { cloudRun: member.cloudRun } : {}),

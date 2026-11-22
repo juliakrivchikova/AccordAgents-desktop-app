@@ -38,14 +38,16 @@ export const SHARED_CONVERSATION_METADATA_KEYS: readonly string[] = [
   "residency",
   /** The chat's main session and its view (shared/mainSession.ts). */
   "mainSessionParticipantId",
-  "chatView"
+  "chatView",
+  /** Its members were moved into their CLI's own mode once (ChatService). */
+  "cliModesConvertedAt"
 ];
 
 /** Shared keys that order the User's chat list or say how the chat is shown,
  *  rather than change the chat: a change of these alone is not activity, so
  *  the chat keeps its time. A turn's older copy of the chat never overwrites
  *  them (ChatService.mergeStoredChatMetadata). */
-export const CHAT_LIST_ORDER_METADATA_KEYS: readonly string[] = ["pinned", "pinnedAt", "chatView"];
+export const CHAT_LIST_ORDER_METADATA_KEYS: readonly string[] = ["pinned", "pinnedAt", "chatView", "cliModesConvertedAt"];
 
 /** Message metadata that describes one device's run of a message. */
 export const LOCAL_MESSAGE_METADATA_KEYS: readonly string[] = [

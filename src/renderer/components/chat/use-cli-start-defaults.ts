@@ -112,7 +112,7 @@ export function useMachineList(): MachineListResult {
 
 function machinesKey(list: MachineListResult): string {
   const said = (hello: MachineRecord["lastHello"] | undefined): string =>
-    `${hello?.cliModesSupported === true ? "1" : "0"}${JSON.stringify(hello?.cliStartDefaults ?? null)}`;
+    `${hello?.cliModesSupported === true ? "1" : "0"}${hello?.liveModeChangeSupported === true ? "1" : "0"}${JSON.stringify(hello?.cliStartDefaults ?? null)}`;
   return [
     ...list.machines.map((machine) => `${machine.id}:${machine.name}:${machine.awsInstanceId ?? ""}:${said(machine.lastHello)}`),
     ...list.status.map((item) => `${item.machineId}:${item.name}:${said(item.lastHello)}`)

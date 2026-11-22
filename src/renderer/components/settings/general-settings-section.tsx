@@ -3,7 +3,8 @@ import { Fragment, useState } from "react";
 import type {
   AgentHealth,
   ChatProviderKind,
-  ChatViewMode,
+  NewChatDefaults,
+  NewChatDefaultsUpdate,
   CliProviderHost,
   CliProviderHostUpdate,
   ChatPromptContextSettings,
@@ -50,7 +51,7 @@ export function GeneralSettingsSection(props: {
   deleteCliProviderHost: (id: string) => Promise<void>;
   agents: AgentHealth[];
   assistantProviderKind?: ChatProviderKind;
-  defaultChatView?: ChatViewMode;
+  newChatDefaults?: NewChatDefaults;
   repoFileOpenAction?: RepoFileOpenAction;
   repoFileExternalOpenAction?: RepoFileExternalOpenAction;
   betaUpdates: boolean;
@@ -63,7 +64,7 @@ export function GeneralSettingsSection(props: {
   mobileControl?: MobileControlSettings;
   updateProvider: (provider: ProviderSettings, patch: { enabled?: boolean }) => Promise<void>;
   setAssistantProviderKind: (kind: ChatProviderKind) => Promise<void>;
-  setDefaultChatView: (view: ChatViewMode) => Promise<void>;
+  setNewChatDefaults: (update: NewChatDefaultsUpdate) => Promise<void>;
   setRepoFileOpenPreference: (action: RepoFileOpenAction | null) => Promise<void>;
   setRepoFileExternalOpenPreference: (action: RepoFileExternalOpenAction | null) => Promise<void>;
   setBetaUpdates: (enabled: boolean) => Promise<void>;
@@ -137,18 +138,23 @@ export function GeneralSettingsSection(props: {
         </div>
       </section>
 
-      <section className="gen-section">
-        <h2 className="gen-section-title gen-section-title-solo">General</h2>
+      <section className="gen-section" data-testid="new-chats-section">
+        <h2 className="gen-section-title gen-section-title-solo">New chats</h2>
         <div className="gen-card">
           <NewChatDefaultsRows
             providers={props.providers}
             agents={props.agents}
             assistantProviderKind={props.assistantProviderKind}
-            defaultChatView={props.defaultChatView}
+            newChatDefaults={props.newChatDefaults}
             setAssistantProviderKind={props.setAssistantProviderKind}
-            setDefaultChatView={props.setDefaultChatView}
+            setNewChatDefaults={props.setNewChatDefaults}
           />
-          <div className="gen-card-divider" />
+        </div>
+      </section>
+
+      <section className="gen-section">
+        <h2 className="gen-section-title gen-section-title-solo">General</h2>
+        <div className="gen-card">
           <div className="gen-row">
             <div className="gen-row-text">
               <div className="gen-row-title">Default file open destination</div>

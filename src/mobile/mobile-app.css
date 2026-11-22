@@ -2379,6 +2379,26 @@ button.mobile-chat-group-title:active {
   font: 400 12px var(--sans);
 }
 
+/* Claude Code's plan on its approval card, shown in full as the CLI shows it. */
+.control-card-plan {
+  margin-top: 8px;
+  padding: 10px 12px;
+  border: 1px solid var(--bd);
+  border-radius: 12px;
+  font-size: 13px;
+  line-height: 1.45;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.control-card-plan .markdown-text {
+  white-space: normal;
+}
+
+.control-card-plan + .control-card-summary {
+  margin-top: 10px;
+}
+
 /* 16px: smaller type makes iOS zoom the page when the field is focused. */
 .control-card-text textarea {
   width: 100%;

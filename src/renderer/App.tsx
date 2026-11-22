@@ -102,8 +102,8 @@ function App(): JSX.Element {
   // The Accord dialog's names in the sessions view, read while it is open.
   const accordChat = view.activeChatConversation;
   const accordDialogNames = React.useMemo(
-    () => (accordDialogOpen && accordChat ? sessionsViewNamesOf(accordChat, state.settings.defaultChatView) : undefined),
-    [accordDialogOpen, accordChat?.messages, accordChat?.metadata, state.settings.defaultChatView]
+    () => (accordDialogOpen && accordChat ? sessionsViewNamesOf(accordChat) : undefined),
+    [accordDialogOpen, accordChat?.messages, accordChat?.metadata]
   );
   const [newChatPrefill, setNewChatPrefill] = React.useState<{
     key: number;
@@ -524,7 +524,7 @@ function App(): JSX.Element {
           participantRoleLabel={(participant) => chatRoleLabel(state.settings.chatRoleConfigs, participant)}
           onOpenChange={setAccordDialogOpen}
           onStart={chatActions.startChatAccord}
-          sessions={chatViewFor(view.activeChatConversation.metadata, state.settings.defaultChatView) === "sessions"}
+          sessions={chatViewFor(view.activeChatConversation.metadata) === "sessions"}
           sessionsNames={accordDialogNames}
         />
       )}
@@ -536,7 +536,7 @@ function App(): JSX.Element {
           agents={state.agents}
           updateProvider={settingsActions.updateProvider}
           setAssistantProviderKind={settingsActions.setAssistantProviderKind}
-          setDefaultChatView={settingsActions.setDefaultChatView}
+          setNewChatDefaults={settingsActions.setNewChatDefaults}
           saveChatRoleConfig={settingsActions.saveChatRoleConfig}
           archiveChatRoleConfig={settingsActions.archiveChatRoleConfig}
           saveChatBehaviorRuleConfig={settingsActions.saveChatBehaviorRuleConfig}

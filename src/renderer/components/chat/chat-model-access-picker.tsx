@@ -7,12 +7,12 @@ import { mainSessionProviderKey, type MainSessionProviderOption } from "../../..
 import type { CloudRunSelection } from "../../../shared/cloudRunPreparation";
 import type { MachineRecord } from "../../../shared/machineLink";
 import type { ChatParticipant, ProviderModel, ProviderModelCatalog, ProviderReasoningEffortOption } from "../../../shared/types";
-import { codexModesUnavailableReason, codexPlanModeOn, selectedChatAccessOption } from "../../../shared/chatAccessModes";
+import { codexModesUnavailableReason, codexPlanModeOn, liveModeChangeReaches, selectedChatAccessOption } from "../../../shared/chatAccessModes";
 import { ChatProviderMark } from "./chat-member-mark";
 import { chipModelLabel, memberDefaultModelName, memberModelName, useMemberModelCatalog } from "./chat-member-model-name";
 import { latestAndOlderModels } from "./chat-model-groups";
 import { ComposerMenu, ComposerMenuDisclosure, ComposerMenuItem, ComposerMenuNote, ComposerMenuSection } from "./composer-menu";
-import { ChatAccessControl, ChatCodexPlanToggle, ComposerControlIcon, iconTriggerProps, TURN_RUNNING_NOTE } from "./chat-access-controls";
+import { ChatAccessControl, ChatCodexPlanToggle, ComposerControlIcon, iconTriggerProps, modeChangesWhileTurnRuns, TURN_RUNNING_NOTE } from "./chat-access-controls";
 import { machineIdOf, machineOf, useCliStartDefaults, useMachineList } from "./use-cli-start-defaults";
 import { COMPOSER_DENSITY, useComposerDensity } from "./use-composer-density";
 import { ParticipantRunLocation } from "./participant-run-location";
@@ -87,6 +87,10 @@ export function ChatMemberComposerControls(props: {
   // (for Cloud run, the machine on the AWS instance it names).
   const modesMachineId = machineIdOf(value, machineList);
   const modesReason = codexModesUnavailableReason({ kind: value.kind, homeMachineId: modesMachineId }, machineOf(machineList, modesMachineId));
+  // The mode while its turn runs: where its CLI takes one then (Shift+Tab in
+  // Claude Code), on this computer or a machine whose program sets it in the
+  // live process; anywhere else it waits for the turn to end.
+  const modeWhileTurnRuns = modeChangesWhileTurnRuns(value.kind) && liveModeChangeReaches(value, machineOf(machineList, modesMachineId));
   // A model chosen without the saved effort: that choice clears it too, so
   // its CLI is never given an effort the model does not have.
   const withEffortFor = (modelId: string | undefined): ChatModelAccessPatch => {
@@ -164,7 +168,7 @@ export function ChatMemberComposerControls(props: {
           )}
         </ComposerMenu>
       )}
-      <ChatAccessControl value={value} mainSession={props.mainSession} disabled={props.disabled} modesReason={modesReason} onChange={onChange} testId={prefix}
+      <ChatAccessControl value={value} mainSession={props.mainSession} disabled={props.disabled && !modeWhileTurnRuns} modesReason={modesReason} onChange={onChange} testId={prefix}
         iconOnly={density >= COMPOSER_DENSITY.modeIcon} />
       {value.kind === "codex-cli" && (
         <ChatCodexPlanToggle value={value} disabled={props.disabled} modesReason={modesReason} onChange={onChange} testId={prefix} iconOnly={density >= COMPOSER_DENSITY.planIcon} />
@@ -289,7 +293,7 @@ export function shownEffort<T extends string>(effort: T | undefined, efforts: Re
 /** The model the CLI runs when none is chosen (the default row names it):
  *  the one the User's config starts it on where it runs, when this list has
  *  it, else the one the list marks (her config's on this computer). */
-function defaultModelOf(catalog: ProviderModelCatalog | undefined, startModel: string | undefined): ProviderModel | undefined {
+export function defaultModelOf(catalog: ProviderModelCatalog | undefined, startModel: string | undefined): ProviderModel | undefined {
   const usable = (model: ProviderModel): boolean => model.source !== "configured" && !model.hidden;
   return (startModel ? catalog?.models.find((model) => model.id === startModel && usable(model)) : undefined) ??
     catalog?.models.find((model) => model.recommended && usable(model));
@@ -297,13 +301,13 @@ function defaultModelOf(catalog: ProviderModelCatalog | undefined, startModel: s
 
 /** The models offered besides the default row: the CLI's list without the
  *  one it runs by default (the default row names it) and hidden ones. */
-function explicitModels(catalog: ProviderModelCatalog | undefined, defaultModel: ProviderModel | undefined): ProviderModel[] {
+export function explicitModels(catalog: ProviderModelCatalog | undefined, defaultModel: ProviderModel | undefined): ProviderModel[] {
   return (catalog?.models ?? []).filter((model) => !model.hidden && model !== defaultModel);
 }
 
 /** The efforts of the chosen model (of the one it runs by default while none
  *  is chosen), else the CLI's own list. */
-function effortOptions(kind: ChatParticipant["kind"], catalog: ProviderModelCatalog | undefined, model: string | undefined): ProviderReasoningEffortOption[] {
+export function effortOptions(kind: ChatParticipant["kind"], catalog: ProviderModelCatalog | undefined, model: string | undefined): ProviderReasoningEffortOption[] {
   const listed = catalog?.models.find((item) => model ? item.id === model : item.recommended && item.source !== "configured");
   return listed?.supportedReasoningEfforts?.length ? listed.supportedReasoningEfforts : reasoningEffortOptionsForProvider(kind);
 }

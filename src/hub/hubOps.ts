@@ -11,7 +11,7 @@ import type { HubDevice, HubMemberRules } from "../shared/hubProtocol";
 import { HUB_CARD_ANSWERED_FIRST } from "../shared/hubCards";
 import { TURN_FINISHED_NOTE_SOURCE, turnFinishedNoteOf } from "../shared/turnFinishedNoteSource";
 import { ACCORD_CLOSED_SOURCE, accordClosedLaunchId, recordClosedAccords } from "../shared/accordProgress";
-import { isChatViewMode, mainSessionMemberOf, mainSessionParticipantId } from "../shared/mainSession";
+import { chatViewFor, isChatViewMode, mainSessionMemberOf, mainSessionParticipantId } from "../shared/mainSession";
 import { memberAsItRunsNow } from "../shared/forkToNewChat";
 import {
   HUB_CHAT_PAGE_MESSAGES,
@@ -514,7 +514,15 @@ export class HubOps {
       return place_({ ...current, stopRequestedAt: acceptedAt });
     }
 
-    if (!conversation.messages.some((message) => message.id === op.messageId)) return reject(opId, "There is no such message.");
+    const trigger = conversation.messages.find((message) => message.id === op.messageId);
+    if (!trigger) return reject(opId, "There is no such message.");
+    // In the sessions view a mention in a member's reply starts nobody
+    // (docs/main-session.md): a new turn for a request a device inferred from
+    // one is refused, whichever device asks or takes it (a cloud machine on
+    // an older program included). A turn already asked for stands.
+    if (!current && chatViewFor(conversation.metadata) === "sessions" && trigger.metadata?.participantRequest?.source === "inferred") {
+      return reject(opId, "In the sessions view a mention in a member's reply starts nobody.");
+    }
     const home = homeDeviceId(conversation, op.participantId, devices);
     if (!home) return reject(opId, "This member is not in the chat, or its machine is not on the server's roster.");
 

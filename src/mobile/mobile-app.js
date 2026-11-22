@@ -3699,15 +3699,28 @@
     const chosen = newChatMainChoice && providers.find(function (item) { return same(item, newChatMainChoice); });
     const provider = chosen || (lead && providers.find(function (item) { return same(item, { kind: lead.kind, hostId: lead.hostId }); })) || providers[0];
     if (!provider) return undefined;
-    const model = chosen && newChatMainChoice.model && provider.models.some(function (item) { return item.id === newChatMainChoice.model; }) ? newChatMainChoice.model : undefined;
+    // What she chose here for this chat; else how the computer's Settings →
+    // General → New chats starts a new chat, carried by the offered main
+    // session (its model, effort and mode on its own provider, where it runs
+    // on any), as the computer's New chat starts from them.
+    const rules = mobileSharedRules();
+    const base = rules && typeof rules.newChatLeadStart === "function" ? rules.newChatLeadStart(lead, provider) : {};
+    const pick = function (key) {
+      return chosen && Object.prototype.hasOwnProperty.call(newChatMainChoice, key) ? newChatMainChoice[key] : base[key];
+    };
+    // The computer's own model and effort stand even when the offer's list
+    // lacks them (not read yet after a restart): it runs them (newChatMainSessionFor).
+    const modelWanted = pick("model");
+    const model = modelWanted && (provider.models.some(function (item) { return item.id === modelWanted; }) || modelWanted === base.model) ? modelWanted : undefined;
     const modelEntry = model ? provider.models.find(function (item) { return item.id === model; }) : undefined;
     const efforts = (modelEntry && modelEntry.efforts) || provider.efforts || [];
-    const effort = chosen && newChatMainChoice.reasoningEffort && efforts.some(function (item) { return item.id === newChatMainChoice.reasoningEffort; }) ? newChatMainChoice.reasoningEffort : undefined;
+    const effortWanted = pick("reasoningEffort");
+    const effort = effortWanted && (efforts.some(function (item) { return item.id === effortWanted; }) || effortWanted === base.reasoningEffort) ? effortWanted : undefined;
     // Its CLI's mode in the CLI's own terms, the computer's picker's modes and
     // words (chatAccessModes): the one its CLI starts in until one is chosen.
     // Where it runs: one of the machines, once there is one; else this computer.
-    const homeMachineId = chosen && newChatMainChoice.homeMachineId && newChatMachineList().some(function (item) { return item.id === newChatMainChoice.homeMachineId; })
-      ? newChatMainChoice.homeMachineId : undefined;
+    const homeWanted = pick("homeMachineId");
+    const homeMachineId = homeWanted && newChatMachineList().some(function (item) { return item.id === homeWanted; }) ? homeWanted : undefined;
     // Codex's Full Access and Plan mode only where they run: a computer that
     // offers them, and a machine whose program does (the computer's offer).
     const modes = offer && offer.cliModes;
@@ -3724,10 +3737,11 @@
     const accessOptions = newChatAccessOptions(provider.kind).concat(startHidden ? [startHidden] : [])
       .filter(function (item) { return modesHere || item.agentMode !== "full-access"; });
     const defaultAccess = accessOptions.length > 0 ? newChatDefaultAccess(provider.kind, start && start.access, accessOptions) : undefined;
-    // A mode she chose; none: the one her config starts the CLI in there,
-    // which follows where it runs until she chooses one.
-    const accessChosen = chosen && newChatMainChoice.access && accessOptions.some(function (item) { return item.id === newChatMainChoice.access; })
-      ? newChatMainChoice.access : undefined;
+    // A mode she chose (or the computer's Settings start a new chat in);
+    // none: the one her config starts the CLI in there, which follows where
+    // it runs until she chooses one.
+    const accessWanted = pick("access");
+    const accessChosen = accessWanted && accessOptions.some(function (item) { return item.id === accessWanted; }) ? accessWanted : undefined;
     const access = accessChosen || defaultAccess;
     // Codex's Plan mode: its own toggle beside the permissions, as on the computer.
     const planOffered = Boolean(accessSet && accessSet.plan && modesHere);
@@ -3737,8 +3751,8 @@
     const startEffort = !effort && !model && !provider.hostId && start && start.reasoningEffort &&
       efforts.some(function (item) { return item.id === start.reasoningEffort; }) ? start.reasoningEffort : undefined;
     const shownEffort = effort || startEffort;
-    return { provider: provider, model: model, modelLabel: modelEntry ? modelEntry.label : startModelLabel || provider.defaultModelLabel, efforts: efforts,
-      effort: effort, effortLabel: shownEffort ? (efforts.find(function (item) { return item.id === shownEffort; }) || {}).label : undefined,
+    return { provider: provider, model: model, modelLabel: modelEntry ? modelEntry.label : model || startModelLabel || provider.defaultModelLabel, efforts: efforts,
+      effort: effort, effortLabel: shownEffort ? (efforts.find(function (item) { return item.id === shownEffort; }) || { label: shownEffort }).label : undefined,
       startEffortLabel: startEffort ? (efforts.find(function (item) { return item.id === startEffort; }) || {}).label : undefined,
       accessOptions: accessOptions, access: access, accessChosen: accessChosen, accessSet: accessSet, planOffered: planOffered, plan: plan, homeMachineId: homeMachineId };
   }
@@ -3842,9 +3856,20 @@
       head.textContent = text;
       list.append(head);
     };
+    // Only what she chose here is hers; the rest follows the computer's
+    // Settings → General → New chats (newChatMainSelection). Another provider
+    // starts from its own, as the computer drops what was chosen for the one
+    // before.
     const choose = function (patch) {
-      const current = { kind: selection.provider.kind, hostId: selection.provider.hostId, model: selection.model, reasoningEffort: selection.effort,
-        access: selection.accessChosen, plan: selection.plan, homeMachineId: selection.homeMachineId };
+      const sameProvider = function (item) {
+        return Boolean(item) && item.kind === selection.provider.kind && (item.hostId || "") === (selection.provider.hostId || "");
+      };
+      const current = { kind: selection.provider.kind, hostId: selection.provider.hostId };
+      if (sameProvider(newChatMainChoice) && (patch.kind === undefined || sameProvider(patch))) {
+        for (const key of ["model", "reasoningEffort", "access", "plan", "homeMachineId"]) {
+          if (Object.prototype.hasOwnProperty.call(newChatMainChoice, key)) current[key] = newChatMainChoice[key];
+        }
+      }
       newChatMainChoice = Object.assign(current, patch);
       renderNewChat("");
     };
@@ -3857,7 +3882,7 @@
         // computer drops what was chosen for the one before.
         onClick: function () {
           if (chosen) return;
-          choose({ kind: provider.kind, hostId: provider.hostId, model: undefined, reasoningEffort: undefined, access: undefined, plan: undefined, homeMachineId: undefined });
+          choose({ kind: provider.kind, hostId: provider.hostId });
         } }));
     }
     section("Model");
@@ -7607,6 +7632,17 @@
    *  identifiers the provider needs back; a choice says what was picked or
    *  written, or that it was cancelled. */
   function answerForCard(card, answer) {
+    if (card.kind === "permission" && card.plan) {
+      // Claude Code's plan approval: the row picked, by the CLI's own value,
+      // and her words for "No, keep planning" (claudePlanApproval.ts).
+      const keepPlanning = answer.optionId === card.plan.feedbackOptionId;
+      const words = keepPlanning && typeof answer.feedback === "string" ? answer.feedback.trim() : "";
+      return {
+        cardId: card.id,
+        cardKind: "permission",
+        answer: { approve: !keepPlanning, planDecision: { optionId: answer.optionId, ...(words ? { feedback: words } : {}) } }
+      };
+    }
     if (card.kind === "permission") {
       const approve = answer.optionId === "allow";
       return {
@@ -7934,7 +7970,8 @@
       card.machineName, card.options, card.recommendedOptionId, card.allowsCustomAnswer, card.allowsCancel,
       isCardLocked(card.id) || controlCardAnswering.has(card.id), controlCardErrors.get(card.id) || "",
       cardSentText(card.id), cardOutcome(card.id) || "", card.signInUrl || "",
-      card.meter || null, card.keeps || null, card.chatScopeLabel || "", card.primaryOptionId || ""]);
+      card.meter || null, card.keeps || null, card.chatScopeLabel || "", card.primaryOptionId || "",
+      card.plan ? [card.plan.text.length, card.plan.isPlan, card.plan.feedbackOptionId] : 0]);
   }
 
   // A card's "for the rest of the chat" box, by card, outside the card: the
@@ -8366,6 +8403,11 @@
       appendCardState(wrap, card);
       return wrap;
     }
+    if (card.plan) {
+      planCardBody(wrap, card, sent);
+      appendCardState(wrap, card);
+      return wrap;
+    }
     const options = document.createElement("div");
     options.className = "control-card-options";
     for (const option of Array.isArray(card.options) ? card.options : []) {
@@ -8464,6 +8506,86 @@
       actions.append(button);
     }
     wrap.append(actions);
+  }
+
+  // Words typed for "No, keep planning" and not sent yet, by card: kept when
+  // the card is drawn again (in the chat and on Activity alike).
+  const planFeedbackDrafts = new Map();
+
+  /**
+   * Claude Code's plan approval, as the CLI shows it ("Ready to code?" is the
+   * card's title): "Here is Claude's plan:", the plan, the CLI's question,
+   * then its rows. A Yes answers at once, as a permission's options do; "No,
+   * keep planning" sends what is typed in its field ("Tell Claude what to
+   * change"), the field taken by the finger.
+   */
+  function planCardBody(wrap, card, sent) {
+    const plan = card.plan;
+    const intro = document.createElement("p");
+    intro.className = "control-card-summary";
+    intro.textContent = plan.intro;
+    const body = document.createElement("div");
+    body.className = "control-card-plan";
+    if (plan.isPlan) {
+      const content = document.createElement("div");
+      content.className = "message-content markdown-text";
+      renderMessageContent(content, plan.text);
+      body.append(content);
+    } else {
+      body.textContent = plan.text;
+    }
+    const question = document.createElement("p");
+    question.className = "control-card-summary";
+    question.textContent = plan.question;
+    wrap.append(intro, body, question);
+
+    const options = document.createElement("div");
+    options.className = "control-card-options";
+    const feedbackOption = (Array.isArray(card.options) ? card.options : []).find(function (option) { return option.id === plan.feedbackOptionId; });
+    for (const option of Array.isArray(card.options) ? card.options : []) {
+      if (option === feedbackOption) continue;
+      const button = document.createElement("button");
+      button.type = "button";
+      button.className = "control-card-option";
+      button.dataset.optionId = option.id;
+      button.textContent = option.label || option.id;
+      button.disabled = sent;
+      button.addEventListener("click", function () {
+        blurWithin(wrap);
+        void answerControlCard(card, { optionId: option.id });
+      });
+      options.append(button);
+    }
+    wrap.append(options);
+    if (!feedbackOption) return;
+    const panel = document.createElement("label");
+    panel.className = "control-card-text control-card-plan-feedback";
+    const field = document.createElement("textarea");
+    field.rows = 2;
+    field.placeholder = plan.feedbackPlaceholder;
+    field.setAttribute("aria-label", feedbackOption.label);
+    field.value = planFeedbackDrafts.get(card.id) || "";
+    field.disabled = sent;
+    field.addEventListener("focus", applyDockKeepingReader);
+    field.addEventListener("blur", applyDockAfterTap);
+    field.addEventListener("input", function () { planFeedbackDrafts.set(card.id, field.value); });
+    panel.append(field);
+    const keep = document.createElement("div");
+    keep.className = "control-card-options";
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "control-card-option";
+    button.dataset.optionId = feedbackOption.id;
+    button.textContent = feedbackOption.label || feedbackOption.id;
+    button.disabled = sent;
+    button.addEventListener("click", function () {
+      blurWithin(wrap);
+      void answerControlCard(card, { optionId: feedbackOption.id, feedback: field.value }).then(function () {
+        if (isCardLocked(card.id)) planFeedbackDrafts.delete(card.id);
+      });
+    });
+    keep.append(button);
+    wrap.append(panel, keep);
   }
 
   /** What a card says under its options. An answer on its way only fades the
@@ -9312,8 +9434,9 @@
     col.className = "act-col";
     col.append(activityRowMain(row, [activityTime(row.at), dot]));
     const sent = isCardLocked(card.id) || controlCardAnswering.has(card.id);
-    if (row.kind === "choice") {
-      // A choice is read and answered in full, so the row opens it.
+    if (row.kind === "choice" || card.plan) {
+      // A choice is read and answered in full, so the row opens it; so is a
+      // plan, read before it is approved, as in Claude Code.
       const chevron = document.createElement("span");
       chevron.className = "act-chevron";
       chevron.append(lineIcon(["m9 18 6-6-6-6"], 20));

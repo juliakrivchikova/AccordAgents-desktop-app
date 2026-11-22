@@ -32,7 +32,7 @@ export { nativeGoalObjective, parseNativeGoalCommand } from "./nativeGoalCommand
 // The sessions view's access, in each CLI's own terms: the same modes and
 // words in the phone's New chat sheet as in the computer's picker.
 export { applyChatAccessOptionById, chatAccessModeSet, chatAccessOptions, currentChatAccessId, defaultChatAccessOption, FULL_ACCESS_CONFIRMATION, selectedChatAccessOption, startChatAccessOption } from "./chatAccessModes";
-export { newChatIntro, newChatMainSessionFor, newChatMemberFitsProject, newChatMetadata, newChatParticipants, newChatPickedMembers, newChatTitle } from "./newChat";
+export { newChatIntro, newChatLeadStart, newChatMainSessionFor, newChatMemberFitsProject, newChatMetadata, newChatParticipants, newChatPickedMembers, newChatTitle } from "./newChat";
 // The list row of a chat the phone started, as the server will list it.
 export { mobileChatGroupLabel, mobileSnippet } from "./mobileChatRow";
 // An artifact note becomes a card on the timeline: the same reading of the

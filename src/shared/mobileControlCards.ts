@@ -29,6 +29,10 @@ import {
   selfCompactionRequestOf
 } from "./compactionCard";
 import { connectorSignInHost, isConnectorSignInRequest } from "./connectorSignIn";
+import {
+  CLAUDE_PLAN_APPROVAL_INTRO, CLAUDE_PLAN_APPROVAL_QUESTION, CLAUDE_PLAN_APPROVAL_TITLE, CLAUDE_PLAN_FEEDBACK_PLACEHOLDER, CLAUDE_PLAN_KEEP_PLANNING_ID,
+  claudePlanApprovalOption, claudePlanApprovalOptions, claudePlanShown, isClaudePlanApprovalRequest
+} from "./claudePlanApproval";
 import type { HubCard } from "./hubOps";
 import { approvalInstallsScriptCode } from "./scripts";
 import { choiceOutcome } from "./usedCards";
@@ -88,6 +92,22 @@ export interface MobileControlCard {
   chatScopeLabel?: string;
   /** The answer the card's primary button gives (drawn last, filled). */
   primaryOptionId?: string;
+  /** Claude Code's plan approval ("Ready to code?"), as the CLI shows it:
+   *  its words around the plan, the plan (markdown), and its "No, keep
+   *  planning" row, which takes her words. Each option's id is the CLI's
+   *  own value, carried back as the answer's planDecision. */
+  plan?: ControlCardPlan;
+}
+
+export interface ControlCardPlan {
+  intro: string;
+  /** The plan, or the CLI's words in its place (an empty or too large one). */
+  text: string;
+  /** The plan itself (markdown), not the CLI's words in its place. */
+  isPlan: boolean;
+  question: string;
+  feedbackOptionId: string;
+  feedbackPlaceholder: string;
 }
 
 const ALLOW = { id: "allow", label: "Allow" };
@@ -266,6 +286,33 @@ function approvalCardBody(conversationId: string, approval: ChatAppToolApproval)
       createdAt: approval.createdAt
     };
   }
+  if (isClaudePlanApprovalRequest(approval.request)) {
+    // Claude Code's own plan approval, word for word (claudePlanApproval.ts).
+    const planApproval = approval.request.planApproval;
+    const shown = claudePlanShown(planApproval);
+    return {
+      id: approval.id,
+      kind: "permission",
+      conversationId,
+      title: CLAUDE_PLAN_APPROVAL_TITLE,
+      summary: "",
+      requesterLabel: approval.requesterHandle ? `@${approval.requesterHandle}` : undefined,
+      machineName: (approval as { machineName?: string }).machineName,
+      options: claudePlanApprovalOptions(planApproval).map((option) => ({ id: option.id, label: option.label })),
+      allowsCustomAnswer: false,
+      allowsCancel: false,
+      status: "pending",
+      createdAt: approval.createdAt,
+      plan: {
+        intro: CLAUDE_PLAN_APPROVAL_INTRO,
+        text: shown,
+        isPlan: shown === planApproval.plan,
+        question: CLAUDE_PLAN_APPROVAL_QUESTION,
+        feedbackOptionId: CLAUDE_PLAN_KEEP_PLANNING_ID,
+        feedbackPlaceholder: CLAUDE_PLAN_FEEDBACK_PLACEHOLDER
+      }
+    };
+  }
   // A script that installs code is approved where its code can be read: the
   // phone shows it as a card it may only decline.
   const desktopOnly = approvalInstallsScriptCode(approval);
@@ -375,14 +422,19 @@ export function controlCardFromHubCard(
       });
       return { ...waiting, id: card.cardId, createdAt: base.createdAt };
     }
-    const chosen = base.options.find((option) => option.id === (approve ? "allow" : "deny"));
-    // A card that words its answers (a removal: "Yes, remove @x") says the
-    // one given; a plain permission says Allowed or Denied; a compaction
-    // ends as its folded line on the desktop does.
+    const planDecision = (card.answer as { planDecision?: { optionId?: unknown } } | undefined)?.planDecision;
+    const planPick = isClaudePlanApprovalRequest(raised.approval.request) && typeof planDecision?.optionId === "string"
+      ? claudePlanApprovalOption(raised.approval.request.planApproval, planDecision.optionId)
+      : undefined;
+    const chosen = planPick ?? base.options.find((option) => option.id === (approve ? "allow" : "deny"));
+    // A card that words its answers (a removal: "Yes, remove @x", a plan:
+    // "Yes, auto-accept edits") says the one given; a plain permission says
+    // Allowed or Denied; a compaction ends as its folded line on the desktop
+    // does.
     const said = selfCompactionRequestOf(raised.approval)
       ? compactionCardEnding({ status: approve ? "approved" : "denied", approvalScope: card.answer?.scope === "chat" ? "chat" : "once" }).ended
       : chosen && chosen.label !== ALLOW.label && chosen.label !== DENY.label ? chosen.label : approve ? "Allowed" : "Denied";
-    const { codexDecisionId: _decision, draftOverride: _draft, meter: _meter, keeps: _keeps, chatScopeLabel: _scope, primaryOptionId: _primary, ...shown } = base;
+    const { codexDecisionId: _decision, draftOverride: _draft, meter: _meter, keeps: _keeps, chatScopeLabel: _scope, primaryOptionId: _primary, plan: _plan, ...shown } = base;
     return { ...shown, options: [], status: "answered", waiting: true, outcome: `${said}. ${HUB_CARD_ANSWERED_WAITING}` };
   }
   if (card.cardKind === "choice" && raised.choice && typeof raised.choice === "object") {

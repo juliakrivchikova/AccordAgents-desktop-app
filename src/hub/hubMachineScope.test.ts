@@ -169,6 +169,10 @@ test("an approved addition adds the member the User saw: its name, role, place, 
   assert.equal(add({ ...added, permissions: { workspaceWrite: true } }), false, "a right it was not given");
   assert.equal(add({ ...added, permissions: { requestParticipants: "allow" } }), false, "leave to ask it was not given");
   assert.equal(add({ ...added, permissions: { repoRead: false } }), true, "less is fine");
+  // In its CLI's own mode (a chat with a main session adds every member so):
+  // it asks about what it was not given, not a right beyond it.
+  assert.equal(add({ ...added, permissions: { requestParticipants: "ask", cliApprovals: true } }), true, "in its CLI's own mode");
+  assert.equal(add({ ...added, permissions: { requestParticipants: "ask", cliApprovals: true, workspaceWrite: true } }), false, "and nothing more");
   assert.equal(add(added, [approved("p-desk", "app_participants_request_change", request)]), false, "approved for a member elsewhere");
   assert.equal(add(added, [approved("p-box", "app_participants_request_change", request, { approve: false })]), false, "denied");
   // As she edited it before approving.
@@ -518,7 +522,8 @@ test("in a chat with a main session only the User and the main session start an 
   const fromMember = { id: "m-acc", role: "participant", participantId: "p-helper", content: "/accord @desk please run it", createdAt: "t" };
   let scoped = scopeMachineConversationUpdate(mainSessionChatWith([deskR, mainOnMachine, helperOnMachine], [fromMember]), { metadata: { participants: [leave, mainOnMachine, helperOnMachine] } }, "machine-1", { rules: mainRules });
   assert.deepEqual(members(scoped).get("p-desk"), deskR, "another member's /accord gives no leave");
-  const fromMain = { ...fromMember, participantId: "p-main" };
+  // The main session's Accord launch (app_chat_start_accord).
+  const fromMain = { ...fromMember, participantId: "p-main", metadata: { accordLaunchByMainSession: true } };
   scoped = scopeMachineConversationUpdate(mainSessionChatWith([deskR, mainOnMachine, helperOnMachine], [fromMain]), { metadata: { participants: [leave, mainOnMachine, helperOnMachine] } }, "machine-1", { rules: mainRules });
   assert.equal((members(scoped).get("p-desk")?.permissions as Record<string, unknown>).requestParticipants, "allow");
   const fromUser = { id: "m-user", role: "user", content: "@desk /accord with @helper", createdAt: "t" };
@@ -738,7 +743,9 @@ test("the main session's `/accord` gives its facilitator no more leave to ask th
   const asking = { ...mainOnMachine, permissions: { ...mainOnMachine.permissions, requestParticipants: "ask" } };
   const denied = { ...deskR, permissions: { requestParticipants: "deny" } };
   const helperOnMachine = { ...boxR, id: "p-helper", handle: "helper", permissions: { requestParticipants: "deny" } };
-  const fromMain = { id: "m-acc", role: "participant", participantId: "p-main", content: "/accord @desk please run it with @helper", createdAt: "t" };
+  // Its Accord launch (app_chat_start_accord), as the app writes it.
+  const fromMain = { id: "m-acc", role: "participant", participantId: "p-main", content: "/accord @desk please run it with @helper", createdAt: "t",
+    metadata: { accordLaunchByMainSession: true } };
   const chat = mainSessionChatWith([denied, asking, helperOnMachine], [fromMain]);
   // A facilitator elsewhere: "ask", never "allow".
   let scoped = scopeMachineConversationUpdate(chat, { metadata: { participants: [{ ...denied, permissions: { requestParticipants: "allow" } }, asking, helperOnMachine] } }, "machine-1", { rules: mainRules });
@@ -755,6 +762,23 @@ test("the main session's `/accord` gives its facilitator no more leave to ask th
   assert.equal((members(scoped).get("p-desk")?.permissions as Record<string, unknown>).requestParticipants, "allow");
 });
 
+test("in the sessions view the main session's reply naming a facilitator with `/accord` gives no leave; its Accord launch does; the classic view as before", () => {
+  const denied = { ...deskR, permissions: { requestParticipants: "deny" } };
+  const raised = { metadata: { participants: [{ ...denied, permissions: { requestParticipants: "allow" } }, mainOnMachine] } };
+  const leaveOf = (chat: Conversation) =>
+    (members(scopeMachineConversationUpdate(chat, raised, "machine-1", { rules: mainRules })).get("p-desk")?.permissions as Record<string, unknown>).requestParticipants;
+  const replyText = { id: "m-acc", role: "participant", participantId: "p-main", content: "@desk /accord on the rollout plan", createdAt: "t" };
+  assert.equal(leaveOf(mainSessionChatWith([denied, mainOnMachine], [replyText])), "deny", "a mention in its reply starts nobody in the sessions view");
+  const sessions = mainSessionChatWith([denied, mainOnMachine], [replyText]);
+  sessions.metadata.chatView = "sessions";
+  assert.equal(leaveOf(sessions), "deny");
+  const launch = { ...replyText, metadata: { accordLaunchByMainSession: true } };
+  assert.equal(leaveOf(mainSessionChatWith([denied, mainOnMachine], [launch])), "allow", "its app_chat_start_accord launch gives the leave");
+  const classic = mainSessionChatWith([denied, mainOnMachine], [replyText]);
+  classic.metadata.chatView = "classic";
+  assert.equal(leaveOf(classic), "allow", "the classic view reads the reply as before");
+});
+
 test("a member the main session made asks others no more freely than the main session can now", () => {
   const lowered = { ...mainOnMachine, permissions: { ...mainOnMachine.permissions, requestParticipants: "ask" } };
   const child = { ...boxR, id: "p-child", handle: "child", delegatedByParticipantId: "p-main", permissions: { requestParticipants: "allow" } };
@@ -765,4 +789,68 @@ test("a member the main session made asks others no more freely than the main se
   // One the User added herself keeps its own leave.
   const own = { ...child, delegatedByParticipantId: undefined };
   assert.equal(machineMayAsk(mainSessionChatWith([deskR, lowered, own], [message]), "machine-1", message, "p-desk", [], hashOf("")), true);
+});
+
+test("only the member's latest answered plan card gives its mode: an older Yes cannot raise a mode after a later answer", () => {
+  const planned = { ...mainOnMachine, agentMode: "plan", permissions: { ...mainOnMachine.permissions, workspaceWrite: false, cliApprovals: true } };
+  const chat = mainSessionChatWith([deskR, planned]);
+  const acceptEdits = { ...planned, agentMode: "default", permissions: { ...planned.permissions, workspaceWrite: true } };
+  const card = (answer: Record<string, unknown>, answeredAt: string) => ({ ...approved("p-main", "app_tool_permission",
+    { kind: "toolPermission", agentMode: "plan", toolName: "ExitPlanMode", planApproval: { plan: "# Plan" } }, answer), answeredAt });
+  const oldYes = card({ approve: true, planDecision: { optionId: "yes-accept-edits-keep-context" } }, "2026-11-22T10:00:00.000Z");
+  const laterNo = card({ approve: false, planDecision: { optionId: "no" } }, "2026-11-22T10:05:00.000Z");
+  const laterYes = card({ approve: true, planDecision: { optionId: "yes-default-keep-context" } }, "2026-11-22T10:05:00.000Z");
+  const write = (approvals: HubCard[], used: string[] = []) => members(scopeMachineConversationUpdate(chat, { metadata: { participants: [deskR, acceptEdits] } }, "machine-1",
+    { rules: mainRules, approvals: approvals.map((item) => keptApproval(item)!), used: new Set(used) })).get("p-main");
+  assert.equal(write([oldYes])?.agentMode, "default", "her latest answer: Accept edits");
+  assert.equal(write([oldYes, laterNo])?.agentMode, "plan", "a later No, keep planning: the older Yes gives nothing");
+  assert.equal(write([oldYes, laterYes], [approvalGrantKey(laterYes.answerOpId!)])?.agentMode, "plan", "a later Yes already used: the older one gives nothing either");
+});
+
+test("a plan she approved lets the machine's member follow its CLI into the mode she picked, once; nothing more", () => {
+  // Claude Code in its own Plan mode on the machine (the sessions view).
+  const planned = { ...mainOnMachine, agentMode: "plan", permissions: { ...mainOnMachine.permissions, workspaceWrite: false, cliApprovals: true } };
+  const chat = mainSessionChatWith([deskR, planned]);
+  const acceptEdits = { ...planned, agentMode: "default", permissions: { ...planned.permissions, workspaceWrite: true } };
+  const plan = (optionId: string, planApproval: Record<string, unknown> = {}) => approved("p-main", "app_tool_permission",
+    { kind: "toolPermission", agentMode: "plan", toolName: "ExitPlanMode", planApproval: { plan: "# Plan", ...planApproval } }, { approve: true, planDecision: { optionId } });
+
+  // Without her Yes the write is held back: Plan stays, and so does Manual's file-edit right.
+  let scoped = scopeMachineConversationUpdate(chat, { metadata: { participants: [deskR, acceptEdits] } }, "machine-1", { rules: mainRules });
+  assert.equal(members(scoped).get("p-main")?.agentMode, "plan");
+  assert.equal((members(scoped).get("p-main")?.permissions as Record<string, unknown>).workspaceWrite, false);
+
+  // "Yes, auto-accept edits": Accept edits, noted so it gives it once.
+  const yes = plan("yes-accept-edits-keep-context");
+  scoped = scopeMachineConversationUpdate(chat, { metadata: { participants: [deskR, acceptEdits] } }, "machine-1", { rules: mainRules, approvals: [keptApproval(yes)!] });
+  assert.equal(members(scoped).get("p-main")?.agentMode, "default");
+  assert.equal((members(scoped).get("p-main")?.permissions as Record<string, unknown>).workspaceWrite, true);
+  assert.ok(scoped.used.includes(approvalGrantKey(yes.answerOpId!)));
+  scoped = scopeMachineConversationUpdate(chat, { metadata: { participants: [deskR, acceptEdits] } }, "machine-1",
+    { rules: mainRules, approvals: [keptApproval(yes)!], used: new Set([approvalGrantKey(yes.answerOpId!)]) });
+  assert.equal(members(scoped).get("p-main")?.agentMode, "plan", "used: nothing more");
+
+  // "Yes, manually approve edits" gives Manual, not its file-edit right; nor Auto.
+  const manual = plan("yes-default-keep-context");
+  scoped = scopeMachineConversationUpdate(chat, { metadata: { participants: [deskR, acceptEdits] } }, "machine-1", { rules: mainRules, approvals: [keptApproval(manual)!] });
+  assert.equal(members(scoped).get("p-main")?.agentMode, "default");
+  assert.equal((members(scoped).get("p-main")?.permissions as Record<string, unknown>).workspaceWrite, false);
+  scoped = scopeMachineConversationUpdate(chat, { metadata: { participants: [deskR, { ...planned, agentMode: "auto" }] } }, "machine-1", { rules: mainRules, approvals: [keptApproval(manual)!] });
+  assert.equal(members(scoped).get("p-main")?.agentMode, "plan");
+
+  // Auto only where the card offered it; a row it did not offer gives nothing.
+  scoped = scopeMachineConversationUpdate(chat, { metadata: { participants: [deskR, { ...planned, agentMode: "auto" }] } }, "machine-1",
+    { rules: mainRules, approvals: [keptApproval(plan("yes-resume-auto-mode", { autoModeAvailable: true }))!] });
+  assert.equal(members(scoped).get("p-main")?.agentMode, "auto");
+  scoped = scopeMachineConversationUpdate(chat, { metadata: { participants: [deskR, { ...planned, agentMode: "auto" }] } }, "machine-1",
+    { rules: mainRules, approvals: [keptApproval(plan("yes-resume-auto-mode"))!] });
+  assert.equal(members(scoped).get("p-main")?.agentMode, "plan");
+
+  // "No, keep planning" gives nothing; what is kept of a Yes holds no plan.
+  const no = approved("p-main", "app_tool_permission", { kind: "toolPermission", toolName: "ExitPlanMode", planApproval: { plan: "x" } },
+    { approve: false, planDecision: { optionId: "no", feedback: "smaller" } });
+  scoped = scopeMachineConversationUpdate(chat, { metadata: { participants: [deskR, acceptEdits] } }, "machine-1", { rules: mainRules, approvals: [keptApproval(no)!] });
+  assert.equal(members(scoped).get("p-main")?.agentMode, "plan");
+  const slim = keptApproval(yes)!;
+  assert.deepEqual((slim.card as { approval: { request: unknown } }).approval.request, { kind: "toolPermission", toolName: "ExitPlanMode", planApproval: {} });
 });

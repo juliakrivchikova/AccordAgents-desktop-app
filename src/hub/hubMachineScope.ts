@@ -65,10 +65,12 @@ import {
   APP_PARTICIPANTS_REQUEST_CHANGE_TOOL,
   APP_CHAT_REQUEST_COMPACTION_TOOL,
   APP_PERMISSIONS_REQUEST_CHANGE_TOOL,
-  APP_ROSTER_REQUEST_CHANGE_TOOL
+  APP_ROSTER_REQUEST_CHANGE_TOOL,
+  APP_TOOL_PERMISSION_TOOL
 } from "../shared/appMcpToolContracts";
+import { claudePlanApprovalOption, claudePlanModeSettings, isClaudePlanApprovalRequest } from "../shared/claudePlanApproval";
 import type { HubCard, HubUserApproval } from "../shared/hubOps";
-import { mainSessionParticipantId } from "../shared/mainSession";
+import { chatViewFor, mainSessionParticipantId } from "../shared/mainSession";
 import type { HubMemberRules } from "../shared/hubProtocol";
 import type {
   ChatAgentMode,
@@ -211,6 +213,7 @@ interface Leave {
 function accordNaming(conversation: Conversation, member: ChatParticipant, used: ReadonlySet<string>): Leave | undefined {
   const mainSessionId = mainSessionParticipantId(conversation.metadata);
   const mainSession = mainSessionId ? participantsOf(conversation.metadata?.participants).find((item) => item.id === mainSessionId) : undefined;
+  const sessionsView = chatViewFor(conversation.metadata) === "sessions";
   let best: Leave | undefined;
   for (const message of conversation.messages) {
     if (message.role !== "user" && message.role !== "participant") continue;
@@ -224,6 +227,10 @@ function accordNaming(conversation: Conversation, member: ChatParticipant, used:
     if (!accord || !names(message, member)) continue;
     const byMainSession = message.role === "participant" && Boolean(mainSessionId) && message.participantId === mainSessionId;
     if (byMainSession && !mainSession) continue;
+    // In the sessions view a mention in a reply starts nobody: the main
+    // session names a facilitator only by starting an Accord with the app
+    // tool (its launch message), as the app gives that leave.
+    if (byMainSession && sessionsView && message.metadata?.accordLaunchByMainSession !== true) continue;
     const cap: ChatParticipantRequestPermission = byMainSession ? requestRight(mainSession!) : "allow";
     if (!best || rank(cap) > rank(best.cap)) best = { cap, key: accordGrantKey(message.id, member.id) };
   }
@@ -414,21 +421,65 @@ function keepAntigravityMode(next: ChatParticipant, current: ChatParticipant): C
   return { ...next, permissions: { ...permissionsOf(next), cliApprovals: true } as unknown as ChatParticipant["permissions"] };
 }
 
+/** Claude Code's plan approvals she answered Yes on this member's cards:
+ *  the CLI then moves the member into the mode she picked itself, and the
+ *  app's mode follows it (the User, 2026-11-22). Each lets that mode be
+ *  written once, and only the member's latest answered plan card counts
+ *  (latestPlanAnswersOnly): an older one cannot raise a mode she lowered. */
+function planModeGrants(approved: Approved[], member: ChatParticipant): Array<{ key: string; agentMode: ChatAgentMode; workspaceWrite?: boolean }> {
+  return approved.flatMap((item) => {
+    if (item.card.participantId !== member.id || item.approval.toolName !== APP_TOOL_PERMISSION_TOOL || !isClaudePlanApprovalRequest(item.approval.request)) return [];
+    const decision = (item.card.answer as { planDecision?: { optionId?: unknown } } | undefined)?.planDecision;
+    const option = claudePlanApprovalOption(item.approval.request.planApproval, typeof decision?.optionId === "string" ? decision.optionId : undefined);
+    return option?.mode ? [{ key: item.key, ...claudePlanModeSettings(option.mode) }] : [];
+  });
+}
+
+/** Approvals with only each member's latest answered plan card among its
+ *  plan approvals: the latest of all she answered (a "No, keep planning",
+ *  one already used, any), so an older Yes never gives its mode again. */
+function latestPlanAnswersOnly(approved: Approved[], approvals: HubUserApproval[] | undefined): Approved[] {
+  const isPlan = (approval: ChatAppToolApproval | undefined): boolean =>
+    Boolean(approval && approval.toolName === APP_TOOL_PERMISSION_TOOL && isClaudePlanApprovalRequest(approval.request));
+  const latest = new Map<string, { at: string; answerOpId: string }>();
+  for (const card of approvals ?? []) {
+    if (card.superseded || !card.answerOpId || !card.participantId) continue;
+    if (!isPlan((card.card as { approval?: ChatAppToolApproval } | undefined)?.approval)) continue;
+    const at = card.answeredAt ?? card.raisedAt;
+    const seen = latest.get(card.participantId);
+    if (!seen || at > seen.at) latest.set(card.participantId, { at, answerOpId: card.answerOpId });
+  }
+  return approved.filter((item) => !isPlan(item.approval) || latest.get(item.card.participantId ?? "")?.answerOpId === item.card.answerOpId);
+}
+
 function keepGrantedRights(next: ChatParticipant, current: ChatParticipant, approved: Approved[], noted: Set<string>): ChatParticipant {
   let kept = next;
-  if (MODE_RANK[normalizeChatAgentMode(next.agentMode)] > MODE_RANK[normalizeChatAgentMode(current.agentMode)]) {
+  const had = normalizeChatAgentPermissions(current.permissions);
+  const wanted = normalizeChatAgentPermissions(next.permissions);
+  const wantedMode = normalizeChatAgentMode(next.agentMode);
+  const raisesMode = MODE_RANK[wantedMode] > MODE_RANK[normalizeChatAgentMode(current.agentMode)];
+  const raisesEdits = wanted.workspaceWrite && !had.workspaceWrite;
+  // A plan she approved: the mode she picked (Accept edits with its
+  // file-edit right), the one that covers this write best.
+  const plans = raisesMode || raisesEdits ? planModeGrants(approved, current) : [];
+  const covers = (grant: { agentMode: ChatAgentMode; workspaceWrite?: boolean }): boolean =>
+    (!raisesMode || MODE_RANK[grant.agentMode] >= MODE_RANK[wantedMode]) && (!raisesEdits || grant.workspaceWrite === true);
+  const plan = plans.find(covers) ?? plans.find((grant) => raisesMode && MODE_RANK[grant.agentMode] >= MODE_RANK[wantedMode]);
+  const planMode = Boolean(plan && raisesMode && MODE_RANK[plan.agentMode] >= MODE_RANK[wantedMode]);
+  const planEdits = Boolean(plan && raisesEdits && plan.workspaceWrite === true);
+  if (plan && (planMode || planEdits)) noted.add(plan.key);
+  if (raisesMode && !planMode) {
     const { agentMode: _mode, ...rest } = kept;
     kept = current.agentMode === undefined ? rest : { ...rest, agentMode: current.agentMode };
   }
-  const had = normalizeChatAgentPermissions(current.permissions);
-  const wanted = normalizeChatAgentPermissions(next.permissions);
-  if (!rightsBeyond(wanted, had)) return kept;
+  const base = planEdits ? { ...had, workspaceWrite: true } : had;
+  if (!rightsBeyond(wanted, base)) return kept;
   // Her "for the chat" answers on its own cards: a permission card grants
   // what it asked; a compaction card ("Don't ask again in this chat") lets
   // it compact without asking, and nothing else.
   const grants = approved.filter((item) => item.scope === "chat" && item.card.participantId === current.id &&
     (item.approval.toolName === APP_PERMISSIONS_REQUEST_CHANGE_TOOL || item.approval.toolName === APP_CHAT_REQUEST_COMPACTION_TOOL));
-  let ceiling = had;
+  let ceiling = base;
   for (const grant of grants) {
     const raised = grant.approval.toolName === APP_CHAT_REQUEST_COMPACTION_TOOL
       ? { ...ceiling, requestCompaction: "allow" as const }
@@ -629,7 +680,14 @@ function isApprovedMember(member: ChatParticipant, approved: ApprovedMember, rul
   // A mode that skips asking (Auto, Codex's Full Access) only as far as she approved.
   const memberMode = normalizeChatAgentMode(member.agentMode);
   if ((memberMode === "auto" || memberMode === "full-access") && !chatAgentModeWithin(memberMode, approved.agentMode)) return false;
-  if (!permissionsWithin(normalizeChatAgentPermissions(member.permissions), approved.permissions)) return false;
+  // Added in its CLI's own mode (a chat with a main session: ChatService
+  // inCliOwnModeInMainSessionChat), it asks about what it was not granted
+  // instead of being refused it: not a right beyond what she approved.
+  const { cliApprovals: _ownMode, codexPlanMode: _plan, ...rights } = normalizeChatAgentPermissions(member.permissions);
+  const memberRights = normalizeChatAgentPermissions(member.permissions).cliApprovals && !normalizeChatAgentPermissions(approved.permissions).cliApprovals
+    ? rights as ChatAgentPermissions
+    : normalizeChatAgentPermissions(member.permissions);
+  if (!permissionsWithin(memberRights, approved.permissions)) return false;
   // Managing members as its role gives it now, never beyond what she saw.
   const actual = Math.max(rank(manageRight(rules?.roles[member.roleConfigId], member.permissions).effective),
     rank(manageRight(approved.role, member.permissions).effective));
@@ -792,7 +850,7 @@ export function scopeMachineConversationUpdate(conversation: Conversation, updat
   const changes: MemberChanges = {
     // As the server has it: a raise in this same write does not count.
     mainSession: mainSessionId ? beforeById.get(mainSessionId) : undefined,
-    machineMembers: ownBefore, policies: beforePolicies, approved: approvedRequests(context.approvals, used), rules: context.rules,
+    machineMembers: ownBefore, policies: beforePolicies, approved: latestPlanAnswersOnly(approvedRequests(context.approvals, used), context.approvals), rules: context.rules,
     claimed: new Set(), noted: new Set()
   };
   let members = before;
@@ -969,6 +1027,18 @@ export function keptApproval(card: HubCard): HubCard | undefined {
   const approval = (card.card as { approval?: ChatAppToolApproval } | undefined)?.approval;
   if (!approval || typeof approval !== "object") return undefined;
   if (approval.toolName === APP_CHAT_REQUEST_PARTICIPANTS_TOOL || memberChangeTool(approval.toolName)) return card;
+  // A plan she approved: which rows it offered and the one she picked, so
+  // the machine may write the mode the CLI then moved to, once (the plan
+  // itself is not needed).
+  if (approval.toolName === APP_TOOL_PERMISSION_TOOL && isClaudePlanApprovalRequest(approval.request)) {
+    const { plan: _plan, ...asked } = approval.request.planApproval;
+    const { draftOverride: _override, ...planAnswer } = (card.answer ?? {}) as Record<string, unknown>;
+    return {
+      ...card,
+      answer: planAnswer,
+      card: { approval: { ...approval, request: { kind: "toolPermission", toolName: approval.request.toolName, planApproval: asked } } }
+    };
+  }
   if ((card.answer as { scope?: unknown } | undefined)?.scope !== "chat") return undefined;
   // A right she granted for the chat: what it grants, so the machine may
   // write it into its member's rights once (keepRights).

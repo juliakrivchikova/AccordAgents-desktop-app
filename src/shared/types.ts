@@ -598,10 +598,10 @@ export interface AppSettings {
   chatParticipantConfigs: ChatParticipantConfig[];
   chatCustomAvatars: CustomAvatarSummary[];
   chatParticipantSeedState?: ChatParticipantSeedState;
+  /** The CLI a new chat runs on (Settings → General → New chats). */
   assistantProviderKind?: ChatProviderKind;
-  /** The view a new chat opens in (Settings → General); the chat's own
-   *  switch changes it afterwards. Unset means "sessions". */
-  defaultChatView?: ChatViewMode;
+  /** How a new chat starts besides its CLI (src/shared/newChatDefaults.ts). */
+  newChatDefaults?: NewChatDefaults;
   lastSuccessfulChatProviderKind?: ChatProviderKind;
   lastRepoPath?: string;
   repoFileOpenAction?: RepoFileOpenAction;
@@ -661,6 +661,36 @@ export interface ChatBehaviorRuleSnapshot {
 }
 
 export type ChatProviderKind = Extract<ProviderKind, "codex-cli" | "claude-code" | "gemini-cli">;
+
+export interface NewChatDefaults {
+  /** The CLI the model, effort and mode were chosen for: they apply only
+   *  while a new chat runs on that CLI's own sign-in. */
+  kind?: ChatProviderKind;
+  /** None: the model the CLI runs by default. */
+  model?: string;
+  /** None: the CLI's own effort. */
+  reasoningEffort?: ChatReasoningEffort;
+  /** The CLI's mode by its own id (chatAccessModes.ts); none: the mode the
+   *  User's own config starts the CLI in where it runs. */
+  access?: string;
+  /** The machine a new chat runs on; none: this computer. */
+  homeMachineId?: string;
+  /** Compaction without a card (the agent's own request to compact its
+   *  context). Off: it asks first. */
+  compactWithoutAsking: boolean;
+}
+
+/** A change from Settings: a value, `null` to go back to the CLI's own, or
+ *  absent to keep it. Model, effort and mode name the CLI (`kind`) they are
+ *  for. */
+export interface NewChatDefaultsUpdate {
+  kind?: ChatProviderKind;
+  model?: string | null;
+  reasoningEffort?: ChatReasoningEffort | null;
+  access?: string | null;
+  homeMachineId?: string | null;
+  compactWithoutAsking?: boolean;
+}
 
 /** How a chat with a main session is shown (shared/mainSession.ts): "classic"
  *  is the timeline with avatars where every member's reply is on it;
@@ -1361,6 +1391,31 @@ export interface ChatToolPermissionRequest {
    *  again" (src/shared/toolPermissionScope.ts): set when the card is
    *  raised. A scoped tool's card without one offers no "for this chat". */
   chatScope?: ChatToolPermissionScope;
+  /** Claude Code's ExitPlanMode: its own plan approval ("Ready to code?",
+   *  src/shared/claudePlanApproval.ts) instead of a tool permission card. */
+  planApproval?: ChatClaudePlanApproval;
+}
+
+/** What Claude Code's plan approval shows and offers. Only a pending card
+ *  holds the plan: it is dropped once the User answered. */
+export interface ChatClaudePlanApproval {
+  /** The plan as Claude wrote it (empty: the CLI's "No plan found"). */
+  plan?: string;
+  planFilePath?: string;
+  /** The account has Claude Code's auto mode, as far as the app knows it
+   *  (the member's CLI ran in auto): "Yes, and use auto mode" in place of
+   *  "Yes, auto-accept edits", as the CLI offers. */
+  autoModeAvailable?: boolean;
+  /** Too large to show (over the CLI's 200,000 characters): only "No, keep
+   *  planning" is offered, as in the CLI. */
+  withheld?: boolean;
+}
+
+/** The User's pick on Claude Code's plan approval: the CLI's own value for
+ *  the row, and her words for "No, keep planning". */
+export interface ChatClaudePlanDecision {
+  optionId: string;
+  feedback?: string;
 }
 
 /** A member asks the User to sign in to (or reconnect) an MCP server its task
@@ -1384,6 +1439,9 @@ export interface ChatConnectorSignInRequest {
 export interface ChatParticipantRequestInput {
   target: string;
   prompt: string;
+  /** Its short title, set by the app only: an inferred request's is the
+   *  reply's sentence that mentions the member (sessionsMentionSentenceTitle). */
+  title?: string;
   reason?: string;
 }
 
@@ -1682,6 +1740,8 @@ export interface ChatAppToolApproval {
   /** Answers its device could not apply (the last few), by the operation
    *  each was sent under: the card is asked again and says why. */
   cardRefusals?: ChatCardRefusal[];
+  /** Claude Code's plan approval, answered: the row she picked. */
+  planDecision?: ChatClaudePlanDecision;
 }
 
 export interface ChatAppToolApprovalPolicy {
@@ -2355,6 +2415,8 @@ export interface RespondToChatAppToolApprovalRequest {
   scope?: ChatAppToolApprovalScope;
   draftOverride?: ChatAppToolApprovalRequest;
   codexDecisionId?: string;
+  /** Claude Code's plan approval: the row she picked and her words. */
+  planDecision?: ChatClaudePlanDecision;
 }
 
 export interface ProviderSettingsUpdate {
@@ -2863,6 +2925,11 @@ export type ConversationMetadata = Record<string, unknown> & {
   /** The chat's view, switched by the User any number of times and shared
    *  through her server like the pin. Read it through chatViewFor(). */
   chatView?: ChatViewMode;
+  /** When the computer moved this sessions-view chat's members with rights
+   *  from the classic view into their CLI's own mode as it opened the chat
+   *  (ChatService.convertMembersForSessionsView), so that is done once and a
+   *  later change is not undone. Shared through her server. */
+  cliModesConvertedAt?: string;
   /** This device's own record of the Accords folded into the chat (a line
    *  her server took), worked out from the whole chat, not the loaded page:
    *  their cards are not pinned (accordProgress.ts). Never shared. */
@@ -3616,7 +3683,7 @@ export interface AppBridge {
   deleteCliProviderHost(id: string): Promise<AppSettings>;
   getSettings(): Promise<AppSettings>;
   setAssistantProviderKind(kind: ChatProviderKind): Promise<AppSettings>;
-  setDefaultChatView(view: ChatViewMode): Promise<AppSettings>;
+  setNewChatDefaults(update: NewChatDefaultsUpdate): Promise<AppSettings>;
   updateProviderSettings(update: ProviderSettingsUpdate): Promise<AppSettings>;
   saveChatRoleConfig(update: ChatRoleConfigUpdate): Promise<AppSettings>;
   archiveChatRoleConfig(id: string): Promise<AppSettings>;

@@ -21,6 +21,7 @@ import type {
   ChatAppToolApprovalRequest,
   ChatAppToolApprovalScope,
   ChatCardRefusal,
+  ChatClaudePlanDecision,
   ChatMessage,
   ChatPendingChoice,
   ChatPendingMention,
@@ -67,6 +68,9 @@ export interface HubApprovalCardAnswer {
   scope?: ChatAppToolApprovalScope;
   codexDecisionId?: string;
   draftOverride?: ChatAppToolApprovalRequest;
+  /** Claude Code's plan approval: the row she picked (the CLI's own value)
+   *  and her words for "No, keep planning". */
+  planDecision?: ChatClaudePlanDecision;
   auto?: boolean;
 }
 
@@ -261,7 +265,14 @@ export function isHubApprovalCardAnswer(value: unknown): value is HubApprovalCar
   const answer = value as Partial<HubApprovalCardAnswer> | undefined;
   return Boolean(answer) && typeof answer!.approve === "boolean" &&
     (answer!.scope === undefined || answer!.scope === "once" || answer!.scope === "chat") &&
-    (answer!.codexDecisionId === undefined || typeof answer!.codexDecisionId === "string");
+    (answer!.codexDecisionId === undefined || typeof answer!.codexDecisionId === "string") &&
+    (answer!.planDecision === undefined || isClaudePlanDecision(answer!.planDecision));
+}
+
+function isClaudePlanDecision(value: unknown): value is ChatClaudePlanDecision {
+  const decision = value as Partial<ChatClaudePlanDecision> | undefined;
+  return Boolean(decision) && typeof decision === "object" && typeof decision!.optionId === "string" &&
+    (decision!.feedback === undefined || typeof decision!.feedback === "string");
 }
 
 export function isHubMentionCardAnswer(value: unknown): value is HubMentionCardAnswer {
