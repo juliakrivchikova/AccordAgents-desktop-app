@@ -191,24 +191,6 @@
   background: var(--ui-bg);
 }
 
-.chat-card-field textarea {
-  min-height: 20px;
-  max-height: 240px;
-  padding: 2px 0;
-  border: 0;
-  border-radius: 0;
-  background: transparent;
-  color: var(--ui-text);
-  font-size: 13px;
-  line-height: 20px;
-  resize: none;
-  box-shadow: none;
-}
-
-.chat-card-field textarea:focus-visible {
-  box-shadow: none;
-}
-
 .chat-card-field-actions,
 .chat-choice-actions {
   display: flex;

@@ -25,6 +25,7 @@ export const ChatWaitingMessageActions = ({ runId, behindRunId, onStopRun }: Cha
         <Button
           variant="ghost"
           size="xs"
+          className="text-ui-text-2"
           disabled={Boolean(pressed)}
           data-testid="chat-waiting-send-now"
           onClick={() => {

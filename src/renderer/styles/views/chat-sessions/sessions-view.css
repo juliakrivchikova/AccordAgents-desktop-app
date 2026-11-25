@@ -124,7 +124,6 @@
   display: flex;
   order: 2;
   align-items: center;
-  color: var(--ui-text-2);
 }
 
 /* Provider marks at row size */

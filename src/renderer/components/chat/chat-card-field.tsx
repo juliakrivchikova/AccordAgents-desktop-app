@@ -29,6 +29,7 @@ export const ChatCardField = ({ value, onChange, label, placeholder, submitting,
         value={value}
         onChange={(event) => onChange(event.target.value)}
         onKeyDown={sendOnEnter}
+        className="max-h-60 min-h-5 resize-none rounded-none border-0 bg-transparent p-0 leading-5 focus-visible:border-0 focus-visible:ring-0"
         aria-label={label}
         placeholder={placeholder}
         rows={1}
