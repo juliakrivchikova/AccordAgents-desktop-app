@@ -69,7 +69,7 @@ import {
 import {
   newChatMemberPermissions,
   normalizeChatAgentMode,
-  normalizeChatAgentPermissions,
+  chatAgentPermissionsFromAgent,
   normalizeChatParticipantRequestPermission,
   normalizeChatRoleManagementPermission,
   normalizeOptionalChatParticipantRequestPermission
@@ -2533,7 +2533,7 @@ export class SettingsService {
         avatarId: update.avatarId?.trim() || undefined,
         hostId: this.participantHostIdForUpdate(stored, update),
         agentMode: normalizeChatAgentMode(update.agentMode),
-        permissions: normalizeChatAgentPermissions(update.permissions),
+        permissions: chatAgentPermissionsFromAgent(update.permissions),
         remoteExecution: this.normalizeConcreteRemoteExecutionMode(update.remoteExecution),
         skipToolchainPreflight: update.skipToolchainPreflight === true,
         autoWatchEnabled: this.autoWatchEnabledForRole(role, update.autoWatchEnabled),
@@ -2743,7 +2743,7 @@ export class SettingsService {
       avatarId: update.avatarId?.trim() || undefined,
       hostId: this.participantHostIdForUpdate(stored, update),
       agentMode: normalizeChatAgentMode(update.agentMode),
-      permissions: normalizeChatAgentPermissions(update.permissions),
+      permissions: chatAgentPermissionsFromAgent(update.permissions),
       remoteExecution: this.normalizeConcreteRemoteExecutionMode(update.remoteExecution),
       homeMachineId: typeof update.homeMachineId === "string" && update.homeMachineId.trim() ? update.homeMachineId.trim() : undefined,
       cloudRun: cloudRunSelection(update.cloudRun),
@@ -4654,7 +4654,7 @@ export class SettingsService {
         return typeof participant.id === "string" && typeof participant.roleConfigId === "string";
       })
       .map((participant) => {
-        const permissions = normalizeChatAgentPermissions((participant as { permissions?: ChatAgentPermissions }).permissions);
+        const permissions = chatAgentPermissionsFromAgent((participant as { permissions?: ChatAgentPermissions }).permissions);
         return {
           id: participant.id,
           handle: participant.handle.trim().replace(/^@/, ""),

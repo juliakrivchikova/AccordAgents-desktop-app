@@ -1696,14 +1696,14 @@ export const APP_MCP_TOOL_CONTRACTS: readonly AppMcpToolContract[] = [
     capability: "compaction.request",
     desktop: {
       "title": "Request Context Compaction",
-      "description": "Request compaction of your own provider session after the current turn finishes. The app validates permission, active-session status, duplicate requests, and cooldown. Optional instructions may preserve a specific focus during compaction.",
+      "description": "Compact your own context: it runs right after your current reply ends, and then the app calls you again to go on with your work, so nobody has to call you. Good moments: before a new task, before the next stage of a big task, whenever most of your context is no longer needed. End your reply after a queued or pending_user_approval result. The app validates permission, active-session status, duplicate requests, and cooldown. instructions name what the summary must keep.",
       "inputSchema": {
         "type": "object",
         "additionalProperties": false,
         "properties": {
           "instructions": {
             "type": "string",
-            "description": "Optional focus instructions for the compacted context."
+            "description": "What the summary must keep for the work that comes next: the goal and the User's decisions, where things stand, the next step."
           }
         }
       },
@@ -2422,7 +2422,7 @@ export const APP_MCP_TOOL_CONTRACTS: readonly AppMcpToolContract[] = [
     effect: "app-managed",
     desktop: {
       "title": "Request Scheduled Task Change",
-      "description": "Propose a scheduled task (the User's name for it; say scheduled task to the User): a small node or bash script the app runs on a schedule (an interval, or a cron expression in the User's time zone) and that can wake chat members by posting into existing chats through the local script API. Follow the automations skill. Every create/update/delete/enable/disable shows the User an approval card (code, schedule, chats, members, keys); nothing runs until the User approves. Key values (API tokens) are entered by the User on the card and you never see them; name them in secretNames and read them from environment variables. run_now starts an approved, switched-on script once without a card. Returns status pending_user_approval with approvalId and scriptId, or started for run_now.",
+      "description": "Propose a scheduled task (the User's name for it; say scheduled task to the User): a small node or bash script the app runs on a schedule (an interval, or a cron expression in the User's time zone) and that can wake chat members by posting into existing chats through the local script API. Follow the automations skill. Every create/update/delete/enable/disable shows the User an approval card (code, schedule, chats, members, keys) and nothing runs until the User approves, except that a create is added and switched on at once when your access says the User lets you create scheduled tasks without a card and it needs no keys. Key values (API tokens) are entered by the User on the card and you never see them; name them in secretNames and read them from environment variables. run_now starts an approved, switched-on script once without a card. Returns status pending_user_approval with approvalId and scriptId, created for a task created without a card, or started for run_now.",
       "inputSchema": {
         "type": "object",
         "additionalProperties": false,

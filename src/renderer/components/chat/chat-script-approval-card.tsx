@@ -24,8 +24,8 @@ function scriptApprovalTitle(handle: string, request: ChatScriptChangeRequest): 
   }
 }
 
-function scriptApprovedEnding(request: ChatScriptChangeRequest, schedule: string | undefined): string {
-  const done = request.op === "delete" ? "Deleted" : request.op === "disable" ? "Switched off" : request.op === "enable" ? "Switched on" : "Approved";
+function scriptApprovedEnding(request: ChatScriptChangeRequest, schedule: string | undefined, withoutCard: boolean): string {
+  const done = withoutCard ? "Created" : request.op === "delete" ? "Deleted" : request.op === "disable" ? "Switched off" : request.op === "enable" ? "Switched on" : "Approved";
   return schedule ? `${done} · ${schedule}` : done;
 }
 
@@ -134,7 +134,8 @@ export function ChatScriptApprovalCard(props: {
   });
   const title = appText(scriptApprovalTitle(approval.requesterHandle, request));
 
-  const queuedDecision = approval.machineDecisionPending;
+  // A task created without a card has nothing to wait for.
+  const queuedDecision = approval.status === "auto-applied" ? undefined : approval.machineDecisionPending;
   if (queuedDecision) {
     return (
       <section className="chat-app-tool-approval-card is-compact-result" aria-label={title}
@@ -150,11 +151,14 @@ export function ChatScriptApprovalCard(props: {
 
   // Used: one line, like a folded urgent alert (the User, 2026-11-18).
   if (!pending) {
-    // Approved, it ends as the button she pressed says; a task that will run
-    // ends with its schedule, not a second time.
-    const runs = approval.status === "approved" && request.op !== "delete" && request.op !== "disable";
+    // Approved, it ends as the button she pressed says (created without a
+    // card: that it was); a task that will run ends with its schedule, not a
+    // second time.
+    const withoutCard = approval.status === "auto-applied";
+    const applied = approval.status === "approved" || withoutCard;
+    const runs = applied && request.op !== "delete" && request.op !== "disable";
     const schedule = runs && request.scheduleText ? request.scheduleText : undefined;
-    const ended = approval.status === "approved" ? scriptApprovedEnding(request, schedule)
+    const ended = applied ? scriptApprovedEnding(request, schedule, withoutCard)
       : approval.status === "denied" ? "Declined" : approval.status === "cancelled" ? "Cancelled" : "Expired";
     return (
       <ChatUsedApprovalLine approval={approval} kind="Scheduled task" icon={CalendarDotsIcon} preview={request.name} ended={ended}

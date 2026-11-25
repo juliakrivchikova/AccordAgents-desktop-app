@@ -2,7 +2,8 @@
 // general-new-chats): how a new chat starts. Its CLI (the setting the Chat
 // Assistant used, AppSettings.assistantProviderKind), that CLI's model,
 // effort and permission mode in its own terms, where it runs, and whether it
-// compacts its context without asking (src/shared/newChatDefaults.ts). The
+// compacts its context and creates scheduled tasks without asking
+// (src/shared/newChatDefaults.ts). The
 // New chat screen's controls start from these; a choice there is that
 // chat's only. The words name no main session (src/shared/sessionsViewText.ts).
 import { Fragment, useState, type ReactNode } from "react";
@@ -45,7 +46,10 @@ const CLI_OWN = "__cli-own__";
 const THIS_COMPUTER = "__this-computer__";
 
 export const COMPACT_WITHOUT_ASKING_DESCRIPTION =
-  "When the context window fills up, the agent summarizes the older part of the conversation to free space, like /compact in Claude Code. Off: it asks you first.";
+  "The agent summarizes the older part of the conversation when the work ahead no longer needs it, for example before a new task or the next stage of a big one, like /compact in Claude Code, and goes on by itself. Off: it asks you first.";
+
+export const SCHEDULE_WITHOUT_ASKING_DESCRIPTION =
+  "The agent creates scheduled tasks on its own; their code runs with your permissions. Off: it asks you first. A task that needs keys and any change to a task still ask.";
 
 export function providerDisplayLabel(provider: Pick<ProviderSettings, "kind" | "label">): string {
   return isChatProviderKind(provider.kind) ? cliProviderMetadata(provider.kind).label : provider.label;
@@ -127,6 +131,8 @@ export function NewChatDefaultsRows(props: {
         <Row title="Provider" description="The CLI a new chat runs on.">{providerSelect}</Row>
         <div className="gen-card-divider" />
         <CompactRow defaults={defaults} setNewChatDefaults={props.setNewChatDefaults} />
+        <div className="gen-card-divider" />
+        <ScheduleRow defaults={defaults} setNewChatDefaults={props.setNewChatDefaults} />
       </Fragment>
     );
   }
@@ -248,6 +254,8 @@ export function NewChatDefaultsRows(props: {
       </Row>
       <div className="gen-card-divider" />
       <CompactRow defaults={defaults} setNewChatDefaults={props.setNewChatDefaults} />
+      <div className="gen-card-divider" />
+      <ScheduleRow defaults={defaults} setNewChatDefaults={props.setNewChatDefaults} />
       <FullAccessConfirmDialog
         option={confirming}
         onCancel={() => setConfirming(undefined)}
@@ -271,6 +279,23 @@ function CompactRow(props: { defaults: NewChatDefaults; setNewChatDefaults: (upd
           data-testid="new-chat-compact-toggle"
           checked={props.defaults.compactWithoutAsking}
           onChange={(event) => void props.setNewChatDefaults({ compactWithoutAsking: event.target.checked })}
+        />
+        <span />
+      </label>
+    </Row>
+  );
+}
+
+function ScheduleRow(props: { defaults: NewChatDefaults; setNewChatDefaults: (update: NewChatDefaultsUpdate) => Promise<void> }): JSX.Element {
+  return (
+    <Row title="Create scheduled tasks without asking" description={SCHEDULE_WITHOUT_ASKING_DESCRIPTION}>
+      <label className="toggle">
+        <input
+          type="checkbox"
+          aria-label="Create scheduled tasks without asking"
+          data-testid="new-chat-schedule-toggle"
+          checked={props.defaults.scheduleWithoutAsking === true}
+          onChange={(event) => void props.setNewChatDefaults({ scheduleWithoutAsking: event.target.checked })}
         />
         <span />
       </label>

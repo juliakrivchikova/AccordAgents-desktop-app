@@ -622,6 +622,33 @@ test("a compaction allowed for the chat on its card lets the machine raise its m
   assert.notEqual((members(scoped).get("p-box")?.permissions as Record<string, unknown>).webAccess, true);
 });
 
+// Creating scheduled tasks without a card is hers to give in Settings
+// (2026-11-25): a machine neither raises it nor adds a member with it.
+test("a machine never gives its members leave to create scheduled tasks without a card", () => {
+  const rightOf = (scoped: ReturnType<typeof scopeMachineConversationUpdate>, id: string) =>
+    (members(scoped).get(id)?.permissions as Record<string, unknown> | undefined)?.scheduleWithoutAsking;
+  const raised = { ...boxR, permissions: { ...boxR.permissions, scheduleWithoutAsking: true } };
+  const always = approved("p-box", "app_chat_request_compaction", { type: "self_compaction" }, { approve: true, scope: "chat" });
+  let scoped = scopeMachineConversationUpdate(chatWith([deskR, boxR]), { metadata: { participants: [deskR, raised] } }, "machine-1", { rules, approvals: [always] });
+  assert.equal(rightOf(scoped, "p-box"), undefined);
+  assert.ok(scoped.refused.includes("participants.p-box.rights"));
+  // The one she gave stays, and may be given up.
+  scoped = scopeMachineConversationUpdate(chatWith([deskR, raised]), { metadata: { participants: [deskR, { ...raised, label: "Box 2" }] } }, "machine-1", { rules });
+  assert.equal(rightOf(scoped, "p-box"), true);
+  scoped = scopeMachineConversationUpdate(chatWith([deskR, raised]), { metadata: { participants: [deskR, boxR] } }, "machine-1", { rules });
+  assert.equal(rightOf(scoped, "p-box"), undefined);
+
+  // Its main session adds a member: with the right only when it has it itself.
+  for (const mainHas of [false, true]) {
+    const main = mainHas ? { ...mainOnMachine, permissions: { ...mainOnMachine.permissions, scheduleWithoutAsking: true } } : mainOnMachine;
+    const made = { id: "p-made", handle: "made", label: "Made", roleConfigId: "r", kind: "claude-code", agentMode: "default", homeMachineId: "machine-1", delegatedByParticipantId: "p-main",
+      permissions: { repoRead: true, workspaceWrite: false, webAccess: false, requestParticipants: "allow", requestCompaction: "ask", manageRolesParticipants: "deny",
+        shell: { enabled: false, rules: [] }, scheduleWithoutAsking: true } };
+    scoped = scopeMachineConversationUpdate(mainSessionChatWith([deskR, main]), { metadata: { participants: [deskR, main, made] } }, "machine-1", { rules: mainRules });
+    assert.equal(members(scoped).has("p-made"), mainHas);
+  }
+});
+
 test("its own member's rights rise only by what the User granted it for the chat, once", () => {
   const chat = mainSessionChatWith([deskR, mainOnMachine]);
   const withWeb = { ...mainOnMachine, permissions: { ...mainOnMachine.permissions, webAccess: true } };

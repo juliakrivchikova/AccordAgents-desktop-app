@@ -1485,6 +1485,30 @@ test("a member the main session made proposes a scheduled task on the normal car
   assert.deepEqual(calls, ["attach"]);
 });
 
+test("scheduled tasks without a card: a member the main session makes has it only as long as the main session does, and no member gives it", async () => {
+  const main = { ...mainSession(), permissions: { ...mainSession().permissions!, scheduleWithoutAsking: true as const } };
+  const conversation = mainSessionChat([main], { participantSessions: [sessionRecord(main, "s")] });
+  const { service, storage } = testService({ conversation });
+  (service as any).startDeferredParticipantRequestRunners = () => undefined;
+  const delegated = await service.delegateTaskFromTool(mainActor(), { task: "Watch the build every minute." });
+  const stored = (): ChatParticipant[] => storage.current.metadata.participants as ChatParticipant[];
+  const child = () => stored().find((participant) => participant.id === delegated.participantId)!;
+  (service as any).settings.getPublicSettings = ((read) => async () => ({ ...await read(), newChatDefaults: { compactWithoutAsking: true, scheduleWithoutAsking: true } }))(
+    (service as any).settings.getPublicSettings.bind((service as any).settings));
+  const creates = () => (service as any).createsScheduledTasksWithoutCard(storage.current, child()) as Promise<boolean>;
+  assert.equal(await creates(), true, "as it has the main session's other rights");
+  storage.current.metadata.participants = stored().map((participant) => participant.id === main.id
+    ? { ...participant, permissions: { ...participant.permissions!, scheduleWithoutAsking: undefined } } : participant);
+  assert.equal(await creates(), false, "gone with the main session's");
+
+  const plain = mainSession();
+  const without = testService({ conversation: mainSessionChat([plain], { participantSessions: [sessionRecord(plain, "s")] }) });
+  (without.service as any).startDeferredParticipantRequestRunners = () => undefined;
+  const raised = await without.service.delegateTaskFromTool(mainActor(), { task: "Watch it.", permissions: { scheduleWithoutAsking: true } });
+  const raisedChild = (without.storage.current.metadata.participants as ChatParticipant[]).find((participant) => participant.id === raised.participantId)!;
+  assert.equal(raisedChild.permissions?.scheduleWithoutAsking, undefined);
+});
+
 test("members made before their task's title was kept with them get it once from the whole history: their delegation's, else their first task's line, never a handle", async () => {
   const main = mainSession();
   const drew = member("drew-id", "drew", { delegatedByParticipantId: main.id });

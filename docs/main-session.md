@@ -611,10 +611,25 @@ name no main session.
   on the machine, as its Runs on does.
 - **Compact without asking**, a switch, on by default: the main session's
   right to compact its context without a card (`requestCompaction` `allow`;
-  off: `ask`).
+  off: `ask`). With the right it is told when to compact on its own (before
+  a new task, before the next stage of a big one); after its compaction the
+  app calls it again (docs/chat-roles-and-participants.md).
+- **Create scheduled tasks without asking**, a switch, off by default (the
+  User, 2026-11-25): the main session's right to create scheduled tasks
+  without a card (`scheduleWithoutAsking`). Its `app_scripts_request_change`
+  with op create is installed and switched on at once; the chat shows the
+  used card's line ("Created"), from a machine too (its card is raised and
+  answered by the machine itself, `taskCreatedAt`, so nobody is asked). A
+  task that needs keys still waits on its card for them; changing, deleting
+  or switching a task still asks; Plan mode (Codex's too) asks. The right is
+  given when a chat is made, and works only while the switch is on: turned
+  off, every chat asks again, on every device. Members it makes have it as
+  they have its other rights, never beyond it; no member, machine, card or
+  saved member gives it (`chatAgentPermissionsFromAgent`, `hubMachineScope`).
 
 Changing the provider takes model, effort and mode back to that CLI's own
-(`newChatDefaultsForProvider`); where it runs and compaction stay. Model,
+(`newChatDefaultsForProvider`); where it runs, compaction and scheduled
+tasks stay. Model,
 effort and mode apply only while a new chat runs on the CLI they were
 chosen for, on its own sign-in (`newChatMainSessionStart`); an added
 provider or another CLI chosen on New chat starts from its own. The rights
@@ -626,10 +641,10 @@ invalid is the CLI's own); existing chats keep their own settings.
 New chat's controls start from these (`newChatMainSessionParticipantConfig`
 with `newChatMainSessionStart`); a choice there is that chat's only and
 never changes Settings. The computer's `createConversation` gives the main
-session the compaction right Settings names (the screen has no control for
-it). The phone's New chat offer carries the same main session
+session the compaction and scheduled-task rights Settings names (the screen
+has no control for them). The phone's New chat offer carries the same main session
 (`ensureMainSessionParticipant` with `newChatDefaults`): its model, effort,
-mode, machine and compaction right; the phone's controls start from it
+mode, machine, compaction and scheduled-task rights; the phone's controls start from it
 (`newChatLeadStart`) the way the computer's start from Settings, another
 provider from its own, and a choice made there wins for that chat.
 

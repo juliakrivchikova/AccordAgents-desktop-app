@@ -53,6 +53,7 @@ export function cloneChatAgentPermissions(permissions: ChatAgentPermissions): Ch
     requestParticipants: normalizeChatParticipantRequestPermission(permissions.requestParticipants),
     requestCompaction: normalizeChatParticipantRequestPermission(permissions.requestCompaction),
     ...(manageRolesParticipants ? { manageRolesParticipants } : {}),
+    ...(permissions.scheduleWithoutAsking === true ? { scheduleWithoutAsking: true as const } : {}),
     shell: {
       enabled: permissions.shell.enabled,
       rules: normalizeChatShellPermissionRules(permissions.shell.rules)
@@ -85,6 +86,15 @@ export function chatAgentModeFromAgent(value: unknown): ChatAgentMode {
   return mode === "full-access" ? "auto" : mode;
 }
 
+/** Rights as a member names them for another member (a tool's input, an
+ *  addition it asks for), and a saved member's: never leave to create
+ *  scheduled tasks without a card, which only the User's switch for new chats
+ *  gives and no card or editor of hers shows. */
+export function chatAgentPermissionsFromAgent(value: unknown): ChatAgentPermissions {
+  const { scheduleWithoutAsking: _hers, ...rest } = normalizeChatAgentPermissions(value);
+  return rest;
+}
+
 export function normalizeChatAgentPermissions(value: unknown): ChatAgentPermissions {
   const record = value && typeof value === "object" && !Array.isArray(value)
     ? value as Partial<ChatAgentPermissions>
@@ -101,6 +111,7 @@ export function normalizeChatAgentPermissions(value: unknown): ChatAgentPermissi
     requestParticipants: normalizeChatParticipantRequestPermission(record.requestParticipants),
     requestCompaction: normalizeChatParticipantRequestPermission(record.requestCompaction),
     ...(manageRolesParticipants ? { manageRolesParticipants } : {}),
+    ...(record.scheduleWithoutAsking === true ? { scheduleWithoutAsking: true as const } : {}),
     shell: {
       enabled: typeof shell.enabled === "boolean" ? shell.enabled : DEFAULT_CHAT_AGENT_PERMISSIONS.shell.enabled,
       rules: normalizeChatShellPermissionRules(shell.rules)
@@ -117,7 +128,8 @@ export function effectiveChatAgentPermissions(mode: ChatAgentMode, permissions: 
   if (mode !== "plan") {
     return normalized;
   }
-  const { providerNative: _providerNative, ...readOnlyPermissions } = normalized;
+  // Plan changes nothing: a scheduled task it wants waits for her card.
+  const { providerNative: _providerNative, scheduleWithoutAsking: _schedule, ...readOnlyPermissions } = normalized;
   return {
     ...readOnlyPermissions,
     workspaceWrite: false,
@@ -133,7 +145,10 @@ export function effectiveChatAgentPermissionsForProvider(
   mode: ChatAgentMode,
   permissions: ChatAgentPermissions
 ): ChatAgentPermissions {
-  const normalized = normalizeChatAgentPermissions(permissions);
+  const given = normalizeChatAgentPermissions(permissions);
+  // Codex's Plan mode changes nothing either (effectiveChatAgentPermissions).
+  const { scheduleWithoutAsking: _schedule, ...planned } = given;
+  const normalized = given.codexPlanMode ? planned : given;
   if (mode !== "auto" && mode !== "full-access") {
     return effectiveChatAgentPermissions(mode, normalized);
   }
@@ -241,6 +256,7 @@ function shellRuleKey(rule: ChatShellPermissionRule): string {
  * - Claude Code native tools: only those the ceiling has;
  * - member requests and compaction requests: deny < ask < allow, never above
  *   the ceiling's;
+ * - scheduled tasks without a card: only when both have it;
  * - managing members: "deny" unless asked for explicitly, and never above
  *   the ceiling's (a member does not create members unless its task says so).
  *
@@ -274,6 +290,7 @@ export function clampChatAgentPermissions(
       normalizeChatParticipantRequestPermission(limit.requestCompaction)
     ),
     manageRolesParticipants,
+    ...(wanted.scheduleWithoutAsking && limit.scheduleWithoutAsking ? { scheduleWithoutAsking: true as const } : {}),
     shell: {
       enabled: wanted.shell.enabled && limit.shell.enabled,
       rules
@@ -343,6 +360,9 @@ export function chatAgentPermissionsWithin(actual: ChatAgentPermissions, ceiling
     return false;
   }
   if (member.cliApprovals && !limit.cliApprovals) {
+    return false;
+  }
+  if (member.scheduleWithoutAsking && !limit.scheduleWithoutAsking) {
     return false;
   }
   const limitRules = new Set(limit.shell.rules.map(shellRuleKey));

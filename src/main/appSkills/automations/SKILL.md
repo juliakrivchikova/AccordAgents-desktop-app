@@ -9,7 +9,8 @@ description: >
   something to happen automatically or repeatedly: "every weekday at 17:00",
   "check X every minute", "watch this channel and react", "remind me", "poll
   this API". Proposes the task with app_scripts_request_change; the User
-  approves it on a card and enters any keys there.
+  approves it on a card and enters any keys there, unless your access says
+  she lets you create scheduled tasks without a card.
 ---
 
 # Automations: scheduled tasks
@@ -33,6 +34,10 @@ to outside events. If the User wants something done once, now, just do it.
 - You write the script and propose it with `app_scripts_request_change`. Nothing
   runs until the User approves the card, which shows the code, the schedule,
   the chats it posts to, the members it may wake and the keys it needs.
+  When your access says the User lets you create scheduled tasks without a
+  card, a `create` that needs no keys is added and switched on at once
+  (status `created`): nobody reads its code first, so check it yourself
+  before you send it.
 - In this version a script posts only into **existing chats**. It cannot create
   chats. Default target: the current chat.
 - A script may mention only the members listed in `members`. Mentions wake
@@ -77,7 +82,9 @@ Call `app_scripts_request_change` with:
   needs the User's approval. `run_now` starts an approved, switched-on script
   once without a card, for testing.
 - After proposing, tell the User in one or two sentences what the task does
-  and that they approve it on the card (and enter the keys there, if any).
+  and that they approve it on the card (and enter the keys there, if any);
+  after a task created without a card, what it does, when it runs and that
+  it is in Settings → Scheduled Tasks.
 
 Use `app_scripts_list` to see scripts and their status, and
 `app_scripts_read_runs` to read a script's history and last output when it is

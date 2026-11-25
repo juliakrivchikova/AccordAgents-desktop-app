@@ -138,10 +138,17 @@ function removalRequest(approval: ChatAppToolApproval): ChatParticipantRemovalRe
     : undefined;
 }
 
-/** Whether a card should be shown for this approval: one that asks, and an
- *  approved roster change that has not happened yet. */
+/** How long a task created without a card keeps its card standing on the
+ *  server at most: it is settled right after it is raised, and a machine that
+ *  stopped in between settles it with its next save after this. */
+const CREATED_TASK_CARD_MS = 60_000;
+
+/** Whether a card should be shown for this approval: one that asks, an
+ *  approved roster change that has not happened yet, and a task a machine's
+ *  member just created without a card. */
 export function approvalHasCard(approval: ChatAppToolApproval): boolean {
   return approval.status === "pending" ||
+    (approval.status === "auto-applied" && typeof approval.taskCreatedAt === "string" && Date.now() - Date.parse(approval.taskCreatedAt) < CREATED_TASK_CARD_MS) ||
     ((approval.status === "approved" || approval.status === "auto-applied") &&
       (typeof approval.memberRemovalQueuedAt === "string" || typeof approval.memberAdditionQueuedAt === "string")) ||
     // A sign-in answered Done stays until its member's device has reconnected
@@ -393,6 +400,8 @@ export function controlCardFromHubCard(
   if (card.state === "settled") return undefined;
   const raised = card.card as { approval?: ChatAppToolApproval; choice?: ChatPendingChoice; sourceMessageId?: unknown; refusals?: unknown };
   if ((card.cardKind === "permission" || card.cardKind === "roster") && raised.approval && typeof raised.approval === "object") {
+    // A task created without a card asks nothing: it is settled right away.
+    if (raised.approval.status === "auto-applied" && raised.approval.taskCreatedAt) return undefined;
     const pending = controlCardFromApproval(card.conversationId, { ...raised.approval, status: "pending" });
     const base: MobileControlCard = { ...pending, id: card.cardId, createdAt: raised.approval.createdAt || card.raisedAt };
     // Decided by its member's own device (its Manage members setting allowed
@@ -472,7 +481,8 @@ export function controlCardsFromConversation(conversation: Conversation): Mobile
   const approvals = (conversation.metadata as { pendingAppToolApprovals?: ChatAppToolApproval[] } | undefined)
     ?.pendingAppToolApprovals ?? [];
   for (const approval of approvals) {
-    if (!approvalHasCard(approval)) continue;
+    // A task created without a card asks nothing.
+    if (!approvalHasCard(approval) || approval.status === "auto-applied" && approval.taskCreatedAt) continue;
     cards.push(controlCardFromApproval(conversation.id, approval));
   }
   for (const message of conversation.messages) {

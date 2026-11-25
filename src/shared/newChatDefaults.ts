@@ -11,7 +11,7 @@
 import { chatAccessModeSet, currentChatAccessId } from "./chatAccessModes";
 import { isChatProviderKind } from "./chatProviders";
 import { normalizeChatReasoningEffort } from "./reasoningEffort";
-import type { ChatParticipantRequestPermission, ChatProviderKind, ChatReasoningEffort, NewChatDefaults, NewChatDefaultsUpdate } from "./types";
+import type { ChatAgentPermissions, ChatParticipantRequestPermission, ChatProviderKind, ChatReasoningEffort, NewChatDefaults, NewChatDefaultsUpdate } from "./types";
 
 export type { NewChatDefaults, NewChatDefaultsUpdate };
 
@@ -31,7 +31,8 @@ function accessFor(kind: ChatProviderKind | undefined, value: unknown): string |
 }
 
 /** What is stored, as Settings reads it: anything missing or invalid is the
- *  CLI's own; compaction without asking unless turned off. */
+ *  CLI's own; compaction without asking unless turned off, scheduled tasks
+ *  without asking only once turned on. */
 export function normalizeNewChatDefaults(value: unknown): NewChatDefaults {
   const record = value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {};
   const kind = isChatProviderKind(record.kind) ? record.kind : undefined;
@@ -45,7 +46,8 @@ export function normalizeNewChatDefaults(value: unknown): NewChatDefaults {
     ...(reasoningEffort ? { reasoningEffort } : {}),
     ...(access ? { access } : {}),
     ...(homeMachineId ? { homeMachineId } : {}),
-    compactWithoutAsking: record.compactWithoutAsking !== false
+    compactWithoutAsking: record.compactWithoutAsking !== false,
+    ...(record.scheduleWithoutAsking === true ? { scheduleWithoutAsking: true as const } : {})
   };
 }
 
@@ -62,22 +64,24 @@ export function applyNewChatDefaultsUpdate(current: unknown, update: NewChatDefa
     reasoningEffort: sameCli ? base.reasoningEffort : undefined,
     access: sameCli ? base.access : undefined,
     homeMachineId: base.homeMachineId,
-    compactWithoutAsking: base.compactWithoutAsking
+    compactWithoutAsking: base.compactWithoutAsking,
+    scheduleWithoutAsking: base.scheduleWithoutAsking
   };
   for (const key of ["model", "reasoningEffort", "access", "homeMachineId"] as const) {
     const value = update[key];
     if (value !== undefined) next[key] = value ?? undefined;
   }
   if (typeof update.compactWithoutAsking === "boolean") next.compactWithoutAsking = update.compactWithoutAsking;
+  if (typeof update.scheduleWithoutAsking === "boolean") next.scheduleWithoutAsking = update.scheduleWithoutAsking;
   return normalizeNewChatDefaults(next);
 }
 
 /** The defaults with the CLI's model, effort and mode dropped: the provider
- *  changed, so they go back to that CLI's own (where it runs and compaction
- *  stay). */
+ *  changed, so they go back to that CLI's own (where it runs, compaction and
+ *  scheduled tasks stay). */
 export function newChatDefaultsForProvider(current: unknown): NewChatDefaults {
-  const { homeMachineId, compactWithoutAsking } = normalizeNewChatDefaults(current);
-  return { ...(homeMachineId ? { homeMachineId } : {}), compactWithoutAsking };
+  const { homeMachineId, compactWithoutAsking, scheduleWithoutAsking } = normalizeNewChatDefaults(current);
+  return { ...(homeMachineId ? { homeMachineId } : {}), compactWithoutAsking, ...(scheduleWithoutAsking ? { scheduleWithoutAsking } : {}) };
 }
 
 /** The main session's right to compact its context without a card. */
@@ -89,14 +93,29 @@ export function newChatCompactionPermission(defaults: Pick<NewChatDefaults, "com
  *  effort and mode chosen for its CLI (never for an added provider, nor for
  *  another CLI: those start from their own), where it runs (a machine that
  *  is still set up; none: this computer; an added provider always here: its
- *  key is this computer's, members on one run on this computer only) and its
- *  compaction right. */
+ *  key is this computer's, members on one run on this computer only), its
+ *  compaction right and whether it creates scheduled tasks without a card. */
 export interface NewChatMainSessionStart {
   model?: string;
   reasoningEffort?: ChatReasoningEffort;
   access?: string;
   homeMachineId?: string;
   requestCompaction: ChatParticipantRequestPermission;
+  scheduleWithoutAsking?: true;
+}
+
+/** The main session's rights with the ones Settings → General → New chats
+ *  gives it: compaction, and scheduled tasks only when it says so. */
+export function withNewChatRights(
+  permissions: ChatAgentPermissions,
+  start: Pick<NewChatMainSessionStart, "requestCompaction" | "scheduleWithoutAsking">
+): ChatAgentPermissions {
+  const { scheduleWithoutAsking: _other, ...rest } = permissions;
+  return {
+    ...rest,
+    requestCompaction: start.requestCompaction,
+    ...(start.scheduleWithoutAsking ? { scheduleWithoutAsking: true as const } : {})
+  };
 }
 
 export function newChatMainSessionStart(
@@ -116,6 +135,7 @@ export function newChatMainSessionStart(
     ...(ownCli && normalized.reasoningEffort ? { reasoningEffort: normalized.reasoningEffort } : {}),
     ...(ownCli && normalized.access ? { access: normalized.access } : {}),
     ...(homeMachineId ? { homeMachineId } : {}),
-    requestCompaction: newChatCompactionPermission(normalized)
+    requestCompaction: newChatCompactionPermission(normalized),
+    ...(normalized.scheduleWithoutAsking ? { scheduleWithoutAsking: true as const } : {})
   };
 }
