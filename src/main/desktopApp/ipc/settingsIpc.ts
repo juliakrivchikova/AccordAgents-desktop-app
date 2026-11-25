@@ -26,6 +26,7 @@ export function registerSettingsIpc(desktopApp: DesktopApp): void {
     }
     return desktopApp.settingsService.setCrashReports(enabled !== false);
   });
+  ipcMain.handle("settings:dismiss-crash-reports-notice", () => desktopApp.settingsService.dismissCrashReportsNotice());
 
   ipcMain.handle("settings:set-cli-agent-run-timeout", async (_event, timeoutMs: number) => {
     const next = await desktopApp.settingsService.setCliAgentRunTimeoutMs(timeoutMs);

@@ -5,6 +5,8 @@ import path from "node:path";
 import test from "node:test";
 import { setHostPlatform } from "../platform";
 import {
+  crashReportsNoticeDue,
+  markCrashReportsNoticeSeen,
   CRASH_REPORTS_OFF_MARKER,
   CRASH_REPORT_CACHE_DIR,
   CRASH_REPORT_INSTALL_ID_FILE,
@@ -104,6 +106,18 @@ test("the window's preload looks for the same launch argument the main process p
   assert.ok(preload.includes(`CRASH_REPORTS_ACTIVE_ARG = "${literal}"`));
 });
 
+test("the notice is due while reports are sent, until it is closed or the choice is made", async () => {
+  await withTempDir(async (dir) => {
+    assert.equal(crashReportsNoticeDue(dir, {}), true);
+    assert.equal(crashReportsNoticeDue(dir, { ACCORDAGENTS_CRASH_REPORTS: "0" }), false);
+    writeCrashReportsChoice(dir, false);
+    assert.equal(crashReportsNoticeDue(dir, {}), false, "nothing to say while reports are off");
+    writeCrashReportsChoice(dir, true);
+    markCrashReportsNoticeSeen(dir);
+    assert.equal(crashReportsNoticeDue(dir, {}), false);
+  });
+});
+
 test("the Settings switch is what the next launch reads, and settings.json writes cannot undo it", async () => {
   await withTempDir(async (dir) => {
     const previous = process.env.ACCORDAGENTS_USER_DATA_DIR;
@@ -112,7 +126,8 @@ test("the Settings switch is what the next launch reads, and settings.json write
     try {
       const { SettingsService } = await import("./settings");
       const settings = new SettingsService();
-      assert.equal((await settings.getPublicSettings()).crashReports, true);
+      const first = await settings.getPublicSettings();
+      assert.deepEqual([first.crashReports, first.crashReportsNotice], [true, true]);
       assert.equal((await settings.setCrashReports(false)).crashReports, false);
       assert.equal(readCrashReportsEnabled(dir, {}), false);
       assert.equal(await exists(path.join(dir, CRASH_REPORTS_OFF_MARKER)), true);
@@ -121,7 +136,8 @@ test("the Settings switch is what the next launch reads, and settings.json write
       await settings.setBetaUpdates(true);
       await writeFile(path.join(dir, "settings.json"), JSON.stringify({ roundLimitDefault: 1 }));
       assert.equal(readCrashReportsEnabled(dir, {}), false);
-      assert.equal((await settings.setCrashReports(true)).crashReports, true);
+      const back = await settings.setCrashReports(true);
+      assert.deepEqual([back.crashReports, back.crashReportsNotice], [true, false], "the choice was made, so there is nothing to announce");
       assert.equal(readCrashReportsEnabled(dir, {}), true);
     } finally {
       if (previous === undefined) delete process.env.ACCORDAGENTS_USER_DATA_DIR;

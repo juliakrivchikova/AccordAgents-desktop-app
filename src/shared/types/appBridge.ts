@@ -94,6 +94,7 @@ export interface AppBridge {
   setBetaUpdates(enabled: boolean): Promise<AppSettings>;
   /** Off takes effect at once; on applies from the next launch. */
   setCrashReports(enabled: boolean): Promise<AppSettings>;
+  dismissCrashReportsNotice(): Promise<AppSettings>;
   /** Whether this window was opened with reports running, so the renderer
    *  starts its half of the SDK only then. */
   readonly crashReportsActive: boolean;

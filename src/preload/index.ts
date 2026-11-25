@@ -170,6 +170,7 @@ const bridge: AppBridge = {
   fileEditsFlushed: (requestId) => ipcRenderer.send("files:flush-done", requestId),
   setBetaUpdates: (enabled: boolean) => ipcRenderer.invoke("settings:set-beta-updates", enabled),
   setCrashReports: (enabled: boolean) => ipcRenderer.invoke("settings:set-crash-reports", enabled),
+  dismissCrashReportsNotice: () => ipcRenderer.invoke("settings:dismiss-crash-reports-notice"),
   crashReportsActive: process.argv.includes(CRASH_REPORTS_ACTIVE_ARG),
   setCliAgentRunTimeoutMs: (timeoutMs: number) => ipcRenderer.invoke("settings:set-cli-agent-run-timeout", timeoutMs),
   setChatParticipantRequestMaxDepth: (maxDepth: number) =>

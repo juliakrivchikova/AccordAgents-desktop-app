@@ -70,6 +70,7 @@ import { FOLDER_BUSY_REASON, folderBusy, normalizeProjectPath, projectLabelForPa
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { AccordMergeIcon } from "./accord-merge-icon";
 import type { ChatModelAccessPatch } from "./chat-model-access-picker";
+import { useComposerNoticeClearance } from "./use-composer-notice-clearance";
 import { newChatViewFor } from "../../../shared/mainSession";
 import {
   type MainSessionProviderChoice,
@@ -146,6 +147,8 @@ export function NewChatScreen(props: {
 }): JSX.Element {
   const promptRef = useRef<HTMLTextAreaElement>(null);
   const highlightRef = useRef<HTMLDivElement>(null);
+  const dockRef = useRef<HTMLDivElement>(null);
+  useComposerNoticeClearance(dockRef);
   const fileInputRef = useRef<HTMLInputElement>(null);
   // A branch switch answers for the folder it was asked for: kept only while
   // that folder is still the one on screen.
@@ -483,7 +486,7 @@ export function NewChatScreen(props: {
 
       {/* The composer stands where the chat keeps its own, with the same
           strip, so nothing moves when the chat starts. */}
-      <div className="new-chat-dock" hidden={needsProviderSetup}>
+      <div ref={dockRef} className="new-chat-dock" hidden={needsProviderSetup}>
         {props.repoInfo && !props.repoInfo.isRepo && props.repoInfo.error && (
           <div className="repo-status new-chat-repo-status bad">
             <XCircleIcon size={16} aria-hidden />

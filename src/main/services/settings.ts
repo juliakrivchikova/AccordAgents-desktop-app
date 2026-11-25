@@ -163,6 +163,10 @@ export class SettingsService {
     return this.modules.appPreferences.setCrashReports(enabled);
   }
 
+  dismissCrashReportsNotice(): Promise<AppSettings> {
+    return this.modules.appPreferences.dismissCrashReportsNotice();
+  }
+
   getCliAgentRunTimeoutMs(): Promise<number> {
     return this.modules.appPreferences.getCliAgentRunTimeoutMs();
   }

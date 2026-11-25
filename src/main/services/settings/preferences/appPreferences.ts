@@ -6,7 +6,7 @@ import {
 import { normalizeChatAutoWatchWakeLimit } from "../../../../shared/chatAutoWatch";
 import { normalizeChatPromptContextSettings } from "../../../../shared/chatPromptContext";
 import { normalizeCliAgentRunTimeoutMs } from "../../../../shared/cliAgentRunSettings";
-import { writeCrashReportsChoice } from "../../crashReportPreferences";
+import { markCrashReportsNoticeSeen, writeCrashReportsChoice } from "../../crashReportPreferences";
 import { normalizeBetaUpdates, normalizeRepoFileExternalOpenAction, normalizeRepoFileOpenAction } from "./storedPreferences";
 import type { SettingsModules } from "../modules";
 
@@ -67,6 +67,12 @@ export class AppPreferences {
    *  CRASH_REPORTS_OFF_MARKER. */
   async setCrashReports(enabled: boolean): Promise<AppSettings> {
     writeCrashReportsChoice(userDataPath(), enabled);
+    return this.dismissCrashReportsNotice();
+  }
+
+  /** The notice that reports are sent was closed, or the choice was made. */
+  async dismissCrashReportsNotice(): Promise<AppSettings> {
+    markCrashReportsNoticeSeen(userDataPath());
     return this.settings.publicSettings.getPublicSettings();
   }
 

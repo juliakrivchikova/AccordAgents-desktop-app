@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { mkdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import path from "node:path";
 
 export const CRASH_REPORTS_ENV_OVERRIDE = "ACCORDAGENTS_CRASH_REPORTS";
@@ -8,6 +8,10 @@ export const CRASH_REPORT_INSTALL_ID_FILE = "crash-report-install-id";
  *  than a settings field: a build without this feature that rewrites
  *  settings.json on the same profile cannot drop the choice. */
 export const CRASH_REPORTS_OFF_MARKER = "crash-reports-off";
+/** Present once the notice that reports are sent was closed, or the choice was
+ *  made in Settings: it is shown until then, also to people who had the app
+ *  before the notice. A file of its own for the same reason as the choice. */
+export const CRASH_REPORTS_NOTICE_SEEN_MARKER = "crash-reports-notice-seen";
 /** Where the SDK keeps its queue, scope and session between launches. */
 export const CRASH_REPORT_CACHE_DIR = "sentry";
 
@@ -46,6 +50,16 @@ export function writeCrashReportsChoice(userDataDir: string, enabled: boolean): 
   }
   mkdirSync(userDataDir, { recursive: true });
   writeFileSync(marker, "Crash and usage reports are turned off in Settings.\n", { encoding: "utf8", mode: 0o600 });
+}
+
+/** Whether the notice is to be shown: reports are sent and it was not closed. */
+export function crashReportsNoticeDue(userDataDir: string, env: NodeJS.ProcessEnv = process.env): boolean {
+  return readCrashReportsEnabled(userDataDir, env) && !existsSync(path.join(userDataDir, CRASH_REPORTS_NOTICE_SEEN_MARKER));
+}
+
+export function markCrashReportsNoticeSeen(userDataDir: string): void {
+  mkdirSync(userDataDir, { recursive: true });
+  writeFileSync(path.join(userDataDir, CRASH_REPORTS_NOTICE_SEEN_MARKER), "", { mode: 0o600 });
 }
 
 /** Everything the SDK kept for later sending: its offline queue, the scope it

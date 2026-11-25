@@ -10,7 +10,8 @@ import {
   scrubCrashReportEvent,
   scrubCrashReportText,
   scrubSerializedUsageLogs,
-  scrubUsageLog
+  scrubUsageLog,
+  type CrashReportEvent
 } from "./crashReportPrivacy";
 
 const HOME = "/Users/julia";
@@ -159,13 +160,39 @@ test("an event keeps its shape but loses request data, extra objects and everyth
   assert.deepEqual(event.breadcrumbs, [{ category: "electron", message: "app.ready" }]);
   assert.equal("request" in event, false);
   assert.deepEqual(event.extra, { unhandledPromiseRejection: true, note: "see [path]" });
-  assert.deepEqual(event.user, { id: "install-1" });
+  assert.deepEqual(event.user, { id: "install-1", geo: {} });
   assert.deepEqual(event.tags, { kept: "yes", url: "[link]" });
   assert.deepEqual(event.contexts, {
     os: { name: "macOS", version: "26.6.2" },
-    minidump: { crashed_url: "[link]" },
     trace: { trace_id: "0123456789abcdef0123456789abcdef" }
   });
+});
+
+test("an error report keeps the app and the system, and nothing about the computer or where it is", () => {
+  // What the SDK fills in on macOS (Electron 31, SDK 7.20).
+  const event = scrubCrashReportEvent({
+    contexts: {
+      app: { app_name: "AccordAgents", app_version: "1.12.0", app_arch: "arm64", app_start_time: "2026-11-25T22:39:20.945Z", app_memory: 424951808, free_memory: 531677184 },
+      os: { name: "macOS", version: "26.6.2", build: "25G83", kernel_version: "25.6.0" },
+      device: { family: "Desktop", arch: "arm64", boot_time: "2026-10-11T10:28:01.362Z", cpu_description: "Apple M4 Pro", memory_size: 25769803776, processor_count: 12, screen_resolution: "3024x1964" },
+      gpu: { name: "Apple M4 Pro", vendor_id: "0x106b", active: true },
+      culture: { locale: "en-CY", timezone: "Asia/Nicosia" },
+      runtime: { name: "Electron", version: "31.7.7" },
+      chrome: { name: "Chrome", version: "126.0.6478.234" },
+      node: { name: "Node", version: "20.18.0" },
+      cloud_resource: {},
+      trace: { trace_id: "0123456789abcdef0123456789abcdef", span_id: "0123456789abcdef" }
+    },
+    user: { id: "install-1", geo: { city: "Nicosia", country_code: "CY" } }
+  });
+  assert.deepEqual(event.contexts, {
+    app: { app_name: "AccordAgents", app_version: "1.12.0" },
+    os: { name: "macOS", version: "26.6.2" },
+    trace: { trace_id: "0123456789abcdef0123456789abcdef", span_id: "0123456789abcdef" }
+  });
+  // An empty place, not no place: Sentry looks one up for an event without it.
+  assert.deepEqual(event.user, { id: "install-1", geo: {} });
+  assert.deepEqual(scrubCrashReportEvent<CrashReportEvent>({ message: "x" }).user, { geo: {} });
 });
 
 test("only usage signals leave as logs, with their known attributes only", () => {
