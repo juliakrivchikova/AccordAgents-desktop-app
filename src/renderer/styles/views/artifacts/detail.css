@@ -1,0 +1,93 @@
+.artifact-detail {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  min-height: 0;
+  overflow-x: hidden;
+  overflow-y: auto;
+}
+
+.artifact-draft-error {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 10px 12px;
+  border: 1px solid var(--app-border-strong);
+  border-radius: 8px;
+  color: var(--app-text);
+  font-size: 12px;
+}
+
+.artifact-rename-row {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+}
+
+.artifact-rename-row input {
+  flex: 1;
+}
+
+.artifact-actions-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.artifact-diff-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  min-height: 30px;
+  color: var(--app-text);
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 500;
+}
+
+.artifact-diff-toggle.is-disabled {
+  cursor: default;
+  opacity: 0.55;
+}
+
+.artifact-diff-toggle > input {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  opacity: 0;
+}
+
+.artifact-diff-toggle-track {
+  position: relative;
+  width: 34px;
+  height: 20px;
+  flex: 0 0 auto;
+  border-radius: var(--radius-pill);
+  background: var(--app-muted);
+  transition: background 120ms ease;
+}
+
+.artifact-diff-toggle-track > span {
+  position: absolute;
+  top: 3px;
+  left: 3px;
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  background: var(--app-surface);
+  transition: transform 120ms ease;
+}
+
+.artifact-diff-toggle > input:checked + .artifact-diff-toggle-track {
+  background: var(--app-accent);
+}
+
+.artifact-diff-toggle > input:checked + .artifact-diff-toggle-track > span {
+  transform: translateX(14px);
+}
+
+.artifact-diff-toggle > input:focus-visible + .artifact-diff-toggle-track {
+  box-shadow: var(--focus-ring);
+}

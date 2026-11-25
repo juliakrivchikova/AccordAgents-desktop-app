@@ -3,6 +3,7 @@ import { readdir, readFile } from "node:fs/promises";
 import path from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
+import { sourceParts, sourceText } from "./source-parts.mjs";
 
 // The User calls the feature "Scheduled Tasks". What she sees must say so:
 // the settings page, its notices in chat, the approval card on the desktop
@@ -55,7 +56,7 @@ async function rendererSources(dir) {
 }
 
 test("what the User sees calls scheduled scripts Scheduled Tasks", async () => {
-  const files = [...await rendererSources("src/renderer"), ...userFacingFiles];
+  const files = [...await rendererSources("src/renderer"), ...userFacingFiles.flatMap((file) => sourceParts(repoRoot, file))];
   const hits = [];
   for (const file of files) {
     const lines = (await readFile(path.join(repoRoot, file), "utf8")).split("\n");
@@ -65,8 +66,7 @@ test("what the User sees calls scheduled scripts Scheduled Tasks", async () => {
       }
     });
   }
-  const chat = await readFile(path.join(repoRoot, "src/main/services/chat.ts"), "utf8");
-  if (chat.includes("Scheduled script approval needed")) hits.push("src/main/services/chat.ts: Scheduled script approval needed");
+  if (sourceText(repoRoot, "src/main/services/chat.ts").includes("Scheduled script approval needed")) hits.push("src/main/services/chat.ts: Scheduled script approval needed");
   assert.deepEqual(hits, []);
 });
 
@@ -81,17 +81,18 @@ test("members are told to call it a scheduled task", async () => {
   assert.match(skill, /When you talk to the User, say "scheduled task"/);
   assert.doesNotMatch(skill, /what the script does/i);
 
-  const tools = await read("src/shared/appMcpToolContracts.ts");
+  const tools = flat(sourceText(repoRoot, "src/shared/appMcpToolContracts.ts"));
   assert.doesNotMatch(tools, /Scheduled Scripts?\b|scheduled scripts?\b|why a script is failing/);
   assert.match(tools, /"title": "Request Scheduled Task Change"/);
 
-  const chatLines = (await readFile(path.join(repoRoot, "src/main/services/chat.ts"), "utf8")).split("\n");
-  const stale = chatLines
-    .map((line, index) => ({ line: line.trim(), at: index + 1 }))
-    .filter(({ line }) => !/^(\/\/|\/\*|\*)/.test(line) && /\b[Ss]cheduled scripts?\b/.test(line))
-    .map(({ line, at }) => `chat.ts:${at}: ${line.slice(0, 120)}`);
+  const stale = [];
+  for (const file of sourceParts(repoRoot, "src/main/services/chat.ts")) {
+    (await readFile(path.join(repoRoot, file), "utf8")).split("\n").map((line) => line.trim()).forEach((line, index) => {
+      if (!/^(\/\/|\/\*|\*)/.test(line) && /\b[Ss]cheduled scripts?\b/.test(line)) stale.push(`${file}:${index + 1}: ${line.slice(0, 120)}`);
+    });
+  }
   assert.deepEqual(stale, []);
-  assert.match(flat(chatLines.join("\n")), /When you talk to the User, call it a scheduled task\./);
+  assert.match(flat(sourceText(repoRoot, "src/main/services/chat.ts")), /When you talk to the User, call it a scheduled task\./);
 });
 
 test("the settings menu and page title read Scheduled Tasks", async () => {

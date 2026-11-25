@@ -1,0 +1,114 @@
+.new-chat-prompt::placeholder {
+  color: var(--ui-text-3);
+}
+
+.new-chat-input-wrap .chat-draft-highlight {
+  padding: 3px 4px;
+  border-radius: 0;
+  font-size: 14px;
+  line-height: 1.5;
+}
+
+.new-chat-prompt.skill-highlight-textarea {
+  position: relative;
+  z-index: 2;
+  color: transparent;
+  -webkit-text-fill-color: transparent;
+  caret-color: var(--app-text-strong);
+}
+
+.new-chat-prompt.skill-highlight-textarea.has-leading-plugin-token {
+  text-indent: calc(0.95em + 4px);
+}
+
+.new-chat-prompt.skill-highlight-textarea::placeholder {
+  color: transparent;
+  opacity: 0;
+}
+
+.new-chat-prompt.skill-highlight-textarea::selection {
+  color: transparent;
+  -webkit-text-fill-color: transparent;
+  background: color-mix(in srgb, var(--app-accent) 28%, transparent);
+}
+
+.new-chat-folder-picker,
+.new-chat-participant-picker {
+  position: relative;
+  min-width: 0;
+}
+
+.new-chat-chip {
+  display: inline-flex;
+  max-width: min(280px, 42vw);
+  height: var(--ui-control-sm);
+  align-items: center;
+  gap: 6px;
+  padding: 0 8px;
+  border: 0;
+  border-radius: var(--ui-radius-8);
+  background: transparent;
+  color: var(--ui-text-2);
+  cursor: pointer;
+  font-family: var(--font-body);
+  font-size: 12px;
+  font-weight: 500;
+  transition:
+    background-color var(--ui-duration-fast) var(--ui-ease-out),
+    color var(--ui-duration-fast) var(--ui-ease-out);
+}
+
+.new-chat-chip:hover,
+.new-chat-chip:focus-visible,
+.new-chat-chip[aria-expanded="true"] {
+  background: var(--ui-row-hover);
+  color: var(--ui-text);
+}
+
+.new-chat-chip:focus-visible,
+.new-chat-menu-item:focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring);
+}
+
+.new-chat-chip.is-set {
+  color: var(--ui-text);
+}
+
+.new-chat-chip span:not(.new-chat-avatar-stack):not(.new-chat-avatar-stack-item) {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.new-chat-participant-trigger {
+  max-width: min(320px, 44vw);
+}
+
+.new-chat-avatar-stack {
+  display: inline-flex;
+  align-items: center;
+  flex: 0 0 auto;
+}
+
+.new-chat-avatar-stack-item {
+  display: inline-flex;
+  width: 24px;
+  height: 24px;
+  align-items: center;
+  justify-content: center;
+  overflow: hidden;
+  border-radius: 8px;
+  background: transparent;
+}
+
+.new-chat-avatar-stack-item .mini-avatar {
+  box-sizing: border-box;
+  width: 24px !important;
+  height: 24px !important;
+  padding: 0 !important;
+  /* No per-context disc background: inherit the base per-kind discs
+     (anthropic -> terracotta, codex -> accent-soft, etc.) so Claude's white
+     mark stays visible and every kind matches the rest of the app. */
+}

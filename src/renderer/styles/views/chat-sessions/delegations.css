@@ -1,0 +1,185 @@
+.chat-worked-fold-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  width: fit-content;
+  padding: 2px 0;
+  border: 0;
+  background: transparent;
+  color: var(--app-muted);
+  font: inherit;
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.chat-worked-fold-toggle:hover {
+  color: var(--app-text-strong);
+}
+
+/* A reply with nothing to unfold: the muted text alone. */
+.chat-worked-fold-toggle.is-static,
+.chat-worked-fold-toggle.is-static:hover {
+  color: var(--app-muted);
+  cursor: default;
+}
+
+/* A part of a turn the User's next message joined: its steps and tasks
+   stay open, with no "Worked for" of its own (as in the CLI's transcript). */
+.chat-turn-continues {
+  display: grid;
+  gap: 2px;
+  margin: 0 0 6px;
+  min-width: 0;
+}
+
+.chat-delegations {
+  display: grid;
+  gap: 0;
+  margin: 2px 0 4px;
+}
+
+.chat-delegations-summary {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 0;
+  color: var(--app-muted);
+  font-size: 12px;
+}
+
+.chat-delegation-row {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto auto;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  padding: 5px 6px;
+  margin-inline: -6px;
+  border: 0;
+  border-radius: var(--radius-control);
+  background: transparent;
+  color: var(--app-text);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.chat-delegation-row:hover {
+  background: var(--ui-row-hover);
+}
+
+.chat-delegation-mark {
+  position: relative;
+  display: inline-flex;
+}
+
+.chat-delegation-dot {
+  position: absolute;
+  right: -3px;
+  bottom: -3px;
+  width: 7px;
+  height: 7px;
+  border: 1.5px solid var(--app-surface);
+  border-radius: 50%;
+  background: var(--app-muted);
+}
+
+.chat-delegation-dot.is-running {
+  background: var(--app-accent);
+}
+
+.chat-delegation-dot.is-done {
+  background: var(--app-success);
+}
+
+.chat-delegation-dot.is-failed {
+  background: var(--app-danger);
+}
+
+.chat-delegation-dot.is-waiting {
+  background: var(--app-warning);
+}
+
+.chat-delegation-text {
+  display: grid;
+  min-width: 0;
+}
+
+.chat-delegation-title,
+.chat-delegation-line {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.chat-delegation-title {
+  color: var(--app-text-strong);
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.chat-delegation-line {
+  color: var(--app-muted);
+  font-size: 12px;
+}
+
+/* A state ("Stopped"), not the member's words. */
+.chat-delegation-line.is-muted {
+  color: var(--app-muted-subtle);
+}
+
+.chat-delegation-time {
+  color: var(--app-muted);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+}
+
+.chat-delegation-chevron {
+  color: var(--app-muted);
+}
+
+.chat-sessions-task {
+  margin: 0 0 8px;
+}
+
+/* A member's mention: its logo and its task, opening its session. */
+.chat-member-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  max-width: 100%;
+  padding: 0 6px 0 3px;
+  border: 0;
+  border-radius: var(--radius-control);
+  background: var(--app-surface-hover);
+  color: var(--app-text-strong);
+  font: inherit;
+  vertical-align: baseline;
+  cursor: pointer;
+}
+
+.chat-member-chip > span:last-child {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* The model chip in a sessions-view composer. */
+.chat-model-chip {
+  display: inline-flex;
+  align-items: center;
+  height: var(--ui-control-sm);
+  padding: 0 8px;
+  border: 0;
+  border-radius: var(--ui-radius-8);
+  background: transparent;
+  color: var(--ui-text-2);
+  font: inherit;
+  font-size: 12px;
+  font-weight: 500;
+  cursor: pointer;
+  transition:
+    background-color var(--ui-duration-fast) var(--ui-ease-out),
+    color var(--ui-duration-fast) var(--ui-ease-out);
+}

@@ -1,0 +1,83 @@
+.chat-title-menu {
+  position: absolute;
+  top: calc(100% - 6px);
+  left: 56px;
+  z-index: 30;
+  min-width: 180px;
+  display: flex;
+  flex-direction: column;
+  padding: 4px;
+  border-radius: 12px;
+  background: var(--surface);
+  box-shadow: var(--menu-shadow);
+}
+
+.chat-title-menu[hidden] {
+  display: none;
+}
+
+.chat-title-menu-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 12px;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--fg1);
+  font: 500 14.5px var(--sans);
+  text-align: left;
+  cursor: pointer;
+}
+
+.chat-title-menu-item::before {
+  content: "";
+  width: 14px;
+  flex-shrink: 0;
+}
+
+.chat-title-menu-item[aria-checked="true"]::before {
+  content: "\2713";
+  color: var(--acc);
+}
+
+.chat-title-menu-item:active {
+  background: var(--press);
+}
+
+.chat-title-menu-item[hidden] {
+  display: none;
+}
+
+/* Fork to new chat: its line under it says what it makes, or why not. */
+.chat-title-menu-fork {
+  align-items: flex-start;
+  max-width: min(300px, calc(100vw - 72px));
+}
+
+.chat-title-menu-item[data-title-view]:not([hidden]) ~ .chat-title-menu-fork:not([hidden]) {
+  margin-top: 4px;
+  border-top: 1px solid var(--bd);
+  border-radius: 0 0 8px 8px;
+}
+
+.chat-title-menu-copy {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.chat-title-menu-detail {
+  color: var(--mut);
+  font: 400 12.5px/1.35 var(--sans);
+  white-space: normal;
+}
+
+.chat-title-menu-fork[aria-disabled="true"] .chat-title-menu-label {
+  color: var(--mut);
+}
+
+.chat-title-menu-fork[aria-disabled="true"]:active {
+  background: transparent;
+}

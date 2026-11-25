@@ -3,6 +3,7 @@ import { readFileSync, readdirSync } from "node:fs";
 import { resolve } from "node:path";
 import test from "node:test";
 import ts from "typescript";
+import { sourceParts } from "./source-parts.mjs";
 
 const forbidden = [
   { label: "Accord", pattern: /\baccord\b/i },
@@ -55,7 +56,7 @@ test("generic artifact surfaces contain no workflow-specific terminology", () =>
     "src/renderer/components/artifacts/artifact-drafts.test.tsx",
     "src/renderer/styles/views/artifacts.css"
   ];
-  for (const path of wholeFiles) {
+  for (const path of wholeFiles.flatMap((file) => sourceParts(process.cwd(), file))) {
     assertGeneric(path, source(path));
   }
 
@@ -68,28 +69,22 @@ test("generic artifact surfaces contain no workflow-specific terminology", () =>
     assertGeneric(path, source(path));
   }
 
-  const contractsPath = "src/shared/appMcpToolContracts.ts";
-  const parsed = ts.createSourceFile(contractsPath, source(contractsPath), ts.ScriptTarget.Latest, true);
-  const contracts = parsed.statements.filter(ts.isVariableStatement)
-    .flatMap(statement => statement.declarationList.declarations)
-    .find(declaration => declaration.name.getText(parsed) === "APP_MCP_TOOL_CONTRACTS")?.initializer;
-  assert.ok(contracts && ts.isArrayLiteralExpression(contracts), "App tool contracts must be inspected from their current source");
-  const artifactContracts = contracts.elements.filter(element => ts.isObjectLiteralExpression(element) && element.properties.some(property =>
-    ts.isPropertyAssignment(property) && property.name.getText(parsed) === "name" && /^APP_ARTIFACT_/.test(property.initializer.getText(parsed))));
+  const artifactContracts = sourceParts(process.cwd(), "src/shared/appMcpToolContracts.ts").flatMap((contractsPath) => {
+    const parsed = ts.createSourceFile(contractsPath, source(contractsPath), ts.ScriptTarget.Latest, true);
+    return parsed.statements.filter(ts.isVariableStatement)
+      .flatMap(statement => statement.declarationList.declarations)
+      .flatMap(declaration => declaration.initializer && ts.isArrayLiteralExpression(declaration.initializer) ? [...declaration.initializer.elements] : [])
+      .filter(element => ts.isObjectLiteralExpression(element) && element.properties.some(property =>
+        ts.isPropertyAssignment(property) && property.name.getText(parsed) === "name" && /^APP_ARTIFACT_/.test(property.initializer.getText(parsed))))
+      .map(element => ({ contractsPath, text: element.getText(parsed) }));
+  });
   assert.equal(artifactContracts.length, 17, "Every artifact tool must remain in the terminology check");
-  for (const contract of artifactContracts) assertGeneric(contractsPath, contract.getText(parsed));
+  for (const contract of artifactContracts) assertGeneric(contract.contractsPath, contract.text);
+  assertGeneric("src/shared/types/artifacts.ts", source("src/shared/types/artifacts.ts"));
   assertGeneric(
-    "src/shared/types.ts#artifactContracts",
+    "src/shared/types/appBridge.ts#artifactBridge",
     between(
-      "src/shared/types.ts",
-      "export const ARTIFACT_USER_MEMBER",
-      "export interface AppBridge"
-    )
-  );
-  assertGeneric(
-    "src/shared/types.ts#artifactBridge",
-    between(
-      "src/shared/types.ts",
+      "src/shared/types/appBridge.ts",
       "  listArtifacts(request: ListArtifactsRequest)",
       "  onReviewProgress(callback:"
     )

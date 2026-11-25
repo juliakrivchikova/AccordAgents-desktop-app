@@ -1,0 +1,68 @@
+.message-image[data-state="ready"] {
+  cursor: zoom-in;
+}
+
+/* --- The "/" menu ---------------------------------------------------------- */
+
+.composer .mobile-slash-option {
+  min-height: 44px;
+}
+
+.mobile-slash-option .mobile-mention-copy span {
+  color: var(--mut);
+  font: 400 12.5px var(--sans);
+}
+
+.mobile-mention-title[data-slash-state] {
+  text-transform: none;
+  letter-spacing: 0;
+  font: 400 13px var(--sans);
+}
+
+/* --- Dark ------------------------------------------------------------------ */
+/* Follows the phone's own setting. The values are the desktop's dark palette,
+   so a chat looks the same on both. */
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    color-scheme: dark;
+    --acc: #b39ef0;
+    --accs: rgba(179, 158, 240, 0.16);
+    --fg1: #f1f3f7;
+    --fg: #c1c7d2;
+    --mut: #7f8794;
+    --bd: #282d36;
+    --bdf: #232831;
+    --s2: #1d2128;
+    --stage: #0d0f13;
+    --surface: #181b21;
+    --surface-fg: #0d0f13;
+    --user-bub: #232a35;
+    --note-card: #1f232a;
+    --ok: #78d9aa;
+    --ok-soft: #143b2c;
+    --code-bg: rgba(255, 255, 255, 0.08);
+    --pre-bg: #0d0f13;
+    --pre-fg: #e5e9f0;
+    --link: #8ab4ff;
+    --danger: #ff8a80;
+    --urgent-soft: #421f1d;
+    --urgent-soft-bd: #823c35;
+    --avatar-bg: #1b202b;
+    --brand-anthropic: #e8896b;
+    --brand-codex: #b1a7ff;
+    --brand-gemini: #8ba2f6;
+    --info-soft: #182740;
+    --press: rgba(255, 255, 255, 0.08);
+    --menu-shadow: 0 12px 30px rgba(0, 0, 0, 0.5);
+    --warn: #f1c86c;
+    --warn-soft: rgba(241, 200, 108, 0.18);
+    --pill-shadow: 0 6px 18px rgba(0, 0, 0, 0.4);
+    --frame-bd: #282d36;
+    --home-bar: #353c47;
+  }
+
+  .members-sheet-backdrop {
+    background: rgba(0, 0, 0, 0.55);
+  }
+}

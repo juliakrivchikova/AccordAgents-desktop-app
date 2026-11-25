@@ -1,0 +1,192 @@
+.chat-provider-icon.is-chip svg,
+.chat-provider-icon.is-chip .provider-mark-claude,
+.chat-provider-icon.is-chip .provider-mark-antigravity {
+  width: 11px;
+  height: 11px;
+}
+
+.chat-provider-icon.is-mini {
+  width: 24px;
+  height: 24px;
+  border-radius: 8px;
+}
+
+.chat-provider-icon.is-mini svg,
+.chat-provider-icon.is-mini .provider-mark-claude,
+.chat-provider-icon.is-mini .provider-mark-antigravity {
+  width: 16px;
+  height: 16px;
+}
+
+.chat-provider-icon.is-large {
+  width: 28px;
+  height: 28px;
+  border-radius: 8px;
+}
+
+.chat-provider-icon.is-large svg,
+.chat-provider-icon.is-large .provider-mark-claude,
+.chat-provider-icon.is-large .provider-mark-antigravity {
+  width: 18px;
+  height: 18px;
+}
+
+.chat-provider-icon .provider-mark-claude {
+  background: url("../../../assets/claude-avatar.png") center / contain no-repeat;
+}
+
+.chat-provider-icon .provider-mark-antigravity {
+  background: url("../../../assets/antigravity-logo.png") center / contain no-repeat;
+}
+
+/* The bare glyph (the sessions view, T3 Code's way): no tile, no rounded
+   square, sized to the text line. Claude's asterisk is its own orange; the
+   white asterisk of the tile is used as its shape. */
+.chat-provider-icon.is-bare {
+  width: 15px;
+  height: 15px;
+  border-radius: 0;
+  background: none;
+  box-shadow: none;
+}
+
+.chat-provider-icon.is-bare[data-provider-kind="claude-code"] {
+  background: none;
+}
+
+.chat-provider-icon.is-bare svg,
+.chat-provider-icon.is-bare .provider-mark-claude,
+.chat-provider-icon.is-bare .provider-mark-antigravity {
+  width: 100%;
+  height: 100%;
+}
+
+.chat-provider-icon.is-bare.is-chip {
+  width: 13px;
+  height: 13px;
+}
+
+.chat-provider-icon.is-bare.is-mini {
+  width: 14px;
+  height: 14px;
+}
+
+.chat-provider-icon.is-bare.is-large {
+  width: 18px;
+  height: 18px;
+}
+
+.chat-provider-icon.is-bare .provider-mark-claude {
+  background: var(--brand-anthropic);
+  -webkit-mask: url("../../../assets/claude-avatar.png") center / contain no-repeat;
+  mask: url("../../../assets/claude-avatar.png") center / contain no-repeat;
+}
+
+/* Task status (task cards, members panel) */
+
+.chat-work-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  color: var(--st, var(--app-muted));
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 1;
+  white-space: nowrap;
+}
+
+.chat-work-status-dot {
+  width: 6px;
+  height: 6px;
+  flex: 0 0 auto;
+  border-radius: 50%;
+  background: var(--st, var(--app-muted));
+}
+
+.chat-work-status.is-running {
+  --st: var(--ui-link);
+}
+
+.chat-work-status.is-running .chat-work-status-dot {
+  animation: chat-rt-pulse 1.4s ease-in-out infinite;
+}
+
+.chat-work-status.is-waiting {
+  --st: var(--app-warning);
+}
+
+.chat-work-status.is-done {
+  --st: var(--app-success);
+}
+
+.chat-work-status.is-failed {
+  --st: var(--app-danger);
+}
+
+.chat-work-status.is-stopped .chat-work-status-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 1.5px;
+}
+
+.chat-work-status.is-idle .chat-work-status-dot {
+  background: transparent;
+  box-shadow: inset 0 0 0 1.6px var(--st, var(--app-muted));
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .chat-work-status-dot {
+    animation: none !important;
+  }
+}
+
+/* Task cards */
+
+.chat-members-row-elapsed {
+  color: var(--app-muted);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+}
+
+/* A member's open choice card */
+
+.chat-sessions-choice {
+  display: grid;
+  gap: 6px;
+  width: min(100%, 640px);
+  margin-bottom: 14px;
+}
+
+.chat-sessions-choice-from {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  width: fit-content;
+  padding: 2px 4px;
+  border: 0;
+  border-radius: var(--radius-control);
+  background: transparent;
+  color: var(--app-text-secondary);
+  font-size: 12px;
+  font-weight: 500;
+  cursor: pointer;
+}
+
+.chat-sessions-choice-from:hover {
+  background: var(--ui-row-hover);
+  color: var(--app-text-strong);
+}
+
+/* The side panel (T3 Code's agents list, the User, 2026-11-22): sections
+   divided by a hairline, 32px rows with the provider's glyph and a dot for
+   the state, the task on one line, the model and time muted at the end. */
+
+.chat-members-panel .thread-panel-head.chat-members-head {
+  border-bottom-color: transparent;
+}
+
+.chat-members-body {
+  display: grid;
+  align-content: start;
+  padding: 0 8px 12px;
+}

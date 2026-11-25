@@ -1,6 +1,10 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
+import { fileURLToPath } from "node:url";
+import { sourceText } from "./source-parts.mjs";
+
+const repoRoot = fileURLToPath(new URL("..", import.meta.url));
 
 function read(path) {
   return readFileSync(new URL(`../${path}`, import.meta.url), "utf8");
@@ -18,7 +22,7 @@ const awsFiles = ["aws-settings-page", "aws-status-section", "aws-program-sectio
   "aws-disk-browser", "aws-setup-section", "aws-connect-section", "aws-dialog", "aws-sign-in-dialog", "aws-worker-auto-stop", "aws-shared"]
   .map((name) => read(`src/renderer/components/settings/${name}.tsx`));
 const toggleCss = read("src/renderer/styles/views/content-markdown.css");
-const approvalCss = read("src/renderer/styles/views/chat-conversation.css");
+const approvalCss = sourceText(repoRoot, "src/renderer/styles/views/chat-conversation.css");
 const providerAuthCss = read("src/renderer/styles/views/provider-device-auth.css");
 const appCss = read("src/renderer/styles/app.css");
 const codexDeviceAuth = read("src/renderer/components/codex-device-auth.tsx");

@@ -1,0 +1,136 @@
+.chat-accord-dock-wrap:has(.chat-accord-strip) {
+  padding-top: 6px;
+}
+
+.chat-accord-strip {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.chat-accord-panel-body .chat-accord-dock {
+  max-height: none;
+  overflow: visible;
+}
+
+.chat-accord-panel-body .chat-accord-dock-head {
+  position: static;
+}
+
+.chat-accord-dock-toggle.is-static {
+  cursor: default;
+}
+
+/* ---- The sessions view, the Claude desktop way (docs/main-session.md) ---- */
+
+/* One reading column: the main timeline's rows, the Accord line and the
+   composer share one centered width, which re-centers as the
+   side panel opens and closes and narrows with the window. */
+.chat-view.is-sessions-view {
+  --chat-reading-width: 768px;
+  --chat-reading-inset: max(0px, calc((100% - var(--chat-reading-width)) / 2));
+}
+
+.chat-view.is-sessions-view .chat-main .virtual-timeline-item,
+.chat-view.is-sessions-view .chat-main > .chat-composer,
+.chat-view.is-sessions-view .chat-main .chat-accord-dock-wrap {
+  padding-inline: max(28px, var(--chat-reading-inset));
+}
+
+.chat-view.is-sessions-view .chat-main .virtual-timeline-item > .message.chat-message {
+  padding-inline: 0;
+}
+
+/* The column's inset is the items' own: the timeline adds none, so replies,
+   the cards the User answers and the composer share one left edge. */
+.chat-view.is-sessions-view .chat-main > .chat-timeline {
+  padding-inline: 0;
+}
+
+.chat-view.is-sessions-view .chat-main .chat-app-tool-approval-slot {
+  padding-inline: max(28px, var(--chat-reading-inset));
+}
+
+.chat-view.is-sessions-view .chat-main .chat-app-tool-approval-slot.has-approvals {
+  border-top: 0;
+}
+
+/* No avatars in the main timeline: the asking member is named above its card. */
+.chat-view.is-sessions-view .chat-app-tool-approval-card {
+  position: relative;
+  grid-template-columns: minmax(0, 1fr);
+  max-width: none;
+}
+
+/* An embedded card names nobody (its message does): no glyph. A one-line
+   result has no name line: its text makes room for the glyph instead. */
+.chat-view.is-sessions-view .chat-app-tool-approval-card.is-embedded > :not(.chat-app-tool-approval-body) {
+  display: none;
+}
+
+.chat-view.is-sessions-view .chat-app-tool-approval-card.is-compact-result > .chat-app-tool-approval-body {
+  padding-left: 22px;
+}
+
+/* The member's glyph sits on its name line, as in an agent row. */
+.chat-view.is-sessions-view .chat-app-tool-approval-card:not(.is-embedded) > :not(.chat-app-tool-approval-body) {
+  position: absolute;
+  top: 2px;
+  left: 0;
+  width: 16px;
+  height: 16px;
+  min-width: 0;
+  border-radius: var(--ui-radius-4);
+}
+
+.chat-view.is-sessions-view .chat-app-tool-approval-card > :not(.chat-app-tool-approval-body) :is(svg, img, span) {
+  width: 16px;
+  height: 16px;
+}
+
+.chat-view.is-sessions-view .chat-app-tool-approval-card .chat-app-tool-approval-meta {
+  padding-left: 22px;
+}
+
+.chat-view.is-sessions-view .chat-app-tool-approval-panel {
+  max-width: none;
+}
+
+/* The header: no text buttons; one icon opens the side panel. */
+.chat-view-header-controls.is-sessions {
+  gap: 0;
+}
+
+.chat-side-panel-toggle {
+  position: relative;
+  display: inline-flex;
+}
+
+.chat-side-panel-badge {
+  position: absolute;
+  top: 1px;
+  right: 0;
+  min-width: 14px;
+  height: 14px;
+  padding: 0 3px;
+  border-radius: 999px;
+  background: var(--ui-primary);
+  color: var(--ui-primary-fg);
+  font-size: 11px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  line-height: 14px;
+  text-align: center;
+  pointer-events: none;
+}
+
+.chat-side-panel-dot {
+  position: absolute;
+  top: 4px;
+  right: 4px;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--ui-primary);
+  pointer-events: none;
+}

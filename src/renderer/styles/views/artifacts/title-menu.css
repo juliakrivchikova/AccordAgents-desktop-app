@@ -1,0 +1,189 @@
+.artifact-title-trigger > span:first-child {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.artifact-title-trigger > svg {
+  flex: 0 0 auto;
+  color: var(--app-muted);
+}
+
+.artifact-title-tag {
+  min-width: 0;
+  flex: 0 1 auto;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--app-muted);
+  font-size: 12px;
+  font-weight: 500;
+}
+
+.artifact-version-subtrigger .artifact-menu-item-label {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+}
+
+.artifact-version-subtrigger-meta {
+  overflow: hidden;
+  color: var(--app-muted);
+  font-size: 12px;
+  font-weight: 500;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.artifact-version-subtrigger[data-state="open"] {
+  background: var(--ui-row-hover);
+}
+
+.artifact-menu-chevron {
+  margin-left: auto;
+}
+
+.artifact-title-trigger:hover:not(:disabled),
+.artifact-title-trigger[data-state="open"] {
+  background: var(--ui-row-hover);
+}
+
+.artifact-title-trigger:disabled {
+  background: transparent;
+  cursor: default;
+  opacity: 0.55;
+}
+
+/* Inset ring: the header clips overflow, so an outside outline would be cut off. */
+.artifact-title-trigger:focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring);
+}
+
+.artifact-menu {
+  z-index: var(--z-popover);
+  display: flex;
+  min-width: 240px;
+  max-width: min(340px, calc(100vw - 24px));
+  flex-direction: column;
+  padding: 5px;
+  border: 1px solid var(--app-border);
+  border-radius: 12px;
+  background: var(--app-surface);
+  box-shadow:
+    0 8px 20px -6px color-mix(in srgb, var(--shadow-color) 14%, transparent),
+    0 24px 48px -12px color-mix(in srgb, var(--shadow-color) 18%, transparent);
+  color: var(--app-text-strong);
+  font-family: var(--font-body);
+}
+
+.artifact-menu-meta {
+  padding: 6px 10px 7px;
+  color: var(--app-muted);
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.artifact-menu-label {
+  padding: 6px 10px 3px;
+  color: var(--app-muted);
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.artifact-menu-separator {
+  height: 1px;
+  margin: 5px 6px;
+  background: var(--app-border);
+}
+
+.artifact-menu-item {
+  display: flex;
+  min-height: var(--ui-control-sm);
+  align-items: center;
+  gap: 10px;
+  padding: 0 10px;
+  border-radius: 8px;
+  color: var(--app-text-strong);
+  font-size: 13px;
+  font-weight: 500;
+  cursor: pointer;
+  outline: none;
+  user-select: none;
+}
+
+.artifact-menu-item > svg {
+  width: 16px;
+  height: 16px;
+  flex: 0 0 auto;
+  color: var(--app-text);
+}
+
+.artifact-menu-item[data-highlighted] {
+  background: var(--ui-row-hover);
+}
+
+.artifact-menu-item[data-disabled] {
+  cursor: default;
+  opacity: 0.5;
+}
+
+.artifact-menu-item-label {
+  min-width: 0;
+  flex: 1 1 auto;
+}
+
+.artifact-menu-indicator {
+  display: inline-flex;
+  color: var(--app-text-strong);
+}
+
+.artifact-menu-indicator svg {
+  width: 15px;
+  height: 15px;
+}
+
+.artifact-version-menu {
+  width: 320px;
+  max-height: var(--radix-dropdown-menu-content-available-height, 420px);
+  overflow-y: auto;
+}
+
+.artifact-version-item {
+  align-items: flex-start;
+  padding: 8px 10px;
+}
+
+.artifact-menu-check {
+  display: inline-flex;
+  width: 15px;
+  flex: 0 0 auto;
+  padding-top: 2px;
+}
+
+.artifact-version-row {
+  display: flex;
+  min-width: 0;
+  flex: 1 1 auto;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.artifact-version-row-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  font-weight: 650;
+}
+
+.artifact-version-row-title > span:first-child {
+  min-width: 0;
+  flex: 1 1 auto;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}

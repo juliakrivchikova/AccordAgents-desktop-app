@@ -1,0 +1,92 @@
+.chat-model-chip:hover,
+.chat-model-chip[data-state="open"] {
+  background: var(--ui-row-hover);
+  color: var(--ui-text);
+}
+
+.chat-model-chip-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  white-space: nowrap;
+}
+
+/* A former member's session. */
+.chat-member-session-gone {
+  margin: 0;
+  padding: 10px 16px 14px;
+  color: var(--app-muted);
+  font-size: 12px;
+}
+
+/* The Accord above the composer: a quiet line, no box. */
+.chat-view.is-sessions-view .chat-accord-strip .chat-accord-row {
+  min-height: 26px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--app-text-secondary);
+  font-size: 12px;
+}
+
+.chat-view.is-sessions-view .chat-accord-strip .chat-accord-row:hover {
+  background: transparent;
+  color: var(--app-text-strong);
+}
+
+.chat-view.is-sessions-view .chat-accord-strip .chat-accord-row-kind,
+.chat-view.is-sessions-view .chat-accord-strip .chat-accord-row-title {
+  flex: none;
+  color: inherit;
+  font-weight: 500;
+}
+
+.chat-view.is-sessions-view .chat-accord-strip .chat-accord-row-title {
+  flex: 0 1 auto;
+}
+
+/* A queued reply's own × in the sessions view: on hover only (always on a
+   touch screen), not a standing control. */
+.chat-message.is-sessions.is-running .message-actions.is-sessions-stop {
+  opacity: 0;
+  pointer-events: none;
+  transform: translateY(-2px);
+}
+
+.chat-message.is-sessions.is-running .message-body:hover .message-actions.is-sessions-stop,
+.chat-message.is-sessions.is-running .message-actions.is-sessions-stop:focus-within {
+  opacity: 1;
+  pointer-events: auto;
+  transform: translateY(0);
+}
+
+@media (hover: none) {
+  .chat-message.is-sessions.is-running .message-actions.is-sessions-stop {
+    opacity: 1;
+    pointer-events: auto;
+    transform: none;
+  }
+}
+
+/* Stop in place of Send (nothing typed): the strong neutral circle. */
+.composer-send-button.is-stop {
+  background: var(--ui-text);
+  color: var(--ui-bg);
+}
+
+.composer-send-button.is-stop:hover:not(:disabled) {
+  background: var(--ui-text-2);
+}
+
+/* Stop next to Send while something is typed: a plain icon button, the
+   accent stays with Send. */
+.composer-send-button.is-stop.is-beside-send {
+  border-radius: var(--ui-radius-8);
+  background: transparent;
+  color: var(--ui-text-2);
+}
+
+.composer-send-button.is-stop.is-beside-send:hover:not(:disabled) {
+  background: var(--ui-row-hover);
+  color: var(--ui-text);
+}

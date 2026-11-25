@@ -1,0 +1,134 @@
+.member-session-provider {
+  flex: 1;
+  min-width: 0;
+  font: 400 13px var(--sans);
+  color: var(--fg);
+}
+
+.member-session-state {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.member-session-empty {
+  flex: 1;
+  margin: 0;
+  padding: 12px;
+  text-align: center;
+  font: 400 14px var(--sans);
+  color: var(--mut);
+}
+
+.member-task {
+  flex: 1;
+  min-width: 0;
+  border: 1px solid var(--bdf);
+  border-radius: 12px;
+  background: var(--note-card);
+}
+
+.member-task-toggle {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 12px;
+  border: 0;
+  background: transparent;
+  color: var(--fg);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.member-task-toggle > svg {
+  flex-shrink: 0;
+}
+
+.member-task-label {
+  flex-shrink: 0;
+  font: 600 13px var(--sans);
+  color: var(--fg1);
+}
+
+.member-task-preview {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font: 400 13px var(--sans);
+  color: var(--mut);
+}
+
+.member-task-body {
+  padding: 0 12px 10px;
+  font: 400 14.5px var(--sans);
+  line-height: 1.5;
+  color: var(--fg);
+}
+
+/* The members sheet in the sessions view. */
+.members-sheet-head {
+  gap: 10px;
+}
+
+.members-sheet-stop-all {
+  margin-left: auto;
+}
+
+.sessions-member-row .members-sheet-copy {
+  flex: 1;
+}
+
+.members-sheet-task {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font: 400 13.5px var(--sans);
+  color: var(--fg1);
+}
+
+.members-previous-toggle {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 10px 8px;
+  border: 0;
+  background: transparent;
+  color: var(--fg);
+  font: 600 13.5px var(--sans);
+  cursor: pointer;
+}
+
+.members-previous-count {
+  font-weight: 500;
+  color: var(--mut);
+}
+
+/* --- The sessions view, T3 Code's way (docs/main-session.md) ------------- */
+
+:root {
+  --provider-claude-bg: var(--brand-anthropic);
+  --provider-tile-bg: var(--s2);
+  --provider-tile-bd: var(--bdf);
+  --provider-codex-top: #b1a7ff;
+  --provider-codex-mid: #7a9dff;
+  --provider-codex-bottom: var(--brand-codex);
+  --sessions-running: #24c17b;
+}
+
+/* A member's mark: its provider's logo tile, never an avatar picture. */
+.provider-logo {
+  position: relative;
+  flex-shrink: 0;
+  width: 22px;
+  height: 22px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 6px;
+  background: var(--provider-tile-bg);
+  box-shadow: inset 0 0 0 1px var(--provider-tile-bd);
+}

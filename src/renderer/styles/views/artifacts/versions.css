@@ -1,0 +1,87 @@
+.artifact-version-row-meta,
+.artifact-version-row-note {
+  overflow-wrap: anywhere;
+  color: var(--app-muted);
+  font-size: 12px;
+  font-weight: 400;
+  line-height: 1.4;
+}
+
+.artifact-version-signed {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  color: var(--app-muted);
+  font-size: 11px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.artifact-version-signed.is-complete {
+  color: var(--app-success);
+}
+
+/* Contextual line under the header when an older version or a draft is on screen. */
+.artifact-view-notice {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px 8px 16px;
+  border-bottom: 1px solid var(--app-border);
+  background: var(--app-warning-soft);
+  color: var(--app-text);
+  font-size: 12px;
+}
+
+.artifact-view-notice > svg {
+  flex: 0 0 auto;
+  color: var(--app-warning);
+}
+
+.artifact-view-notice > span {
+  min-width: 0;
+  flex: 1 1 auto;
+}
+
+.artifact-view-notice strong {
+  color: var(--app-text-strong);
+  font-weight: 650;
+}
+
+.artifact-link-button {
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--app-text-strong);
+  font: inherit;
+  font-weight: 600;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.artifact-link-button:hover {
+  text-decoration-thickness: 2px;
+}
+
+.artifact-link-button:focus-visible {
+  outline: none;
+  border-radius: var(--ui-radius-8);
+  box-shadow: var(--focus-ring);
+}
+
+.artifact-diff-caption {
+  flex: 0 0 auto;
+  padding: 12px 22px 4px;
+  color: var(--app-muted);
+  font-size: 12px;
+}
+
+/* Revise: Preview / Edit sit with Cancel and Save in a row above the editor. */
+.artifact-edit-surface > .artifact-edit-fabs {
+  position: static;
+  justify-content: flex-end;
+  padding: 10px 12px 0;
+}

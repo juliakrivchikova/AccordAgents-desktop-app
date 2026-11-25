@@ -2,6 +2,10 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { inflateSync } from "node:zlib";
 import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
+import { sourceText } from "./source-parts.mjs";
+
+const repoRoot = fileURLToPath(new URL("..", import.meta.url));
 
 function read(path) {
   return readFileSync(new URL(`../${path}`, import.meta.url), "utf8");
@@ -24,7 +28,7 @@ const avatarCssFiles = [
   "src/renderer/styles/views/settings-roles.css",
   "src/renderer/styles/views/settings-rules.css"
 ];
-const avatarCss = avatarCssFiles.map((path) => read(path)).join("\n");
+const avatarCss = avatarCssFiles.map((path) => sourceText(repoRoot, path)).join("\n");
 
 test("avatar specs carry explicit glyph/photo media modes", () => {
   assert.match(chatAvatars, /export type AvatarMediaMode = "glyph" \| "photo";/);

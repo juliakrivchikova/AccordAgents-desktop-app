@@ -1,0 +1,139 @@
+.chat-artifact-note-card:hover {
+  background: var(--ui-card-hover-bg);
+  border-color: var(--ui-card-hover-border);
+}
+
+/* The member's name is part of the card, so it takes the card's cursor. */
+.chat-artifact-note-card .chat-mention {
+  cursor: inherit;
+}
+
+/* Where a search hit or a message link lands: the wash other messages get. */
+.chat-artifact-note.message-focused {
+  position: relative;
+  isolation: isolate;
+}
+
+.chat-artifact-note.message-focused::before {
+  position: absolute;
+  z-index: -1;
+  inset: -16px;
+  border-radius: 12px;
+  background: color-mix(in srgb, var(--app-accent-soft) 45%, transparent);
+  content: "";
+}
+
+.chat-artifact-note .chat-message-reactions {
+  margin-top: 6px;
+}
+
+.chat-artifact-note-card:focus-visible {
+  outline: none;
+  outline-offset: 0;
+  box-shadow: var(--focus-ring);
+}
+
+.chat-artifact-note-icon {
+  display: flex;
+  flex: none;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  border-radius: var(--ui-radius-4);
+  background: transparent;
+  color: var(--ui-text-3);
+}
+
+.chat-artifact-note-text {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+/* Who did what leads the card; the artifact and the time follow in grey. */
+.chat-artifact-note-title {
+  font-size: 13px;
+  line-height: 20px;
+  overflow-wrap: anywhere;
+  color: var(--ui-text);
+}
+
+.chat-artifact-note-version {
+  display: inline-block;
+  margin-left: 6px;
+  padding: 0;
+  border-radius: 999px;
+  background: transparent;
+  color: var(--ui-text-3);
+  font-size: 12px;
+  font-weight: 500;
+  line-height: 18px;
+  vertical-align: 1px;
+}
+
+/* One mark per member the artifact waits for: grey until their draft or
+   signature is in, lilac once it is, green when every signature is. */
+.chat-artifact-note-marks {
+  display: flex;
+  flex: none;
+  align-self: center;
+  gap: 6px;
+  margin-left: auto;
+  padding-left: 8px;
+}
+
+.chat-artifact-note-mark {
+  display: flex;
+  width: 28px;
+  height: 28px;
+  align-items: center;
+  justify-content: center;
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--app-muted) 12%, transparent);
+  color: color-mix(in srgb, var(--app-muted) 75%, transparent);
+}
+
+/* Many members: smaller marks, so the text keeps its room. */
+.chat-artifact-note-marks.is-many {
+  gap: 3px;
+}
+
+.chat-artifact-note-marks.is-many .chat-artifact-note-mark {
+  width: 22px;
+  height: 22px;
+  border-radius: 6px;
+}
+
+.chat-artifact-note-marks.is-many svg {
+  width: 13px;
+  height: 13px;
+}
+
+.chat-artifact-note-mark.is-given {
+  background: var(--app-accent-soft);
+  color: var(--ui-link);
+}
+
+.chat-artifact-note-mark.is-complete {
+  background: var(--app-success-soft);
+  color: var(--app-success);
+}
+
+.chat-artifact-note-meta {
+  margin-top: 0;
+  color: var(--ui-text-3);
+  font-size: 12px;
+  line-height: 18px;
+}
+
+.chat-artifact-note-meta .message-when {
+  color: inherit;
+  font-size: inherit;
+}
+
+.chat-artifact-note-body {
+  margin-top: 4px;
+  font-size: 13px;
+  overflow-wrap: anywhere;
+}
