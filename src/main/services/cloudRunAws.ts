@@ -1,3 +1,7 @@
+// AWS-managed Cloud Runs worker ownership and reconciliation. AWS tags are the
+// source of truth; persisted handles are local caches, while guarded automatic
+// stop is authorized by worker-side registered activity across upgraded apps.
+
 import type { AwsWorkerActualSpec, SetAwsAutoStopRequest, AwsWorkerStatus, CloudRunWorkerSettings } from "../../shared/types";
 import type { AwsMachinePowerConfig } from "../../shared/machinePower";
 import type { MachineInstallRecord } from "../../shared/machineInstall";

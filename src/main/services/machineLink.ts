@@ -1,3 +1,18 @@
+/**
+ * Machine link, desktop side.
+ *
+ * A cloud machine is a plain client of the User's server (agreements Д1–Д13):
+ * its members' turns are asked of it there, it takes them there and writes
+ * their replies there, and a Stop reaches it there (ChatService). This desktop
+ * dispatches nothing to it. What is left here is the live control between
+ * this desktop and the machines it set up, in each machine's room on the
+ * server, never stored: the machine's greeting and status (Settings, updates,
+ * automatic stop), its scheduled scripts, a picture a member there reads from
+ * this desktop, background-task labels, next-prompt suggestions and live
+ * progress for this window. And this desktop publishes each machine's
+ * settings on the server, sealed for that machine alone.
+ */
+
 import type { CliStartDefaultsByKind } from "../../shared/cliStartDefaults";
 import type { MachineMemberRestartSupport } from "../../shared/memberRestart";
 import type { MachineSessionMoveTarget } from "../../shared/memberSessionMove";
