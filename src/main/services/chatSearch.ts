@@ -188,20 +188,16 @@ export class ChatSearchService {
     // many chats of them (a whole account on its first search) can exhaust
     // the process and the small hub.
     const indexedAt = new Date().toISOString();
+    let changedConversationId: string | undefined;
     for (const batch of chunks(staleSnapshots, INDEX_WRITE_BATCH_SIZE)) {
       const replacements: ChatSearchDocumentReplacement[] = [];
       for (const planned of batch) {
         const [read] = await atStage("source-read", false, () => this.storage.readChatSearchConversations([planned.conversationId]));
-        if (!read) {
-          throw new ChatSearchFailure(
-            "source-read",
-            planned.conversationId,
-            false,
-            new Error(`Saved chat disappeared during search: ${planned.conversationId}`)
-          );
-        }
-        if (!sameSourceVersion(planned, read.snapshot)) {
-          throw new ChatSearchSourceChanged(planned.conversationId);
+        // Saved or deleted since the snapshot. The others are still read and
+        // written, so the next attempt reads only the changed ones.
+        if (!read || !sameSourceVersion(planned, read.snapshot)) {
+          changedConversationId ??= planned.conversationId;
+          continue;
         }
         replacements.push({
           snapshot: read.snapshot,
@@ -215,6 +211,9 @@ export class ChatSearchService {
           stateByConversationId.set(replacement.snapshot.conversationId, stateFromReplacement(replacement));
         }
       }
+    }
+    if (changedConversationId) {
+      throw new ChatSearchSourceChanged(changedConversationId);
     }
 
     if (request.requester.kind === "user") {

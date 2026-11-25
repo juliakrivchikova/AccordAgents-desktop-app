@@ -3,6 +3,8 @@ import { randomUUID } from "node:crypto";
 import { CommandError, commandEnvironment, spawnCommand } from "./command";
 
 const OUTPUT_KEPT_FOR_ERRORS = 8192;
+/** A longer response is refused: holding more could take the whole process down. */
+const LONGEST_RESPONSE = 1024 * 1024 * 1024;
 const QUOTE = 0x22, COMMA = 0x2c, OPEN_ARRAY = 0x5b, BACKSLASH = 0x5c, CLOSE_ARRAY = 0x5d, OPEN_ROW = 0x7b, CLOSE_ROW = 0x7d;
 
 /** Reads what one operation prints, piece by piece. */
@@ -20,7 +22,12 @@ export class SqliteSession {
   private queue: Promise<void> = Promise.resolve();
   private idle?: ReturnType<typeof setTimeout>;
 
-  constructor(private readonly executable: string, private readonly dbPath: string, private readonly busyTimeoutMs: number) {}
+  constructor(
+    private readonly executable: string,
+    private readonly dbPath: string,
+    private readonly busyTimeoutMs: number,
+    private readonly longestResponse = LONGEST_RESPONSE
+  ) {}
 
   /** The operation's output as text. */
   run(sql: string, timeoutMs: number): Promise<string> {
@@ -65,6 +72,7 @@ export class SqliteSession {
       const read = (text: string): void => {
         if (readFailure !== undefined) return;
         try {
+          if (outputLength > this.longestResponse) throw new Error("It is too long.");
           reader.write(text);
         } catch (error) {
           readFailure = error;
