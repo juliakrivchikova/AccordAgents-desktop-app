@@ -21,7 +21,7 @@ export function sessionsMainRows(state) {
   state.rows.forEach(function (row, position) {
     const message = state.messages[position];
     if (isWaitingReplyRow(message)) return;
-    const base = { ...row, presentation: "sessions", replyCount: undefined };
+    const base = { ...row, presentation: "sessions", replyCount: undefined, waiting: waiting.get(message.id) };
     if (state.openCardIds.has(message.id)) {
       const member = state.members.find(function (candidate) { return candidate.id === row.participantId; });
       rows.push({ ...base, memberChoice: { participantId: row.participantId || "", name: sessionsMemberName(member, row.participantLabel), kind: member ? member.kind : "" } });
@@ -35,7 +35,6 @@ export function sessionsMainRows(state) {
     }
     if (row.author === "you") {
       base.content = shared.withoutLeadingMention(String(row.content || ""), state.mainHandle);
-      base.waiting = waiting.get(message.id);
     }
     const tasks = state.placement.tasksByReplyId.get(message.id);
     // A part of a turn her next message joined, with nothing in it, is not
@@ -104,7 +103,7 @@ export function sessionsMemberSessionRows(state, member) {
     // desktop: the main session is named by nothing.
     const asksMain = batch && batch.requesterParticipantId === participantId && typeof shared.withoutLeadingMention === "function";
     const base = { ...drawn, presentation: "sessions", replyCount: undefined,
-      ...(drawn.author === "you" ? { waiting: waiting.get(message.id) } : {}),
+      waiting: waiting.get(message.id),
       ...(asksMain ? { content: shared.withoutLeadingMention(String(drawn.content || ""), state.mainHandle) } : {}) };
     if (given) {
       const key = drawn.rowKey || drawn.id;

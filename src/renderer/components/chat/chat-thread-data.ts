@@ -20,7 +20,8 @@ export function isChatMessageHiddenInChat(conversation: Pick<Conversation, "mess
     (message.role === "system" && accordFoldedMessageIds(conversation.messages).has(message.id)) ||
     // An Accord closed on two devices at once: its first line is the one.
     (message.role === "system" && isRepeatedAccordClosedLine(conversation.messages, message)) ||
-    isEmptyFinishedReply(message);
+    // Kept when a thread starts at it: nothing else opens that thread.
+    (isEmptyFinishedReply(message) && !conversation.messages.some((reply) => reply.metadata?.chatThreadRootId === message.id && reply.id !== message.id));
 }
 
 /** A message drawn as a row of the chat's main timeline: shown, and not a thread reply. */

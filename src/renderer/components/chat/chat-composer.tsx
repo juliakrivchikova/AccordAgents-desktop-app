@@ -52,6 +52,8 @@ export interface ChatComposerPicks {
  *  CLI's prompt can: send it and wait (Enter), or send it now (Cmd or Ctrl
  *  with Enter; Enter with nothing typed sends what already waits). */
 export interface ChatComposerSendNow {
+  /** The reply that makes way. */
+  runId: string;
   waiting: boolean;
   onSendNow: () => void;
 }
@@ -107,6 +109,9 @@ export interface ChatComposerProps {
   takesFocusRequests?: boolean;
 }
 
+/** Enter with nothing typed this soon after a message went is the same press. */
+const SEND_AGAIN_MS = 800;
+
 export function ChatComposer(props: ChatComposerProps): JSX.Element {
   const rootRef = useRef<HTMLDivElement>(null);
   const [footerSlot, setFooterSlot] = React.useState<HTMLElement | null>(null);
@@ -114,6 +119,9 @@ export function ChatComposer(props: ChatComposerProps): JSX.Element {
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const highlightRef = useRef<HTMLDivElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const latestSendNowRef = useRef(props.sendNow);
+  latestSendNowRef.current = props.sendNow;
+  const sentAtRef = useRef(0);
   const searchSource = useMemo(
     () => ({
       type: "conversation" as const,
@@ -183,11 +191,17 @@ export function ChatComposer(props: ChatComposerProps): JSX.Element {
     highlightRef.current.scrollLeft = event.currentTarget.scrollLeft;
   }
 
-  async function submit(now: boolean): Promise<void> {
-    // The reply written when the key was pressed is the one that makes way.
+  async function submit(now: boolean, held: boolean): Promise<void> {
+    // The reply written when the key was pressed is the one that makes way,
+    // if it is still being written.
     const sendNow = props.sendNow;
+    // The key held, or pressed again as a message goes, sends nothing more.
+    const pressedOnPurpose = !held && Date.now() - sentAtRef.current > SEND_AGAIN_MS;
+    if (canSend) sentAtRef.current = Date.now();
     const sent = await sendDraft();
-    if (sendNow && ((sent && now) || (draftEmpty && sendNow.waiting))) sendNow.onSendNow();
+    if (sent) sentAtRef.current = Date.now();
+    if (!sendNow || latestSendNowRef.current?.runId !== sendNow.runId) return;
+    if ((sent && now) || (draftEmpty && sendNow.waiting && pressedOnPurpose)) sendNow.onSendNow();
   }
 
   async function sendDraft(): Promise<boolean> {
@@ -352,7 +366,7 @@ export function ChatComposer(props: ChatComposerProps): JSX.Element {
             }
             if (event.key === "Enter" && !event.shiftKey) {
               event.preventDefault();
-              void submit(event.metaKey || event.ctrlKey);
+              void submit(event.metaKey || event.ctrlKey, event.repeat);
             }
           }}
           onBlur={() => window.setTimeout(() => {

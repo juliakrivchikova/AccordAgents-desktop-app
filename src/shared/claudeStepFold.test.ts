@@ -56,3 +56,14 @@ test("several servers are named once each, and steps the CLI does not count say 
   assert.equal(claudeStepSummary([step("tool", "ToolSearch"), step("tool", "Thinking")]), "");
   assert.equal(claudeStepSummary([step("tool", "Searching for foo"), step("tool", "Finding **/*.ts"), step("tool", "Reading a.ts")]), "Searched for 2 patterns, read 1 file");
 });
+
+test("a command with an unclosed quote and many backslashes is read at once", () => {
+  const started = Date.now();
+  const says = (command: string) => claudeStepSummary([shell("Doing it", command)]);
+  assert.equal(says(`node -e '${"\\".repeat(1_000)}`), "Ran 1 shell command");
+  assert.equal(says(`cat <<EOF\n# don't ${"\\n".repeat(600)}\nEOF`), "Ran 1 shell command");
+  assert.equal(says(`grep "${"\\\"".repeat(800)} notes.md`), "Searched for 1 pattern");
+  assert.equal(says("grep 'a\\' notes.md > out.txt"), "Ran 1 shell command", "a backslash escapes nothing in single quotes");
+  assert.equal(says("grep \"a \\\" > b\" notes.md"), "Searched for 1 pattern");
+  assert.ok(Date.now() - started < 500);
+});

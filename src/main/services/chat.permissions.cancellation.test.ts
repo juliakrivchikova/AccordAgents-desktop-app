@@ -296,6 +296,7 @@ test("cancelling same participant queued response removes bubble before earlier 
   const participant = chatParticipant("codex-cli");
   const conversation = chatConversation([participant]);
   let runCount = 0;
+  const prompts: string[] = [];
   let releaseFirst!: () => void;
   const firstCanFinish = new Promise<void>((resolve) => {
     releaseFirst = resolve;
@@ -306,8 +307,9 @@ test("cancelling same participant queued response removes bubble before earlier 
   });
   const { service, storage, tempRoot } = testService({
     conversation,
-    run: async (runParticipant) => {
+    run: async (runParticipant, prompt) => {
       runCount += 1;
+      prompts.push(prompt);
       const runNumber = runCount;
       if (runNumber === 1) {
         await firstCanFinish;
@@ -411,6 +413,8 @@ test("cancelling same participant queued response removes bubble before earlier 
       promoted.metadata?.queuedBehind === undefined;
   });
 
+  assert.match(prompts[1]!, /third/);
+  assert.doesNotMatch(prompts[1]!, /second/, "a message taken back is not given to its member later");
   releaseThird();
   await waitFor(() =>
     storage.current.messages.some((message: ChatMessage) =>

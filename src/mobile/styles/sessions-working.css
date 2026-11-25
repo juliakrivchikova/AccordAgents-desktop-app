@@ -40,6 +40,12 @@
   white-space: nowrap;
 }
 
+/* What folded steps came to is read in full: it does not open on the phone. */
+.sessions-activity-row.is-folded:not(.is-current) .sessions-activity-text {
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+
 .sessions-activity-row.is-current .sessions-activity-text {
   background: linear-gradient(90deg, var(--mut) 0%, var(--mut) 35%, var(--fg1) 50%, var(--mut) 65%, var(--mut) 100%);
   background-size: 230% 100%;

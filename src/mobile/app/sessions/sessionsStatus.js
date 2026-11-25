@@ -237,7 +237,7 @@ export function sessionsActivityElement(entry, live) {
   }
   rows.forEach(function (row, index) {
     const line = document.createElement("div");
-    line.className = "sessions-activity-row is-" + row.kind + (live && index === rows.length - 1 ? " is-current" : "");
+    line.className = "sessions-activity-row is-" + row.kind + (row.folded ? " is-folded" : "") + (live && index === rows.length - 1 ? " is-current" : "");
     line.dataset.activityKind = row.kind;
     // Steps folded into one line, as Claude Code folds them, are words alone.
     if (!row.folded) {

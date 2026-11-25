@@ -27,9 +27,25 @@ const NEUTRAL_COMMANDS = new Set(["echo", "printf", "true", "false", ":"]);
 /** A redirection that writes somewhere (not to /dev/null). */
 const WRITES = />(?!\s*(?:&|\/dev\/null))/;
 
+/** A command without what stands in its quotes, read once from start to end
+ *  (a pattern for it took hours on an unclosed quote with many backslashes;
+ *  a long command is kept cut, so its quote is often not closed). */
+function withoutQuoted(command: string): string {
+  let kept = "";
+  let quote = "";
+  for (let index = 0; index < command.length; index += 1) {
+    const char = command[index]!;
+    if (char === "\\" && quote !== "'") index += 1;
+    else if (quote) quote = char === quote ? "" : quote;
+    else if (char === "\"" || char === "'") quote = char;
+    else kept += char;
+  }
+  return kept;
+}
+
 function shellStep(command: string | undefined): FoldedStep {
   const shell: FoldedStep = { kind: "shell" };
-  if (!command || WRITES.test(command.replace(/(["'])(?:\\.|(?!\1)[\s\S])*\1/g, "x"))) return shell;
+  if (!command || WRITES.test(withoutQuoted(command))) return shell;
   let found: FoldedStep | undefined;
   for (const part of command.split(/&&|\|\||[;|\n]/)) {
     const [name = "", ...args] = part.trim().split(/\s+/);
@@ -44,7 +60,19 @@ function shellStep(command: string | undefined): FoldedStep {
   return found ?? shell;
 }
 
+/** Each step is read once: the same steps are folded again on every update
+ *  of a reply being written. */
+const foldedSteps = new WeakMap<StepEvent, StepEvent & { step: FoldedStep | undefined }>();
+
 function foldedStep(event: StepEvent): FoldedStep | undefined {
+  const known = foldedSteps.get(event);
+  if (known && known.kind === event.kind && known.label === event.label && known.detail === event.detail) return known.step;
+  const step = readFoldedStep(event);
+  foldedSteps.set(event, { kind: event.kind, label: event.label, detail: event.detail, step });
+  return step;
+}
+
+function readFoldedStep(event: StepEvent): FoldedStep | undefined {
   const label = event.label.replace(/\s+/g, " ").trim();
   if (event.kind === "command") return shellStep(event.detail);
   if (/^(?:thinking|reasoning)\b/i.test(label)) return { kind: "silent" };

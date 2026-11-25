@@ -224,21 +224,24 @@ test("a Claude reply the next message joined is stored as part of a turn that go
   assert.equal(typeof last.metadata?.workedMs, "number");
 });
 
-test("Stop on a Claude reply its CLI still holds removes it, and the running reply goes on", async () => {
+test("Stop on a Claude reply its CLI still holds removes it, the running reply goes on, and no later turn is given its message", async () => {
   const participant = chatParticipant("claude-code");
   const conversation = chatConversation([participant]);
   const runs: any[] = [];
+  const prompts: string[] = [];
   let releaseFirst!: () => void;
   const firstBlocked = new Promise<void>((resolve) => { releaseFirst = resolve; });
   const { service, storage, tempRoot } = testService({
     conversation,
-    run: async (runParticipant, _prompt, _repoPath, _diffMode, _kind, signal: AbortSignal | undefined, runOptions: any) => {
+    run: async (runParticipant, prompt, _repoPath, _diffMode, _kind, signal: AbortSignal | undefined, runOptions: any) => {
       runOptions?.warm?.onMessageWritten?.();
       runs.push(runOptions);
+      prompts.push(prompt);
       if (runs.length === 1) {
         await firstBlocked;
         return { participant: runParticipant, ok: true, content: "First done.", durationMs: 1 };
       }
+      if (runs.length > 2) return { participant: runParticipant, ok: true, content: "Third done.", durationMs: 1 };
       // The CLI takes it out of its queue when stopped (cancel_async_message).
       await new Promise<void>((resolve) => signal?.addEventListener("abort", () => resolve(), { once: true }));
       return { participant: runParticipant, ok: false, content: "", error: "Chat run cancelled.", durationMs: 1 };
@@ -259,6 +262,11 @@ test("Stop on a Claude reply its CLI still holds removes it, and the running rep
   releaseFirst();
   await waitFor(() => storage.current.messages.some((message: ChatMessage) => message.content === "First done." && message.status === "done"));
   assert.equal(storage.current.messages.some((message: ChatMessage) => message.metadata?.turnQueued || message.metadata?.queuedBehind), false, "nothing is left queued");
+
+  await service.sendMessage({ conversationId: conversation.id, runId: "after-third", content: `@${participant.handle} third` });
+  await waitFor(() => storage.current.messages.some((message: ChatMessage) => message.content === "Third done." && message.status === "done"));
+  assert.match(prompts[2]!, /third/);
+  assert.doesNotMatch(prompts[2]!, /second/);
 });
 
 test("a queued Claude message the CLI starts on its own step (the one before ended) counts from then", async () => {

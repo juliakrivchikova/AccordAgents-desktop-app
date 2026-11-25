@@ -63,6 +63,7 @@ export function composerSendNow(
   const runId = participantId && onStopRun ? runningReplyOf(messages, participantId)?.metadata?.runId : undefined;
   if (!participantId || !runId || !onStopRun) return undefined;
   return {
+    runId,
     waiting: waitingMessages(messages, participantId).size > 0,
     onSendNow: () => onStopRun(runId)
   };

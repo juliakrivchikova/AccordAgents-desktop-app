@@ -56,7 +56,8 @@ async function rendererSources(dir) {
 }
 
 test("what the User sees calls scheduled scripts Scheduled Tasks", async () => {
-  const files = [...await rendererSources("src/renderer"), ...userFacingFiles.flatMap((file) => sourceParts(repoRoot, file))];
+  const files = [...await rendererSources("src/renderer"), ...userFacingFiles.flatMap((file) => sourceParts(repoRoot, file)),
+    ...sourceParts(repoRoot, "src/main/desktopApp.ts")];
   const hits = [];
   for (const file of files) {
     const lines = (await readFile(path.join(repoRoot, file), "utf8")).split("\n");

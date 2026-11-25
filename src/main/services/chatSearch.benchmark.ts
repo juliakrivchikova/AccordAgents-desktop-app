@@ -8,6 +8,8 @@ import type { ChatMessage, Conversation } from "../../shared/types";
 import { ChatSearchService } from "./chatSearch";
 import { resolveSqliteExecutable } from "./sqliteCli";
 import { StorageService } from "./storage";
+import type { Sqlite } from "./storage/database/sqlite";
+import { storageParts } from "./storage/test/storageParts";
 
 const CHAT_COUNT = 370;
 const MESSAGES_PER_CHAT = 50;
@@ -28,20 +30,22 @@ async function main(): Promise<void> {
       textBytes += chat.messages.reduce((total, message) => total + Buffer.byteLength(message.content, "utf8"), 0);
       await storage.saveConversation(chat);
     }
-    const instrumented = storage as unknown as {
-      queryJson(sql: string, timeoutMs?: number): Promise<unknown[]>;
-      runSql(sql: string, timeoutMs?: number): Promise<void>;
-    };
-    const originalQueryJson = instrumented.queryJson.bind(storage);
-    const originalRunSql = instrumented.runSql.bind(storage);
+    const sqlite: Sqlite = storageParts(storage).sqlite;
+    const originalQueryJson = sqlite.queryJson.bind(sqlite);
+    const originalQueryLines = sqlite.queryLines.bind(sqlite);
+    const originalRunSql = sqlite.runSql.bind(sqlite);
     let sqliteProcessCount = 0;
-    instrumented.queryJson = async (sql, timeoutMs) => {
+    sqlite.queryJson = async <T>(sql: string) => {
       sqliteProcessCount += 1;
-      return originalQueryJson(sql, timeoutMs);
+      return originalQueryJson<T>(sql);
     };
-    instrumented.runSql = async (sql, timeoutMs) => {
+    sqlite.queryLines = async (sql) => {
       sqliteProcessCount += 1;
-      return originalRunSql(sql, timeoutMs);
+      return originalQueryLines(sql);
+    };
+    sqlite.runSql = async (...args) => {
+      sqliteProcessCount += 1;
+      return originalRunSql(...args);
     };
     const service = new ChatSearchService(storage);
     const coldStartedAt = performance.now();

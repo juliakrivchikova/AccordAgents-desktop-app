@@ -31,16 +31,18 @@ export function runningReplyOf<T extends WaitingSource>(messages: readonly T[], 
     Boolean(message.metadata?.runId) && !isWaitingReply(message));
 }
 
-/** The User's messages one member has not taken yet, by the message's id (a
- *  message to several members waits in each one's session on its own). */
+/** The User's messages (and a scheduled task's posts) one member has not
+ *  taken yet, by the message's id (a message to several members waits in each
+ *  one's session on its own). What another member asked waits without a line:
+ *  its task says so. */
 export function waitingMessages(messages: readonly WaitingSource[], participantId: string): ReadonlyMap<string, WaitingMessage> {
   const waiting = new Map<string, WaitingMessage>();
   const replies = messages.filter((message) => message.participantId === participantId && isWaitingReply(message));
   if (replies.length === 0) return waiting;
-  const users = new Set(messages.filter((message) => message.role === "user").map((message) => message.id));
+  const asked = new Set(messages.filter((message) => message.role === "user" || message.role === "script").map((message) => message.id));
   const running = runningReplyOf(messages, participantId);
   for (const { metadata } of replies) {
-    if (!metadata?.runId || !metadata.sourceMessageId || !users.has(metadata.sourceMessageId)) continue;
+    if (!metadata?.runId || !metadata.sourceMessageId || !asked.has(metadata.sourceMessageId)) continue;
     waiting.set(metadata.sourceMessageId, {
       participantId,
       runId: metadata.runId,

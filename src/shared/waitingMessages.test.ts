@@ -32,12 +32,16 @@ test("a reply that runs, has ended or has no run waits for nothing", () => {
   assert.equal(waitingMessages([message("u", "user"), reply("a", "main", "u", { turnQueued: true, runId: undefined })], "main").size, 0);
 });
 
-test("a message to two members waits in each one's session on its own, and only the User's messages do", () => {
+test("a message to two members waits in each one's session on its own, a scheduled task's post waits too, what a member asked does not", () => {
   const messages = [
     message("u1", "user"), reply("a1", "main", "u1"), reply("b1", "drew", "u1"),
     message("u2", "user"), reply("a2", "main", "u2", { turnQueued: true }), reply("b2", "drew", "u2", { turnQueued: true }),
-    message("s1", "script"), reply("a3", "main", "s1", { turnQueued: true })
+    message("s1", "script"), reply("a3", "main", "s1", { turnQueued: true }),
+    reply("q1", "drew", "u1", {}, "done"), reply("a4", "main", "q1", { turnQueued: true })
   ];
-  assert.deepEqual([...waitingMessages(messages, "main")], [["u2", { participantId: "main", runId: "run-a2", behind: { runId: "run-a1", messageId: "u1" } }]]);
+  const behind = { runId: "run-a1", messageId: "u1" };
+  assert.deepEqual([...waitingMessages(messages, "main")], [
+    ["u2", { participantId: "main", runId: "run-a2", behind }], ["s1", { participantId: "main", runId: "run-a3", behind }]
+  ]);
   assert.deepEqual([...waitingMessages(messages, "drew")], [["u2", { participantId: "drew", runId: "run-b2", behind: { runId: "run-b1", messageId: "u1" } }]]);
 });

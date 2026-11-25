@@ -63,8 +63,25 @@ process.exit(1);
 });
 
 test("a Claude Code ended from outside says by which signal", { timeout: 15_000, skip: process.platform === "win32" }, async () => {
-  const { result } = await runWith(`setTimeout(() => process.kill(process.pid, "SIGKILL"), 100);`);
+  const { result } = await runWith(`process.stderr.write("(node:1) Warning: something at startup\\n"); setTimeout(() => process.kill(process.pid, "SIGKILL"), 100);`);
   assert.equal(result.content, "@gera stopped before it returned a response: Claude Code was ended by SIGKILL.");
+});
+
+test("what it wrote before the step that failed is not that step's reason", { timeout: 15_000, skip: process.platform === "win32" }, async () => {
+  const { result } = await runWith(`
+const send = (value) => process.stdout.write(JSON.stringify(value) + "\\n");
+process.stderr.write("Error: an MCP server did not start\\n");
+require("node:readline").createInterface({ input: process.stdin }).on("line", (line) => {
+  const message = JSON.parse(line);
+  if (message.type !== "user") return;
+  setTimeout(() => {
+    send({ type: "command_lifecycle", command_uuid: message.uuid, state: "started" });
+    send({ type: "system", subtype: "init", session_id: "s" });
+    setTimeout(() => process.exit(3), 100);
+  }, 200);
+});
+`);
+  assert.equal(result.content, "@gera stopped before it returned a response: Claude Code exited with code 3.");
 });
 
 test("a usage limit is said in Claude Code's own words", { timeout: 15_000, skip: process.platform === "win32" }, async () => {
@@ -89,7 +106,7 @@ require("node:readline").createInterface({ input: process.stdin }).on("line", (l
   if (message.type !== "user") return;
   send({ type: "command_lifecycle", command_uuid: message.uuid, state: "started" });
   send({ type: "system", subtype: "init", session_id: "s" });
-  send({ type: "result", subtype: "error_during_execution", is_error: true, errors: ["The request was too large."], session_id: "s" });
+  send({ type: "result", subtype: "error_during_execution", is_error: true, errors: ["[ede_diagnostic] result_type=user last_content_type=n/a stop_reason=null", "The request was too large."], session_id: "s" });
 });
 `);
   assert.equal(result.content, "@gera: The request was too large.");

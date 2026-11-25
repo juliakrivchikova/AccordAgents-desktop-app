@@ -40,6 +40,7 @@ import {
   cliStartedReplyStart, emitProgress, markParticipantMessageStoppedByUser, markParticipantMessageStopUnconfirmed,
   processingTranscriptWithTerminalMessage, withCliStartedReplyStart
 } from "./replyMessages";
+import { takenBackMark } from "./takenBackMessages";
 import type { ClaudeWriteGate } from "./types";
 import type { ChatAppMcpTokenGrant, ChatMemberAccess, ChatPromptContextScope, ProgressCallback } from "../types";
 import type { ChatModules } from "../modules";
@@ -726,8 +727,9 @@ export class ParticipantTurn {
       if (pendingMessage.metadata?.queuedBehind || pendingMessage.metadata?.turnQueued) {
         // A reply its CLI never started (it failed or stopped while queued)
         // is not left queued.
+        const takenBack = signal?.aborted && !this.chat.appQuit.endsByQuit(runId) ? takenBackMark(pendingMessage) : undefined;
         const { queuedBehind: _queuedBehind, turnQueued: _turnQueued, ...metadata } = pendingMessage.metadata;
-        pendingMessage.metadata = metadata;
+        pendingMessage.metadata = { ...metadata, ...takenBack };
       }
       const endedByQuit = !signal?.aborted && !result.ok && this.chat.appQuit.endsByQuit(runId) && closedByQuit(result.error);
       const notReady = !signal?.aborted && !result.ok && !endedByQuit && firstTurnHere ? await this.chat.agentEnvironment.firstTurnProviderProblem(participant) : undefined;

@@ -9,6 +9,7 @@ import { markChatMessageRemoved } from "../store/mergeStoredChat";
 import { clone, createChatMessage } from "../store/messages";
 import { promptContextScopeForTrigger } from "./promptContextRecords";
 import { emitProgress } from "./replyMessages";
+import { takenBackMark } from "./takenBackMessages";
 import type { ProgressCallback, ServerTurnOpen } from "../types";
 import type { ChatModules } from "../modules";
 
@@ -17,7 +18,7 @@ export class ParticipantBatch {
   constructor(
     private readonly chat: Pick<
       ChatModules,
-      | "activeRuns" | "agentEnvironment" | "approvalDecisions" | "chatHistory" | "members" | "messageSending"
+      | "activeRuns" | "agentEnvironment" | "appQuit" | "approvalDecisions" | "chatHistory" | "members" | "messageSending"
       | "participantRequests" | "pendingReplies" | "promptContext" | "serverLink" | "serverPlaceholders" | "serverTurns"
       | "store" | "titles" | "turnQueue"
     >
@@ -266,12 +267,14 @@ export class ParticipantBatch {
       let threadId: string | undefined;
       let chatThreadRootId: string | undefined;
       let keptStoppedParticipantMessage = false;
+      let takenBack: ReturnType<typeof takenBackMark>;
       if (pendingMessageId) {
         const idx = conversation.messages.findIndex((message) => message.id === pendingMessageId);
         if (idx >= 0) {
           const pending = conversation.messages[idx];
           threadId = pending.metadata?.threadId;
           chatThreadRootId = pending.metadata?.chatThreadRootId;
+          if (!this.chat.appQuit.endsByQuit(runId)) takenBack = takenBackMark(pending);
           if (pending.role === "participant" && pending.status === "pending") {
             conversation.messages.splice(idx, 1);
             markChatMessageRemoved(conversation, pendingMessageId);
@@ -284,7 +287,7 @@ export class ParticipantBatch {
             const { queuedBehind: _queuedBehind, turnQueued: _turnQueued, ...metadata } = pending.metadata;
             conversation.messages[idx] = {
               ...pending,
-              metadata
+              metadata: { ...metadata, ...takenBack }
             };
           }
           if (
@@ -307,7 +310,7 @@ export class ParticipantBatch {
           "system",
           `@${participant.handle} stopped by user.`,
           undefined,
-          { threadId, chatThreadRootId }
+          { threadId, chatThreadRootId, ...takenBack }
         ));
       }
       conversation.updatedAt = new Date().toISOString();

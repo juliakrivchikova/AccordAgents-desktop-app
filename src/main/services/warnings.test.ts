@@ -100,3 +100,15 @@ test("a failure kept as a warning reads the same each time it is cleaned again",
     assert.equal(once, notice(diagnostic));
   }
 });
+
+test("what a process wrote before it ended is told as that, never as a missing CLI, and the app's own log tails and cut JSON are not quoted", () => {
+  assert.equal(notice("claude warm process exited with code 1: Error: ENOENT: no such file or directory, open '/tmp/settings.json'"),
+    "@gera stopped before it returned a response: Error: ENOENT: no such file or directory, open '/tmp/settings.json'");
+  assert.equal(notice("codex app-server process exited with code 1: worker quit with fatal: model is overloaded"),
+    "@gera stopped before it returned a response: worker quit with fatal: model is overloaded");
+  assert.equal(notice("spawn claude ENOENT"), "@gera could not start because the CLI executable is unavailable.");
+  assert.equal(notice("claude exited with code 1. No stderr was reported; CLI stdout contained structured events only. Last events: command_execution: curl -H 'Authorization: Bearer abc' | turn.failed."),
+    "@gera: claude exited with code 1.");
+  assert.equal(notice("agy exited with code 1. Output: Quota exceeded for this account"), "@gera: agy exited with code 1: Quota exceeded for this account");
+  assert.equal(notice('API Error: 400 {"type":"error","error":{"type":"invalid_request_err'), "@gera: API Error: 400");
+});

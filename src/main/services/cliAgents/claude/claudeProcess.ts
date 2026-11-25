@@ -17,9 +17,8 @@ import {
   settleClaudeWarmReply
 } from "./replies";
 import type { ClaudeWarmProcessHooks, ClaudeWarmProcessState } from "./types";
-import { MAX_CLI_ERROR_CHARS } from "../constants";
 import { findModelId } from "../models/modelLists";
-import { reportSessionId, truncateText } from "../runs/outputText";
+import { reportSessionId } from "../runs/outputText";
 import { asRecord, findSessionId, stringField } from "../runs/records";
 import { agentRunEnv, normalizedExtraReadableDirs } from "../runs/runEnvironment";
 import type {
@@ -39,6 +38,8 @@ const CLAUDE_WARM_LEGACY_FLUSH_QUIET_MS = 400;
 
 // How long a CLI that closed its input may take to end and say why.
 const CLAUDE_INPUT_CLOSED_EXIT_WAIT_MS = 5_000;
+// The last of its stderr, from which a failed reply takes its reason.
+const MAX_KEPT_STDERR_CHARS = 2_000;
 
 /** A member's live Claude Code process. */
 export class ClaudeProcess {
@@ -96,7 +97,6 @@ export class ClaudeProcess {
     let processIdentity = capturePosixProcessIdentity(child.pid, this.cli.warmAgentClose.readPosixProcessTableForTermination);
 
     let stdoutBuffer = "";
-    let stderr = "";
     let closed = false;
     let ended = false;
     const state: ClaudeWarmProcessState = {
@@ -154,7 +154,7 @@ export class ClaudeProcess {
 
     /** No reply is waiting or running, and none is about to start on its own
      *  (a finished task the CLI is expected to answer). */
-    const isReplyIdle = (): boolean => closed
+    const isReplyIdle = (): boolean => (closed && state.replies.length === 0)
       || (state.replies.length === 0 && !state.stepActive && Date.now() >= state.selfResumeExpectedUntil);
     const isIdle = (): boolean => isReplyIdle() && (closed || state.backgroundTasks.size === 0);
     const notifyIfIdle = (): void => {
@@ -242,6 +242,8 @@ export class ClaudeProcess {
     let inputFailure: NodeJS.Timeout | undefined;
     const inputFailed = (error: Error): void => {
       closed = true;
+      // It takes no message any more, ended or not.
+      entry.unusable = true;
       if (inputFailure || ended) {
         return;
       }
@@ -310,7 +312,7 @@ export class ClaudeProcess {
     };
 
     child.stderr.on("data", (chunk: string) => {
-      stderr = truncateText(`${stderr}${chunk}`, MAX_CLI_ERROR_CHARS);
+      state.stderr = `${state.stderr ?? ""}${chunk}`.slice(-MAX_KEPT_STDERR_CHARS);
     });
 
     child.stdin.on("error", inputFailed);
@@ -344,7 +346,8 @@ export class ClaudeProcess {
       ended = true;
       clearTimeout(inputFailure);
       const how = signal ? ` after signal ${signal}` : exitCode === null ? "" : ` with code ${exitCode}`;
-      const said = stderr.trim() || state.errorOutsideReply;
+      // A process ended from outside says nothing of why.
+      const said = signal ? undefined : state.errorOutsideReply || state.stderr?.trim();
       failProcess(new Error(`claude warm process exited${how}${said ? `: ${said}` : ""}`));
       // Its background tasks ended with it (stdin EOF or a kill).
       this.cli.claudeReplyFlow.reportClaudeBackgroundTasks(state, participant, true);
@@ -660,6 +663,7 @@ export class ClaudeProcess {
     state.stepActive = true;
     state.everStartedStep = true;
     state.errorOutsideReply = undefined;
+    state.stderr = undefined;
     state.promptSuggestionTarget = undefined;
     if (state.active && !state.active.settled) {
       return;

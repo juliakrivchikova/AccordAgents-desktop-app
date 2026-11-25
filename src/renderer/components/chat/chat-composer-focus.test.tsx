@@ -133,7 +133,7 @@ test("a request for the chat already on screen is taken at once, by its main com
 test("while its member works, Enter sends and waits, Cmd+Enter sends now, and Enter with nothing typed sends what waits", async () => {
   const composer = mount();
   const did: string[] = [];
-  const sendNow = { waiting: true, onSendNow: () => { did.push("now"); } };
+  const sendNow = { runId: "run-1", waiting: true, onSendNow: () => { did.push("now"); } };
   const key = async (init: KeyboardEventInit): Promise<void> => {
     await act(async () => { composer.field().dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true, ...init })); });
   };
@@ -148,6 +148,11 @@ test("while its member works, Enter sends and waits, Cmd+Enter sends now, and En
     assert.deepEqual(did.splice(0), ["sent", "now"]);
     await render({ draft: "", sendNow });
     await key({});
+    assert.deepEqual(did.splice(0), [], "the press after a message went is not another one");
+    await new Promise((resolve) => setTimeout(resolve, 850));
+    await key({ repeat: true });
+    assert.deepEqual(did.splice(0), [], "nor is the key held");
+    await key({});
     assert.deepEqual(did.splice(0), ["now"]);
     await render({ draft: "", sendNow: { ...sendNow, waiting: false } });
     await key({});
@@ -156,6 +161,12 @@ test("while its member works, Enter sends and waits, Cmd+Enter sends now, and En
     await render({ draft: "Hello" });
     await key({ metaKey: true });
     assert.deepEqual(did.splice(0), ["sent"], "the member is free: it just sends");
+    let ended = (): void => undefined;
+    await render({ draft: "Hello", sendNow, onSend: async () => { await new Promise<void>((resolve) => { ended = resolve; }); did.push("sent"); return true; } });
+    await key({ metaKey: true });
+    await render({ draft: "", sendNow: { ...sendNow, runId: "run-2" } });
+    await act(async () => { ended(); });
+    assert.deepEqual(did.splice(0), ["sent"], "the reply it was to interrupt ended meanwhile: the next one is left alone");
     await render({ draft: "Hello", sendNow, onSend: () => false });
     await key({ metaKey: true });
     assert.deepEqual(did.splice(0), [], "a message that was not sent interrupts nothing");

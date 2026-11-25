@@ -177,6 +177,10 @@ export interface ChatMessageMetadata {
    *  of `queuedBehind` (which stays on the device), so the phone shows it
    *  queued, with no clock. */
   turnQueued?: true;
+  /** The User took a waiting message back before its member took it: on the
+   *  reply that never began, or on the line that stands in its place. No
+   *  later turn is given that message (chat/turns/takenBackMessages.ts). */
+  takenBack?: { participantId: string; messageId: string };
   /** When a reply that waited behind its member's turn before it began its
    *  own turn: its "Working for …" counts from here, not from when it was
    *  queued (desktop and phone). */

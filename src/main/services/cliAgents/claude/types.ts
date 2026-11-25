@@ -67,6 +67,8 @@ export interface ClaudeWarmProcessState {
   /** The error the CLI reported outside any reply, kept for what its end is
    *  said to be (a session it could not load, then exit code 1). */
   errorOutsideReply?: string;
+  /** What it last wrote to stderr since a step began. */
+  stderr?: string;
   /** control_request ids of our own questions to the CLI, and who waits. */
   controlWaiters: Map<string, (response: Record<string, unknown> | undefined) => void>;
   /** What the CLI said about the last compaction of this session, numbered,

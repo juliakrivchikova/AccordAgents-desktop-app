@@ -8,6 +8,7 @@ import {
   promptContextRecordsAfterPointer, selectPromptContextRecords
 } from "./promptContextRecords";
 import { newMessageNonce } from "./promptSections";
+import { takenBackMessageIds } from "./takenBackMessages";
 import type { ClaudeWriteGate } from "./types";
 import type { ChatPromptContextScope } from "../types";
 import type { ChatModules } from "../modules";
@@ -69,7 +70,9 @@ export class PromptContext {
       const inFlight = this.inFlightPromptContextFloor(inFlightKey);
       const pointer = inFlight && !promptContextPointerAtOrAfter(committed, inFlight) ? inFlight : committed;
       const records = promptContextRecordsAfterPointer(promptConversation.messages, scope, pointer, triggerMessage.id);
-      const renderCandidates = records.filter((record) => record.message.id !== triggerMessage.id);
+      const takenBack = takenBackMessageIds([...promptConversation.messages, ...conversation.messages], participant.id);
+      const renderCandidates = records.filter((record) =>
+        record.message.id !== triggerMessage.id && !takenBack.has(record.message.id) && !record.message.metadata?.takenBack);
       const resumedRenderCandidates = isResumingSession
         ? renderCandidates.filter((record) => !isParticipantOwnPromptContextMessage(record.message, participant.id))
         : renderCandidates;
