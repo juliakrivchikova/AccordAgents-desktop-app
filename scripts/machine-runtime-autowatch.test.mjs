@@ -70,7 +70,7 @@ function desktopChat(storage) {
   } };
   const cliRunner = { async detectAgents() { return []; }, async contextUsageForSession() { return undefined; }, async closeConversationSessions() { return undefined; } };
   const chat = new ChatService(storage, settings, cliRunner, { async write() { return undefined; } });
-  chat.ensureHistoryFiles = async () => tmpdir();
+  chat.modules.chatHistory.ensureHistoryFiles = async () => tmpdir();
   return chat;
 }
 
@@ -124,7 +124,7 @@ test("a machine member that watches the chat runs once for a User's message that
     publishSettings: async (machineId, sealed) => { await desktopHub.putMachineSettings({ machineId, sealed }); }, machineProjects: async () => ({}) });
   chat.setRemoteTurnPreparation({ beforeRemoteTurn: () => machines.syncSettings() });
   const at = new Date().toISOString();
-  await chat.saveConversation({ id: "conv-watch", kind: "chat", title: "Watch", createdAt: at, updatedAt: at, findings: [],
+  await chat.modules.store.saveConversation({ id: "conv-watch", kind: "chat", title: "Watch", createdAt: at, updatedAt: at, findings: [],
     messages: [{ id: "conv-watch-start", role: "system", content: "Chat started.", createdAt: at, status: "done" }],
     metadata: { participants: [member], participantSessions: [], running: false, warnings: [] } });
   const page = async () => {

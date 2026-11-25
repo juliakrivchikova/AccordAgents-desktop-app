@@ -15,6 +15,7 @@ import { desktopEvents, hostEvents, DESKTOP_ID, MACHINE_ID, DESKTOP_ISSUER } fro
 import { startHubWorld, machinePairing, desktopRoomClient, machineRoomClient, waitFor } from "./machine-hub-fixture.mjs";
 
 const { MachineLinkService, machineActivityIsBusy } = await import("../dist/main/main/services/machineLink.js");
+const { rejectPendingScripts } = await import("../dist/main/main/services/machineLink/scriptRequests.js");
 const { MachineHostService } = await import("../dist/main/main/services/machineHost.js");
 const { isMachineLinkEnvelope, isMachineSettingsDocument, MACHINE_LINK_PROTOCOL, MACHINE_ATTACHMENT_PART_BYTES } = await import("../dist/main/shared/machineLink.js");
 const { sealMachinePayload, openChannelPayload } = await import("../dist/main/main/services/machineChannelSealing.js");
@@ -86,11 +87,11 @@ test("the desktop answers a picture request in bounded parts, for any chat it ho
   ]);
   link.setConversationLoader(async (id) => chats.get(id));
   const sent = [];
-  link.send = async (_connection, body) => { sent.push(body); };
+  link.modules.machineMessages.send = async (_connection, body) => { sent.push(body); };
   const connection = { record };
   const request = (conversationId) => ({ type: "machine.attachment.request", requestId: `r-${conversationId}`, conversationId, attachmentId: "a1" });
 
-  await link.answerAttachmentRequest(connection, request("chat-on-box"));
+  await link.modules.machineMessages.answerAttachmentRequest(connection, request("chat-on-box"));
   const parts = sent.filter((body) => body.type === "machine.attachment.result" && body.requestId === "r-chat-on-box");
   assert.equal(parts.length, 3, "a picture above one part travels in several");
   assert.ok(parts.every((body) => body.ok && body.parts === 3), "every part says how many there are");
@@ -103,9 +104,9 @@ test("the desktop answers a picture request in bounded parts, for any chat it ho
   assert.ok(Buffer.byteLength(sealed) < HUB_ROOM_MAX_MESSAGE_BYTES - 64 * 1024, "a sealed part (with room for its signature) fits the server room's message limit");
 
   // A chat without a member there is served too (an agent searching another chat).
-  await link.answerAttachmentRequest(connection, request("chat-elsewhere"));
+  await link.modules.machineMessages.answerAttachmentRequest(connection, request("chat-elsewhere"));
   assert.ok(sent.some((body) => body.requestId === "r-chat-elsewhere" && body.ok));
-  await link.answerAttachmentRequest(connection, request("chat-missing"));
+  await link.modules.machineMessages.answerAttachmentRequest(connection, request("chat-missing"));
   const refused = sent.find((body) => body.requestId === "r-chat-missing");
   assert.equal(refused.ok, false);
   assert.match(refused.error, /not on this desktop/);
@@ -362,8 +363,8 @@ test("script requests go to the one machine, resolve on its answer, and refuse a
     appVersion: "test", desktopDeviceId: DESKTOP_ID, deviceIdentity: desktopEvents.deviceIdentity });
   const sent = [];
   const connection = { record, machineDeviceId: "dev-s", pendingScripts: new Map(), client: { close() {} }, pairing: { issuer: { originId: DESKTOP_ID } } };
-  link.connections.set(record.id, connection);
-  link.send = async (_connection, body) => { sent.push(body); };
+  link.modules.machineConnections.connections.set(record.id, connection);
+  link.modules.machineMessages.send = async (_connection, body) => { sent.push(body); };
 
   const listed = link.scriptsRequest("machine-s", { op: "setSecret", scriptId: "s1", name: "SLACK_TOKEN", value: "xoxb-1" });
   await new Promise((resolve) => setImmediate(resolve));
@@ -372,17 +373,17 @@ test("script requests go to the one machine, resolve on its answer, and refuse a
   assert.deepEqual(sent[0].operation, { op: "setSecret", scriptId: "s1", name: "SLACK_TOKEN", value: "xoxb-1" });
   assert.equal(sent[0].instanceId, "run-7", "the request names the run of the machine it was made for");
   assert.ok(Date.parse(sent[0].expiresAt) > Date.now(), "and when the desktop stops waiting for it");
-  await link.handleBody(connection, { type: "machine.scripts.result", requestId: sent[0].requestId, ok: true, result: { id: "s1" } });
+  await link.modules.machineMessages.handleBody(connection, { type: "machine.scripts.result", requestId: sent[0].requestId, ok: true, result: { id: "s1" } });
   assert.deepEqual(await listed, { id: "s1" });
 
   const refused = link.scriptsRequest("machine-s", { op: "runNow", scriptId: "s1" });
   await new Promise((resolve) => setImmediate(resolve));
-  await link.handleBody(connection, { type: "machine.scripts.result", requestId: sent[1].requestId, ok: false, error: "That script is switched off." });
+  await link.modules.machineMessages.handleBody(connection, { type: "machine.scripts.result", requestId: sent[1].requestId, ok: false, error: "That script is switched off." });
   await assert.rejects(refused, /switched off/);
 
   const changed = [];
   link.onScriptsChanged((machineId) => changed.push(machineId));
-  await link.handleBody(connection, { type: "machine.scripts.changed" });
+  await link.modules.machineMessages.handleBody(connection, { type: "machine.scripts.changed" });
   assert.deepEqual(changed, ["machine-s"]);
 
   assert.equal(link.machineKeepsAwake(), true, "switched-on scripts keep the box from the AWS idle stop");
@@ -390,7 +391,7 @@ test("script requests go to the one machine, resolve on its answer, and refuse a
 
   const waiting = link.scriptsRequest("machine-s", { op: "list" });
   await new Promise((resolve) => setImmediate(resolve));
-  link.rejectPendingScripts(connection, "The machine went away.");
+  rejectPendingScripts(connection, "The machine went away.");
   await assert.rejects(waiting, /went away/);
 
   connection.machineDeviceId = undefined;
@@ -418,7 +419,7 @@ test("a machine restarts its members only when its connected runtime says it can
   try {
     assert.equal(link.memberRestartSupport("missing"), "unknown", "a machine this desktop does not know");
     const connection = { record, machineDeviceId: undefined, pendingScripts: new Map(), client: { close() {} }, pairing: { issuer: { originId: DESKTOP_ID } } };
-    link.connections.set(record.id, connection);
+    link.modules.machineConnections.connections.set(record.id, connection);
     assert.equal(link.memberRestartSupport("machine-r"), "unknown", "no hello yet");
     record.lastHello = { protocol: MACHINE_LINK_PROTOCOL, deviceId: "dev-r", instanceId: "run-1" };
     assert.equal(link.memberRestartSupport("machine-r"), "outdated", "an older runtime would take the turn as an ordinary one");
@@ -450,22 +451,20 @@ test("another machine meeting this one in its room does not make it look present
 });
 
 test("when a machine goes away the desktop stops showing the background work it reported, and asks again when it is back", async () => {
-  const link = Object.create(MachineLinkService.prototype);
-  link.backgroundListeners = [];
-  link.debugLogs = { write: async () => undefined };
-  link.emitStatus = () => undefined;
+  const link = new MachineLinkService({}, { write: async () => undefined }, { desktopDeviceId: "desktop" });
+  const { machineConnections, machineMessages } = link.modules;
+  machineConnections.emitStatus = () => undefined;
   const events = [];
-  MachineLinkService.prototype.onMemberBackgroundTasks.call(link, (event) => events.push(event));
+  link.onMemberBackgroundTasks((event) => events.push(event));
   const connection = { record: { id: "machine-a", name: "A" }, machineDeviceId: "device-a", helloSeen: true, pendingScripts: new Map(), progress: new Map() };
-  link.setMachinePeer(connection, undefined);
+  machineConnections.setMachinePeer(connection, undefined);
   assert.deepEqual(events, [{ machineId: "machine-a", snapshot: [] }]);
-  link.setMachinePeer(connection, undefined);
+  machineConnections.setMachinePeer(connection, undefined);
   assert.equal(events.length, 1, "an already absent machine is not cleared twice");
   assert.equal(connection.helloSeen, false, "gone, what greeted it before counts for nothing");
   const sent = [];
-  link.send = async (_connection, body) => { sent.push(body.type); };
-  link.options = { desktopDeviceId: "desktop" };
-  link.setMachinePeer(connection, "device-a");
+  machineMessages.send = async (_connection, body) => { sent.push(body.type); };
+  machineConnections.setMachinePeer(connection, "device-a");
   assert.ok(sent.includes("machine.member.background.request"), "back on the link, the desktop asks what is running now");
   // And, with no hello of its own, for a hello.
   for (let i = 0; i < 40 && !sent.includes("machine.hello.request"); i += 1) await settle(50);
@@ -501,9 +500,9 @@ test("a machine whose new connection takes the seat of its old one is asked for 
     appVersion: "test", desktopDeviceId: DESKTOP_ID, deviceIdentity: desktopEvents.deviceIdentity, createClient: () => client });
   try {
     await link.start();
-    const connection = link.connections.get(record.id);
+    const connection = link.modules.machineConnections.connections.get(record.id);
     const types = [];
-    link.send = async (_connection, body) => { types.push(body.type); };
+    link.modules.machineMessages.send = async (_connection, body) => { types.push(body.type); };
     client.emit("peer", { type: "ready", deviceId: DESKTOP_ID, peerConnected: true, peers: [{ role: "machine", deviceId: MACHINE_ID }] });
     connection.helloSeen = true; // it greeted this connection (handleHello sets this)
     await settle(900);
