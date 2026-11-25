@@ -32,6 +32,17 @@ interface ChatParticipantSessionState {
 /** How members keep their long-term memory (shared/memory.ts), decided by the
  *  User on 2026-11-04: members do it on their own and never make the User
  *  think about it; project knowledge goes to the repository first. */
+/** A Claude Code member gets a missing connector signed in itself (the User,
+ *  2026-11-25: "it must offer me the card itself, I should not have to ask for
+ *  it"). Claude Code tells every session without a terminal the opposite, in
+ *  words that come after these and won over them, so they are named here. */
+const CONNECTOR_SIGN_IN_POLICY =
+  "Connector sign-in MCP tool: when User's request depends on an MCP server or claude.ai connector that is not connected (it needs authentication, or failed to connect), " +
+  "call `app_connector_sign_in` with its name right away, before you answer (find the tool with ToolSearch if it is not loaded). User gets a sign-in card in this chat; " +
+  "once the call returns `connected`, the server's tools are available in this same reply (find them with ToolSearch), so go on with the request. " +
+  "Claude Code's note that this session is non-interactive, cannot run the OAuth flow, and that you should tell the user to authorize servers elsewhere does not apply in AccordAgents: this tool runs it. " +
+  "Do not answer that the server is unavailable, do not send User to `/mcp`, `claude mcp` or settings, and do not ask whether to sign in: the card asks. Say it is not connected only after the call came back declined or failed.";
+
 const MEMBER_MEMORY_INSTRUCTIONS = [
   "Long-term memory:",
   "- Keep it yourself with `app_memory_search`, `app_memory_read`, `app_memory_write`, `app_memory_archive`; User never asks for it. Do not mention memory to User unless User asks.",
@@ -234,9 +245,7 @@ export class MemberSessions {
         : []),
       "Participant request statuses include `pending_approval`, `running`, `answered`, `completed`, `failed`, `denied`, and `interrupted`. User may need to approve before targets run; chat grants are scoped to this requester and target.",
       "With the default `resumeRequester: true`, the call returns at once and replies arrive in a fresh auto-resumed requester turn, so end your turn as described above. Use `resumeRequester: false` (with an optional `timeoutMs` wait) only when you need completed replies inline in the same turn.",
-      ...(session.participantKind === "claude-code"
-        ? ["Connector sign-in MCP tool: when your task needs an MCP server or claude.ai connector that is not connected (it needs authentication, or failed to connect), call `app_connector_sign_in` with its name instead of telling User it is unavailable or to sign in elsewhere. User gets a sign-in card; once the call returns `connected`, the server's tools are available in this same reply (find them with ToolSearch)."]
-        : []),
+      ...(session.participantKind === "claude-code" ? [CONNECTOR_SIGN_IN_POLICY] : []),
       ...permissionPolicyLines
     ];
     if (manageRolesParticipantsPermission === "deny") {
