@@ -432,6 +432,9 @@ export async function startMachine(args: MachineArgs): Promise<() => Promise<voi
       catch { return false; }
     },
     detectProviders: () => cliAgentRunner.detectAgents(),
+    // The mode, model and effort its CLIs start in with this machine's own
+    // config: a main session that runs here starts in them.
+    readCliStartDefaults: () => cliAgentRunner.cliStartDefaults(),
     onNativeActivitySettled: () => idlePower?.noteActivity() ?? Promise.resolve(),
     idleStopWarning: () => presenceWarning || idlePower?.warning(),
     autoStopEnabled: () => autoStopEnabled,
@@ -650,12 +653,7 @@ export async function startMachine(args: MachineArgs): Promise<() => Promise<voi
     // the server while the link still stands.
     await host.shutdown(() => cliAgentRunner.shutdownWarmAgents());
     await linking;
-    const deadline = Date.now() + 5_000;
-    for (;;) {
-      const status = await serverChatLink.status().catch(() => undefined);
-      if (!status || status.queued === 0 || Date.now() > deadline) break;
-      await new Promise((resolve) => setTimeout(resolve, 100));
-    }
+    await serverChatLink.waitUntilSent(5_000);
     // An unreachable server gets what is left at the next start.
     await serverChatLink.stop();
     machineSettings.stop();

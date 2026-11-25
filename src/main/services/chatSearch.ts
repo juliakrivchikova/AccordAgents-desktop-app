@@ -10,7 +10,6 @@ import type {
   ChatSearchResponse
 } from "../../shared/types";
 import {
-  type ChatSearchConversationRead,
   type ChatSearchConversationSnapshot,
   type ChatSearchDocumentReplacement,
   type ChatSearchIndexState,
@@ -22,7 +21,6 @@ const DEFAULT_SEARCH_LIMIT = 100;
 const MAX_SEARCH_LIMIT = 200;
 const MAX_QUERY_CHARS = 500;
 const MAX_QUERY_TERMS = 24;
-const SOURCE_READ_BATCH_SIZE = 24;
 const INDEX_WRITE_BATCH_SIZE = 24;
 const INDEX_WRITE_BATCH_CHARS = 4_000_000;
 
@@ -185,40 +183,37 @@ export class ChatSearchService {
     const staleSnapshots = scope.filter((snapshot) =>
       !chatSearchStateMatchesSnapshot(stateByConversationId.get(snapshot.conversationId), snapshot)
     );
-    // Read, index and write one batch at a time: holding every stale chat at
-    // once (a whole account on its first search) can exhaust a small hub.
+    // Read one chat at a time, keep only its documents, and write them in
+    // batches: a chat's messages carry everything its turns did, and holding
+    // many chats of them (a whole account on its first search) can exhaust
+    // the process and the small hub.
     const indexedAt = new Date().toISOString();
-    for (const batch of chunks(staleSnapshots, SOURCE_READ_BATCH_SIZE)) {
-      const batchIds = batch.map((snapshot) => snapshot.conversationId);
-      const batchReads = await atStage("source-read", false, () => this.storage.readChatSearchConversations(batchIds));
-      const readById = new Map(batchReads.map((read) => [read.snapshot.conversationId, read]));
-      const reads: ChatSearchConversationRead[] = [];
+    let changedConversationId: string | undefined;
+    for (const batch of chunks(staleSnapshots, INDEX_WRITE_BATCH_SIZE)) {
+      const replacements: ChatSearchDocumentReplacement[] = [];
       for (const planned of batch) {
-        const read = readById.get(planned.conversationId);
-        if (!read) {
-          throw new ChatSearchFailure(
-            "source-read",
-            planned.conversationId,
-            false,
-            new Error(`Saved chat disappeared during search: ${planned.conversationId}`)
-          );
+        const [read] = await atStage("source-read", false, () => this.storage.readChatSearchConversations([planned.conversationId]));
+        // Saved or deleted since the snapshot. The others are still read and
+        // written, so the next attempt reads only the changed ones.
+        if (!read || !sameSourceVersion(planned, read.snapshot)) {
+          changedConversationId ??= planned.conversationId;
+          continue;
         }
-        if (!sameSourceVersion(planned, read.snapshot)) {
-          throw new ChatSearchSourceChanged(planned.conversationId);
-        }
-        reads.push(read);
+        replacements.push({
+          snapshot: read.snapshot,
+          documents: buildChatSearchDocuments({ ...read.conversation, title: read.snapshot.title }),
+          indexedAt
+        });
       }
-      const replacements: ChatSearchDocumentReplacement[] = reads.map((read) => ({
-        snapshot: read.snapshot,
-        documents: buildChatSearchDocuments({ ...read.conversation, title: read.snapshot.title }),
-        indexedAt
-      }));
       for (const replacementBatch of replacementChunks(replacements)) {
         await atStage("index-write", true, () => this.storage.replaceChatSearchDocumentsBatch(replacementBatch));
         for (const replacement of replacementBatch) {
           stateByConversationId.set(replacement.snapshot.conversationId, stateFromReplacement(replacement));
         }
       }
+    }
+    if (changedConversationId) {
+      throw new ChatSearchSourceChanged(changedConversationId);
     }
 
     if (request.requester.kind === "user") {
@@ -289,6 +284,7 @@ export class ChatSearchService {
             ...(row.threadRootId ? { threadRootId: row.threadRootId } : {}),
             role: row.role,
             authorLabel: row.authorLabel,
+            ...(snapshotInSessionsView(snapshot) ? { sessionsView: true } : {}),
             createdAt: row.createdAt,
             snippetText: parsedSnippet.text,
             highlightRanges: parsedSnippet.highlightRanges,
@@ -553,6 +549,12 @@ function replacementChunks(replacements: ChatSearchDocumentReplacement[]): ChatS
     result.push(current);
   }
   return result;
+}
+
+/** A chat with a main session shown in the sessions view (a chat gets its
+ *  view when its main session is made, docs/main-session.md). */
+function snapshotInSessionsView(snapshot: ChatSearchConversationSnapshot): boolean {
+  return Boolean(snapshot.mainSessionParticipantId) && (snapshot.chatView ?? "sessions") === "sessions";
 }
 
 function corpusFingerprint(scope: ChatSearchConversationSnapshot[]): string {

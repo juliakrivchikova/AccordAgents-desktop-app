@@ -265,6 +265,8 @@ function usageLogAttributeAllowed(key: string, value: unknown, signal?: unknown)
     case "members_total":
     case "max_members_in_chat":
     case "chats_with_2plus_members":
+    case "chats_sessions_view_active":
+    case "chats_classic_view_active":
       return typeof value === "string" && (USAGE_COUNT_BUCKETS as readonly string[]).includes(value);
     case "distinct_roles_in_use":
     case "custom_roles_count":

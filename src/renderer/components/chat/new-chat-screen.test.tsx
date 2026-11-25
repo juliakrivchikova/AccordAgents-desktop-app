@@ -9,8 +9,12 @@ import type {
   ChatParticipantConfig,
   ChatImageInput,
   ChatSkillMention,
+  ProviderModelCatalog,
   RepoFileMention
 } from "../../../shared/types";
+import { defaultChatAgentPermissions } from "../../../shared/agentPermissions";
+import { resetMemberModelCatalogs } from "./chat-member-model-name";
+import type { ChatParticipantRuntimeOverride } from "./chat-participant-drafts";
 import { NewChatScreen } from "./new-chat-screen";
 import { ChatParticipantSelectableRosterRow } from "./chat-participant-roster-row";
 import { TooltipProvider } from "@/components/ui/tooltip";
@@ -44,6 +48,14 @@ const SETTINGS: AppSettings = {
     { kind: "codex-cli", label: "Codex", enabled: true }
   ],
   chatRoleConfigs: [{
+    id: "main-session",
+    label: "Main session",
+    instructions: "Work on the user's requests.",
+    version: 1,
+    appToolCapabilities: [],
+    builtIn: true,
+    updatedAt: "2026-11-20T00:00:00.000Z"
+  }, {
     id: "administrator",
     label: "Chat Assistant",
     instructions: "Assist the user.",
@@ -51,6 +63,15 @@ const SETTINGS: AppSettings = {
     appToolCapabilities: [],
     builtIn: true,
     updatedAt: "2026-07-13T00:00:00.000Z"
+  }, {
+    id: "main-session",
+    label: "Main session",
+    instructions: "Work on the User's requests.",
+    version: 1,
+    appToolCapabilities: ["participants.manage", "participants.delegate", "accord.start"],
+    builtIn: true,
+    participantDefaults: { requestParticipants: "allow", manageRolesParticipants: "allow" },
+    updatedAt: "2026-11-20T00:00:00.000Z"
   }],
   chatBehaviorRules: [],
   chatSavedPrompts: [],
@@ -58,13 +79,17 @@ const SETTINGS: AppSettings = {
   cliProviderHosts: [],
 };
 
+// A settings file from before may still name the classic view for new
+// chats: it is ignored (the User, 2026-11-22: every new chat opens in the
+// sessions view).
+const LEGACY_CLASSIC = { ...SETTINGS, defaultChatView: "classic" } as unknown as AppSettings;
+
 test("multiple ready providers silently use Codex without rendering a chooser", () => {
   installWindowBridge();
-  const renderer = create(<NewChatScreen {...baseProps(readyAgents())} />);
+  const renderer = create(<NewChatScreen {...baseProps(readyAgents(), { settings: SETTINGS })} />);
 
   assert.doesNotMatch(textOf(renderer.root), /Choose the Assistant provider/);
   assert.equal(renderer.root.findAllByProps({ "data-testid": "new-chat-provider-choice" }).length, 0);
-  assert.match(textOf(renderer.root), /1 member/);
   assert.equal(renderer.root.findByProps({ "data-testid": "new-chat-prompt" }).props.value, "Draft");
   renderer.unmount();
 });
@@ -79,7 +104,7 @@ test("saved Assistant provider hides the provider choice", () => {
   renderer.unmount();
 });
 
-test("a saved Assistant CLI that is not ready gives way to a ready one, says so under the composer, and send stays open", async () => {
+test("a saved CLI that is not ready gives way to a ready one, says so under the composer naming the main session, and send stays open", async () => {
   installWindowBridge();
   let startCalls = 0;
   const renderer = create(<NewChatScreen
@@ -92,7 +117,7 @@ test("a saved Assistant CLI that is not ready gives way to a ready one, says so 
   assert.equal(renderer.root.findAllByProps({ "data-testid": "new-chat-provider-unavailable" }).length, 0);
   assert.equal(
     textOf(renderer.root.findByProps({ "data-testid": "new-chat-assistant-note" })),
-    "The Assistant uses Codex in this chat: Claude Code, your saved choice, needs sign-in."
+    "Codex runs this chat: Claude Code, your saved choice, needs sign-in."
   );
   const start = renderer.root.findByProps({ "data-testid": "new-chat-start" });
   assert.equal(start.props.disabled, false);
@@ -102,15 +127,15 @@ test("a saved Assistant CLI that is not ready gives way to a ready one, says so 
   renderer.unmount();
 });
 
-test("settings made for the Assistant on one CLI are dropped when it moves to another", async () => {
+test("settings made for the main session on one CLI are dropped when it moves to another", async () => {
   installWindowBridge();
-  let overrides: Record<string, unknown> = { "__new-chat-assistant__": { model: "opus" }, "saved-member": { model: "keep" } };
+  let overrides: Record<string, unknown> = { "__new-chat-main-session__": { model: "opus" }, "saved-member": { model: "keep" } };
   const onSelectedParticipantRuntimeOverridesChange = (next: unknown) => {
     overrides = typeof next === "function" ? (next as (current: typeof overrides) => typeof overrides)(overrides) : next as typeof overrides;
   };
   const settings = { ...SETTINGS, assistantProviderKind: "claude-code" as const };
   const renderer = create(<NewChatScreen {...baseProps(readyAgents(), { settings, onSelectedParticipantRuntimeOverridesChange })} />);
-  assert.deepEqual(Object.keys(overrides), ["__new-chat-assistant__", "saved-member"], "nothing dropped while the CLI stays");
+  assert.deepEqual(Object.keys(overrides), ["__new-chat-main-session__", "saved-member"], "nothing dropped while the CLI stays");
   await act(async () => {
     renderer.update(<NewChatScreen {...baseProps([readyAgent("codex-cli"), { ...readyAgent("claude-code"), authentication: "required" }], { settings, onSelectedParticipantRuntimeOverridesChange })} />);
   });
@@ -294,6 +319,287 @@ test("a member that cannot run where it is set to cannot be added, and once adde
   await click(selected);
   assert.deepEqual(toggled, [member.id]);
 });
+
+const CATALOGS: Record<string, ProviderModelCatalog> = {
+  "codex-cli": {
+    kind: "codex-cli", authoritative: true, fetchedAt: "2026-11-21T00:00:00.000Z",
+    models: [
+      { id: "gpt-5.5", label: "GPT-5.5 (gpt-5.5)", recommended: true, source: "cli",
+        supportedReasoningEfforts: [{ id: "low", label: "Low" }, { id: "medium", label: "Medium" }, { id: "high", label: "High" }] },
+      { id: "gpt-5.5-mini", label: "GPT-5.5 mini", source: "cli" }
+    ]
+  },
+  "claude-code": {
+    kind: "claude-code", authoritative: true, fetchedAt: "2026-11-21T00:00:00.000Z",
+    models: [
+      { id: "opus", label: "Opus 5.5", recommended: true, source: "cli" },
+      { id: "haiku", label: "Haiku 5.5", source: "cli" }
+    ]
+  },
+  "gemini-cli": { kind: "gemini-cli", authoritative: true, fetchedAt: "2026-11-21T00:00:00.000Z", models: [{ id: "gemini-3.5-pro", label: "Gemini 3.5 Pro", recommended: true, source: "cli" }] }
+};
+
+function installModelBridge(): void {
+  resetMemberModelCatalogs();
+  installWindowBridge({
+    listProviderModels: async (kind: string) => CATALOGS[kind],
+    listMachines: async () => ({ machines: [] })
+  });
+  // The chip's menu closes on a press outside it (the document's).
+  (globalThis as any).document = { addEventListener: () => undefined, removeEventListener: () => undefined, querySelector: () => null };
+}
+
+async function settle(): Promise<void> {
+  await act(async () => { await new Promise<void>((resolve) => setTimeout(resolve, 0)); });
+}
+
+/** One of the New chat composer's controls (model, effort, mode, plan). */
+const control = (root: ReactTestInstance, part: string): ReactTestInstance => root.findByProps({ "data-testid": `new-chat-controls-${part}` });
+const rowsOf = (root: ReactTestInstance, testId: string): ReactTestInstance[] => root.findAllByProps({ "data-testid": testId }).filter((node) => typeof node.type === "string");
+const rowLabel = (row: ReactTestInstance): string => textOf(row.findByProps({ className: "composer-menu-item-label" }));
+
+test("a new chat that opens in the sessions view has no members picker: the composer shows the provider glyph and the model, the effort and the mode as controls of their own", async () => {
+  installModelBridge();
+  const settings = { ...SETTINGS, assistantProviderKind: "codex-cli" as const, chatParticipantConfigs: [savedMember()] };
+  const renderer = create(<NewChatScreen {...baseProps(readyAgents(), {
+    settings,
+    selectedParticipantRuntimeOverrides: { "__new-chat-main-session__": { reasoningEffort: "high" } }
+  })} />);
+  await settle();
+  assert.equal(renderer.root.findAll(hasClass("new-chat-participant-trigger")).length, 0, "no members picker");
+  assert.doesNotMatch(textOf(renderer.root), /members?/i, "no member wording");
+  assert.doesNotMatch(textOf(renderer.root), /@drew/, "no saved member, handle or avatar");
+  const chip = control(renderer.root, "model");
+  assert.equal(textOf(chip), "GPT-5.5", "the CLI's default model by name");
+  assert.equal(textOf(control(renderer.root, "effort")), "High", "the effort, a control of its own");
+  assert.equal(textOf(control(renderer.root, "mode")), "Ask for approval", "Codex's permission preset by its own name");
+  assert.equal(textOf(control(renderer.root, "plan")), "Plan mode", "Codex's Plan mode beside it");
+  const mark = chip.find(hasClass("chat-provider-icon"));
+  assert.equal(mark.props["data-provider-kind"], "codex-cli", "Settings → General's provider");
+  assert.ok(mark.props.className.split(" ").includes("is-bare"), "a bare glyph, no tile");
+  renderer.unmount();
+});
+
+test("the chip's picker chooses this chat's provider, model and effort, with access in the CLI's own terms and nothing about members", async () => {
+  installModelBridge();
+  const settings = { ...SETTINGS, assistantProviderKind: "codex-cli" as const };
+  const seen: { provider?: unknown; overrides: Record<string, unknown> } = { overrides: {} };
+  function Harness(): JSX.Element {
+    const [provider, setProvider] = useState<{ kind: AgentHealth["kind"]; hostId?: string } | undefined>();
+    const [overrides, setOverrides] = useState<Record<string, ChatParticipantRuntimeOverride>>({});
+    seen.provider = provider;
+    seen.overrides = overrides;
+    return <NewChatScreen {...baseProps(readyAgents(), {
+      settings,
+      mainSessionProvider: provider,
+      onMainSessionProviderChange: setProvider,
+      selectedParticipantRuntimeOverrides: overrides,
+      onSelectedParticipantRuntimeOverridesChange: setOverrides
+    })} />;
+  }
+  const renderer = create(<Harness />);
+  await settle();
+  await click(control(renderer.root, "model"));
+  await settle();
+  assert.deepEqual(rowsOf(renderer.root, "chat-model-provider").map(textOf), ["Antigravity", "Claude Code", "Codex"], "every ready CLI, in the model's menu");
+  assert.doesNotMatch(textOf(renderer.root.findByProps({ "data-testid": "new-chat-controls" })), /Request other members|Manage members|Auto-watch|Main session/);
+
+  await click(rowsOf(renderer.root, "chat-model-provider").find((row) => textOf(row) === "Claude Code")!);
+  await settle();
+  assert.deepEqual(seen.provider, { kind: "claude-code" }, "this chat's provider, not the setting");
+  assert.equal(settings.assistantProviderKind, "codex-cli", "Settings → General keeps its own");
+  assert.equal(rowsOf(renderer.root, "chat-model-option").length, 0, "a choice closes its menu");
+  await click(control(renderer.root, "model"));
+  assert.deepEqual(rowsOf(renderer.root, "chat-model-option").map(textOf), ["Opus 5.5Default", "Haiku 5.5"], "its default first");
+  await click(rowsOf(renderer.root, "chat-model-option").find((row) => textOf(row) === "Haiku 5.5")!);
+  await click(control(renderer.root, "effort"));
+  await click(rowsOf(renderer.root, "chat-effort-option").find((row) => textOf(row) === "Low")!);
+  await click(control(renderer.root, "mode"));
+  assert.deepEqual(rowsOf(renderer.root, "chat-access-option").map(rowLabel), ["Manual", "Accept edits", "Plan", "Auto"], "Claude Code's own permission modes");
+  await click(rowsOf(renderer.root, "chat-access-option").find((row) => rowLabel(row) === "Accept edits")!);
+  await settle();
+  const main = seen.overrides["__new-chat-main-session__"] as ChatParticipantRuntimeOverride;
+  assert.equal(main.model, "haiku");
+  assert.equal(main.reasoningEffort, "low");
+  assert.equal(main.agentMode, "default");
+  assert.equal(main.permissions?.workspaceWrite, true);
+  assert.equal(textOf(control(renderer.root, "model")), "Haiku 5.5");
+  assert.equal(textOf(control(renderer.root, "effort")), "Low");
+  assert.equal(textOf(control(renderer.root, "mode")), "Accept edits");
+  assert.equal(control(renderer.root, "model").find(hasClass("chat-provider-icon")).props["data-provider-kind"], "claude-code");
+  renderer.unmount();
+});
+
+test("New chat's controls start from Settings → General → New chats; another provider on the chip starts from its own", async () => {
+  installModelBridge();
+  installWindowBridge({
+    listProviderModels: async (kind: string) => CATALOGS[kind],
+    listMachines: async () => ({ machines: [{ id: "m-1", name: "Studio" }], status: [] })
+  });
+  const settings: AppSettings = { ...SETTINGS, assistantProviderKind: "codex-cli",
+    newChatDefaults: { kind: "codex-cli", model: "gpt-5.5-mini", reasoningEffort: "low", access: "auto-review", homeMachineId: "m-1", compactWithoutAsking: true } };
+  const renderer = create(<NewChatScreen {...baseProps(readyAgents(), { settings })} />);
+  await settle();
+  assert.equal(textOf(control(renderer.root, "model")), "GPT-5.5 mini");
+  assert.equal(textOf(control(renderer.root, "effort")), "Low");
+  assert.equal(textOf(control(renderer.root, "mode")), "Approve for me", "Codex's own name for the mode");
+  assert.equal(textOf(control(renderer.root, "runs-on")), "Studio", "the machine Settings names");
+  renderer.unmount();
+
+  // The chip chose Claude Code for this chat: its own model and mode; where
+  // it runs stays as Settings says.
+  const claude = create(<NewChatScreen {...baseProps(readyAgents(), { settings, mainSessionProvider: { kind: "claude-code" } })} />);
+  await settle();
+  assert.equal(textOf(control(claude.root, "model")), "Opus 5.5");
+  assert.equal(textOf(control(claude.root, "mode")), "Manual", "Claude Code's built-in mode");
+  assert.equal(textOf(control(claude.root, "runs-on")), "Studio");
+  claude.unmount();
+});
+
+test("a classic view stored for new chats from before no longer brings back the members picker: New chat has its controls", async () => {
+  installModelBridge();
+  const renderer = create(<NewChatScreen {...baseProps(readyAgents(), { settings: { ...LEGACY_CLASSIC, chatParticipantConfigs: [savedMember()] } })} />);
+  await settle();
+  assert.doesNotMatch(textOf(renderer.root), /1 member/);
+  assert.equal(renderer.root.findAll(hasClass("new-chat-participant-trigger")).length, 0);
+  assert.equal(renderer.root.findAllByProps({ "data-testid": "new-chat-controls-model" }).length, 1);
+  renderer.unmount();
+});
+
+/** The New chat screen as App keeps it: its chip's provider, the main
+ *  session's settings and which provider they were made for live outside it. */
+function trackedHarness(settingsFor: () => AppSettings, agentsFor: () => AgentHealth[] = readyAgents) {
+  const state: {
+    provider?: { kind: AgentHealth["kind"]; hostId?: string };
+    overrides: Record<string, ChatParticipantRuntimeOverride>;
+    madeFor?: string;
+  } = { overrides: {} };
+  // The state outlives the screen (App keeps it), so a write made as the
+  // screen goes away still lands.
+  function setter<K extends keyof typeof state>(key: K, force: () => void) {
+    return (value: unknown) => {
+      state[key] = (typeof value === "function" ? (value as (current: unknown) => unknown)(state[key]) : value) as (typeof state)[K];
+      force();
+    };
+  }
+  function Harness(): JSX.Element {
+    const [, setTick] = useState(0);
+    const force = (): void => setTick((tick) => tick + 1);
+    return <NewChatScreen {...baseProps(agentsFor(), {
+      settings: settingsFor(),
+      mainSessionProvider: state.provider,
+      onMainSessionProviderChange: setter("provider", force),
+      selectedParticipantRuntimeOverrides: state.overrides,
+      onSelectedParticipantRuntimeOverridesChange: setter("overrides", force),
+      mainSessionOverrideFor: state.madeFor,
+      onMainSessionOverrideForChange: setter("madeFor", force)
+    })} />;
+  }
+  return { state, Harness };
+}
+
+test("a new chat's main session starts in the mode her own CLI config starts it in, as the screen shows it, and is made in what was shown", async () => {
+  resetMemberModelCatalogs();
+  const withConfig: Record<string, ProviderModelCatalog> = {
+    ...CATALOGS,
+    "codex-cli": { ...CATALOGS["codex-cli"]!, startDefaults: { access: "auto-review", model: "gpt-5.5", modelLabel: "GPT-5.5", reasoningEffort: "low" } }
+  };
+  installWindowBridge({ listProviderModels: async (kind: string) => withConfig[kind], listMachines: async () => ({ machines: [] }) });
+  (globalThis as any).document = { addEventListener: () => undefined, removeEventListener: () => undefined, querySelector: () => null };
+  const shown: Array<{ key: string; access?: string } | undefined> = [];
+  const renderer = create(<NewChatScreen {...baseProps(readyAgents(), {
+    settings: { ...SETTINGS, assistantProviderKind: "codex-cli" },
+    onMainSessionStartAccessChange: (value: { key: string; access?: string } | undefined) => { shown.push(value); }
+  })} />);
+  await settle();
+  await settle();
+  await openModes(renderer.root);
+  assert.equal(checkedMode(renderer.root), "Approve for me", "her config's Approve for me, not Ask for approval");
+  assert.equal(textOf(control(renderer.root, "effort")), "Low", "the effort her config sets");
+  assert.equal(shown.at(-1)?.access, "auto-review", "the mode shown is what the chat is made in");
+  act(() => renderer.unmount());
+});
+
+const modeRows = (root: ReactTestInstance): ReactTestInstance[] => rowsOf(root, "chat-access-option");
+const checkedMode = (root: ReactTestInstance): string | undefined => {
+  const row = modeRows(root).find((candidate) => candidate.props["aria-checked"] === true);
+  return row ? rowLabel(row) : undefined;
+};
+async function openModes(root: ReactTestInstance): Promise<void> {
+  if (modeRows(root).length === 0) await click(control(root, "mode"));
+}
+
+test("a new chat's main session in the sessions view starts in its CLI's own default mode, and another provider's settings never carry over", async () => {
+  installModelBridge();
+  let settings: AppSettings = { ...SETTINGS, assistantProviderKind: "claude-code" };
+  const { state, Harness } = trackedHarness(() => settings);
+  let renderer = create(<Harness />);
+  await settle();
+  await openModes(renderer.root);
+  assert.equal(checkedMode(renderer.root), "Manual", "Claude Code's Manual (its Default before 2.1.330)");
+  assert.match(textOf(modeRows(renderer.root)[0]!), /Always ask before making changes/, "in the Claude desktop app's words");
+
+  await click(modeRows(renderer.root).find((row) => rowLabel(row) === "Accept edits")!);
+  await click(control(renderer.root, "model"));
+  await click(rowsOf(renderer.root, "chat-model-option").find((row) => textOf(row) === "Haiku 5.5")!);
+  await settle();
+  assert.equal(state.overrides["__new-chat-main-session__"]?.model, "haiku");
+  assert.equal(state.madeFor, "claude-code\u0000", "made for Claude Code");
+
+  // Codex chosen on the chip: what was set for Claude Code is dropped,
+  // its access included, and Codex starts in its own default mode.
+  await click(control(renderer.root, "model"));
+  await click(rowsOf(renderer.root, "chat-model-provider").find((row) => textOf(row) === "Codex")!);
+  await settle();
+  assert.equal(state.overrides["__new-chat-main-session__"], undefined, "no Claude model (or mode) reaches Codex");
+  await openModes(renderer.root);
+  assert.equal(checkedMode(renderer.root), "Ask for approval", "Codex's own default preset (workspace write, asking to go further)");
+  assert.equal(textOf(control(renderer.root, "model")), "GPT-5.5", "Codex's own default model");
+  await click(modeRows(renderer.root).find((row) => rowLabel(row) === "Full Access")!);
+  // Codex's own question first; only Yes switches.
+  assert.equal(state.overrides["__new-chat-main-session__"]?.agentMode, undefined, "not before the question is answered");
+  await click(renderer.root.find((node) => typeof node.type === "string" && node.props["data-testid"] === "chat-full-access-confirm-yes"));
+  await click(control(renderer.root, "plan"));
+  await settle();
+  assert.equal(state.overrides["__new-chat-main-session__"]?.agentMode, "full-access", "Codex's Full Access");
+  assert.equal(state.overrides["__new-chat-main-session__"]?.permissions?.codexPlanMode, true, "with Plan mode on");
+  act(() => renderer.unmount());
+  assert.equal(state.provider, undefined, "leaving New chat without sending forgets the chip's provider");
+  assert.equal(state.overrides["__new-chat-main-session__"], undefined, "and what was chosen for that chat");
+
+  // A visit made while Settings named another CLI: settings made for the old
+  // one (kept from before this rule, say) are not used.
+  state.overrides = { "__new-chat-main-session__": { model: "haiku" } };
+  state.madeFor = "claude-code\u0000";
+  settings = { ...SETTINGS, assistantProviderKind: "codex-cli" };
+  renderer = create(<Harness />);
+  await settle();
+  assert.equal(textOf(control(renderer.root, "model")), "GPT-5.5", "the Claude model is never shown or sent for Codex");
+  assert.equal(state.overrides["__new-chat-main-session__"], undefined);
+  act(() => renderer.unmount());
+});
+
+test("a provider chosen on the chip that stops being ready is said on the screen, never taken over silently", async () => {
+  installModelBridge();
+  const renderer = create(<NewChatScreen {...baseProps([readyAgent("codex-cli"), { ...readyAgent("claude-code"), authentication: "required" }], {
+    settings: { ...SETTINGS, assistantProviderKind: "codex-cli" },
+    mainSessionProvider: { kind: "claude-code" }
+  })} />);
+  await settle();
+  assert.match(textOf(renderer.root.findByProps({ "data-testid": "new-chat-assistant-note" })), /chosen on the model chip is not ready now: this chat would start on Codex/);
+  renderer.unmount();
+});
+
+function savedMember(): ChatParticipantConfig {
+  return {
+    id: "saved-drew", handle: "drew", roleConfigId: "main-session-reviewer", behaviorRuleIds: [], kind: "claude-code",
+    agentMode: "default", permissions: defaultChatAgentPermissions(), remoteExecution: "local", updatedAt: "2026-11-20T00:00:00.000Z"
+  } as ChatParticipantConfig;
+}
+
+function hasClass(name: string) {
+  return (node: ReactTestInstance): boolean => typeof node.type === "string" && typeof node.props.className === "string" && node.props.className.split(" ").includes(name);
+}
 
 function GoalCommandHarness(): JSX.Element {
   const [prompt, setPrompt] = useState("");

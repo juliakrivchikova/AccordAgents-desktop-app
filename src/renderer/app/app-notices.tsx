@@ -1,4 +1,4 @@
-import { Server, X } from "lucide-react";
+import { HardDrivesIcon, XIcon } from "@phosphor-icons/react";
 import { Button } from "@/components/ui/button";
 import { useMachineInactivityQuestions } from "./use-machine-inactivity";
 import { IconButton, Notice } from "../components/primitives";
@@ -15,6 +15,8 @@ export function AppNotices(props: {
   warnings: WarningNoticeEntry[];
   warningScope: string;
   conversationId?: string;
+  /** How the open chat's view words a notice (warningNoticeEntries). */
+  noticeText?: (text: string) => string;
   setError: (value: string | undefined) => void;
   setWarnings: React.Dispatch<React.SetStateAction<string[]>>;
   setDismissedWarningKeysByScope: React.Dispatch<React.SetStateAction<DismissedWarningMap>>;
@@ -70,9 +72,9 @@ export function AppNotices(props: {
           <Notice
             tone="error"
             role="alert"
-            action={<IconButton label="Dismiss error" icon={X} size="xs" onClick={() => props.setError(undefined)} />}
+            action={<IconButton label="Dismiss error" icon={XIcon} size="xs" onClick={() => props.setError(undefined)} />}
           >
-            {displayNoticeText(props.error)}
+            {props.noticeText ? props.noticeText(displayNoticeText(props.error)) : displayNoticeText(props.error)}
           </Notice>
         </div>
       )}
@@ -80,7 +82,7 @@ export function AppNotices(props: {
         <div className="app-notice-card" key={`machine-inactive:${question.machineId}`} data-testid="machine-inactivity-question">
           <Notice
             tone="info"
-            icon={Server}
+            icon={HardDrivesIcon}
             title={`Is ${question.name} still in use?`}
           >
             <p>
@@ -107,7 +109,7 @@ export function AppNotices(props: {
             action={
               <IconButton
                 label="Dismiss warning"
-                icon={X}
+                icon={XIcon}
                 size="xs"
                 onClick={() => dismissWarnings([warning.key])}
               />

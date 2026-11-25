@@ -14,7 +14,7 @@
    the same face, size, and weight (the app's display family). */
 .settings-view .settings-view-head h1 {
   font-family: var(--font-display);
-  font-size: 21px;
+  font-size: 20px;
   font-weight: 600;
   line-height: 1.2;
   letter-spacing: -0.02em;
@@ -38,6 +38,11 @@
   margin-bottom: 0;
 }
 
+/* A section's description keeps its distance from the card under it. */
+.settings-view .gen-section > p:not(:last-child) {
+  margin: 0 0 12px;
+}
+
 /* Sections, cards and rows follow the ChatGPT desktop app's settings: a 14px
    section title, 13px row titles over 12px secondary lines, hairline card
    edges and dividers, 12px by 16px row padding. */
@@ -51,7 +56,7 @@
 
 .settings-view .gen-section-title {
   margin: 0;
-  font-size: 14px;
+  font-size: 13px;
   font-weight: 500;
   line-height: 20px;
   color: var(--app-text-strong);
@@ -69,7 +74,7 @@
 .settings-view .gen-card {
   background: var(--app-surface);
   border: 1px solid var(--app-hairline);
-  border-radius: 14px;
+  border-radius: 12px;
 }
 
 .settings-view .gen-card-divider {
@@ -88,20 +93,20 @@
 }
 
 .settings-view .gen-cli-icon {
-  width: 36px;
-  height: 36px;
+  width: 28px;
+  height: 28px;
   flex-shrink: 0;
   display: flex;
   align-items: center;
   justify-content: center;
-  border-radius: 10px;
+  border-radius: 8px;
   background: var(--app-surface-subtle);
   overflow: hidden;
 }
 
 .settings-view .gen-cli-icon img {
-  width: 24px;
-  height: 24px;
+  width: 18px;
+  height: 18px;
   object-fit: contain;
   display: block;
 }
@@ -210,23 +215,13 @@
   gap: 12px;
 }
 
-.settings-view .gen-grid-form {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 10px;
-}
-
-.settings-view .gen-grid-form-compact {
-  grid-template-columns: repeat(2, minmax(120px, 180px));
-}
-
 .settings-view .gen-input,
 .gen-aws-dialog .gen-input {
   min-width: 0;
   width: 100%;
   padding: 9px 11px;
   border: 1px solid var(--app-border);
-  border-radius: 10px;
+  border-radius: 8px;
   background: var(--app-surface);
   color: var(--app-text-strong);
   font: 500 13px var(--font-body);
@@ -236,27 +231,6 @@
 .gen-aws-dialog .gen-input:focus {
   outline: none;
   border-color: var(--app-focus-border);
-}
-
-.settings-view .gen-select-wrap {
-  position: relative;
-  display: block;
-  min-width: 0;
-  width: 100%;
-}
-
-.settings-view .gen-select-wrap .gen-input {
-  appearance: none;
-  padding-right: 34px;
-}
-
-.settings-view .gen-select-wrap svg {
-  position: absolute;
-  right: 11px;
-  top: 50%;
-  pointer-events: none;
-  color: var(--app-muted);
-  transform: translateY(-50%);
 }
 
 .settings-view .gen-actions {
@@ -285,11 +259,6 @@
 
 /* ---- File-open dropdown pill ---- */
 
-.settings-view .gen-dropdown {
-  position: relative;
-  flex-shrink: 0;
-}
-
 /* A row's control, like the ChatGPT app's: 28px, white, a hairline edge. */
 .settings-view .gen-pill {
   display: inline-flex;
@@ -298,7 +267,7 @@
   min-width: 206px;
   height: 28px;
   padding: 0 12px;
-  border-radius: 10px;
+  border-radius: 8px;
   border: 1px solid var(--app-hairline);
   background: var(--app-surface);
   cursor: pointer;
@@ -309,7 +278,7 @@
 }
 
 .settings-view .gen-pill:hover:not(:disabled) {
-  background: var(--app-surface-hover);
+  background: var(--ui-row-hover);
   border-color: var(--app-border-strong);
 }
 
@@ -337,80 +306,16 @@
 
 .settings-view .gen-pill-label {
   flex: 1;
-  font-size: 14px;
+  font-size: 13px;
   font-weight: 400;
   color: var(--app-text-strong);
   white-space: nowrap;
   text-align: left;
 }
 
-.settings-view .gen-pill-chev {
-  flex-shrink: 0;
-  color: var(--app-muted);
-  transition: transform 150ms ease;
-}
-
-.settings-view .gen-pill.is-open .gen-pill-chev {
-  transform: rotate(180deg);
-}
-
 /* The file-open menu renders in a body-level portal (so the settings pane's
    overflow:auto can't clip it), so these selectors are NOT scoped under
    .settings-view. Position is set inline (fixed, anchored to the trigger rect). */
-.gen-menu {
-  min-width: 236px;
-  padding: 6px;
-  border-radius: 12px;
-  border: 1px solid var(--app-border);
-  background: var(--app-surface);
-  box-shadow: 0 18px 40px -12px color-mix(in srgb, var(--shadow-color) 34%, transparent);
-  z-index: 50;
-}
-
-.gen-menu-item {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  width: 100%;
-  padding: 9px 10px;
-  border: none;
-  border-radius: 8px;
-  background: transparent;
-  text-align: left;
-  cursor: pointer;
-  transition: background 120ms ease;
-}
-
-.gen-menu-item:hover {
-  background: var(--app-surface-hover);
-}
-
-.gen-menu-item.is-selected {
-  background: var(--app-surface-subtle);
-}
-
-.gen-menu-item:focus-visible {
-  outline: none;
-  box-shadow: var(--focus-ring);
-}
-
-.gen-menu-item-icon {
-  display: flex;
-  flex-shrink: 0;
-  color: var(--app-muted);
-}
-
-.gen-menu-item-label {
-  flex: 1;
-  font-size: 13px;
-  font-weight: 500;
-  color: var(--app-text-strong);
-}
-
-.gen-menu-item-check {
-  flex-shrink: 0;
-  color: var(--app-text-strong);
-}
 
 /* ---- Run timeout control ---- */
 
@@ -437,7 +342,7 @@
   width: 250px;
   height: 28px;
   border: 1px solid var(--app-hairline);
-  border-radius: 10px;
+  border-radius: 8px;
   background: var(--app-surface);
   color: var(--app-text-strong);
 }
@@ -452,7 +357,7 @@
   appearance: none;
   background: transparent;
   color: inherit;
-  font: 400 14px var(--font-body);
+  font: 400 13px var(--font-body);
   white-space: nowrap;
   text-overflow: ellipsis;
 }
@@ -475,7 +380,7 @@
   align-items: stretch;
   height: 28px;
   border: 1px solid var(--app-hairline);
-  border-radius: 10px;
+  border-radius: 8px;
   background: var(--app-surface);
   overflow: hidden;
 }
@@ -487,7 +392,7 @@
   outline: none;
   background: transparent;
   text-align: center;
-  font: 400 14px var(--font-body);
+  font: 400 13px var(--font-body);
   color: var(--app-text-strong);
 }
 
@@ -496,7 +401,7 @@
   align-items: center;
   padding: 0 12px;
   border-left: 1px solid var(--app-hairline);
-  font-size: 14px;
+  font-size: 13px;
   font-weight: 400;
   color: var(--app-text-strong);
 }
@@ -504,11 +409,11 @@
 .settings-view .gen-timeout-save {
   height: 28px;
   padding: 0 12px;
-  border-radius: 10px;
+  border-radius: 8px;
   border: 1px solid var(--app-hairline);
   background: var(--app-surface);
   color: var(--app-muted);
-  font-size: 14px;
+  font-size: 13px;
   font-weight: 400;
   cursor: default;
   transition:
@@ -532,52 +437,6 @@
   text-align: right;
 }
 
-.settings-view .gen-doctor-list {
-  list-style: none;
-  margin: 0;
-  padding: 12px 16px;
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-}
-
-.settings-view .gen-doctor-item {
-  display: flex;
-  align-items: baseline;
-  gap: 10px;
-  font-size: 12.5px;
-  line-height: 1.4;
-  color: var(--app-text-strong);
-}
-
-.settings-view .gen-doctor-mark {
-  flex: none;
-  width: 16px;
-  text-align: center;
-  font-weight: 700;
-  color: var(--app-muted);
-}
-
-.settings-view .gen-doctor-item.is-pass .gen-doctor-mark {
-  color: var(--app-success);
-}
-
-.settings-view .gen-doctor-item.is-warn .gen-doctor-mark {
-  color: var(--app-warning);
-}
-
-.settings-view .gen-doctor-item.is-fail .gen-doctor-mark {
-  color: var(--app-danger);
-}
-
-.settings-view .gen-doctor-label {
-  font-weight: 600;
-}
-
-.settings-view .gen-doctor-detail {
-  color: var(--app-muted);
-}
-
 .settings-view .gen-doctor-auth-link {
   padding: 0;
   border: none;
@@ -586,38 +445,6 @@
   font: inherit;
   text-decoration: underline;
   cursor: pointer;
-}
-
-.settings-view .gen-cloud-runs-settings {
-  min-inline-size: 0;
-  margin: 0;
-  padding: 0;
-  border: 0;
-}
-
-.settings-view .gen-segmented {
-  display: inline-flex;
-  gap: 4px;
-  padding: 3px;
-  border-radius: 12px;
-  background: var(--app-surface);
-  border: 1px solid var(--app-border);
-}
-
-.settings-view .gen-segment {
-  padding: 7px 12px;
-  border: none;
-  border-radius: 9px;
-  background: none;
-  color: var(--app-muted);
-  font-size: 12.5px;
-  font-weight: 600;
-  cursor: pointer;
-}
-
-.settings-view .gen-segment.is-active {
-  background: var(--app-primary);
-  color: var(--app-primary-fg);
 }
 
 .settings-view .gen-aws {
@@ -655,22 +482,6 @@
   line-height: 20px;
 }
 
-.settings-view .gen-aws-spinner,
-.gen-aws-dialog .gen-aws-spinner {
-  display: inline-block;
-  vertical-align: middle;
-  animation: gen-aws-spin 1s linear infinite;
-}
-
-@keyframes gen-aws-spin {
-  to { transform: rotate(360deg); }
-}
-
-@media (prefers-reduced-motion: reduce) {
-  .settings-view .gen-aws-spinner,
-  .gen-aws-dialog .gen-aws-spinner { animation: none; }
-}
-
 .settings-view .gen-aws-state.is-billable {
   color: var(--app-warning);
 }
@@ -680,7 +491,7 @@
   gap: 6px;
   min-width: 0;
   color: var(--app-muted);
-  font-size: 12.5px;
+  font-size: 12px;
 }
 
 /* A command to run in Terminal: the text and, beside it, the copy icon. */
@@ -690,7 +501,7 @@
   gap: 6px;
   margin: 0;
   padding: 6px;
-  border-radius: 10px;
+  border-radius: 8px;
   background: var(--app-surface);
   border: 1px solid var(--app-border);
 }
@@ -705,7 +516,7 @@
   margin: 0;
   padding: 5px 6px 5px 8px;
   font-family: var(--font-mono, monospace);
-  font-size: 11.5px;
+  font-size: 11px;
   line-height: 1.5;
   white-space: pre-wrap;
   word-break: break-all;
@@ -717,7 +528,7 @@
   min-height: 60px;
   resize: vertical;
   font-family: var(--font-mono, monospace);
-  font-size: 11.5px;
+  font-size: 11px;
 }
 
 .settings-view .gen-aws-specs {
@@ -756,7 +567,7 @@
   gap: 6px;
   min-width: 0;
   color: var(--app-muted);
-  font-size: 11.5px;
+  font-size: 11px;
 }
 
 .settings-view .gen-aws-progress li > span:first-child,
@@ -768,7 +579,7 @@
   height: 20px;
   border: 1px solid var(--app-border);
   border-radius: 50%;
-  font-size: 10px;
+  font-size: 11px;
 }
 
 .settings-view .gen-aws-progress li.is-current,
@@ -991,7 +802,7 @@
   margin-top: 12px;
   padding: 12px;
   border: 1px solid var(--border);
-  border-radius: 10px;
+  border-radius: 8px;
   background: var(--muted);
 }
 

@@ -1,5 +1,5 @@
 import React from "react";
-import { Check, Loader2 } from "lucide-react";
+import { CheckIcon } from "@phosphor-icons/react";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Textarea } from "@/components/ui/textarea";
@@ -15,11 +15,14 @@ import {
   readAccordLauncherPreferences
 } from "../../app/storage";
 import { AppSelect, FormRow } from "../primitives";
-import { Avatar } from "../avatar/avatar";
 import { chatParticipantDisplayName, isChatAssistantParticipant } from "../conversation/conversation-display";
 import { avatarForChatParticipant } from "./chat-avatars";
+import { ChatMemberMark, ChatSessionsPresentationContext } from "./chat-member-mark";
 import { AccordMergeIcon } from "./accord-merge-icon";
 import { providerLabel } from "./chat-conversation-data";
+import { sessionsViewLabel, type SessionsViewNames } from "../../../shared/sessionsViewText";
+import { Spinner } from "@/components/ui/spinner";
+import { Delayed } from "@/components/ui/delayed";
 
 export interface ChatAccordLauncherPayload {
   facilitatorParticipantId: string;
@@ -34,11 +37,19 @@ export function ChatAccordLauncherDialog(props: {
   participantRoleLabel: (participant: ChatParticipant) => string;
   onOpenChange: (open: boolean) => void;
   onStart: (payload: ChatAccordLauncherPayload) => Promise<boolean>;
+  /** Opened from a chat shown in the sessions view: members by provider logo. */
+  sessions?: boolean;
+  /** The sessions view's names (no handles there): a member by its task, the
+   *  main session by its CLI alone. */
+  sessionsNames?: SessionsViewNames;
 }): JSX.Element {
   const participants = React.useMemo(
     () => props.participants.filter((participant) => !isChatAssistantParticipant(participant)),
     [props.participants]
   );
+  const names = props.sessionsNames;
+  const nameOf = (participant: ChatParticipant): string =>
+    names ? sessionsViewLabel(participant.handle, names) : chatParticipantDisplayName(participant);
   const [facilitatorId, setFacilitatorId] = React.useState("");
   const [targetIds, setTargetIds] = React.useState<string[]>([]);
   const [subject, setSubject] = React.useState("");
@@ -122,6 +133,7 @@ export function ChatAccordLauncherDialog(props: {
   };
 
   return (
+    <ChatSessionsPresentationContext.Provider value={props.sessions === true}>
     <Dialog open={props.open} onOpenChange={(open) => {
       if (!saving) {
         props.onOpenChange(open);
@@ -182,11 +194,11 @@ export function ChatAccordLauncherDialog(props: {
             <AppSelect
               value={resolvedFacilitatorId}
               options={participants.map((participant) => {
-                const displayName = chatParticipantDisplayName(participant);
+                const displayName = nameOf(participant) || providerLabel(participant.kind);
                 return {
                   value: participant.id,
                   label: displayName,
-                  icon: <Avatar className="chat-accord-select-avatar" spec={avatarForChatParticipant(participant, displayName)} tooltip={null} />
+                  icon: <ChatMemberMark className="chat-accord-select-avatar" markClassName="is-mini" avatar={avatarForChatParticipant(participant, displayName)} member={participant} tooltip={null} />
                 };
               })}
               placeholder="Choose who leads"
@@ -197,11 +209,12 @@ export function ChatAccordLauncherDialog(props: {
             />
           </FormRow>
 
-          <FormRow className="chat-accord-field" label="Members">
+          <FormRow className="chat-accord-field" label={props.sessions === true ? "Sessions" : "Members"}>
             <div className="chat-accord-target-list" data-testid="chat-accord-targets">
               {targetOptions.map((participant) => {
                 const checked = targetIds.includes(participant.id);
-                const displayName = chatParticipantDisplayName(participant);
+                const named = nameOf(participant);
+                const displayName = named || providerLabel(participant.kind);
                 return (
                   <label className={`chat-accord-target${checked ? " is-selected" : ""}`} key={participant.id}>
                     <input
@@ -213,12 +226,12 @@ export function ChatAccordLauncherDialog(props: {
                       onChange={() => toggleTarget(participant.id)}
                     />
                     <span className="chat-accord-target-check" aria-hidden="true">
-                      <Check size={12} strokeWidth={3.4} />
+                      <CheckIcon size={12} />
                     </span>
-                    <Avatar className="chat-accord-target-avatar" spec={avatarForChatParticipant(participant, displayName)} tooltip={null} />
+                    <ChatMemberMark className="chat-accord-target-avatar" markClassName="is-mini" avatar={avatarForChatParticipant(participant, displayName)} member={participant} tooltip={null} />
                     <span className="chat-accord-target-title" title={props.participantRoleLabel(participant)}>
                       <strong>{displayName}</strong>
-                      <span>- {providerLabel(participant.kind)}</span>
+                      {named && <span>- {providerLabel(participant.kind)}</span>}
                     </span>
                   </label>
                 );
@@ -237,12 +250,13 @@ export function ChatAccordLauncherDialog(props: {
             Cancel
           </Button>
           <Button type="button" size="sm" disabled={!canSubmit} data-testid="chat-accord-start" onClick={() => void submit()}>
-            {saving && <Loader2 className="chat-accord-spinner" aria-hidden />}
+            {saving && <Delayed><Spinner size={14} /></Delayed>}
             Start Accord
           </Button>
         </DialogFooter>
       </DialogContent>
     </Dialog>
+    </ChatSessionsPresentationContext.Provider>
   );
 }
 

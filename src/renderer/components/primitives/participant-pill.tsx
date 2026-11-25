@@ -44,14 +44,14 @@ export const ParticipantPill = React.forwardRef<HTMLButtonElement, ParticipantPi
   ) {
     const isInteractive = asButton && Boolean(onClick);
     const fallbackInitials = (initials ?? name.slice(0, 2)).toUpperCase();
-    const padding = size === "sm" ? "h-6 pl-0.5 pr-2 text-[11px]" : "h-7 pl-0.5 pr-2.5 text-xs";
+    const padding = size === "sm" ? "h-6 pl-0.5 pr-2 text-ui-11" : "h-7 pl-0.5 pr-2.5 text-xs";
     const avatarSize = size === "sm" ? "size-5" : "size-6";
     const baseClass = cn(
       "inline-flex items-center gap-1.5 rounded-full border border-border bg-background font-medium",
       "text-foreground transition-colors",
       padding,
       isInteractive &&
-        "cursor-pointer hover:bg-muted/60 focus-visible:outline-none focus-visible:shadow-[var(--focus-ring)]",
+        "cursor-pointer hover:bg-ui-row-hover/60 focus-visible:outline-none focus-visible:shadow-[var(--focus-ring)]",
       selected && "border-[var(--app-accent)] bg-[var(--app-accent-soft)] text-[var(--app-text-strong)]",
       disabled && "cursor-not-allowed opacity-50 hover:bg-background",
       className
@@ -61,7 +61,7 @@ export const ParticipantPill = React.forwardRef<HTMLButtonElement, ParticipantPi
       <>
         <Avatar className={cn(avatarSize, "shrink-0 after:hidden")}>
           {avatarUrl ? <AvatarImage src={avatarUrl} alt={name} /> : null}
-          <AvatarFallback className="text-[10px]">{fallbackInitials}</AvatarFallback>
+          <AvatarFallback className="text-ui-11">{fallbackInitials}</AvatarFallback>
         </Avatar>
         <span className="truncate">{handle ? `@${handle}` : name}</span>
         {status ? (

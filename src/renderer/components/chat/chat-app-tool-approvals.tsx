@@ -1,6 +1,7 @@
 import type {
   ChatAppToolApproval,
   ChatAppToolApprovalRequest,
+  ChatClaudePlanDecision,
   ChatAppToolApprovalScope,
   ChatParticipant,
   ChatParticipantConfig,
@@ -22,7 +23,8 @@ export function ChatAppToolApprovalList(props: {
     approve: boolean,
     scope?: ChatAppToolApprovalScope,
     draftOverride?: ChatAppToolApprovalRequest,
-    codexDecisionId?: string
+    codexDecisionId?: string,
+    planDecision?: ChatClaudePlanDecision
   ) => Promise<void>;
 }): JSX.Element {
   return (

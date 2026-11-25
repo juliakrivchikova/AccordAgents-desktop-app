@@ -1,10 +1,11 @@
 import { useEffect, useMemo, useState } from "react";
-import { Trash2, X } from "lucide-react";
+import { TrashIcon, XIcon } from "@phosphor-icons/react";
 
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogClose, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import type { AgentHealth, AppSettings, ChatAgentMode, ChatParticipantConfigUpdate, ChatProviderKind, ChatRosterChangeParticipantInput } from "../../../shared/types";
 import { normalizeChatAgentMode } from "../../../shared/agentPermissions";
+import { isRoleOfferedForNewMembers } from "../../../shared/mainSession";
 import { chatReasoningEffortLabel, normalizeChatReasoningEffort, reasoningEffortOptionsForProvider } from "../../../shared/reasoningEffort";
 import { displayChatRoleLabel } from "../chat/chat-role-labels";
 import {
@@ -78,10 +79,11 @@ export function ParticipantEditorDialog(props: {
   );
   const selectedRole = props.settings.chatRoleConfigs.find((role) => role.id === draft.roleConfigId);
   const isWorkflowManager = draft.roleConfigId === WORKFLOW_MANAGER_ROLE_ID;
-  // Hide archived (deleted) roles from the picker so no new references form, but keep the
-  // member's current role selectable so editing an existing binding never goes blank.
+  // Hide archived (deleted) roles and those no longer offered (the main session's, the Workflow
+  // Manager's) from the picker so no new references form, but keep the member's current role
+  // selectable so editing an existing binding never goes blank.
   const roleOptions = props.settings.chatRoleConfigs
-    .filter((role) => !role.archivedAt || role.id === draft.roleConfigId)
+    .filter((role) => (!role.archivedAt && isRoleOfferedForNewMembers(role.id)) || role.id === draft.roleConfigId)
     .map((role) => ({ value: role.id, label: role.archivedAt ? `${displayChatRoleLabel(role)} (deleted)` : displayChatRoleLabel(role) }));
   const hosts = props.settings.cliProviderHosts ?? [];
   const draftHost = chatParticipantHost(draft, hosts);
@@ -179,7 +181,7 @@ export function ParticipantEditorDialog(props: {
               <DialogDescription>{roleLabel || "Saved member preset"}</DialogDescription>
             </span>
             <DialogClose asChild>
-              <IconButton label="Close member editor" icon={X} />
+              <IconButton label="Close member editor" icon={XIcon} />
             </DialogClose>
           </div>
         </DialogHeader>
@@ -300,7 +302,7 @@ export function ParticipantEditorDialog(props: {
               data-testid="settings-participant-modal-delete"
               onClick={() => setDeleteConfirmOpen(true)}
             >
-              <Trash2 size={14} aria-hidden />
+              <TrashIcon size={14} aria-hidden />
               Delete preset
             </Button>
           )}

@@ -15,7 +15,10 @@ import {
   APP_CHAT_GET_PARTICIPANT_ACTIVITY_TOOL,
   AppMcpService
 } from "./appMcp";
+import { appMcpParts } from "./appMcp/test/appMcpParts";
+import { toolsForActor } from "./appMcp/protocol";
 import { ChatService } from "./chat";
+import { chatParts } from "./chat/test/chatParts";
 
 const SNAPSHOT_AT = "2026-07-31T09:00:00.000Z";
 
@@ -673,13 +676,13 @@ test("app MCP dispatches participant activity as capability-free read-only JSON"
     capabilities: []
   };
 
-  const result = await (appMcp as any).callTool(actor, {
+  const result = await appMcpParts(appMcp).toolCalls.callTool(actor, {
     name: APP_CHAT_GET_PARTICIPANT_ACTIVITY_TOOL,
     arguments: {}
   });
   const text = result.content[0].text;
   assert.deepEqual(JSON.parse(text), expected);
-  const tool = ((appMcp as any).toolsForActor(actor) as Array<Record<string, any>>)
+  const tool = (toolsForActor(actor) as Array<Record<string, any>>)
     .find((item) => item.name === APP_CHAT_GET_PARTICIPANT_ACTIVITY_TOOL);
   assert.deepEqual(tool?.inputSchema, {
     type: "object",
@@ -718,7 +721,7 @@ test("ChatService activity handler is actor-scoped, live past snapshotMaxSequenc
     snapshotMaxSequence: 0
   };
 
-  const result = await (appMcp as any).callTool(actor, {
+  const result = await appMcpParts(appMcp).toolCalls.callTool(actor, {
     name: APP_CHAT_GET_PARTICIPANT_ACTIVITY_TOOL,
     arguments: {}
   });
@@ -762,7 +765,7 @@ test("activity snapshot stays roster-consistent while request-status explicitly 
     })
   }));
   const harness = chatServiceHarness([conversation]);
-  (harness.service as any).activeRunIds.add("unrelated-live-run");
+  chatParts(harness.service).activeRuns.activeRunIds.add("unrelated-live-run");
   const actor = {
     conversationId: conversation.id,
     participantId: requester.id,
@@ -787,17 +790,13 @@ test("participant activity guidance is local-only and absent from detached remot
   const session = participantSession(local);
   const harness = chatServiceHarness([chatConversation([local, remote])]);
 
-  const localInstructions = (harness.service as any).nativeRoleInstructions(local, session) as string;
-  const remoteInstructions = (harness.service as any).nativeRoleInstructions(remote, {
-    ...session,
-    participantId: remote.id,
-    participantKind: remote.kind
-  }) as string;
-  const remoteFallback = (harness.service as any).promptFallbackStaticInstructions(remote, {
-    ...session,
-    participantId: remote.id,
-    participantKind: remote.kind
-  }) as string;
+  const conversation = chatConversation([local, remote]);
+  const access = { agentMode: "default", permissions: local.permissions };
+  const remoteSession = { ...session, participantId: remote.id, participantKind: remote.kind };
+  const localInstructions = chatParts(harness.service).memberSessions.sessionInstructions(conversation, local, session, access, "/tmp/ws") as string;
+  const remoteInstructions = chatParts(harness.service).memberSessions.sessionInstructions(conversation, remote, remoteSession, access, "/tmp/ws") as string;
+  // The same instructions go in-band when the CLI cannot take them natively.
+  const remoteFallback = chatParts(harness.service).turnPrompt.buildPromptParts(conversation, remote, remoteSession, { id: "m", role: "user", content: "Hi.", createdAt: "2026-05-01T00:00:00.000Z", status: "done" }, "/tmp/ws", false, { includeRoleInstructions: true, ...access }).prompt as string;
 
   assert.match(localInstructions, /app_chat_get_participant_activity/);
   assert.doesNotMatch(remoteInstructions, /app_chat_get_participant_activity/);

@@ -1,4 +1,4 @@
-import { Moon, Sun } from "lucide-react";
+import { MoonIcon, SunIcon } from "@phosphor-icons/react";
 
 import { IconButton } from "./primitives";
 import { useTheme } from "./theme-provider";
@@ -9,7 +9,7 @@ export function ModeToggle(): JSX.Element {
     <IconButton
       data-testid="theme-toggle"
       label={theme === "dark" ? "Switch to light theme" : "Switch to dark theme"}
-      icon={theme === "dark" ? Sun : Moon}
+      icon={theme === "dark" ? SunIcon : MoonIcon}
       tooltip={theme === "dark" ? "Light theme" : "Dark theme"}
       onClick={toggleTheme}
     />

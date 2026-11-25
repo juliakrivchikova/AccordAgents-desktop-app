@@ -1,0 +1,222 @@
+.control-card-choice.is-selected {
+  border-color: var(--acc);
+  background: var(--accs);
+  box-shadow: inset 0 0 0 1px var(--acc);
+}
+
+.control-card-choice[disabled]:not(.is-selected) {
+  opacity: 0.45;
+}
+
+.control-card-choice-num {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  min-width: 18px;
+  min-height: 20px;
+  color: var(--mut);
+  font: 600 14px var(--sans);
+}
+
+.control-card-choice.is-selected .control-card-choice-num {
+  color: var(--acc);
+}
+
+.control-card-choice-body {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  min-width: 0;
+  /* A path or a link in an option wraps instead of running out of the row. */
+  overflow-wrap: anywhere;
+}
+
+.control-card-choice-title {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  font: 500 15px var(--sans);
+  line-height: 1.35;
+}
+
+.control-card-choice-title strong {
+  font-weight: 600;
+}
+
+/* Solid accent: the tint pair read below AA contrast at this size. */
+.control-card-recommended {
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: var(--acc);
+  color: var(--surface-fg);
+  font: 600 11.5px var(--sans);
+}
+
+.control-card-choice-description {
+  color: var(--fg);
+  font: 400 13.5px var(--sans);
+  line-height: 1.4;
+}
+
+.control-card-text {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-top: 12px;
+}
+
+/* Under the picked option, the list's own gap is the space above it; your own
+   answer opens under its row, the last, with the same space. */
+.control-card-choices > .control-card-note {
+  margin-top: 0;
+}
+
+.control-card-answer {
+  margin-top: 8px;
+}
+
+.control-card-text[hidden] {
+  display: none;
+}
+
+.control-card-text-caption {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 8px;
+}
+
+.control-card-text-caption strong {
+  color: var(--fg1);
+  font: 600 13px var(--sans);
+}
+
+.control-card-text-caption small {
+  color: var(--mut);
+  font: 400 12px var(--sans);
+}
+
+/* Claude Code's plan on its approval card, shown in full as the CLI shows it. */
+.control-card-plan {
+  margin-top: 8px;
+  padding: 10px 12px;
+  border: 1px solid var(--bd);
+  border-radius: 12px;
+  font-size: 13px;
+  line-height: 1.45;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.control-card-plan .markdown-text {
+  white-space: normal;
+}
+
+.control-card-plan + .control-card-summary {
+  margin-top: 10px;
+}
+
+/* 16px: smaller type makes iOS zoom the page when the field is focused. */
+.control-card-text textarea {
+  width: 100%;
+  box-sizing: border-box;
+  padding: 10px 12px;
+  border: 1px solid var(--bd);
+  border-radius: 12px;
+  background: var(--s2);
+  color: var(--fg1);
+  font: 400 16px var(--sans);
+  line-height: 1.4;
+  resize: none;
+}
+
+/* Cancel and Submit end the card and scroll with it. Pinned to the foot of a
+   long choice, they lay on top of the options scrolling under them (the User,
+   2026-09-24). */
+.control-card-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 12px;
+}
+
+.control-card-hint {
+  margin-right: auto;
+  color: var(--mut);
+  font: 400 12px var(--sans);
+}
+
+.control-card-hint[hidden] {
+  display: none;
+}
+
+.control-card-cancel {
+  min-height: 44px;
+  padding: 0 12px;
+  border: 0;
+  border-radius: 999px;
+  background: transparent;
+  color: var(--mut);
+  font: 600 15px var(--sans);
+}
+
+.control-card-submit {
+  min-height: 44px;
+  padding: 0 22px;
+  border: 0;
+  border-radius: 999px;
+  background: var(--fg1);
+  color: var(--surface-fg);
+  font: 600 15px var(--sans);
+}
+
+.control-card-submit[disabled],
+.control-card-cancel[disabled] {
+  opacity: 0.35;
+}
+
+.control-card-choice:active,
+.control-card-cancel:active {
+  background: var(--press);
+}
+
+.control-card-submit:active {
+  background: var(--fg);
+}
+
+.control-card-choice:focus-visible,
+.control-card-cancel:focus-visible,
+.control-card-submit:focus-visible {
+  outline: 2px solid var(--fg1);
+  outline-offset: 1px;
+}
+
+/* --- Search in the chat list ---------------------------------------------- */
+
+.mobile-chat-search {
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 0 20px 10px;
+}
+
+.mobile-chat-search[hidden] {
+  display: none;
+}
+
+.mobile-chat-search input {
+  flex: 1;
+  min-width: 0;
+  height: 38px;
+  border: 1px solid var(--bd);
+  border-radius: 12px;
+  padding: 0 12px;
+  background: var(--s2);
+  color: var(--fg1);
+  font: 400 15px var(--sans);
+  -webkit-appearance: none;
+  appearance: none;
+}

@@ -1,10 +1,12 @@
 import { Fragment, useEffect, useMemo, useRef, useState } from "react";
-import { ChevronDown, ChevronRight, File, Folder, FolderOpen, Loader2 } from "lucide-react";
+import { CaretDownIcon, CaretRightIcon, FileIcon, FolderSimpleIcon, FolderOpenIcon } from "@phosphor-icons/react";
 import { Button } from "@/components/ui/button";
 import type { AwsDiskEntry, AwsDiskEntryRole, AwsDiskWorkReason } from "../../../shared/types";
 import { AwsConfirmDialog, AwsDialog, AwsWaiting } from "./aws-dialog";
 import { cleanError } from "./aws-shared";
 import { formatBytes, keptText, LOCK_TEXT, WORK_TEXT, type AwsDiskControl } from "./use-aws-disk";
+import { Spinner } from "@/components/ui/spinner";
+import { Delayed } from "@/components/ui/delayed";
 
 export type AwsDiskBrowseStart = "" | "@runs";
 
@@ -152,8 +154,8 @@ export function AwsDiskBrowser(props: { open: boolean; start: AwsDiskBrowseStart
     if (folder.error) return [<div key={`${path}:error`} className="gen-aws-tree-row is-note" style={indent(depth)}><span className="gen-row-error">{folder.error}</span></div>];
     const list = (folder.entries ?? []).map((entry) => {
       const open = expanded.has(entry.path);
-      const Chevron = entry.dir ? (open ? ChevronDown : ChevronRight) : null;
-      const Icon = entry.dir ? (open ? FolderOpen : Folder) : File;
+      const Chevron = entry.dir ? (open ? CaretDownIcon : CaretRightIcon) : null;
+      const Icon = entry.dir ? (open ? FolderOpenIcon : FolderSimpleIcon) : FileIcon;
       const inherited = covered(entry.path);
       const role = entry.role ? ROLE_TEXT[entry.role] : undefined;
       const managed = inProjects(entry.path);
@@ -208,7 +210,7 @@ export function AwsDiskBrowser(props: { open: boolean; start: AwsDiskBrowseStart
       actions={<>
         <Button type="button" variant="outline" size="sm" disabled={deleting} onClick={props.onClose}>{selected.size ? "Cancel" : "Close"}</Button>
         <Button ref={deleteButton} type="button" size="sm" data-testid="aws-disk-delete" disabled={!selected.size || deleting || tooMany} onClick={() => setConfirming(true)}>
-          {deleting ? <Loader2 size={14} className="gen-aws-spinner" aria-hidden /> : null}
+          {deleting ? <Delayed><Spinner size={14} /></Delayed> : null}
           {deleting ? "Deleting…" : selected.size ? `Delete ${formatBytes(total)}` : "Delete"}
         </Button>
       </>}

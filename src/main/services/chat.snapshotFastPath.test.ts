@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { ChatService } from "./chat";
+import { chatParts } from "./chat/test/chatParts";
 import type {
   AgentContextUsage,
   ChatParticipant,
@@ -114,7 +115,7 @@ function testService(conversationList: Conversation[]): {
     undefined,
     (_conversation, update) => updates.push(update)
   );
-  (service as unknown as { ensureHistoryFiles(conversation: Conversation): Promise<string> }).ensureHistoryFiles = async () => "/mock/history";
+  (chatParts(service).chatHistory as unknown as { ensureHistoryFiles(conversation: Conversation): Promise<string> }).ensureHistoryFiles = async () => "/mock/history";
   return { service, storage: state, updates };
 }
 
@@ -152,7 +153,7 @@ test("messages adopted from the shared saved snapshot are copies, and the next u
   const refreshed = await service.hydrateContextUsage(live);
   const adopted = refreshed.messages.find((message) => message.id === "message-2");
   assert.ok(adopted);
-  const internal = service as unknown as { lastSavedSnapshots: Map<string, { snapshot: Conversation; token: string }> };
+  const internal = chatParts(service).store as unknown as { lastSavedSnapshots: Map<string, { snapshot: Conversation; token: string }> };
   const saved = internal.lastSavedSnapshots.get(conversation.id)?.snapshot;
   assert.ok(saved);
   assert.notEqual(adopted, saved.messages[1], "the live conversation must not hold the snapshot's object");

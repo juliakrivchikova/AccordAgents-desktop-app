@@ -6,14 +6,14 @@
   min-inline-size: 0;
   padding: 14px;
   border: 1px solid var(--app-accent);
-  border-radius: 10px;
+  border-radius: 8px;
   background: var(--app-surface);
   color: var(--app-text-strong);
   font-size: 13px;
   font-weight: 400;
 }
 
-.provider-device-auth > strong { font-size: 14px; }
+.provider-device-auth > strong { font-size: 13px; }
 .provider-device-auth > p { margin: 0; overflow-wrap: anywhere; }
 .provider-device-auth-code-row { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; }
 .provider-device-auth-code-row > code {
@@ -21,7 +21,7 @@
   border: 1px solid var(--app-border);
   border-radius: 6px;
   font-family: var(--font-mono, monospace);
-  font-size: 22px;
+  font-size: 20px;
   font-weight: 700;
   letter-spacing: 0.06em;
   overflow-wrap: anywhere;
@@ -32,21 +32,21 @@
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  min-height: 36px;
+  min-height: var(--ui-control-sm);
   border: 1px solid var(--app-border);
-  border-radius: 7px;
+  border-radius: var(--ui-radius-8);
   background: var(--app-surface);
   color: var(--app-text-strong);
   font: inherit;
   cursor: pointer;
 }
-.provider-device-auth-open { padding: 6px 12px; font-weight: 600; }
+.provider-device-auth-open { padding: 0 10px; font-weight: 500; }
 .provider-device-auth-open:hover { border-color: var(--app-border-strong); }
 .provider-device-auth-open:focus-visible { outline: none; border-color: var(--app-focus-border); }
 .provider-device-auth-error { color: var(--app-danger); }
 .provider-device-auth-code-row > [role="status"] { color: var(--app-success); }
 .provider-auth-form { display: grid; gap: 10px; width: 100%; }
 .provider-auth-form label { display: grid; gap: 6px; }
-.provider-auth-form input { min-width: 0; padding: 8px; border: 1px solid var(--app-border); border-radius: 6px; background: var(--app-surface); color: var(--app-text-strong); }
+.provider-auth-form input { min-width: 0; padding: 8px; border: 1px solid var(--app-border); border-radius: var(--ui-radius-8); background: var(--app-surface); color: var(--app-text-strong); }
 .provider-auth-actions { display: flex; flex-wrap: wrap; gap: 8px; }
 .provider-device-auth-open:disabled { opacity: 0.6; cursor: default; }

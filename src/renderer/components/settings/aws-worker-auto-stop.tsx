@@ -1,9 +1,11 @@
 import { useEffect, useState } from "react";
-import { Loader2 } from "lucide-react";
+import { Switch } from "@/components/ui/switch";
 import { Button } from "@/components/ui/button";
 import type { AwsWorkerAutoStop, AwsWorkerAutoStopProblem, AwsWorkerStatus } from "../../../shared/types";
 import { AwsCommandBox, AwsDialog } from "./aws-dialog";
 import { ADMIN_COMMAND_TEXT, AwsPasteField, cleanError } from "./aws-shared";
+import { Spinner } from "@/components/ui/spinner";
+import { Delayed } from "@/components/ui/delayed";
 
 /**
  * What the switch and the fix in its row do. On with a saved key is
@@ -73,17 +75,13 @@ export function AwsAutoStopRow(props: {
           </button>
         </div>
       ) : null}
-      <label className="toggle">
-        <input
-          type="checkbox"
-          data-testid="aws-worker-auto-stop-toggle"
-          aria-label="Automatic stop"
-          checked={props.autoStop.enabled}
-          disabled={props.busy}
-          onChange={(event) => props.onToggle(event.target.checked)}
-        />
-        <span />
-      </label>
+      <Switch
+        data-testid="aws-worker-auto-stop-toggle"
+        aria-label="Automatic stop"
+        checked={props.autoStop.enabled}
+        disabled={props.busy}
+        onChange={(event) => props.onToggle(event.target.checked)}
+      />
     </div>
   );
 }
@@ -150,7 +148,7 @@ export function AwsAutoStopSetupDialog(props: {
       actions={<>
         <Button type="button" variant="outline" size="sm" disabled={applying} onClick={props.onClose}>Cancel</Button>
         <Button type="button" size="sm" data-testid="aws-worker-auto-stop-apply" disabled={applying || !blob.trim()} onClick={() => void apply()}>
-          {applying ? <Loader2 size={14} className="gen-aws-spinner" aria-hidden /> : null}
+          {applying ? <Delayed><Spinner size={14} /></Delayed> : null}
           {applying ? "Applying…" : props.mode === "set-up-again" ? "Apply" : "Turn on"}
         </Button>
       </>}

@@ -1,16 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import {
-  Check,
-  CheckCheck,
-  ChevronDown,
-  ChevronUp,
-  Copy,
-  ExternalLink,
-  RefreshCw,
-  Settings,
-  ShieldCheck,
-  Terminal
-} from "lucide-react";
+import { CheckIcon, ChecksIcon, CaretDownIcon, CaretUpIcon, CopyIcon, ArrowSquareOutIcon, ArrowsClockwiseIcon, GearSixIcon, ShieldCheckIcon, TerminalIcon } from "@phosphor-icons/react";
 
 import type {
   AgentHealth,
@@ -29,6 +18,8 @@ import {
 } from "../../../shared/cliReadiness";
 import { IconButton } from "../primitives";
 import { CliSignInStep, useCliSignIns } from "./cli-sign-in-step";
+import { ProviderIcon } from "./provider-icon";
+import { Spinner } from "@/components/ui/spinner";
 
 export function CliReadinessSetupPanel(props: {
   agents: AgentHealth[];
@@ -100,7 +91,7 @@ export function CliReadinessSetupPanel(props: {
           disabled={checking}
           onClick={() => void refreshAll()}
         >
-          <RefreshCw className={checking ? "spin" : undefined} size={15} aria-hidden />
+          {checking ? <Spinner size={15} /> : <ArrowsClockwiseIcon size={15} aria-hidden />}
           Check again
         </button>
       </div>
@@ -126,7 +117,7 @@ export function CliReadinessSetupPanel(props: {
                 <IconButton
                   className="cli-readiness-toggle"
                   label={`${expanded ? "Hide" : "Set up"} ${metadata.label}`}
-                  icon={expanded ? ChevronUp : ChevronDown}
+                  icon={expanded ? CaretUpIcon : CaretDownIcon}
                   aria-expanded={expanded}
                   onClick={() => toggleProvider(kind)}
                 />
@@ -152,25 +143,10 @@ export function CliReadinessSetupPanel(props: {
       </div>
       {actionError && <p className="inline-error cli-readiness-error">{actionError}</p>}
       <p className="cli-readiness-note">
-        <ShieldCheck size={15} aria-hidden />
+        <ShieldCheckIcon size={15} aria-hidden />
         <span>AccordAgents never installs software. <strong>Sign in</strong> runs the CLI's own sign-in; the CLI keeps your credentials.</span>
       </p>
     </section>
-  );
-}
-
-function ProviderIcon(props: {
-  kind: ChatProviderKind;
-  label: string;
-}): JSX.Element {
-  return (
-    <span className="cli-readiness-provider-icon" role="img" aria-label={props.label}>
-      {props.kind === "gemini-cli"
-        ? <span className="cli-readiness-antigravity-mark" aria-hidden="true" />
-        : props.kind === "codex-cli"
-          ? <CodexGlyph />
-          : <span className="cli-readiness-claude-mark" aria-hidden="true" />}
-    </span>
   );
 }
 
@@ -195,7 +171,7 @@ function CliReadinessDetails(props: {
       <div className="cli-readiness-steps">
         <p>This provider is disabled in AccordAgents.</p>
         <button type="button" className="cli-readiness-settings-action" onClick={props.onOpenSettings}>
-          <Settings size={15} aria-hidden /> Enable in Settings
+          <GearSixIcon size={15} aria-hidden /> Enable in Settings
         </button>
       </div>
     );
@@ -204,7 +180,7 @@ function CliReadinessDetails(props: {
   if (props.readiness === "ready") {
     return (
       <div className="cli-readiness-steps">
-        <p className="cli-readiness-ready"><Check size={15} aria-hidden /> Ready to use.</p>
+        <p className="cli-readiness-ready"><CheckIcon size={15} aria-hidden /> Ready to use.</p>
       </div>
     );
   }
@@ -218,7 +194,7 @@ function CliReadinessDetails(props: {
           className="cli-readiness-settings-action"
           onClick={() => void window.consensus.openExternal(props.metadata.guideUrl).catch(() => props.onError("Could not open the official guide."))}
         >
-          <ExternalLink size={15} aria-hidden /> Official guide
+          <ArrowSquareOutIcon size={15} aria-hidden /> Official guide
         </button>
       </div>
     );
@@ -284,14 +260,14 @@ function CliReadinessActionButtons(props: {
         className="cli-readiness-detail-action"
         onClick={() => void window.consensus.openTerminal().catch(() => props.onError("Could not open Terminal."))}
       >
-        <Terminal size={15} aria-hidden /> Open Terminal
+        <TerminalIcon size={15} aria-hidden /> Open Terminal
       </button>
       <button
         type="button"
         className="cli-readiness-detail-action"
         onClick={() => void window.consensus.openExternal(props.guideUrl).catch(() => props.onError("Could not open the official guide."))}
       >
-        <ExternalLink size={15} aria-hidden /> Official guide
+        <ArrowSquareOutIcon size={15} aria-hidden /> Official guide
       </button>
     </div>
   );
@@ -306,7 +282,7 @@ function SetupStep(props: {
     <div className="cli-readiness-step">
       <span className="cli-readiness-step-number">{props.number}</span>
       <span>{props.children}</span>
-      {props.done && <CheckCheck className="cli-readiness-step-done" size={17} aria-label="Done" />}
+      {props.done && <ChecksIcon className="cli-readiness-step-done" size={17} aria-label="Done" />}
     </div>
   );
 }
@@ -327,7 +303,7 @@ function SetupCommand(props: {
         size="xs"
         label={`Copy ${props.label} command`}
         tooltip={props.copiedValue === props.command ? "Copied" : "Copy"}
-        icon={props.copiedValue === props.command ? Check : Copy}
+        icon={props.copiedValue === props.command ? CheckIcon : CopyIcon}
         onClick={() => void props.onCopy(props.command as string)}
       />
     </div>
@@ -360,24 +336,4 @@ function defaultExpandedProviderKind(agents: AgentHealth[], settings: AppSetting
     );
     return readiness === "sign-in-required" || readiness === "could-not-verify" || readiness === "failed-to-run";
   });
-}
-
-function CodexGlyph(): JSX.Element {
-  return (
-    <svg viewBox="0 0 24 24" aria-hidden="true">
-      <defs>
-        <linearGradient id="cli-readiness-codex-gradient" x1="12" x2="12" y1="0" y2="24" gradientUnits="userSpaceOnUse">
-          <stop stopColor="var(--provider-setup-codex-gradient-top)" />
-          <stop offset=".5" stopColor="var(--provider-setup-codex-gradient-mid)" />
-          <stop offset="1" stopColor="var(--provider-setup-codex-gradient-bottom)" />
-        </linearGradient>
-      </defs>
-      <path
-        fill="url(#cli-readiness-codex-gradient)"
-        fillRule="evenodd"
-        clipRule="evenodd"
-        d="M8.086.457a6.105 6.105 0 013.046-.415c1.333.153 2.521.72 3.564 1.7a.117.117 0 00.107.029c1.408-.346 2.762-.224 4.061.366l.063.03.154.076c1.357.703 2.33 1.77 2.918 3.198.278.679.418 1.388.421 2.126a5.655 5.655 0 01-.18 1.631.167.167 0 00.04.155 5.982 5.982 0 011.578 2.891c.385 1.901-.01 3.615-1.183 5.14l-.182.22a6.063 6.063 0 01-2.934 1.851.162.162 0 00-.108.102c-.255.736-.511 1.364-.987 1.992-1.199 1.582-2.962 2.462-4.948 2.451-1.583-.008-2.986-.587-4.21-1.736a.145.145 0 00-.14-.032c-.518.167-1.04.191-1.604.185a5.924 5.924 0 01-2.595-.622 6.058 6.058 0 01-2.146-1.781c-.203-.269-.404-.522-.551-.821a7.74 7.74 0 01-.495-1.283 6.11 6.11 0 01-.017-3.064.166.166 0 00.008-.074.115.115 0 00-.037-.064 5.958 5.958 0 01-1.38-2.202 5.196 5.196 0 01-.333-1.589 6.915 6.915 0 01.188-2.132c.45-1.484 1.309-2.648 2.577-3.493.282-.188.55-.334.802-.438.286-.12.573-.22.861-.304a.129.129 0 00.087-.087A6.016 6.016 0 015.635 2.31C6.315 1.464 7.132.846 8.086.457zm-.804 7.85a.848.848 0 00-1.473.842l1.694 2.965-1.688 2.848a.849.849 0 001.46.864l1.94-3.272a.849.849 0 00.007-.854l-1.94-3.393zm5.446 6.24a.849.849 0 000 1.695h4.848a.849.849 0 000-1.696h-4.848z"
-      />
-    </svg>
-  );
 }

@@ -1,4 +1,4 @@
-import { CheckCircle2, Columns2, Maximize2, MessageSquare, RefreshCw, X } from "lucide-react";
+import { CheckCircleIcon, ColumnsIcon, ArrowsOutSimpleIcon, ChatIcon, XIcon } from "@phosphor-icons/react";
 
 import { Button } from "@/components/ui/button";
 import type {
@@ -25,6 +25,7 @@ import {
   ThreadMessage,
   TypingIndicator
 } from "./review-thread-message";
+import { Spinner } from "@/components/ui/spinner";
 
 export function DecisionThread(props: {
   decision: PlanDecisionRequest;
@@ -86,12 +87,12 @@ export function DecisionThread(props: {
           <StatusBadge tone={hasThreadContext || readOnly ? "success" : "neutral"}>{statusLabel}</StatusBadge>
           <IconButton
             size="sm"
-            icon={focused ? Columns2 : Maximize2}
+            icon={focused ? ColumnsIcon : ArrowsOutSimpleIcon}
             label={focused ? "Show timeline" : "Expand thread"}
             tooltip={focused ? "Show timeline" : "Expand thread"}
             onClick={focused ? onExitFocus : onFocus}
           />
-          <IconButton size="sm" icon={X} label="Close thread" tooltip="Close thread" onClick={onClose} />
+          <IconButton size="sm" icon={XIcon} label="Close thread" tooltip="Close thread" onClick={onClose} />
         </div>
       </div>
 
@@ -168,11 +169,11 @@ export function DecisionThread(props: {
           />
           <div className="decision-compose-actions">
             <Button variant="outline" size="sm" disabled={busy || !clarificationDraft.trim()} onClick={onAskClarification}>
-              {isAsking ? <RefreshCw size={16} className="spin" /> : <MessageSquare size={16} />}
+              {isAsking ? <Spinner size={16} /> : <ChatIcon size={16} />}
               {isAsking ? "Sending..." : "Send"}
             </Button>
             <Button variant="outline" size="sm" disabled={busy || !canResolve} onClick={onResolve}>
-              <CheckCircle2 size={16} />
+              <CheckCircleIcon size={16} />
               Resolve
             </Button>
           </div>

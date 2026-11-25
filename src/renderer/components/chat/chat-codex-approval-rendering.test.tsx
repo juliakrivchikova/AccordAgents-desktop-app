@@ -121,8 +121,12 @@ test("a decided Codex card with a short summary says who asked, how it ended and
 
 test("Claude Auto permission prompts cannot offer chat-wide scope", () => {
   const toolRequest = { kind: "toolPermission" as const, agentMode: "auto" as const, toolName: "Write" };
-  assert.equal(chatToolPermissionAllowsChatScope(toolRequest), false);
-  assert.equal(chatToolPermissionAllowsChatScope({ ...toolRequest, agentMode: "default" }), true);
+  const folder = { kind: "folder" as const, path: "/repo/src" };
+  assert.equal(chatToolPermissionAllowsChatScope({ ...toolRequest, chatScope: folder }), false, "Auto never offers it");
+  // A file edit is scoped (6d5b15fa): "for this chat" covers the folder the
+  // request names, and one with no folder to cover is asked each time.
+  assert.equal(chatToolPermissionAllowsChatScope({ ...toolRequest, agentMode: "default", chatScope: folder }), true);
+  assert.equal(chatToolPermissionAllowsChatScope({ ...toolRequest, agentMode: "default" }), false);
 
   const legacyApproval: ChatAppToolApproval = {
     ...codexApproval("legacy-auto", "participant", "run"),

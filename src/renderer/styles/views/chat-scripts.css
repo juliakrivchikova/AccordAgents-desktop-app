@@ -1,28 +1,33 @@
 /* Scheduled-task approval card (chat) and the Settings → Scheduled Tasks page. */
 
-.chat-script-approval-content {
+.chat-script-approval-content,
+.chat-script-approval-details {
   display: grid;
   /* A long code line scrolls inside its block; it must not widen the card. */
   grid-template-columns: minmax(0, 1fr);
-  gap: 10px;
-  padding: 4px 15px 12px;
+  gap: 8px;
   min-width: 0;
 }
 
-.chat-app-tool-approval-panel .chat-script-approval-title,
-.chat-app-tool-approval-panel.is-review-change .chat-script-approval-title {
-  margin: 0;
-  padding: 0;
-  border: 0;
-  font-size: 14px;
-  font-weight: 600;
-  color: var(--app-text-strong);
+.chat-script-approval-content {
+  padding: 10px 12px;
+}
+
+.chat-script-approval-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 2px 8px;
+  min-width: 0;
+  color: var(--app-text-secondary);
+  font-size: 13px;
+  line-height: 20px;
 }
 
 .chat-script-approval-name {
-  font-size: 15px;
+  overflow-wrap: anywhere;
+  color: var(--app-text-strong);
   font-weight: 600;
-  color: var(--app-text);
 }
 
 .chat-script-approval-description,
@@ -51,24 +56,6 @@
   overflow-wrap: anywhere;
 }
 
-.chat-script-approval-section-title {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  font-size: 13px;
-  font-weight: 600;
-  color: var(--app-text);
-}
-
-.chat-script-approval-keys {
-  display: grid;
-  gap: 8px;
-  padding: 10px 12px;
-  border: 1px solid var(--app-border);
-  border-radius: 10px;
-  background: var(--app-surface-subtle);
-}
-
 .chat-script-approval-key {
   display: flex;
   align-items: center;
@@ -89,52 +76,18 @@
   font-size: 13px;
 }
 
-.chat-script-approval-key-entry {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
+.chat-script-approval-key-field {
   flex: 1 1 220px;
-  justify-content: flex-end;
+  max-width: 320px;
 }
 
-.chat-script-approval-key-entry input {
-  flex: 1 1 auto;
-  min-width: 0;
-  max-width: 280px;
-  height: 30px;
-  padding: 0 10px;
-  border: 1px solid var(--app-border);
-  border-radius: 8px;
-  background: var(--app-surface);
-  color: var(--app-text);
-  font-size: 13px;
-}
-
-.chat-script-approval-key-entry input:focus {
-  outline: none;
-  border-color: var(--app-focus-border);
-}
-
-.chat-script-approval-save-key,
 .chat-script-approval-link,
-.chat-script-approval-code-toggle {
+.chat-script-approval-toggle {
   border: 0;
   background: transparent;
   color: var(--app-text);
   font-size: 13px;
   cursor: pointer;
-}
-
-.chat-script-approval-save-key {
-  height: 30px;
-  padding: 0 10px;
-  border: 1px solid var(--app-border);
-  border-radius: 8px;
-}
-
-.chat-script-approval-save-key:disabled {
-  opacity: 0.5;
-  cursor: default;
 }
 
 .chat-script-approval-link {
@@ -143,12 +96,17 @@
   text-decoration: underline;
 }
 
-.chat-script-approval-code-toggle {
+.chat-script-approval-toggle {
   display: inline-flex;
+  width: fit-content;
   align-items: center;
   gap: 4px;
   padding: 0;
   color: var(--app-text-secondary);
+}
+
+.chat-script-approval-toggle:hover {
+  color: var(--app-text);
 }
 
 .chat-script-approval-files {
@@ -210,13 +168,6 @@
   gap: 8px;
 }
 
-.scripts-settings-item-head {
-  display: flex;
-  align-items: flex-start;
-  justify-content: space-between;
-  gap: 12px;
-}
-
 .scripts-settings-item-title {
   display: grid;
   gap: 2px;
@@ -224,7 +175,7 @@
 }
 
 .scripts-settings-item-title strong {
-  font-size: 14px;
+  font-size: 13px;
   color: var(--app-text-strong);
 }
 
@@ -240,6 +191,15 @@
   align-items: center;
   gap: 8px;
   flex-wrap: wrap;
+}
+
+.scripts-settings-key-entry {
+  display: inline-flex;
+  flex: 1 1 220px;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 6px;
+  max-width: 360px;
 }
 
 .scripts-settings-head-controls {

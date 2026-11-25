@@ -11,6 +11,7 @@ import {
 import { DeviceIdentityService } from "./deviceIdentity";
 import { MobilePairingService } from "./mobilePairing";
 import { StorageService } from "./storage";
+import { storageDependencies, storageParts, storageWithoutDatabase } from "./storage/test/storageParts";
 
 test("a machine enrollment names the User's server and keeps its room apart from its routing identity", async () => {
   const { storage, cleanup } = await testStorage();
@@ -92,9 +93,9 @@ test("mobile control settings ignore an unsafe site for the phone's app", () => 
 
 async function testStorage(): Promise<{ storage: StorageService; cleanup: () => Promise<void> }> {
   const directory = await mkdtemp(path.join(tmpdir(), "accordagents-mobile-pairing-"));
-  const storage = Object.create(StorageService.prototype) as any;
-  storage.dbPath = path.join(directory, "accordagents.sqlite3");
-  storage.initialized = false;
+  const storage = storageWithoutDatabase();
+  storageDependencies(storage).dbPath = path.join(directory, "accordagents.sqlite3");
+  storageParts(storage).schema.initialized = false;
   await storage.init();
   return {
     storage: storage as StorageService,

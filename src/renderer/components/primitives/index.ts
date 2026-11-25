@@ -5,14 +5,13 @@ export { SeverityBadge } from "./severity-badge";
 export type { SeverityBadgeProps } from "./severity-badge";
 
 export { IconButton } from "./icon-button";
+export { SidePanelIcon } from "./side-panel-icon";
 export type { IconButtonIcon, IconButtonProps, IconButtonSize, IconButtonTone } from "./icon-button";
 
 export { CopyButton } from "./copy-button";
 
 export { EmptyState } from "./empty-state";
 
-export { LoadingDot } from "./loading-dot";
-export type { LoadingDotProps } from "./loading-dot";
 
 export { ParticipantPill } from "./participant-pill";
 export type { ParticipantPillProps, ParticipantStatus } from "./participant-pill";

@@ -14,6 +14,7 @@ import {
   chatProviderOptions,
   normalizeChatParticipantDraftForSettings,
   updateChatParticipantDraft,
+  validateChatStartupDrafts,
   type ChatParticipantDraft
 } from "./chat-participant-drafts";
 
@@ -62,6 +63,12 @@ function draft(patch: Partial<ChatParticipantDraft> = {}): ChatParticipantDraft 
     ...patch
   };
 }
+
+test("a new chat without its main session's role says so in words that name no main session", () => {
+  const reason = validateChatStartupDrafts([], [ROLE], []);
+  assert.equal(reason, "The role new chats start with is missing from Settings. Restart the app and try again.");
+  assert.doesNotMatch(reason ?? "", /main session/i);
+});
 
 test("the provider picker lists built-in CLIs first, then every added provider whose CLI is offered", () => {
   const options = chatProviderOptions(["codex-cli", "claude-code", "gemini-cli"], [ZAI, ZAI_CODEX]);

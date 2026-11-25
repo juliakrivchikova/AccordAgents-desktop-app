@@ -1,4 +1,4 @@
-import type { RefObject } from "react";
+import type { ComponentProps, RefObject } from "react";
 import type { VirtualItem, Virtualizer } from "@tanstack/react-virtual";
 
 import type {
@@ -7,6 +7,7 @@ import type {
   AppSettings,
   ChatAppToolApproval,
   ChatAppToolApprovalRequest,
+  ChatClaudePlanDecision,
   ChatAppToolApprovalScope,
   ChatParticipant,
   ChatParticipantRequestBatch,
@@ -24,6 +25,7 @@ import { ChatMessageItem, type ChatChoiceResponse } from "./chat-message-item";
 import type { ChatThreadSummary } from "./chat-thread-data";
 import type { ChatParticipantRosterStatus } from "./chat-participant-menu";
 import { ChatThinkingRowItem } from "./chat-streaming";
+import { ChatSessionsTimelineRow, type ChatSessionsTimelineContext } from "./chat-sessions-timeline-row";
 import { unmeasuredRowClip } from "./chat-timeline-row-clip";
 import type { ChatActivityDisclosureState } from "./use-chat-activity-disclosure";
 
@@ -49,7 +51,8 @@ export function ChatConversationTimeline(props: {
     approve: boolean,
     scope?: ChatAppToolApprovalScope,
     draftOverride?: ChatAppToolApprovalRequest,
-    codexDecisionId?: string
+    codexDecisionId?: string,
+    planDecision?: ChatClaudePlanDecision
   ) => Promise<void>;
   onRespondToChoice: (sourceMessageId: string, choiceId: string, response: ChatChoiceResponse) => void | Promise<void>;
   onScroll: () => void;
@@ -62,6 +65,8 @@ export function ChatConversationTimeline(props: {
   approvalsByMessageId: ReadonlyMap<string, ChatAppToolApproval[]>;
   pendingApprovalRows: ChatAppToolApproval[];
   rows: ChatTimelineRow[];
+  /** The sessions view: rows without avatars or threads, task cards. */
+  sessions?: ChatSessionsTimelineContext;
   selectedThreadRootId?: string;
   sessionsByParticipant: Map<string, ChatParticipantSession>;
   settings: AppSettings;
@@ -123,37 +128,40 @@ export function ChatConversationTimeline(props: {
                   onRespond={props.onRespondToAppToolApproval}
                 />
               ) : (
-                <ChatMessageItem
-                  activityDisclosure={props.activityDisclosure}
-                  message={row.message}
-                  conversationId={props.conversationId}
-                  participants={props.participants}
-                  participantStatusById={props.participantStatusById}
-                  contextUsage={contextUsageForMessage(row.message, props.contextUsageByParticipant)}
-                  sessionId={sessionIdForMessage(row.message, props.sessionsByParticipant)}
-                  busy={props.isRunning}
-                  submittingChoiceIds={props.submittingChoiceIds}
-                  selected={row.message.id === props.selectedThreadRootId}
-                  replyCount={props.threadSummaries.get(row.message.id)?.countedReplies.length ?? 0}
-                  replyPreviewMessages={props.threadSummaries.get(row.message.id)?.countedReplies}
-                  latestReplyAt={props.threadSummaries.get(row.message.id)?.latestReplyAt}
-                  hasContinuationReply={props.continuedMentionRequestIds.has(row.message.id)}
-                  inferredParticipantRequests={props.inferredParticipantRequestsByTrigger.get(row.message.id)}
-                  liveProgress={props.liveProgressById.get(row.message.id)}
-                  appToolApprovals={props.approvalsByMessageId.get(row.message.id)}
-                  savedParticipants={props.settings.chatParticipantConfigs}
-                  cliProviderHosts={props.settings.cliProviderHosts}
-                  roles={props.settings.chatRoleConfigs}
-                  submittingApprovalIds={props.submittingApprovalIds}
-                  onOpenThread={props.onOpenThread}
-                  onApproveMentions={props.onApproveMentions}
-                  onRejectMentions={props.onRejectMentions}
-                  onRespondToChoice={props.onRespondToChoice}
-                  onToggleReaction={props.onToggleReaction}
-                  onDismissTurnFinishedNote={props.onDismissTurnFinishedNote}
-                  onCompactParticipant={props.onCompactParticipant}
-                  onStopRun={props.onStopRun}
-                  onRespondToAppToolApproval={props.onRespondToAppToolApproval}
+                <ChatTimelineMessageRow
+                  sessions={props.sessions}
+                  itemProps={{
+                    activityDisclosure: props.activityDisclosure,
+                    message: row.message,
+                    conversationId: props.conversationId,
+                    participants: props.participants,
+                    participantStatusById: props.participantStatusById,
+                    contextUsage: contextUsageForMessage(row.message, props.contextUsageByParticipant),
+                    sessionId: sessionIdForMessage(row.message, props.sessionsByParticipant),
+                    busy: props.isRunning,
+                    submittingChoiceIds: props.submittingChoiceIds,
+                    selected: row.message.id === props.selectedThreadRootId,
+                    replyCount: props.threadSummaries.get(row.message.id)?.countedReplies.length ?? 0,
+                    replyPreviewMessages: props.threadSummaries.get(row.message.id)?.countedReplies,
+                    latestReplyAt: props.threadSummaries.get(row.message.id)?.latestReplyAt,
+                    hasContinuationReply: props.continuedMentionRequestIds.has(row.message.id),
+                    inferredParticipantRequests: props.inferredParticipantRequestsByTrigger.get(row.message.id),
+                    liveProgress: props.liveProgressById.get(row.message.id),
+                    appToolApprovals: props.approvalsByMessageId.get(row.message.id),
+                    savedParticipants: props.settings.chatParticipantConfigs,
+                    cliProviderHosts: props.settings.cliProviderHosts,
+                    roles: props.settings.chatRoleConfigs,
+                    submittingApprovalIds: props.submittingApprovalIds,
+                    onOpenThread: props.onOpenThread,
+                    onApproveMentions: props.onApproveMentions,
+                    onRejectMentions: props.onRejectMentions,
+                    onRespondToChoice: props.onRespondToChoice,
+                    onToggleReaction: props.onToggleReaction,
+                    onDismissTurnFinishedNote: props.onDismissTurnFinishedNote,
+                    onCompactParticipant: props.onCompactParticipant,
+                    onStopRun: props.onStopRun,
+                    onRespondToAppToolApproval: props.onRespondToAppToolApproval
+                  }}
                 />
               )}
             </div>
@@ -185,4 +193,13 @@ function isScrollKey(key: string): boolean {
     key === "PageDown" ||
     key === "PageUp" ||
     key === " ";
+}
+
+function ChatTimelineMessageRow(props: {
+  itemProps: ComponentProps<typeof ChatMessageItem>;
+  sessions?: ChatSessionsTimelineContext;
+}): JSX.Element {
+  return props.sessions
+    ? <ChatSessionsTimelineRow itemProps={props.itemProps} context={props.sessions} />
+    : <ChatMessageItem {...props.itemProps} />;
 }

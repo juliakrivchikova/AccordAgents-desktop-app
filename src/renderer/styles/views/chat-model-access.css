@@ -1,0 +1,413 @@
+/* The sessions view's composer controls (Claude's desktop app, Codex and T3
+   Code's way): quiet chips under the composer (model, effort, permission
+   mode, Codex's Plan mode, where it runs), each opening its own small menu
+   laid over the window. Tiny muted section titles, each choice's name with
+   the vendor's description wrapped under it, a check on the chosen one. */
+
+/* One quiet row that never wraps. In a narrow composer the controls turn
+   into icons one by one (use-composer-density.ts: where it runs, Plan mode,
+   the mode, the effort), the model loses its glyph, and only then does the
+   model's name shorten, never below a few letters: no one-letter stubs. The
+   row's own box shrinks with the composer and hides what still does not
+   fit, so Send and the panel's edge stay in view. */
+.chat-composer-controls {
+  display: inline-flex;
+  align-items: center;
+  flex-wrap: nowrap;
+  justify-content: flex-start;
+  gap: 2px;
+  min-width: 0;
+  flex: 0 1 auto;
+  overflow: hidden;
+  /* Room for a control's focus ring inside the clipped box. */
+  margin: -3px;
+  padding: 3px;
+}
+
+.chat-composer-controls > .chat-model-chip {
+  flex: 0 0 auto;
+}
+
+.chat-composer-controls > .chat-model-chip:has(.is-shortened) {
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+}
+
+.chat-composer-control-text.is-model.is-shortened {
+  min-width: 6ch;
+}
+
+.chat-model-chip.is-icon {
+  gap: 0;
+  padding: 0 7px;
+}
+
+.chat-composer-control-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.composer-menu-trigger .chat-model-chip-label {
+  min-width: 0;
+  overflow: hidden;
+}
+
+.chat-composer-controls[aria-disabled="true"] .chat-model-chip {
+  opacity: 0.6;
+}
+
+.chat-composer-control-text {
+  min-width: 0;
+  max-width: 160px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.chat-composer-control-text.is-muted {
+  color: var(--app-muted);
+}
+
+.composer-menu-trigger {
+  gap: 4px;
+  min-width: 0;
+  max-width: 100%;
+}
+
+.composer-menu-trigger[aria-expanded="true"] {
+  background: var(--ui-row-hover);
+  color: var(--app-text-strong);
+}
+
+.composer-menu-trigger:disabled,
+.chat-composer-toggle:disabled {
+  cursor: default;
+}
+
+.chat-composer-toggle:disabled:hover {
+  background: transparent;
+  color: var(--app-text-secondary);
+}
+
+.composer-menu-chevron {
+  flex: 0 0 auto;
+  color: var(--app-muted);
+}
+
+/* Codex's Plan mode: pressed, it reads as the chosen one, not as a colour. */
+.chat-composer-toggle.is-on {
+  background: var(--app-surface-active);
+  color: var(--app-text-strong);
+}
+
+.chat-member-actions-trigger {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  border: 0;
+  border-radius: var(--radius-control);
+  background: transparent;
+  color: var(--app-text-secondary);
+  cursor: pointer;
+}
+
+.chat-member-actions-trigger:hover,
+.chat-member-actions-trigger[aria-expanded="true"] {
+  background: var(--ui-row-hover);
+  color: var(--app-text-strong);
+}
+
+.chat-member-actions-trigger:focus-visible,
+.chat-composer-toggle:focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring);
+}
+
+.composer-menu-item:focus-visible {
+  outline: none;
+}
+
+/* The menu itself: over the window, never wider than it nor taller than the
+   room on its side of its control (composer-menu.tsx sets both). */
+.composer-menu {
+  position: fixed;
+  z-index: var(--z-menu);
+  display: grid;
+  gap: 2px;
+  min-width: 200px;
+  overflow-x: hidden;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding: 4px;
+  border: 1px solid var(--app-border);
+  border-radius: var(--radius-card);
+  background: var(--popover);
+  color: var(--app-text);
+  box-shadow: var(--shadow-lg);
+  font-size: 13px;
+}
+
+.composer-menu-section {
+  display: grid;
+  gap: 1px;
+  min-width: 0;
+  padding: 2px 0 4px;
+}
+
+.composer-menu-section + .composer-menu-section {
+  border-top: 1px solid var(--app-hairline);
+  padding-top: 6px;
+}
+
+.composer-menu-label {
+  padding: 2px 8px 3px;
+  color: var(--app-muted);
+  font-size: 11px;
+  font-weight: 500;
+}
+
+.composer-menu-item {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  width: 100%;
+  min-width: 0;
+  min-height: 28px;
+  padding: 5px 8px;
+  border: 0;
+  border-radius: var(--radius-control);
+  background: transparent;
+  color: var(--app-text);
+  font: inherit;
+  font-size: 13px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.composer-menu-item:hover:not(:disabled),
+.composer-menu-item:focus-visible {
+  background: var(--ui-row-hover);
+}
+
+.composer-menu-item:disabled {
+  cursor: default;
+}
+
+.composer-menu-item:disabled .composer-menu-item-label {
+  color: var(--app-muted);
+}
+
+.composer-menu-item.is-danger .composer-menu-item-label {
+  color: var(--app-danger);
+}
+
+.composer-menu-item-mark {
+  display: inline-flex;
+  flex: 0 0 auto;
+  padding-top: 2px;
+}
+
+.composer-menu-item-copy {
+  display: grid;
+  gap: 1px;
+  min-width: 0;
+  flex: 1 1 auto;
+}
+
+.composer-menu-item-label,
+.composer-menu-item-detail {
+  min-width: 0;
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+
+.composer-menu-item-detail {
+  color: var(--app-muted);
+  font-size: 12px;
+  line-height: 1.35;
+}
+
+.composer-menu-check {
+  display: inline-flex;
+  width: 14px;
+  flex: 0 0 auto;
+  padding-top: 2px;
+  color: var(--app-text-strong);
+}
+
+.composer-menu-disclosure {
+  align-items: center;
+  color: var(--app-text-secondary);
+}
+
+.composer-menu-note {
+  margin: 0;
+  padding: 2px 8px 4px;
+  color: var(--app-muted);
+  font-size: 12px;
+  line-height: 1.35;
+}
+
+/* A question in place of a menu's list (Codex's "Enable full access?"):
+   its title reads as the question, not as a muted section name. */
+.composer-menu-confirm .composer-menu-label {
+  color: var(--app-text-strong);
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.composer-menu-field {
+  padding: 0 8px 2px;
+}
+
+/* The New chat composer's controls: shrink with its row so they fit. */
+.new-chat-model-picker {
+  display: flex;
+  justify-content: flex-end;
+  min-width: 0;
+}
+
+/* The chat title's menu: the main session's … actions under the view
+   switch. */
+.chat-title-menu-group {
+  margin-top: 4px;
+  padding-top: 4px;
+  border-top: 1px solid var(--app-hairline);
+}
+
+/* In the sessions view a composer may be narrower than its controls'
+   natural width (the main column and the side panel at the smallest
+   window): it shrinks, so its controls shorten instead of pushing Send
+   and the panel's edge out of view. */
+.is-sessions-view .chat-composer,
+.is-sessions-view .chat-composer-shell,
+.is-sessions-view .chat-composer-toolbar {
+  min-width: 0;
+}
+
+/* The composer's context strip (composer-context.tsx): the folder and branch
+   on the left, the main session's controls on the right, over the text. */
+.chat-composer-context {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  min-width: 0;
+  margin: -2px -4px 0;
+  padding-bottom: 6px;
+  border-bottom: 1px solid var(--ui-border-subtle);
+}
+
+.chat-composer-context-lead {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  min-width: 0;
+  flex: 0 1 auto;
+}
+
+.chat-composer-context-spacer {
+  flex: 1 1 auto;
+  min-width: 8px;
+}
+
+.chat-composer-context-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  height: 28px;
+  padding: 0 8px;
+  border-radius: var(--ui-radius-8);
+  color: var(--ui-text-2);
+  font-size: 13px;
+  white-space: nowrap;
+}
+
+.chat-composer-context-item:focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring);
+}
+
+.chat-composer-context-item.is-quiet {
+  color: var(--ui-text-3);
+}
+
+.chat-composer-context-text {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* Plan mode by Send: a small switch and its name; the switch says on or off. */
+.chat-composer-footer-slot {
+  display: contents;
+}
+
+.chat-composer-toggle.is-footer,
+.chat-composer-toggle.is-footer.is-on {
+  gap: 6px;
+  background: transparent;
+  color: var(--ui-text-2);
+}
+
+.chat-composer-toggle.is-footer:hover:not(:disabled) {
+  background: var(--ui-row-hover);
+  color: var(--ui-text);
+}
+
+.chat-composer-toggle-track {
+  position: relative;
+  flex: none;
+  width: 24px;
+  height: 14px;
+  border-radius: 999px;
+  background: var(--ui-bg-muted);
+  transition: background-color var(--ui-duration-fast) var(--ui-ease-out);
+}
+
+.chat-composer-toggle-track::after {
+  content: "";
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  background: var(--ui-bg);
+  box-shadow: var(--ui-shadow-sm);
+  transition: transform var(--ui-duration-fast) var(--ui-ease-out);
+}
+
+.chat-composer-toggle.is-on .chat-composer-toggle-track {
+  background: var(--ui-primary);
+}
+
+.chat-composer-toggle.is-on .chat-composer-toggle-track::after {
+  transform: translateX(10px);
+}
+
+/* The branch in the strip opens its menu (composer-context.tsx). */
+button.chat-composer-context-item.is-menu {
+  border: 0;
+  background: transparent;
+  font: inherit;
+  font-size: 13px;
+  cursor: pointer;
+  transition:
+    background-color var(--ui-duration-fast) var(--ui-ease-out),
+    color var(--ui-duration-fast) var(--ui-ease-out);
+}
+
+button.chat-composer-context-item.is-menu:hover:not(:disabled),
+button.chat-composer-context-item.is-menu[aria-expanded="true"] {
+  background: var(--ui-row-hover);
+  color: var(--ui-text);
+}
+
+button.chat-composer-context-item.is-menu:disabled {
+  cursor: default;
+}

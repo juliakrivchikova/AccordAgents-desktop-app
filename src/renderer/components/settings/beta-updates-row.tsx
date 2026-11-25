@@ -1,4 +1,5 @@
 import { isWindowsPlatform } from "../../lib/platform";
+import { Switch } from "@/components/ui/switch";
 
 interface BetaUpdatesRowProps {
   enabled: boolean;
@@ -19,15 +20,11 @@ export const BetaUpdatesRow = ({ enabled, onChange }: BetaUpdatesRowProps) => {
           <div className="gen-row-title">Beta updates</div>
           <div className="gen-row-desc">Receive beta releases. Applies on next restart.</div>
         </div>
-        <label className="toggle">
-          <input
-            type="checkbox"
-            data-testid="beta-updates-toggle"
-            checked={enabled}
-            onChange={(event) => void onChange(event.target.checked)}
-          />
-          <span />
-        </label>
+        <Switch
+          data-testid="beta-updates-toggle"
+          checked={enabled}
+          onChange={(event) => void onChange(event.target.checked)}
+        />
       </div>
     </>
   );

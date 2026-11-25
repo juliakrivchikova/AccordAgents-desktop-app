@@ -1,7 +1,7 @@
 import type { MemberRestartInProgress } from "../../../shared/memberRestart";
 import { memberSessionMoves } from "../../../shared/memberSessionMove";
 import React, { useState } from "react";
-import { ChevronLeft, ChevronRight, Plus, Users } from "lucide-react";
+import { CaretLeftIcon, CaretRightIcon, PlusIcon, GearSixIcon, UsersIcon } from "@phosphor-icons/react";
 
 import { Button } from "@/components/ui/button";
 import { IconButton } from "../primitives";
@@ -53,8 +53,16 @@ export interface ChatParticipantMenuViewProps {
   /** Members whose restart has not ended. */
   restartingById?: ReadonlyMap<string, MemberRestartInProgress>;
   onRemoveParticipant: (participantId: string) => void;
+  /** Fork to new chat: a new chat whose main session is a copy of the member. */
+  onForkToNewChat?: (participantId: string) => void;
+  /** Why a member cannot be forked to a new chat now. */
+  forkToNewChatReason?: (participant: ChatParticipant) => string | undefined;
   onJumpToParticipantLastMessage: (participantId: string) => void;
   onManageInSettings: () => void;
+  /** One member's settings only (the sessions view, from its session or its
+   *  model chip), opened by this trigger (a gear by default). */
+  memberId?: string;
+  trigger?: React.ReactNode;
 }
 
 export function ChatParticipantMenuView(props: ChatParticipantMenuViewProps): JSX.Element {
@@ -105,15 +113,55 @@ export function ChatParticipantMenuView(props: ChatParticipantMenuViewProps): JS
     return undefined;
   }
 
+  function renderRosterRow(participant: ChatParticipant, expanded: boolean): JSX.Element {
+    return (
+      <ChatParticipantRosterRow
+        key={participant.id}
+        defaultExpanded={expanded}
+        participant={participant}
+        removeDisabledReason={participantRemoveDisabledReason(participant)}
+        busy={memberWorking(participant)}
+        status={props.participantStatusById.get(participant.id) ?? "idle"}
+        autoWatchDisabledReason={
+          activeWatcher && activeWatcher.id !== participant.id
+            ? "Only one member can watch a chat. Turn off the current watcher first."
+            : undefined
+        }
+        autoWatchPausedReason={props.participantWatchers?.[participant.id]?.pausedReason}
+        roleParticipantDefaults={props.participantRoleDefaults(participant)}
+        renderParticipantAvatar={props.renderParticipantAvatar}
+        participantRoleLabel={props.participantRoleLabel}
+        participantRoleArchived={props.participantRoleArchived}
+        runLocationLocked={props.participantHasRunById.get(participant.id) === true && !memberSessionMoves(participant)}
+        runLocationMoves={props.participantHasRunById.get(participant.id) === true && memberSessionMoves(participant)}
+        onInsertMention={insertParticipantMention}
+        onJumpToLastMessage={jumpToParticipantLastMessage}
+        onUpdateParticipantRuntime={props.onUpdateParticipantRuntime}
+        onCompactParticipant={props.onCompactParticipant}
+        onRestartParticipant={props.onRestartParticipant}
+        onStopRestart={props.onStopRestart}
+        restartStatus={props.restartingById?.get(participant.id)}
+        onRemoveParticipant={props.onRemoveParticipant}
+        onForkToNewChat={props.onForkToNewChat}
+        forkToNewChatDisabledReason={props.onForkToNewChat ? props.forkToNewChatReason?.(participant) : undefined}
+      />
+    );
+  }
+
+  const only = props.memberId ? props.participants.filter((participant) => participant.id === props.memberId) : undefined;
   return (
     <Popover open={open} onOpenChange={handleOpenChange}>
       <PopoverTrigger asChild>
-        <IconButton
-          label={participantCountLabel}
-          icon={Users}
-          tooltip="Members"
-          data-testid="chat-participants-trigger"
-        />
+        {only ? props.trigger ?? (
+          <IconButton label="Member settings" icon={GearSixIcon} tooltip="Settings" data-testid="chat-member-settings-trigger" />
+        ) : (
+          <IconButton
+            label={participantCountLabel}
+            icon={UsersIcon}
+            tooltip="Members"
+            data-testid="chat-participants-trigger"
+          />
+        )}
       </PopoverTrigger>
       <PopoverContent
         align="end"
@@ -121,10 +169,14 @@ export function ChatParticipantMenuView(props: ChatParticipantMenuViewProps): JS
         data-testid="chat-participants-popover"
         className="chat-participant-popover w-[min(640px,calc(100vw-32px))] max-h-[min(720px,calc(100vh-96px))] overflow-auto p-2"
       >
-        {view === "create" ? (
+        {only ? (
+          <div className="chat-participant-popover-list" data-testid="chat-member-settings">
+            {only.map((participant) => renderRosterRow(participant, true))}
+          </div>
+        ) : view === "create" ? (
           <div className="chat-participant-create">
             <div className="chat-participant-create-head">
-              <IconButton size="xs" label="Back to members" icon={ChevronLeft} onClick={() => setView("roster")} />
+              <IconButton size="xs" label="Back to members" icon={CaretLeftIcon} onClick={() => setView("roster")} />
               <span className="chat-popover-section-title">New member</span>
             </div>
             {props.addParticipantEditor}
@@ -141,7 +193,7 @@ export function ChatParticipantMenuView(props: ChatParticipantMenuViewProps): JS
                   setView("roster");
                 }}
               >
-                <Plus size={16} />
+                <PlusIcon size={16} />
                 Add to chat
               </Button>
             </div>
@@ -149,35 +201,7 @@ export function ChatParticipantMenuView(props: ChatParticipantMenuViewProps): JS
         ) : (
           <>
             <div className="chat-participant-popover-list">
-              {props.participants.map((participant) => (
-                <ChatParticipantRosterRow
-                  key={participant.id}
-                  participant={participant}
-                  removeDisabledReason={participantRemoveDisabledReason(participant)}
-                  busy={memberWorking(participant)}
-                  status={props.participantStatusById.get(participant.id) ?? "idle"}
-                  autoWatchDisabledReason={
-                    activeWatcher && activeWatcher.id !== participant.id
-                      ? "Only one member can watch a chat. Turn off the current watcher first."
-                      : undefined
-                  }
-                  autoWatchPausedReason={props.participantWatchers?.[participant.id]?.pausedReason}
-                  roleParticipantDefaults={props.participantRoleDefaults(participant)}
-                  renderParticipantAvatar={props.renderParticipantAvatar}
-                  participantRoleLabel={props.participantRoleLabel}
-                  participantRoleArchived={props.participantRoleArchived}
-                  runLocationLocked={props.participantHasRunById.get(participant.id) === true && !memberSessionMoves(participant)}
-                  runLocationMoves={props.participantHasRunById.get(participant.id) === true && memberSessionMoves(participant)}
-                  onInsertMention={insertParticipantMention}
-                  onJumpToLastMessage={jumpToParticipantLastMessage}
-                  onUpdateParticipantRuntime={props.onUpdateParticipantRuntime}
-                  onCompactParticipant={props.onCompactParticipant}
-                  onRestartParticipant={props.onRestartParticipant}
-                  onStopRestart={props.onStopRestart}
-                  restartStatus={props.restartingById?.get(participant.id)}
-                  onRemoveParticipant={props.onRemoveParticipant}
-                />
-              ))}
+              {props.participants.map((participant) => renderRosterRow(participant, false))}
             </div>
             <button
               type="button"
@@ -185,9 +209,9 @@ export function ChatParticipantMenuView(props: ChatParticipantMenuViewProps): JS
               aria-expanded={showSaved}
               onClick={() => setShowSaved((value) => !value)}
             >
-              <Plus size={15} aria-hidden className="chat-addsaved-plus" />
+              <PlusIcon size={15} aria-hidden className="chat-addsaved-plus" />
               Add a saved member
-              <ChevronRight size={15} aria-hidden className={`chat-addsaved-chev${showSaved ? " is-open" : ""}`} />
+              <CaretRightIcon size={15} aria-hidden className={`chat-addsaved-chev${showSaved ? " is-open" : ""}`} />
             </button>
             {showSaved && (
               props.savedParticipants.length === 0 ? (
@@ -210,7 +234,7 @@ export function ChatParticipantMenuView(props: ChatParticipantMenuViewProps): JS
                         disabled={Boolean(invalidReason)}
                         onClick={() => props.onAddSavedParticipant(config)}
                       >
-                        <Plus size={16} />
+                        <PlusIcon size={16} />
                         Add
                       </Button>
                     </div>

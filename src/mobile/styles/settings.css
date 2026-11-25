@@ -1,0 +1,140 @@
+.set-group-title {
+  padding: 0 4px 7px;
+  font: 600 12.5px var(--mono);
+  letter-spacing: 0.02em;
+  color: var(--mut);
+}
+
+.set-group {
+  border-radius: 16px;
+  background: var(--s2);
+  overflow: hidden;
+}
+
+.set-row {
+  min-height: 60px;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 12px 14px;
+}
+
+.set-row + .set-row {
+  border-top: 1px solid var(--bd);
+}
+
+.set-copy {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.set-title {
+  font: 600 15px var(--sans);
+  color: var(--fg1);
+}
+
+.set-sub {
+  font: 400 13px var(--sans);
+  line-height: 1.35;
+  color: var(--mut);
+}
+
+/* ---- Pressed and focused, for every new control ---- */
+.pb-tab:active,
+.pb-action:active,
+.act-tab:active,
+.act-stop:active .act-stop-ring,
+.act-open-chat:active {
+  background: var(--press);
+}
+
+.act-pill:active,
+.set-button:active,
+.act-swipe-action:active,
+.thread-reply-button:active,
+.act-detail .control-card-option:active,
+.finished-note-open:active,
+.finished-note-close:active {
+  background: var(--press);
+}
+
+/* A message opens on its own screen; the press says the row was hit. Not a
+   press on a card in it: that answers the card and opens nothing. */
+.message-row[data-thread-root]:active:not(:has(.control-card:active)) {
+  background: var(--press);
+}
+
+/* The sessions view opens no thread from a message: no press on the row. */
+.message-row.is-sessions[data-thread-root]:active:not(:has(.control-card:active)) {
+  background: transparent;
+}
+
+.act-pill-primary:active {
+  background: var(--fg);
+}
+
+.pb-tab:focus-visible,
+.pb-action:focus-visible,
+.act-tab:focus-visible,
+.act-main:focus-visible,
+.act-pill:focus-visible,
+.set-button:focus-visible,
+.act-stop:focus-visible,
+.act-open-chat:focus-visible,
+.act-swipe-action:focus-visible,
+.thread-reply-button:focus-visible,
+.act-detail .control-card-option:focus-visible,
+.finished-note-open:focus-visible,
+.finished-note-close:focus-visible {
+  outline: 2px solid var(--fg1);
+  outline-offset: 1px;
+}
+
+/* An urgent alert a member raised: the desktop's card as the User approved it
+   on 2026-11-15 — the red header whatever its state, the member and the time,
+   the message, then a status band with Got it under it while the alert waits
+   for her. Full width: no avatar, so no gutter for one. */
+.urgent-alert-card {
+  flex: 1;
+  min-width: 0;
+  font-family: var(--sans);
+}
+
+.urgent-alert-panel {
+  overflow: hidden;
+  border: 1px solid var(--urgent);
+  border-radius: 14px;
+  background: var(--surface);
+}
+
+.urgent-alert-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 48px;
+  padding: 0 2px 0 14px;
+  background: var(--urgent);
+  color: var(--urgent-fg);
+}
+
+.urgent-alert-title {
+  font-size: 15px;
+  font-weight: 600;
+}
+
+.urgent-alert-close {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 44px;
+  height: 44px;
+  margin-left: auto;
+  -webkit-tap-highlight-color: transparent;
+  border: 0;
+  border-radius: 10px;
+  background: transparent;
+  color: inherit;
+}

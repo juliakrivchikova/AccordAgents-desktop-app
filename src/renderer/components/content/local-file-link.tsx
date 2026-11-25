@@ -1,5 +1,5 @@
 import { createContext, useContext } from "react";
-import { Code2, ExternalLink, FolderOpen, PanelRight } from "lucide-react";
+import { CodeIcon, ArrowSquareOutIcon, FolderOpenIcon } from "@phosphor-icons/react";
 
 import { Button } from "@/components/ui/button";
 import {
@@ -10,6 +10,7 @@ import {
   DialogTitle
 } from "@/components/ui/dialog";
 import type { RepoFileOpenAction } from "../../../shared/types";
+import { SidePanelIcon } from "../primitives";
 import { CLOUD_FILE_LINK_TITLE, FileLinkAuthorContext, FilePanelOriginContext } from "../files/file-panel-context";
 
 export interface FileLinkRef {
@@ -103,25 +104,25 @@ export function LocalFileOpenChooser(props: {
     : props.fileRef?.path ?? "";
   const openButton = (
     <Button variant="outline" onClick={() => props.onChoose("open")}>
-      <ExternalLink size={16} />
+      <ArrowSquareOutIcon size={16} />
       Open with default app
     </Button>
   );
   const revealButton = (
     <Button variant="outline" onClick={() => props.onChoose("reveal")}>
-      <FolderOpen size={16} />
+      <FolderOpenIcon size={16} />
       Reveal in file manager
     </Button>
   );
   const panelButton = (
     <Button variant="outline" onClick={() => props.onChoose("panel")}>
-      <PanelRight size={16} />
+      <SidePanelIcon size={16} />
       {isOutsideWorkspace ? "View in side panel" : "Open in side panel"}
     </Button>
   );
   const intellijButton = (
     <Button variant="outline" onClick={() => props.onChoose("intellij-idea")}>
-      <Code2 size={16} />
+      <CodeIcon size={16} />
       Open in IntelliJ IDEA
     </Button>
   );

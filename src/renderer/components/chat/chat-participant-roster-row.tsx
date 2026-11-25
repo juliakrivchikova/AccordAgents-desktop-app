@@ -1,8 +1,9 @@
 import { useContext, useState } from "react";
 import type React from "react";
-import { AtSign, Check, ChevronDown, Minimize2, RotateCcw, Trash2 } from "lucide-react";
+import { AtIcon, CheckIcon, CaretDownIcon, GitForkIcon, ArrowsInSimpleIcon, ArrowCounterClockwiseIcon, TrashIcon } from "@phosphor-icons/react";
 
 import { canCompactParticipant, canRestartParticipant, memberProcessRestartable } from "../../../shared/chatParticipantStatus";
+import { FORK_TO_NEW_CHAT_DETAIL, FORK_TO_NEW_CHAT_LABEL } from "../../../shared/forkToNewChat";
 import type {
   ChatParticipant,
   ChatParticipantConfig,
@@ -13,10 +14,12 @@ import type {
 import type { MemberRestartInProgress } from "../../../shared/memberRestart";
 import { IconButton } from "../primitives";
 import { chatParticipantDisplayName } from "../conversation/conversation-display";
+import { useChatSessionsLinks } from "./chat-sessions-links";
 import { ParticipantRuntimeControls } from "./chat-participant-runtime-controls";
 import { chatCliProviderLabel, type ChatParticipantRuntimeOverride } from "./chat-participant-drafts";
 import { cliProviderHostForParticipant } from "../../../shared/cliProviderHosts";
 import { backgroundTasksStatusLabel, ChatBackgroundTasksContext, RosterStatusIndicator, type ChatParticipantRosterStatus } from "./chat-roster-status";
+import { Spinner } from "@/components/ui/spinner";
 
 type ParticipantRuntimePatch = Pick<ChatParticipant, "model" | "reasoningEffort" | "agentMode" | "permissions" | "remoteExecution" | "cloudRun" | "homeMachineId" | "skipToolchainPreflight" | "autoWatch">;
 
@@ -49,11 +52,24 @@ export function ChatParticipantRosterRow(props: {
   /** Its restart has not ended (also after this row closed and opened again). */
   restartStatus?: MemberRestartInProgress;
   onRemoveParticipant: (participantId: string) => void;
+  /** Makes a new chat whose main session is a copy of it (Fork to new chat). */
+  onForkToNewChat?: (participantId: string) => void;
+  /** Why it cannot be forked to a new chat now. */
+  forkToNewChatDisabledReason?: string;
+  /** Opened at its settings (one member's settings, the sessions view). */
+  defaultExpanded?: boolean;
 }): JSX.Element {
-  const displayName = chatParticipantDisplayName(props.participant);
+  // The sessions view names no handles and no label for the main session: a
+  // member by its task's title, the main session by its CLI ("Claude Code").
+  const sessionsLinks = useChatSessionsLinks();
+  const displayName = (sessionsLinks
+    ? props.participant.id === sessionsLinks.mainSessionId
+      ? chatCliProviderLabel(props.participant.kind)
+      : sessionsLinks.byHandle.get(props.participant.handle.toLowerCase())?.title
+    : undefined) || chatParticipantDisplayName(props.participant);
   const roleLabel = props.participantRoleLabel(props.participant);
   const roleArchived = props.participantRoleArchived(props.participant);
-  const [expanded, setExpanded] = useState(false);
+  const [expanded, setExpanded] = useState(props.defaultExpanded === true);
   const compactDisabled = !canCompactParticipant(props.status);
   const backgroundTasks = useContext(ChatBackgroundTasksContext).get(props.participant.id) ?? [];
   const [confirmingRestart, setConfirmingRestart] = useState(false);
@@ -117,7 +133,7 @@ export function ChatParticipantRosterRow(props: {
           <div className="chat-participant-row-actions">
             <IconButton
               size="xs"
-              icon={ChevronDown}
+              icon={CaretDownIcon}
               iconClassName={expanded ? undefined : "-rotate-90"}
               label={expanded ? `Collapse ${displayName} settings` : `Expand ${displayName} settings`}
               tooltip={expanded ? "Collapse" : "Expand"}
@@ -126,7 +142,7 @@ export function ChatParticipantRosterRow(props: {
             />
             <IconButton
               size="xs"
-              icon={Minimize2}
+              icon={ArrowsInSimpleIcon}
               label={`Compact ${displayName} context`}
               tooltip={compactDisabled ? "This member is busy." : "Compact this member's underlying session to free context."}
               disabled={compactDisabled}
@@ -135,8 +151,7 @@ export function ChatParticipantRosterRow(props: {
             {restartable && (
               <IconButton
                 size="xs"
-                icon={RotateCcw}
-                iconClassName={restarting ? "animate-spin" : undefined}
+                icon={restarting ? Spinner : ArrowCounterClockwiseIcon}
                 label={restartWait ? `Stop restarting ${displayName}` : `Restart ${displayName}`}
                 tooltip={restartWait
                   ? "Stop waiting for the machine to restart this member."
@@ -150,9 +165,20 @@ export function ChatParticipantRosterRow(props: {
                 onClick={onRestartButton}
               />
             )}
+            {props.onForkToNewChat && (
+              <IconButton
+                size="xs"
+                icon={GitForkIcon}
+                label={`${FORK_TO_NEW_CHAT_LABEL}: ${displayName}`}
+                tooltip={`${FORK_TO_NEW_CHAT_LABEL}. ${props.forkToNewChatDisabledReason ?? `${FORK_TO_NEW_CHAT_DETAIL}.`}`}
+                disabled={Boolean(props.forkToNewChatDisabledReason)}
+                data-testid="chat-participant-fork"
+                onClick={() => props.onForkToNewChat?.(props.participant.id)}
+              />
+            )}
             <IconButton
               size="xs"
-              icon={AtSign}
+              icon={AtIcon}
               label={`Mention ${displayName}`}
               tooltip="Add this member mention to your message."
               onClick={() => props.onInsertMention(props.participant)}
@@ -160,7 +186,7 @@ export function ChatParticipantRosterRow(props: {
             <IconButton
               size="xs"
               tone="danger"
-              icon={Trash2}
+              icon={TrashIcon}
               label={`Remove ${displayName} from chat`}
               tooltip={props.removeDisabledReason ?? "Remove from chat"}
               disabled={Boolean(props.removeDisabledReason)}
@@ -270,7 +296,7 @@ export function ChatParticipantSelectableRosterRow(props: {
           <div className="chat-participant-row-actions">
             <IconButton
               size="xs"
-              icon={ChevronDown}
+              icon={CaretDownIcon}
               iconClassName={expanded ? undefined : "-rotate-90"}
               label={expanded ? `Collapse ${displayName} settings` : `Expand ${displayName} settings`}
               tooltip={expanded ? "Collapse" : "Expand"}
@@ -286,7 +312,7 @@ export function ChatParticipantSelectableRosterRow(props: {
               disabled={checkboxDisabled}
               onClick={() => props.onToggleSelected(props.participant.id)}
             >
-              {props.selected && <Check size={14} strokeWidth={3.1} aria-hidden />}
+              {props.selected && <CheckIcon size={14} aria-hidden />}
             </button>
           </div>
         </div>

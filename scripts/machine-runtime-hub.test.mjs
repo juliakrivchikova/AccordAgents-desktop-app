@@ -40,7 +40,7 @@ function desktopChat(storage) {
   } };
   const cliRunner = { async detectAgents() { return []; }, async contextUsageForSession() { return undefined; }, async closeConversationSessions() { return undefined; } };
   const chat = new ChatService(storage, settings, cliRunner, { async write() { return undefined; } });
-  chat.ensureHistoryFiles = async () => tmpdir();
+  chat.modules.chatHistory.ensureHistoryFiles = async () => tmpdir();
   return chat;
 }
 
@@ -97,7 +97,7 @@ test("the built machine runtime takes its member's turns from the server, applie
   let link = new MachineLinkService(settings, { write: async () => undefined }, linkOptions);
   chat.setRemoteTurnPreparation({ beforeRemoteTurn: () => link.syncSettings() });
   const at = new Date().toISOString();
-  await chat.saveConversation({ id: "conv-e2e", kind: "chat", title: "E2E", createdAt: at, updatedAt: at, findings: [],
+  await chat.modules.store.saveConversation({ id: "conv-e2e", kind: "chat", title: "E2E", createdAt: at, updatedAt: at, findings: [],
     messages: [{ id: "conv-e2e-start", role: "system", content: "Chat started.", createdAt: at, status: "done" }],
     metadata: { participants: [member], participantSessions: [], running: false, warnings: [] } });
   const call = async (who, method, pathWithQuery, body) => {

@@ -20,6 +20,7 @@ import {
   parseAgyModelList,
   syncGeminiMcpConfig
 } from "./cliAgents";
+import { cliParts } from "./cliAgents/test/cliParts";
 import {
   buildGeminiExecInvocation,
   buildGeminiInteractiveGoalInvocation,
@@ -71,9 +72,8 @@ test("buildGeminiExecInvocation: new chat run is read-only sandboxed with catalo
     .filter((value): value is string => Boolean(value));
   assert.deepEqual(addDirIndexes, ["/repo/project", "/extra/history"]);
   const printPrompt = flagValue(invocation.args, "--print");
-  assert.ok(printPrompt?.includes("Say hi"));
-  assert.ok(printPrompt?.includes("AccordAgents Chat in default mode"));
-  assert.ok(printPrompt?.includes("read-only"));
+  // The member's message as it is: its mode and access are in its instructions.
+  assert.equal(printPrompt, "Say hi");
   // agy's own print deadline stays behind the app-side timeout.
   assert.equal(flagValue(invocation.args, "--print-timeout"), "180s");
 });
@@ -118,11 +118,11 @@ test("buildGeminiExecInvocation: auto mode and granted write skip tool confirmat
     }
   });
   assert.equal(write.args.includes("--dangerously-skip-permissions"), true);
-  const autoPrompt = flagValue(auto.args, "--print") ?? "";
-  assert.match(autoPrompt, /\/outside\/explicit-target\.txt/);
-  assert.doesNotMatch(autoPrompt, /File modifications are limited to the selected repository workspace/);
+  // A chat turn is the member's message as it is; where it may write is said
+  // once, in its session's instructions (antigravityAccessLines).
+  assert.equal(flagValue(auto.args, "--print"), "Create exactly /outside/explicit-target.txt with the text parity-proof.");
   assert.doesNotMatch(JSON.stringify(auto.args), /writable_roots|sandbox\.filesystem\.allowWrite/);
-  assert.match(flagValue(write.args, "--print") ?? "", /Do not create, modify, move, or delete files outside that workspace/);
+  assert.equal(flagValue(write.args, "--print"), "Do work");
 });
 
 test("buildGeminiExecInvocation: app MCP url/token travel through the process environment", () => {
@@ -220,7 +220,7 @@ test("a Gemini API key provider's model list is read from agy on that key, once 
   const runner = new CliAgentRunner();
   const calls: Array<{ env: Record<string, string>; settings: Readonly<Record<string, unknown>> } | undefined> = [];
   let fail = false;
-  (runner as any).listGeminiModelCatalog = async (fetchedAt: string, apiKey?: { env: Record<string, string>; settings: Readonly<Record<string, unknown>> }) => {
+  cliParts(runner).modelCatalogs.listGeminiModelCatalog = async (fetchedAt: string, apiKey?: { env: Record<string, string>; settings: Readonly<Record<string, unknown>> }) => {
     calls.push(apiKey);
     await new Promise((resolve) => setTimeout(resolve, 5));
     if (fail) {
@@ -254,7 +254,7 @@ test("a Gemini API key provider's model list is read from agy on that key, once 
   const fixed = await runner.listHostModelCatalog({ host: edited, apiKey: "other-key" });
   assert.equal(calls.length, 3);
   assert.deepEqual(fixed.models.map((model) => model.id), ["gemini-4-carbon-low"]);
-  assert.deepEqual([...(runner as any).hostModelCatalogs.keys()], ["host-google|2026-11-18T01:00:00.000Z"], "the old version's list is dropped");
+  assert.deepEqual([...cliParts(runner).modelCatalogs.hostModelCatalogs.keys()], ["host-google|2026-11-18T01:00:00.000Z"], "the old version's list is dropped");
 
   const noKey = await runner.listHostModelCatalog({ host, apiKey: undefined });
   assert.deepEqual(noKey.models, []);
@@ -567,7 +567,7 @@ test("geminiMcpProxyLaunchArgs: packaged and default-app launches use the dedica
 test("compactGeminiSession: aborts when resume recovery started a fresh conversation", async () => {
   const runner = new CliAgentRunner();
   let calls = 0;
-  (runner as any).runGeminiOneShot = async () => {
+  cliParts(runner).geminiRuns.runGeminiOneShot = async () => {
     calls += 1;
     return {
       participant,
@@ -577,7 +577,7 @@ test("compactGeminiSession: aborts when resume recovery started a fresh conversa
       sessionRestarted: true
     };
   };
-  const result = await (runner as any).compactGeminiSession(
+  const result = await cliParts(runner).geminiRuns.compactGeminiSession(
     participant,
     undefined,
     "chat",
@@ -620,4 +620,49 @@ test("geminiTranscriptPathForConversation: points into the Antigravity brain", (
     transcript,
     path.join("/home/user", ".gemini", "antigravity-cli", "brain", "abc-123", ".system_generated", "logs", "transcript.jsonl")
   );
+});
+
+// The sessions view's access in agy's own terms (src/shared/chatAccessModes.ts):
+// agy runs in its own mode and nothing skips its confirmations; what the mode
+// would ask about, print mode refuses (agy 1.5.14, checked 2026-11-21: Default
+// refused write_file, accept-edits wrote in its workspace and refused the
+// command, plan refused Bash, and `--mode default` is not a value agy takes).
+for (const scenario of [
+  { name: "Default", agentMode: "default" as const, workspaceWrite: false, mode: undefined, agentModeSetting: "" },
+  { name: "Accept edits", agentMode: "default" as const, workspaceWrite: true, mode: "accept-edits", agentModeSetting: undefined },
+  { name: "Auto mode", agentMode: "auto" as const, workspaceWrite: false, mode: "auto", agentModeSetting: undefined },
+  { name: "Plan mode", agentMode: "plan" as const, workspaceWrite: false, mode: "plan", agentModeSetting: undefined },
+  // Codex's Full Access is not an agy mode: agy's Auto, never skipped confirmations.
+  { name: "given Codex's Full Access", agentMode: "full-access" as const, workspaceWrite: true, mode: "auto", agentModeSetting: undefined }
+]) {
+  test(`buildGeminiExecInvocation: agy ${scenario.name} runs in agy's own mode, never skipping its confirmations`, () => {
+    const invocation = buildGeminiExecInvocation({
+      participant,
+      prompt: "Do work",
+      repoPath: "/repo/project",
+      kind: "chat",
+      options: {
+        agentMode: scenario.agentMode,
+        permissions: { ...defaultChatAgentPermissions(), workspaceWrite: scenario.workspaceWrite, cliApprovals: true },
+        appMcp: { url: "http://127.0.0.1:1/mcp", token: "t", toolNames: ["app_chat_set_title"] },
+        userSettings: { readable: true }
+      }
+    });
+    assert.equal(flagValue(invocation.args, "--mode"), scenario.mode);
+    assert.equal(invocation.args.includes("--dangerously-skip-permissions"), false, "agy's own confirmations decide");
+    assert.equal(invocation.args.includes("--sandbox"), false, "the CLI's own default, not the classic read-only stand-in");
+    const settings = JSON.parse(flagValue(invocation.args, "--settings") ?? "{}") as { agentMode?: string; permissions?: { allow?: string[] } };
+    assert.equal(settings.agentMode, scenario.agentModeSetting, "agy's Default is its agentMode \"\" (its --mode has no default)");
+    assert.ok(settings.permissions?.allow?.some((rule) => rule.includes("app_chat_set_title")), "the app's own tools stay allowed, as print mode cannot ask");
+    assert.equal(flagValue(invocation.args, "--print"), "Do work", "what print mode cannot ask is in its instructions, said once");
+  });
+}
+
+test("buildGeminiExecInvocation: the classic controls keep the app's own agy mapping", () => {
+  const classic = buildGeminiExecInvocation({
+    participant, prompt: "Do work", repoPath: "/repo/project", kind: "chat",
+    options: { agentMode: "default", permissions: { ...defaultChatAgentPermissions(), workspaceWrite: true } }
+  });
+  assert.equal(classic.args.includes("--dangerously-skip-permissions"), true);
+  assert.equal(classic.args.includes("--mode"), false);
 });

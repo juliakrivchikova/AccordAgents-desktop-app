@@ -1,10 +1,14 @@
 import { useState } from "react";
+import { withoutLeadingMention } from "../../../shared/mainSession";
 
 /** A member's next-prompt suggestion, addressed to that member. */
 export interface ChatComposerSuggestion {
   participantId: string;
   handle: string;
   text: string;
+  /** Offered as plain text, without the member's handle (the sessions
+   *  view's composer, which writes to that member only). */
+  withoutHandle?: boolean;
 }
 
 export interface ChatComposerSuggestionsState {
@@ -21,7 +25,27 @@ export interface ChatComposerSuggestionsState {
  *  addresses members (the User wrote `@a @b …` last time) is used as it is;
  *  otherwise it goes to the member that suggested it. */
 export function chatComposerSuggestionText(suggestion: ChatComposerSuggestion): string {
+  if (suggestion.withoutHandle) {
+    return withoutLeadingMention(suggestion.text.trim(), suggestion.handle).trim();
+  }
   return suggestion.text.trimStart().startsWith("@") ? suggestion.text.trim() : `@${suggestion.handle} ${suggestion.text}`;
+}
+
+/**
+ * The main composer's next-prompt suggestions in the sessions view: the main
+ * session's own, offered as the text it would send, without its handle (the
+ * composer writes only to it, and the view shows no handles). Another
+ * member's suggestion is for that member's session, which this composer does
+ * not write to. The classic view's are as before (`sessionsMainId` unset).
+ */
+export function sessionsComposerSuggestions(
+  suggestions: ChatComposerSuggestion[],
+  sessionsMainId: string | undefined
+): ChatComposerSuggestion[] {
+  if (!sessionsMainId) return suggestions;
+  return suggestions
+    .filter((suggestion) => suggestion.participantId === sessionsMainId)
+    .map((suggestion) => ({ ...suggestion, withoutHandle: true }));
 }
 
 /**

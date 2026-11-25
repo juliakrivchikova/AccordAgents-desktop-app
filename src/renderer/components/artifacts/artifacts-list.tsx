@@ -1,4 +1,4 @@
-import { FileText } from "lucide-react";
+import { FileTextIcon } from "@phosphor-icons/react";
 
 import type { ArtifactSummary } from "../../../shared/types";
 import { artifactMemberLabel } from "../../../shared/artifacts";
@@ -23,7 +23,7 @@ export function ArtifactsList(props: {
         <li key={artifact.id}>
           <button type="button" className="artifact-list-item" onClick={() => props.onSelect(artifact.id)}>
             <span className="artifact-list-mark" aria-hidden>
-              <FileText size={15} strokeWidth={1.9} />
+              <FileTextIcon size={15} />
             </span>
             <span className="artifact-list-body">
               <span className="artifact-list-line">

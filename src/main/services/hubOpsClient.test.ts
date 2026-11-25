@@ -320,3 +320,27 @@ test("a pause taken before the reader starts holds from its first read", async (
   for (let i = 0; i < 100 && reads === 0; i++) await new Promise((resolve) => setTimeout(resolve, 10));
   assert.ok(reads > 0);
 });
+
+test("replies left running: created on the server as running (or still to be) and never ended there by an operation kept here", async (t) => {
+  const dir = await mkdtemp(path.join(tmpdir(), "accord-ops-left-running-"));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const store = new StorageService({ dbPath: path.join(dir, "device.sqlite3") }).hubClientOps();
+  const at = new Date().toISOString();
+  const reply = (id: string, status = "pending"): HubOp => ({ opId: `create-${id}`, kind: "message.create", conversationId: "chat-1",
+    message: { id, role: "participant", participantId: "p1", content: "", status, createdAt: at } } as HubOp);
+  const update = (id: string, status: string): HubOp => ({ opId: `update-${id}`, kind: "message.update", conversationId: "chat-1",
+    message: { id, role: "participant", participantId: "p1", content: "x", status, createdAt: at } } as HubOp);
+  const ids = ["open", "ended", "removed", "endQueued", "endRefused", "stillRunning", "createQueued", "doneAtOnce"];
+  await store.enqueue([...ids.filter((id) => id !== "doneAtOnce").map((id) => reply(id)), reply("doneAtOnce", "done"),
+    { opId: "create-user", kind: "message.create", conversationId: "chat-1", message: { id: "user", role: "user", content: "hi", status: "pending", createdAt: at } } as HubOp], at);
+  for (const id of [...ids, "user"].filter((id) => id !== "createQueued")) await store.accept(`create-${id}`, 1, at);
+  await store.enqueue([update("ended", "done"), { opId: "remove-removed", kind: "message.remove", conversationId: "chat-1", messageId: "removed" } as HubOp,
+    update("endQueued", "error"), update("endRefused", "done"), update("stillRunning", "pending")], at);
+  await store.accept("update-ended", 2, at);
+  await store.accept("remove-removed", 3, at);
+  await store.reject((await store.get("update-endRefused"))!, "no", at);
+  await store.accept("update-stillRunning", 4, at);
+  // Small slices: the reading goes on past the first one.
+  assert.deepEqual((await store.repliesLeftRunning(2)).map((row) => row.messageId).sort(),
+    ["createQueued", "endRefused", "open", "stillRunning"]);
+});

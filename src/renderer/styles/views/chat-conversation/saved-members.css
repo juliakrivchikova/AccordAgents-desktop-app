@@ -1,0 +1,176 @@
+.chat-saved-participant-row.disabled {
+  opacity: 0.64;
+}
+
+.chat-saved-run-location {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 5px;
+  color: var(--app-muted);
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.chat-saved-run-location select {
+  min-width: 78px;
+  height: 26px;
+  border: 1px solid var(--app-border);
+  border-radius: var(--ui-radius-8);
+  background: var(--app-surface);
+  color: var(--app-text);
+  font: inherit;
+}
+
+.chat-saved-participant-main {
+  display: grid;
+  min-width: 0;
+  gap: 2px;
+}
+
+.chat-saved-participant-main strong,
+.chat-saved-participant-main span,
+.chat-saved-participant-main small {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.chat-saved-participant-main strong {
+  color: var(--app-text-strong);
+  font-family: var(--font-code);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.chat-saved-participant-main span,
+.chat-saved-participant-main small,
+.chat-saved-participants-empty {
+  color: var(--app-muted);
+  font-size: 11px;
+}
+
+.chat-saved-participant-main small {
+  color: var(--app-danger);
+}
+
+.chat-saved-participants-empty {
+  padding: 4px 14px 10px;
+}
+
+/* Compact roster: saved participants live behind this expander. */
+.chat-addsaved-toggle {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  margin-top: 4px;
+  padding: 13px 14px;
+  border: 1px dashed var(--app-border-strong);
+  border-radius: 12px;
+  background: transparent;
+  color: var(--app-text-strong);
+  font-size: 13px;
+  font-weight: 500;
+  cursor: pointer;
+  text-align: left;
+  transition: border-color 0.16s ease, background 0.16s ease;
+}
+
+.chat-addsaved-toggle:hover {
+  border-color: var(--app-accent);
+  background: var(--app-accent-soft);
+}
+
+.chat-addsaved-plus {
+  flex: 0 0 auto;
+  color: var(--ui-link);
+}
+
+.chat-addsaved-chev {
+  flex: 0 0 auto;
+  margin-left: auto;
+  color: var(--app-muted);
+  transition: transform 0.15s ease;
+}
+
+.chat-addsaved-chev.is-open {
+  transform: rotate(90deg);
+}
+
+.chat-participant-footer {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 10px;
+  margin-top: 8px;
+  padding: 8px 6px 4px;
+  border-top: 1px solid var(--app-border);
+}
+
+.chat-manage-link {
+  padding: 7px 6px;
+  border: 0;
+  background: transparent;
+  color: var(--app-muted);
+  cursor: pointer;
+  font-family: var(--font-body);
+  font-size: 13px;
+  font-weight: 500;
+  white-space: nowrap;
+}
+
+.chat-manage-link:hover,
+.chat-manage-link:focus-visible {
+  color: var(--app-text-strong);
+}
+
+.chat-participant-create {
+  display: grid;
+  gap: 12px;
+}
+
+.chat-participant-create-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.chat-participant-create-head .chat-popover-section-title {
+  margin-bottom: 0;
+}
+
+.chat-participant-create-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.chat-timeline {
+  min-height: 0;
+  overflow: auto;
+  overflow-anchor: none;
+  padding: 18px 28px 8px;
+  scroll-padding-top: 22px;
+  background: var(--app-surface);
+}
+
+/* Let the conversation stream use the available panel width. */
+.chat-timeline > .virtual-timeline-inner {
+  max-width: none;
+  margin: 0;
+}
+
+.chat-app-tool-approval-slot {
+  min-height: 0;
+}
+
+.chat-app-tool-approval-slot.has-approvals {
+  display: grid;
+  gap: var(--space-3);
+  margin-top: 10px;
+  padding: 14px 0 34px;
+  border-top: 1px solid var(--app-border);
+  background: var(--app-surface);
+}

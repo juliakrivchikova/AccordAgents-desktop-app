@@ -1,0 +1,208 @@
+/* Keep the main composer aligned with the full-width stream. */
+.chat-main > .chat-composer > .chat-composer-shell,
+.chat-main > .chat-composer > .chat-composer-status,
+.chat-main > .chat-composer > .file-mention-chips,
+.chat-main > .chat-composer > .pending-image-strip {
+  width: 100%;
+  max-width: none;
+  margin-inline: 0;
+}
+
+.chat-composer-shell {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 6px 8px 8px;
+  border: 1px solid var(--ui-border);
+  border-radius: var(--ui-radius-12);
+  background: var(--ui-bg);
+  box-shadow: var(--ui-shadow-sm);
+  transition:
+    border-color var(--ui-duration-fast) var(--ui-ease-out),
+    box-shadow var(--ui-duration-fast) var(--ui-ease-out);
+}
+
+/* No highlight while typing: the caret says where the keyboard is (the
+   User, 2026-11-22). */
+
+.chat-composer-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin: 0 -8px;
+  padding: 4px 10px 0;
+}
+
+.chat-composer-tools,
+.chat-composer-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+/* Compact active-run chip on the composer footer (design handoff §10). */
+.composer-active-run {
+  display: inline-flex;
+  align-items: center;
+  height: 26px;
+  border: 1px solid var(--app-border);
+  border-radius: var(--radius-pill);
+  background: transparent;
+  color: var(--app-muted);
+  font-size: 12px;
+  font-weight: 500;
+  white-space: nowrap;
+  overflow: hidden;
+  transition: border-color 130ms ease, color 130ms ease, background 130ms ease;
+}
+
+.composer-active-run:hover {
+  border-color: var(--app-border-strong);
+  color: var(--app-text-strong);
+  background: var(--ui-row-hover);
+}
+
+.composer-active-run-info {
+  border: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+}
+
+.composer-active-run-info {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 100%;
+  min-width: 0;
+  padding: 0 7px 0 9px;
+}
+
+.composer-active-run-info:hover {
+  color: var(--app-text-strong);
+}
+
+.composer-active-run-info:focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring);
+}
+
+.composer-active-run-popover {
+  display: grid;
+  gap: 8px;
+}
+
+.composer-active-run-popover-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 2px 2px 0;
+}
+
+.composer-active-run-popover-count {
+  color: var(--app-muted);
+  font-size: 11px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+
+.composer-active-run-list {
+  display: grid;
+  gap: 3px;
+}
+
+.composer-active-run-row {
+  display: grid;
+  grid-template-columns: 32px minmax(0, 1fr) 26px;
+  align-items: center;
+  gap: 8px;
+  min-height: 40px;
+  padding: 5px 6px;
+  border-radius: 8px;
+}
+
+.composer-active-run-row .mini-avatar {
+  width: 32px;
+  height: 32px;
+  border-radius: 8px;
+  font-size: 11px;
+}
+
+.composer-active-run-row-main {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+
+button.composer-active-run-row-main {
+  margin: 0;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+  font: inherit;
+  text-align: left;
+}
+
+button.composer-active-run-row-main:focus-visible {
+  border-radius: var(--ui-radius-8);
+  outline: none;
+  box-shadow: var(--focus-ring);
+}
+
+.composer-active-run-row-name {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--app-text-strong);
+  font-size: 13px;
+  font-weight: 650;
+  line-height: 1.2;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.composer-active-run-row-meta {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 4px 8px;
+  min-width: 0;
+}
+
+.composer-active-run-row-role {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--app-muted);
+  font-size: 11px;
+  line-height: 1.2;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.composer-active-run-empty {
+  padding: 8px 6px 6px;
+  color: var(--app-muted);
+  font-size: 12px;
+}
+
+/* Dictation: a recording shows its time and stops on click; notices are one
+   quiet line beside the microphone. */
+.composer-dictation-recording {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 26px;
+  padding: 0 9px;
+  border: 1px solid var(--app-border);
+  border-radius: var(--radius-pill);
+  background: transparent;
+  color: var(--app-text-secondary);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  cursor: pointer;
+}

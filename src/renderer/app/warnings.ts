@@ -12,7 +12,10 @@ export function warningDismissScope(conversation: Conversation | undefined): str
   return conversation?.id ?? GLOBAL_WARNING_DISMISS_SCOPE;
 }
 
-export function warningNoticeEntries(warnings: string[], dismissedKeys: Set<string>): WarningNoticeEntry[] {
+/** `shownAs`: how the open chat's view words a notice (the sessions view
+ *  names nobody by handle); the key stays the stored text, so dismissing
+ *  matches it whatever the view. */
+export function warningNoticeEntries(warnings: string[], dismissedKeys: Set<string>, shownAs: (text: string) => string = (text) => text): WarningNoticeEntry[] {
   const seen = new Set<string>();
   const entries: WarningNoticeEntry[] = [];
   for (const warning of warnings) {
@@ -21,7 +24,7 @@ export function warningNoticeEntries(warnings: string[], dismissedKeys: Set<stri
       continue;
     }
     seen.add(text);
-    entries.push({ key: text, text });
+    entries.push({ key: text, text: shownAs(text) });
   }
   return entries;
 }

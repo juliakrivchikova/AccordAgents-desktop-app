@@ -1,3 +1,4 @@
+import type React from "react";
 import type { MemberRestartInProgress } from "../../../shared/memberRestart";
 import { chatReasoningEffortLabel } from "../../../shared/reasoningEffort";
 import type {
@@ -14,6 +15,7 @@ import {
   avatarForChatParticipant
 } from "./chat-avatars";
 import { chatRoleLabel } from "./chat-conversation-data";
+import { ChatMemberMark } from "./chat-member-mark";
 import { ChatParticipantDraftRow } from "./chat-participant-draft-row";
 import { ChatParticipantMenuView } from "./chat-participant-menu-view";
 import type { ChatParticipantRosterStatus } from "./chat-roster-status";
@@ -57,8 +59,15 @@ export function ChatParticipantMenu(props: {
   /** Members whose restart has not ended. */
   restartingById?: ReadonlyMap<string, MemberRestartInProgress>;
   onRemoveParticipant: (participantId: string) => void;
+  /** Fork to new chat: a new chat whose main session is a copy of the member. */
+  onForkToNewChat?: (participantId: string) => void;
+  /** Why a member cannot be forked to a new chat now. */
+  forkToNewChatReason?: (participant: ChatParticipant) => string | undefined;
   onJumpToParticipantLastMessage: (participantId: string) => void;
   onManageInSettings: () => void;
+  /** One member's settings only, opened by this trigger (a gear by default). */
+  memberId?: string;
+  trigger?: React.ReactNode;
 }): JSX.Element {
   const existingHandles = new Set(props.participants.map((participant) => participant.handle.toLowerCase()));
   const addDraft = normalizedChatDrafts([props.addParticipantDraft]);
@@ -85,8 +94,12 @@ export function ChatParticipantMenu(props: {
       participantWatchers={props.participantWatchers}
       savedParticipants={savedParticipants}
       hasSavedParticipantConfigs={props.settings.chatParticipantConfigs.length > 0}
-      renderParticipantAvatar={(participant) => <Avatar className="mini-avatar" spec={avatarForChatParticipant(participant, chatParticipantDisplayName(participant))} />}
-      renderSavedParticipantAvatar={(participant) => <Avatar className="mini-avatar" spec={avatarForChatParticipant(participant)} />}
+      renderParticipantAvatar={(participant) => (
+        <ChatMemberMark className="mini-avatar" markClassName="is-mini" avatar={avatarForChatParticipant(participant, chatParticipantDisplayName(participant))} member={participant} />
+      )}
+      renderSavedParticipantAvatar={(participant) => (
+        <ChatMemberMark className="mini-avatar" markClassName="is-mini" avatar={avatarForChatParticipant(participant)} member={participant} />
+      )}
       participantRoleLabel={(participant) => chatRoleLabel(props.settings.chatRoleConfigs, participant)}
       participantRoleArchived={(participant) => Boolean(
         props.settings.chatRoleConfigs.find((role) => role.id === participant.roleConfigId)?.archivedAt
@@ -115,8 +128,12 @@ export function ChatParticipantMenu(props: {
       onStopRestart={props.onStopRestart}
       restartingById={props.restartingById}
       onRemoveParticipant={props.onRemoveParticipant}
+      onForkToNewChat={props.onForkToNewChat}
+      forkToNewChatReason={props.forkToNewChatReason}
       onJumpToParticipantLastMessage={props.onJumpToParticipantLastMessage}
       onManageInSettings={props.onManageInSettings}
+      memberId={props.memberId}
+      trigger={props.trigger}
     />
   );
 }

@@ -16,14 +16,24 @@ import {
 } from "../components/review/review-conversation-data";
 import { buildProjectSessionGroups, compareConversationSummaries, pinnedChatSummaries, recentChatSummaries } from "./conversation-summaries";
 import type { AppState } from "./app-state";
+import { useDelayedFlag } from "@/components/ui/delayed";
 import { warningDismissScope, warningNoticeEntries } from "./warnings";
+import { sessionsViewNamesOf, sessionsViewText, type SessionsViewNames } from "../../shared/sessionsViewText";
 
 export function useAppViewModel(state: AppState) {
   const openingConversation = state.openingConversationId
     ? state.summaries.find((summary) => summary.id === state.openingConversationId)
     : undefined;
   const isOpeningConversation = Boolean(state.openingConversationId);
-  const hasResultContext = Boolean(state.conversation) || state.busy || isOpeningConversation;
+  // A chat being opened takes the screen once it is in, or once the wait
+  // lasts: a quick open keeps what was there (the New chat screen, say)
+  // instead of a blank panel for a tenth of a second.
+  const openingSlow = useDelayedFlag(isOpeningConversation);
+  // A new chat being started keeps New chat on screen, its send button busy,
+  // its choices in place and its composer where the chat will have it, until
+  // the chat itself takes the screen: no card and no blank frame between.
+  const startingChat = state.busy && state.startingChatRef.current && !state.conversation;
+  const hasResultContext = Boolean(state.conversation) || (state.busy && !startingChat) || (isOpeningConversation && openingSlow);
   const pendingDecisions = pendingPlanDecisions(state.conversation);
   const reviewablePlanItems = requiredPlanItemReviewFindings(state.conversation);
   const reviewedPlanItemCount = reviewablePlanItems.filter((finding) => planItemReviewForFinding(finding, planItemReviews(state.conversation))).length;
@@ -39,7 +49,19 @@ export function useAppViewModel(state: AppState) {
     : [];
   const warningScope = warningDismissScope(state.conversation);
   const dismissedWarningKeys = new Set(state.dismissedWarningKeysByScope[warningScope] ?? []);
-  const visibleWarnings = warningNoticeEntries([...state.warnings, ...conversationMetadataWarnings], dismissedWarningKeys);
+  // The open chat's view words the notices: the sessions view names nobody
+  // by handle (shared/sessionsViewText.ts); the classic view as written.
+  // The names are read from the chat only when a notice names someone.
+  const noticeText = useMemo(() => {
+    const conversation = state.conversation;
+    let names: SessionsViewNames | undefined | null = null;
+    return (text: string): string => {
+      if (!text.includes("@")) return text;
+      if (names === null) names = conversation?.kind === "chat" ? sessionsViewNamesOf(conversation) : undefined;
+      return sessionsViewText(text, names);
+    };
+  }, [state.conversation]);
+  const visibleWarnings = warningNoticeEntries([...state.warnings, ...conversationMetadataWarnings], dismissedWarningKeys, noticeText);
   const chatSummaries = useMemo(() => state.summaries.filter((summary) => summary.kind === "chat"), [state.summaries]);
   const projectSessionGroups = useMemo(() => buildProjectSessionGroups(chatSummaries), [chatSummaries]);
   const pinnedSessions = useMemo(() => pinnedChatSummaries(chatSummaries), [chatSummaries]);
@@ -87,6 +109,7 @@ export function useAppViewModel(state: AppState) {
     conversationRunning,
     warningScope,
     visibleWarnings,
+    noticeText,
     projectSessionGroups,
     pinnedSessions,
     recentSessions,

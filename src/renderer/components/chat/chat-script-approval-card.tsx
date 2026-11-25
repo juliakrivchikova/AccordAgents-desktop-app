@@ -1,14 +1,19 @@
-import { useEffect, useState } from "react";
-import { CalendarClock, Check, ChevronDown, ChevronRight, KeyRound, ShieldAlert } from "lucide-react";
+import { useState } from "react";
+import { CalendarDotsIcon, CheckIcon, CaretDownIcon, CaretRightIcon } from "@phosphor-icons/react";
 
+import { Input } from "@/components/ui/input";
 import type { ChatAppToolApproval, ChatAppToolApprovalScope, ChatParticipant } from "../../../shared/types";
-import type { ChatScriptChangeRequest, ScriptRevisionContent } from "../../../shared/scripts";
-import { Avatar, avatarForParticipant } from "../avatar/avatar";
+import type { ChatScriptChangeRequest } from "../../../shared/scripts";
+import { avatarForParticipant } from "../avatar/avatar";
 import { chatParticipantDisplayName, chatParticipantReference } from "../conversation/conversation-display";
 import { avatarForChatParticipant } from "./chat-avatars";
+import { ChatMemberMark } from "./chat-member-mark";
 import { formatChatTime } from "./chat-format";
 import { ChatAppToolReviewFooter } from "./chat-app-tool-approval-review";
 import { ChatUsedApprovalLine } from "./chat-used-card-row";
+import { ChatScriptApprovalDetails } from "./chat-script-approval-details";
+import { useSessionsViewLabel, useSessionsViewText } from "./chat-sessions-links";
+import { useScriptApprovalKeys, type ScriptApprovalKeys } from "./use-script-approval-keys";
 
 function scriptApprovalTitle(handle: string, request: ChatScriptChangeRequest): string {
   const who = chatParticipantReference(handle);
@@ -21,8 +26,8 @@ function scriptApprovalTitle(handle: string, request: ChatScriptChangeRequest): 
   }
 }
 
-function scriptApprovedEnding(request: ChatScriptChangeRequest, schedule: string | undefined): string {
-  const done = request.op === "delete" ? "Deleted" : request.op === "disable" ? "Switched off" : request.op === "enable" ? "Switched on" : "Approved";
+function scriptApprovedEnding(request: ChatScriptChangeRequest, schedule: string | undefined, withoutCard: boolean): string {
+  const done = withoutCard ? "Created" : request.op === "delete" ? "Deleted" : request.op === "disable" ? "Switched off" : request.op === "enable" ? "Switched on" : "Approved";
   return schedule ? `${done} · ${schedule}` : done;
 }
 
@@ -36,14 +41,23 @@ function scriptApprovalPrimaryLabel(request: ChatScriptChangeRequest): string {
   }
 }
 
-function formatBytes(bytes: number): string {
-  return bytes < 1024 ? `${bytes} B` : `${(bytes / 1024).toFixed(1)} KB`;
+/** What the card proposes, beside who proposes it. */
+function scriptProposal(op: ChatScriptChangeRequest["op"]): string {
+  switch (op) {
+    case "create": return "Proposes a scheduled task";
+    case "update": return "Proposes a change to a scheduled task";
+    case "delete": return "Proposes to delete a scheduled task";
+    case "enable": return "Proposes to switch on a scheduled task";
+    case "disable": return "Proposes to switch off a scheduled task";
+  }
 }
 
 /** The approval card for a scheduled-script proposal. It always approves
- *  this one proposal: no "for this chat", no editing. Keys are typed here and
- *  saved straight to the computer that runs the script (this one, or the
- *  member's machine); they never travel with the decision. */
+ *  this one proposal: no "for this chat", no editing. It says the task's name
+ *  and when it runs and asks for its keys; everything else is under Details
+ *  (the User, 2026-11-25: a huge card nobody reads). Keys are typed here and
+ *  saved, as she approves, straight to the computer that runs the script (this
+ *  one, or the member's machine); they never travel with the decision. */
 export function ChatScriptApprovalCard(props: {
   approval: ChatAppToolApproval;
   request: ChatScriptChangeRequest;
@@ -58,77 +72,37 @@ export function ChatScriptApprovalCard(props: {
   const requesterAvatar = requester
     ? avatarForChatParticipant(requester, requesterLabel)
     : avatarForParticipant(requesterLabel, approval.requesterParticipantId);
+  // The sessions view names members by their task, the main session by
+  // nothing (it is "this chat" where a list must name it).
+  const appText = useSessionsViewText();
+  const nameOf = useSessionsViewLabel();
+  const requesterName = nameOf(requesterLabel);
   const pending = approval.status === "pending";
   // A member on a machine proposed it: the script, its code and its keys
   // live on that machine.
   const hostId = approval.homeMachineId;
   const needsKeys = request.op === "create" || request.op === "update";
-  const [savedNames, setSavedNames] = useState<string[]>([]);
-  const [drafts, setDrafts] = useState<Record<string, string>>({});
-  const [keyError, setKeyError] = useState<string | undefined>();
-  const [savingKey, setSavingKey] = useState<string | undefined>();
-  const [codeOpen, setCodeOpen] = useState(false);
-  const [code, setCode] = useState<ScriptRevisionContent | undefined>();
-  const [codeError, setCodeError] = useState<string | undefined>();
+  const keys = useScriptApprovalKeys(request, hostId, pending && needsKeys);
+  const [detailsOpen, setDetailsOpen] = useState(false);
 
-  useEffect(() => {
-    if (!pending || !needsKeys || typeof window.consensus?.listScripts !== "function") return undefined;
-    let cancelled = false;
-    const apply = (scripts: Array<{ id: string; savedSecretNames: string[] }>) => {
-      const summary = scripts.find((item) => item.id === request.scriptId);
-      if (!cancelled && summary) setSavedNames(summary.savedSecretNames);
-    };
-    void window.consensus.listScripts().then(apply).catch(() => undefined);
-    const off = window.consensus.onScriptsUpdated((event) => apply(event.scripts));
-    return () => {
-      cancelled = true;
-      off();
-    };
-  }, [pending, needsKeys, request.scriptId]);
-
-  useEffect(() => {
-    if (!codeOpen || code || !request.revisionId) return;
-    let cancelled = false;
-    void window.consensus.getScriptRevision({ scriptId: request.scriptId, revisionId: request.revisionId, ...(hostId ? { hostId } : {}) })
-      .then((content) => {
-        if (!cancelled) setCode(content);
-      })
-      .catch((error: unknown) => {
-        if (!cancelled) setCodeError(error instanceof Error ? error.message : String(error));
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [codeOpen, code, request.scriptId, request.revisionId, hostId]);
-
-  const missing = needsKeys ? request.secretNames.filter((name) => !savedNames.includes(name)) : [];
-
-  async function saveKey(name: string): Promise<void> {
-    const value = drafts[name] ?? "";
-    if (!value.trim()) return;
-    setSavingKey(name);
-    setKeyError(undefined);
-    try {
-      const summary = await window.consensus.setScriptSecret({ scriptId: request.scriptId, ...(hostId ? { hostId } : {}), name, value });
-      setSavedNames(summary.savedSecretNames);
-      setDrafts((current) => ({ ...current, [name]: "" }));
-    } catch (error) {
-      setKeyError(error instanceof Error ? error.message : String(error));
-    } finally {
-      setSavingKey(undefined);
-    }
+  async function approve(): Promise<void> {
+    if (await keys.save()) await props.onRespond(approval.id, true, "once");
   }
 
   const chats = request.permissions.chatIds.map((chatId) => request.chatLabels[chatId] ?? chatId);
-  const members = request.permissions.participantIds.map((participantId) => request.participantLabels[participantId] ?? participantId);
-  const title = scriptApprovalTitle(approval.requesterHandle, request);
+  const members = request.permissions.participantIds.map((participantId) => {
+    const label = request.participantLabels[participantId] ?? participantId;
+    return nameOf(label) || (label.startsWith("@") ? "this chat" : label);
+  });
+  const title = appText(scriptApprovalTitle(approval.requesterHandle, request));
 
-  const queuedDecision = approval.machineDecisionPending;
+  // A task created without a card has nothing to wait for.
+  const queuedDecision = approval.status === "auto-applied" ? undefined : approval.machineDecisionPending;
   if (queuedDecision) {
     return (
       <section className="chat-app-tool-approval-card is-compact-result" aria-label={title}
         data-app-tool-approval-id={approval.id} tabIndex={-1}>
-        <Avatar className="message-avatar chat-app-tool-approval-avatar" spec={requesterAvatar} />
+        <ChatMemberMark className="message-avatar chat-app-tool-approval-avatar" markClassName="is-large" avatar={requesterAvatar} member={requester} />
         <div className="chat-app-tool-approval-body">
           <strong>{queuedDecision.approve ? "Approval saved" : "Refusal saved"}</strong>
           <p>Waiting for machine {queuedDecision.machineName} to confirm the decision.</p>
@@ -139,14 +113,17 @@ export function ChatScriptApprovalCard(props: {
 
   // Used: one line, like a folded urgent alert (the User, 2026-11-18).
   if (!pending) {
-    // Approved, it ends as the button she pressed says; a task that will run
-    // ends with its schedule, not a second time.
-    const runs = approval.status === "approved" && request.op !== "delete" && request.op !== "disable";
+    // Approved, it ends as the button she pressed says (created without a
+    // card: that it was); a task that will run ends with its schedule, not a
+    // second time.
+    const withoutCard = approval.status === "auto-applied";
+    const applied = approval.status === "approved" || withoutCard;
+    const runs = applied && request.op !== "delete" && request.op !== "disable";
     const schedule = runs && request.scheduleText ? request.scheduleText : undefined;
-    const ended = approval.status === "approved" ? scriptApprovedEnding(request, schedule)
+    const ended = applied ? scriptApprovedEnding(request, schedule, withoutCard)
       : approval.status === "denied" ? "Declined" : approval.status === "cancelled" ? "Cancelled" : "Expired";
     return (
-      <ChatUsedApprovalLine approval={approval} kind="Scheduled task" icon={CalendarClock} preview={request.name} ended={ended}
+      <ChatUsedApprovalLine approval={approval} kind="Scheduled task" icon={CalendarDotsIcon} preview={request.name} ended={ended}
         withoutTime={Boolean(schedule)} detail={approval.error} />
     );
   }
@@ -158,136 +135,70 @@ export function ChatScriptApprovalCard(props: {
       data-app-tool-approval-id={approval.id}
       tabIndex={-1}
     >
-      <Avatar className="message-avatar chat-app-tool-approval-avatar" spec={requesterAvatar} />
+      <ChatMemberMark className="message-avatar chat-app-tool-approval-avatar" markClassName="is-large" avatar={requesterAvatar} member={requester} />
       <div className="chat-app-tool-approval-body">
         <div className="chat-app-tool-approval-meta">
-          <strong>{requesterLabel}</strong>
-          <span className="message-provider">Proposes a scheduled task</span>
+          {requesterName && <strong>{requesterName}</strong>}
+          <span className="message-provider">{scriptProposal(request.op)}</span>
           <span className="message-when">{formatChatTime(approval.createdAt)}</span>
         </div>
         <div className="chat-app-tool-approval-panel is-review-change">
-          <div className="chat-app-tool-review-header">
-            <div className="chat-app-tool-review-chip">
-              <CalendarClock size={13} aria-hidden />
-              Scheduled task
-            </div>
-          </div>
           <div className="chat-script-approval-content">
-            <h3 className="chat-script-approval-title">{title}</h3>
+            <div className="chat-script-approval-head">
+              <CalendarDotsIcon size={14} aria-hidden />
+              <strong className="chat-script-approval-name">{request.name}</strong>
+              <span className="chat-script-approval-schedule">{request.scheduleText} on {request.hostPhrase}</span>
+            </div>
             {approval.cardRefusals?.length ? (
-              <p className="chat-script-approval-error">Your earlier answer was not applied: {approval.cardRefusals[approval.cardRefusals.length - 1].reason}</p>
+              <p className="chat-script-approval-error">Your earlier answer was not applied: {appText(approval.cardRefusals[approval.cardRefusals.length - 1].reason)}</p>
             ) : null}
-            <div className="chat-script-approval-name">{request.name}</div>
-            {request.description && <p className="chat-script-approval-description">{request.description}</p>}
-            <dl className="chat-script-approval-facts">
-              <dt>Runs on</dt>
-              <dd>{request.hostLabel}</dd>
-              <dt>Schedule</dt>
-              <dd>{request.scheduleText}</dd>
-              <dt>Posts to</dt>
-              <dd>{chats.join(", ")}</dd>
-              <dt>May wake</dt>
-              <dd>{members.length > 0 ? `${members.join(", ")} · at most ${request.permissions.maxWakeupsPerHour} per hour` : "Nobody; it only posts notes"}</dd>
-              {needsKeys && (
-                <>
-                  <dt>Stops after</dt>
-                  <dd>{request.timeoutSeconds} s per run</dd>
-                </>
-              )}
-            </dl>
-            {request.reason && <p className="chat-script-approval-reason">{request.reason}</p>}
-            {needsKeys && request.secretNames.length > 0 && (
-              <div className="chat-script-approval-keys">
-                <div className="chat-script-approval-section-title">
-                  <KeyRound size={13} aria-hidden />
-                  Keys
-                </div>
-                <p className="chat-script-approval-hint">Saved only on {request.hostPhrase}. The task reads them from its environment; agents never see them.</p>
-                {request.secretNames.map((name) => {
-                  const saved = savedNames.includes(name);
-                  return (
-                    <div className="chat-script-approval-key" key={name}>
-                      <code>{name}</code>
-                      {saved && !(name in drafts && drafts[name] !== "") ? (
-                        <span className="chat-script-approval-key-saved">
-                          <Check size={13} aria-hidden /> Saved
-                          <button type="button" className="chat-script-approval-link" onClick={() => setDrafts((current) => ({ ...current, [name]: " " }))}>
-                            Replace
-                          </button>
-                        </span>
-                      ) : (
-                        <span className="chat-script-approval-key-entry">
-                          <input
-                            type="password"
-                            autoComplete="off"
-                            spellCheck={false}
-                            aria-label={`Value for ${name}`}
-                            placeholder="Paste value"
-                            value={(drafts[name] ?? "").trimStart()}
-                            onChange={(event) => setDrafts((current) => ({ ...current, [name]: event.target.value }))}
-                            onKeyDown={(event) => {
-                              if (event.key === "Enter") {
-                                event.preventDefault();
-                                void saveKey(name);
-                              }
-                            }}
-                          />
-                          <button
-                            type="button"
-                            className="chat-script-approval-save-key"
-                            disabled={savingKey === name || !(drafts[name] ?? "").trim()}
-                            onClick={() => void saveKey(name)}
-                          >
-                            Save
-                          </button>
-                        </span>
-                      )}
-                    </div>
-                  );
-                })}
-                {keyError && <p className="chat-script-approval-error">{keyError}</p>}
-              </div>
-            )}
-            {request.revisionId && (
-              <div className="chat-script-approval-code">
-                <button type="button" className="chat-script-approval-code-toggle" aria-expanded={codeOpen} onClick={() => setCodeOpen((open) => !open)}>
-                  {codeOpen ? <ChevronDown size={14} aria-hidden /> : <ChevronRight size={14} aria-hidden />}
-                  {codeOpen ? "Hide code" : "Show code"} · {request.runtime} · {request.fileCount} {request.fileCount === 1 ? "file" : "files"}, {formatBytes(request.totalBytes)}
-                </button>
-                {codeOpen && (
-                  <div className="chat-script-approval-files">
-                    {codeError && <p className="chat-script-approval-error">{codeError}</p>}
-                    {!code && !codeError && <p className="chat-script-approval-hint">Loading…</p>}
-                    {code?.files.map((file) => (
-                      <div className="chat-script-approval-file" key={file.path}>
-                        <div className="chat-script-approval-file-name">{file.path}{file.path === code.entry ? " (runs this)" : ""}</div>
-                        <pre><code>{file.content}</code></pre>
-                      </div>
-                    ))}
-                  </div>
-                )}
-              </div>
-            )}
-            {needsKeys && (
-              <p className="chat-script-approval-warning">
-                <ShieldAlert size={13} aria-hidden />
-                Runs with your user&apos;s full permissions on {request.hostPhrase}. Read the code before approving.
-              </p>
-            )}
-            {missing.length > 0 && (
-              <p className="chat-script-approval-hint">Save {missing.length === 1 ? "the key" : "every key"} above to approve.</p>
-            )}
+            {keys.names.map((name) => <ChatScriptApprovalKey key={name} name={name} keys={keys} />)}
+            {keys.error && <p className="chat-script-approval-error">{keys.error}</p>}
+            <button type="button" className="chat-script-approval-toggle" aria-expanded={detailsOpen} onClick={() => setDetailsOpen(!detailsOpen)}>
+              {detailsOpen ? <CaretDownIcon size={14} aria-hidden /> : <CaretRightIcon size={14} aria-hidden />}
+              Details
+            </button>
+            {detailsOpen && <ChatScriptApprovalDetails request={request} hostId={hostId} chats={chats} members={members} installs={needsKeys} />}
           </div>
           <ChatAppToolReviewFooter
             primaryLabel={scriptApprovalPrimaryLabel(request)}
-            submitting={props.submitting}
-            approveDisabled={missing.length > 0}
+            submitting={props.submitting || keys.saving}
+            approveDisabled={!keys.complete}
             cancelLabel="Decline"
             onCancel={() => void props.onRespond(approval.id, false)}
-            onApprove={() => void props.onRespond(approval.id, true, "once")}
+            onApprove={() => void approve()}
           />
         </div>
       </div>
     </section>
   );
 }
+
+interface ChatScriptApprovalKeyProps {
+  name: string;
+  keys: ScriptApprovalKeys;
+}
+
+const ChatScriptApprovalKey = ({ name, keys }: ChatScriptApprovalKeyProps): JSX.Element => (
+  <div className="chat-script-approval-key">
+    <code>{name}</code>
+    {keys.isSaved(name) ? (
+      <span className="chat-script-approval-key-saved">
+        <CheckIcon size={13} aria-hidden /> Saved
+        <button type="button" className="chat-script-approval-link" onClick={() => keys.replace(name)}>Replace</button>
+      </span>
+    ) : (
+      <Input
+        type="password"
+        autoComplete="off"
+        spellCheck={false}
+        className="chat-script-approval-key-field focus-visible:ring-0"
+        aria-label={`Value for ${name}`}
+        placeholder="Paste value"
+        disabled={keys.saving}
+        value={keys.valueOf(name)}
+        onChange={(event) => keys.onChange(name, event.target.value)}
+      />
+    )}
+  </div>
+);

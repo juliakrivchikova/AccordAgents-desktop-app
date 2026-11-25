@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { CheckCircle2, Copy } from "lucide-react";
+import { CheckCircleIcon, CopyIcon } from "@phosphor-icons/react";
 
 import type {
   Conversation,
@@ -18,7 +18,6 @@ import { MarkdownText } from "../content/markdown-text";
 import { authorForMessage } from "../conversation/conversation-display";
 import {
   IconButton,
-  LoadingDot,
   SeverityBadge,
   StatusBadge
 } from "../primitives";
@@ -30,6 +29,7 @@ import {
   PlanItemReviewBadge,
   PointStatusBadge
 } from "./review-badges";
+import { Spinner } from "@/components/ui/spinner";
 
 export function TimelineMessage({ message, kind }: { message: Conversation["messages"][number]; kind: ConversationKind }): JSX.Element {
   const [copied, setCopied] = useState(false);
@@ -58,7 +58,7 @@ export function TimelineMessage({ message, kind }: { message: Conversation["mess
         <IconButton
           className="message-copy-button"
           size="xs"
-          icon={copied ? CheckCircle2 : Copy}
+          icon={copied ? CheckCircleIcon : CopyIcon}
           label={copied ? "Copied" : "Copy markdown"}
           tooltip={copied ? "Copied" : "Copy markdown"}
           disabled={!canCopy}
@@ -68,7 +68,7 @@ export function TimelineMessage({ message, kind }: { message: Conversation["mess
         <div className="message-meta">
           <strong>{author}</strong>
           {isFinalPlan && (
-            <StatusBadge tone="success" icon={CheckCircle2} uppercase>
+            <StatusBadge tone="success" icon={CheckCircleIcon} uppercase>
               Final plan
             </StatusBadge>
           )}
@@ -76,7 +76,7 @@ export function TimelineMessage({ message, kind }: { message: Conversation["mess
           {message.progressPhase && (
             <StatusBadge tone="neutral">{message.progressPhase}</StatusBadge>
           )}
-          {isLiveProgress && <LoadingDot label="In progress" />}
+          {isLiveProgress && <Spinner size={14} label="In progress" />}
           {message.status === "error" && <StatusBadge tone="danger">error</StatusBadge>}
         </div>
         <div className="message-content">{display.markdown ? <MarkdownText content={display.content} /> : <pre>{display.content}</pre>}</div>

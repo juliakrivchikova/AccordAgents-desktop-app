@@ -1,4 +1,5 @@
 import * as React from "react";
+import type { IconWeight } from "@phosphor-icons/react";
 
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { cn } from "@/lib/utils";
@@ -11,7 +12,7 @@ export type IconButtonTone = "default" | "danger";
 
 export type IconButtonIcon = React.ComponentType<{
   className?: string;
-  strokeWidth?: number | string;
+  weight?: IconWeight;
   "aria-hidden"?: boolean | "true" | "false";
 }>;
 
@@ -20,6 +21,8 @@ export interface IconButtonProps
   label: string;
   icon: IconButtonIcon;
   iconClassName?: string;
+  // Fill for glyphs that read as solid, such as Stop.
+  iconWeight?: IconWeight;
   size?: IconButtonSize;
   // Danger turns the icon red on hover; the shape never changes.
   tone?: IconButtonTone;
@@ -37,6 +40,7 @@ export const IconButton = React.forwardRef<HTMLButtonElement, IconButtonProps>(f
     label,
     icon: Icon,
     iconClassName,
+    iconWeight = "regular",
     size = "sm",
     tone = "default",
     floating = false,
@@ -58,14 +62,14 @@ export const IconButton = React.forwardRef<HTMLButtonElement, IconButtonProps>(f
       data-floating={floating ? "true" : undefined}
       aria-label={label}
       aria-pressed={pressed}
-      title={tooltip ? undefined : label}
       className={cn("aa-icon-button", className)}
       {...rest}
     >
-      <Icon className={iconClassName} strokeWidth={1.75} aria-hidden />
+      <Icon className={iconClassName} weight={iconWeight} aria-hidden />
     </button>
   );
 
+  // Hints come only from the app's own delayed tooltip, never a system title.
   if (!tooltip) {
     return button;
   }

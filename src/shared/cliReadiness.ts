@@ -210,13 +210,16 @@ const SUBSTITUTE_REASON: Record<Exclude<AgentReadinessState, "ready">, string> =
   checking: "is not ready"
 };
 
-/** The line a new chat shows when its Assistant runs on another CLI than the
+/** The line a new chat shows when its main session runs on another CLI than the
  *  saved one; nothing when they are the same. Worded for the computer and the
  *  phone alike, so it names no screen. */
 export function assistantSubstituteNote(options: {
   agents: AgentHealth[];
   providers: Array<Pick<ProviderSettings, "kind" | "enabled">>;
   explicitKind?: ChatProviderKind;
+  /** Who takes the CLI when it is named ("The Assistant"); a new chat's main
+   *  session is named by nothing: the CLI runs the chat. */
+  subject?: string;
 }): string | undefined {
   const saved = options.explicitKind;
   const used = resolveAssistantProviderKind(options);
@@ -225,7 +228,9 @@ export function assistantSubstituteNote(options: {
   }
   const state = readinessForProvider(saved, options.agents, options.providers);
   const why = state === "ready" ? "is not ready" : SUBSTITUTE_REASON[state];
-  return `The Assistant uses ${CLI_PROVIDER_SETUP[used].label} in this chat: ${CLI_PROVIDER_SETUP[saved].label}, your saved choice, ${why}.`;
+  return options.subject
+    ? `${options.subject} uses ${CLI_PROVIDER_SETUP[used].label} in this chat: ${CLI_PROVIDER_SETUP[saved].label}, your saved choice, ${why}.`
+    : `${CLI_PROVIDER_SETUP[used].label} runs this chat: ${CLI_PROVIDER_SETUP[saved].label}, your saved choice, ${why}.`;
 }
 
 export function isAgentSnapshotStale(agents: AgentHealth[], now = Date.now()): boolean {

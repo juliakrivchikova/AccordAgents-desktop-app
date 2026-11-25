@@ -1,23 +1,31 @@
-import { BarChart3, Clock3, Loader2 } from "lucide-react";
+import { ChartBarIcon, ClockIcon } from "@phosphor-icons/react";
 import type { CSSProperties, ReactNode } from "react";
 
 import { Skeleton } from "@/components/ui/skeleton";
 import "./loading-states.css";
+import { Spinner } from "@/components/ui/spinner";
+import { useDelayedFlag } from "@/components/ui/delayed";
 
 export interface AppLoadingStateProps {
   title?: string;
   description?: ReactNode;
+  /** The wait before it shows (LOADING_DELAY_MS); 0 when the wait has
+   *  already been sat through elsewhere. */
+  delayMs?: number;
 }
 
 export function AppLoadingState({
   title = "Preparing workspace",
-  description = "Loading settings, agents, and recent consensus history."
+  description = "Loading settings, agents, and recent consensus history.",
+  delayMs
 }: AppLoadingStateProps): JSX.Element {
+  // A quick load shows an empty area, not a loader that flashes.
+  if (!useDelayedFlag(true, delayMs)) return <div className="app-loading-state" aria-busy="true" />;
   return (
     <div className="app-loading-state" role="status" aria-live="polite">
       <div className="app-loading-state__panel">
         <div className="loading-state-icon">
-          <Loader2 aria-hidden />
+          <Spinner />
         </div>
         <div className="app-loading-state__copy">
           <h2>{title}</h2>
@@ -33,11 +41,12 @@ export function AppLoadingState({
   );
 }
 
-export function HistoryLoadingState(): JSX.Element {
+export function HistoryLoadingState(): JSX.Element | null {
+  if (!useDelayedFlag(true)) return null;
   return (
     <div className="history-loading-state" role="status" aria-live="polite" aria-label="Loading history">
       <div className="history-loading-state__label">
-        <Clock3 aria-hidden />
+        <ClockIcon aria-hidden />
         <span>Syncing history</span>
       </div>
       {Array.from({ length: 7 }, (_, index) => (
@@ -63,7 +72,7 @@ export function ChartLoadingState({
     <div className="chart-loading-state" role="status" aria-live="polite">
       <div className="chart-loading-state__header">
         <div className="loading-state-icon">
-          <BarChart3 aria-hidden />
+          <ChartBarIcon aria-hidden />
         </div>
         <div>
           <h2>{title}</h2>

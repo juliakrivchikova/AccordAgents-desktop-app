@@ -7,6 +7,7 @@ import type {
   ChatParticipantConfigUpdate,
   CliProviderHostUpdate,
   ChatProviderKind,
+  NewChatDefaultsUpdate,
   ChatPromptContextSettings,
   ChatRoleConfigUpdate,
   ChatSavedPromptConfigUpdate,
@@ -27,7 +28,7 @@ import { BehaviorRuleSettingsSection } from "./behavior-rules-settings-section";
 import { SavedPromptsSettingsSection } from "./saved-prompts-settings-section";
 import { EnvironmentSettingsSection } from "./environment-settings-section";
 import { PluginsSettingsSection } from "./plugins/plugins-settings-section";
-import { X } from "lucide-react";
+import { XIcon } from "@phosphor-icons/react";
 import { AwsSettingsPage } from "./aws-settings-page";
 import { ScriptsSettingsSection } from "./scripts-settings-section";
 import { AlertsSettingsSection } from "./alerts-settings-section";
@@ -41,6 +42,7 @@ export function SettingsView(props: {
   agents: AgentHealth[];
   updateProvider: (provider: ProviderSettings, patch: { enabled?: boolean }) => Promise<void>;
   setAssistantProviderKind: (kind: ChatProviderKind) => Promise<void>;
+  setNewChatDefaults: (update: NewChatDefaultsUpdate) => Promise<void>;
   saveChatRoleConfig: (update: ChatRoleConfigUpdate) => Promise<void>;
   archiveChatRoleConfig: (id: string) => Promise<void>;
   saveChatBehaviorRuleConfig: (update: ChatBehaviorRuleConfigUpdate) => Promise<void>;
@@ -98,14 +100,14 @@ export function SettingsView(props: {
       <div className={`settings-view-inner ${props.section === "participants" ? "settings-view-inner-participants" : ""}`}>
         <div className="settings-view-head" data-titlebar>
           <div className="settings-view-head-lead">
-            {props.sidebarCollapsed && <SidebarToggleButton expanded={false} onToggle={props.onExpandSidebar} />}
+            {props.sidebarCollapsed && <span className="settings-view-sidebar-toggle"><SidebarToggleButton expanded={false} onToggle={props.onExpandSidebar} /></span>}
             <h1>{title}</h1>
           </div>
           <div className="settings-view-head-actions">
             {(props.section === "plugins" || props.section === "environment") && headerAction}
             <IconButton
               size="sm"
-              icon={X}
+              icon={XIcon}
               label="Close settings"
               tooltip="Close settings"
               onClick={props.onClose}
@@ -168,6 +170,7 @@ export function SettingsView(props: {
             deleteCliProviderHost={props.deleteCliProviderHost}
             agents={props.agents}
             assistantProviderKind={props.settings.assistantProviderKind}
+            newChatDefaults={props.settings.newChatDefaults}
             repoFileOpenAction={props.settings.repoFileOpenAction}
             repoFileExternalOpenAction={props.settings.repoFileExternalOpenAction}
             betaUpdates={props.settings.betaUpdates}
@@ -180,6 +183,7 @@ export function SettingsView(props: {
             mobileControl={props.settings.mobileControl}
             updateProvider={props.updateProvider}
             setAssistantProviderKind={props.setAssistantProviderKind}
+            setNewChatDefaults={props.setNewChatDefaults}
             setRepoFileOpenPreference={props.setRepoFileOpenPreference}
             setRepoFileExternalOpenPreference={props.setRepoFileExternalOpenPreference}
             setBetaUpdates={props.setBetaUpdates}

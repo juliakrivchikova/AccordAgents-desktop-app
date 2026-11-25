@@ -11,12 +11,16 @@ import type {
   ChatRoleParticipantChangeRequest,
   ChatSelfCompactionRequest,
   ChatShellPermissionRule,
+  ChatClaudePlanApproval,
   ChatConnectorSignInRequest,
   ChatToolPermissionRequest,
   Conversation
 } from "../../../shared/types";
+import { selfCompactionRequestOf } from "../../../shared/compactionCard";
 import { isChatScriptChangeRequest, type ChatScriptChangeRequest } from "../../../shared/scripts";
 import { isConnectorSignInRequest } from "../../../shared/connectorSignIn";
+import { isClaudePlanApprovalRequest } from "../../../shared/claudePlanApproval";
+import { chatToolPermissionIsScoped, normalizeChatToolPermissionScope } from "../../../shared/toolPermissionScope";
 import { chatParticipantReference } from "../conversation/conversation-display";
 import { CODEX_APPROVAL_TOOL_NAME, chatCodexApprovalRequest } from "./chat-codex-approval-presentation";
 
@@ -48,6 +52,13 @@ export function chatConnectorSignInRequest(approval: ChatAppToolApproval): ChatC
   return approval.toolName === APP_CONNECTOR_SIGN_IN_TOOL && isConnectorSignInRequest(approval.request)
     ? approval.request
     : undefined;
+}
+
+export type ChatClaudePlanApprovalRequest = ChatToolPermissionRequest & { planApproval: ChatClaudePlanApproval };
+
+/** Claude Code's plan approval (ExitPlanMode), when this approval is one. */
+export function chatClaudePlanApprovalRequest(approval: ChatAppToolApproval): ChatClaudePlanApprovalRequest | undefined {
+  return approval.toolName === APP_TOOL_PERMISSION_TOOL && isClaudePlanApprovalRequest(approval.request) ? approval.request : undefined;
 }
 
 /** A scheduled-script proposal, when this approval is one. */
@@ -107,17 +118,7 @@ export function chatAppToolApprovals(conversation: Conversation | undefined): Ch
 }
 
 export function chatSelfCompactionRequest(approval: ChatAppToolApproval): ChatSelfCompactionRequest | undefined {
-  if (approval.toolName !== APP_CHAT_REQUEST_COMPACTION_TOOL) {
-    return undefined;
-  }
-  const request = approval.request as Partial<ChatSelfCompactionRequest>;
-  return request.type === "self_compaction" &&
-    (request.instructions === undefined || typeof request.instructions === "string")
-    ? {
-        type: "self_compaction",
-        instructions: request.instructions?.trim() || undefined
-      }
-    : undefined;
+  return selfCompactionRequestOf(approval);
 }
 
 export function chatRoleChangeRequest(approval: ChatAppToolApproval): ChatRoleChangeRequest | undefined {
@@ -305,12 +306,16 @@ export function chatToolPermissionRequest(
       : fallbackAgentMode,
     reason: typeof request.reason === "string" ? request.reason : undefined,
     toolName,
-    toolInput: request.toolInput
+    toolInput: request.toolInput,
+    ...(normalizeChatToolPermissionScope(request.chatScope) ? { chatScope: normalizeChatToolPermissionScope(request.chatScope) } : {})
   };
 }
 
+/** Whether the card offers "for this chat": not in Claude's Auto mode, and
+ *  for Bash, WebFetch and file edits only with the scope Claude Code's
+ *  "don't ask again" would have (src/shared/toolPermissionScope.ts). */
 export function chatToolPermissionAllowsChatScope(request: ChatToolPermissionRequest): boolean {
-  return request.agentMode !== "auto";
+  return request.agentMode !== "auto" && (!chatToolPermissionIsScoped(request.toolName) || Boolean(request.chatScope));
 }
 
 export function chatPermissionGrantLabel(permission: ChatPermissionGrant): string {

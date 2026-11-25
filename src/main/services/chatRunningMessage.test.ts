@@ -5,7 +5,7 @@ import path from "node:path";
 import test from "node:test";
 import { runningMessageForParticipant, runningMessageTarget } from "../../shared/chatRunningMessage";
 import { resolveSqliteExecutable } from "./sqliteCli";
-import { StorageService } from "./storage";
+import { storageDependencies, storageParts, storageWithoutDatabase } from "./storage/test/storageParts";
 import type { ChatMessage, ChatParticipant, Conversation } from "../../shared/types";
 
 const taylor: ChatParticipant = { id: "taylor", handle: "taylor", roleConfigId: "engineer", kind: "claude-code" };
@@ -144,10 +144,10 @@ test("a turn in a thread opens in that thread; one in the timeline opens inline"
 
 test("storage finds the turn in progress far above the latest page, skipping posts and the queued turn", async () => {
   const directory = await mkdtemp(path.join(tmpdir(), "accordagents-running-message-"));
-  const storage = Object.create(StorageService.prototype) as any;
-  storage.dbPath = path.join(directory, "accordagents.sqlite3");
-  storage.sqliteExecutable = resolveSqliteExecutable({ appPath: process.cwd() });
-  storage.initialized = true;
+  const storage = storageWithoutDatabase();
+  storageDependencies(storage).dbPath = path.join(directory, "accordagents.sqlite3");
+  storageDependencies(storage).sqliteExecutable = resolveSqliteExecutable({ appPath: process.cwd() });
+  storageParts(storage).schema.initialized = true;
   const filler: ChatMessage[] = Array.from({ length: 120 }, (_, index) => ({
     id: `filler-${index}`,
     role: "user" as const,
@@ -170,7 +170,7 @@ test("storage finds the turn in progress far above the latest page, skipping pos
   ], { "run-1": "taylor", "run-2": "taylor", "run-d": "drew" });
 
   try {
-    await storage.runSql(`
+    await storageParts(storage).sqlite.runSql(`
       create table conversations (
         id text primary key, title text not null, kind text not null, created_at text not null,
         updated_at text not null, repo_path text, body_json text, save_token text, payload_json text not null
@@ -200,10 +200,10 @@ test("storage finds the turn in progress far above the latest page, skipping pos
 
 test("the server reads only the turns in progress it has open, from the message each one answers on", async () => {
   const directory = await mkdtemp(path.join(tmpdir(), "accordagents-pending-turns-"));
-  const storage = Object.create(StorageService.prototype) as any;
-  storage.dbPath = path.join(directory, "accordagents.sqlite3");
-  storage.sqliteExecutable = resolveSqliteExecutable({ appPath: process.cwd() });
-  storage.initialized = true;
+  const storage = storageWithoutDatabase();
+  storageDependencies(storage).dbPath = path.join(directory, "accordagents.sqlite3");
+  storageDependencies(storage).sqliteExecutable = resolveSqliteExecutable({ appPath: process.cwd() });
+  storageParts(storage).schema.initialized = true;
   const ask = { id: "ask", role: "user" as const, content: "@taylor go", createdAt: at(10) };
   const turn = { ...memberMessage("turn", 11, { status: "pending", runId: "run-1" }), metadata: { runId: "run-1", sourceMessageId: "ask", parentMessageId: "ask" } };
   // Dead long ago, answering nothing open; and a running message of a member
@@ -212,7 +212,7 @@ test("the server reads only the turns in progress it has open, from the message 
   const other = { ...memberMessage("other", 12, { participant: drew, status: "pending", runId: "run-d" }), metadata: { runId: "run-d", sourceMessageId: "ask" } };
   const conversation = chat([dead, ask as ChatMessage, turn, other, memberMessage("post", 13, { runId: "run-1" })]);
   try {
-    await storage.runSql(`
+    await storageParts(storage).sqlite.runSql(`
       create table conversations (
         id text primary key, title text not null, kind text not null, created_at text not null,
         updated_at text not null, repo_path text, body_json text, save_token text, payload_json text not null

@@ -1,6 +1,9 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { SettingsService } from "./settings";
+import { settingsParts, settingsWithoutFile } from "./settings/test/settingsParts";
+import { publicCliProviderHosts } from "./settings/providers/storedHosts";
+import { mergeDefaults } from "./settings/stored/storedDefaults";
 import type { AppSettings, ChatParticipantConfig, ChatRoleConfig } from "../../shared/types";
 import {
   CHAT_PARTICIPANT_REQUEST_MAX_DEPTH_DEFAULT,
@@ -21,7 +24,7 @@ const ROLE: ChatRoleConfig = {
 };
 
 function settingsServiceWith(initial: { chatParticipantConfigs?: unknown[]; cliProviderHosts?: unknown[] } = {}) {
-  const service = Object.create(SettingsService.prototype) as any;
+  const service = settingsWithoutFile();
   let stored = {
     settingsVersion: 1,
     roundLimitDefault: 1,
@@ -49,13 +52,13 @@ function settingsServiceWith(initial: { chatParticipantConfigs?: unknown[]; cliP
     chatParticipantSeedState: {},
     cliProviderHosts: initial.cliProviderHosts ?? []
   };
-  service.readStored = async () => stored;
-  service.writeStored = async (next: typeof stored) => {
+  settingsParts(service).settingsStore.readStored = async () => stored;
+  settingsParts(service).settingsStore.writeStored = async (next: typeof stored) => {
     stored = next;
   };
   // Object.create skips the constructor; safeStorage is unavailable in tests,
   // so keys are base64-obfuscated (the same fallback the app uses without a keychain).
-  service.getPublicSettings = async (): Promise<AppSettings> => ({
+  settingsParts(service).publicSettings.getPublicSettings = async (): Promise<AppSettings> => ({
     roundLimitDefault: stored.roundLimitDefault,
     betaUpdates: false,
     crashReports: true,
@@ -73,7 +76,7 @@ function settingsServiceWith(initial: { chatParticipantConfigs?: unknown[]; cliP
     chatParticipantSeedState: stored.chatParticipantSeedState,
     mobileControl: EMPTY_MOBILE_CONTROL_SETTINGS,
     chatCustomAvatars: [],
-    cliProviderHosts: service.publicCliProviderHosts(stored)
+    cliProviderHosts: publicCliProviderHosts(stored as never)
   });
   return { service, stored: () => stored };
 }
@@ -144,9 +147,9 @@ test("member presets bind only to an existing provider on their own CLI, and los
   await assert.rejects(service.saveChatParticipantConfig({ ...base, kind: "codex-cli", hostId: host.id }), /runs through Claude Code/);
   await service.saveChatParticipantConfig({ ...base, hostId: host.id, model: "glm-5.3" });
   assert.equal(stored().chatParticipantConfigs[0]?.hostId, host.id);
-  const reloaded = service.mergeDefaults(JSON.parse(JSON.stringify(stored())));
-  assert.equal(reloaded.chatParticipantConfigs[0]?.hostId, host.id);
-  assert.equal(reloaded.cliProviderHosts[0]?.id, host.id);
+  const reloaded = mergeDefaults(JSON.parse(JSON.stringify(stored())));
+  assert.equal(reloaded.chatParticipantConfigs![0]?.hostId, host.id);
+  assert.equal(reloaded.cliProviderHosts![0]?.id, host.id);
 
   // Changing the provider's CLI underneath bound presets is refused.
   await assert.rejects(service.saveCliProviderHost({ id: host.id, label: "GLM", cli: "codex-cli", vendor: "zai", baseUrl: "https://api.z.ai/api/v1" }), /Members are bound/);
@@ -171,7 +174,7 @@ test("member presets bind only to an existing provider on their own CLI, and los
 
 test("damaged stored providers are dropped on reload instead of half-applying", () => {
   const { service } = settingsServiceWith();
-  const reloaded = service.mergeDefaults({
+  const reloaded = mergeDefaults({
     settingsVersion: 1,
     providers: [],
     chatRoleConfigs: [ROLE],
@@ -182,8 +185,8 @@ test("damaged stored providers are dropped on reload instead of half-applying", 
       { id: "bad", label: "x", cli: "codex-cli", vendor: "deepseek", baseUrl: "https://x" },
       "garbage"
     ]
-  });
-  assert.deepEqual(reloaded.cliProviderHosts.map((host: { id: string; baseUrl: string; encryptedApiKey?: string }) => [host.id, host.baseUrl, Boolean(host.encryptedApiKey)]), [
+  } as never);
+  assert.deepEqual(reloaded.cliProviderHosts!.map((host: { id: string; baseUrl: string; encryptedApiKey?: string }) => [host.id, host.baseUrl, Boolean(host.encryptedApiKey)]), [
     ["ok", "https://api.z.ai/api/anthropic", true],
     ["dup", "https://api.moonshot.ai/anthropic", false]
   ]);

@@ -1,5 +1,5 @@
 import { type CSSProperties, type ReactNode, useCallback, useEffect, useMemo, useState } from "react";
-import { Copy, ListChecks, Plug, RefreshCw, Search } from "lucide-react";
+import { CopyIcon, ListChecksIcon, PlugIcon, ArrowsClockwiseIcon, MagnifyingGlassIcon } from "@phosphor-icons/react";
 
 import { Button } from "@/components/ui/button";
 import { IconButton } from "../../primitives";
@@ -10,6 +10,7 @@ import type {
   UserSkillListResult,
   UserSkillSummary
 } from "../../../../shared/types";
+import { Delayed } from "@/components/ui/delayed";
 
 type CatalogTab = "plugins" | "skills";
 type ProviderFilter = "all" | ChatProviderKind;
@@ -60,7 +61,7 @@ export function PluginsSettingsSection(props: {
     props.onHeaderActionChange?.(
       <IconButton
         size="sm"
-        icon={RefreshCw}
+        icon={ArrowsClockwiseIcon}
         label="Refresh plugins and skills"
         tooltip="Refresh"
         disabled={state.loading}
@@ -105,7 +106,7 @@ export function PluginsSettingsSection(props: {
             aria-selected={activeTab === "plugins"}
             onClick={() => setActiveTab("plugins")}
           >
-            <Plug size={15} aria-hidden />
+            <PlugIcon size={15} aria-hidden />
             Plugins
           </button>
           <button
@@ -114,12 +115,12 @@ export function PluginsSettingsSection(props: {
             aria-selected={activeTab === "skills"}
             onClick={() => setActiveTab("skills")}
           >
-            <ListChecks size={15} aria-hidden />
+            <ListChecksIcon size={15} aria-hidden />
             Skills
           </button>
         </div>
         <label className="plugins-search" aria-label="Search plugins and skills">
-          <Search size={16} aria-hidden />
+          <MagnifyingGlassIcon size={16} aria-hidden />
           <input
             value={search}
             onChange={(event) => setSearch(event.target.value)}
@@ -133,7 +134,7 @@ export function PluginsSettingsSection(props: {
 
       <div className="plugins-status-row">
         {state.loading ? (
-          <span>Loading local catalog...</span>
+          <Delayed><span>Loading local catalog...</span></Delayed>
         ) : state.error ? (
           <span className="plugins-error">{state.error}</span>
         ) : (
@@ -296,7 +297,7 @@ function PluginIcon(props: { plugin: PluginCatalogItem }): JSX.Element {
   }
   return (
     <span className="plugins-card-icon" style={style}>
-      <Plug size={18} aria-hidden />
+      <PlugIcon size={18} aria-hidden />
     </span>
   );
 }
@@ -356,7 +357,7 @@ function SkillCard(props: {
   return (
     <article className="plugins-card" data-testid="skill-card">
       <div className="plugins-card-main">
-        <span className="plugins-card-icon"><ListChecks size={18} aria-hidden /></span>
+        <span className="plugins-card-icon"><ListChecksIcon size={18} aria-hidden /></span>
         <div className="plugins-card-copy">
           <div className="plugins-card-title-row">
             <h2>{props.skill.displayName}</h2>
@@ -376,7 +377,7 @@ function SkillCard(props: {
         </div>
       </div>
       <div className="plugins-row-actions">
-        <IconButton icon={Copy} label={`Copy /${props.skill.frontmatterName}`} tooltip="Copy"
+        <IconButton icon={CopyIcon} label={`Copy /${props.skill.frontmatterName}`} tooltip="Copy"
           onClick={() => void props.onCopy(props.skill.displayName, `/${props.skill.frontmatterName}`)} />
       </div>
     </article>

@@ -1,8 +1,9 @@
 import { useEffect, useRef, useState } from "react";
-import { ChevronDown, ChevronUp, Minus, Plus, Search } from "lucide-react";
+import { CaretDownIcon, CaretUpIcon, MinusIcon, PlusIcon, MagnifyingGlassIcon } from "@phosphor-icons/react";
 
 import { IconButton } from "../primitives";
 import { ZOOM_MAX, ZOOM_MIN, ZOOM_STEP } from "./zoom";
+import { Delayed } from "@/components/ui/delayed";
 
 type PdfViewer = import("pdfjs-dist/web/pdf_viewer.mjs").PDFViewer;
 type EventBus = import("pdfjs-dist/web/pdf_viewer.mjs").EventBus;
@@ -112,9 +113,9 @@ export function PdfView(props: { data: Uint8Array; revision: number }): JSX.Elem
   return (
     <div className="file-pdf-view">
       <div className="file-viewer-toolbar" role="toolbar" aria-label="PDF">
-        <IconButton label="Zoom out" icon={Minus} onClick={() => zoom(1 / ZOOM_STEP)} />
+        <IconButton label="Zoom out" icon={MinusIcon} onClick={() => zoom(1 / ZOOM_STEP)} />
         <span className="file-viewer-zoom-value">{scale ? `${Math.round(scale * 100)}%` : "…"}</span>
-        <IconButton label="Zoom in" icon={Plus} onClick={() => zoom(ZOOM_STEP)} />
+        <IconButton label="Zoom in" icon={PlusIcon} onClick={() => zoom(ZOOM_STEP)} />
         <button
           type="button"
           className="file-viewer-text-button"
@@ -123,7 +124,7 @@ export function PdfView(props: { data: Uint8Array; revision: number }): JSX.Elem
           Fit width
         </button>
         <form className="file-viewer-search" role="search" onSubmit={(event) => { event.preventDefault(); find(); }}>
-          <Search size={13} aria-hidden />
+          <MagnifyingGlassIcon size={13} aria-hidden />
           <input
             value={query}
             placeholder="Find in PDF"
@@ -138,15 +139,15 @@ export function PdfView(props: { data: Uint8Array; revision: number }): JSX.Elem
           />
           {matches && query && <span className="file-viewer-meta">{matches.total ? `${matches.current}/${matches.total}` : "0"}</span>}
         </form>
-        <IconButton label="Previous match" icon={ChevronUp} disabled={!query} onClick={() => find(true)} />
-        <IconButton label="Next match" icon={ChevronDown} disabled={!query} onClick={() => find(false)} />
+        <IconButton label="Previous match" icon={CaretUpIcon} disabled={!query} onClick={() => find(true)} />
+        <IconButton label="Next match" icon={CaretDownIcon} disabled={!query} onClick={() => find(false)} />
         {state.pages ? <span className="file-viewer-meta">{state.pages} pages</span> : null}
       </div>
       <div className="file-pdf-stage">
         <div ref={containerRef} className="file-pdf-container" data-testid="file-pdf">
           <div className="pdfViewer" />
         </div>
-        {state.status === "loading" && <p className="file-panel-message file-pdf-overlay">Loading PDF…</p>}
+        {state.status === "loading" && <Delayed><p className="file-panel-message file-pdf-overlay">Loading PDF…</p></Delayed>}
         {state.status === "error" && <p className="file-panel-message file-pdf-overlay">This PDF could not be shown: {state.error}</p>}
       </div>
     </div>

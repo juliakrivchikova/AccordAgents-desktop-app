@@ -309,8 +309,10 @@ function say(text: string): string {
 /** The spoken text of an alert: who and where, then the member's message. */
 export function spokenAlert(requester: string, chatTitle: string | undefined, message: string): string {
   const where = chatTitle ? ` in the chat ${chatTitle}` : "";
-  // "@taylor" would be read out as "at taylor".
-  return `Urgent alert from ${requester.replace(/^@/, "")}${where}. ${message}`;
+  // "@taylor" would be read out as "at taylor". Nobody named (the main
+  // session in the sessions view): the alert and where it is from.
+  const who = requester.replace(/^@/, "");
+  return who ? `Urgent alert from ${who}${where}. ${message}` : `Urgent alert${where}. ${message}`;
 }
 
 /** With a server Twilio can reach: 1 confirms, 2 repeats. */

@@ -1,4 +1,4 @@
-import { CheckCircle2, Circle, HelpCircle, XCircle } from "lucide-react";
+import { CheckCircleIcon, CircleIcon, QuestionIcon, XCircleIcon } from "@phosphor-icons/react";
 
 import type {
   Finding,
@@ -19,7 +19,7 @@ const POINT_STATUS_TONE: Record<"confirmed" | "disputed" | "unresolved" | "filte
 
 export function PointStatusBadge({ finding }: { finding: Finding }): JSX.Element {
   const status = pointStatus(finding);
-  const Icon = status.kind === "confirmed" ? CheckCircle2 : status.kind === "filtered-out" ? XCircle : HelpCircle;
+  const Icon = status.kind === "confirmed" ? CheckCircleIcon : status.kind === "filtered-out" ? XCircleIcon : QuestionIcon;
   return (
     <StatusBadge tone={POINT_STATUS_TONE[status.kind]} icon={Icon}>
       {status.label}
@@ -30,13 +30,13 @@ export function PointStatusBadge({ finding }: { finding: Finding }): JSX.Element
 export function PlanItemReviewBadge({ review }: { review?: PlanItemReview }): JSX.Element {
   if (review) {
     return (
-      <StatusBadge tone="success" icon={CheckCircle2}>
+      <StatusBadge tone="success" icon={CheckCircleIcon}>
         reviewed
       </StatusBadge>
     );
   }
   return (
-    <StatusBadge tone="neutral" icon={Circle}>
+    <StatusBadge tone="neutral" icon={CircleIcon}>
       pending
     </StatusBadge>
   );

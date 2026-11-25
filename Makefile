@@ -50,7 +50,8 @@ test-chat-progress-renderer: ## Run focused chat activity rendering tests
 lint-colors: ## Check renderer style guardrails
 	npm run lint:renderer-styles
 
-lint-lines: ## Check renderer line-count guardrails
+lint-lines: ## Check line-count guardrails
+	npm run lint:file-lengths
 	npm run lint:renderer-line-counts
 
 lint-unused: ## Check renderer unused locals and orphan files

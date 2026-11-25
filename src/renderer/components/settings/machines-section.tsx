@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { Copy, Loader2, Plus, Trash2 } from "lucide-react";
+import { CopyIcon, PlusIcon, TrashIcon } from "@phosphor-icons/react";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import type { CreateMachineResult, MachineLinkStatus, MachineListResult, MachineRecord } from "../../../shared/machineLink";
@@ -7,6 +7,7 @@ import type { MachineInstallRecord, MachineInstallSnapshot, MachineRuntimePayloa
 import type { MachineTrustedDevicesResult } from "../../../shared/machineLink";
 import { writeClipboardText } from "../../../shared/clipboard";
 import { MachineRow } from "./machine-row";
+import { Spinner } from "@/components/ui/spinner";
 
 /**
  * Machines transport: computers that run the app without a window and host
@@ -207,7 +208,7 @@ export function MachinesSection(): JSX.Element {
               disabled={busy || !name.trim()}
               onClick={() => void addMachine()}
             >
-              <span className="gen-pill-lead">{busy ? <Loader2 className="spin" size={16} aria-hidden /> : <Plus size={16} aria-hidden />}</span>
+              <span className="gen-pill-lead">{busy ? <Spinner size={16} /> : <PlusIcon size={16} aria-hidden />}</span>
               <span className="gen-pill-label">Add machine</span>
             </button>
           </div>
@@ -267,7 +268,7 @@ export function MachinesSection(): JSX.Element {
               </div>
               <div className="gen-row-control">
                 <button type="button" className="gen-pill" onClick={() => void copyEnrollment()} data-testid="machine-copy-enrollment">
-                  <span className="gen-pill-lead"><Copy size={14} aria-hidden /></span>
+                  <span className="gen-pill-lead"><CopyIcon size={14} aria-hidden /></span>
                   <span className="gen-pill-label">{copied ? "Copied" : "Copy"}</span>
                 </button>
               </div>
@@ -288,7 +289,7 @@ export function MachinesSection(): JSX.Element {
           </div>
           <div className="gen-row-control">
             <button type="button" className="gen-pill" onClick={() => void copyIdentity()} data-testid="machines-copy-identity">
-              <span className="gen-pill-lead"><Copy size={14} aria-hidden /></span>
+              <span className="gen-pill-lead"><CopyIcon size={14} aria-hidden /></span>
               <span className="gen-pill-label">{identityCopied ? "Copied" : "Copy this device"}</span>
             </button>
           </div>
@@ -316,7 +317,7 @@ export function MachinesSection(): JSX.Element {
                   setTrustError(removeError instanceof Error ? removeError.message : String(removeError));
                 })}
               >
-                <span className="gen-pill-lead"><Trash2 size={14} aria-hidden /></span>
+                <span className="gen-pill-lead"><TrashIcon size={14} aria-hidden /></span>
                 <span className="gen-pill-label">Remove</span>
               </button>
             </div>
@@ -355,7 +356,7 @@ export function MachinesSection(): JSX.Element {
               disabled={!trustDraft.deviceId.trim() || !trustDraft.publicKeyDerBase64.trim()}
               onClick={() => void addTrustedDevice()}
             >
-              <span className="gen-pill-lead"><Plus size={16} aria-hidden /></span>
+              <span className="gen-pill-lead"><PlusIcon size={16} aria-hidden /></span>
               <span className="gen-pill-label">Allow device</span>
             </button>
           </div>

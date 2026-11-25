@@ -62,7 +62,7 @@ const highlightStyle = HighlightStyle.define([
   { tag: [tags.propertyName, tags.attributeName, tags.labelName], color: "var(--app-code-property)" },
   { tag: [tags.meta, tags.processingInstruction, tags.tagName], color: "var(--app-code-meta)" },
   { tag: [tags.heading], color: "var(--app-text-strong)", fontWeight: "600" },
-  { tag: [tags.link, tags.url], color: "var(--app-accent)", textDecoration: "underline" },
+  { tag: [tags.link, tags.url], color: "var(--ui-link)", textDecoration: "underline" },
   { tag: [tags.emphasis], fontStyle: "italic" },
   { tag: [tags.strong], fontWeight: "600" },
   { tag: [tags.invalid], color: "var(--app-code-invalid)" }

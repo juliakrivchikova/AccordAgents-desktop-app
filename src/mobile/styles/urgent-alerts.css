@@ -1,0 +1,210 @@
+.urgent-alert-from {
+  padding: 12px 14px 0;
+  color: var(--fg);
+  font-size: 13px;
+  font-weight: 500;
+  font-variant-numeric: tabular-nums;
+}
+
+.urgent-alert-text {
+  padding: 4px 14px 14px;
+  color: var(--fg1);
+  font-size: 15.5px;
+  font-weight: 600;
+  line-height: 1.4;
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+}
+
+/* What happens now; Got it under it, full width, in the thumb's reach. */
+.urgent-alert-status {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-start;
+  gap: 12px 11px;
+  padding: 13px 14px 14px;
+  border-top: 1px solid var(--bd);
+  background: var(--s2);
+}
+
+.urgent-alert-status.is-bad {
+  border-top-color: var(--urgent-soft-bd);
+  background: var(--urgent-soft);
+}
+
+.urgent-alert-status-icon {
+  flex: none;
+  margin-top: 2px;
+  color: var(--fg1);
+}
+
+.urgent-alert-status.is-done .urgent-alert-status-icon {
+  color: var(--ok);
+}
+
+.urgent-alert-status.is-bad .urgent-alert-status-icon,
+.urgent-alert-status.is-bad .urgent-alert-status-main {
+  color: var(--danger);
+}
+
+.urgent-alert-status-words {
+  flex: 1;
+  min-width: 0;
+}
+
+.urgent-alert-status-main {
+  color: var(--fg1);
+  font-size: 15px;
+  font-weight: 600;
+  line-height: 1.35;
+  font-variant-numeric: tabular-nums;
+}
+
+.urgent-alert-countdown {
+  font-weight: 750;
+}
+
+.urgent-alert-status-detail {
+  margin-top: 3px;
+  color: var(--fg);
+  font-size: 13px;
+  line-height: 1.4;
+  overflow-wrap: anywhere;
+  font-variant-numeric: tabular-nums;
+}
+
+.urgent-alert-error {
+  margin-top: 5px;
+  color: var(--danger);
+  font-size: 13px;
+  line-height: 1.4;
+  overflow-wrap: anywhere;
+}
+
+.urgent-alert-action {
+  flex: 1 0 100%;
+  min-height: 44px;
+  -webkit-tap-highlight-color: transparent;
+  border: 0;
+  border-radius: 999px;
+  background: var(--fg1);
+  color: var(--surface-fg);
+  font: 600 15px var(--sans);
+}
+
+.urgent-alert-action:active {
+  background: var(--fg);
+}
+
+.urgent-alert-action[disabled] {
+  opacity: 0.35;
+}
+
+.urgent-alert-hint {
+  flex: 1 0 100%;
+  color: var(--fg);
+  font-size: 13px;
+  line-height: 1.4;
+}
+
+/* Closed: one line, the message first, then how it ended. Every used card is
+   this same line (.card-row: a choice, a closed Accord). */
+.urgent-alert-folded,
+.card-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  min-width: 0;
+  min-height: 48px;
+  padding: 0 12px;
+  -webkit-tap-highlight-color: transparent;
+  border: 1px solid var(--bd);
+  border-radius: 12px;
+  background: var(--surface);
+  font: inherit;
+  font-size: 14px;
+  text-align: left;
+}
+
+/* A grey bell once she reacted; red when it never reached her. */
+.urgent-alert-folded-bell,
+.card-row-icon {
+  flex: none;
+  color: var(--mut);
+}
+
+.card-row-icon {
+  display: inline-flex;
+}
+
+.urgent-alert-folded.is-unresolved .urgent-alert-folded-bell {
+  color: var(--urgent);
+}
+
+.urgent-alert-folded-preview,
+.card-row-preview {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  color: var(--fg1);
+  font-weight: 500;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.urgent-alert-folded-outcome,
+.card-row-outcome {
+  flex: none;
+  max-width: 45%;
+  overflow: hidden;
+  color: var(--fg);
+  font-size: 13px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+
+.urgent-alert-folded.is-unresolved .urgent-alert-folded-outcome {
+  color: var(--danger);
+}
+
+.urgent-alert-folded-chevron,
+.card-row-chevron {
+  flex: none;
+  color: var(--fg);
+}
+
+.urgent-alert-close:active {
+  background: color-mix(in srgb, var(--urgent-fg) 18%, transparent);
+}
+
+.urgent-alert-folded:active,
+button.card-row:active {
+  background: var(--press);
+}
+
+.urgent-alert-close:focus-visible {
+  outline: 2px solid var(--urgent-fg);
+  outline-offset: -4px;
+}
+
+.urgent-alert-action:focus-visible,
+.urgent-alert-folded:focus-visible,
+button.card-row:focus-visible {
+  outline: 2px solid var(--fg1);
+  outline-offset: 2px;
+}
+
+/* The line a closed Accord left in the chat; opened, the Accord's own card
+   in the chat, its whole height. */
+.accord-line {
+  flex: 1;
+  min-width: 0;
+  font-family: var(--sans);
+}
+
+.accord-line.is-open .accord-dock-card {
+  max-height: none;
+  overflow: hidden;
+}

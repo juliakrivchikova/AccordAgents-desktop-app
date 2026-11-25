@@ -60,7 +60,7 @@ export function wireChatAppToolHandlers(appMcpService: AppMcpService, chatServic
   appMcpService.setParticipantChangeHandler((actor, request) => chatService.requestParticipantChangeFromTool(actor, request));
   appMcpService.setParticipantOptionsHandler((actor) => chatService.describeParticipantOptionsForTool(actor));
   appMcpService.setPermissionChangeHandler((actor, request) => chatService.requestPermissionChangeFromTool(actor, request));
-  appMcpService.setToolPermissionHandler((actor, request) => chatService.requestToolPermissionFromTool(actor, request));
+  appMcpService.setToolPermissionHandler((actor, request, signal) => chatService.requestToolPermissionFromTool(actor, request, signal));
   appMcpService.setConnectorSignInHandler((actor, request, signal) => chatService.requestConnectorSignInFromTool(actor, request, signal));
   appMcpService.setChatContextHandler((actor) => chatService.describeChatContextForTool(actor));
   appMcpService.setChatParticipantsHandler((actor) => chatService.describeChatParticipantsForTool(actor));
@@ -75,6 +75,8 @@ export function wireChatAppToolHandlers(appMcpService: AppMcpService, chatServic
   appMcpService.setChatReactHandler((actor, request) => chatService.reactToMessageFromTool(actor, request));
   appMcpService.setChatSendMessageHandler((actor, request) => chatService.sendChatMessageFromTool(actor, request));
   appMcpService.setChatSetTitleHandler((actor, request) => chatService.setChatTitleFromTool(actor, request));
+  appMcpService.setChatDelegateTaskHandler((actor, request) => chatService.delegateTaskFromTool(actor, request));
+  appMcpService.setChatStartAccordHandler((actor, request) => chatService.startAccordFromTool(actor, request));
   appMcpService.setScriptToolHandler((actor, toolName, request) => chatService.scriptToolFromApp(actor, toolName, request));
 }
 

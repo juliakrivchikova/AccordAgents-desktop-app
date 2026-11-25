@@ -1,5 +1,5 @@
 import * as React from "react";
-import { AlertCircle, Plus, SquareTerminal, X } from "lucide-react";
+import { WarningCircleIcon, PlusIcon, TerminalWindowIcon, XIcon } from "@phosphor-icons/react";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 import { terminalWorkspaceMatches } from "../../../shared/terminal";
@@ -123,11 +123,11 @@ export function TerminalPanel({ state, chat }: TerminalPanelProps): JSX.Element 
                   if (event.key === "Enter" || event.key === " ") state.selectTerminal(terminal.terminalId);
                 }}
               >
-                <SquareTerminal className="terminal-panel-tab-icon" aria-hidden />
+                <TerminalWindowIcon className="terminal-panel-tab-icon" aria-hidden />
                 <span className="terminal-panel-tab-title">{terminal.title}</span>
                 <IconButton
                   label="Close terminal"
-                  icon={X}
+                  icon={XIcon}
                   size="xs"
                   className="terminal-panel-tab-close"
                   data-testid="terminal-tab-close"
@@ -141,17 +141,17 @@ export function TerminalPanel({ state, chat }: TerminalPanelProps): JSX.Element 
           })}
           <IconButton
             label="New terminal"
-            icon={Plus}
+            icon={PlusIcon}
             data-testid="terminal-new"
             disabled={state.creating}
             onClick={state.newTerminal}
           />
         </div>
-        <IconButton label="Hide terminal" icon={X} data-testid="terminal-hide" onClick={state.close} />
+        <IconButton label="Hide terminal" icon={XIcon} data-testid="terminal-hide" onClick={state.close} />
       </div>
       {showMismatch && dismissKey && (
         <div className="terminal-panel-notice" role="status" data-testid="terminal-mismatch">
-          <AlertCircle className="terminal-panel-notice-icon" aria-hidden />
+          <WarningCircleIcon className="terminal-panel-notice-icon" aria-hidden />
           <span className="terminal-panel-notice-text">This terminal's folder does not match this chat's project</span>
           <Button
             variant="ghost"

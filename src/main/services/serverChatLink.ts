@@ -2,7 +2,7 @@ import type { HubAlertRequest, HubAlertResult } from "../../shared/urgentAlerts"
 import { accordClosedLaunchId } from "../../shared/accordProgress";
 import { HubClient, HubIdentityError, HubHttpError } from "./hubClient";
 import { HubOpsClient, HUB_FEED_CURSOR_KEY, type HubOpOutcome } from "./hubOpsClient";
-import { conversationFieldsOf, newOpId, type ChatServerLink } from "./chatServerOps";
+import { conversationFieldsOf, newOpId, type ChatServerLink, type ChatServerQueue } from "./chatServerOps";
 import { LOCAL_MESSAGE_METADATA_KEYS } from "./chatChanges";
 import type { HubSigningIdentity } from "./hubAuth";
 import type { StorageService } from "./storage";
@@ -256,11 +256,30 @@ export class ServerChatLink {
     return put;
   }
 
+  /** The statements that queue operations with a local save (alsoCommit),
+   *  in this device's own database: a save that began before the link
+   *  stopped still commits with them, and they go at the next start. */
+  private queueSql(ops: HubOp[], condition?: string): string {
+    return this.options.storage.hubClientOps().insertSql(ops, new Date().toISOString(), condition);
+  }
+
+  /** Where the chats queue what they change while no link stands (the app
+   *  quitting, or between two links): sent by the next one that starts. */
+  private parkedQueue(): ChatServerQueue {
+    return {
+      deviceId: () => this.deviceIdValue,
+      queueSql: (ops, condition) => this.queueSql(ops, condition),
+      enqueue: (ops) => this.options.storage.hubClientOps().enqueue(ops, new Date().toISOString())
+    };
+  }
+
   /** The link as ChatService uses it. */
   private chatLink(): ChatServerLink {
     return {
       deviceId: () => this.deviceIdValue,
-      queueSql: (ops, condition) => this.requireOps().queueSql(ops, condition),
+      queueSql: (ops, condition) => this.queueSql(ops, condition),
+      // A Stop, a claim or a turn's end sent through a link that has stopped
+      // fails, as before: the parked queue takes the chats' own changes.
       enqueue: (ops) => this.requireOps().enqueue(ops),
       nudge: () => this.ops?.nudge(),
       messageAccepted: async (conversationId, messageId, signal) => {
@@ -500,7 +519,9 @@ export class ServerChatLink {
     legacy?.abort.abort();
     await legacy?.done;
     await this.ops?.stop();
-    this.options.chat.setServerLink(undefined);
+    // What the chats change from here on (a member's reply that ends while
+    // the app quits) still queues, and goes at the next start.
+    this.options.chat.setServerLink(undefined, this.deviceIdValue ? this.parkedQueue() : undefined);
     this.options.chat.setServerChatReader(undefined);
     this.options.artifacts?.setServerLink(undefined);
     this.ops = undefined;
@@ -578,6 +599,17 @@ export class ServerChatLink {
     const status = await this.ops.status();
     if (this.identityProblem) return { ...status, unreachableSince: status.unreachableSince ?? this.identityProblem.since, lastError: this.identityProblem.message, ready: this.ready };
     return { ...status, ready: this.ready };
+  }
+
+  /** Waits until nothing this device queued is left unsent, at most
+   *  `timeoutMs`; resolves with how many are left (undefined: no link). */
+  async waitUntilSent(timeoutMs: number): Promise<number | undefined> {
+    const deadline = Date.now() + timeoutMs;
+    for (;;) {
+      const queued = (await this.status().catch(() => undefined))?.queued;
+      if (queued === undefined || queued === 0 || Date.now() >= deadline) return queued;
+      await new Promise((resolve) => setTimeout(resolve, 100));
+    }
   }
 
   async failures(): Promise<ReturnType<ReturnType<StorageService["hubClientOps"]>["failures"]>> {

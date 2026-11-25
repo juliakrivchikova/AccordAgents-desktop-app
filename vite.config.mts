@@ -13,6 +13,12 @@ export default defineConfig({
   root: ".",
   base: "./",
   build: {
+    // The renderer runs only in this app's Electron (31: Chromium 126). Vite's
+    // default target rewrites newer syntax for 2020 browsers, and its esbuild
+    // then drops a variable it still assigns: in xterm's requestMode that
+    // stopped a terminal for good as soon as a program asked it for a mode
+    // (the Codex CLI does when it starts).
+    target: "chrome126",
     outDir: "dist/renderer",
     emptyOutDir: true,
     rollupOptions: {
@@ -21,12 +27,12 @@ export default defineConfig({
           if (!id.includes("node_modules")) {
             return undefined;
           }
-          if (id.includes("/react/") || id.includes("/react-dom/") || id.includes("/scheduler/")) {
+          if (id.includes("/node_modules/react/") || id.includes("/node_modules/react-dom/") || id.includes("/node_modules/scheduler/")) {
             return "react-vendor";
           }
           if (
             id.includes("/radix-ui/") ||
-            id.includes("/lucide-react/") ||
+            id.includes("/@phosphor-icons/react/") ||
             id.includes("/@tanstack/react-virtual/") ||
             id.includes("/cmdk/") ||
             id.includes("/next-themes/") ||

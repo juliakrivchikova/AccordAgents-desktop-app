@@ -15,7 +15,7 @@ export function useDockedAccord(
   artifactNotesKey: string,
   participants: ChatParticipant[],
   closedLaunchIds: readonly string[] = []
-): { docked: DockedAccord | undefined; accordLines: AccordLinesValue } {
+): { docked: DockedAccord | undefined; latest: DockedAccord | undefined; accordLines: AccordLinesValue } {
   const newest = useMemo(() => dockedAccordOfMessages(messages), [artifactNotesKey, messages]);
   // Folded into the chat: the chat's record of the lines her server took,
   // over the whole chat, and the lines among the loaded messages.
@@ -50,5 +50,6 @@ export function useDockedAccord(
     };
   }, [artifactNotesKey, linesKey, participantsKey]);
   const closed = newest ? lines.has(newest.launchId) || closedLaunchIds.includes(newest.launchId) : false;
-  return { docked: newest && !closed ? newest : undefined, accordLines };
+  // The latest, also once closed: the sessions view lists it with the members.
+  return { docked: newest && !closed ? newest : undefined, latest: newest, accordLines };
 }

@@ -1,12 +1,13 @@
-import { ShieldCheck } from "lucide-react";
+import { ShieldCheckIcon } from "@phosphor-icons/react";
 import type { ChatAppToolApproval, ChatRoleConfig, ChatRosterChangeOperation, ChatRosterChangeParticipantInput } from "../../../shared/types";
-import { Avatar } from "../avatar/avatar";
 import { chatParticipantDisplayName, chatParticipantReference } from "../conversation/conversation-display";
 import { chatReasoningEffortLabel } from "../../../shared/reasoningEffort";
 import { avatarForChatParticipant } from "./chat-avatars";
+import { ChatMemberMark, useChatSessionsPresentation } from "./chat-member-mark";
 import { participantProviderLabel } from "./chat-conversation-data";
 import { rosterPermissionGrantLabels } from "./chat-participant-config-panel";
 import { displayChatRoleLabel } from "./chat-role-labels";
+import { useSessionsViewLabel, useSessionsViewText } from "./chat-sessions-links";
 
 export function rosterApprovalQuestion(approval: ChatAppToolApproval, added: ChatRosterChangeOperation[]): string {
   const requester = chatParticipantReference(approval.requesterHandle);
@@ -14,10 +15,16 @@ export function rosterApprovalQuestion(approval: ChatAppToolApproval, added: Cha
 }
 
 export function RosterApprovalTitle({ requesterHandle, added }: { requesterHandle: string; added: ChatRosterChangeOperation[] }): JSX.Element {
+  const appText = useSessionsViewText();
+  const requester = useSessionsViewLabel()(chatParticipantReference(requesterHandle));
+  const rest = `wants to add ${added.length === 1 ? "a member" : "members"} to this chat`;
+  // The sessions view names the main session by nothing: the sentence has
+  // no subject then.
+  if (!requester) return <>{appText(`@${requesterHandle.replace(/^@/, "")} ${rest}`)}</>;
   return (
     <>
-      <span className="chat-app-tool-approval-title-handle">{chatParticipantReference(requesterHandle)}</span>{" "}
-      wants to add {added.length === 1 ? "a member" : "members"} to this chat
+      <span className="chat-app-tool-approval-title-handle">{requester}</span>{" "}
+      {rest}
     </>
   );
 }
@@ -25,6 +32,10 @@ export function RosterApprovalTitle({ requesterHandle, added }: { requesterHandl
 export function ChatAppToolRosterOperation({ operation, roles }: { operation: ChatRosterChangeOperation; roles: ChatRoleConfig[] }): JSX.Element {
   const participant = operation.participant;
   const label = chatParticipantDisplayName(participant);
+  // The sessions view names no handles: a member being added (it has no task
+  // yet) is its role, else its provider.
+  const sessions = useChatSessionsPresentation();
+  const shownLabel = sessions ? roleLabelForRosterParticipant(participant, roles) || participantProviderLabel(participant.kind) : label;
   const details = [
     participantProviderLabel(participant.kind),
     participant.model,
@@ -43,10 +54,10 @@ export function ChatAppToolRosterOperation({ operation, roles }: { operation: Ch
 
   return (
     <div className="chat-app-tool-roster-participant">
-      <Avatar className="chat-app-tool-roster-avatar" spec={avatar} />
+      <ChatMemberMark className="chat-app-tool-roster-avatar" markClassName="is-large" avatar={avatar} member={participant} />
       <div className="chat-app-tool-roster-participant-info">
-        <strong>{label}</strong>
-        <span>{details.join(" · ")}</span>
+        <strong>{shownLabel}</strong>
+        <span>{(sessions ? details.filter((detail) => detail !== shownLabel) : details).join(" · ")}</span>
       </div>
     </div>
   );
@@ -63,7 +74,7 @@ export function ChatAppToolRosterPermissionEnvelope({ operations }: { operations
       <div className="chat-app-tool-roster-grants">
         {labels.map((label) => (
           <span className="chat-app-tool-roster-grant" key={label}>
-            <ShieldCheck size={12} aria-hidden />
+            <ShieldCheckIcon size={12} aria-hidden />
             {label}
           </span>
         ))}

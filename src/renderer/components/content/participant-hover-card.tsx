@@ -1,12 +1,13 @@
 import { createContext, useContext, useEffect, useRef, useState } from "react";
 import type { MouseEvent } from "react";
-import { CheckCircle2, Copy, Minimize2 } from "lucide-react";
+import { CheckCircleIcon, CopyIcon, ArrowsInSimpleIcon } from "@phosphor-icons/react";
 
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import type { AgentContextUsage } from "../../../shared/types";
 import { formatContextUsageLabel } from "../../../shared/agentContext";
 import { Avatar } from "../avatar/avatar";
 import type { AvatarSpec } from "../chat/chat-avatars";
+import { ChatMemberMark, type ChatMemberProvider } from "../chat/chat-member-mark";
 import { IconButton } from "../primitives";
 
 // One detail line shown in a participant hover card.
@@ -24,6 +25,8 @@ export interface ParticipantProfile {
   rows: ParticipantDetailRow[];
   sessionId?: string;
   avatar?: AvatarSpec;
+  /** Its provider, the member's only mark in the sessions view. */
+  provider?: ChatMemberProvider;
 }
 
 export interface ParticipantCompactContext {
@@ -39,6 +42,8 @@ export type ParticipantCompactHandler = (
 
 // Lowercased handle -> hover-card profile. Only handles present here render as highlighted
 // pills; everything else (and any view without a provider, e.g. plan/review) stays plain text.
+const HOVER_CARD_OPEN_DELAY_MS = 500;
+
 export const MentionDirectoryContext = createContext<ReadonlyMap<string, ParticipantProfile> | undefined>(undefined);
 
 // Hover-open / grace-delay-close behaviour shared by the mention pill and the avatar trigger,
@@ -51,27 +56,31 @@ export function useHoverCard(): {
 } {
   const [open, setOpen] = useState(false);
   const closeTimerRef = useRef<number>();
+  const openTimerRef = useRef<number>();
 
   useEffect(() => {
     return () => {
-      if (closeTimerRef.current !== undefined) {
-        window.clearTimeout(closeTimerRef.current);
-      }
+      clearTimeout(closeTimerRef.current);
+      clearTimeout(openTimerRef.current);
     };
   }, []);
 
+  // Opens once the pointer rests on the trigger (as tooltips do); an open
+  // card stays open while the pointer travels onto it.
   function openCard(): void {
-    if (closeTimerRef.current !== undefined) {
-      window.clearTimeout(closeTimerRef.current);
-      closeTimerRef.current = undefined;
-    }
-    setOpen(true);
+    window.clearTimeout(closeTimerRef.current);
+    closeTimerRef.current = undefined;
+    if (open || openTimerRef.current !== undefined) return;
+    openTimerRef.current = window.setTimeout(() => {
+      openTimerRef.current = undefined;
+      setOpen(true);
+    }, HOVER_CARD_OPEN_DELAY_MS);
   }
 
   function scheduleClose(): void {
-    if (closeTimerRef.current !== undefined) {
-      window.clearTimeout(closeTimerRef.current);
-    }
+    window.clearTimeout(openTimerRef.current);
+    openTimerRef.current = undefined;
+    window.clearTimeout(closeTimerRef.current);
     closeTimerRef.current = window.setTimeout(() => setOpen(false), 120);
   }
 
@@ -113,13 +122,15 @@ export function ParticipantHoverCard(props: {
   return (
     <>
       <div className="chat-mention-card-head">
-        {profile.avatar && <Avatar className="chat-mention-card-avatar" spec={profile.avatar} tooltip={null} />}
+        {profile.avatar && (
+          <ChatMemberMark className="chat-mention-card-avatar" markClassName="is-large" avatar={profile.avatar} member={profile.provider} tooltip={null} />
+        )}
         <div className="chat-mention-card-handle">{profileHandleLabel(profile.handle)}</div>
         {profile.participantId && props.onCompactParticipant && (
           <IconButton
             className="chat-mention-card-compact"
             size="xs"
-            icon={Minimize2}
+            icon={ArrowsInSimpleIcon}
             label={`Compact ${profileHandleLabel(profile.handle)} context`}
             tooltip="Compact this member's underlying session to free context."
             disabled={props.compactDisabled}
@@ -138,7 +149,7 @@ export function ParticipantHoverCard(props: {
         <code title={sessionId}>{sessionId ?? "Not started yet"}</code>
         <IconButton
           size="xs"
-          icon={copied ? CheckCircle2 : Copy}
+          icon={copied ? CheckCircleIcon : CopyIcon}
           label={copied ? "Copied session ID" : "Copy session ID"}
           tooltip={copied ? "Copied" : "Copy"}
           disabled={!sessionId}

@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { LogIn, X } from "lucide-react";
+import { SignInIcon, XIcon } from "@phosphor-icons/react";
 
 import { isCliSignInRunning } from "../../../shared/cliReadiness";
 import type { CliSignInKind, CliSignInState } from "../../../shared/types";
@@ -125,7 +125,7 @@ export function CliSignInStep(props: {
           disabled={starting || props.checkingAfterSignIn}
           onClick={() => void start()}
         >
-          <LogIn size={15} aria-hidden /> {signIn?.status === "failed" ? "Sign in again" : "Sign in"}
+          <SignInIcon size={15} aria-hidden /> {signIn?.status === "failed" ? "Sign in again" : "Sign in"}
         </button>
         {signIn?.status === "failed" && signIn.message && <p className="inline-error cli-sign-in-error" role="alert">{signIn.message}</p>}
         {props.checkingAfterSignIn && <p role="status">Signed in. Checking {props.label}…</p>}
@@ -142,7 +142,7 @@ export function CliSignInStep(props: {
           disabled={cancelling}
           onClick={() => void cancel()}
         >
-          <X size={15} aria-hidden /> Cancel
+          <XIcon size={15} aria-hidden /> Cancel
         </button>
         <p role="status">
           {cancelling

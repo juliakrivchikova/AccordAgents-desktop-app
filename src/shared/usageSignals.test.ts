@@ -6,8 +6,10 @@ import {
   usageCountBucket,
   usageIsoWeek,
   usageLocale,
+  usageMultiRoleChat,
   usageOs,
   usageProviderFamily,
+  usageRoleChosen,
   usageSignalAttributes,
   usageWeeklySnapshot,
   usageWeeklySnapshotAttributes
@@ -89,15 +91,25 @@ test("the weekly snapshot: members once across chats, no Assistant, custom roles
     chats_with_2plus_members: "2",
     distinct_roles_in_use: 3,
     custom_roles_count: 3,
-    builtin_roles_in_use: "product-designer,software-engineer"
+    builtin_roles_in_use: "product-designer,software-engineer",
+    chats_sessions_view_active: "0",
+    chats_classic_view_active: "0"
   });
   assert.equal(JSON.stringify(snapshot).includes("acme"), false, "a role the person made is never named");
+  const byView = usageWeeklySnapshot("2026-W47", [], 0, ["sessions", "classic", "sessions", "sessions", "sessions"]);
+  assert.deepEqual([byView.chats_sessions_view_active, byView.chats_classic_view_active], ["3-5", "1"], "bucketed as the other counts");
   assert.equal(usageWeeklySnapshot("2026-W47", [], 0).builtin_roles_in_use, "none");
   const attributes = usageWeeklySnapshotAttributes({ os: "mac", appVersion: "1.11.9", locale: "en-US", cohort: "existing", teamDevice: true }, snapshot);
   assert.equal(attributes.milestone, "weekly_snapshot");
   assert.equal(attributes.install_cohort, "existing");
   assert.equal(attributes.custom_roles_count, 3);
   assert.equal(attributes.team_device, true, "the weekly record carries the same mark");
+});
+
+test("the main session is the app's own member, as the Assistant was: its role is nobody's choice", () => {
+  assert.equal(usageRoleChosen("main-session"), false);
+  assert.equal(usageMultiRoleChat([{ roleConfigId: "main-session" }, { roleConfigId: "generic-participant" }]), false, "a new chat with one member");
+  assert.equal(usageMultiRoleChat([{ roleConfigId: "main-session" }, { roleConfigId: "generic-participant" }, { roleConfigId: "debugger" }]), true);
 });
 
 test("every built-in role id is a plain app id", () => {

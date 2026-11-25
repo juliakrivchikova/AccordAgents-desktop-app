@@ -1,13 +1,23 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { SettingsService } from "./settings";
+import { settingsParts, settingsWithoutFile } from "./settings/test/settingsParts";
+import { normalizeBetaUpdates } from "./settings/preferences/storedPreferences";
+import { mergeDefaultRoles } from "./settings/roles/storedRoles";
+import { mergeDefaults } from "./settings/stored/storedDefaults";
 import type { AppSettings, ChatParticipantConfig, ChatRoleConfig } from "../../shared/types";
 import {
   CHAT_PARTICIPANT_REQUEST_MAX_DEPTH_DEFAULT,
   CHAT_PARTICIPANT_REQUEST_PROMPT_MAX_CHARS_DEFAULT
 } from "../../shared/chatParticipantRequests";
-import { CHAT_AUTO_WATCH_WAKE_LIMIT_DEFAULT } from "../../shared/chatAutoWatch";
-import { DEFAULT_CHAT_PROMPT_CONTEXT } from "../../shared/chatPromptContext";
+import {
+  CHAT_AUTO_WATCH_WAKE_LIMIT_DEFAULT,
+  normalizeChatAutoWatchWakeLimit
+} from "../../shared/chatAutoWatch";
+import {
+  DEFAULT_CHAT_PROMPT_CONTEXT,
+  normalizeChatPromptContextSettings
+} from "../../shared/chatPromptContext";
 import { CLI_AGENT_RUN_TIMEOUT_DEFAULT_MS } from "../../shared/cliAgentRunSettings";
 import { EMPTY_MOBILE_CONTROL_SETTINGS } from "../../shared/mobilePairing";
 
@@ -38,7 +48,7 @@ function makeParticipant(over: Partial<ChatParticipantConfig> = {}): ChatPartici
 function settingsServiceWith(
   initial: { chatRoleConfigs?: ChatRoleConfig[]; chatParticipantConfigs?: ChatParticipantConfig[]; chatBehaviorRules?: AppSettings["chatBehaviorRules"] } = {}
 ) {
-  const service = Object.create(SettingsService.prototype) as any;
+  const service = settingsWithoutFile();
   let stored = {
     settingsVersion: 1,
     roundLimitDefault: 1,
@@ -67,21 +77,21 @@ function settingsServiceWith(
     cliProviderHosts: [],
   };
   let writeCount = 0;
-  service.readStored = async () => stored;
-  service.writeStored = async (next: typeof stored) => {
+  settingsParts(service).settingsStore.readStored = async () => stored;
+  settingsParts(service).settingsStore.writeStored = async (next: typeof stored) => {
     writeCount += 1;
     stored = next;
   };
-  service.getPublicSettings = async (): Promise<AppSettings> => ({
+  settingsParts(service).publicSettings.getPublicSettings = async (): Promise<AppSettings> => ({
     chatCustomAvatars: [],
     roundLimitDefault: stored.roundLimitDefault,
-    betaUpdates: service.normalizeBetaUpdates(stored.betaUpdates),
+    betaUpdates: normalizeBetaUpdates(stored.betaUpdates),
     crashReports: true,
     cliAgentRunTimeoutMs: stored.cliAgentRunTimeoutMs,
-    chatAutoWatchWakeLimit: service.normalizeChatAutoWatchWakeLimit(stored.chatAutoWatchWakeLimit),
+    chatAutoWatchWakeLimit: normalizeChatAutoWatchWakeLimit(stored.chatAutoWatchWakeLimit),
     chatParticipantRequestMaxDepth: stored.chatParticipantRequestMaxDepth,
     chatParticipantRequestPromptMaxChars: stored.chatParticipantRequestPromptMaxChars,
-    chatPromptContext: service.normalizeChatPromptContextSettings(stored.chatPromptContext),
+    chatPromptContext: normalizeChatPromptContextSettings(stored.chatPromptContext),
     cloudRuns: stored.cloudRuns,
     mobileControl: EMPTY_MOBILE_CONTROL_SETTINGS,
     providers: stored.providers,
@@ -97,7 +107,7 @@ function settingsServiceWith(
 
 test("default Chat Assistant does not offer itself for off-setup task work", () => {
   const { service } = settingsServiceWith();
-  const roles = (service as any).mergeDefaultRoles(undefined) as ChatRoleConfig[];
+  const roles = mergeDefaultRoles(undefined) as ChatRoleConfig[];
   const assistant = roles.find((role) => role.id === "administrator");
 
   assert.ok(assistant);
@@ -121,7 +131,7 @@ test("default Chat Assistant does not offer itself for off-setup task work", () 
 
 test("stored v11 Chat Assistant is reseeded with member greeting", () => {
   const { service } = settingsServiceWith();
-  const defaults = (service as any).mergeDefaultRoles(undefined) as ChatRoleConfig[];
+  const defaults = mergeDefaultRoles(undefined) as ChatRoleConfig[];
   const currentAssistant = defaults.find((role) => role.id === "administrator");
   assert.ok(currentAssistant);
 
@@ -134,7 +144,7 @@ test("stored v11 Chat Assistant is reseeded with member greeting", () => {
     version: 11,
     updatedAt: "2026-06-23T00:00:00.000Z"
   };
-  const roles = (service as any).mergeDefaultRoles([storedAssistant]) as ChatRoleConfig[];
+  const roles = mergeDefaultRoles([storedAssistant]) as ChatRoleConfig[];
   const assistant = roles.find((role) => role.id === "administrator");
 
   assert.ok(assistant);
@@ -145,7 +155,7 @@ test("stored v11 Chat Assistant is reseeded with member greeting", () => {
 
 test("stored v13 Chat Assistant is reseeded with removal instructions that follow member management", () => {
   const { service } = settingsServiceWith();
-  const defaults = (service as any).mergeDefaultRoles(undefined) as ChatRoleConfig[];
+  const defaults = mergeDefaultRoles(undefined) as ChatRoleConfig[];
   const currentAssistant = defaults.find((role) => role.id === "administrator");
   assert.ok(currentAssistant);
   assert.match(currentAssistant.instructions, /remove_participant_from_chat/);
@@ -159,7 +169,7 @@ test("stored v13 Chat Assistant is reseeded with removal instructions that follo
     version: 13,
     updatedAt: "2026-10-22T00:00:00.000Z"
   };
-  const roles = (service as any).mergeDefaultRoles([storedAssistant]) as ChatRoleConfig[];
+  const roles = mergeDefaultRoles([storedAssistant]) as ChatRoleConfig[];
   const assistant = roles.find((role) => role.id === "administrator");
 
   assert.ok(assistant);
@@ -170,7 +180,7 @@ test("stored v13 Chat Assistant is reseeded with removal instructions that follo
 
 test("default Workflow Manager only follows implementation workflow when explicitly selected", () => {
   const { service } = settingsServiceWith();
-  const roles = (service as any).mergeDefaultRoles(undefined) as ChatRoleConfig[];
+  const roles = mergeDefaultRoles(undefined) as ChatRoleConfig[];
   const manager = roles.find((role) => role.id === "workflow-manager");
 
   assert.ok(manager);
@@ -287,7 +297,7 @@ test("custom role participant defaults are editable and preserved when omitted",
 
 test("role management defaults normalize safely for legacy roles", () => {
   const { service } = settingsServiceWith();
-  const roles = (service as any).mergeDefaultRoles([
+  const roles = mergeDefaultRoles([
     makeRole({
       participantDefaults: {
         autoWatch: true,
@@ -332,7 +342,7 @@ test("role management defaults normalize safely for legacy roles", () => {
 
 test("Workflow Manager upgrade allows existing saved member presets to manage roles", () => {
   const { service } = settingsServiceWith();
-  const merged = (service as any).mergeDefaults({
+  const merged = mergeDefaults({
     settingsVersion: 1,
     roundLimitDefault: 1,
     providers: [],
@@ -367,9 +377,9 @@ test("Workflow Manager upgrade allows existing saved member presets to manage ro
     ]
   });
 
-  const workflow = merged.chatRoleConfigs.find((role: ChatRoleConfig) => role.id === "workflow-manager");
+  const workflow = merged.chatRoleConfigs!.find((role: ChatRoleConfig) => role.id === "workflow-manager");
   assert.equal(workflow?.participantDefaults?.manageRolesParticipants, "allow");
-  assert.equal(merged.chatParticipantConfigs[0]?.permissions?.manageRolesParticipants, "allow");
+  assert.equal(merged.chatParticipantConfigs![0]?.permissions?.manageRolesParticipants, "allow");
 });
 
 test("Workflow Manager saved member presets force auto-watch on", async () => {
@@ -408,8 +418,8 @@ test("saved Codex max and ultra survive settings writes and reload normalization
       reasoningEffort
     });
     assert.equal(stored().chatParticipantConfigs[0]?.reasoningEffort, reasoningEffort);
-    const reloaded = service.mergeDefaults(JSON.parse(JSON.stringify(stored())));
-    assert.equal(reloaded.chatParticipantConfigs[0]?.reasoningEffort, reasoningEffort);
+    const reloaded = mergeDefaults(JSON.parse(JSON.stringify(stored())));
+    assert.equal(reloaded.chatParticipantConfigs![0]?.reasoningEffort, reasoningEffort);
   }
 });
 

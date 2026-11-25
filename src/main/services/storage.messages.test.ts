@@ -9,6 +9,7 @@ import {
   StorageService,
   UnsupportedStorageSchemaVersionError
 } from "./storage";
+import { storageDependencies, storageParts, storageWithoutDatabase } from "./storage/test/storageParts";
 import { resolveSqliteExecutable } from "./sqliteCli";
 import type { ChatMessage, Conversation } from "../../shared/types";
 
@@ -19,17 +20,17 @@ function hexJson(value: unknown): string {
 const SQLITE_EXECUTABLE = resolveSqliteExecutable({ appPath: process.cwd() });
 
 function fakeStorage(queryJson: (sql: string) => Promise<unknown[]>): StorageService {
-  const storage = Object.create(StorageService.prototype) as any;
-  storage.init = async () => {};
-  storage.queryJson = queryJson;
+  const storage = storageWithoutDatabase();
+  storageParts(storage).schema.init = async () => {};
+  storageParts(storage).sqlite.queryJson = queryJson;
   return storage as StorageService;
 }
 
 test("openConversation returns a message window consistent with messagePage", async () => {
-  const storage = Object.create(StorageService.prototype) as any;
-  storage.init = async () => {};
+  const storage = storageWithoutDatabase();
+  storageParts(storage).schema.init = async () => {};
   // body_json carries an emptied messages array; the window comes from conversation_messages.
-  storage.queryText = async () => JSON.stringify({
+  storageParts(storage).sqlite.queryText = async () => JSON.stringify({
     id: "conversation",
     title: "Long chat",
     kind: "chat",
@@ -39,7 +40,7 @@ test("openConversation returns a message window consistent with messagePage", as
     findings: [],
     metadata: {}
   });
-  storage.queryJson = async (sql: string) => {
+  storageParts(storage).sqlite.queryJson = async (sql: string) => {
     if (sql.includes("hex(payload_json) as payloadHex")) {
       // newest-first; limit+1 rows so hasMoreBefore is true
       return [4, 3, 2].map((sequence) => ({
@@ -123,10 +124,10 @@ test("listConversationMessages can page around a target message id", async () =>
 
 test("listConversationMessages round-trips large escape-dense output across adjacent SQLite pages", async () => {
   const directory = await mkdtemp(path.join(tmpdir(), "accordagents-storage-messages-"));
-  const storage = Object.create(StorageService.prototype) as any;
-  storage.dbPath = path.join(directory, "accordagents.sqlite3");
-  storage.sqliteExecutable = SQLITE_EXECUTABLE;
-  storage.initialized = true;
+  const storage = storageWithoutDatabase();
+  storageDependencies(storage).dbPath = path.join(directory, "accordagents.sqlite3");
+  storageDependencies(storage).sqliteExecutable = SQLITE_EXECUTABLE;
+  storageParts(storage).schema.initialized = true;
   const denseContent = `quotes "' slash \\\\ tabs\t lines\n separators \u001e\u001f unicode 🙂 lone \ud800 `
     .repeat(12_000);
   const messages: ChatMessage[] = [0, 1, 2, 3].map((sequence) => ({
@@ -144,7 +145,7 @@ test("listConversationMessages round-trips large escape-dense output across adja
   const chat = basicConversation("dense-chat", messages);
 
   try {
-    await storage.runSql(`
+    await storageParts(storage).sqlite.runSql(`
       create table conversations (
         id text primary key, title text not null, kind text not null, created_at text not null,
         updated_at text not null, repo_path text, body_json text, save_token text, payload_json text not null
@@ -329,7 +330,7 @@ test("normalizeInferredParticipantRequestThreads runs once and avoids blob query
     payloads: new Map([[legacy.id, JSON.stringify(legacy)]])
   });
 
-  await (storage as any).normalizeInferredParticipantRequestThreads();
+  await storageParts(storage).startupRepairs.normalizeInferredParticipantRequestThreads();
 
   assert.equal(saved.length, 1);
   assert.equal(saved[0].messages.find((message) => message.id === "legacy-request")?.metadata?.hiddenFromTimeline, true);
@@ -353,7 +354,7 @@ test("normalizeInferredParticipantRequestThreads skips when migration is marked 
     metaValue: "complete"
   });
 
-  await (storage as any).normalizeInferredParticipantRequestThreads();
+  await storageParts(storage).startupRepairs.normalizeInferredParticipantRequestThreads();
 
   assert.deepEqual(queryJsonSql, []);
   assert.equal(queryTextSql.length, 1);
@@ -364,7 +365,7 @@ test("normalizeInferredParticipantRequestThreads skips when migration is marked 
 test("normalizeInferredParticipantRequestThreads marks zero-row migration complete", async () => {
   const { storage, runSqlStatements } = maintenanceStorage({ ids: [] });
 
-  await (storage as any).normalizeInferredParticipantRequestThreads();
+  await storageParts(storage).startupRepairs.normalizeInferredParticipantRequestThreads();
 
   assert.ok(runSqlStatements.some((sql) => sql.includes("inferred-participant-request-threads-v1") && sql.includes("complete")));
 });
@@ -377,7 +378,7 @@ test("normalizeInferredParticipantRequestThreads does not mark complete when sav
     saveError: new Error("write failed")
   });
 
-  await assert.rejects(() => (storage as any).normalizeInferredParticipantRequestThreads(), /write failed/);
+  await assert.rejects(() => storageParts(storage).startupRepairs.normalizeInferredParticipantRequestThreads(), /write failed/);
 
   assert.equal(runSqlStatements.some((sql) => sql.includes("inferred-participant-request-threads-v1")), false);
 });
@@ -401,7 +402,7 @@ test("clearInterruptedRuns reads payloads by id and preserves local run state", 
     payloads: new Map([[conversation.id, JSON.stringify(conversation)]])
   });
 
-  await (storage as any).clearInterruptedRuns();
+  await storageParts(storage).startupRepairs.clearInterruptedRuns();
 
   assert.equal(saved.length, 0);
   // The id prefilter, then that conversation's message rows.
@@ -415,10 +416,10 @@ test("clearInterruptedRuns reads payloads by id and preserves local run state", 
 
 test("deleteConversation removes messages and conversation in one transaction", async () => {
   const statements: string[] = [];
-  const storage = Object.create(StorageService.prototype) as any;
-  storage.initialized = true;
-  storage.queryText = async () => "conversation-1";
-  storage.runSql = async (sql: string) => {
+  const storage = storageWithoutDatabase();
+  storageParts(storage).schema.initialized = true;
+  storageParts(storage).sqlite.queryText = async () => "conversation-1";
+  storageParts(storage).sqlite.runSql = async (sql: string) => {
     statements.push(sql);
   };
 
@@ -432,29 +433,29 @@ test("deleteConversation removes messages and conversation in one transaction", 
 
 test("init records the supported storage schema version for a legacy database", async () => {
   const directory = await mkdtemp(path.join(tmpdir(), "accordagents-storage-floor-"));
-  const storage = Object.create(StorageService.prototype) as any;
+  const storage = storageWithoutDatabase();
   const runSqlStatements: string[] = [];
   const queryTextSql: string[] = [];
   const calls: string[] = [];
-  storage.dbPath = path.join(directory, "accordagents.sqlite3");
-  storage.initialized = false;
-  storage.runSql = async (sql: string) => {
+  storageDependencies(storage).dbPath = path.join(directory, "accordagents.sqlite3");
+  storageParts(storage).schema.initialized = false;
+  storageParts(storage).sqlite.runSql = async (sql: string) => {
     runSqlStatements.push(sql);
   };
-  storage.queryText = async (sql: string) => {
+  storageParts(storage).sqlite.queryText = async (sql: string) => {
     queryTextSql.push(sql);
     return "";
   };
-  storage.pruneStaleRunCancelRequests = async () => calls.push("prune");
-  storage.ensureColumn = async () => calls.push("ensureColumn");
-  storage.backfillConversationBodiesAndMessages = async () => calls.push("backfill");
-  storage.normalizeInferredParticipantRequestThreads = async () => calls.push("normalize");
-  storage.clearInterruptedRuns = async () => calls.push("clear");
+  storageParts(storage).runCancels.pruneStaleRunCancelRequests = async () => calls.push("prune");
+  storageParts(storage).schema.ensureColumn = async () => calls.push("ensureColumn");
+  storageParts(storage).startupRepairs.backfillConversationBodiesAndMessages = async () => calls.push("backfill");
+  storageParts(storage).startupRepairs.normalizeInferredParticipantRequestThreads = async () => calls.push("normalize");
+  storageParts(storage).startupRepairs.clearInterruptedRuns = async () => calls.push("clear");
 
   try {
     await (storage as StorageService).init();
 
-    assert.equal(storage.initialized, true);
+    assert.equal(storageParts(storage).schema.initialized, true);
     assert.match(runSqlStatements[0], /create table if not exists schema_meta/);
     assert.match(queryTextSql[0], new RegExp(STORAGE_SCHEMA_VERSION_META_KEY));
     // The conversation columns upgrade before reads and recovery run against
@@ -471,25 +472,25 @@ test("init records the supported storage schema version for a legacy database", 
 
 test("init refuses a database written by a newer storage schema before migrations run", async () => {
   const directory = await mkdtemp(path.join(tmpdir(), "accordagents-storage-floor-newer-"));
-  const storage = Object.create(StorageService.prototype) as any;
+  const storage = storageWithoutDatabase();
   const runSqlStatements: string[] = [];
   const queryTextSql: string[] = [];
-  storage.dbPath = path.join(directory, "accordagents.sqlite3");
-  storage.initialized = false;
-  storage.runSql = async (sql: string) => {
+  storageDependencies(storage).dbPath = path.join(directory, "accordagents.sqlite3");
+  storageParts(storage).schema.initialized = false;
+  storageParts(storage).sqlite.runSql = async (sql: string) => {
     runSqlStatements.push(sql);
   };
-  storage.queryText = async (sql: string) => {
+  storageParts(storage).sqlite.queryText = async (sql: string) => {
     queryTextSql.push(sql);
     return String(SUPPORTED_STORAGE_SCHEMA_VERSION + 1);
   };
-  storage.pruneStaleRunCancelRequests = async () => {
+  storageParts(storage).runCancels.pruneStaleRunCancelRequests = async () => {
     throw new Error("migration should not run");
   };
-  storage.ensureColumn = async () => {
+  storageParts(storage).schema.ensureColumn = async () => {
     throw new Error("migration should not run");
   };
-  storage.backfillConversationBodiesAndMessages = async () => {
+  storageParts(storage).startupRepairs.backfillConversationBodiesAndMessages = async () => {
     throw new Error("migration should not run");
   };
 
@@ -499,7 +500,7 @@ test("init refuses a database written by a newer storage schema before migration
       UnsupportedStorageSchemaVersionError
     );
 
-    assert.equal(storage.initialized, false);
+    assert.equal(storageParts(storage).schema.initialized, false);
     assert.equal(runSqlStatements.length, 1);
     assert.match(runSqlStatements[0], /create table if not exists schema_meta/);
     assert.equal(queryTextSql.length, 1);
@@ -511,29 +512,29 @@ test("init refuses a database written by a newer storage schema before migration
 
 test("SQLite operations roll back at the first error and install fresh timeout and synchronous pragmas", async () => {
   const directory = await mkdtemp(path.join(tmpdir(), "accordagents-storage-sql-boundaries-"));
-  const storage = Object.create(StorageService.prototype) as any;
-  storage.dbPath = path.join(directory, "state.sqlite3");
-  storage.sqliteExecutable = SQLITE_EXECUTABLE;
+  const storage = storageWithoutDatabase();
+  storageDependencies(storage).dbPath = path.join(directory, "state.sqlite3");
+  storageDependencies(storage).sqliteExecutable = SQLITE_EXECUTABLE;
   try {
-    await storage.runSql("create table entries(id integer primary key); insert into entries values(1);");
-    await assert.rejects(storage.runSql("begin; insert into entries values(2); insert into entries values(1); commit;"));
-    assert.deepEqual(await storage.queryJson("select id from entries;"), [{ id: 1 }]);
-    assert.deepEqual(await storage.queryJson("select timeout, synchronous from pragma_busy_timeout, pragma_synchronous;"),
+    await storageParts(storage).sqlite.runSql("create table entries(id integer primary key); insert into entries values(1);");
+    await assert.rejects(storageParts(storage).sqlite.runSql("begin; insert into entries values(2); insert into entries values(1); commit;"));
+    assert.deepEqual(await storageParts(storage).sqlite.queryJson("select id from entries;"), [{ id: 1 }]);
+    assert.deepEqual(await storageParts(storage).sqlite.queryJson("select timeout, synchronous from pragma_busy_timeout, pragma_synchronous;"),
       [{ timeout: 30000, synchronous: 1 }]);
   } finally { await rm(directory, { recursive: true, force: true }); }
 });
 
 test("queryJson and queryText stream SQL larger than the process argument limit", async () => {
   const directory = await mkdtemp(path.join(tmpdir(), "accordagents-storage-large-query-"));
-  const storage = Object.create(StorageService.prototype) as any;
-  storage.dbPath = path.join(directory, "accordagents.sqlite3");
-  storage.sqliteExecutable = SQLITE_EXECUTABLE;
+  const storage = storageWithoutDatabase();
+  storageDependencies(storage).dbPath = path.join(directory, "accordagents.sqlite3");
+  storageDependencies(storage).sqliteExecutable = SQLITE_EXECUTABLE;
   const content = "x".repeat(3 * 1024 * 1024);
 
   try {
-    const jsonRows = await storage.queryJson(`select length('${content}') as bytes;`) as Array<{ bytes: number }>;
+    const jsonRows = await storageParts(storage).sqlite.queryJson(`select length('${content}') as bytes;`) as Array<{ bytes: number }>;
     assert.deepEqual(jsonRows, [{ bytes: content.length }]);
-    assert.equal(await storage.queryText(`select length('${content}');`), String(content.length));
+    assert.equal(await storageParts(storage).sqlite.queryText(`select length('${content}');`), String(content.length));
   } finally {
     await rm(directory, { recursive: true, force: true });
   }
@@ -541,9 +542,9 @@ test("queryJson and queryText stream SQL larger than the process argument limit"
 
 test("createPreMigrationBackup produces a standalone SQLite backup", async () => {
   const directory = await mkdtemp(path.join(tmpdir(), "accordagents-storage-backup-"));
-  const storage = Object.create(StorageService.prototype) as any;
-  storage.dbPath = path.join(directory, "accordagents.sqlite3");
-  storage.initialized = false;
+  const storage = storageWithoutDatabase();
+  storageDependencies(storage).dbPath = path.join(directory, "accordagents.sqlite3");
+  storageParts(storage).schema.initialized = false;
 
   try {
     await (storage as StorageService).saveConversation(basicConversation("backup-chat", [
@@ -576,10 +577,10 @@ function maintenanceStorage(options: {
   const queryTextSql: string[] = [];
   const runSqlStatements: string[] = [];
   const saved: Conversation[] = [];
-  const storage = Object.create(StorageService.prototype) as any;
+  const storage = storageWithoutDatabase();
   // Maintenance reads a conversation the way everything else does now: the body
   // from the conversation row, the messages from their own rows.
-  storage.queryJson = async (sql: string) => {
+  storageParts(storage).sqlite.queryJson = async (sql: string) => {
     queryJsonSql.push(sql);
     if (sql.includes("select id from conversations")) {
       return (options.ids ?? []).map((id) => ({ id }));
@@ -592,7 +593,7 @@ function maintenanceStorage(options: {
     }
     throw new Error(`Unexpected queryJson: ${sql}`);
   };
-  storage.queryText = async (sql: string) => {
+  storageParts(storage).sqlite.queryText = async (sql: string) => {
     queryTextSql.push(sql);
     if (sql.includes("schema_meta")) {
       return options.metaValue ?? "";
@@ -607,10 +608,10 @@ function maintenanceStorage(options: {
     }
     throw new Error(`Unexpected queryText: ${sql}`);
   };
-  storage.runSql = async (sql: string) => {
+  storageParts(storage).sqlite.runSql = async (sql: string) => {
     runSqlStatements.push(sql);
   };
-  storage.saveConversation = async (conversation: Conversation) => {
+  storageParts(storage).conversationSaves.saveConversation = async (conversation: Conversation) => {
     if (options.saveError) {
       throw options.saveError;
     }
@@ -687,3 +688,65 @@ function basicConversation(id: string, messages: ChatMessage[]): Conversation {
     metadata: {}
   };
 }
+
+test("memberTaskMessages reads a member's delegation when its newest tasks are untitled follow-ups", async () => {
+  const request = (id: string, sequence: number, title?: string, delegation = false): { sequence: number; payloadJson: string } => ({
+    sequence,
+    payloadJson: JSON.stringify({
+      id,
+      role: "participant",
+      content: "",
+      createdAt: `2026-11-22T10:${String(sequence).padStart(2, "0")}:00.000Z`,
+      metadata: {
+        participantRequest: {
+          id: `b-${id}`,
+          ...(delegation ? { delegation: { start: "clean" } } : {}),
+          items: [{ targetParticipantId: "p-drew", prompt: `Follow-up ${id}`, ...(title ? { title } : {}), createdAt: `2026-11-22T10:${String(sequence).padStart(2, "0")}:00.000Z` }]
+        }
+      }
+    })
+  });
+  const asked: string[] = [];
+  const followUps = [10, 9, 8, 7, 6].map((sequence) => request(`f${sequence}`, sequence));
+  const storage = fakeStorage(async (sql) => {
+    asked.push(sql);
+    return sql.includes(`'"delegation"'`) ? [request("d1", 1, "Новые чаты в General", true)] : followUps;
+  });
+  const messages = await storage.memberTaskMessages("chat", "p-drew");
+  assert.deepEqual(messages.map((message) => message.id), ["d1", "f6", "f7", "f8", "f9", "f10"], "the delegation first, then the newest five, oldest first");
+  assert.equal(asked.length, 2);
+
+  // A titled task among the newest: nothing more is read.
+  const titledAsked: string[] = [];
+  const titled = fakeStorage(async (sql) => {
+    titledAsked.push(sql);
+    return [request("f10", 10), request("d9", 9, "Ход как в Claude Code", true)];
+  });
+  assert.deepEqual((await titled.memberTaskMessages("chat", "p-drew")).map((message) => message.id), ["d9", "f10"]);
+  assert.equal(titledAsked.length, 1);
+
+  // An untitled delegation already among the newest: listed once.
+  const untitledAsked: string[] = [];
+  const untitled = fakeStorage(async (sql) => {
+    untitledAsked.push(sql);
+    return sql.includes(`'"delegation"'`) ? [request("d5", 5, undefined, true)] : [request("f6", 6), request("d5", 5, undefined, true)];
+  });
+  assert.deepEqual((await untitled.memberTaskMessages("chat", "p-drew")).map((message) => message.id), ["d5", "f6"]);
+  assert.equal(untitledAsked.length, 2);
+
+  // A task the app inferred from a reply's mention has the app's title, not
+  // the main session's: the delegation is still read.
+  const inferred = (id: string, sequence: number): { sequence: number; payloadJson: string } => {
+    const row = request(id, sequence, "Could check the release notes?");
+    const message = JSON.parse(row.payloadJson);
+    message.metadata.participantRequest.source = "inferred";
+    return { sequence, payloadJson: JSON.stringify(message) };
+  };
+  const inferredAsked: string[] = [];
+  const withInferred = fakeStorage(async (sql) => {
+    inferredAsked.push(sql);
+    return sql.includes(`'"delegation"'`) ? [request("d1", 1, "Новые чаты в General", true)] : [request("f10", 10), inferred("i9", 9)];
+  });
+  assert.deepEqual((await withInferred.memberTaskMessages("chat", "p-drew")).map((message) => message.id), ["d1", "i9", "f10"]);
+  assert.equal(inferredAsked.length, 2);
+});

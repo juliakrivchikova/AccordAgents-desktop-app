@@ -29,6 +29,20 @@ export function defaultChatAgentPermissions(): ChatAgentPermissions {
   return cloneChatAgentPermissions(DEFAULT_CHAT_AGENT_PERMISSIONS);
 }
 
+/** What an ordinary member starts with in a new chat: the generic member the
+ *  app seeds for each CLI reads the chat's project when it has one (and is
+ *  given nothing else); it asks for anything more. The main session starts
+ *  the same way (docs/main-session.md). */
+export function newChatMemberPermissions(hasProject: boolean): ChatAgentPermissions {
+  return {
+    ...defaultChatAgentPermissions(),
+    repoRead: hasProject,
+    workspaceWrite: false,
+    webAccess: false,
+    shell: { enabled: false, rules: [] }
+  };
+}
+
 export function cloneChatAgentPermissions(permissions: ChatAgentPermissions): ChatAgentPermissions {
   const providerNative = cloneProviderNativePermissions(permissions.providerNative);
   const manageRolesParticipants = normalizeOptionalChatParticipantRequestPermission(permissions.manageRolesParticipants);
@@ -39,16 +53,46 @@ export function cloneChatAgentPermissions(permissions: ChatAgentPermissions): Ch
     requestParticipants: normalizeChatParticipantRequestPermission(permissions.requestParticipants),
     requestCompaction: normalizeChatParticipantRequestPermission(permissions.requestCompaction),
     ...(manageRolesParticipants ? { manageRolesParticipants } : {}),
+    ...(permissions.scheduleWithoutAsking === true ? { scheduleWithoutAsking: true as const } : {}),
     shell: {
       enabled: permissions.shell.enabled,
       rules: normalizeChatShellPermissionRules(permissions.shell.rules)
     },
-    ...(providerNative ? { providerNative } : {})
+    ...(providerNative ? { providerNative } : {}),
+    ...(permissions.cliApprovals === true ? { cliApprovals: true as const } : {}),
+    // Codex's Plan mode lives only in the CLI's own mode.
+    ...(permissions.cliApprovals === true && permissions.codexPlanMode === true ? { codexPlanMode: true as const } : {})
   };
 }
 
 export function normalizeChatAgentMode(value: unknown): ChatAgentMode {
-  return value === "plan" || value === "auto" || value === "default" ? value : DEFAULT_CHAT_AGENT_MODE;
+  return value === "plan" || value === "auto" || value === "default" || value === "full-access" ? value : DEFAULT_CHAT_AGENT_MODE;
+}
+
+/** The mode a member really runs in on its CLI: Codex's Full Access is
+ *  Codex's alone (no other CLI offers it without extra flags), so a member
+ *  on another CLI asked for it (a Codex main session's mode handed to a
+ *  member it makes) runs Auto, the broadest mode that CLI offers. */
+export function chatAgentModeForKind(kind: ChatProviderKind | undefined, mode: ChatAgentMode | undefined): ChatAgentMode {
+  const normalized = normalizeChatAgentMode(mode);
+  return normalized === "full-access" && kind !== "codex-cli" ? "auto" : normalized;
+}
+
+/** A mode a member or a machine names (a tool's input, a member it adds or
+ *  changes): never Codex's Full Access, which only the User chooses (her
+ *  menus); Auto at most. */
+export function chatAgentModeFromAgent(value: unknown): ChatAgentMode {
+  const mode = normalizeChatAgentMode(value);
+  return mode === "full-access" ? "auto" : mode;
+}
+
+/** Rights as a member names them for another member (a tool's input, an
+ *  addition it asks for), and a saved member's: never leave to create
+ *  scheduled tasks without a card, which only the User's switch for new chats
+ *  gives and no card or editor of hers shows. */
+export function chatAgentPermissionsFromAgent(value: unknown): ChatAgentPermissions {
+  const { scheduleWithoutAsking: _hers, ...rest } = normalizeChatAgentPermissions(value);
+  return rest;
 }
 
 export function normalizeChatAgentPermissions(value: unknown): ChatAgentPermissions {
@@ -67,11 +111,15 @@ export function normalizeChatAgentPermissions(value: unknown): ChatAgentPermissi
     requestParticipants: normalizeChatParticipantRequestPermission(record.requestParticipants),
     requestCompaction: normalizeChatParticipantRequestPermission(record.requestCompaction),
     ...(manageRolesParticipants ? { manageRolesParticipants } : {}),
+    ...(record.scheduleWithoutAsking === true ? { scheduleWithoutAsking: true as const } : {}),
     shell: {
       enabled: typeof shell.enabled === "boolean" ? shell.enabled : DEFAULT_CHAT_AGENT_PERMISSIONS.shell.enabled,
       rules: normalizeChatShellPermissionRules(shell.rules)
     },
-    ...(providerNative ? { providerNative } : {})
+    ...(providerNative ? { providerNative } : {}),
+    ...(record.cliApprovals === true ? { cliApprovals: true as const } : {}),
+    // Codex's Plan mode lives only in the CLI's own mode.
+    ...(record.cliApprovals === true && record.codexPlanMode === true ? { codexPlanMode: true as const } : {})
   };
 }
 
@@ -80,7 +128,8 @@ export function effectiveChatAgentPermissions(mode: ChatAgentMode, permissions: 
   if (mode !== "plan") {
     return normalized;
   }
-  const { providerNative: _providerNative, ...readOnlyPermissions } = normalized;
+  // Plan changes nothing: a scheduled task it wants waits for her card.
+  const { providerNative: _providerNative, scheduleWithoutAsking: _schedule, ...readOnlyPermissions } = normalized;
   return {
     ...readOnlyPermissions,
     workspaceWrite: false,
@@ -96,8 +145,11 @@ export function effectiveChatAgentPermissionsForProvider(
   mode: ChatAgentMode,
   permissions: ChatAgentPermissions
 ): ChatAgentPermissions {
-  const normalized = normalizeChatAgentPermissions(permissions);
-  if (mode !== "auto") {
+  const given = normalizeChatAgentPermissions(permissions);
+  // Codex's Plan mode changes nothing either (effectiveChatAgentPermissions).
+  const { scheduleWithoutAsking: _schedule, ...planned } = given;
+  const normalized = given.codexPlanMode ? planned : given;
+  if (mode !== "auto" && mode !== "full-access") {
     return effectiveChatAgentPermissions(mode, normalized);
   }
   // Auto-review enables command execution for both providers. Codex runs commands in
@@ -106,6 +158,8 @@ export function effectiveChatAgentPermissionsForProvider(
   // session tool surface.
   // Stored app rules remain part of the saved configuration but are not forwarded as
   // hard provider policy in Auto; the provider's native classifier owns each decision.
+  // Codex's Full Access gives the same rights without any review: its
+  // danger-full-access sandbox, never asking.
   const shell = {
     ...normalized.shell,
     enabled: true
@@ -165,6 +219,175 @@ export function resolveChatManageRolesParticipantsPermission(
     effective,
     exceedsRoleDefault: chatParticipantRequestPermissionExceeds(effective, roleDefault)
   };
+}
+
+const CHAT_AGENT_MODE_RANK: Record<ChatAgentMode, number> = { plan: 0, default: 1, auto: 2, "full-access": 3 };
+
+/** A member's mode never above its ceiling's: plan < default < auto <
+ *  full-access. */
+export function clampChatAgentMode(requested: ChatAgentMode | undefined, ceiling: ChatAgentMode | undefined): ChatAgentMode {
+  const wanted = normalizeChatAgentMode(requested);
+  const limit = normalizeChatAgentMode(ceiling);
+  return CHAT_AGENT_MODE_RANK[wanted] <= CHAT_AGENT_MODE_RANK[limit] ? wanted : limit;
+}
+
+function lowerChatParticipantRequestPermission(
+  left: ChatParticipantRequestPermission,
+  right: ChatParticipantRequestPermission
+): ChatParticipantRequestPermission {
+  return chatParticipantRequestPermissionRank(left) <= chatParticipantRequestPermissionRank(right) ? left : right;
+}
+
+function shellRuleKey(rule: ChatShellPermissionRule): string {
+  return `${rule.action}\0${rule.match}\0${rule.pattern}`;
+}
+
+/**
+ * The rights a member gets when another member makes it (the main session
+ * delegating, docs/main-session.md): what was asked for, never more than the
+ * ceiling has. Pass as the ceiling what the parent really has: its effective
+ * permissions for its mode (effectiveChatAgentPermissionsForProvider), with
+ * `manageRolesParticipants` set to its resolved right to manage members.
+ *
+ * - repo, edits and web: only when both have them;
+ * - shell: on only when the ceiling's is; a rule that lets a command run
+ *   (allow or ask) only when the ceiling has the same rule; every deny rule
+ *   of either is kept;
+ * - Claude Code native tools: only those the ceiling has;
+ * - member requests and compaction requests: deny < ask < allow, never above
+ *   the ceiling's;
+ * - scheduled tasks without a card: only when both have it;
+ * - managing members: "deny" unless asked for explicitly, and never above
+ *   the ceiling's (a member does not create members unless its task says so).
+ *
+ * The User's server holds a machine's additions to the same rule
+ * (chatAgentPermissionsWithin, hub/hubMachineScope.ts).
+ */
+export function clampChatAgentPermissions(
+  requested: ChatAgentPermissions,
+  ceiling: ChatAgentPermissions
+): ChatAgentPermissions {
+  const wanted = normalizeChatAgentPermissions(requested);
+  const limit = normalizeChatAgentPermissions(ceiling);
+  const limitRules = new Set(limit.shell.rules.map(shellRuleKey));
+  const rules = normalizeChatShellPermissionRules([
+    ...wanted.shell.rules.filter((rule) => rule.action === "deny" || limitRules.has(shellRuleKey(rule))),
+    ...limit.shell.rules.filter((rule) => rule.action === "deny")
+  ]);
+  const limitTools = new Set(limit.providerNative?.["claude-code"]?.allowedTools ?? []);
+  const allowedTools = (wanted.providerNative?.["claude-code"]?.allowedTools ?? []).filter((tool) => limitTools.has(tool));
+  const explicitManage = normalizeOptionalChatParticipantRequestPermission(requested?.manageRolesParticipants);
+  const manageRolesParticipants = explicitManage
+    ? lowerChatParticipantRequestPermission(explicitManage, normalizeChatRoleManagementPermission(limit.manageRolesParticipants))
+    : "deny";
+  return {
+    repoRead: wanted.repoRead && limit.repoRead,
+    workspaceWrite: wanted.workspaceWrite && limit.workspaceWrite,
+    webAccess: wanted.webAccess && limit.webAccess,
+    requestParticipants: lowerChatParticipantRequestPermission(wanted.requestParticipants, limit.requestParticipants),
+    requestCompaction: lowerChatParticipantRequestPermission(
+      normalizeChatParticipantRequestPermission(wanted.requestCompaction),
+      normalizeChatParticipantRequestPermission(limit.requestCompaction)
+    ),
+    manageRolesParticipants,
+    ...(wanted.scheduleWithoutAsking && limit.scheduleWithoutAsking ? { scheduleWithoutAsking: true as const } : {}),
+    shell: {
+      enabled: wanted.shell.enabled && limit.shell.enabled,
+      rules
+    },
+    ...(allowedTools.length > 0 ? { providerNative: { "claude-code": { allowedTools } } } : {}),
+    // Asking the User before what is not granted is a right of its own: only
+    // when the ceiling may ask too.
+    ...(wanted.cliApprovals && limit.cliApprovals ? { cliApprovals: true as const } : {}),
+    // Codex's Plan mode only holds it back: kept with its own mode.
+    ...(wanted.codexPlanMode && wanted.cliApprovals && limit.cliApprovals ? { codexPlanMode: true as const } : {})
+  };
+}
+
+/**
+ * A member's mode and rights held to a ceiling's (clampChatAgentMode and
+ * clampChatAgentPermissions), for the CLI it runs on. The ceiling never
+ * turns a restricting mode into a broader one: Antigravity in its own mode
+ * (`cliApprovals`, agy's `--mode`) is held back by that mode, while without
+ * it the app's mapping skips every agy confirmation once edits are granted
+ * or in Auto (geminiExec.ts geminiPermissionArgs). So when the ceiling takes
+ * its own mode away, or it would skip every confirmation (edits, commands,
+ * web) under a ceiling without all three, it runs the most restrictive way
+ * instead: Default with no edits (agy's `--sandbox`, read-only).
+ * Claude Code and Codex without their own mode refuse what is not granted
+ * instead of asking, which is already narrower.
+ */
+export function clampChatAgentAccess(
+  kind: ChatProviderKind | undefined,
+  requested: { agentMode?: ChatAgentMode; permissions: ChatAgentPermissions },
+  ceiling: { agentMode?: ChatAgentMode; permissions: ChatAgentPermissions }
+): { agentMode: ChatAgentMode; permissions: ChatAgentPermissions } {
+  // Full Access is Codex's alone: on another CLI, Auto (never above it).
+  const agentMode = chatAgentModeForKind(kind, clampChatAgentMode(requested.agentMode, ceiling.agentMode));
+  const permissions = clampChatAgentPermissions(requested.permissions, ceiling.permissions);
+  if (kind !== "gemini-cli") {
+    return { agentMode, permissions };
+  }
+  const ownModeTaken = normalizeChatAgentPermissions(requested.permissions).cliApprovals === true && !permissions.cliApprovals;
+  // Without its own mode, agy with edits or in Auto skips every
+  // confirmation: edits, commands and web alike. That is within a ceiling
+  // only when the ceiling has all three.
+  const limit = normalizeChatAgentPermissions(ceiling.permissions);
+  const skipsAll = !permissions.cliApprovals && (agentMode === "auto" || permissions.workspaceWrite);
+  const ceilingSkipsAll = limit.workspaceWrite && limit.shell.enabled && limit.webAccess;
+  if (!ownModeTaken && !(skipsAll && !ceilingSkipsAll)) {
+    return { agentMode, permissions };
+  }
+  return {
+    agentMode: agentMode === "plan" ? "plan" : "default",
+    permissions: { ...permissions, workspaceWrite: false }
+  };
+}
+
+/**
+ * Whether a member's permissions give it nothing beyond `ceiling` (managing
+ * members aside: it depends on the member's role, so callers check it with
+ * resolveChatManageRolesParticipantsPermission). What clampChatAgentPermissions
+ * returns is always within its ceiling.
+ */
+export function chatAgentPermissionsWithin(actual: ChatAgentPermissions, ceiling: ChatAgentPermissions): boolean {
+  const member = normalizeChatAgentPermissions(actual);
+  const limit = normalizeChatAgentPermissions(ceiling);
+  if ((member.repoRead && !limit.repoRead) || (member.workspaceWrite && !limit.workspaceWrite) || (member.webAccess && !limit.webAccess)) {
+    return false;
+  }
+  if (member.shell.enabled && !limit.shell.enabled) {
+    return false;
+  }
+  if (member.cliApprovals && !limit.cliApprovals) {
+    return false;
+  }
+  if (member.scheduleWithoutAsking && !limit.scheduleWithoutAsking) {
+    return false;
+  }
+  const limitRules = new Set(limit.shell.rules.map(shellRuleKey));
+  if (member.shell.rules.some((rule) => rule.action !== "deny" && !limitRules.has(shellRuleKey(rule)))) {
+    return false;
+  }
+  // A command the ceiling may not run stays forbidden: a member with a shell
+  // keeps every deny rule of the ceiling (clampChatAgentPermissions carries
+  // them), dropping one is a broader right.
+  const memberRules = new Set(member.shell.rules.map(shellRuleKey));
+  if (member.shell.enabled && limit.shell.rules.some((rule) => rule.action === "deny" && !memberRules.has(shellRuleKey(rule)))) {
+    return false;
+  }
+  const limitTools = new Set(limit.providerNative?.["claude-code"]?.allowedTools ?? []);
+  if ((member.providerNative?.["claude-code"]?.allowedTools ?? []).some((tool) => !limitTools.has(tool))) {
+    return false;
+  }
+  return chatParticipantRequestPermissionRank(member.requestParticipants) <= chatParticipantRequestPermissionRank(limit.requestParticipants) &&
+    chatParticipantRequestPermissionRank(normalizeChatParticipantRequestPermission(member.requestCompaction)) <=
+      chatParticipantRequestPermissionRank(normalizeChatParticipantRequestPermission(limit.requestCompaction));
+}
+
+/** Whether a member's mode is not above `ceiling`'s. */
+export function chatAgentModeWithin(actual: ChatAgentMode | undefined, ceiling: ChatAgentMode | undefined): boolean {
+  return CHAT_AGENT_MODE_RANK[normalizeChatAgentMode(actual)] <= CHAT_AGENT_MODE_RANK[normalizeChatAgentMode(ceiling)];
 }
 
 export function isChatShellPermissionPatternSafe(pattern: string): boolean {

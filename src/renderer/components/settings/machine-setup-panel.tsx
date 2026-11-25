@@ -1,10 +1,11 @@
 import { useEffect, useMemo, useState } from "react";
-import { AlertTriangle, Check, Download, FolderInput, Loader2 } from "lucide-react";
+import { WarningIcon, CheckIcon, DownloadSimpleIcon, FolderOpenIcon } from "@phosphor-icons/react";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { isMachineInstallTerminalPhase, type MachineInstallRecord, type MachineInstallSnapshot, type MachineMirrorBootstrapResult, type MachineSshTarget } from "../../../shared/machineInstall";
 import { MACHINE_INSTALL_PHASE_ORDER, machineInstallPhaseLabel } from "../../../shared/machineInstall";
 import { CloudProviderAuth } from "../cloud-provider-auth";
+import { Spinner } from "@/components/ui/spinner";
 
 /**
  * Installing and upgrading the runtime on a machine, from Settings.
@@ -153,7 +154,7 @@ export function MachineSetupPanel(props: {
           disabled={busy || !target.host.trim()}
           onClick={() => void run(alreadyInstalled ? "upgrade" : "install")}
         >
-          <span className="gen-pill-lead">{running ? <Loader2 className="spin" size={14} aria-hidden /> : <Download size={14} aria-hidden />}</span>
+          <span className="gen-pill-lead">{running ? <Spinner size={14} /> : <DownloadSimpleIcon size={14} aria-hidden />}</span>
           <span className="gen-pill-label">{alreadyInstalled ? "Upgrade runtime" : "Install runtime"}</span>
         </button>
         <button
@@ -163,7 +164,7 @@ export function MachineSetupPanel(props: {
           disabled={busy || !install?.installRoot}
           onClick={() => void copyProject()}
         >
-          <span className="gen-pill-lead"><FolderInput size={14} aria-hidden /></span>
+          <span className="gen-pill-lead"><FolderOpenIcon size={14} aria-hidden /></span>
           <span className="gen-pill-label">Put project on machine</span>
         </button>
       </div>
@@ -196,7 +197,7 @@ function MachineSetupSteps(props: { snapshot: MachineInstallSnapshot }): JSX.Ele
               data-state={done ? "done" : current ? (failed ? "failed" : "current") : "pending"}
             >
               <span className="machine-setup-step-mark" aria-hidden>
-                {done ? <Check size={12} /> : current && !failed ? <Loader2 className="spin" size={12} /> : current ? <AlertTriangle size={12} /> : null}
+                {done ? <CheckIcon size={12} /> : current && !failed ? <Spinner size={12} /> : current ? <WarningIcon size={12} /> : null}
               </span>
               <span>{machineInstallPhaseLabel(phase)}</span>
             </li>

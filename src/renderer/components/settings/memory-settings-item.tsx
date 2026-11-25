@@ -1,4 +1,4 @@
-import { UserRound } from "lucide-react";
+import { UserIcon } from "@phosphor-icons/react";
 
 import type { MemoryNoteSummary } from "../../../shared/memory";
 
@@ -50,7 +50,7 @@ export function MemoryNoteCard(props: {
         {note.tags.length > 0 && <span className="memory-card-tags">{` · ${note.tags.map((tag) => `#${tag}`).join(" ")}`}</span>}
       </span>
       <span className="roles-no-participants">
-        <UserRound size={15} aria-hidden />
+        <UserIcon size={15} aria-hidden />
         <span className="memory-card-footer-text">
           @{note.author} · {memoryDate(note.updatedAt)}{state ? ` · ${state}` : ""}
         </span>

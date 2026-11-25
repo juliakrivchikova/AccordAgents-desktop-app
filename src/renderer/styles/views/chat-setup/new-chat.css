@@ -1,0 +1,165 @@
+/* chat setup styles. Keep token-driven; migrate rules into components as views are extracted. */
+
+:root:not(.dark) .app-shell-root.is-new-chat-screen {
+  --bg: var(--app-new-chat-bg);
+  --app-bg: var(--bg);
+  --app-workspace-bg: var(--bg);
+}
+
+/* The title row reads "New chat" as the chat's own will read its name. */
+[data-shell="topbar"].new-chat-topbar {
+  background: var(--app-bg) !important;
+}
+
+/* New chat as "B + C" (the User, 2026-11-22): the folder's heading and its
+   recent chats in the middle, the composer docked where the chat keeps it
+   (the sessions view's reading column, 768px), so nothing moves on Enter. */
+.new-chat-composer {
+  width: 100%;
+  height: 100%;
+  min-height: 0;
+  padding: 0;
+  gap: 0;
+}
+
+.new-chat-screen {
+  display: flex;
+  flex-direction: column;
+  width: 100%;
+  height: 100%;
+  min-height: 0;
+  color: var(--app-text);
+}
+
+.new-chat-center {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  align-items: center;
+  /* Centred while it fits; scrolled from its top (the CLI setup steps) when
+     it does not. */
+  justify-content: safe center;
+  gap: 4px;
+  min-height: 0;
+  padding: 24px;
+  overflow: auto;
+  text-align: center;
+}
+
+.new-chat-center > * {
+  flex: none;
+}
+
+.new-chat-mark {
+  width: 28px;
+  height: 28px;
+  margin-bottom: 8px;
+  object-fit: contain;
+}
+
+.new-chat-title {
+  margin: 0;
+  color: var(--ui-text);
+  font-size: 16px;
+  font-weight: 600;
+  line-height: 24px;
+}
+
+.new-chat-hint {
+  margin: 0;
+  color: var(--ui-text-3);
+  font-size: 13px;
+  line-height: 20px;
+}
+
+.new-chat-recent {
+  display: grid;
+  gap: 2px;
+  width: min(100%, 420px);
+  margin-top: 14px;
+}
+
+.new-chat-recent-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  height: 30px;
+  padding: 0 10px;
+  border: 0;
+  border-radius: var(--ui-radius-8);
+  background: transparent;
+  color: var(--ui-text-2);
+  font: inherit;
+  font-size: 13px;
+  text-align: left;
+  cursor: pointer;
+  transition: background-color var(--ui-duration-fast) var(--ui-ease-out);
+}
+
+.new-chat-recent-row:hover {
+  background: var(--ui-row-hover);
+  color: var(--ui-text);
+}
+
+.new-chat-recent-row:focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring);
+}
+
+.new-chat-recent-title {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.new-chat-recent-time {
+  flex: none;
+  color: var(--ui-text-3);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+
+.new-chat-dock {
+  display: flex;
+  flex: none;
+  flex-direction: column;
+  gap: var(--space-2);
+  padding: 10px max(28px, calc((100% - 768px) / 2)) 18px;
+}
+
+.new-chat-dock[hidden] {
+  display: none;
+}
+
+.cli-readiness-heading p {
+  color: var(--app-muted);
+  font-size: 13px;
+  line-height: 1.45;
+}
+
+.cli-readiness-panel {
+  --cli-surface: var(--provider-setup-surface);
+  --cli-surface-2: var(--provider-setup-surface-2);
+  --cli-bg-sunken: var(--provider-setup-bg-sunken);
+  --cli-border: var(--provider-setup-border);
+  --cli-border-strong: var(--provider-setup-border-strong);
+  --cli-border-faint: var(--provider-setup-border-faint);
+  --cli-fg1: var(--provider-setup-fg1);
+  --cli-fg2: var(--provider-setup-fg2);
+  --cli-fg3: var(--provider-setup-fg3);
+  --cli-warning: var(--provider-setup-warning);
+  --cli-ok: var(--provider-setup-ok);
+  --cli-provider: var(--brand-gemini);
+  --cli-provider-soft: var(--brand-gemini-soft);
+  width: min(100%, 480px);
+  margin-top: 26px;
+  overflow: hidden;
+  border: 1px solid var(--cli-border);
+  border-radius: 12px;
+  background: var(--cli-surface);
+  box-shadow: var(--provider-setup-shadow-md);
+  color: var(--cli-fg1);
+  font-family: var(--font-body);
+}

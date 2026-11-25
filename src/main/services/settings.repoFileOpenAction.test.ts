@@ -2,15 +2,25 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
   CHAT_PARTICIPANT_REQUEST_MAX_DEPTH_DEFAULT,
-  CHAT_PARTICIPANT_REQUEST_PROMPT_MAX_CHARS_DEFAULT
+  CHAT_PARTICIPANT_REQUEST_PROMPT_MAX_CHARS_DEFAULT,
+  normalizeChatParticipantRequestMaxDepth,
+  normalizeChatParticipantRequestPromptMaxChars
 } from "../../shared/chatParticipantRequests";
-import { DEFAULT_CHAT_PROMPT_CONTEXT } from "../../shared/chatPromptContext";
-import { CLI_AGENT_RUN_TIMEOUT_DEFAULT_MS } from "../../shared/cliAgentRunSettings";
+import {
+  DEFAULT_CHAT_PROMPT_CONTEXT,
+  normalizeChatPromptContextSettings
+} from "../../shared/chatPromptContext";
+import {
+  CLI_AGENT_RUN_TIMEOUT_DEFAULT_MS,
+  normalizeCliAgentRunTimeoutMs
+} from "../../shared/cliAgentRunSettings";
 import type { AppSettings } from "../../shared/types";
 import { SettingsService } from "./settings";
+import { settingsDependencies, settingsParts, settingsWithoutFile } from "./settings/test/settingsParts";
+import { normalizeBetaUpdates, normalizeRepoFileOpenAction } from "./settings/preferences/storedPreferences";
 
 function settingsServiceWithStoredSettings(initial: Partial<AppSettings> = {}) {
-  const service = Object.create(SettingsService.prototype) as any;
+  const service = settingsWithoutFile();
   let stored = {
     settingsVersion: 1,
     roundLimitDefault: 1,
@@ -28,24 +38,24 @@ function settingsServiceWithStoredSettings(initial: Partial<AppSettings> = {}) {
     ...initial
   };
 
-  service.readStored = async () => stored;
-  service.writeStored = async (next: typeof stored) => {
+  settingsParts(service).settingsStore.readStored = async () => stored;
+  settingsParts(service).settingsStore.writeStored = async (next: typeof stored) => {
     stored = next;
   };
-  service.getPublicSettings = async () => ({
+  settingsParts(service).publicSettings.getPublicSettings = async () => ({
     roundLimitDefault: stored.roundLimitDefault,
-    betaUpdates: service.normalizeBetaUpdates(stored.betaUpdates),
-    cliAgentRunTimeoutMs: service.normalizeCliAgentRunTimeoutMs(stored.cliAgentRunTimeoutMs),
-    chatParticipantRequestMaxDepth: service.normalizeChatParticipantRequestMaxDepth(stored.chatParticipantRequestMaxDepth),
-    chatParticipantRequestPromptMaxChars: service.normalizeChatParticipantRequestPromptMaxChars(stored.chatParticipantRequestPromptMaxChars),
-    chatPromptContext: service.normalizeChatPromptContextSettings(stored.chatPromptContext),
+    betaUpdates: normalizeBetaUpdates(stored.betaUpdates),
+    cliAgentRunTimeoutMs: normalizeCliAgentRunTimeoutMs(stored.cliAgentRunTimeoutMs),
+    chatParticipantRequestMaxDepth: normalizeChatParticipantRequestMaxDepth(stored.chatParticipantRequestMaxDepth),
+    chatParticipantRequestPromptMaxChars: normalizeChatParticipantRequestPromptMaxChars(stored.chatParticipantRequestPromptMaxChars),
+    chatPromptContext: normalizeChatPromptContextSettings(stored.chatPromptContext),
     providers: stored.providers,
     chatRoleConfigs: stored.chatRoleConfigs,
     chatBehaviorRules: stored.chatBehaviorRules,
     chatSavedPrompts: stored.chatSavedPrompts,
     chatParticipantConfigs: stored.chatParticipantConfigs,
     chatParticipantSeedState: stored.chatParticipantSeedState,
-    repoFileOpenAction: service.normalizeRepoFileOpenAction(stored.repoFileOpenAction)
+    repoFileOpenAction: normalizeRepoFileOpenAction(stored.repoFileOpenAction)
   });
 
   return { service, stored: () => stored };
@@ -87,7 +97,7 @@ async function settingsOnDisk(contents: Record<string, unknown>) {
   await writeFile(file, JSON.stringify({ settingsVersion: 1, roundLimitDefault: 1, providers: [], ...contents }));
   const make = () => {
     const service = new SettingsService();
-    (service as any).settingsPath = file;
+    settingsDependencies(service).settingsPath = file;
     return service;
   };
   return { make, read: async () => JSON.parse(await readFile(file, "utf8")) };

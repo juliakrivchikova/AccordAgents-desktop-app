@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { Search, X } from "lucide-react";
+import { MagnifyingGlassIcon, XIcon } from "@phosphor-icons/react";
 import { Dialog as DialogPrimitive } from "radix-ui";
 
 import type { ChatSearchMessageMatch, ChatSearchResponse } from "../../../shared/types";
@@ -116,7 +116,7 @@ export function ChatSearchModal({
           >
             <DialogPrimitive.Title className="sr-only">Search chats</DialogPrimitive.Title>
             <div className="aa-searchmodal-field">
-              <Search size={17} aria-hidden />
+              <MagnifyingGlassIcon size={17} aria-hidden />
               <input
                 ref={inputRef}
                 className="aa-searchmodal-input"
@@ -132,7 +132,7 @@ export function ChatSearchModal({
                 autoComplete="off"
               />
               {searching && (
-                <IconButton size="xs" label="Clear search" icon={X} onClick={onClear} />
+                <IconButton size="xs" label="Clear search" icon={XIcon} onClick={onClear} />
               )}
               <kbd className="aa-searchmodal-kbd">esc</kbd>
             </div>

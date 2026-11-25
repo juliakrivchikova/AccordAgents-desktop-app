@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { SettingsService } from "./settings";
+import { settingsParts, settingsWithoutFile } from "./settings/test/settingsParts";
 import type { AppSettings, ChatSavedPromptConfig } from "../../shared/types";
 import {
   CHAT_SAVED_PROMPT_BODY_MAX_CHARS,
@@ -26,7 +27,7 @@ function savedPrompt(overrides: Partial<ChatSavedPromptConfig> = {}): ChatSavedP
 }
 
 function settingsServiceWithStoredSettings(initial: Partial<AppSettings> = {}) {
-  const service = Object.create(SettingsService.prototype) as any;
+  const service = settingsWithoutFile();
   let stored: {
     settingsVersion: number;
     roundLimitDefault: number;
@@ -59,8 +60,8 @@ function settingsServiceWithStoredSettings(initial: Partial<AppSettings> = {}) {
   };
   let writeCount = 0;
 
-  service.readStored = async () => stored;
-  service.writeStored = async (next: typeof stored) => {
+  settingsParts(service).settingsStore.readStored = async () => stored;
+  settingsParts(service).settingsStore.writeStored = async (next: typeof stored) => {
     writeCount += 1;
     stored = next;
   };

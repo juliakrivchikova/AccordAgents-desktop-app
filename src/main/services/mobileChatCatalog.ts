@@ -1,4 +1,5 @@
 import type { ChatMessage, ChatParticipant, Conversation, ConversationSummary } from "../../shared/types";
+import { chatViewFor, mainSessionParticipantId } from "../../shared/mainSession";
 import { chatMessageHiddenFromTimeline } from "../../shared/chatParticipantRequestThreads";
 import { turnFinishedNoteOf } from "../../shared/turnFinishedNoteSource";
 import { accordClosedLaunchId } from "../../shared/accordProgress";
@@ -83,6 +84,9 @@ export async function buildMobileChatList(store: MobileCatalogStore, options: Mo
     const members = mobileChatMembers(conversation);
     const pendingCards = options.pendingCardsFor?.(summary.id, conversation);
     const activity = runState ? phoneActivityEvents(runState) : [];
+    // A chat with a main session has two views; its own (or the default)
+    // travels so the phone opens it as the desktop does.
+    const mainId = conversation ? mainSessionParticipantId(conversation.metadata) : undefined;
     items.push({
       id: summary.id,
       title: summary.title || "Chat",
@@ -102,6 +106,9 @@ export async function buildMobileChatList(store: MobileCatalogStore, options: Mo
       // read whole, else the chat's messages do.
       ...((pendingCards ? pendingCards.some((card) => card.kind === "choice") : summary.waitingChoice === true) ? { waitingChoice: true } : {}),
       ...(activity.length ? { activity } : {}),
+      ...(mainId && conversation
+        ? { mainSessionParticipantId: mainId, chatView: chatViewFor(conversation.metadata), canSwitchView: true as const }
+        : {}),
       members: members.map((participant) => ({
         id: participant.id,
         handle: participant.handle,
@@ -110,6 +117,9 @@ export async function buildMobileChatList(store: MobileCatalogStore, options: Mo
         roleLabel: options.roleLabels.get(participant.roleConfigId) ?? participant.roleConfigId,
         // What the phone resolves a draft's member with, as the desktop does.
         roleConfigId: participant.roleConfigId,
+        // The title its delegation gave it: the sessions view's name for it.
+        ...(typeof participant.taskTitle === "string" && participant.taskTitle.trim() ? { taskTitle: participant.taskTitle } : {}),
+
         kind: participant.kind,
         ...(participant.avatarId ? { avatarId: participant.avatarId } : {}),
         ...(mobileParticipantIsAssistant(participant) ? { isAssistant: true } : {}),

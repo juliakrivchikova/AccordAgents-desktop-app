@@ -1,12 +1,14 @@
 import { useState } from "react";
-import { PlugZap } from "lucide-react";
+import { PlugChargingIcon } from "@phosphor-icons/react";
 
 import { Button } from "@/components/ui/button";
 import type { ChatAppToolApproval, ChatConnectorSignInRequest, ChatParticipant } from "../../../shared/types";
 import { connectorSignInHost } from "../../../shared/connectorSignIn";
-import { Avatar, avatarForParticipant } from "../avatar/avatar";
+import { avatarForParticipant } from "../avatar/avatar";
 import { chatParticipantDisplayName, chatParticipantReference } from "../conversation/conversation-display";
+import { useSessionsViewLabel, useSessionsViewText } from "./chat-sessions-links";
 import { avatarForChatParticipant } from "./chat-avatars";
+import { ChatMemberMark } from "./chat-member-mark";
 import { formatChatTime } from "./chat-format";
 import { ChatUsedApprovalLine } from "./chat-used-card-row";
 
@@ -49,6 +51,9 @@ export function ChatConnectorSignInCard(props: {
   const { approval, request } = props;
   const requester = props.participants.find((participant) => participant.id === approval.requesterParticipantId);
   const requesterLabel = requester ? chatParticipantDisplayName(requester) : chatParticipantReference(approval.requesterHandle);
+  // The sessions view names who asks by its task, the main session by nothing.
+  const appText = useSessionsViewText();
+  const requesterName = useSessionsViewLabel()(requesterLabel);
   const requesterAvatar = requester
     ? avatarForChatParticipant(requester, requesterLabel)
     : avatarForParticipant(requesterLabel, approval.requesterParticipantId);
@@ -64,7 +69,7 @@ export function ChatConnectorSignInCard(props: {
   // browser there: not from this one for a member on a machine.
   const elsewhere = signIn && request.callbackOnMemberComputer === true && Boolean(approval.homeMachineId);
   const [openError, setOpenError] = useState<string | undefined>();
-  const title = connectorSignInTitle(approval.requesterHandle, request);
+  const title = appText(connectorSignInTitle(approval.requesterHandle, request));
   const queuedDecision = approval.machineDecisionPending;
 
   async function openSignIn(): Promise<void> {
@@ -82,7 +87,7 @@ export function ChatConnectorSignInCard(props: {
     return (
       <section className="chat-app-tool-approval-card is-compact-result" aria-label={title}
         data-app-tool-approval-id={approval.id} tabIndex={-1}>
-        <Avatar className="message-avatar chat-app-tool-approval-avatar" spec={requesterAvatar} />
+        <ChatMemberMark className="message-avatar chat-app-tool-approval-avatar" markClassName="is-large" avatar={requesterAvatar} member={requester} />
         <div className="chat-app-tool-approval-body">
           <strong>{queuedDecision.approve ? (request.action === "sign-in" ? "Done" : "Reconnect") : "Not now"}</strong>
           <p>Waiting for machine {queuedDecision.machineName} to confirm.</p>
@@ -94,7 +99,7 @@ export function ChatConnectorSignInCard(props: {
   // Used: one line, like a folded urgent alert (the User, 2026-11-18); its
   // full outcome on hover.
   if (!pending) {
-    return <ChatUsedApprovalLine approval={approval} kind="Connector sign-in" icon={PlugZap} preview={request.connector} {...connectorSignInEnding(approval, request)} />;
+    return <ChatUsedApprovalLine approval={approval} kind="Connector sign-in" icon={PlugChargingIcon} preview={request.connector} {...connectorSignInEnding(approval, request)} />;
   }
 
   return (
@@ -104,29 +109,29 @@ export function ChatConnectorSignInCard(props: {
       data-app-tool-approval-id={approval.id}
       tabIndex={-1}
     >
-      <Avatar className="message-avatar chat-app-tool-approval-avatar" spec={requesterAvatar} />
+      <ChatMemberMark className="message-avatar chat-app-tool-approval-avatar" markClassName="is-large" avatar={requesterAvatar} member={requester} />
       <div className="chat-app-tool-approval-body">
         <div className="chat-app-tool-approval-meta">
-          <strong>{requesterLabel}</strong>
+          {requesterName && <strong>{requesterName}</strong>}
           <span className="message-provider">Needs a connector</span>
           <span className="message-when">{formatChatTime(approval.createdAt)}</span>
         </div>
         <div className="chat-app-tool-approval-panel is-review-change">
           <div className="chat-app-tool-review-header">
             <div className="chat-app-tool-review-chip">
-              <PlugZap size={13} aria-hidden />
+              <PlugChargingIcon size={13} aria-hidden />
               {request.connector}
             </div>
           </div>
           <div className="chat-connector-sign-in-content">
             <h3 className="chat-connector-sign-in-title">{title}</h3>
             {approval.cardRefusals?.length ? (
-              <p className="chat-connector-sign-in-error">Your earlier answer was not applied: {approval.cardRefusals[approval.cardRefusals.length - 1].reason}</p>
+              <p className="chat-connector-sign-in-error">Your earlier answer was not applied: {appText(approval.cardRefusals[approval.cardRefusals.length - 1].reason)}</p>
             ) : null}
             {request.reason && <p className="chat-connector-sign-in-reason">{request.reason}</p>}
             <p className="chat-connector-sign-in-hint">
               {elsewhere
-                ? `Signing in to ${request.connector} finishes in a browser on the computer ${chatParticipantReference(approval.requesterHandle)} runs on, so it cannot be done from here.`
+                ? appText(`Signing in to ${request.connector} finishes in a browser on the computer ${chatParticipantReference(approval.requesterHandle)} runs on, so it cannot be done from here.`)
                 : signIn
                 ? opened
                   ? "Finish signing in in your browser, then press Done."

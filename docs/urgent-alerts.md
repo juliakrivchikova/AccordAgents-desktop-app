@@ -42,7 +42,7 @@ call", artifact "План: Urgent alert — Telegram и звонок".
 
 - `src/shared/urgentAlerts.ts` — wire format, states, what the card says
   (shared by the desktop card and the phone's, through `mobileSharedRules.ts`).
-- `src/hub/hubAlerts.ts` — the alert's course on the server: settings
+- `src/hub/hubAlerts.ts` and `hubAlerts/` — the alert's course on the server: settings
   (`hub_documents` key `urgent-alerts`), alerts (`urgent_alerts` table),
   Telegram long polling, calls and their status, Twilio key presses.
 - `src/hub/alertChannels.ts` — Telegram Bot API and Twilio REST clients,
@@ -57,7 +57,7 @@ call", artifact "План: Urgent alert — Telegram и звонок".
   (`alerts-settings-section.tsx`, `alerts-settings-parts.tsx`,
   `alerts-connect-dialogs.tsx`, `alerts-phone-dialog.tsx`; what each state
   says is `src/shared/urgentAlertSettings.ts`).
-- Phone: `urgentAlertCardElement` in `src/mobile/mobile-app.js`; its Got it
+- Phone: `urgentAlertCardElement` in `src/mobile/app/chat/urgentAlerts.js`; its Got it
   (and its cross on a card nobody closed) posts `close` to `/v3/alerts`.
 
 ## Settings → Alerts

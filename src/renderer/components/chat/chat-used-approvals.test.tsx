@@ -70,6 +70,9 @@ test("a used member, role, task, sign-in or Codex card is one line: what it was,
     "Create role \"Reviewer\"", `${who} · Request cancelled ${at}`],
     ["task approved", approval({ toolName: "app_scripts_request_change", summary: "Add scheduled task", request: scriptRequest() }),
       "Morning Sentry digest", `${who} · Approved · weekdays at 09:00`],
+    ["task created without a card", approval({ toolName: "app_scripts_request_change", status: "auto-applied", summary: "Add scheduled task", request: scriptRequest(),
+      machineDecisionPending: { decisionId: "d", machineName: "Box", approve: true, at: AT } }),
+      "Morning Sentry digest", `${who} · Created · weekdays at 09:00`],
     ["task declined", approval({ toolName: "app_scripts_request_change", status: "denied", summary: "Add scheduled task", request: scriptRequest() }),
       "Morning Sentry digest", `${who} · Declined ${at}`],
     ["signed in", approval({ toolName: "app_connector_sign_in", summary: "Sign in to claude.ai Gmail", consumedAt: AT, request: signInRequest }),
@@ -200,4 +203,22 @@ test("a card still asking, or answered and waiting for its machine, is not folde
   assert.equal(removal.outcome, `${who} · Removal approved ${at}`);
   assert.match(removal.title ?? "", /Waiting for running turns to finish/);
   removal.unmount();
+});
+
+test("a Bash card offers \"for this chat\" in Claude Code's words, scoped to the command prefixes; one it cannot scope offers once only", () => {
+  const bash = (request: Record<string, unknown>) => approval({ toolName: "app_tool_permission", capability: "permissions.request", status: "pending",
+    summary: "Use Bash", request: { kind: "toolPermission", agentMode: "default", toolName: "Bash", ...request } as never });
+  const scoped = line(bash({ toolInput: { command: "mkdir -p /tmp/a && date" }, chatScope: { kind: "commands", prefixes: ["mkdir", "date"] } }));
+  assert.match(scoped.text, /Yes, allow once/);
+  assert.match(scoped.text, /Yes, and don't ask again for mkdir and date commands in this chat/);
+  assert.doesNotMatch(scoped.text, /to use Bash in this chat/, "never the whole of Bash");
+  scoped.unmount();
+  const opaque = line(bash({ toolInput: { command: "echo $(whoami)" } }));
+  assert.match(opaque.text, /Yes, allow once/);
+  assert.doesNotMatch(opaque.text, /in this chat/);
+  opaque.unmount();
+  const web = line(approval({ toolName: "app_tool_permission", capability: "permissions.request", status: "pending", summary: "Use WebFetch",
+    request: { kind: "toolPermission", agentMode: "default", toolName: "WebFetch", toolInput: { url: "https://docs.example.com/" }, chatScope: { kind: "domain", domain: "docs.example.com" } } as never }));
+  assert.match(web.text, /Yes, and don't ask again for docs\.example\.com in this chat/);
+  web.unmount();
 });

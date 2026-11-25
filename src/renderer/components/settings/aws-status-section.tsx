@@ -1,5 +1,4 @@
 import { useEffect, useState } from "react";
-import { Loader2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { AwsAutoStopRow, AwsAutoStopSetupDialog } from "./aws-worker-auto-stop";
 import { AwsConfirmDialog, AwsDialog, AwsWaiting } from "./aws-dialog";
@@ -8,6 +7,7 @@ import { AwsSignInDialog } from "./aws-sign-in-dialog";
 import { AwsSetupProgressLine, type AwsSetupView } from "./aws-setup-progress";
 import { awsWorkerStateLabel, isAwsTransition } from "./use-aws-worker-status";
 import type { AwsWorkerControl } from "./use-aws-worker-control";
+import { Spinner } from "@/components/ui/spinner";
 
 const FAILED_PREFIX: Record<string, string> = {
   setup: "Start failed", resize: "The change failed", stop: "Stop failed", delete: "Delete failed"
@@ -60,7 +60,7 @@ export function AwsStatusSection(props: { control: AwsWorkerControl; setupView: 
               <div className="gen-actions">
                 {working ? (
                   <button type="button" className="gen-pill" data-testid="aws-worker-start" disabled>
-                    <span className="gen-pill-label"><Loader2 size={14} className="gen-aws-spinner" aria-hidden /> {workingLabel}</span>
+                    <span className="gen-pill-label"><Spinner size={14} /> {workingLabel}</span>
                   </button>
                 ) : <>
                   {showStart ? (

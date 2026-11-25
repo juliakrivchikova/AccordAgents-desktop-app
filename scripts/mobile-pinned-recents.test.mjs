@@ -142,3 +142,50 @@ test("Pinned, Recents and projects on the phone; one mark per row; a long press 
     await rm(profile, { recursive: true, force: true });
   }
 });
+
+test("a pin undone on the phone stays undone while her server catches up with the pin before it", { timeout: 120_000 }, async () => {
+  const hub = await startMobileHub();
+  const site = await serveMobileShell({ port: 8380, hubOrigins: [hub.base] });
+  const profile = await tempProfile("aa-mobile-pin-undo-");
+  const chrome = launchChrome({ port: 9526, profile, url: `${site.origin}/` });
+  let app;
+  try {
+    await hub.createChat("chat-a", {
+      title: "Chat A", participants: [DREW], createdAt: minutesAgo(30),
+      messages: [{ id: "u-a", role: "user", content: "hello", status: "done", createdAt: minutesAgo(20) }]
+    });
+    app = await attachApp({ port: 9526 });
+    await pairPage(app, { hub, siteOrigin: site.origin, query: "qa=1" });
+    await app.waitFor(`JSON.stringify(${sectionRows("recents")}) === JSON.stringify(["chat-a"])`, "the chat listed");
+    // Her server is slow to take a pin: each change waits a while on the way.
+    const isPin = (op) => op.kind === "conversation.update" && ((op.metadata && "pinned" in op.metadata) || (op.removedMetadataKeys || []).includes("pinned"));
+    hub.setGate((seen) => (seen.ops || []).some(isPin) ? { delayMs: 1500 } : undefined);
+    const toggle = async (label) => {
+      await app.evaluate(`document.querySelector('#chat-list .mobile-chat-row[data-conversation-id="chat-a"]')
+        .dispatchEvent(new MouseEvent("contextmenu", { bubbles: true, cancelable: true }))`);
+      await app.waitFor(`!document.getElementById("chat-actions-sheet").hidden && document.getElementById("chat-actions-pin").textContent === ${JSON.stringify(label)}`, `offers ${label}`);
+      await app.evaluate(`document.getElementById("chat-actions-pin").click()`);
+    };
+    const pinnedShown = `${sectionRows("pinned")}.includes("chat-a")`;
+    await toggle("Pin");
+    await app.waitFor(pinnedShown, "pinned at once");
+    // Undone before her server has taken the pin: the phone keeps showing
+    // what she did last while the server catches up.
+    await toggle("Unpin");
+    await app.waitFor(`!${pinnedShown}`, "unpinned at once");
+    await app.evaluate(`(() => { window.__pinShown = []; const t0 = performance.now();
+      const tick = () => { const shown = ${pinnedShown} ? "pinned" : "unpinned";
+        if (window.__pinShown[window.__pinShown.length - 1] !== shown) window.__pinShown.push(shown);
+        if (performance.now() - t0 < 6000) setTimeout(tick, 20); };
+      tick(); })()`);
+    await sleep(6500);
+    assert.deepEqual(await app.evaluate(`window.__pinShown`), ["unpinned"], "never pinned again while the server caught up");
+    assert.equal((await hub.storage.getConversation("chat-a")).metadata.pinned, undefined, "her server holds what she did last");
+  } finally {
+    app?.close();
+    chrome.kill("SIGKILL");
+    await site.close();
+    await hub.close();
+    await rm(profile, { recursive: true, force: true });
+  }
+});

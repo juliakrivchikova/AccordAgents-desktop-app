@@ -25,9 +25,11 @@ Treat the dedicated CLI as the source of truth. Do not invent app-specific seman
 
 This is an Electron desktop app built with TypeScript, React, and Vite. Main-process code lives in `src/main`, with service classes under `src/main/services`. The preload bridge is in `src/preload`, shared types and utilities are in `src/shared`, and the React renderer is in `src/renderer`. Renderer assets belong in `src/renderer/assets`. The app-wide style entrypoint is `src/renderer/styles/app.css`, which imports foundation/theme files and view-specific CSS under `src/renderer/styles/views`. Build output goes to `dist`; do not edit generated files by hand.
 
+No source file is longer than 1000 lines; a service that outgrew one file is a facade (`chat.ts`) and a folder of parts (`chat/`). Read `docs/code-structure.md` before adding to a service, `main.ts`, the phone app or a big test.
+
 For chat role presets, saved participants, and runtime participant sessions, read `docs/chat-roles-and-participants.md` before changing role or participant behavior.
 
-For chat concurrency and cancellation changes, treat `src/main/services/chat.ts`, `src/shared/chatRunState.ts`, chat storage summaries, and the renderer chat UI as one contract. Active chat runs are tracked with `metadata.activeRunIds`; `metadata.running` and `metadata.runId` are compatibility fields. Chat conversation mutations from concurrent runs must go through the `ChatService` mutation queue rather than direct stale snapshots.
+For chat concurrency and cancellation changes, treat `src/main/services/chat.ts` and its parts in `chat/`, `src/shared/chatRunState.ts`, chat storage summaries, and the renderer chat UI as one contract. Active chat runs are tracked with `metadata.activeRunIds`; `metadata.running` and `metadata.runId` are compatibility fields. Chat conversation mutations from concurrent runs must go through the `ChatService` mutation queue rather than direct stale snapshots.
 
 ## Build, Test, and Development Commands
 
@@ -48,7 +50,11 @@ Equivalent npm scripts are in `package.json`, for example `npm run dev`, `npm ru
 
 ## Coding Style & Naming Conventions
 
-Use strict TypeScript and keep types explicit at IPC, service, and shared boundaries. Match the existing style: 2-space indentation, double quotes, semicolons, and named imports. React components and service classes use `PascalCase`; functions, hooks, variables, and IPC handlers use `camelCase`. Keep shared contracts in `src/shared/types.ts`.
+Use strict TypeScript and keep types explicit at IPC, service, and shared boundaries. Match the existing style: 2-space indentation, double quotes, semicolons, and named imports. React components and service classes use `PascalCase`; functions, hooks, variables, and IPC handlers use `camelCase`. Keep shared contracts in `src/shared/types/`.
+
+## Renderer UI code
+
+Before writing or changing anything under `src/renderer` or `src/components`, read `src/components/ui/AGENTS.md`: the UI kit, its tokens, sizes and radii, hover and focus, icons, Select, Spinner, and the loading and layout-stability rules the User set. Write and review renderer code with the repo-local `renderer-ui-code` skill (`.agents/skills/renderer-ui-code`, mirrored in `.claude/skills`): find and reuse before writing, one implementation per concern, state and effects where they belong, pure functions, types instead of tests, and the checks that close a change. Keep `SKILL.md` and `references/` identical in both copies; `agents/openai.yaml` is Codex-only and lives in `.agents` alone, as for the other repo skills.
 
 ## Testing Guidelines
 

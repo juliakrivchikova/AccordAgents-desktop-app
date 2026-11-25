@@ -1,0 +1,221 @@
+import { useMemo, useRef } from "react";
+
+import {
+  buildSessionsViewIndex,
+  isSessionsHiddenTurnFinishedNote,
+  mainSessionParticipantId,
+  sessionsFormerMembers,
+  sessionsTaskPlacement,
+  sessionsViewLane,
+  type SessionsFormerMember,
+  type SessionsViewIndex,
+  type SessionsViewLane
+} from "../../../shared/mainSession";
+import {
+  isMainSessionDelegationRosterCard,
+  latestTaskByMember,
+  openMemberCardMessages,
+  sessionsFormerMemberStatus,
+  sessionsMemberActivity,
+  sessionsMemberRows,
+  sessionsMembersWaitingSince,
+  sessionsMemberTitle,
+  sessionsRunningCount,
+  sessionsTaskEntries,
+  titleTaskByMember,
+  type SessionsMemberActivity,
+  type SessionsMemberRow,
+  type SessionsMemberTask,
+  type SessionsTaskEntry,
+  type SessionsWorkStatus
+} from "../../../shared/mainSessionView";
+import { sessionsMentionText, sessionsViewNames, sessionsViewText } from "../../../shared/sessionsViewText";
+import type { ChatAppToolApproval, ChatMessage, ChatParticipant, ChatViewMode, Conversation } from "../../../shared/types";
+import type { ChatParticipantRosterStatus } from "./chat-roster-status";
+import { isWaitingReply, waitingMessages, type WaitingMessage } from "../../../shared/waitingMessages";
+import { isChatMessageHiddenInChat } from "./chat-thread-data";
+
+export { useChatSessionsChrome } from "./use-chat-sessions-chrome";
+
+/** A member no longer in the chat, listed read-only under "Removed". */
+export interface SessionsFormerRow {
+  member: SessionsFormerMember;
+  title: string;
+  status: SessionsWorkStatus;
+  task?: SessionsMemberTask;
+}
+
+/** Everything the sessions view shows, worked out once per change of the
+ *  loaded chat (docs/main-session.md, shared/mainSession.ts). */
+export interface ChatSessionsView {
+  mainSessionId: string;
+  index: SessionsViewIndex;
+  /** The main timeline's messages: the User and the main session, and
+   *  members' choice cards still open. The main session's tasks are inside
+   *  the replies of the turns that gave them (workByReplyId); a task whose
+   *  reply is not loaded is here on its own. */
+  mainMessages: ChatMessage[];
+  /** Members' messages on the main timeline only for their open card. */
+  openCardMessageIds: ReadonlySet<string>;
+  messagesById: ReadonlyMap<string, ChatMessage>;
+  tasksByMember: ReadonlyMap<string, SessionsMemberTask>;
+  /** Members a card waits on the User for: "Waiting for you" while they run. */
+  waitingForUser: ReadonlySet<string>;
+  /** When each of them began to wait. */
+  waitingSince: ReadonlyMap<string, string>;
+  activity: SessionsMemberActivity;
+  /** Each request message's tasks, by the message's id. */
+  taskEntriesByMessageId: ReadonlyMap<string, readonly SessionsTaskEntry[]>;
+  /** The tasks shown inside a reply of the main session, by the reply's id. */
+  workByReplyId: ReadonlyMap<string, readonly SessionsTaskEntry[]>;
+  memberRows: { current: SessionsMemberRow[]; previous: SessionsMemberRow[] };
+  formerRows: SessionsFormerRow[];
+  runningMemberCount: number;
+  /** A member's (or former member's) title: the short title of the task
+   *  it is named by (titleTaskByMember: its delegation's, else its first). */
+  memberTitle: (participantId: string) => string;
+  isFormerMember: (participantId: string) => boolean;
+  laneOf: (message: ChatMessage) => SessionsViewLane;
+  /** The User's messages the main session has not taken yet, by message id. */
+  waiting: ReadonlyMap<string, WaitingMessage>;
+  /** A card the sessions view does not show: the member a delegation added. */
+  hidesApproval: (approval: ChatAppToolApproval) => boolean;
+}
+
+const NO_ENTRIES: readonly SessionsTaskEntry[] = [];
+const NO_WAITING: ReadonlyMap<string, string> = new Map();
+
+/** Keeps each value's identity while its signature is the same, so a row
+ *  drawn from it is not drawn again on every update of the chat. */
+function useSignatureCache<T>(): (key: string, signature: string, value: () => T) => T {
+  const cache = useRef(new Map<string, { signature: string; value: T }>());
+  return (key, signature, value) => {
+    const known = cache.current.get(key);
+    if (known && known.signature === signature) return known.value;
+    const next = value();
+    cache.current.set(key, { signature, value: next });
+    return next;
+  };
+}
+
+function entriesSignature(entries: readonly SessionsTaskEntry[]): string {
+  return entries.map((entry) =>
+    [entry.messageId, entry.item.targetParticipantId, entry.item.replyMessageId, entry.title, entry.status, entry.since, entry.durationMs, entry.line].join("\u0001")
+  ).join("\u0002");
+}
+
+export function useChatSessionsView(input: {
+  conversation: Conversation;
+  view: ChatViewMode;
+  participants: ChatParticipant[];
+  participantStatusById: ReadonlyMap<string, ChatParticipantRosterStatus>;
+  /** The runs this computer holds live (activeRunSummaryForConversation):
+   *  a member's reply of any other run is not the one it works on now. */
+  liveRunIds?: readonly string[];
+}): ChatSessionsView | undefined {
+  const { conversation, view, participants, participantStatusById } = input;
+  const mainId = view === "sessions" ? mainSessionParticipantId(conversation.metadata) : undefined;
+  const cached = useSignatureCache<readonly SessionsTaskEntry[]>();
+
+  const placement = useMemo(() => {
+    if (!mainId) return undefined;
+    const messages = conversation.messages;
+    const index = buildSessionsViewIndex(messages, mainId);
+    // A reply that has not started has no row: the message it answers says so.
+    const shown = (message: ChatMessage): boolean => !isChatMessageHiddenInChat(conversation, message) && !isWaitingReply(message);
+    const openCards = openMemberCardMessages(messages, index).filter(shown);
+    const openCardMessageIds = new Set(openCards.map((message) => message.id));
+    const lane = messages.filter((message) => openCardMessageIds.has(message.id) ||
+      (sessionsViewLane(message, index).kind === "main" && shown(message) && !isSessionsHiddenTurnFinishedNote(message)));
+    const tasks = sessionsTaskPlacement(lane, index);
+    return {
+      index,
+      mainMessages: lane.filter((message) => !tasks.placedTaskIds.has(message.id)),
+      tasks,
+      openCardMessageIds,
+      waiting: waitingMessages(messages, mainId),
+      messagesById: new Map(messages.map((message) => [message.id, message])),
+      tasksByMember: latestTaskByMember(messages),
+      titleTasksByMember: titleTaskByMember(messages),
+      requestMessages: messages.filter((message) => message.metadata?.participantRequest)
+    };
+  }, [conversation.messages, mainId]);
+
+  // Its own memo: the chat's metadata is a new object on every update, and
+  // only this reads the approvals.
+  const approvals = conversation.metadata.pendingAppToolApprovals;
+  // By value: the summary is new on every update of the chat's metadata.
+  const liveRunKey = input.liveRunIds?.join("\u0000");
+  const liveRunIds = useMemo(
+    () => (liveRunKey === undefined ? undefined : new Set(liveRunKey ? liveRunKey.split("\u0000") : [])),
+    [liveRunKey]
+  );
+  const activity = useMemo(
+    () => (mainId ? sessionsMemberActivity(conversation.messages, liveRunIds) : undefined),
+    [conversation.messages, liveRunIds, mainId]
+  );
+  const waitingSince = useMemo(
+    () => (mainId ? sessionsMembersWaitingSince(conversation.messages, Array.isArray(approvals) ? approvals as ChatAppToolApproval[] : undefined, liveRunIds) : NO_WAITING),
+    [approvals, conversation.messages, liveRunIds, mainId]
+  );
+  const waitingForUser = useMemo(() => new Set(waitingSince.keys()), [waitingSince]);
+
+  const former = useMemo(
+    () => (mainId ? sessionsFormerMembers(conversation.messages, participants, mainId) : []),
+    [conversation.messages, mainId, participants]
+  );
+
+  return useMemo(() => {
+    if (!mainId || !placement || !activity) return undefined;
+    const byId = new Map(participants.map((participant) => [participant.id, participant]));
+    const formerById = new Map(former.map((member) => [member.id, member]));
+    const memberTitle = (participantId: string): string => {
+      const task = placement.titleTasksByMember.get(participantId)?.item;
+      return sessionsMemberTitle(byId.get(participantId) ?? formerById.get(participantId), task);
+    };
+    const names = sessionsViewNames(
+      byId.get(mainId)?.handle,
+      [...former.map((member) => [member.handle, memberTitle(member.id)] as const),
+        ...participants.filter((participant) => participant.id !== mainId).map((participant) => [participant.handle, memberTitle(participant.id)] as const)]
+    );
+    const appText = (text: string): string => sessionsViewText(text, names);
+    const wordsText = (text: string): string => sessionsMentionText(text, names);
+    const taskEntriesByMessageId = new Map<string, readonly SessionsTaskEntry[]>();
+    for (const message of placement.requestMessages) {
+      const batch = message.metadata!.participantRequest!;
+      const entries = sessionsTaskEntries(message, batch, participantStatusById, activity, placement.messagesById, appText, wordsText, waitingForUser);
+      taskEntriesByMessageId.set(message.id, cached(message.id, entriesSignature(entries), () => entries));
+    }
+    const workByReplyId = new Map<string, readonly SessionsTaskEntry[]>();
+    for (const [replyId, tasks] of placement.tasks.tasksByReplyId) {
+      const entries = tasks.flatMap((task) => taskEntriesByMessageId.get(task.id) ?? NO_ENTRIES);
+      workByReplyId.set(replyId, cached(`reply:${replyId}`, entriesSignature(entries), () => entries));
+    }
+    const index = placement.index;
+    const memberRows = sessionsMemberRows(participants, mainId, participantStatusById, placement.tasksByMember, activity.finishedAt, waitingForUser);
+    return {
+      mainSessionId: mainId,
+      index,
+      mainMessages: placement.mainMessages,
+      openCardMessageIds: placement.openCardMessageIds,
+      waiting: placement.waiting,
+      messagesById: placement.messagesById,
+      tasksByMember: placement.tasksByMember,
+      waitingForUser,
+      waitingSince,
+      activity,
+      taskEntriesByMessageId,
+      workByReplyId,
+      memberRows,
+      formerRows: former.map((member) => {
+        const task = placement.tasksByMember.get(member.id);
+        return { member, title: memberTitle(member.id), status: sessionsFormerMemberStatus(task?.item), ...(task ? { task } : {}) };
+      }),
+      runningMemberCount: sessionsRunningCount(memberRows),
+      memberTitle,
+      isFormerMember: (participantId: string) => formerById.has(participantId),
+      laneOf: (message: ChatMessage) => sessionsViewLane(message, index),
+      hidesApproval: (approval: ChatAppToolApproval) => isMainSessionDelegationRosterCard(approval, mainId)
+    };
+  }, [activity, former, mainId, participantStatusById, participants, placement, waitingForUser, waitingSince]);
+}

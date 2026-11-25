@@ -1,0 +1,97 @@
+.message-typing span {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--mut);
+  opacity: 0.3;
+  animation: typing-pulse 1.3s ease-in-out infinite;
+}
+
+.message-typing span:nth-child(2) {
+  animation-delay: 0.16s;
+}
+
+.message-typing span:nth-child(3) {
+  animation-delay: 0.32s;
+}
+
+@keyframes typing-pulse {
+  0%, 65%, 100% { opacity: 0.28; transform: translateY(0); }
+  32% { opacity: 0.9; transform: translateY(-2px); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .message-typing span {
+    animation: none;
+    opacity: 0.5;
+  }
+}
+
+/* Matches the desktop's shimmering "Thinking" label. */
+.thinking-label {
+  display: inline-block;
+  background: linear-gradient(
+    90deg,
+    var(--mut) 0%,
+    var(--mut) 30%,
+    var(--fg1) 48%,
+    var(--mut) 66%,
+    var(--mut) 100%
+  );
+  background-size: 230% 100%;
+  background-position: 120% 0;
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: var(--mut);
+  -webkit-text-fill-color: transparent;
+  font-weight: 600;
+  animation: thinking-transfusion 1.8s ease-in-out infinite;
+}
+
+.thinking-elapsed {
+  margin-left: 8px;
+  color: var(--mut);
+  font-family: var(--mono);
+  font-size: 13px;
+  /* Fixed width so ticking seconds cannot reflow the row. */
+  font-variant-numeric: tabular-nums;
+}
+
+@keyframes thinking-transfusion {
+  0% { background-position: 120% 0; }
+  100% { background-position: -120% 0; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .thinking-label {
+    animation: none;
+    -webkit-text-fill-color: currentColor;
+    color: var(--fg1);
+  }
+}
+
+.pairing-form {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin: 14px 20px 0;
+}
+
+.pairing-input {
+  width: 100%;
+  padding: 13px 14px;
+  border: 1px solid var(--bd);
+  border-radius: 14px;
+  background: var(--surface);
+  color: var(--fg1);
+  font: 400 15px var(--sans);
+}
+
+.pairing-submit {
+  padding: 13px 16px;
+  border: 0;
+  border-radius: 14px;
+  background: var(--fg1);
+  color: var(--surface-fg);
+  font: 600 15px var(--sans);
+}

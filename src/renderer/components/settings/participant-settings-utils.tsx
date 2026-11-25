@@ -67,6 +67,8 @@ export function participantModeLabel(participant: ChatParticipantConfig): string
       return "Plan";
     case "auto":
       return "Auto-review";
+    case "full-access":
+      return "Full Access";
     case "default":
     default:
       return "Custom Access";

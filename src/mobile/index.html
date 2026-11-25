@@ -12,7 +12,7 @@
          draws a grey letter (the User, 2026-11-01). The Mac app's icon
          (assets/icon.icns), full bleed at 180px: iOS rounds the corners. -->
     <link rel="apple-touch-icon" href="apple-touch-icon.png" />
-    <link rel="stylesheet" href="mobile-app.css?v=2026-11-16-used-cards-one-line" />
+    <link rel="stylesheet" href="mobile-app.css?v=2026-11-26-split-and-eight-fixes" />
   </head>
   <body>
     <div class="mobile-stage">
@@ -45,6 +45,20 @@
           <button id="enable-alerts" class="mobile-alerts-banner" type="button" hidden>Enable message alerts</button>
           <div id="chat-list-refresh" class="pull-refresh" aria-hidden="true"><span class="pull-refresh-spinner"></span></div>
           <div id="chat-list" class="mobile-chat-list mscroll" aria-live="polite"></div>
+          <!-- A long press on a chat: what can be done to it from the list. -->
+          <div id="chat-actions-sheet" class="members-sheet chat-actions-sheet" role="dialog" aria-modal="true" aria-labelledby="chat-actions-title" hidden>
+            <div class="members-sheet-backdrop" data-chat-actions-close="1"></div>
+            <div class="members-sheet-panel">
+              <div class="members-sheet-grip" aria-hidden="true"></div>
+              <div class="members-sheet-head">
+                <strong id="chat-actions-title">Chat</strong>
+                <button id="chat-actions-close" class="members-sheet-close" type="button">Cancel</button>
+              </div>
+              <div class="chat-actions-list">
+                <button id="chat-actions-pin" class="chat-actions-row" type="button">Pin</button>
+              </div>
+            </div>
+          </div>
         </section>
         <!-- What members are doing across every chat, from what the server
              already delivered: runs in progress, questions waiting for you,
@@ -101,7 +115,32 @@
             <button id="chat-members-toggle" class="mobile-title" type="button" aria-haspopup="dialog" aria-controls="members-sheet" aria-expanded="false">
               <span id="chat-title" class="mobile-title-name" role="heading" aria-level="1">AccordAgents</span>
               <span id="connection-state" class="mobile-title-state"></span>
+              <!-- The sessions view keeps its header quiet: the chat's view is
+                   chosen in a menu under the title (docs/main-session.md). -->
+              <span id="chat-title-chevron" class="mobile-title-chevron" aria-hidden="true" hidden><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <path d="m6 9 6 6 6-6"></path>
+              </svg></span>
             </button>
+            <div id="chat-title-menu" class="chat-title-menu" role="menu" aria-label="Chat view" hidden>
+              <button type="button" class="chat-title-menu-item" role="menuitemradio" data-title-view="sessions" aria-checked="false">View: Sessions</button>
+              <button type="button" class="chat-title-menu-item" role="menuitemradio" data-title-view="classic" aria-checked="false">View: Classic</button>
+              <!-- Fork to new chat (src/shared/forkToNewChat.ts): the main
+                   session on the main timeline, the member on its own
+                   screen, as the computer's member menus offer it; disabled
+                   with the computer's reason. -->
+              <button id="chat-title-fork" type="button" class="chat-title-menu-item chat-title-menu-fork" role="menuitem" aria-disabled="true" aria-describedby="chat-title-fork-detail" hidden>
+                <span class="chat-title-menu-copy">
+                  <span class="chat-title-menu-label">Fork to new chat</span>
+                  <span id="chat-title-fork-detail" class="chat-title-menu-detail"></span>
+                </span>
+              </button>
+            </div>
+            <!-- The chat's two views (docs/main-session.md): only a chat with a
+                 main session has both; any other shows the switch unavailable. -->
+            <div id="chat-view-switch" class="chat-view-switch" role="group" aria-label="Chat view" hidden>
+              <button type="button" class="chat-view-switch-option" data-view="sessions" aria-pressed="false">Sessions</button>
+              <button type="button" class="chat-view-switch-option" data-view="classic" aria-pressed="false">Classic</button>
+            </div>
             <span id="send-log-spacer" class="mobile-header-spacer" aria-hidden="true"></span>
             <!-- The way to the send log, beside where the header says whether
                  the phone is connected: there while something sent has not
@@ -124,9 +163,12 @@
                   <path d="M16 3.13a4 4 0 0 1 0 7.75"></path>
                 </svg>
                 <span id="chat-members-count" aria-hidden="true"></span>
+                <span id="chat-members-dot" class="chat-members-dot" aria-hidden="true" hidden></span>
               </span>
             </button>
           </header>
+          <!-- Why the view switch is unavailable, said where it was tapped. -->
+          <div id="chat-view-note" class="chat-view-note" role="status" hidden></div>
           <div id="timeline-refresh" class="pull-refresh" aria-hidden="true"><span class="pull-refresh-spinner"></span></div>
           <section class="thread-surface mscroll" aria-live="polite">
             <button id="load-earlier" class="load-earlier" type="button" hidden>Show earlier messages</button>
@@ -139,6 +181,8 @@
               <div class="members-sheet-grip" aria-hidden="true"></div>
               <div class="members-sheet-head">
                 <strong id="members-sheet-title">Members</strong>
+                <!-- The sessions view's Stop all, while any member is at work. -->
+                <button id="members-sheet-stop-all" class="sessions-stop members-sheet-stop-all" type="button" hidden>Stop all</button>
                 <button id="members-sheet-close" class="members-sheet-close" type="button" aria-label="Close">Done</button>
               </div>
               <div id="members-sheet-list" class="members-sheet-list"></div>
@@ -211,6 +255,9 @@
                   </svg>
                 </button>
                 <button id="mention-button" class="composer-tool composer-tool-glyph" type="button" aria-label="Mention a member" aria-controls="mention-menu">@</button>
+                <button id="composer-stop-button" class="composer-tool composer-stop" type="button" aria-label="Stop" hidden>
+                  <svg width="12" height="12" viewBox="0 0 14 14" aria-hidden="true"><rect x="1.5" y="1.5" width="11" height="11" rx="2" fill="currentColor"></rect></svg>
+                </button>
                 <button id="send-button" class="composer-send" type="submit" aria-label="Send message">
                   <svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round">
                     <path d="M12 19V5M5 12l7-7 7 7"></path>
@@ -319,6 +366,12 @@
                 <svg class="new-chat-chevron" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m6 9 6 6 6-6"></path></svg>
               </button>
               <span class="new-chat-spacer"></span>
+              <!-- In the sessions view, the main session's provider, model and
+                   effort instead of members, as the computer's chip (T3 Code). -->
+              <button id="new-chat-model-button" class="new-chat-chip new-chat-model-chip" type="button" aria-haspopup="dialog" aria-controls="new-chat-model-sheet" aria-label="Model" hidden disabled>
+                <span id="new-chat-model-label" class="new-chat-model-label"></span>
+                <svg class="new-chat-chevron" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m6 9 6 6 6-6"></path></svg>
+              </button>
               <button id="new-chat-start" class="new-chat-send" type="button" aria-label="Start chat" disabled>
                 <svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
                   <path d="M12 19V5M5 12l7-7 7 7"></path>
@@ -339,6 +392,18 @@
               <div id="new-chat-projects" class="members-sheet-list new-chat-options" role="group" aria-label="Project"></div>
             </div>
           </div>
+          <!-- The main session's provider, model and effort (sessions view). -->
+          <div id="new-chat-model-sheet" class="members-sheet new-chat-picker" role="dialog" aria-modal="true" aria-label="Model" hidden>
+            <div class="members-sheet-backdrop" data-new-chat-picker-close="1"></div>
+            <div class="members-sheet-panel">
+              <div class="members-sheet-grip" aria-hidden="true"></div>
+              <div class="members-sheet-head">
+                <strong>Model</strong>
+                <button class="members-sheet-close" type="button" data-new-chat-picker-close="1">Done</button>
+              </div>
+              <div id="new-chat-model-options" class="members-sheet-list new-chat-options" role="group" aria-label="Model"></div>
+            </div>
+          </div>
           <div id="new-chat-members-sheet" class="members-sheet new-chat-picker" role="dialog" aria-modal="true" aria-label="Members" hidden>
             <div class="members-sheet-backdrop" data-new-chat-picker-close="1"></div>
             <div class="members-sheet-panel">
@@ -355,15 +420,15 @@
       </main>
     </div>
     <!-- The database description both the page and the service worker load. -->
-    <script src="mobile-db.js?v=2026-11-16-used-cards-one-line" defer></script>
-    <script src="jsqr.js?v=2026-11-16-used-cards-one-line" defer></script>
+    <script src="mobile-db.js?v=2026-11-26-split-and-eight-fixes" defer></script>
+    <script src="jsqr.js?v=2026-11-26-split-and-eight-fixes" defer></script>
     <!-- How the phone talks to the User's server (signed requests carrying
          its operations), and the rules shared with the desktop verbatim
          (avatars, timeline visibility), bundled from src/shared by the mobile
          build. -->
-    <script src="mobile-hub-client.js?v=2026-11-16-used-cards-one-line" defer></script>
-    <script src="mobile-shared.js?v=2026-11-16-used-cards-one-line" defer></script>
-    <script src="mobile-activity.js?v=2026-11-16-used-cards-one-line" defer></script>
-    <script src="mobile-app.js?v=2026-11-16-used-cards-one-line" defer></script>
+    <script src="mobile-hub-client.js?v=2026-11-26-split-and-eight-fixes" defer></script>
+    <script src="mobile-shared.js?v=2026-11-26-split-and-eight-fixes" defer></script>
+    <script src="mobile-activity.js?v=2026-11-26-split-and-eight-fixes" defer></script>
+    <script src="mobile-app.js?v=2026-11-26-split-and-eight-fixes" defer></script>
   </body>
 </html>

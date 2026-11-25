@@ -1,0 +1,234 @@
+:root {
+  color-scheme: light;
+  --acc: #7d5fd3;
+  --accs: #efebfb;
+  --fg1: #16191f;
+  --fg: #424955;
+  --mut: #868d9b;
+  --bd: #e7e9ee;
+  --bdf: #f0f1f4;
+  --s2: #f6f7f8;
+  /* Surfaces the handoff states as literal colors. Named here so the dark
+     palette below can restate them; the light values are the handoff's. */
+  --stage: #eceef2;
+  --surface: #ffffff;
+  --surface-fg: #ffffff;
+  --user-bub: #eceff3;
+  /* An artifact note's card, a shade paler than a bubble (as on the desktop). */
+  --note-card: #f8f9fb;
+  --code-bg: rgba(15, 23, 42, 0.08);
+  --pre-bg: #111827;
+  --pre-fg: #f9fafb;
+  --link: #2563eb;
+  --danger: #b4443a;
+  /* An urgent alert's header: the desktop's --app-urgent pair. */
+  --urgent: #dc2626;
+  --urgent-fg: #ffffff;
+  /* Its status band when the alert never reached her (the desktop's
+     --app-danger-soft pair). */
+  --urgent-soft: #fff0ef;
+  --urgent-soft-bd: #f2c0bb;
+  /* Avatar discs, the desktop's values: a member's picture must sit on the
+     same colour here as on the desktop. */
+  --avatar-bg: #f8fbff;
+  --brand-anthropic: #d97757;
+  --brand-codex: #3941ff;
+  --brand-gemini: #6e8bf0;
+  --info-soft: #edf4ff;
+  --press: rgba(22, 25, 31, 0.08);
+  --menu-shadow: 0 12px 30px rgba(22, 25, 31, 0.16);
+  /* Something waiting for the User: the desktop's warning colour. */
+  --warn: #c98a13;
+  /* Every signature in: the desktop's --app-success pair. */
+  --ok: #08794e;
+  --ok-soft: #e8f8f1;
+  /* The Start Accord glyph's branches, as the desktop's --app-accord-icon-*. */
+  --accord-icon-top: #a855f7;
+  --accord-icon-left: #e73975;
+  --accord-icon-right: #447bf3;
+  --warn-soft: rgba(201, 138, 19, 0.16);
+  --pill-shadow: 0 6px 18px rgba(22, 25, 31, 0.12);
+  --sans: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Helvetica Neue", "Segoe UI", system-ui, sans-serif;
+  --disp: -apple-system, BlinkMacSystemFont, "SF Pro Display", "Helvetica Neue", "Segoe UI", system-ui, sans-serif;
+  --mono: "JetBrains Mono", ui-monospace, Menlo, monospace;
+  font-family: var(--sans);
+  background: var(--stage);
+  color: var(--fg);
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  min-height: 100vh;
+  background: var(--stage);
+}
+
+button,
+textarea {
+  font: inherit;
+}
+
+.mobile-stage {
+  min-height: 100vh;
+  min-height: 100dvh;
+  display: flex;
+  justify-content: center;
+  align-items: flex-start;
+  padding: 56px 44px 72px;
+  background: var(--stage);
+  font-family: var(--sans);
+  color: var(--fg);
+}
+
+.mobile-phone {
+  /* The bottom bar is placed against the phone, above whatever it floats over. */
+  position: relative;
+  /* How far the bottom bar sits from the bottom edge. */
+  --dock-offset: 30px;
+  width: 390px;
+  height: 844px;
+  border-radius: 44px;
+  background: var(--surface);
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+  box-shadow: 0 2px 6px rgba(18, 24, 40, 0.08), 0 26px 60px -18px rgba(18, 24, 40, 0.28);
+  border: 1px solid var(--frame-bd, #dcdee5);
+}
+
+/* Narrow window, or the installed app in any orientation. The width test alone
+   misses a phone held sideways — 874px wide on a 16 Pro — which is how the
+   desktop preview frame and the rubber-band came back the moment the phone was
+   rotated. */
+@media (max-width: 620px), (display-mode: standalone) {
+  /* On a phone the document itself must never be a scroller. iOS rubber-bands
+     the root scroller in a standalone PWA even when there is nothing to scroll,
+     which drags the whole app off the screen and shows the page background
+     above and below it. Pinning html/body to the viewport and turning
+     overscroll off leaves the lists inside as the only things that move. */
+  /* --app-h is the height the phone can actually show, measured in JS on every
+     frame that changes it. The 100% fallback only covers the moment before the
+     script runs. */
+  html,
+  body {
+    height: var(--app-h, 100%);
+    /* The base rule's min-height: 100vh would otherwise hold the body at the
+       full screen height and make the measured height do nothing. */
+    min-height: 0;
+    overflow: hidden;
+    overscroll-behavior: none;
+  }
+
+  .mobile-stage {
+    padding: 0;
+    align-items: stretch;
+    height: 100%;
+    min-height: 0;
+  }
+
+  .mobile-phone {
+    width: 100%;
+    height: 100%;
+    border: 0;
+    border-radius: 0;
+    box-shadow: none;
+  }
+}
+
+/* The app is full-bleed on a phone, so every edge it touches has to clear the
+   status bar, the home indicator and — in landscape — the notch. env() is 0
+   wherever there is no inset, so these calc() values are the plain ones there. */
+.mobile-screen {
+  flex: 1;
+  min-height: 0;
+  display: none;
+  flex-direction: column;
+  padding-left: env(safe-area-inset-left);
+  padding-right: env(safe-area-inset-right);
+}
+
+.mobile-screen.is-active {
+  display: flex;
+}
+
+.mobile-home-indicator {
+  height: 24px;
+  flex-shrink: 0;
+  display: flex;
+  align-items: flex-start;
+  justify-content: center;
+  padding-top: 6px;
+}
+
+.mobile-home-indicator span {
+  width: 96px;
+  height: 4px;
+  border-radius: 999px;
+  background: var(--home-bar, #cfd3dc);
+}
+
+.mobile-status-bar {
+  flex-shrink: 0;
+  height: 52px;
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  padding: 0 30px 8px;
+  color: var(--fg1);
+}
+
+.mobile-status-bar > span:first-child {
+  font: 600 14px var(--sans);
+  letter-spacing: -0.01em;
+}
+
+.mobile-status-icons {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+}
+
+.mobile-signal {
+  width: 16px;
+  height: 10px;
+  border-radius: 2px;
+  background: var(--fg1);
+}
+
+.mobile-battery {
+  width: 22px;
+  height: 11px;
+  border-radius: 3px;
+  border: 1.5px solid var(--fg1);
+}
+
+/* The mock status bar and home indicator are scenery for the desktop preview.
+   The real device draws its own, so on a phone these are 76px of stolen
+   screen. This has to sit after the rules above: it lost to them on equal
+   specificity while it lived up in the phone media block, so the scenery
+   shipped to the phone. */
+@media (max-width: 620px), (display-mode: standalone) {
+  .mobile-status-bar,
+  .mobile-home-indicator {
+    display: none;
+  }
+
+  /* The bottom bar sits just above the home indicator the phone draws. */
+  .mobile-phone {
+    --dock-offset: max(10px, calc(env(safe-area-inset-bottom) - 4px));
+  }
+}
+
+.mobile-chats-header {
+  flex-shrink: 0;
+  /* The height a header with a 44px control has, so the title sits at the
+     same place on every home tab. */
+  min-height: calc(60px + env(safe-area-inset-top));
+  padding: calc(6px + env(safe-area-inset-top)) 20px 10px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}

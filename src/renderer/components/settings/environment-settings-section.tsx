@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
-import { Plus, RefreshCw, Search, Trash2 } from "lucide-react";
+import { PlusIcon, ArrowsClockwiseIcon, MagnifyingGlassIcon, TrashIcon } from "@phosphor-icons/react";
 
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogClose, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
@@ -14,6 +14,7 @@ import type {
 import { errorText } from "../review/review-conversation-data";
 import { IconButton } from "../primitives";
 import { DeleteConfirmationDialog } from "./delete-confirmation-dialog";
+import { Delayed } from "@/components/ui/delayed";
 
 type EnvironmentFilter = "all" | "custom" | "automatic";
 
@@ -71,7 +72,7 @@ export function EnvironmentSettingsSection(props: {
     onHeaderActionChange?.(
       <IconButton
         size="sm"
-        icon={RefreshCw}
+        icon={ArrowsClockwiseIcon}
         label="Read this computer's variables again"
         tooltip="Read this computer's variables again"
         disabled={loading}
@@ -128,7 +129,7 @@ export function EnvironmentSettingsSection(props: {
       </p>
       <div className="roles-toolbar">
         <label className="roles-search">
-          <Search size={16} aria-hidden />
+          <MagnifyingGlassIcon size={16} aria-hidden />
           <input
             data-testid="env-search"
             value={query}
@@ -137,7 +138,7 @@ export function EnvironmentSettingsSection(props: {
             aria-label="Search variables"
           />
         </label>
-        <span className="roles-count" data-testid="env-count">{snapshot ? `${visible.length} shown` : loading ? "Loading" : ""}</span>
+        <span className="roles-count" data-testid="env-count">{snapshot ? `${visible.length} shown` : loading ? <Delayed>Loading</Delayed> : ""}</span>
         <div className="roles-toolbar-spacer" />
         <div className="roles-filter-tabs" aria-label="Variable filters">
           {FILTER_TABS.map((tab) => (
@@ -153,7 +154,7 @@ export function EnvironmentSettingsSection(props: {
           ))}
         </div>
         <Button type="button" className="roles-new-button" data-testid="env-new" onClick={() => setCreating(true)}>
-          <Plus size={15} aria-hidden />
+          <PlusIcon size={15} aria-hidden />
           New variable
         </Button>
       </div>
@@ -261,7 +262,7 @@ function EnvironmentRow(props: {
         </button>
         <IconButton
           size="sm"
-          icon={Trash2}
+          icon={TrashIcon}
           label={`Delete ${variable.key}`}
           tooltip="Delete"
           data-testid={`env-delete-${variable.key}`}

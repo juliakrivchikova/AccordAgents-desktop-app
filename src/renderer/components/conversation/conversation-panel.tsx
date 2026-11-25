@@ -1,7 +1,7 @@
 import { ChatConversationView } from "../chat/chat-conversation-view";
-import { ChatCreationState } from "../chat/chat-creation-state";
+import type { MainSessionActions } from "../chat/chat-view-switch";
 import { SlackView } from "../review/review-view";
-import { AppLoadingState } from "../loading-states";
+import { LoadingBar } from "@/components/ui/loading-bar";
 import { planDecisionReplies } from "../review/review-conversation-data";
 import { markActivityItemRead } from "../../app/activity-item-state";
 import type { AppState } from "../../app/app-state";
@@ -15,6 +15,9 @@ import type { ArtifactsState } from "../artifacts/use-artifacts";
 
 type AppViewModel = ReturnType<typeof useAppViewModel>;
 
+/** React 18 has no typed `inert`; the attribute is passed through as is. */
+const INERT = { inert: "" } as Record<string, string>;
+
 export interface ConversationPanelProps {
   state: AppState;
   view: AppViewModel;
@@ -23,9 +26,14 @@ export interface ConversationPanelProps {
   reviewDecisionActions: ReviewDecisionActions;
   reviewPlanActions: ReviewPlanActions;
   settingsActions: SettingsActions;
-  openingConversationDescription: string;
   accordDisabledReason?: string;
   onOpenAccord: () => void;
+  /** The sessions view: a member's … actions (its session's header), and
+   *  its controls under its composer. */
+  renderMemberSettings?: (participantId: string) => React.ReactNode;
+  renderMemberChip?: (participantId: string) => React.ReactNode;
+  /** The main session's … actions, in the chat title's menu. */
+  mainSessionActions?: MainSessionActions;
   topBar?: React.ReactNode;
   artifacts: ArtifactsState;
 }
@@ -38,25 +46,33 @@ export function ConversationPanel({
   reviewDecisionActions,
   reviewPlanActions,
   settingsActions,
-  openingConversationDescription,
   accordDisabledReason,
   onOpenAccord,
+  renderMemberSettings,
+  renderMemberChip,
+  mainSessionActions,
   topBar,
   artifacts
 }: ConversationPanelProps): JSX.Element | null {
   if (!view.hasResultContext) {
     return null;
   }
+  // Opening another chat keeps the one on screen until the new one is in,
+  // with a thin line under its header if that takes a while; no loading card
+  // (the User, 2026-11-22). Meanwhile the old chat takes no clicks, keys or
+  // focus: nothing done there could land on the chat being opened.
+  const leaving = view.isOpeningConversation && Boolean(state.conversation);
   return (
-    <section className={`conversation-panel ${view.conversationKind === "chat" ? "chat-conversation-panel" : ""}`}>
-      {state.busy && !state.conversation && state.startingChatRef.current ? (
-        <ChatCreationState key={state.currentRunId}
-          progress={[...state.progressLog].reverse().find(item => item.runId === state.currentRunId)}
-          stopping={Boolean(state.chatCreationRef.current?.signal.aborted)} />
-      ) : view.isOpeningConversation ? (
-        <AppLoadingState title="Loading chat" description={openingConversationDescription} />
-      ) : view.conversationKind === "chat" && state.conversation ? (
+    <section className={`conversation-panel ${view.conversationKind === "chat" ? "chat-conversation-panel" : ""}`}
+      {...(leaving ? INERT : {})}>
+      {view.isOpeningConversation && (
+        <LoadingBar label="Loading chat" className={leaving ? "top-[calc(var(--app-header-height)_-_1px)]" : undefined} delayMs={leaving ? undefined : 0} />
+      )}
+      {view.isOpeningConversation && !state.conversation ? null : view.conversationKind === "chat" && state.conversation ? (
         <ChatConversationView
+          // One view per chat: nothing it holds (a draft image, a scroll
+          // position) carries over to the next chat opened.
+          key={state.conversation.id}
           conversation={state.conversation}
           topBar={topBar}
           settings={state.settings}
@@ -79,10 +95,18 @@ export function ConversationPanel({
           onLoadOlderMessages={() => void conversationActions.loadOlderConversationMessages()}
           onLoadMessagePageForMessage={conversationActions.loadConversationMessagePageForMessage}
           messageFocusRequest={state.chatMessageFocusRequest}
-          onSend={(repoFileMentions, imageAttachments, skillMentions, content) =>
-            chatActions.sendChatMessage({ content, repoFileMentions, imageAttachments, skillMentions })}
+          onSend={(repoFileMentions, imageAttachments, skillMentions, content, targetParticipantIds) =>
+            chatActions.sendChatMessage({ content, repoFileMentions, imageAttachments, skillMentions, targetParticipantIds, fromMainComposer: true })}
+          onSendToMember={(request) => chatActions.sendChatMessage(request)}
+          onChatViewSaved={(saved) => state.setConversation((current) => current?.id === saved.conversationId
+            ? { ...current, metadata: { ...current.metadata, chatView: saved.view } }
+            : current)}
+          onChatViewError={state.setError}
           accordDisabledReason={accordDisabledReason}
           onOpenAccord={onOpenAccord}
+          renderMemberSettings={renderMemberSettings}
+          renderMemberChip={renderMemberChip}
+          mainSessionActions={mainSessionActions}
           onSendThread={(rootMessage, content, repoFileMentions, imageAttachments, skillMentions) => chatActions.sendChatMessage({
             content,
             skillMentions,

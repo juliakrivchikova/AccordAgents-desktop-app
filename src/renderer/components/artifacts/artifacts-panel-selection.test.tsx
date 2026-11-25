@@ -353,8 +353,7 @@ test("the changes caption never describes a pair the body is not showing", async
 test("a diff for a superseded pair is never captioned as the current one", async () => {
   assert.equal(globalThis.ACCORD_RENDERER_JSDOM, true, "run this test with scripts/renderer-jsdom-setup.mjs");
   const noop = (): void => undefined;
-  const container = document.createElement("div");
-  document.body.append(container);
+  const container = document.body.appendChild(document.createElement("div"));
   const root = createRoot(container);
   const props: Parameters<typeof ArtifactDetailView>[0] = {
     detail: published(4),
@@ -378,6 +377,7 @@ test("a diff for a superseded pair is never captioned as the current one", async
   };
   try {
     await act(async () => { root.render(<TooltipProvider><ArtifactDetailView {...props} /></TooltipProvider>); });
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 450)); }); // past LOADING_DELAY_MS
     const shown = container.textContent ?? "";
     assert.doesNotMatch(shown, /\+stale line/, "the v2-to-v3 body must not be shown beside v4");
     assert.doesNotMatch(shown, /Changes from v3 to v4/, "and must never be captioned as v3-to-v4");

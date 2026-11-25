@@ -1,4 +1,4 @@
-import { CheckCheck } from "lucide-react";
+import { ChecksIcon } from "@phosphor-icons/react";
 
 import type { ArtifactApproval } from "../../../shared/types";
 
@@ -28,7 +28,7 @@ export function ArtifactApprovalBadge({ approval, compact }: { approval: Artifac
 export function ArtifactApprovedMark(): JSX.Element {
   return (
     <span className="artifact-approved-mark" title="Fully approved">
-      <CheckCheck aria-hidden />
+      <ChecksIcon aria-hidden />
     </span>
   );
 }

@@ -63,8 +63,8 @@ curl -s https://mobile.accordagents.com/mobile-app.js | grep -c "<a string your 
 `ASSET_VERSION` in `src/mobile/service-worker.js` is what busts the phone's
 cache. If a change ships without bumping it, the phone can keep serving its
 cached copy: the service worker only refetches assets whose version string
-changed. Bump it in the same commit as any change to `mobile-app.js`,
-`mobile-app.css` or `index.html`, using only letters, digits, dots, dashes and
+changed. Bump it in the same commit as any change to `src/mobile/app`,
+`src/mobile/styles` or `index.html`, using only letters, digits, dots, dashes and
 underscores (`scripts/mobile-shell-contract.test.mjs` checks it): a stable
 release reads it to tell which phone app the phone runs.
 

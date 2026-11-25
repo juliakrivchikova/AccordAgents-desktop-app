@@ -1,5 +1,5 @@
 import { type ReactNode, useState } from "react";
-import { Bell, ChevronDown, ChevronRight, Plus, Search, Settings, SquarePen } from "lucide-react";
+import { BellIcon, CaretRightIcon, FolderSimpleIcon, GearSixIcon, MagnifyingGlassIcon, NotePencilIcon, PlusIcon } from "@phosphor-icons/react";
 
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { HistoryLoadingState } from "@/renderer/components/loading-states";
@@ -14,7 +14,6 @@ import { chatSearchShortcutAria, chatSearchShortcutLabel } from "../../app/chat-
 import { isMacPlatform } from "../../lib/platform";
 
 const INITIAL_PROJECT_SESSION_LIMIT = 5;
-const ACCORDAGENTS_MARK_URL = new URL("../../assets/accordagents-mark.png", import.meta.url).href;
 
 export interface ProjectSessionGroup {
   key: string;
@@ -53,6 +52,8 @@ export interface SidebarProps {
   // Small window-level controls (theme, refresh) shown next to Settings.
   footerActions?: ReactNode;
 }
+
+type RowSection = "pinned" | "recent" | "project" | "archived";
 
 export const Sidebar = ({
   pinnedSessions = [],
@@ -99,14 +100,21 @@ export const Sidebar = ({
     });
   }
 
+  function showMoreSessions(key: string): void {
+    setExpandedProjectKeys((current) => new Set(current).add(key));
+  }
+
   /** One chat's row: the same chat may be listed under Pinned, Recents and
    *  its project at once, and every listing shows it the same way. */
-  function renderSessionRow(summary: ConversationSummary, section: "pinned" | "recent" | "project"): JSX.Element {
+  function renderSessionRow(summary: ConversationSummary, section: RowSection): JSX.Element {
     const pending = summary.id === pendingId;
-    const selected = summary.id === activeId || pending;
+    // While a chat opens, only it is selected: the one still on screen is
+    // being left.
+    const selected = pendingId ? pending : summary.id === activeId;
     const running = summary.running === true;
     const working = running || summary.replyPending === true;
-    const unread = !selected && !working && unreadIds?.has(summary.id) === true;
+    const archived = section === "archived";
+    const unread = !archived && !selected && !working && unreadIds?.has(summary.id) === true;
     return (
       <SidebarSessionRow
         key={summary.id}
@@ -117,38 +125,25 @@ export const Sidebar = ({
         working={working}
         unread={unread}
         section={section}
+        indented={section === "project"}
         onSelect={onSelect}
         onArchive={onArchive}
         onUnarchive={onUnarchive}
         onDelete={setDeleteTarget}
-        onSetPinned={onSetPinned}
+        onSetPinned={archived ? undefined : onSetPinned}
       />
     );
   }
 
-  function showMoreSessions(key: string): void {
-    setExpandedProjectKeys((current) => {
-      const next = new Set(current);
-      next.add(key);
-      return next;
-    });
-  }
-
   return (
-    <aside
-      id="app-sidebar"
-      data-shell="sidebar"
-      className="flex min-h-0 flex-col text-foreground"
-    >
+    <aside id="app-sidebar" data-shell="sidebar" className="flex min-h-0 flex-col bg-ui-sidebar text-ui-text">
       <div data-shell="sidebar-brand" data-titlebar className="app-titlebar-row sidebar-brand-row">
-        <div className="flex min-w-0 items-center gap-2">
-          <img src={ACCORDAGENTS_MARK_URL} alt="" className="size-5 shrink-0 rounded-[5px]" aria-hidden="true" />
-          <span className="min-w-0 truncate">AccordAgents</span>
-        </div>
+        {/* No name by the lights: the toggle sits where the collapsed
+            sidebar keeps it, so it never moves (the User, 2026-11-22). */}
         {onToggleSidebar && <SidebarToggleButton expanded onToggle={onToggleSidebar} />}
       </div>
 
-      <div className="px-[var(--app-gutter-tight)] pt-2">
+      <div className="px-2 pt-1">
         <button
           id="chat-search-trigger"
           type="button"
@@ -158,30 +153,26 @@ export const Sidebar = ({
           aria-keyshortcuts={chatSearchShortcutAria(macShortcuts)}
           data-testid="chat-search-trigger"
           className={cn(
-            "flex h-8 w-full items-center gap-2 rounded-md border border-[var(--app-border)] bg-[var(--app-workspace-bg)] px-2.5",
-            "text-left text-[13px] text-muted-foreground transition-colors",
-            "hover:border-[var(--app-border-strong)] hover:text-[var(--app-text)]",
-            "focus-visible:outline-none focus-visible:shadow-[var(--focus-ring)]"
+            "flex h-7 w-full items-center gap-2 rounded-ui-8 border border-ui-border-subtle bg-ui-bg px-2 text-left text-ui-13 text-ui-text-3",
+            "transition-colors duration-120 ease-ui-out hover:border-ui-border hover:text-ui-text-2",
+            "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ui-focus-ring"
           )}
         >
-          <Search className="size-[15px] shrink-0" aria-hidden />
+          <MagnifyingGlassIcon className="size-3.5 shrink-0" aria-hidden />
           <span className="min-w-0 flex-1 truncate">Search chats</span>
-          <kbd className="shrink-0 font-sans text-[11px] text-muted-foreground" data-testid="chat-search-shortcut">
+          <kbd
+            className="inline-flex h-[18px] shrink-0 items-center rounded-ui-4 border border-ui-border-subtle bg-ui-bg px-1.5 font-sans text-ui-11 text-ui-text-3"
+            data-testid="chat-search-shortcut"
+          >
             {chatSearchShortcutLabel(macShortcuts)}
           </kbd>
         </button>
       </div>
 
-      <nav className="flex flex-col gap-0.5 px-[var(--app-gutter-tight)] pt-2 pb-2" aria-label="Primary">
+      <nav className="flex flex-col gap-px px-2 pt-1.5 pb-1" aria-label="Primary">
+        <SidebarNavItem icon={NotePencilIcon} label="New chat" onClick={onNewSession} disabled={busy} testId="new-chat" />
         <SidebarNavItem
-          icon={SquarePen}
-          label="New chat"
-          onClick={onNewSession}
-          disabled={busy}
-          testId="new-chat"
-        />
-        <SidebarNavItem
-          icon={Bell}
+          icon={BellIcon}
           label="Activity"
           ariaLabel={activityUnreadCount > 0 ? `Activity, ${activityUnreadCount} unread` : undefined}
           onClick={onOpenActivity}
@@ -190,32 +181,22 @@ export const Sidebar = ({
         />
       </nav>
 
-      <ScrollArea className="min-h-0 min-w-0 flex-1 px-[var(--app-gutter-tight)] pb-2">
-        <div className="flex min-w-0 flex-col gap-1">
-          {!loading && pinnedSessions.length > 0 && (
-            <SidebarChatSection
-              label="Pinned"
-              testId="pinned-group"
-              collapsed={pinnedCollapsed}
-              onToggle={() => setPinnedCollapsed((current) => !current)}
-            >
+      <ScrollArea className="min-h-0 min-w-0 flex-1 px-2 pb-2">
+        <div className="flex min-w-0 flex-col gap-1 pt-1">
+          {pinnedSessions.length > 0 && (
+            <SidebarSection label="Pinned" testId="pinned-group" open={!pinnedCollapsed} onOpenChange={(open) => setPinnedCollapsed(!open)}>
               {pinnedSessions.map((summary) => renderSessionRow(summary, "pinned"))}
-            </SidebarChatSection>
+            </SidebarSection>
           )}
-          {!loading && recentSessions.length > 0 && (
-            <SidebarChatSection
-              label="Recents"
-              testId="recents-group"
-              collapsed={recentsCollapsed}
-              onToggle={() => setRecentsCollapsed((current) => !current)}
-            >
+          {recentSessions.length > 0 && (
+            <SidebarSection label="Recents" testId="recents-group" open={!recentsCollapsed} onOpenChange={(open) => setRecentsCollapsed(!open)}>
               {recentSessions.map((summary) => renderSessionRow(summary, "recent"))}
-            </SidebarChatSection>
+            </SidebarSection>
           )}
-          <div className="px-1 pb-1 pt-2 text-[11.5px] font-semibold tracking-[0.01em] text-muted-foreground" data-testid="projects-heading">
-            Projects
-          </div>
-          {loading ? (
+          <div className={SECTION_LABEL} data-testid="projects-heading">Projects</div>
+          {/* A refresh keeps the rows on screen; the placeholder is for the
+              first load, before there is anything to show. */}
+          {loading && pinnedSessions.length + recentSessions.length + projectGroups.length === 0 ? (
             <HistoryLoadingState />
           ) : projectGroups.length === 0 ? (
             <EmptyState size="sm">
@@ -229,107 +210,59 @@ export const Sidebar = ({
               const hiddenCount = group.sessions.length - visibleSessions.length;
               return (
                 <section key={group.key} className="min-w-0" data-testid="project-group" data-project-key={group.key}>
-                  <div className="group flex min-w-0 items-center gap-1 rounded-md px-1 py-1">
-                    <button
-                      type="button"
-                      onClick={() => toggleProject(group.key)}
-                      aria-expanded={!collapsed}
-                      data-testid="project-toggle"
-                      className={cn(
-                        "flex min-w-0 flex-1 items-center gap-1.5 rounded-md px-1 py-1 text-left text-sm",
-                        "text-[var(--app-text)] transition-colors hover:bg-[var(--app-surface-hover)]",
-                        "focus-visible:outline-none focus-visible:shadow-[var(--focus-ring)]"
-                      )}
-                    >
-                      {collapsed ? <ChevronRight className="size-3.5 shrink-0 text-muted-foreground" aria-hidden /> : <ChevronDown className="size-3.5 shrink-0 text-muted-foreground" aria-hidden />}
-                      <span className="min-w-0 truncate text-[11.5px] font-semibold tracking-[0.01em] text-muted-foreground">{group.label}</span>
-                    </button>
-                    <IconButton
-                      size="xs"
-                      icon={Plus}
-                      label={`New chat in ${group.label}`}
-                      onClick={() => onNewProjectSession(group.repoPath)}
-                      disabled={busy}
-                      data-testid="project-new-session"
-                      className="opacity-0 group-hover:opacity-100 focus-visible:opacity-100 disabled:opacity-30"
-                    />
-                  </div>
-
-                  {!collapsed && (
-                    <div className="ml-3 flex min-w-0 flex-col gap-0.5">
-                      {visibleSessions.map((summary) => renderSessionRow(summary, "project"))}
-                      {hiddenCount > 0 && (
-                        <button
-                          type="button"
-                          onClick={() => showMoreSessions(group.key)}
-                          data-testid="project-show-more"
-                          className={cn(
-                            "w-full rounded-md px-2 py-1.5 text-left text-[12px] text-muted-foreground",
-                            "transition-colors hover:bg-[var(--app-surface-hover)] hover:text-[var(--app-text)]",
-                            "focus-visible:outline-none focus-visible:shadow-[var(--focus-ring)]"
-                          )}
-                        >
-                          Show {hiddenCount} more
+                    <div className="group flex min-w-0 items-center gap-0.5">
+                      {/* As Recents: the name, then its caret; its chats start under the name. */}
+                      <button type="button" onClick={() => toggleProject(group.key)} aria-expanded={!collapsed} data-testid="project-toggle" className={cn(ROW, "min-w-0 flex-1 gap-1.5 text-ui-text-2")}>
+                          <FolderSimpleIcon className="size-3.5 shrink-0 text-ui-text-3" aria-hidden />
+                          <span className="min-w-0 truncate">{group.label}</span>
+                          <CaretRightIcon className={cn(CARET, "text-ui-text-3", !collapsed && "rotate-90")} aria-hidden />
                         </button>
-                      )}
+                      <IconButton
+                        size="xs"
+                        icon={PlusIcon}
+                        label={`New chat in ${group.label}`}
+                        onClick={() => onNewProjectSession(group.repoPath)}
+                        disabled={busy}
+                        data-testid="project-new-session"
+                        className="opacity-0 transition-opacity duration-120 group-hover:opacity-100 focus-visible:opacity-100 disabled:opacity-30"
+                      />
                     </div>
-                  )}
-                </section>
+                    {!collapsed && (
+                      <div className={GROUP_BODY}>
+                        {visibleSessions.map((summary) => renderSessionRow(summary, "project"))}
+                        {hiddenCount > 0 && (
+                          <button
+                            type="button"
+                            onClick={() => showMoreSessions(group.key)}
+                            data-testid="project-show-more"
+                            className={cn(ROW, "pl-7 text-ui-12 text-ui-text-3 hover:text-ui-text-2")}
+                          >
+                            Show {hiddenCount} more
+                          </button>
+                        )}
+                      </div>
+                    )}
+                  </section>
               );
             })
           )}
 
           {archivedSessions.length > 0 && (
             <section className="mt-1 min-w-0" data-testid="archived-group">
-              <button
-                type="button"
-                onClick={() => setArchivedCollapsed((current) => !current)}
-                aria-expanded={!archivedCollapsed}
-                data-testid="archived-toggle"
-                className={cn(
-                  "flex min-w-0 w-full items-center gap-1.5 rounded-md px-2 py-1 text-left text-sm",
-                  "text-[var(--app-text)] transition-colors hover:bg-[var(--app-surface-hover)]",
-                  "focus-visible:outline-none focus-visible:shadow-[var(--focus-ring)]"
-                )}
-              >
-                {archivedCollapsed ? <ChevronRight className="size-3.5 shrink-0 text-muted-foreground" aria-hidden /> : <ChevronDown className="size-3.5 shrink-0 text-muted-foreground" aria-hidden />}
-                <span className="min-w-0 truncate text-[11.5px] font-semibold tracking-[0.01em] text-muted-foreground">
-                  Archived ({archivedSessions.length})
-                </span>
-              </button>
-
-              {!archivedCollapsed && (
-                <div className="ml-3 flex min-w-0 flex-col gap-0.5">
-                  {archivedSessions.map((summary) => {
-                    const pending = summary.id === pendingId;
-                    const selected = summary.id === activeId || pending;
-                    return (
-                      <SidebarSessionRow
-                        key={summary.id}
-                        summary={summary}
-                        selected={selected}
-                        pending={pending}
-                        running={summary.running === true}
-                        working={summary.running === true || summary.replyPending === true}
-                        unread={false}
-                        section="archived"
-                        onSelect={onSelect}
-                        onArchive={onArchive}
-                        onUnarchive={onUnarchive}
-                        onDelete={setDeleteTarget}
-                      />
-                    );
-                  })}
-                </div>
-              )}
-            </section>
+                  <button type="button" onClick={() => setArchivedCollapsed((current) => !current)} aria-expanded={!archivedCollapsed} data-testid="archived-toggle" className={SECTION_TOGGLE}>
+                    <span className="min-w-0 flex-1 truncate">Archived</span>
+                    <CaretRightIcon className={cn(CARET, !archivedCollapsed && "rotate-90")} aria-hidden />
+                    <span className="tabular-nums text-ui-11 font-normal">{archivedSessions.length}</span>
+                  </button>
+                {!archivedCollapsed && <div className={GROUP_BODY}>{archivedSessions.map((summary) => renderSessionRow(summary, "archived"))}</div>}
+              </section>
           )}
         </div>
       </ScrollArea>
 
-      <div className="flex shrink-0 items-center gap-1 border-t border-[var(--app-shell-border)] px-[var(--app-gutter-tight)] py-2">
+      <div className="flex h-11 shrink-0 items-center gap-0.5 border-t border-ui-border-subtle px-2">
         <div className="min-w-0 flex-1">
-          <SidebarNavItem icon={Settings} label="Settings" onClick={onOpenSettings} testId="sidebar-settings" />
+          <SidebarNavItem icon={GearSixIcon} label="Settings" onClick={onOpenSettings} testId="sidebar-settings" />
         </div>
         {footerActions}
       </div>
@@ -356,42 +289,44 @@ export const Sidebar = ({
           }
         }}
       />
-
     </aside>
   );
 };
 
+/** A 28px sidebar row (the one row shape of the sidebar). */
+const ROW = cn(
+  "flex h-7 items-center gap-2 rounded-ui-8 px-2 text-left text-ui-13",
+  "transition-colors duration-120 ease-ui-out hover:bg-ui-row-hover",
+  "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ui-focus-ring"
+);
+const SECTION_LABEL = "flex h-6 min-w-0 items-center gap-1 px-2 pt-1 text-left text-ui-12 font-medium text-ui-text-3";
+/** A section heading that folds its group: the whole row is the target. */
+const SECTION_TOGGLE = cn(SECTION_LABEL, "w-full rounded-ui-8 hover:text-ui-text-2 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ui-focus-ring");
+const CARET = "size-3.5 shrink-0 transition-transform duration-180 ease-ui-out";
+/** A group opening: its rows fade and slide in; closing is immediate. */
+const GROUP_BODY = "flex min-w-0 flex-col gap-px animate-in fade-in-0 slide-in-from-top-1 duration-180 ease-ui-out";
+
 /** A top-level list of chats (Pinned, Recents): a heading that folds it. */
-function SidebarChatSection({
+function SidebarSection({
   label,
   testId,
-  collapsed,
-  onToggle,
+  open,
+  onOpenChange,
   children
 }: {
   label: string;
   testId: string;
-  collapsed: boolean;
-  onToggle: () => void;
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
   children: ReactNode;
 }): JSX.Element {
   return (
     <section className="min-w-0 pb-1" data-testid={testId}>
-      <button
-        type="button"
-        onClick={onToggle}
-        aria-expanded={!collapsed}
-        data-testid={`${testId}-toggle`}
-        className={cn(
-          "flex min-w-0 w-full items-center gap-1 rounded-md px-1 pb-1 pt-2 text-left",
-          "text-[11.5px] font-semibold tracking-[0.01em] text-muted-foreground transition-colors hover:text-[var(--app-text)]",
-          "focus-visible:outline-none focus-visible:shadow-[var(--focus-ring)]"
-        )}
-      >
+      <button type="button" onClick={() => onOpenChange(!open)} aria-expanded={open} data-testid={`${testId}-toggle`} className={SECTION_TOGGLE}>
         <span className="min-w-0 truncate">{label}</span>
-        {collapsed ? <ChevronRight className="size-3 shrink-0" aria-hidden /> : <ChevronDown className="size-3 shrink-0" aria-hidden />}
+        <CaretRightIcon className={cn(CARET, open && "rotate-90")} aria-hidden />
       </button>
-      {!collapsed && <div className="flex min-w-0 flex-col gap-0.5">{children}</div>}
+      {open && <div className={GROUP_BODY}>{children}</div>}
     </section>
   );
 }

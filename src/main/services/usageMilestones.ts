@@ -2,6 +2,7 @@ import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync 
 import path from "node:path";
 import { deriveAgentReadiness } from "../../shared/cliReadiness";
 import type { AgentHealth, ChatMessage, Conversation } from "../../shared/types";
+import { chatViewFor, isChatViewMode } from "../../shared/mainSession";
 import {
   USAGE_EXISTING_INSTALL,
   USAGE_MILESTONES,
@@ -24,6 +25,7 @@ import {
   type UsageSignalAttributes,
   type UsageSignalExtra,
   type UsageSignalName,
+  type UsageChatView,
   type UsageWeeklySnapshot
 } from "../../shared/usageSignals";
 
@@ -143,6 +145,20 @@ type UsageMember = { kind?: unknown; hostId?: unknown; hostVendor?: unknown; rol
  *  Assistant is in every chat, so it does not make a chat mixed). */
 function addedMemberFamilies(members: ReadonlyArray<UsageMember | null | undefined>): Set<UsageProviderFamily> {
   return usageMemberFamilies(members.filter((member) => member?.roleConfigId !== USAGE_ASSISTANT_ROLE_ID));
+}
+
+/** The view each active chat is shown in (StorageService
+ *  .listChatViewsWithUserMessagesSince), read as the chat's own switch reads
+ *  it: a chat without a main session is classic, one whose view is unset is
+ *  in the sessions view (every new chat opens there). */
+export function usageActiveChatViews(
+  chats: ReadonlyArray<{ mainSessionParticipantId?: string; chatView?: string }>
+): UsageChatView[] {
+  return chats.map((chat) => chatViewFor({
+    mainSessionParticipantId: chat.mainSessionParticipantId,
+    chatView: isChatViewMode(chat.chatView) ? chat.chatView : undefined,
+    participants: chat.mainSessionParticipantId ? [{ id: chat.mainSessionParticipantId }] : []
+  }));
 }
 
 /** How far before an installation's first launch a chat or message made on

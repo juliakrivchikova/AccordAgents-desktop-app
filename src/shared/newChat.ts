@@ -1,5 +1,19 @@
 import { normalizeAutoChatTitle, normalizeManualChatTitle } from "./chatTitles";
-import type { ChatParticipant, ChatParticipantConfig, ConversationSummary } from "./types";
+import type { CliStartDefaults } from "./cliStartDefaults";
+import { applyChatAccessOptionById, selectedChatAccessOption } from "./chatAccessModes";
+import { DEFAULT_CHAT_VIEW, MAIN_SESSION_ROLE_ID, isChatViewMode, mainSessionMemberOf } from "./mainSession";
+import type {
+  ChatParticipant,
+  ChatParticipantConfig,
+  ChatProviderKind,
+  ChatReasoningEffort,
+  ChatViewMode,
+  CliProviderHostVendor,
+  ConversationMetadata,
+  ConversationSummary,
+  ProviderModelCatalog,
+  ProviderReasoningEffortOption
+} from "./types";
 
 /**
  * How a new chat is made, the same on the computer and on the phone (the
@@ -65,6 +79,15 @@ function participantFallbackKey(participant: Pick<ChatParticipantConfig, "handle
 }
 
 /** A project's folder, as the computer's sidebar groups chats by it. */
+/** Why a folder's branch cannot be switched now: a chat working there would
+ *  find its files changed under it. Main checks the same before it switches. */
+export const FOLDER_BUSY_REASON = "A chat is working in this folder: switch the branch when it finishes.";
+
+export function folderBusy(summaries: ReadonlyArray<{ repoPath?: string; running?: boolean; replyPending?: boolean }>, repoPath: string | undefined): boolean {
+  const folder = normalizeProjectPath(repoPath);
+  return Boolean(folder) && summaries.some((summary) => (summary.running || summary.replyPending) && normalizeProjectPath(summary.repoPath) === folder);
+}
+
 export function normalizeProjectPath(repoPath: string | undefined): string | undefined {
   const trimmed = repoPath?.trim();
   if (!trimmed) return undefined;
@@ -158,16 +181,23 @@ export function newChatPickedMembers(input: { members: NewChatMemberOption[]; ch
 
 /**
  * A new chat's members, as the computer makes them: each member chosen, and
- * each saved member the first message names with an @, then the Chat
- * Assistant before them all. Only the first that watches the chat (the
- * Assistant counted last) keeps watching it. Every member gets a fresh id.
+ * each saved member the first message names with an @, then the chat's own
+ * member before them all: its main session (docs/main-session.md). A phone
+ * from before passes the offer's `assistant`, which the computer now fills
+ * with the main session too. Only the first that watches the chat (the
+ * chat's own member counted last) keeps watching it. Every member gets a
+ * fresh id; the first is the main session (newChatMetadata names it). Given
+ * the chat's project ("" for none), the main session reads it exactly when
+ * there is one, as the computer gives it (an ordinary member's start).
  */
 export function newChatParticipants(input: {
-  assistant: ChatParticipant;
+  mainSession?: ChatParticipant;
+  assistant?: ChatParticipant;
   members: NewChatMemberOption[];
   chosenConfigIds: string[];
   firstMessage: string;
   newId: () => string;
+  project?: string;
 }): ChatParticipant[] {
   const picked = newChatPickedMembers(input);
   let watching = false;
@@ -176,11 +206,206 @@ export function newChatParticipants(input: {
     if (autoWatch) watching = true;
     return { ...member.participant, ...(member.machineId ? { homeMachineId: member.machineId } : {}), id: input.newId(), autoWatch };
   });
+  const offered = input.mainSession ?? input.assistant;
+  if (!offered) return members;
+  const lead = offered.roleConfigId === MAIN_SESSION_ROLE_ID && input.project !== undefined && offered.permissions
+    ? { ...offered, permissions: { ...offered.permissions, repoRead: Boolean(normalizeProjectPath(input.project)) } }
+    : offered;
   const taken = new Set(members.map((member) => member.handle.toLowerCase()));
-  let handle = input.assistant.handle;
+  let handle = lead.handle;
   for (let suffix = 2; taken.has(handle.toLowerCase()); suffix += 1) {
     const suffixText = `-${suffix}`;
-    handle = `${input.assistant.handle.slice(0, 32 - suffixText.length)}${suffixText}`;
+    handle = `${lead.handle.slice(0, 32 - suffixText.length)}${suffixText}`;
   }
-  return [{ ...input.assistant, id: input.newId(), handle, autoWatch: input.assistant.autoWatch === true && !watching }, ...members];
+  return [{ ...lead, id: input.newId(), handle, autoWatch: lead.autoWatch === true && !watching }, ...members];
+}
+
+/** What a new chat's metadata says besides its members: which member is its
+ *  main session and the view it opens in (the sessions view; a computer from
+ *  before 2026-11-22 may still name one, HubNewChatOptions.defaultChatView).
+ *  Nothing for a chat without a main session (an offer from a computer from
+ *  before). */
+export function newChatMetadata(
+  participants: ReadonlyArray<Pick<ChatParticipant, "id" | "roleConfigId">>,
+  defaultChatView?: ChatViewMode
+): Pick<ConversationMetadata, "mainSessionParticipantId" | "chatView"> {
+  const mainSession = mainSessionMemberOf(participants);
+  if (!mainSession) return {};
+  return { mainSessionParticipantId: mainSession.id, chatView: isChatViewMode(defaultChatView) ? defaultChatView : DEFAULT_CHAT_VIEW };
+}
+
+/** At most this many models of one provider go into the New chat offer: a
+ *  CLI lists a handful; the cap keeps a long list (a custom provider's) from
+ *  growing what the server holds and every phone reads. */
+export const NEW_CHAT_PROVIDER_MODELS_MAX = 24;
+const NEW_CHAT_LABEL_MAX = 60;
+
+export interface NewChatEffortOption {
+  id: ChatReasoningEffort;
+  label: string;
+}
+
+/**
+ * A provider the phone's New chat chip offers for the main session, as the
+ * computer's chip lists it (the User, 2026-11-21): its name, the model its
+ * CLI runs on by default, its other models (each with its efforts when they
+ * differ from the provider's) and its efforts. Only what the phone shows.
+ */
+export interface NewChatProviderOffer {
+  kind: ChatProviderKind;
+  hostId?: string;
+  hostLabel?: string;
+  hostVendor?: CliProviderHostVendor;
+  label: string;
+  defaultModelLabel: string;
+  models: Array<{ id: string; label: string; efforts?: NewChatEffortOption[] }>;
+  efforts: NewChatEffortOption[];
+  /** What its CLI starts a new session in with the User's own config on this
+   *  computer (src/shared/cliStartDefaults.ts): the mode a main session that
+   *  runs here starts in, and the effort its chip names until one is
+   *  chosen. A computer from before says none. */
+  start?: Pick<CliStartDefaults, "access" | "reasoningEffort">;
+}
+
+function shortLabel(text: string): string {
+  const clean = text.replace(/\s+/g, " ").trim();
+  return clean.length > NEW_CHAT_LABEL_MAX ? `${clean.slice(0, NEW_CHAT_LABEL_MAX - 1)}…` : clean;
+}
+
+function effortList(options: readonly ProviderReasoningEffortOption[] | undefined): NewChatEffortOption[] {
+  return (options ?? []).map((option) => ({ id: option.id, label: shortLabel(option.label) }));
+}
+
+/** The offer of one provider from its CLI's model list: the default model
+ *  (its row says "Default") left out of the list, as on the computer. */
+export function newChatProviderOffer(input: {
+  kind: ChatProviderKind;
+  hostId?: string;
+  hostLabel?: string;
+  hostVendor?: CliProviderHostVendor;
+  label: string;
+  /** An added provider's vendor default model, by name. */
+  vendorDefaultModelLabel?: string;
+  catalog?: ProviderModelCatalog;
+  providerEfforts: readonly ProviderReasoningEffortOption[];
+  /** Its CLI's start defaults here (an added provider's CLI's too). */
+  start?: CliStartDefaults;
+}): NewChatProviderOffer {
+  const efforts = effortList(input.providerEfforts);
+  const same = (list: NewChatEffortOption[]): boolean => list.length === efforts.length && list.every((item, index) => item.id === efforts[index]?.id);
+  const listed = input.catalog?.models ?? [];
+  const usual = listed.find((model) => model.recommended && model.source !== "configured" && !model.hidden);
+  const usualEfforts = effortList(usual?.supportedReasoningEfforts);
+  // A model's name as a chip says it: without the id Codex repeats in brackets.
+  const nameOf = (model: { id: string; label: string }): string => {
+    const label = model.label.trim();
+    const repeated = ` (${model.id})`;
+    return label.endsWith(repeated) && label.length > repeated.length ? label.slice(0, -repeated.length) : label || model.id;
+  };
+  const models = listed
+    .filter((model) => !model.hidden && model !== usual)
+    .slice(0, NEW_CHAT_PROVIDER_MODELS_MAX)
+    .map((model) => {
+      const own = effortList(model.supportedReasoningEfforts);
+      return { id: model.id, label: shortLabel(nameOf(model)), ...(own.length > 0 && !same(own) ? { efforts: own } : {}) };
+    });
+  return {
+    kind: input.kind,
+    ...(input.hostId ? { hostId: input.hostId, hostLabel: input.hostLabel, hostVendor: input.hostVendor } : {}),
+    label: shortLabel(input.label),
+    // The model its CLI runs on by default (the computer's chip says the same).
+    defaultModelLabel: shortLabel(input.vendorDefaultModelLabel ?? (usual ? nameOf(usual) : input.label)),
+    models,
+    efforts: usualEfforts.length > 0 ? usualEfforts : efforts,
+    ...offeredStart(input.start, Boolean(input.hostVendor))
+  };
+}
+
+/** The start defaults the phone is told: the mode, and the effort for a
+ *  provider whose model is the CLI's own (an added provider's is the
+ *  vendor's). */
+function offeredStart(start: CliStartDefaults | undefined, hosted: boolean): Pick<NewChatProviderOffer, "start"> {
+  if (!start) return {};
+  const value = { ...(start.access ? { access: start.access } : {}), ...(!hosted && start.reasoningEffort ? { reasoningEffort: start.reasoningEffort } : {}) };
+  return Object.keys(value).length > 0 ? { start: value } : {};
+}
+
+/** What the phone's chip chose for the main session. */
+export interface NewChatMainSessionChoice {
+  kind: ChatProviderKind;
+  hostId?: string;
+  model?: string;
+  reasoningEffort?: ChatReasoningEffort;
+  /** Its CLI's mode by the CLI's own name (chatAccessOptions); none: the
+   *  mode its CLI starts in. */
+  access?: string;
+  /** Codex's Plan mode on (its own toggle beside the permissions). */
+  plan?: boolean;
+  /** The machine it runs on; none: the computer. */
+  homeMachineId?: string;
+}
+
+/**
+ * The main session a phone's new chat is made with in the sessions view:
+ * the one the computer offers (its role, rights and handle), on the provider,
+ * model and effort the chip chose. A provider the offer no longer has, or a
+ * model or effort it does not list, is left out: the offer's main session as
+ * it is, or its CLI's own model and effort.
+ */
+export function newChatMainSessionFor(
+  offered: ChatParticipant,
+  providers: readonly NewChatProviderOffer[] | undefined,
+  choice: NewChatMainSessionChoice | undefined
+): ChatParticipant {
+  if (!choice) return offered;
+  const provider = (providers ?? []).find((item) => item.kind === choice.kind && (item.hostId ?? "") === (choice.hostId ?? ""));
+  if (!provider) {
+    // Its CLI's mode, on the provider the offer has (the one her config
+    // starts that CLI in, when the phone named none it has).
+    const same = choice.kind === offered.kind;
+    const start = (providers ?? []).find((item) => item.kind === offered.kind && !item.hostId)?.start?.access;
+    return { ...offered, ...applyChatAccessOptionById(offered.kind, same ? choice.access : undefined, offered.permissions, same && choice.plan, start) };
+  }
+  // The computer's own main session's model and effort (Settings → General
+  // → New chats) stand even when the offer's list lacks them (a list not
+  // read yet after a restart, the default left out of it).
+  const own = provider.kind === offered.kind && !provider.hostId && !offered.hostId;
+  const model = choice.model && (provider.models.some((item) => item.id === choice.model) || (own && choice.model === offered.model)) ? choice.model : undefined;
+  const efforts = (model ? provider.models.find((item) => item.id === model)?.efforts : undefined) ?? provider.efforts;
+  const reasoningEffort = choice.reasoningEffort && (efforts.some((item) => item.id === choice.reasoningEffort) || (own && choice.reasoningEffort === offered.reasoningEffort))
+    ? choice.reasoningEffort : undefined;
+  const { hostId: _hostId, hostLabel: _hostLabel, hostVendor: _hostVendor, model: _model, reasoningEffort: _effort, avatarId: _avatar, ...rest } = offered;
+  const { homeMachineId: _home, ...placed } = rest;
+  return {
+    ...placed,
+    kind: provider.kind,
+    ...(provider.hostId ? { hostId: provider.hostId, hostLabel: provider.hostLabel, hostVendor: provider.hostVendor } : {}),
+    ...(model ? { model } : {}),
+    ...(reasoningEffort ? { reasoningEffort } : {}),
+    ...applyChatAccessOptionById(provider.kind, choice.access, offered.permissions, choice.plan, provider.start?.access),
+    ...(choice.homeMachineId ? { homeMachineId: choice.homeMachineId } : {})
+  };
+}
+
+/** What the phone's New chat controls start from, read from the main session
+ *  the computer offers (made as Settings → General → New chats starts it,
+ *  src/shared/newChatDefaults.ts): on its own provider its model, effort and
+ *  mode (none: the CLI's own; no mode of its own: the one her config starts
+ *  the CLI in); on any CLI's own sign-in where it runs (an added provider
+ *  runs on the computer only). A choice on the phone wins,
+ *  as on the computer's New chat. */
+export function newChatLeadStart(
+  lead: ChatParticipant | undefined,
+  provider: { kind: ChatProviderKind; hostId?: string }
+): Pick<NewChatMainSessionChoice, "model" | "reasoningEffort" | "access" | "homeMachineId"> {
+  if (!lead) return {};
+  const own = lead.kind === provider.kind && !provider.hostId && !lead.hostId;
+  const access = own ? selectedChatAccessOption(lead.kind, lead.agentMode, lead.permissions)?.id : undefined;
+  return {
+    ...(own && lead.model ? { model: lead.model } : {}),
+    ...(own && lead.reasoningEffort ? { reasoningEffort: lead.reasoningEffort } : {}),
+    ...(access ? { access } : {}),
+    // An added provider runs on this computer only (its key is the computer's).
+    ...(lead.homeMachineId && !provider.hostId ? { homeMachineId: lead.homeMachineId } : {})
+  };
 }

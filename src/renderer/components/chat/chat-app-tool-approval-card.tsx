@@ -1,11 +1,12 @@
 import { useState, type KeyboardEvent } from "react";
-import { ArrowDown, ArrowUp, CornerDownLeft, Sparkles } from "lucide-react";
+import { ArrowDownIcon, ArrowUpIcon, ArrowElbowDownLeftIcon, SparkleIcon } from "@phosphor-icons/react";
 
 import { Button } from "@/components/ui/button";
 import type {
   ChatAppToolApproval,
   ChatAppToolApprovalRequest,
   ChatAppToolApprovalScope,
+  ChatClaudePlanDecision,
   ChatParticipant,
   ChatParticipantChangeRequest,
   ChatParticipantConfig,
@@ -14,10 +15,11 @@ import type {
   ChatRoleConfig,
   ChatRoleParticipantChangeRequest
 } from "../../../shared/types";
-import { Avatar, avatarForParticipant } from "../avatar/avatar";
+import { avatarForParticipant } from "../avatar/avatar";
 import { chatParticipantDisplayName, chatParticipantReference } from "../conversation/conversation-display";
 import { MarkdownText } from "../content/markdown-text";
 import { avatarForChatParticipant } from "./chat-avatars";
+import { ChatMemberMark } from "./chat-member-mark";
 import { formatChatTime } from "./chat-format";
 import { APP_ROSTER_REQUEST_CHANGE_TOOL, CHAT_CODEX_APPROVAL_CANCEL_DECISION_ID, chatApprovalKeyboardAction, chatApprovalShowsGenericSkip, chatCodexApprovalRequest, chatCodexApprovalShowsCancel, chatParticipantChangeRequest, chatParticipantRequestApprovalRequest, chatPermissionChangeRequest, chatRoleChangeRequest, chatRoleParticipantChangeRequest, chatSelfCompactionRequest, chatToolPermissionRequest, participantProviderLabel } from "./chat-conversation-data";
 import { chatCodexApprovalShowsCompactResult } from "./chat-codex-approval-presentation";
@@ -29,20 +31,30 @@ import { ChatAppToolRoleChangeOperation } from "./chat-app-tool-role-operation";
 import { ChatAppToolParticipantChangeOperation } from "./chat-app-tool-participant-operation";
 import { ChatCodexApprovalOperation } from "./chat-codex-approval-operation";
 import { ChatScriptApprovalCard } from "./chat-script-approval-card";
-import { chatConnectorSignInRequest, chatParticipantRemovalRequest, chatScriptChangeRequest } from "./chat-app-tool-data";
+import { chatClaudePlanApprovalRequest, chatConnectorSignInRequest, chatParticipantRemovalRequest, chatScriptChangeRequest, chatToolPermissionAllowsChatScope } from "./chat-app-tool-data";
+import { ChatClaudePlanApprovalCard } from "./chat-claude-plan-approval-card";
 import { ChatConnectorSignInCard } from "./chat-connector-sign-in-card";
+import { ChatCompactionApprovalCard } from "./chat-compaction-approval-card";
+import { useSessionsViewLabel, useSessionsViewText } from "./chat-sessions-links";
+import { chatToolPermissionScopeSummary } from "../../../shared/toolPermissionScope";
 import { ChatAppToolMemberRemovalOperation, ChatAppToolMemberRemovalResult, memberRemovalOptions, memberRemovalQuestion } from "./chat-app-tool-member-removal";
 
-/** Scheduled-script proposals and connector sign-ins have their own cards;
- *  every other approval uses the generic one. */
+/** Scheduled-script proposals, connector sign-ins, compaction requests and Claude Code's plan
+ *  approvals have their own cards; every other approval uses the generic one. */
 export function ChatAppToolApprovalCard(props: Parameters<typeof GenericChatAppToolApprovalCard>[0]): JSX.Element {
   const request = chatScriptChangeRequest(props.approval);
   const signIn = chatConnectorSignInRequest(props.approval);
+  const compaction = chatSelfCompactionRequest(props.approval);
+  const plan = chatClaudePlanApprovalRequest(props.approval);
   return request
     ? <ChatScriptApprovalCard {...props} request={request} />
     : signIn
       ? <ChatConnectorSignInCard {...props} request={signIn} />
-      : <GenericChatAppToolApprovalCard {...props} />;
+      : compaction
+        ? <ChatCompactionApprovalCard {...props} request={compaction} />
+        : plan
+          ? <ChatClaudePlanApprovalCard {...props} request={plan} />
+          : <GenericChatAppToolApprovalCard {...props} />;
 }
 
 function GenericChatAppToolApprovalCard(props: {
@@ -58,7 +70,8 @@ function GenericChatAppToolApprovalCard(props: {
     approve: boolean,
     scope?: ChatAppToolApprovalScope,
     draftOverride?: ChatAppToolApprovalRequest,
-    codexDecisionId?: string
+    codexDecisionId?: string,
+    planDecision?: ChatClaudePlanDecision
   ) => Promise<void>;
 }): JSX.Element {
   const requester = props.participants.find((participant) => participant.id === props.approval.requesterParticipantId);
@@ -69,7 +82,6 @@ function GenericChatAppToolApprovalCard(props: {
   const participantChange = chatParticipantChangeRequest(props.approval);
   const memberRemoval = chatParticipantRemovalRequest(props.approval);
   const participantRequest = chatParticipantRequestApprovalRequest(props.approval);
-  const selfCompactionRequest = chatSelfCompactionRequest(props.approval);
   const codexRequest = chatCodexApprovalRequest(props.approval);
   const showCodexCancel = chatCodexApprovalShowsCancel(codexRequest);
   const inferredParticipantRequest = participantRequest?.source === "inferred";
@@ -80,7 +92,11 @@ function GenericChatAppToolApprovalCard(props: {
   const added = props.approval.toolName === APP_ROSTER_REQUEST_CHANGE_TOOL && "operations" in props.approval.request
     ? props.approval.request.operations.filter((operation) => operation.type === "add")
     : [];
-  const rosterApproval = !permissionRequest && !combinedRequest && !roleRequest && !participantChange && !participantRequest && !selfCompactionRequest && added.length > 0;
+  const rosterApproval = !permissionRequest && !combinedRequest && !roleRequest && !participantChange && !participantRequest && added.length > 0;
+  // The sessions view names the asking member by its task and the main
+  // session by nothing, in its "who" and in every sentence of the card.
+  const appText = useSessionsViewText();
+  const nameOf = useSessionsViewLabel();
   const [combinedDraft, setCombinedDraft] = useState<ChatRoleParticipantChangeRequest | undefined>(combinedRequest);
   const [roleDraft, setRoleDraft] = useState<ChatRoleChangeRequest | undefined>(combinedRequest?.roleRequest ?? roleRequest);
   const [participantDraft, setParticipantDraft] = useState<ChatParticipantChangeRequest | undefined>(combinedRequest?.participantRequest ?? participantChange);
@@ -116,7 +132,6 @@ function GenericChatAppToolApprovalCard(props: {
     effectiveRoleRequest,
     effectiveParticipantChange,
     participantRequest,
-    selfCompactionRequest,
     toolPermissionRequest,
     added,
     inferredParticipantRequest
@@ -133,8 +148,9 @@ function GenericChatAppToolApprovalCard(props: {
       : `${chatParticipantReference(props.approval.requesterHandle)} needs approval before Codex can continue`
     : effectiveCombinedRequest
       ? `${chatParticipantReference(props.approval.requesterHandle)} wants to create a role and add a member`
-      : memberRemoval ? memberRemovalQuestion(props.approval, memberRemoval) : approvalQuestion(props.approval, permissionRequest, effectiveRoleRequest, effectiveParticipantChange, participantRequest, selfCompactionRequest, toolPermissionRequest);
-  const displayPrompt = rosterApproval ? rosterApprovalQuestion(props.approval, added) : approvalPrompt;
+      : memberRemoval ? memberRemovalQuestion(props.approval, memberRemoval) : approvalQuestion(props.approval, permissionRequest, effectiveRoleRequest, effectiveParticipantChange, participantRequest, toolPermissionRequest);
+  const displayPrompt = appText(rosterApproval ? rosterApprovalQuestion(props.approval, added) : approvalPrompt);
+  const requesterName = nameOf(requesterLabel);
 
   // A removal its member's setting allowed asked nobody: no decision to
   // confirm, it waits like a local member's (memberRemovalResultSummary).
@@ -146,7 +162,7 @@ function GenericChatAppToolApprovalCard(props: {
     return (
       <section className="chat-app-tool-approval-card is-compact-result" aria-label={displayPrompt}
         data-app-tool-approval-id={props.approval.id} tabIndex={-1}>
-        <Avatar className="message-avatar chat-app-tool-approval-avatar" spec={requesterAvatar} />
+        <ChatMemberMark className="message-avatar chat-app-tool-approval-avatar" markClassName="is-large" avatar={requesterAvatar} member={requester} />
         <div className="chat-app-tool-approval-body">
           <strong>{queuedDecision.approve ? "Approval saved" : "Refusal saved"}</strong>
           <p>Waiting for machine {queuedDecision.machineName} to confirm the decision.</p>
@@ -222,10 +238,10 @@ function GenericChatAppToolApprovalCard(props: {
       data-app-tool-approval-id={props.approval.id}
       tabIndex={-1}
     >
-      <Avatar className="message-avatar chat-app-tool-approval-avatar" spec={requesterAvatar} />
+      <ChatMemberMark className="message-avatar chat-app-tool-approval-avatar" markClassName="is-large" avatar={requesterAvatar} member={requester} />
       <div className="chat-app-tool-approval-body">
         <div className="chat-app-tool-approval-meta">
-          <strong>{requesterLabel}</strong>
+          {requesterName && <strong>{requesterName}</strong>}
           {requester && <span className="message-provider">{reviewChange ? "Proposes changes for your approval" : participantProviderLabel(requester.kind, requester.hostLabel)}</span>}
           <span className="message-when">{formatChatTime(props.approval.createdAt)}</span>
         </div>
@@ -234,13 +250,13 @@ function GenericChatAppToolApprovalCard(props: {
           {reviewChange && (
             <div className="chat-app-tool-review-header">
               <div className="chat-app-tool-review-chip">
-                <Sparkles size={13} aria-hidden />
+                <SparkleIcon size={13} aria-hidden />
                 {effectiveCombinedRequest ? "Role + member" : effectiveRoleRequest ? roleReviewChipLabel(effectiveRoleRequest) : participantReviewChipLabel(effectiveParticipantChange)}
               </div>
             </div>
           )}
           {!reviewChange && <h3>{rosterApproval ? <RosterApprovalTitle requesterHandle={props.approval.requesterHandle} added={added} /> : displayPrompt}</h3>}
-          {lastRefusal && <div className="chat-app-tool-approval-reason">Your earlier answer was not applied: {lastRefusal.reason}</div>}
+          {lastRefusal && <div className="chat-app-tool-approval-reason">Your earlier answer was not applied: {appText(lastRefusal.reason)}</div>}
           {readOnly && <ChatAppToolReviewStatus approval={props.approval} />}
           <fieldset className="chat-app-tool-review-fieldset" disabled={props.submitting}>
           {codexRequest ? (
@@ -297,13 +313,6 @@ function GenericChatAppToolApprovalCard(props: {
             <ChatAppToolMemberRemovalOperation approval={props.approval} request={memberRemoval} />
           ) : participantRequest ? (
             <ChatAppToolParticipantRequestOperation request={participantRequest} requesterHandle={props.approval.requesterHandle} />
-          ) : selfCompactionRequest ? (
-            <div className="chat-app-tool-roster-list">
-              <div className="chat-app-tool-approval-reason">
-                Compact this member&apos;s current provider session after its active turn finishes.
-                {selfCompactionRequest.instructions ? ` Focus: ${selfCompactionRequest.instructions}` : ""}
-              </div>
-            </div>
           ) : (
             <div className="chat-app-tool-roster-list">
               {added.map((operation, index) => (
@@ -320,24 +329,23 @@ function GenericChatAppToolApprovalCard(props: {
           {rosterApproval && <ChatAppToolRosterPermissionEnvelope operations={added} />}
           {permissionRequest && (
             <p className="chat-app-tool-scope-note">
-              Applies only to {requesterLabel}. Allow once expires after the next run; chat grants stay enabled for this member in this chat.
+              {appText(`Applies only to ${requesterLabel}. Allow once expires after the next run; chat grants stay enabled for this member in this chat.`)}
             </p>
           )}
           {toolPermissionRequest && (
             <p className="chat-app-tool-scope-note">
-              {toolPermissionRequest.agentMode === "auto"
+              {appText(toolPermissionRequest.agentMode === "auto"
                 ? `Applies only to ${requesterLabel}. Claude Auto approvals are per occurrence and do not grant future calls.`
-                : `Applies only to ${requesterLabel}. Allow once approves this blocked call; chat grants apply to future ${toolPermissionRequest.toolName} calls from this member in this chat.`}
+                : toolPermissionRequest.chatScope
+                  ? `Applies only to ${requesterLabel}. Allow once approves this blocked call; the chat grant lets it ${chatToolPermissionScopeSummary(toolPermissionRequest.chatScope)} in this chat without asking.`
+                  : !chatToolPermissionAllowsChatScope(toolPermissionRequest)
+                    ? `Applies only to ${requesterLabel}. Allow once approves this blocked call; the next one asks again.`
+                    : `Applies only to ${requesterLabel}. Allow once approves this blocked call; chat grants apply to future ${toolPermissionRequest.toolName} calls from this member in this chat.`)}
             </p>
           )}
           {participantRequest && (
             <p className="chat-app-tool-scope-note">
-              Approval runs the requested member{participantRequest.requests.length === 1 ? "" : "s"} and then returns to {requesterLabel} after replies or errors. {inferredParticipantRequest ? "Inferred requests are approved one time." : "Chat grants apply only to this requester and target set."}
-            </p>
-          )}
-          {selfCompactionRequest && (
-            <p className="chat-app-tool-scope-note">
-              Allow once queues this compaction only. Chat approval allows future compaction requests from {requesterLabel} without another approval.
+              {appText(`Approval runs the requested member${participantRequest.requests.length === 1 ? "" : "s"} and then returns to ${requesterLabel} after replies or errors. ${inferredParticipantRequest ? "Inferred requests are approved one time." : "Chat grants apply only to this requester and target set."}`)}
             </p>
           )}
           {codexRequest && (
@@ -373,13 +381,13 @@ function GenericChatAppToolApprovalCard(props: {
               >
                 <span className="chat-approval-option-num">{index + 1}.</span>
                 <span className="chat-approval-option-copy">
-                  <span className="chat-approval-option-label">{option.label}</span>
+                  <span className="chat-approval-option-label">{appText(option.label)}</span>
                   {option.detail && <span className="chat-approval-option-detail">{option.detail}</span>}
                 </span>
                 {index === selectedIndex && (
                   <span className="chat-approval-option-keys" aria-hidden>
-                    <ArrowUp size={16} />
-                    <ArrowDown size={16} />
+                    <ArrowUpIcon size={16} />
+                    <ArrowDownIcon size={16} />
                   </span>
                 )}
               </button>
@@ -404,7 +412,7 @@ function GenericChatAppToolApprovalCard(props: {
                 )}
                 <Button variant="default" size="sm" className="chat-approval-submit" disabled={props.submitting} onClick={submit}>
                   <span>Submit</span>
-                  <CornerDownLeft size={14} aria-hidden />
+                  <ArrowElbowDownLeftIcon size={14} aria-hidden />
                 </Button>
               </div>
             </>

@@ -21,7 +21,7 @@ export { replaceActivePluginMention } from "./chat-composer-plugin-token";
 export { draftHasMention } from "./chat-composer-mention-token";
 
 export const CHAT_COMPOSER_TEXTAREA_STYLE: CSSProperties = {
-  fontSize: "14.5px",
+  fontSize: "14px",
   lineHeight: 1.5,
   // Match the design handoff composer: single-line resting height that grows.
   minHeight: "24px",

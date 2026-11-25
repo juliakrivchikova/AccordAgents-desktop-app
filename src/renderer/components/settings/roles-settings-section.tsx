@@ -1,5 +1,5 @@
 import { useMemo, useState } from "react";
-import { Plus, Search } from "lucide-react";
+import { PlusIcon, MagnifyingGlassIcon } from "@phosphor-icons/react";
 
 import { Button } from "@/components/ui/button";
 import type { AppSettings, ChatRoleConfig, ChatRoleConfigUpdate } from "../../../shared/types";
@@ -72,7 +72,7 @@ export function RolesSettingsSection(props: {
     <section className="roles-settings-screen" data-testid="settings-roles-screen">
       <div className="roles-toolbar">
         <label className="roles-search">
-          <Search size={16} aria-hidden />
+          <MagnifyingGlassIcon size={16} aria-hidden />
           <input
             data-testid="settings-roles-search"
             value={query}
@@ -102,7 +102,7 @@ export function RolesSettingsSection(props: {
           data-testid="settings-roles-new"
           onClick={() => setEditor({ type: "new" })}
         >
-          <Plus size={15} aria-hidden />
+          <PlusIcon size={15} aria-hidden />
           New role
         </Button>
       </div>

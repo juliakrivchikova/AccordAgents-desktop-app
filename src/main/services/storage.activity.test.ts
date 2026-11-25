@@ -5,6 +5,7 @@ import path from "node:path";
 import test from "node:test";
 import { resolveSqliteExecutable } from "./sqliteCli";
 import { StorageService } from "./storage";
+import { storageDependencies, storageParts, storageWithoutDatabase } from "./storage/test/storageParts";
 import type { ChatAppToolApproval, ChatMessage, Conversation } from "../../shared/types";
 
 const SQLITE_EXECUTABLE = resolveSqliteExecutable({ appPath: process.cwd() });
@@ -14,9 +15,9 @@ function hexText(value: string): string {
 }
 
 function fakeStorage(queryJson: (sql: string) => Promise<unknown[]>): StorageService {
-  const storage = Object.create(StorageService.prototype) as any;
-  storage.init = async () => {};
-  storage.queryJson = async (sql: string) => {
+  const storage = storageWithoutDatabase();
+  storageParts(storage).schema.init = async () => {};
+  storageParts(storage).sqlite.queryJson = async (sql: string) => {
     const rows = await queryJson(sql);
     return rows.map((value) => {
       if (!value || typeof value !== "object" || Array.isArray(value)) {
@@ -83,10 +84,10 @@ test("listChatActivity finds pending messages outside the recent participant win
 
 test("listChatActivity uses the payload fallback when body_json is empty", async () => {
   const directory = await mkdtemp(path.join(tmpdir(), "accordagents-storage-activity-"));
-  const storage = Object.create(StorageService.prototype) as any;
-  storage.dbPath = path.join(directory, "accordagents.sqlite3");
-  storage.sqliteExecutable = SQLITE_EXECUTABLE;
-  storage.initialized = true;
+  const storage = storageWithoutDatabase();
+  storageDependencies(storage).dbPath = path.join(directory, "accordagents.sqlite3");
+  storageDependencies(storage).sqliteExecutable = SQLITE_EXECUTABLE;
+  storageParts(storage).schema.initialized = true;
   const chat = conversation("fallback-chat", "Fallback chat");
   chat.messages = [participantMessage("fallback-choice", {
     content: "Choose \"one\"\nline two\t\u001f🙂",
@@ -102,7 +103,7 @@ test("listChatActivity uses the payload fallback when body_json is empty", async
   })];
 
   try {
-    await storage.runSql(`
+    await storageParts(storage).sqlite.runSql(`
       create table conversations (
         id text primary key, title text not null, kind text not null, created_at text not null,
         updated_at text not null, repo_path text, body_json text, payload_json text not null
@@ -114,7 +115,7 @@ test("listChatActivity uses the payload fallback when body_json is empty", async
       );
     `);
     await storage.saveConversation(chat);
-    await storage.runSql("update conversations set body_json = '' where id = 'fallback-chat';");
+    await storageParts(storage).sqlite.runSql("update conversations set body_json = '' where id = 'fallback-chat';");
 
     const result = await storage.listChatActivity();
 
@@ -128,10 +129,10 @@ test("listChatActivity uses the payload fallback when body_json is empty", async
 
 test("listChatActivity skips a malformed conversation body and keeps remaining activity", async () => {
   const directory = await mkdtemp(path.join(tmpdir(), "accordagents-storage-activity-"));
-  const storage = Object.create(StorageService.prototype) as any;
-  storage.dbPath = path.join(directory, "accordagents.sqlite3");
-  storage.sqliteExecutable = SQLITE_EXECUTABLE;
-  storage.initialized = true;
+  const storage = storageWithoutDatabase();
+  storageDependencies(storage).dbPath = path.join(directory, "accordagents.sqlite3");
+  storageDependencies(storage).sqliteExecutable = SQLITE_EXECUTABLE;
+  storageParts(storage).schema.initialized = true;
   const goodChat = conversation("good-chat", "Good chat");
   goodChat.messages = [participantMessage("good-choice", {
     metadata: {
@@ -152,7 +153,7 @@ test("listChatActivity skips a malformed conversation body and keeps remaining a
   };
 
   try {
-    await storage.runSql(`
+    await storageParts(storage).sqlite.runSql(`
       create table conversations (
         id text primary key, title text not null, kind text not null, created_at text not null,
         updated_at text not null, repo_path text, body_json text, payload_json text not null
@@ -165,7 +166,7 @@ test("listChatActivity skips a malformed conversation body and keeps remaining a
     `);
     await storage.saveConversation(goodChat);
     await storage.saveConversation(badChat);
-    await storage.runSql("update conversations set body_json = '{oops' where id = 'bad-chat';");
+    await storageParts(storage).sqlite.runSql("update conversations set body_json = '{oops' where id = 'bad-chat';");
 
     const result = await storage.listChatActivity();
 
@@ -215,7 +216,7 @@ test("listChatActivity transports every full JSON result through hex projections
     return [];
   });
 
-  await (messageStorage as any).activityMessageRows(
+  await storageParts(messageStorage).chatActivity.activityMessageRows(
     ["chat-1"],
     40,
     ["chat-1"],
@@ -400,7 +401,7 @@ test("listChatActivity returns bounded sorted items with resolvable message targ
     }
     throw new Error(`Unexpected query: ${sql}`);
   }) as any;
-  storage.listConversationMessages = async (request: { aroundMessageId?: string }) => ({
+  storageParts(storage).conversationReads.listConversationMessages = async (request: { aroundMessageId?: string }) => ({
     messages: request.aroundMessageId === "recent-reply" ? [message] : [],
     oldestSequence: 3,
     newestSequence: 3,
@@ -552,3 +553,33 @@ function participantMessage(
     }
   };
 }
+
+test("listChatActivity names a sessions-view chat's member by its task even when its task message is older than the rows it reads", async () => {
+  const directory = await mkdtemp(path.join(tmpdir(), "accordagents-activity-sessions-"));
+  const storage = new StorageService({ dbPath: path.join(directory, "accordagents.sqlite3"), sqliteExecutable: SQLITE_EXECUTABLE });
+  try {
+    await storage.init();
+    const main = { id: "p-main", handle: "main", roleConfigId: "main-session", kind: "claude-code" as const };
+    const member = { id: "p-claude", handle: "claude", roleConfigId: "generic-participant", kind: "claude-code" as const };
+    const at = (minute: number) => new Date(Date.UTC(2026, 0, 8, 10, minute)).toISOString();
+    const task = participantMessage("task", { createdAt: at(0), content: "@claude Reply PING", metadata: { participantRequest: {
+      id: "b", requesterParticipantId: main.id, requesterHandle: "main", source: "mcp", resumeRequester: true, status: "running", depth: 1, createdAt: at(0), updatedAt: at(0),
+      items: [{ targetParticipantId: member.id, targetHandle: "claude", prompt: "Reply PING.", title: "Say ping", status: "answered", createdAt: at(0), updatedAt: at(1) }]
+    } } as never }, main);
+    const reply = participantMessage("ping", { createdAt: at(1), content: "PING" }, member);
+    // The main session's many replies since push its task message out of the rows Activity reads.
+    const later = Array.from({ length: 30 }, (_, index) => participantMessage(`later-${index}`, { createdAt: at(2 + index), content: `Reply ${index}` }, main));
+    await storage.saveConversation({
+      ...conversation("chat-sessions", "Sessions chat"), updatedAt: at(40), messages: [task, reply, ...later],
+      metadata: { participants: [main, member], mainSessionParticipantId: main.id, chatView: "sessions" }
+    } as Conversation);
+    const result = await storage.listChatActivity({ limit: 50, recentWindowDays: 4000 });
+    const memberRow = result.items.find((item) => item.participant?.id === member.id);
+    assert.ok(memberRow, "the member's finished reply is listed");
+    assert.equal(memberRow.participant?.displayName, "Say ping");
+    const mainRow = result.items.find((item) => item.participant?.id === main.id);
+    assert.equal(mainRow?.participant?.displayName, "", "the main session is named by nothing");
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});

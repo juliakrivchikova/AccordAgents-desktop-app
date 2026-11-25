@@ -3,18 +3,20 @@ import { createRoot } from "react-dom/client";
 import { startRendererCrashReporting } from "./app/crash-reporting";
 import type {
   ChatActivityItem,
+  ChatParticipant,
   ChatSkillMention,
   Conversation,
   PluginCatalogItem,
   StartReviewResult
 } from "../shared/types";
-import { ArrowLeft, ArrowRight, FileBox, RefreshCw, SquareTerminal, XCircle } from "lucide-react";
+import { ArrowLeftIcon, ArrowRightIcon, FilesIcon, ArrowsClockwiseIcon, IconContext, TerminalWindowIcon, XCircleIcon } from "@phosphor-icons/react";
 import { Button } from "@/components/ui/button";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { Toaster } from "@/components/ui/sonner";
 import { ModeToggle } from "./components/mode-toggle";
 import { ThemeProvider } from "./components/theme-provider";
 import { AppLoadingState } from "./components/loading-states";
+import { LoadingBar } from "@/components/ui/loading-bar";
 import { AppShell, Sidebar, SidebarToggleButton, TopBar } from "./components/shell";
 import { ActivityConversationTitle, ActivityView } from "./components/activity/activity-view";
 import { SettingsView } from "./components/settings/settings-view";
@@ -28,11 +30,15 @@ import { ChatAccordLauncherDialog } from "./components/chat/chat-accord-launcher
 import { NewChatScreen } from "./components/chat/new-chat-screen";
 import { ChatSearchModal } from "./components/search/chat-search-modal";
 import { ChatTopBarTitle } from "./components/chat/chat-top-bar-title";
+import { ChatClassicOnly, ChatViewHeaderControls } from "./components/chat/chat-view-switch";
+import { sessionsViewNamesOf } from "../shared/sessionsViewText";
+import { sessionsMemberSettings } from "./app/sessions-member-settings";
+import { forkToNewChatReasonFor, useMachineForkSupport } from "./components/chat/use-fork-to-new-chat";
+import { renderNewChatMemberMark } from "./components/chat/chat-member-mark";
+import { chatViewFor } from "../shared/mainSession";
 import { chatRoleLabel } from "./components/chat/chat-conversation-data";
-import { avatarForChatParticipant } from "./components/chat/chat-avatars";
 import { defaultChatParticipantDraft } from "./components/chat/chat-participant-drafts";
 import type { DraftPluginMention } from "./components/chat/chat-composer-draft-utils";
-import { Avatar } from "./components/avatar/avatar";
 import { isChatAssistantParticipant } from "./components/conversation/conversation-display";
 import { useAppState } from "./app/app-state";
 import { useConversationActions } from "./app/use-conversation-actions";
@@ -58,6 +64,7 @@ import { UrgentAlertActionsContext } from "./components/chat/urgent-alert-contex
 import { restartingMembers } from "../shared/memberRestart";
 import { TerminalPanel } from "./components/terminal/terminal-panel";
 import { useTerminalPanel } from "./components/terminal/use-terminal-panel";
+import { chatCreationStatus } from "./components/chat/chat-creation-state";
 import "./styles/app.css";
 function App(): JSX.Element {
   const state = useAppState();
@@ -82,6 +89,7 @@ function App(): JSX.Element {
     conversationActions.refreshActivity
   );
   const view = useAppViewModel(state);
+  const machineForkSupport = useMachineForkSupport();
   const artifacts = useArtifacts(state.conversation?.id);
   // A new terminal opens in the project of the chat in view, or of the new
   // chat being set up; with neither, in the home folder.
@@ -93,6 +101,12 @@ function App(): JSX.Element {
     0
   );
   const [accordDialogOpen, setAccordDialogOpen] = React.useState(false);
+  // The Accord dialog's names in the sessions view, read while it is open.
+  const accordChat = view.activeChatConversation;
+  const accordDialogNames = React.useMemo(
+    () => (accordDialogOpen && accordChat ? sessionsViewNamesOf(accordChat) : undefined),
+    [accordDialogOpen, accordChat?.messages, accordChat?.metadata]
+  );
   const [newChatPrefill, setNewChatPrefill] = React.useState<{
     key: number;
     prompt: string;
@@ -102,6 +116,14 @@ function App(): JSX.Element {
 
   const navigation = useAppNavigation(state, conversationActions);
   useFileEditLifecycle({ conversationId: state.conversation?.id, artifacts, openChat: navigation.openChat });
+  // Fork to new chat: a fork made after she went to another chat or screen
+  // is opened from its notice as the sidebar opens a chat, as navigation
+  // stands when she clicks it.
+  const openChatRef = React.useRef(navigation.openChat);
+  openChatRef.current = navigation.openChat;
+  const forkToNewChat = (participantId: string): void => {
+    void chatActions.forkChatParticipantToNewChat(participantId, { openChat: (conversationId) => openChatRef.current(conversationId) });
+  };
   const { openSettingsSection } = navigation;
   const urgentAlertActions = React.useMemo(() => ({
     openAlertSettings: () => openSettingsSection("alerts"),
@@ -236,9 +258,6 @@ function App(): JSX.Element {
     }
   };
 
-  const openingConversationDescription = view.openingConversation
-    ? `${view.openingConversation.kind === "chat" ? "Chat" : view.openingConversation.kind} · ${view.openingConversation.title}`
-    : "Opening the selected conversation from history.";
   const isNewChatScreen = !state.initializing && !view.hasResultContext;
   const topBarTitle = view.activeChatConversation
     ? (
@@ -250,9 +269,7 @@ function App(): JSX.Element {
     )
     : view.hasResultContext
       ? state.conversation?.title ?? view.openingConversation?.title ?? "Chat"
-      : isNewChatScreen
-        ? undefined
-        : "New chat";
+      : "New chat";
   const topBarLeading = state.railView === "chats" && state.sidebarCollapsed ? (
     <SidebarToggleButton expanded={false} onToggle={expandSidebar} />
   ) : undefined;
@@ -261,7 +278,7 @@ function App(): JSX.Element {
       <ModeToggle />
       <IconButton
         label="Refresh"
-        icon={RefreshCw}
+        icon={ArrowsClockwiseIcon}
         onClick={() => void (async () => {
           await conversationActions.refreshAll();
           if (state.railView === "activity") {
@@ -286,19 +303,61 @@ function App(): JSX.Element {
   const terminalToggle = (
     <IconButton
       label="Terminal"
-      icon={SquareTerminal}
+      icon={TerminalWindowIcon}
       data-testid="terminal-toggle"
       pressed={terminal.open}
       onClick={terminal.toggle}
       tooltip="Terminal (Ctrl+`)"
     />
   );
+  // Fork to new chat (src/shared/forkToNewChat.ts): why a member of the open
+  // chat cannot be copied into a new chat's main session now.
+  const forkToNewChatReason = (participant: ChatParticipant): string | undefined => view.activeChatConversation
+    ? forkToNewChatReasonFor(participant, view.activeChatConversation, state.agents, state.settings, machineForkSupport)
+    : "Open its chat first.";
+  // The chat's members and their settings: the roster in the classic view's
+  // header (the sessions view has a member's controls under its composer and
+  // its … actions instead: sessionsMemberSettings).
+  const rosterMenu = (memberId?: string, trigger?: React.ReactNode): JSX.Element | null => view.activeChatConversation ? (
+    <ChatParticipantMenu
+      participants={view.activeChatParticipants}
+      participantHasRunById={view.participantHasRunById}
+      settings={state.settings}
+      agents={state.agents}
+      draft={state.chatMessageDraft}
+      addParticipantDraft={state.chatAddParticipantDraft ?? defaultChatParticipantDraft(state.settings)}
+      busyParticipantIds={view.busyParticipantIds}
+      participantStatusById={view.participantStatusById}
+      participantWatchers={view.activeChatConversation.metadata.participantWatchers}
+      onDraftChange={state.setChatMessageDraft}
+      onAddParticipantDraftChange={state.setChatAddParticipantDraft}
+      onAddParticipant={() => void chatActions.addChatParticipant()}
+      onAddSavedParticipant={(participant) => void chatActions.addSavedChatParticipant(participant)}
+      onUpdateParticipantRuntime={(participantId, patch) => chatActions.updateChatParticipantRuntime(participantId, patch)}
+      onCompactParticipant={(participantId) => void chatActions.compactChatParticipant(participantId)}
+      onRestartParticipant={(participantId, stopBackgroundTasks) => chatActions.restartChatParticipant(participantId, stopBackgroundTasks)}
+      onStopRestart={(runId) => void window.consensus.cancelReview(runId)}
+      restartingById={restartingMembers(state.progressLog)}
+      onRemoveParticipant={(participantId) => void chatActions.removeChatParticipant(participantId)}
+      onForkToNewChat={forkToNewChat}
+      forkToNewChatReason={forkToNewChatReason}
+      onJumpToParticipantLastMessage={conversationActions.jumpToParticipantLastMessage}
+      onManageInSettings={() => openSettingsSection("participants")}
+      memberId={memberId}
+      trigger={trigger}
+    />
+  ) : null;
+  // The sessions view's settings of one member: controls under its composer,
+  // its … actions in its session's header, the main session's in the title's menu.
+  const sessionsMember = sessionsMemberSettings({ view, progressLog: state.progressLog, chatActions, forkToNewChat, forkToNewChatReason });
   const topBarActions = isNewChatScreen ? terminalToggle : (
     <>
+      {/* The open chat's view switch and members button (its chat view provides them). */}
+      <ChatViewHeaderControls />
       {terminalToggle}
       {state.busy && (
         <Button variant="outline" size="sm" onClick={() => void conversationActions.cancelReview()}>
-          <XCircle aria-hidden />
+          <XCircleIcon aria-hidden />
           Stop
         </Button>
       )}
@@ -306,36 +365,15 @@ function App(): JSX.Element {
         <>
           <IconButton
             label="Artifacts"
-            icon={FileBox}
+            icon={FilesIcon}
             data-artifacts-trigger="true"
             pressed={artifacts.panelOpen && !artifacts.fileTarget}
             // While a file is shown, the button switches the panel to artifacts.
             onClick={() => (artifacts.panelOpen && !artifacts.fileTarget ? artifacts.closePanel() : artifacts.openPanel())}
             tooltip="Artifacts — durable shared documents (plans, QA cases, decisions) with versions and sign-off"
           />
-          <ChatParticipantMenu
-            participants={view.activeChatParticipants}
-            participantHasRunById={view.participantHasRunById}
-            settings={state.settings}
-            agents={state.agents}
-            draft={state.chatMessageDraft}
-            addParticipantDraft={state.chatAddParticipantDraft ?? defaultChatParticipantDraft(state.settings)}
-            busyParticipantIds={view.busyParticipantIds}
-            participantStatusById={view.participantStatusById}
-            participantWatchers={view.activeChatConversation.metadata.participantWatchers}
-            onDraftChange={state.setChatMessageDraft}
-            onAddParticipantDraftChange={state.setChatAddParticipantDraft}
-            onAddParticipant={() => void chatActions.addChatParticipant()}
-            onAddSavedParticipant={(participant) => void chatActions.addSavedChatParticipant(participant)}
-            onUpdateParticipantRuntime={(participantId, patch) => chatActions.updateChatParticipantRuntime(participantId, patch)}
-            onCompactParticipant={(participantId) => void chatActions.compactChatParticipant(participantId)}
-            onRestartParticipant={(participantId, stopBackgroundTasks) => chatActions.restartChatParticipant(participantId, stopBackgroundTasks)}
-            onStopRestart={(runId) => void window.consensus.cancelReview(runId)}
-            restartingById={restartingMembers(state.progressLog)}
-            onRemoveParticipant={(participantId) => void chatActions.removeChatParticipant(participantId)}
-            onJumpToParticipantLastMessage={conversationActions.jumpToParticipantLastMessage}
-            onManageInSettings={() => openSettingsSection("participants")}
-          />
+          {/* The sessions view has one side panel instead (its own control). */}
+          <ChatClassicOnly>{rosterMenu()}</ChatClassicOnly>
         </>
       )}
     </>
@@ -360,7 +398,7 @@ function App(): JSX.Element {
     <TopBar
       className="pr-4 border-[var(--app-border-subtle)]"
       title={<ActivityConversationTitle title={view.activeChatConversation.title} />}
-      actions={<IconButton label="Open in chat" icon={ArrowRight} onClick={() => openActivityItemInChat(activityPreviewItem)} />}
+      actions={<IconButton label="Open in chat" icon={ArrowRightIcon} onClick={() => openActivityItemInChat(activityPreviewItem)} />}
     />
   ) : undefined;
   const chatTopBar = <TopBar leading={topBarLeading} title={topBarTitle} actions={topBarActions} className={isNewChatScreen ? "new-chat-topbar" : undefined} />;
@@ -373,9 +411,11 @@ function App(): JSX.Element {
       reviewDecisionActions={reviewDecisionActions}
       reviewPlanActions={reviewPlanActions}
       settingsActions={settingsActions}
-      openingConversationDescription={openingConversationDescription}
       accordDisabledReason={accordDisabledReason}
       onOpenAccord={() => setAccordDialogOpen(true)}
+      renderMemberSettings={sessionsMember.actions}
+      renderMemberChip={sessionsMember.controls}
+      mainSessionActions={sessionsMember.mainSessionActions}
       topBar={chatUsesInlineTopBar ? chatTopBar : activityTopBar}
       artifacts={artifacts}
     />
@@ -391,7 +431,9 @@ function App(): JSX.Element {
       sidebarHidden={state.railView === "activity"}
       sidebarWidth={state.sidebarWidth}
       onSidebarWidthChange={state.setSidebarWidth}
-      minWorkspaceWidth={view.hasResultContext ? CHAT_SPLIT_WORKSPACE_MIN_WIDTH : undefined}
+      // New chat keeps the chat's workspace width, so its composer stays put
+      // when the chat opens.
+      minWorkspaceWidth={view.hasResultContext || isNewChatScreen ? CHAT_SPLIT_WORKSPACE_MIN_WIDTH : undefined}
       className={isNewChatScreen ? "is-new-chat-screen" : undefined}
       sidebar={
         state.railView === "settings" ? (
@@ -451,6 +493,7 @@ function App(): JSX.Element {
         error={state.error}
         warnings={view.visibleWarnings}
         warningScope={view.warningScope}
+        noticeText={view.noticeText}
         conversationId={state.conversation?.id}
         setError={(value) => state.setError(value)}
         setWarnings={state.setWarnings}
@@ -479,6 +522,8 @@ function App(): JSX.Element {
           participantRoleLabel={(participant) => chatRoleLabel(state.settings.chatRoleConfigs, participant)}
           onOpenChange={setAccordDialogOpen}
           onStart={chatActions.startChatAccord}
+          sessions={chatViewFor(view.activeChatConversation.metadata) === "sessions"}
+          sessionsNames={accordDialogNames}
         />
       )}
 
@@ -489,6 +534,7 @@ function App(): JSX.Element {
           agents={state.agents}
           updateProvider={settingsActions.updateProvider}
           setAssistantProviderKind={settingsActions.setAssistantProviderKind}
+          setNewChatDefaults={settingsActions.setNewChatDefaults}
           saveChatRoleConfig={settingsActions.saveChatRoleConfig}
           archiveChatRoleConfig={settingsActions.archiveChatRoleConfig}
           saveChatBehaviorRuleConfig={settingsActions.saveChatBehaviorRuleConfig}
@@ -523,7 +569,7 @@ function App(): JSX.Element {
           leading={(
             <IconButton
               label="Back to chats"
-              icon={ArrowLeft}
+              icon={ArrowLeftIcon}
               data-testid="activity-back-to-chats"
               onClick={() => {
                 navigation.leaveActivity();
@@ -538,8 +584,8 @@ function App(): JSX.Element {
           error={state.activityError}
           detailError={state.activityFocusError}
           onDismissDetailError={() => state.setActivityFocusError(undefined)}
-          detail={<div className="content-area result-layout activity-conversation-content">
-            {conversationPanel ?? <AppLoadingState title="Loading chat" description={openingConversationDescription} />}
+          detail={<div className="content-area result-layout activity-conversation-content relative">
+            {conversationPanel ?? <LoadingBar label="Loading chat" />}
           </div>}
           onSelect={(item) => {
             if (isCodexActivityApprovalItem(item)) {
@@ -584,6 +630,11 @@ function App(): JSX.Element {
                 repoInfo={state.repoInfo}
                 selectedParticipantIds={state.selectedChatParticipantConfigIds}
                 selectedParticipantRuntimeOverrides={state.selectedChatParticipantRuntimeOverrides}
+                mainSessionProvider={state.newChatMainSessionProvider}
+                onMainSessionProviderChange={state.setNewChatMainSessionProvider}
+                mainSessionOverrideFor={state.newChatMainSessionOverrideFor}
+                onMainSessionOverrideForChange={state.setNewChatMainSessionOverrideFor}
+                onMainSessionStartAccessChange={state.setNewChatMainSessionStartAccess}
                 settings={state.settings}
                 summaries={state.summaries}
                 agents={state.agents}
@@ -592,7 +643,13 @@ function App(): JSX.Element {
                 prefillPrompt={newChatPrefill?.prompt}
                 prefillRequestKey={newChatPrefill?.key}
                 busy={state.busy}
-                renderParticipantAvatar={(participant) => <Avatar className="mini-avatar" spec={avatarForChatParticipant(participant)} />}
+                onOpenChat={navigation.openChat}
+                onRepoInfoChange={state.setRepoInfo}
+                onStopStart={() => void conversationActions.cancelReview()}
+                creationStatus={state.busy && state.startingChatRef.current
+                  ? chatCreationStatus(state.progressLog, state.currentRunId, Boolean(state.chatCreationRef.current?.signal.aborted))
+                  : undefined}
+                renderParticipantAvatar={renderNewChatMemberMark}
                 participantRoleLabel={(participant) => chatRoleLabel(state.settings.chatRoleConfigs, participant)}
                 onPromptChange={state.setQuestion}
                 onPendingImagesChange={state.setNewChatPendingImages}
@@ -631,13 +688,18 @@ function App(): JSX.Element {
 
 startRendererCrashReporting();
 
+// Every icon in the app: Phosphor regular at 16px unless its owner sizes it.
+const ICON_DEFAULTS = { size: 16, weight: "regular" } as const;
+
 createRoot(document.getElementById("root") as HTMLElement).render(
   <React.StrictMode>
     <ThemeProvider>
-      <TooltipProvider>
-        <App />
-        <Toaster richColors position="bottom-right" />
-      </TooltipProvider>
+      <IconContext.Provider value={ICON_DEFAULTS}>
+        <TooltipProvider>
+          <App />
+          <Toaster richColors position="bottom-right" />
+        </TooltipProvider>
+      </IconContext.Provider>
     </ThemeProvider>
   </React.StrictMode>
 );

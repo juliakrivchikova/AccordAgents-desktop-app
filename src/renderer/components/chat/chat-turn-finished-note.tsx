@@ -1,9 +1,11 @@
-import { X } from "lucide-react";
+import { XIcon } from "@phosphor-icons/react";
 import type { ChatMessage, ChatParticipant, ChatTurnFinishedNoteMetadata } from "../../../shared/types";
-import { Avatar, avatarForParticipant } from "../avatar/avatar";
+import { avatarForParticipant } from "../avatar/avatar";
 import { useFocusChatMessage } from "../content/markdown-text";
 import { IconButton } from "../primitives";
 import { avatarForChatParticipant } from "./chat-avatars";
+import { ChatMemberMark } from "./chat-member-mark";
+import { useChatSessionsLinks } from "./chat-sessions-links";
 import { ChatMessageWhen } from "./chat-streaming";
 
 // A member finished answering while its reply had other messages below it:
@@ -18,15 +20,21 @@ export function ChatTurnFinishedNote(props: {
 }): JSX.Element {
   const { message, note, participant } = props;
   const focusMessage = useFocusChatMessage();
-  const label = participant ? `@${participant.handle}` : note.participantLabel || "A member";
-  const avatar = participant ? avatarForChatParticipant(participant, label) : avatarForParticipant(label, note.participantId);
+  const handleLabel = participant ? `@${participant.handle}` : note.participantLabel || "A member";
+  const avatar = participant ? avatarForChatParticipant(participant, handleLabel) : avatarForParticipant(handleLabel, note.participantId);
+  // The sessions view has no handles: a member by its task, the main session
+  // by nothing (its note only says it finished).
+  const links = useChatSessionsLinks();
+  const mainSession = Boolean(links) && note.participantId === links?.mainSessionId;
+  const sessionsName = links && !mainSession && participant ? links.byHandle.get(participant.handle.toLowerCase())?.title : undefined;
+  const label = mainSession ? "" : sessionsName || handleLabel;
   return (
     <article data-message-id={message.id} className="chat-turn-finished-note">
       <div className="chat-turn-finished-note-card">
         <button
           type="button"
           className="chat-turn-finished-note-open"
-          title={`Go to ${label}'s reply`}
+          title={label ? `Go to ${label}'s reply` : "Go to the reply"}
           // Marked as a move of the highlight, as a link to a message is: the
           // chat drops the highlight on any other click outside it.
           onClick={(event) => {
@@ -34,13 +42,14 @@ export function ChatTurnFinishedNote(props: {
             focusMessage(note.messageId);
           }}
         >
-          {/* The title says who: the avatar is not read out a second time. */}
+          {/* The title says who: the avatar (in the sessions view, the
+              provider's logo) is not read out a second time. */}
           <span aria-hidden="true" className="chat-turn-finished-note-avatar-slot">
-            <Avatar className="chat-turn-finished-note-avatar" spec={avatar} tooltip={null} />
+            <ChatMemberMark className="chat-turn-finished-note-avatar" markClassName="is-large" avatar={avatar} member={participant} tooltip={null} />
           </span>
           <span className="chat-turn-finished-note-text">
             <span className="chat-turn-finished-note-title">
-              <span className="chat-mention">{label}</span> finished answering · <ChatMessageWhen createdAt={message.createdAt} />
+              {label ? <><span className={links ? "chat-turn-finished-note-name" : "chat-mention"}>{label}</span> finished answering</> : "Finished answering"} · <ChatMessageWhen createdAt={message.createdAt} />
             </span>
             <span className="chat-turn-finished-note-preview">{message.content}</span>
           </span>
@@ -49,7 +58,7 @@ export function ChatTurnFinishedNote(props: {
           <IconButton
             className="chat-turn-finished-note-dismiss"
             size="xs"
-            icon={X}
+            icon={XIcon}
             label="Dismiss note"
             tooltip="Dismiss note"
             onClick={() => props.onDismiss?.(message.id)}

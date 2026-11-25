@@ -5,9 +5,11 @@ import type {
 import { chatParticipantReference } from "../conversation/conversation-display";
 import { stripChatControlBlocks } from "../../../shared/chatControlBlocks";
 
-export function chatDisplayContent(message: Conversation["messages"][number], author: string): string {
+/** `mainSessionHandle`: in the sessions view, a request to the main session
+ *  shows its question alone (the main session is named by nothing there). */
+export function chatDisplayContent(message: Conversation["messages"][number], author: string, mainSessionHandle?: string): string {
   if (message.metadata?.participantRequest) {
-    return participantRequestDisplayContent(message.metadata.participantRequest);
+    return participantRequestDisplayContent(message.metadata.participantRequest, mainSessionHandle);
   }
   if (message.role !== "participant") {
     return message.content;
@@ -29,10 +31,15 @@ export function chatDisplayContent(message: Conversation["messages"][number], au
   return stripChatControlBlocks(next.join("\n"));
 }
 
-function participantRequestDisplayContent(batch: ChatParticipantRequestBatch): string {
+function participantRequestDisplayContent(batch: ChatParticipantRequestBatch, mainSessionHandle?: string): string {
+  const main = mainSessionHandle?.trim().replace(/^@/, "").toLowerCase();
+  const toMain = (item: ChatParticipantRequestBatch["items"][number]): boolean =>
+    Boolean(main) && item.targetHandle.trim().replace(/^@/, "").toLowerCase() === main;
   if (batch.source === "inferred") {
-    const targets = batch.items.map((item) => chatParticipantReference(item.targetHandle)).join(", ");
+    const named = batch.items.filter((item) => !toMain(item));
+    if (named.length === 0) return "Asked for input.";
+    const targets = named.map((item) => chatParticipantReference(item.targetHandle)).join(", ");
     return `Asked ${targets} for input.`;
   }
-  return batch.items.map((item) => `${chatParticipantReference(item.targetHandle)} ${item.prompt}`.trim()).join("\n");
+  return batch.items.map((item) => (toMain(item) ? item.prompt : `${chatParticipantReference(item.targetHandle)} ${item.prompt}`).trim()).join("\n");
 }

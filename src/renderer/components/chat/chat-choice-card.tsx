@@ -1,12 +1,12 @@
 import { useEffect, useState } from "react";
-import { ListChecks, PencilLine } from "lucide-react";
+import { ListChecksIcon, PencilLineIcon } from "@phosphor-icons/react";
 
-import { Button } from "@/components/ui/button";
-import { Textarea } from "@/components/ui/textarea";
 import type { ChatPendingChoice } from "../../../shared/types";
 import { choiceOutcome } from "../../../shared/usedCards";
+import { ChatCardField } from "./chat-card-field";
 import { CHAT_CUSTOM_CHOICE_OPTION_ID } from "./chat-conversation-data";
 import { formatChatTime } from "./chat-format";
+import { useSessionsViewLabel, useSessionsViewText } from "./chat-sessions-links";
 
 export function ChatChoiceCard(props: {
   choice: ChatPendingChoice;
@@ -14,14 +14,18 @@ export function ChatChoiceCard(props: {
   submitting: boolean;
   onConfirm: (response: { cancel?: boolean; selectedOptionId?: string; customAnswer?: string; note?: string }) => void;
 }): JSX.Element {
-  const { choice, requesterLabel, submitting, onConfirm } = props;
+  const { choice, submitting, onConfirm } = props;
+  // The sessions view names the main session by nothing and a member by its
+  // task: the "who" and every sentence about it follow.
+  const appText = useSessionsViewText();
+  const requesterLabel = useSessionsViewLabel()(props.requesterLabel);
   const [draftSelection, setDraftSelection] = useState(choice.selectedOptionId ?? choice.recommendedOptionId ?? "");
   const [customAnswer, setCustomAnswer] = useState(choice.customAnswer ?? "");
   const [note, setNote] = useState(choice.note ?? "");
   const selectedOptionId = draftSelection;
   const isCustomSelected = selectedOptionId === CHAT_CUSTOM_CHOICE_OPTION_ID;
   const selectedOption = choice.options.find((option) => option.id === selectedOptionId);
-  const requesterMention = requesterLabel.startsWith("@") ? requesterLabel : requesterLabel === "You" ? "User" : requesterLabel;
+  const requesterMention = props.requesterLabel.startsWith("@") ? props.requesterLabel : props.requesterLabel === "You" ? "User" : props.requesterLabel;
   const canCancel = !submitting;
   const canConfirm = !submitting && (isCustomSelected ? Boolean(customAnswer.trim()) : Boolean(selectedOption));
 
@@ -38,10 +42,10 @@ export function ChatChoiceCard(props: {
     return (
       <section className="chat-choice-card is-folded" aria-label={`${choice.title}: ${outcome.text}`}>
         <div className="chat-card-row">
-          <ListChecks className="chat-card-row-icon" size={14} aria-hidden="true" />
+          <ListChecksIcon className="chat-card-row-icon" size={14} aria-hidden="true" />
           <span className="chat-card-row-preview">{choice.title}</span>
           <span className="chat-card-row-outcome" title={outcome.text}>
-            {requesterLabel} · {outcome.text}{outcome.at ? ` ${formatChatTime(outcome.at)}` : ""}
+            {requesterLabel ? `${requesterLabel} · ` : ""}{outcome.text}{outcome.at ? ` ${formatChatTime(outcome.at)}` : ""}
           </span>
         </div>
       </section>
@@ -73,6 +77,12 @@ export function ChatChoiceCard(props: {
       });
     }
   }
+
+  const cancelButton = (
+    <button type="button" className="chat-choice-cancel" disabled={submitting} onClick={cancelChoice}>
+      Cancel
+    </button>
+  );
 
   return (
     <section className="chat-choice-card" aria-label={choice.title}>
@@ -114,60 +124,32 @@ export function ChatChoiceCard(props: {
             onChange={() => setDraftSelection(CHAT_CUSTOM_CHOICE_OPTION_ID)}
           />
           <span className="chat-choice-num chat-choice-custom-icon" aria-hidden="true">
-            <PencilLine size={14} />
+            <PencilLineIcon size={14} />
           </span>
           <span className="chat-choice-option-body">
             <span className="chat-choice-option-title">
               <strong>Write your own answer</strong>
             </span>
-            <span className="chat-choice-option-description">None of the suggestions fit — type your own direction for {requesterMention}.</span>
+            <span className="chat-choice-option-description">{appText(`None of the suggestions fit — type your own direction for ${requesterMention}.`)}</span>
           </span>
         </label>
       </div>
-      {isCustomSelected && (
-        <label className="chat-choice-text-panel">
-          <span>
-            <strong>Your answer</strong>
-            <small>required · sent verbatim to {requesterMention}</small>
-          </span>
-          <Textarea
-            value={customAnswer}
-            onChange={(event) => setCustomAnswer(event.target.value)}
-            placeholder={'e.g. "Use session cookies for web, but issue short-lived JWTs to native clients"'}
-            rows={3}
-            disabled={submitting}
-          />
-        </label>
+      {isCustomSelected || selectedOption ? (
+        <ChatCardField
+          key={isCustomSelected ? "answer" : "note"}
+          value={isCustomSelected ? customAnswer : note}
+          onChange={isCustomSelected ? setCustomAnswer : setNote}
+          label={isCustomSelected ? "Your answer" : "Add a note"}
+          placeholder={isCustomSelected ? "Your answer" : "Add a note (optional)"}
+          submitting={submitting}
+          canSend={canConfirm}
+          onSend={confirmChoice}
+        >
+          {cancelButton}
+        </ChatCardField>
+      ) : (
+        <div className="chat-choice-actions">{cancelButton}</div>
       )}
-      {!isCustomSelected && selectedOption && (
-        <label className="chat-choice-text-panel">
-          <span>
-            <strong>Add a note</strong>
-            <small>optional · {requesterMention} will see it alongside your pick</small>
-          </span>
-          <Textarea
-            value={note}
-            onChange={(event) => setNote(event.target.value)}
-            placeholder={`Constraints, caveats, or follow-up questions for ${requesterMention}...`}
-            rows={2}
-            disabled={submitting}
-          />
-        </label>
-      )}
-      <div className="chat-choice-actions">
-        {isCustomSelected && !customAnswer.trim() && (
-          <span className="chat-choice-hint">Type your answer to enable send.</span>
-        )}
-        <div className="chat-choice-action-buttons">
-          <button type="button" className="chat-choice-cancel" disabled={submitting} onClick={cancelChoice}>
-            Cancel
-          </button>
-          <Button size="sm" className="chat-choice-submit" disabled={!canConfirm} onClick={confirmChoice}>
-            <span>Submit</span>
-            <kbd aria-hidden="true">↵</kbd>
-          </Button>
-        </div>
-      </div>
     </section>
   );
 }

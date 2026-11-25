@@ -256,3 +256,71 @@ test("a decided roster change keeps its card on the server until it is made, eve
   // A question from a member that left asks nobody.
   assert.deepEqual(wantedHubCards(chatWith(["gera-id"], [removalApproval()]), owns), []);
 });
+
+// The compaction card the User approved on 2026-11-22, on the phone as on the
+// desktop: its question, its sentence, the meter from the member's context
+// indicator, what the summary keeps, the box, Not now and Compact.
+test("a compaction card on the phone says what the desktop card says and answers with its box", () => {
+  const approval = { id: "approval-compact", conversationId: "conversation-1", requesterParticipantId: "drew-id", requesterHandle: "drew",
+    requesterRoleConfigId: "software-engineer", toolName: "app_chat_request_compaction", capability: "compaction.request", status: "pending",
+    request: { type: "self_compaction", instructions: "beta.3 status, your rules, open defects", contextPercentage: 82 }, summary: "Compact @drew context",
+    createdAt: "2026-11-22T08:59:00.000Z", updatedAt: "2026-11-22T08:59:00.000Z" } as unknown as ChatAppToolApproval;
+  const pending = controlCardFromHubCard(hubCard({ cardId: "approval-compact", card: { approval } }));
+  assert.equal(pending?.title, "Compact the conversation?");
+  assert.equal(pending?.summary, "After this reply the older part of the conversation is replaced by a short summary, and work continues from it.");
+  assert.doesNotMatch(`${pending?.title} ${pending?.summary}`, /\bit to\b|provider session|@drew/);
+  assert.deepEqual(pending?.meter, { percentage: 82, label: "82% of context used", name: "Context used" });
+  assert.deepEqual(pending?.keeps, { label: "Summary keeps:", text: "beta.3 status, your rules, open defects" });
+  assert.equal(pending?.chatScopeLabel, "Don't ask again in this chat");
+  assert.deepEqual(pending?.options.map((option) => [option.id, option.label]), [["deny", "Not now"], ["allow", "Compact"]]);
+  assert.equal(pending?.primaryOptionId, "allow");
+  assert.equal(pending?.requesterLabel, "@drew", "named by the phone as its chat's view names members");
+  assert.equal(pending?.draftOverride, undefined);
+
+  const unknown = controlCardFromApproval("conversation-1", { ...approval, request: { type: "self_compaction" } } as ChatAppToolApproval);
+  assert.equal(unknown.meter, undefined, "no figure, no meter");
+  assert.equal(unknown.keeps, undefined);
+
+  const always = controlCardFromHubCard(hubCard({ cardId: "approval-compact", card: { approval }, state: "answered", answer: { approve: true, scope: "chat" } }));
+  assert.equal(always?.outcome, "Compact · Don't ask again in this chat. Waiting for it to be applied.");
+  assert.deepEqual([always?.meter, always?.chatScopeLabel, always?.options], [undefined, undefined, []]);
+  const once = controlCardFromHubCard(hubCard({ cardId: "approval-compact", card: { approval }, state: "answered", answer: { approve: true, scope: "once" } }));
+  assert.equal(once?.outcome, "Compact. Waiting for it to be applied.");
+  const notNow = controlCardFromHubCard(hubCard({ cardId: "approval-compact", card: { approval }, state: "answered", answer: { approve: false } }));
+  assert.equal(notNow?.outcome, "Not now. Waiting for it to be applied.");
+});
+
+test("Claude Code's plan approval is the CLI's own card on the phone: its words, the plan, its rows, and the row she picked once answered", () => {
+  const approval = { id: "plan-1", conversationId: "conversation-1", requesterParticipantId: "drew-id", requesterHandle: "drew", requesterRoleConfigId: "main-session",
+    toolName: "app_tool_permission", capability: "permissions.request", status: "pending", summary: "Ready to code?",
+    request: { kind: "toolPermission", agentMode: "plan", toolName: "ExitPlanMode", planApproval: { plan: "# Plan\n\n1. Write hello.txt" } },
+    createdAt: "2026-11-22T09:00:00.000Z", updatedAt: "2026-11-22T09:00:00.000Z" } as unknown as ChatAppToolApproval;
+  const pending = controlCardFromHubCard(hubCard({ cardId: "plan-1", card: { approval } }));
+  assert.equal(pending?.title, "Ready to code?");
+  assert.equal(pending?.kind, "permission");
+  assert.deepEqual(pending?.options, [
+    { id: "yes-accept-edits-keep-context", label: "Yes, auto-accept edits" },
+    { id: "yes-default-keep-context", label: "Yes, manually approve edits" },
+    { id: "no", label: "No, keep planning" }
+  ]);
+  assert.deepEqual(pending?.plan, {
+    intro: "Here is Claude's plan:",
+    text: "# Plan\n\n1. Write hello.txt",
+    isPlan: true,
+    question: "Claude has written up a plan and is ready to execute. Would you like to proceed?",
+    feedbackOptionId: "no",
+    feedbackPlaceholder: "Tell Claude what to change"
+  });
+  const auto = controlCardFromApproval("conversation-1", { ...approval, request: { ...(approval.request as object), planApproval: { plan: "", autoModeAvailable: true } } } as ChatAppToolApproval);
+  assert.equal(auto.options[0].label, "Yes, and use auto mode");
+  assert.deepEqual([auto.plan?.text, auto.plan?.isPlan], ["No plan found. Please write your plan to the plan file first.", false]);
+
+  const answered = controlCardFromHubCard(hubCard({ cardId: "plan-1", card: { approval }, state: "answered",
+    answer: { approve: true, planDecision: { optionId: "yes-accept-edits-keep-context" } } }));
+  assert.equal(answered?.outcome, "Yes, auto-accept edits. Waiting for it to be applied.");
+  assert.equal(answered?.plan, undefined, "folded: no plan, no rows");
+  assert.deepEqual(answered?.options, []);
+  const kept = controlCardFromHubCard(hubCard({ cardId: "plan-1", card: { approval }, state: "answered",
+    answer: { approve: false, planDecision: { optionId: "no", feedback: "Smaller steps." } } }));
+  assert.equal(kept?.outcome, "No, keep planning. Waiting for it to be applied.");
+});

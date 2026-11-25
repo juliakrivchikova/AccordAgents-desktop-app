@@ -1,9 +1,12 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
+  CHAT_DELIVERY_POLICY_OPTIONS,
   createChatDeliveryPolicySnapshot,
+  resolveChatDeliveryTargets,
   resolveChatDeliveryTargetsFromSnapshot
 } from "../../shared/chatDeliveryPolicy";
+import { MAIN_SESSION_ROLE_ID } from "../../shared/mainSession";
 import type { ChatMessage, ChatParticipant, Conversation } from "../../shared/types";
 
 const OPTIONS = {
@@ -81,6 +84,54 @@ test("resolveChatDeliveryTargetsFromSnapshot resolves mentions and last-sender f
   assert.deepEqual(mentioned.status === "ready" ? mentioned.result.targets.map((item) => item.handle) : [], ["codex"]);
   assert.equal(fallback.status, "ready");
   assert.deepEqual(fallback.status === "ready" ? fallback.result.targets.map((item) => item.handle) : [], ["codex"]);
+});
+
+test("in a chat with a main session, a message on the timeline without an @ goes to the main session, not the member that spoke last", () => {
+  const main = participant("main", MAIN_SESSION_ROLE_ID);
+  const drew = participant("drew", "generic-participant");
+  const participants = [main, drew];
+  const conversation = { ...chatConversation([participantMessage("reply-drew", drew.id)]), metadata: { participants, mainSessionParticipantId: main.id } };
+  const route = (content: string, context?: Parameters<typeof resolveChatDeliveryTargets>[0]["context"]) =>
+    resolveChatDeliveryTargets({ conversation, participants, content, context, options: CHAT_DELIVERY_POLICY_OPTIONS });
+
+  assert.deepEqual(route("go on").targets.map((item) => item.handle), ["main"]);
+  assert.deepEqual(route("@drew go on").targets.map((item) => item.handle), ["drew"], "an @ still names whom it is for");
+  // The phone and the server pass the members without the chat's metadata:
+  // the main session is told by its role.
+  const bare = resolveChatDeliveryTargets({ conversation: chatConversation([participantMessage("reply-drew", drew.id)]), participants, content: "go on", options: CHAT_DELIVERY_POLICY_OPTIONS });
+  assert.deepEqual(bare.targets.map((item) => item.handle), ["main"]);
+});
+
+test("in a thread of a main-session chat the thread's own rule holds, and the main session is its last resort", () => {
+  const main = participant("main", MAIN_SESSION_ROLE_ID);
+  const drew = participant("drew", "generic-participant");
+  const participants = [main, drew];
+  const inThread: ChatMessage = { ...participantMessage("reply-drew", drew.id), metadata: { chatThreadRootId: "root-1" } };
+  const conversation = { ...chatConversation([inThread]), metadata: { participants, mainSessionParticipantId: main.id } };
+  const route = (context: Parameters<typeof resolveChatDeliveryTargets>[0]["context"]) =>
+    resolveChatDeliveryTargets({ conversation, participants, content: "and then?", context, options: CHAT_DELIVERY_POLICY_OPTIONS }).targets.map((item) => item.handle);
+
+  assert.deepEqual(route({ chatThreadRootId: "root-1" }), ["drew"], "the newest member that spoke in the thread");
+  assert.deepEqual(route({ chatThreadRootId: "root-2" }), ["main"], "nobody spoke in that thread yet");
+});
+
+test("@assistant and @admin do not reach a main session; a chat from before still routes to its Assistant", () => {
+  const main = participant("main", MAIN_SESSION_ROLE_ID);
+  const participants = [main, participant("drew", "generic-participant")];
+  const conversation = { ...chatConversation([]), metadata: { participants, mainSessionParticipantId: main.id } };
+  for (const alias of ["@assistant hi", "@admin hi"]) {
+    const routed = resolveChatDeliveryTargets({ conversation, participants, content: alias, options: CHAT_DELIVERY_POLICY_OPTIONS });
+    assert.deepEqual(routed.targets, [], alias);
+    assert.deepEqual(routed.unknownHandles, [alias.slice(1, alias.indexOf(" "))], alias);
+  }
+
+  const assistant = participant("admin", "administrator");
+  const codex = participant("codex");
+  const old = chatConversation([participantMessage("reply-1", codex.id)]);
+  const routed = (content: string) => resolveChatDeliveryTargets({ conversation: old, participants: [assistant, codex], content, options: CHAT_DELIVERY_POLICY_OPTIONS }).targets.map((item) => item.handle);
+  assert.deepEqual(routed("follow up"), ["codex"], "the member that spoke last, as before");
+  assert.deepEqual(routed("@assistant hi"), ["admin"]);
+  assert.deepEqual(resolveChatDeliveryTargets({ conversation: chatConversation([]), participants: [assistant, codex], content: "hi", options: CHAT_DELIVERY_POLICY_OPTIONS }).targets.map((item) => item.handle), ["admin"], "nobody spoke yet: the Assistant");
 });
 
 function participant(handle: string, roleConfigId = "engineer"): ChatParticipant {

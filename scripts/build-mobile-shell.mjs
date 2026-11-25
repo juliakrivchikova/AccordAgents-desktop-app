@@ -1,4 +1,4 @@
-import { cp, mkdir, rm } from "node:fs/promises";
+import { cp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { build } from "esbuild";
@@ -11,7 +11,24 @@ const assetTarget = path.join(target, "assets");
 const rendererAssets = path.join(repoRoot, "src/renderer/assets");
 
 await rm(target, { recursive: true, force: true });
-await cp(source, target, { recursive: true });
+// Everything but the app's own modules and styles, which go into one file each.
+const appSource = path.join(source, "app");
+const styleSource = path.join(source, "styles");
+await cp(source, target, { recursive: true, filter: (from) => from !== appSource && from !== styleSource });
+// The phone app itself: one file on the phone, one module per subject here.
+await build({ entryPoints: [path.join(appSource, "main.js")],
+  outfile: path.join(target, "mobile-app.js"), bundle: true,
+  format: "iife", platform: "browser", target: "es2022", charset: "utf8" });
+// Its styles, in the order they override each other.
+const styles = [
+  "base", "chats", "chat-header", "messages", "artifact-notes", "accord", "finished-notes", "message-text", "composer",
+  "waiting", "pairing", "stream-view", "control-cards", "choice-cards", "chat-search", "refresh", "members-sheet",
+  "new-chat", "new-chat-options", "send-log", "images", "folded-cards", "dock", "activity", "settings", "urgent-alerts",
+  "sessions-view", "member-session", "provider-logos", "title-menu", "members-sheet-fork", "sessions-accord",
+  "sessions-progress", "sessions-working", "cards-kept"
+];
+const styleTexts = await Promise.all(styles.map((name) => readFile(path.join(styleSource, `${name}.css`), "utf8")));
+await writeFile(path.join(target, "mobile-app.css"), styleTexts.join("\n"));
 // How the phone and its service worker talk to the User's server: signed
 // requests, its own signed events, bodies by hash. The same bytes every other
 // device signs, from the same module the tests check against the desktop's.
@@ -28,6 +45,12 @@ await cp(
   path.join(rendererAssets, "accordagents-mark.png"),
   path.join(assetTarget, "accordagents-mark.png")
 );
+// The providers' logo tiles the sessions view marks members with (the
+// desktop's ProviderIcon pictures; Codex's mark is drawn inline).
+const providerTarget = path.join(assetTarget, "providers");
+await mkdir(providerTarget, { recursive: true });
+await cp(path.join(rendererAssets, "claude-avatar.png"), path.join(providerTarget, "claude.png"));
+await cp(path.join(rendererAssets, "antigravity-logo.png"), path.join(providerTarget, "antigravity.png"));
 // Every built-in avatar the desktop can show, copied under its catalog id so
 // the phone resolves `assetId` -> file without a list of its own. The catalog
 // is read from the same module the desktop ships, bundled as ESM in memory:
@@ -42,8 +65,8 @@ await mkdir(avatarTarget, { recursive: true });
 for (const entry of CHAT_AVATAR_CATALOG) {
   await cp(path.join(rendererAssets, entry.assetFile), path.join(avatarTarget, chatAvatarAssetFileName(entry)));
 }
-// QR decoder for in-app pairing. Copied rather than bundled because the mobile
-// shell ships as plain static files with no build step.
+// QR decoder for in-app pairing. Copied rather than bundled: it is a file of
+// its own on the phone.
 await cp(
   path.join(repoRoot, "node_modules/jsqr/dist/jsQR.js"),
   path.join(target, "jsqr.js")

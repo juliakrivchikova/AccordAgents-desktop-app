@@ -16,10 +16,27 @@
 
 import type { ChatAppToolApproval, ChatChoiceOption, ChatMessage, ChatParticipantRemovalRequest, ChatPendingChoice, Conversation } from "./types";
 import { APP_CONNECTOR_SIGN_IN_TOOL, APP_PARTICIPANTS_REQUEST_CHANGE_TOOL } from "./appMcpToolContracts";
+import {
+  COMPACTION_CARD_CHAT_SCOPE,
+  COMPACTION_CARD_COMPACT,
+  COMPACTION_CARD_KEEPS,
+  COMPACTION_CARD_METER_NAME,
+  COMPACTION_CARD_NOT_NOW,
+  COMPACTION_CARD_SENTENCE,
+  COMPACTION_CARD_TITLE,
+  compactionCardEnding,
+  compactionMeterLabel,
+  selfCompactionRequestOf
+} from "./compactionCard";
 import { connectorSignInHost, isConnectorSignInRequest } from "./connectorSignIn";
+import {
+  CLAUDE_PLAN_APPROVAL_INTRO, CLAUDE_PLAN_APPROVAL_QUESTION, CLAUDE_PLAN_APPROVAL_TITLE, CLAUDE_PLAN_FEEDBACK_PLACEHOLDER, CLAUDE_PLAN_KEEP_PLANNING_ID,
+  claudePlanApprovalOption, claudePlanApprovalOptions, claudePlanShown, isClaudePlanApprovalRequest
+} from "./claudePlanApproval";
 import type { HubCard } from "./hubOps";
 import { approvalInstallsScriptCode } from "./scripts";
 import { choiceOutcome } from "./usedCards";
+import { approvalHoldsTurn } from "./mainSessionView";
 
 export type MobileControlCardKind = "permission" | "choice";
 
@@ -31,6 +48,11 @@ export interface MobileControlCard {
   /** What is being asked, in the words the desktop uses. */
   summary: string;
   requesterLabel?: string;
+  /** The member that asked, by id (a permission it asked). */
+  requesterParticipantId?: string;
+  /** Its member's turn stops until the User answers (shared
+   *  approvalHoldsTurn): the side panel shows it waiting for her. */
+  holdsTurn?: true;
   /** The machine whose member raised it, when it is not this one. */
   machineName?: string;
   options: ChatChoiceOption[];
@@ -61,6 +83,31 @@ export interface MobileControlCard {
   /** Answers to a still pending choice that were refused, named by the
    *  operation id each was sent under, so the phone that sent one stops waiting. */
   refusedAnswers?: Array<{ operationId: string; reason: string }>;
+  /** A compaction card's context meter, as the desktop card draws it. */
+  meter?: { percentage: number; label: string; name: string };
+  /** A compaction card's "Summary keeps:" line. */
+  keeps?: { label: string; text: string };
+  /** A box beside the answers that, ticked, makes an approval hold for the
+   *  rest of the chat (scope "chat"), labelled as the desktop's is. */
+  chatScopeLabel?: string;
+  /** The answer the card's primary button gives (drawn last, filled). */
+  primaryOptionId?: string;
+  /** Claude Code's plan approval ("Ready to code?"), as the CLI shows it:
+   *  its words around the plan, the plan (markdown), and its "No, keep
+   *  planning" row, which takes her words. Each option's id is the CLI's
+   *  own value, carried back as the answer's planDecision. */
+  plan?: ControlCardPlan;
+}
+
+export interface ControlCardPlan {
+  intro: string;
+  /** The plan, or the CLI's words in its place (an empty or too large one). */
+  text: string;
+  /** The plan itself (markdown), not the CLI's words in its place. */
+  isPlan: boolean;
+  question: string;
+  feedbackOptionId: string;
+  feedbackPlaceholder: string;
 }
 
 const ALLOW = { id: "allow", label: "Allow" };
@@ -91,10 +138,17 @@ function removalRequest(approval: ChatAppToolApproval): ChatParticipantRemovalRe
     : undefined;
 }
 
-/** Whether a card should be shown for this approval: one that asks, and an
- *  approved roster change that has not happened yet. */
+/** How long a task created without a card keeps its card standing on the
+ *  server at most: it is settled right after it is raised, and a machine that
+ *  stopped in between settles it with its next save after this. */
+const CREATED_TASK_CARD_MS = 60_000;
+
+/** Whether a card should be shown for this approval: one that asks, an
+ *  approved roster change that has not happened yet, and a task a machine's
+ *  member just created without a card. */
 export function approvalHasCard(approval: ChatAppToolApproval): boolean {
   return approval.status === "pending" ||
+    (approval.status === "auto-applied" && typeof approval.taskCreatedAt === "string" && Date.now() - Date.parse(approval.taskCreatedAt) < CREATED_TASK_CARD_MS) ||
     ((approval.status === "approved" || approval.status === "auto-applied") &&
       (typeof approval.memberRemovalQueuedAt === "string" || typeof approval.memberAdditionQueuedAt === "string")) ||
     // A sign-in answered Done stays until its member's device has reconnected
@@ -107,6 +161,18 @@ export function approvalHasCard(approval: ChatAppToolApproval): boolean {
  *  it has happened (approvalHasCard); an answered approval has no record the
  *  phone keeps. */
 export function controlCardFromApproval(conversationId: string, approval: ChatAppToolApproval): MobileControlCard {
+  const card = approvalCardBody(conversationId, approval);
+  // Which member asks, by id, and whether its turn waits for the answer: the
+  // phone's side panel shows that member as waiting for the User, by the
+  // desktop's rule (shared sessionsMembersWaitingForUser).
+  return {
+    ...card,
+    ...(typeof approval.requesterParticipantId === "string" && approval.requesterParticipantId ? { requesterParticipantId: approval.requesterParticipantId } : {}),
+    ...(approvalHoldsTurn(approval) ? { holdsTurn: true as const } : {})
+  };
+}
+
+function approvalCardBody(conversationId: string, approval: ChatAppToolApproval): MobileControlCard {
   const removal = removalRequest(approval);
   if (removal) {
     // The desktop's removal card, word for word: who asks, who leaves, what
@@ -204,6 +270,56 @@ export function controlCardFromApproval(conversationId: string, approval: ChatAp
       ...(signIn && !elsewhere ? { signInUrl: request.authUrl } : {})
     };
   }
+  const compaction = selfCompactionRequestOf(approval);
+  if (compaction) {
+    // The desktop's card, word for word (src/shared/compactionCard.ts).
+    const percentage = compaction.contextPercentage;
+    return {
+      id: approval.id,
+      kind: "permission",
+      conversationId,
+      title: COMPACTION_CARD_TITLE,
+      summary: COMPACTION_CARD_SENTENCE,
+      requesterLabel: approval.requesterHandle ? `@${approval.requesterHandle}` : undefined,
+      machineName: (approval as { machineName?: string }).machineName,
+      options: [{ id: "deny", label: COMPACTION_CARD_NOT_NOW }, { id: "allow", label: COMPACTION_CARD_COMPACT }],
+      primaryOptionId: "allow",
+      chatScopeLabel: COMPACTION_CARD_CHAT_SCOPE,
+      ...(percentage !== undefined ? { meter: { percentage, label: compactionMeterLabel(percentage), name: COMPACTION_CARD_METER_NAME } } : {}),
+      ...(compaction.instructions ? { keeps: { label: COMPACTION_CARD_KEEPS, text: compaction.instructions } } : {}),
+      allowsCustomAnswer: false,
+      allowsCancel: false,
+      status: "pending",
+      createdAt: approval.createdAt
+    };
+  }
+  if (isClaudePlanApprovalRequest(approval.request)) {
+    // Claude Code's own plan approval, word for word (claudePlanApproval.ts).
+    const planApproval = approval.request.planApproval;
+    const shown = claudePlanShown(planApproval);
+    return {
+      id: approval.id,
+      kind: "permission",
+      conversationId,
+      title: CLAUDE_PLAN_APPROVAL_TITLE,
+      summary: "",
+      requesterLabel: approval.requesterHandle ? `@${approval.requesterHandle}` : undefined,
+      machineName: (approval as { machineName?: string }).machineName,
+      options: claudePlanApprovalOptions(planApproval).map((option) => ({ id: option.id, label: option.label })),
+      allowsCustomAnswer: false,
+      allowsCancel: false,
+      status: "pending",
+      createdAt: approval.createdAt,
+      plan: {
+        intro: CLAUDE_PLAN_APPROVAL_INTRO,
+        text: shown,
+        isPlan: shown === planApproval.plan,
+        question: CLAUDE_PLAN_APPROVAL_QUESTION,
+        feedbackOptionId: CLAUDE_PLAN_KEEP_PLANNING_ID,
+        feedbackPlaceholder: CLAUDE_PLAN_FEEDBACK_PLACEHOLDER
+      }
+    };
+  }
   // A script that installs code is approved where its code can be read: the
   // phone shows it as a card it may only decline.
   const desktopOnly = approvalInstallsScriptCode(approval);
@@ -284,6 +400,8 @@ export function controlCardFromHubCard(
   if (card.state === "settled") return undefined;
   const raised = card.card as { approval?: ChatAppToolApproval; choice?: ChatPendingChoice; sourceMessageId?: unknown; refusals?: unknown };
   if ((card.cardKind === "permission" || card.cardKind === "roster") && raised.approval && typeof raised.approval === "object") {
+    // A task created without a card asks nothing: it is settled right away.
+    if (raised.approval.status === "auto-applied" && raised.approval.taskCreatedAt) return undefined;
     const pending = controlCardFromApproval(card.conversationId, { ...raised.approval, status: "pending" });
     const base: MobileControlCard = { ...pending, id: card.cardId, createdAt: raised.approval.createdAt || card.raisedAt };
     // Decided by its member's own device (its Manage members setting allowed
@@ -313,11 +431,19 @@ export function controlCardFromHubCard(
       });
       return { ...waiting, id: card.cardId, createdAt: base.createdAt };
     }
-    const chosen = base.options.find((option) => option.id === (approve ? "allow" : "deny"));
-    // A card that words its answers (a removal: "Yes, remove @x") says the
-    // one given; a plain permission says Allowed or Denied.
-    const said = chosen && chosen.label !== ALLOW.label && chosen.label !== DENY.label ? chosen.label : approve ? "Allowed" : "Denied";
-    const { codexDecisionId: _decision, draftOverride: _draft, ...shown } = base;
+    const planDecision = (card.answer as { planDecision?: { optionId?: unknown } } | undefined)?.planDecision;
+    const planPick = isClaudePlanApprovalRequest(raised.approval.request) && typeof planDecision?.optionId === "string"
+      ? claudePlanApprovalOption(raised.approval.request.planApproval, planDecision.optionId)
+      : undefined;
+    const chosen = planPick ?? base.options.find((option) => option.id === (approve ? "allow" : "deny"));
+    // A card that words its answers (a removal: "Yes, remove @x", a plan:
+    // "Yes, auto-accept edits") says the one given; a plain permission says
+    // Allowed or Denied; a compaction ends as its folded line on the desktop
+    // does.
+    const said = selfCompactionRequestOf(raised.approval)
+      ? compactionCardEnding({ status: approve ? "approved" : "denied", approvalScope: card.answer?.scope === "chat" ? "chat" : "once" }).ended
+      : chosen && chosen.label !== ALLOW.label && chosen.label !== DENY.label ? chosen.label : approve ? "Allowed" : "Denied";
+    const { codexDecisionId: _decision, draftOverride: _draft, meter: _meter, keeps: _keeps, chatScopeLabel: _scope, primaryOptionId: _primary, plan: _plan, ...shown } = base;
     return { ...shown, options: [], status: "answered", waiting: true, outcome: `${said}. ${HUB_CARD_ANSWERED_WAITING}` };
   }
   if (card.cardKind === "choice" && raised.choice && typeof raised.choice === "object") {
@@ -355,7 +481,8 @@ export function controlCardsFromConversation(conversation: Conversation): Mobile
   const approvals = (conversation.metadata as { pendingAppToolApprovals?: ChatAppToolApproval[] } | undefined)
     ?.pendingAppToolApprovals ?? [];
   for (const approval of approvals) {
-    if (!approvalHasCard(approval)) continue;
+    // A task created without a card asks nothing.
+    if (!approvalHasCard(approval) || approval.status === "auto-applied" && approval.taskCreatedAt) continue;
     cards.push(controlCardFromApproval(conversation.id, approval));
   }
   for (const message of conversation.messages) {

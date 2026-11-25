@@ -14,7 +14,7 @@
 
 .settings-view .env-error {
   color: var(--destructive);
-  font-size: 12.5px;
+  font-size: 12px;
 }
 
 .settings-view .environment-settings-screen .roles-toolbar {
@@ -45,9 +45,9 @@
 .settings-view .env-value-input {
   width: 240px;
   height: 28px;
-  border-radius: 10px;
+  border-radius: 8px;
   font-family: var(--font-mono, ui-monospace, "SF Mono", Menlo, monospace);
-  font-size: 12.5px;
+  font-size: 12px;
 }
 
 .settings-view .env-value-input::placeholder {

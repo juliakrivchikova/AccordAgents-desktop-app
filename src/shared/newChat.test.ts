@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { newChatIntro, newChatMemberFitsProject, newChatParticipants, newChatPickedMembers, newChatProjects, newChatTitle, normalizeProjectPath, orderByParticipantUsage } from "./newChat";
+import { newChatIntro, newChatMemberFitsProject, newChatMetadata, newChatParticipants, newChatPickedMembers, newChatProjects, newChatTitle, normalizeProjectPath, orderByParticipantUsage } from "./newChat";
+import { MAIN_SESSION_ROLE_ID } from "./mainSession";
 import type { ChatParticipant, ConversationSummary } from "./types";
 
 const assistant = { id: "template-assistant", handle: "assistant", roleConfigId: "administrator", kind: "codex-cli", autoWatch: false } as ChatParticipant;
@@ -17,6 +18,37 @@ test("a new chat has the Chat Assistant first, then each member chosen or named 
   assert.deepEqual(participants.map((item) => item.handle), ["assistant", "gera", "taylor"], "in the order the computer saved them");
   assert.deepEqual(participants.map((item) => item.id), ["id-3", "id-1", "id-2"]);
   assert.equal(participants[1].participantConfigId, "c-gera");
+});
+
+const mainSession = { id: "template-main", handle: "main", roleConfigId: MAIN_SESSION_ROLE_ID, kind: "claude-code", autoWatch: false } as ChatParticipant;
+
+test("a new chat has its main session first, and its metadata names it and the view it opens in", () => {
+  let next = 0;
+  const participants = newChatParticipants({
+    mainSession, members: [member("c-drew", "drew"), member("c-gera", "gera")],
+    chosenConfigIds: ["c-gera"], firstMessage: "hi", newId: () => `id-${++next}`
+  });
+  assert.deepEqual(participants.map((item) => item.handle), ["main", "gera"]);
+  assert.equal(participants[0].roleConfigId, MAIN_SESSION_ROLE_ID);
+  assert.deepEqual(newChatMetadata(participants), { mainSessionParticipantId: participants[0].id, chatView: "sessions" }, "unset: the sessions view");
+  assert.deepEqual(newChatMetadata(participants, "classic"), { mainSessionParticipantId: participants[0].id, chatView: "classic" }, "the computer's choice in Settings");
+  assert.deepEqual(newChatMetadata(participants, "other" as never).chatView, "sessions");
+});
+
+test("the main session reads the chat's project exactly when it has one", () => {
+  const offered = { ...mainSession, permissions: { repoRead: true, workspaceWrite: false, webAccess: false, requestParticipants: "allow", requestCompaction: "ask", shell: { enabled: false, rules: [] } } } as ChatParticipant;
+  const start = (project?: string) => newChatParticipants({ mainSession: offered, members: [], chosenConfigIds: [], firstMessage: "", newId: () => "id", project })[0].permissions?.repoRead;
+  assert.equal(start("/Users/u/api"), true);
+  assert.equal(start(""), false, "a chat without a project");
+  assert.equal(start(undefined), true, "a phone from before passes no project: as offered");
+});
+
+test("a phone from before passes the offer's assistant, which is the main session now, and gets a main-session chat too", () => {
+  const participants = newChatParticipants({ assistant: mainSession, members: [], chosenConfigIds: [], firstMessage: "", newId: () => "id-1" });
+  assert.deepEqual(participants.map((item) => [item.handle, item.roleConfigId]), [["main", MAIN_SESSION_ROLE_ID]]);
+  assert.equal(newChatMetadata(participants).mainSessionParticipantId, "id-1");
+  assert.deepEqual(newChatMetadata(newChatParticipants({ assistant, members: [], chosenConfigIds: [], firstMessage: "", newId: () => "x" })), {},
+    "an offer from a computer from before: an Assistant chat, no main session");
 });
 
 test("only the first member that watches the chat keeps watching it", () => {

@@ -1,9 +1,10 @@
 import React, { useEffect, useRef, useState } from "react";
-import { Check, Pencil, X } from "lucide-react";
+import { CheckIcon, PencilSimpleIcon, XIcon } from "@phosphor-icons/react";
 
 import { Input } from "@/components/ui/input";
 import { IconButton } from "../primitives";
 import type { Conversation } from "../../../shared/types";
+import { ChatViewTitleMenu } from "./chat-view-switch";
 
 export function normalizeChatTitle(value: string): string {
   return value.trim().slice(0, 80) || "Chat";
@@ -96,7 +97,7 @@ export function ChatTopBarTitle(props: {
           />
           <IconButton
             size="xs"
-            icon={Check}
+            icon={CheckIcon}
             label="Save chat name"
             tooltip="Save chat name"
             disabled={titleSaveDisabled}
@@ -105,7 +106,7 @@ export function ChatTopBarTitle(props: {
           />
           <IconButton
             size="xs"
-            icon={X}
+            icon={XIcon}
             label="Cancel chat name edit"
             tooltip="Cancel chat name edit"
             disabled={titleSaving}
@@ -116,9 +117,10 @@ export function ChatTopBarTitle(props: {
       ) : (
         <div className="topbar-chat-title-row">
           <span className="topbar-chat-title-text">{props.conversation.title}</span>
+          <ChatViewTitleMenu />
           <IconButton
             size="xs"
-            icon={Pencil}
+            icon={PencilSimpleIcon}
             label="Edit chat name"
             tooltip={props.isRunning ? "Chat name cannot be edited while members are running" : "Edit chat name"}
             disabled={props.isRunning}

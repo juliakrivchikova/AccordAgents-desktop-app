@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { timelineEventsFromSnapshot } from "./mobileTimeline";
 import { mobileWhoLabel } from "./mobileChatCatalog";
-import type { Conversation } from "../../shared/types";
+import type { ChatMessage, Conversation } from "../../shared/types";
 
 // What the User's server serves the phone as a chat's page (mobileChatCatalog
 // builds it with these), carried over from the relay's control tests.
@@ -303,6 +303,57 @@ test("a member's posts during its turn are marked, and a turn that ends empty st
   assert.equal(events.answer?.hidden, undefined);
 });
 
+test("a part of a turn her next message joined travels with its steps even with no words in the sessions view; elsewhere, or with nothing in it, it travels hidden", () => {
+  const member = { participantId: "taylor", participantLabel: "@taylor" };
+  const steps = [{ id: "a1", sequence: 1, kind: "command" as const, label: "Running npm test", createdAt: "2026-11-22T10:00:01Z" }];
+  const conversation: Conversation = {
+    id: "joined-chat", kind: "chat", title: "Joined", createdAt: "2026-11-22T10:00:00Z", updatedAt: "2026-11-22T10:00:03Z", findings: [], metadata: { mainSessionParticipantId: "taylor", chatView: "sessions", participants: [{ id: "taylor", handle: "taylor", kind: "claude-code", roleConfigId: "main-session" }] },
+    messages: [
+      { id: "steps-only", role: "participant", ...member, content: "", status: "done", createdAt: "2026-11-22T10:00:00Z",
+        metadata: { runId: "run-1", turnContinues: true, activityEvents: steps } },
+      { id: "nothing", role: "participant", ...member, content: "", status: "done", createdAt: "2026-11-22T10:00:02Z",
+        metadata: { runId: "run-2", turnContinues: true } }
+    ]
+  };
+  const events = Object.fromEntries(timelineEventsFromSnapshot(conversation).map((event) => [event.id, event]));
+  assert.equal(events["steps-only"]?.hidden, undefined, "its steps are what it says");
+  assert.equal(events["steps-only"]?.turnContinues, true);
+  assert.ok(events["steps-only"]?.activity?.length);
+  assert.equal(events.nothing?.hidden, true);
+  const classic = Object.fromEntries(timelineEventsFromSnapshot({ ...conversation, metadata: { ...conversation.metadata, chatView: "classic" } }).map((event) => [event.id, event]));
+  assert.equal(classic["steps-only"]?.hidden, true, "a classic chat's phone draws no steps: the part ends its run unseen");
+});
+
+test("a reply's posts during its turn travel inside it to the phone, and a reply whose words all went out as posts still shows", async () => {
+  const { phoneActivityEvents } = await import("./mobileTimeline");
+  const member = { participantId: "taylor", participantLabel: "@taylor" };
+  const posts = [
+    { id: "post-1", content: "Found the cause.", createdAt: "2026-11-20T10:00:01Z", afterContentLength: 4, afterActivitySequence: 2 },
+    { id: "post-2", content: "Here it is.", createdAt: "2026-11-20T10:00:02Z", attachmentIds: ["pic"] }
+  ];
+  const conversation: Conversation = {
+    id: "posts-chat", kind: "chat", title: "Posts", createdAt: "2026-11-20T10:00:00Z", updatedAt: "2026-11-20T10:00:03Z", findings: [], metadata: {},
+    messages: [
+      { id: "running", role: "participant", ...member, content: "", status: "pending", createdAt: "2026-11-20T10:00:00Z",
+        metadata: { runId: "run-1", interimPosts: posts } },
+      { id: "posts-only", role: "participant", ...member, content: "", status: "done", createdAt: "2026-11-20T10:00:00Z",
+        metadata: { runId: "run-2", interimPosts: [posts[0]] } }
+    ]
+  };
+  const events = Object.fromEntries(timelineEventsFromSnapshot(conversation).map((event) => [event.id, event]));
+  assert.deepEqual(events.running?.interimPosts, [
+    { id: "post-1", content: "Found the cause.", createdAt: "2026-11-20T10:00:01Z" },
+    { id: "post-2", content: "Here it is.", createdAt: "2026-11-20T10:00:02Z", attachmentIds: ["pic"] }
+  ], "the words and their pictures, nothing about the stream");
+  assert.equal(events.running?.status, "pending");
+  assert.equal(events.running?.content, "@taylor is running...");
+  assert.equal(events["posts-only"]?.hidden, undefined, "not an empty turn: its posts are its words");
+  assert.equal(events["posts-only"]?.interimPosts?.length, 1);
+  const activity = phoneActivityEvents(conversation, Date.parse("2026-11-20T10:05:00Z"));
+  assert.ok(activity.length > 0);
+  assert.ok(activity.every((event) => !("interimPosts" in event)), "Activity carries no posts: the chat's page does");
+});
+
 test("a turn in progress travels to the phone's Activity however many newer replies there are", async () => {
   const { phoneActivityEvents, PHONE_ACTIVITY_PER_CHAT } = await import("./mobileTimeline");
   const now = Date.parse("2026-11-01T08:00:00.000Z");
@@ -431,4 +482,219 @@ test("the phone lists the newest hundred chats and every pinned one however old,
   assert.equal(listed.length, MOBILE_CHAT_LIST_LIMIT + 1);
   assert.equal(listed.at(-1), "chat-500", "the old pinned chat after the newest hundred");
   assert.ok(!listed.includes("chat-501") && !listed.includes("chat-502") && !listed.includes(`chat-${MOBILE_CHAT_LIST_LIMIT}`));
+});
+
+// The sessions view on the phone (docs/main-session.md): the main session's
+// requests become task cards and the User's messages are placed by whom they
+// were addressed to, so both travel, cut to what the phone shows.
+
+function requestConversation(prompt: string, itemCount: number): Conversation {
+  const items = Array.from({ length: itemCount }, (_, index) => ({
+    targetParticipantId: `m${index}`, targetHandle: `member${index}`, prompt, reason: "x".repeat(2_000),
+    status: index === 0 ? "answered" as const : index === 1 ? "failed" as const : "running" as const,
+    createdAt: "2026-11-20T10:00:00Z", updatedAt: "2026-11-20T10:01:00Z",
+    ...(index === 0 ? { replyMessageId: "reply-0" } : {}),
+    ...(index === 1 ? { error: "The CLI exited.\nStack trace follows" } : {})
+  }));
+  return {
+    id: "chat-main", kind: "chat", title: "Main", createdAt: "2026-11-20T10:00:00Z", updatedAt: "2026-11-20T10:02:00Z", findings: [],
+    metadata: { mainSessionParticipantId: "main", participants: [{ id: "main", handle: "main", kind: "claude-code", roleConfigId: "main-session" }] },
+    messages: [
+      { id: "ask", role: "user", content: "Do it", createdAt: "2026-11-20T09:59:00Z", status: "done", metadata: { deliveryTargets: ["main"], askedParticipantIds: ["main", "m0"] } },
+      { id: "to-member", role: "user", content: "Only you", createdAt: "2026-11-20T09:59:30Z", status: "done", metadata: { deliveryTargets: ["m0"] } },
+      {
+        id: "request", role: "participant", participantId: "main", participantLabel: "@main", content: items.map((item) => `@${item.targetHandle} ${prompt}`).join("\n"),
+        createdAt: "2026-11-20T10:00:00Z", status: "done",
+        metadata: { participantRequest: {
+          id: "batch-1", requesterParticipantId: "main", requesterHandle: "main", source: "tool", resumeRequester: true, status: "running",
+          depth: 1, createdAt: "2026-11-20T10:00:00Z", updatedAt: "2026-11-20T10:01:00Z", autoResumeMessageId: "resume", items
+        } }
+      }
+    ]
+  } as unknown as Conversation;
+}
+
+test("the main session's request travels as a small task batch: a line per task, no reasons", () => {
+  const prompt = `## Fix the **login** button\n${"Then explain everything in detail. ".repeat(400)}`;
+  const events = timelineEventsFromSnapshot(requestConversation(prompt, 3));
+  const request = events.find((event) => event.id === "request")?.participantRequest;
+  assert.ok(request, "the request carries its batch");
+  assert.deepEqual({ ...request, items: undefined }, {
+    id: "batch-1", requesterParticipantId: "main", requesterHandle: "main", resumeRequester: true, autoResumeMessageId: "resume", items: undefined
+  });
+  assert.deepEqual(request.items.map((item) => item.prompt), ["Fix the login button", "Fix the login button", "Fix the login button"],
+    "the task's first line, without markdown");
+  assert.equal(request.items[0].replyMessageId, "reply-0");
+  assert.equal(request.items[0].status, "answered");
+  assert.equal(request.items[1].error, "The CLI exited.", "an error's first line");
+  assert.equal(JSON.stringify(request).includes("xxxx"), false, "no reasons");
+  assert.equal(events.find((event) => event.id === "ask")?.participantRequest, undefined);
+});
+
+test("a task travels with its short title: the main session's, else the desktop's from the whole task", () => {
+  const conversation = requestConversation("Назови столицу Италии. Ответь ровно одним словом, без пояснений и пунктуации.", 2);
+  const batch = conversation.messages[2]!.metadata!.participantRequest!;
+  batch.items[1] = { ...batch.items[1]!, title: "Столица Италии" };
+  const request = timelineEventsFromSnapshot(conversation).find((event) => event.id === "request")?.participantRequest;
+  assert.deepEqual(request?.items.map((item) => item.title), ["Назови столицу Италии", "Столица Италии"]);
+});
+
+test("a task batch stays small however long the tasks and however many members", async () => {
+  const { PHONE_TASK_ITEMS_MAX, PHONE_TASK_LINE_CHARS } = await import("./mobileTimeline");
+  const prompt = "word ".repeat(20_000);
+  const request = timelineEventsFromSnapshot(requestConversation(prompt, 40)).find((event) => event.id === "request")?.participantRequest;
+  assert.equal(request?.items.length, PHONE_TASK_ITEMS_MAX, "a batch names at most this many members");
+  assert.ok(request!.items.every((item) => item.prompt.length <= PHONE_TASK_LINE_CHARS), "each line is cut");
+  // What the card adds to the message on the phone, whatever the tasks: well
+  // under a page's worth even for the largest batch.
+  assert.ok(JSON.stringify(request).length < PHONE_TASK_ITEMS_MAX * 400, `batch is ${JSON.stringify(request).length} bytes`);
+});
+
+test("the User's message says whom it was addressed to; members' and system messages do not", () => {
+  const events = timelineEventsFromSnapshot(requestConversation("Task", 1));
+  assert.deepEqual(events.find((event) => event.id === "ask")?.addressees, ["main", "m0"]);
+  assert.deepEqual(events.find((event) => event.id === "to-member")?.addressees, ["m0"]);
+  assert.equal(events.find((event) => event.id === "request")?.addressees, undefined);
+});
+
+test("Activity carries no task batch and no addressees", async () => {
+  const { phoneActivityEvents } = await import("./mobileTimeline");
+  const events = phoneActivityEvents(requestConversation("Task", 2), Date.parse("2026-11-20T11:00:00Z"));
+  const request = events.find((event) => event.id === "request");
+  assert.ok(request, "the request is a member's message Activity lists");
+  assert.equal(request.participantRequest, undefined);
+});
+
+test("an Accord the main session started travels as one, with how long a turn worked and when each task last changed", () => {
+  const conversation = requestConversation("Task", 1);
+  conversation.messages.push(
+    { id: "launch", role: "participant", participantId: "main", participantLabel: "@main", content: "Accord: Ship it", createdAt: "2026-11-20T10:03:00Z", status: "done",
+      metadata: { accordLaunchByMainSession: true, workedMs: 54_321.4 } },
+    { id: "member-launch", role: "participant", participantId: "m0", participantLabel: "@member0", content: "Accord: no", createdAt: "2026-11-20T10:04:00Z", status: "pending",
+      metadata: { workedMs: 10 } }
+  );
+  const events = timelineEventsFromSnapshot(conversation);
+  const launch = events.find((event) => event.id === "launch");
+  assert.equal(launch?.accordLaunchByMainSession, true);
+  assert.equal(launch?.workedMs, 54_321);
+  assert.equal(events.find((event) => event.id === "member-launch")?.workedMs, undefined, "a turn still going has no worked time yet");
+  assert.equal(events.find((event) => event.id === "ask")?.accordLaunchByMainSession, undefined);
+  assert.equal(events.find((event) => event.id === "request")?.participantRequest?.items[0]?.updatedAt, "2026-11-20T10:01:00Z");
+});
+
+test("a hidden request carrier carries no task batch", () => {
+  const conversation = requestConversation("Task", 1);
+  const request = conversation.messages[2]!;
+  request.metadata = { ...request.metadata, hiddenFromTimeline: true };
+  const event = timelineEventsFromSnapshot(conversation).find((item) => item.id === "request");
+  assert.equal(event?.hidden, true);
+  assert.equal(event?.participantRequest, undefined);
+});
+
+test("the phone's chat list says which chats have a main session and the view each opens in", async () => {
+  const { buildMobileChatList } = await import("./mobileChatCatalog");
+  const main = { id: "main", handle: "main", kind: "claude-code", roleConfigId: "main-session" };
+  const chats: Record<string, Conversation> = {
+    sessions: { ...requestConversation("Task", 1), id: "sessions" },
+    classic: { ...requestConversation("Task", 1), id: "classic", metadata: { mainSessionParticipantId: "main", chatView: "classic", participants: [main] } },
+    old: { ...requestConversation("Task", 1), id: "old", metadata: { participants: [{ id: "admin", handle: "admin", kind: "claude-code", roleConfigId: "administrator" }] } },
+    gone: { ...requestConversation("Task", 1), id: "gone", metadata: { mainSessionParticipantId: "main", chatView: "sessions", participants: [] } }
+  } as unknown as Record<string, Conversation>;
+  const store = {
+    listConversations: async () => Object.keys(chats).map((id) => ({ id, kind: "chat", title: id, createdAt: "2026-11-20T10:00:00Z", updatedAt: "2026-11-20T10:00:00Z" })),
+    openConversation: async (id: string) => ({ conversation: chats[id], messagePage: { hasMoreBefore: false } })
+  } as unknown as Parameters<typeof buildMobileChatList>[0];
+  const options = { roleLabels: new Map<string, string>(), machineNames: new Map<string, string>() };
+  const byId = new Map((await buildMobileChatList(store, options)).map((row) => [row.id, row]));
+  assert.deepEqual([byId.get("sessions")?.mainSessionParticipantId, byId.get("sessions")?.chatView, byId.get("sessions")?.canSwitchView], ["main", "sessions", true]);
+  assert.equal(byId.get("classic")?.chatView, "classic", "the chat's own view");
+  for (const id of ["old", "gone"]) {
+    const row = byId.get(id);
+    assert.deepEqual([row?.mainSessionParticipantId, row?.chatView, row?.canSwitchView], [undefined, undefined, undefined],
+      `${id}: one view only, and nothing travels for it`);
+  }
+});
+
+test("a reply's step rows travel to the phone only for a chat in the sessions view; a classic chat's reply carries none", () => {
+  const steps = [
+    { id: "s1", sequence: 1, kind: "command" as const, label: "Running command", detail: "npm test", createdAt: "2026-11-20T10:03:00Z" },
+    { id: "s2", sequence: 2, kind: "tool" as const, label: "Reading file", detail: "src/a.ts", createdAt: "2026-11-20T10:03:10Z" }
+  ];
+  const withReply = (metadata: Record<string, unknown>): Conversation => {
+    const conversation = requestConversation("Task", 1);
+    conversation.metadata = { ...conversation.metadata, ...metadata };
+    conversation.messages.push({ id: "worked", role: "participant", participantId: "main", participantLabel: "@main", content: "Done.",
+      createdAt: "2026-11-20T10:04:00Z", status: "done", metadata: { workedMs: 9_000, activityEvents: steps } });
+    return conversation;
+  };
+  const rowsOf = (conversation: Conversation) => timelineEventsFromSnapshot(conversation).find((event) => event.id === "worked");
+  assert.deepEqual(rowsOf(withReply({ chatView: "sessions" }))?.activity, [{ kind: "status", folded: true, text: "Read 1 file, ran 1 shell command" }], "folded as Claude Code folds them");
+  const codex = (requestConversation("Task", 1).metadata.participants as Array<{ id: string }>).map((item) => item.id === "main" ? { ...item, kind: "codex-cli" } : item);
+  assert.deepEqual(rowsOf(withReply({ chatView: "sessions", participants: codex }))?.activity, [{ kind: "shell", text: "npm test" }, { kind: "read", text: "src/a.ts" }]);
+  const classic = rowsOf(withReply({ chatView: "classic" }));
+  assert.equal(classic?.activity, undefined, "the classic view shows no step rows");
+  assert.equal(classic?.activityMore, undefined);
+  const old = rowsOf(withReply({ mainSessionParticipantId: undefined, participants: [{ id: "admin", handle: "admin", kind: "claude-code", roleConfigId: "administrator" }] }));
+  assert.equal(old?.activity, undefined, "a chat without a main session is always classic");
+});
+
+test("a running reply waiting behind its member's turn travels as queued; a machine's run with when its own run began", () => {
+  const conversation = requestConversation("Task", 1);
+  const startedAt = "2026-11-20T10:05:30Z";
+  conversation.messages.push(
+    { id: "queued", role: "participant", participantId: "main", participantLabel: "@main", content: "", createdAt: "2026-11-20T10:05:00Z", status: "pending",
+      metadata: { runId: "run-q", queuedBehind: { handle: "main" } } },
+    { id: "remote", role: "participant", participantId: "main", participantLabel: "@main", content: "", createdAt: "2026-11-20T10:04:00Z", status: "pending",
+      metadata: { runId: "run-r", remoteRunStatus: { phase: "waiting-for-response", label: "Working", startedAt, updatedAt: startedAt } } },
+    { id: "local", role: "participant", participantId: "main", participantLabel: "@main", content: "", createdAt: "2026-11-20T10:06:00Z", status: "pending",
+      metadata: { runId: "run-l" } }
+  );
+  const byId = new Map(timelineEventsFromSnapshot(conversation).map((event) => [event.id, event]));
+  assert.deepEqual([byId.get("queued")?.queued, byId.get("queued")?.startedAt], [true, undefined]);
+  assert.deepEqual([byId.get("remote")?.queued, byId.get("remote")?.startedAt], [undefined, startedAt]);
+  assert.deepEqual([byId.get("local")?.queued, byId.get("local")?.startedAt], [undefined, undefined], "a local turn counts from its reply");
+});
+
+test("a reply that waited in the queue works, on the phone too, from when its own turn began", () => {
+  const conversation = requestConversation("Task", 1);
+  const turnStartedAt = "2026-11-20T10:07:45Z";
+  conversation.messages.push({ id: "was-queued", role: "participant", participantId: "main", participantLabel: "@main", content: "", createdAt: "2026-11-20T10:07:00Z", status: "pending",
+    metadata: { runId: "run-w", turnStartedAt } });
+  const event = timelineEventsFromSnapshot(conversation).find((item) => item.id === "was-queued");
+  assert.equal(event?.queued, undefined);
+  assert.equal(event?.startedAt, turnStartedAt, "not the time it was queued");
+});
+
+test("a task travels to the phone saying whether the main session gave its title, so a follow-up never renames the member there", () => {
+  const at = (minute: number): string => `2026-11-22T10:${String(minute).padStart(2, "0")}:00.000Z`;
+  const item = (minute: number, extra: Record<string, unknown>) => ({ targetParticipantId: "p-drew", targetHandle: "drew", status: "answered", createdAt: at(minute), updatedAt: at(minute), ...extra });
+  const request = (id: string, minute: number, items: unknown[]) => ({
+    id, role: "participant", participantId: "p-main", content: `@drew task ${id}`, createdAt: at(minute), status: "done",
+    metadata: { participantRequest: { id: `b-${id}`, requesterParticipantId: "p-main", requesterHandle: "main", source: "mcp", resumeRequester: true, status: "completed", depth: 1, createdAt: at(minute), updatedAt: at(minute), items } }
+  });
+  const conversation = {
+    id: "titles-chat", kind: "chat", title: "Titles", createdAt: at(0), updatedAt: at(9), findings: [], metadata: {},
+    messages: [
+      request("delegate", 1, [item(1, { prompt: "Implement new chats in General.", title: "Новые чаты в General" })]),
+      request("follow-up", 9, [item(9, { prompt: 'Two additions to your task "Новые чаты в General": the phone too.' })])
+    ]
+  } as unknown as Conversation;
+  const events = timelineEventsFromSnapshot(conversation) as unknown as Array<{ id: string; participantRequest?: { items: Array<{ title: string; titled: boolean }> } }>;
+  const items = (id: string) => events.find((event) => event.id === id)?.participantRequest?.items ?? [];
+  assert.deepEqual(items("delegate").map((entry) => [entry.title, entry.titled]), [["Новые чаты в General", true]]);
+  assert.deepEqual(items("follow-up").map((entry) => [entry.titled]), [[false]], "a title made from its text is not the main session's");
+});
+
+test("a reply a Stop or the User's quit ended reaches the phone as stopped, not as an error", () => {
+  const at = "2026-11-22T10:00:00.000Z";
+  const reply = (id: string, terminalReason?: "user-stopped" | "stop-unconfirmed"): ChatMessage => ({ id, role: "participant", participantId: "p", participantLabel: "@p",
+    content: "Interrupted before completion.", createdAt: at, status: "error", ...(terminalReason ? { metadata: { terminalReason } } : {}) });
+  const chat: Conversation = { id: "quit-chat", kind: "chat", title: "Quit", createdAt: at, updatedAt: at, findings: [], metadata: {},
+    messages: [reply("stopped", "user-stopped"), reply("failed"), reply("unconfirmed", "stop-unconfirmed")] } as Conversation;
+  const events = timelineEventsFromSnapshot(chat);
+  const byId = new Map(events.map((event) => [event.id, event]));
+  assert.equal(byId.get("stopped")?.stopped, true);
+  assert.equal(byId.get("stopped")?.status, "error");
+  assert.equal(byId.get("failed")?.stopped, undefined);
+  assert.equal(byId.get("unconfirmed")?.stopped, undefined, "a Stop nobody confirmed is not said to have stopped");
 });

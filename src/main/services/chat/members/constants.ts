@@ -1,0 +1,1 @@
+export const CHAT_ROSTER_CHANGE_MAX_OPERATIONS = 12;

@@ -1,0 +1,261 @@
+.chat-codex-approval-command * {
+  font: inherit;
+}
+
+.chat-codex-approval-facts {
+  display: grid;
+  grid-template-columns: max-content minmax(0, 1fr);
+  gap: 4px 12px;
+  margin: 0;
+  font-size: 12px;
+  line-height: 18px;
+}
+
+.chat-codex-approval-facts dt {
+  color: var(--app-muted);
+}
+
+.chat-codex-approval-facts dd {
+  min-width: 0;
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+.chat-codex-approval-files {
+  display: grid;
+  gap: 6px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.chat-codex-approval-files li {
+  display: grid;
+  grid-template-columns: 56px minmax(0, 1fr);
+  gap: 8px;
+  font-size: 12px;
+}
+
+.chat-codex-approval-files span {
+  color: var(--app-muted);
+  text-transform: capitalize;
+}
+
+.chat-codex-approval-files code {
+  overflow-wrap: anywhere;
+}
+
+.chat-codex-approval-actions {
+  display: grid;
+  gap: 6px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.chat-codex-approval-actions li {
+  display: grid;
+  grid-template-columns: minmax(80px, max-content) minmax(0, 1fr);
+  gap: 8px;
+  font-size: 12px;
+}
+
+.chat-codex-approval-actions span {
+  color: var(--app-muted);
+}
+
+.chat-codex-approval-actions code {
+  overflow-wrap: anywhere;
+}
+
+/* Numbered options listbox + Submit footer: rows of the card, the chosen
+   one in the selection color. */
+.chat-approval-options {
+  grid-column: 1;
+  display: grid;
+  gap: 2px;
+  outline: none;
+}
+
+.chat-approval-options:focus-visible {
+  border-radius: var(--ui-radius-8);
+  box-shadow: var(--focus-ring);
+}
+
+.chat-approval-option {
+  display: grid;
+  grid-template-columns: 20px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  min-height: 28px;
+  padding: 4px 8px;
+  border: 0;
+  border-radius: var(--ui-radius-8);
+  background: transparent;
+  color: var(--ui-text);
+  font-size: 13px;
+  line-height: 20px;
+  text-align: left;
+  cursor: pointer;
+  transition: background-color var(--ui-duration-fast) var(--ui-ease-out), color var(--ui-duration-fast) var(--ui-ease-out);
+}
+
+.chat-approval-option:hover:not(:disabled) {
+  background: var(--ui-row-hover);
+}
+
+.chat-approval-option.selected,
+.chat-approval-option.selected:hover:not(:disabled) {
+  background: var(--ui-select-bg);
+  color: var(--ui-select-fg);
+}
+
+.chat-approval-option:disabled {
+  cursor: not-allowed;
+}
+
+.chat-approval-option-num {
+  color: var(--ui-text-3);
+  font-variant-numeric: tabular-nums;
+}
+
+.chat-approval-option.selected .chat-approval-option-num {
+  color: inherit;
+}
+
+.chat-approval-option-label {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.chat-approval-option-copy {
+  display: grid;
+  min-width: 0;
+  gap: 2px;
+}
+
+.chat-approval-option-detail {
+  color: var(--ui-text-3);
+  font-size: 12px;
+  line-height: 18px;
+  overflow-wrap: anywhere;
+}
+
+.chat-approval-option.selected .chat-approval-option-detail {
+  color: inherit;
+}
+
+.chat-approval-option-keys {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  color: inherit;
+}
+
+.chat-approval-option-keys svg {
+  width: 14px;
+  height: 14px;
+}
+
+.chat-approval-footer {
+  grid-column: 1;
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.chat-approval-skip {
+  height: var(--ui-control-sm);
+  padding: 0 8px;
+  border: 0;
+  border-radius: var(--ui-radius-8);
+  background: transparent;
+  color: var(--ui-text-2);
+  font-family: var(--font-sans);
+  font-size: 13px;
+  cursor: pointer;
+  transition: background-color var(--ui-duration-fast) var(--ui-ease-out), color var(--ui-duration-fast) var(--ui-ease-out);
+}
+
+.chat-approval-skip:hover:not(:disabled) {
+  background: var(--ui-row-hover);
+  color: var(--ui-text);
+}
+
+.chat-approval-skip:focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring);
+}
+
+.chat-approval-skip:disabled {
+  cursor: not-allowed;
+  opacity: 0.45;
+}
+
+@media (max-width: 760px) {
+  .chat-view {
+  }
+
+  .chat-app-tool-approval-card {
+    grid-template-columns: 32px minmax(0, 1fr);
+    gap: 10px;
+  }
+
+  .chat-app-tool-approval-avatar {
+    width: 32px;
+    height: 32px;
+    border-radius: 8px;
+  }
+
+  .chat-app-tool-approval-panel {
+    grid-template-columns: minmax(0, 1fr);
+    padding: 12px;
+  }
+
+  .chat-app-tool-approval-panel.is-roster-request {
+    padding: 16px;
+    border-radius: 12px;
+    gap: 12px;
+  }
+
+  .chat-app-tool-approval-panel h3 {
+    font-size: 14px;
+  }
+
+  .chat-app-tool-roster-item {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 2px;
+  }
+
+  .chat-app-tool-roster-participant {
+    padding: 9px 10px;
+  }
+
+  .chat-app-tool-roster-avatar {
+    width: 36px;
+    height: 36px;
+    border-radius: 8px;
+  }
+
+  .chat-approval-option {
+    grid-template-columns: 28px minmax(0, 1fr);
+    min-height: 30px;
+    padding: 4px 8px;
+    font-size: 13px;
+  }
+
+  .chat-approval-option-num {
+    width: 28px;
+    font-size: 13px;
+  }
+
+  .chat-approval-option-keys {
+    display: none;
+  }
+
+  .chat-approval-footer {
+    grid-column: 1;
+  }
+}

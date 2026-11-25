@@ -7,6 +7,9 @@ import type { ChatMessage, ChatParticipant, ChatParticipantSession, ChatRoleConf
 import { defaultChatAgentPermissions, normalizeChatAgentPermissions } from "../../shared/agentPermissions";
 import { DEFAULT_CHAT_PROMPT_CONTEXT } from "../../shared/chatPromptContext";
 import { ChatService } from "./chat";
+import { chatParts } from "./chat/test/chatParts";
+import { historyMarkdown } from "./chat/store/historyText";
+import { selectedSkillInstructions, skillMentionsPromptSection } from "./chat/turns/promptSections";
 import { UserSkillsService } from "./userSkills";
 
 const NOW = "2026-01-01T00:00:00.000Z";
@@ -22,6 +25,15 @@ const GENERIC_ROLE: ChatRoleConfig = {
   label: "Generic participant",
   instructions: "Answer directly.",
   version: 1,
+  updatedAt: NOW
+};
+/** The main session's built-in role, which every install has (settings.ts). */
+const MAIN_SESSION_ROLE: ChatRoleConfig = {
+  id: "main-session",
+  label: "Main session",
+  instructions: "Work on User's requests.",
+  version: 1,
+  participantDefaults: { requestParticipants: "allow", manageRolesParticipants: "allow" },
   updatedAt: NOW
 };
 const WORKFLOW_MANAGER_ROLE: ChatRoleConfig = {
@@ -77,7 +89,7 @@ test("skill-only send stores explicit content and keeps skill metadata path/cont
         };
       }
     });
-    (service as any).ensureHistoryFiles = async () => tempRoot;
+    chatParts(service).chatHistory.ensureHistoryFiles = async () => tempRoot;
 
     await service.sendMessage({
       conversationId: conversation.id,
@@ -92,7 +104,7 @@ test("skill-only send stores explicit content and keeps skill metadata path/cont
     assert.equal(userMessage?.content, "Use the selected skill(s).");
     assert.equal(userMessage?.metadata?.skillMentions?.[0]?.frontmatterName, "qa");
 
-    const historyMarkdown = (service as any).historyMarkdown(saved) as string;
+    const historyText = historyMarkdown(saved);
     const historyJson = JSON.stringify(saved);
     const toolRead = await service.readChatMessagesForTool({
       conversationId: saved.id,
@@ -103,7 +115,7 @@ test("skill-only send stores explicit content and keeps skill metadata path/cont
       snapshotMaxSequence: saved.messages.length - 1
     } as never, {});
 
-    for (const output of [historyMarkdown, historyJson, JSON.stringify(toolRead), capturedPrompt]) {
+    for (const output of [historyText, historyJson, JSON.stringify(toolRead), capturedPrompt]) {
       assert.equal(output.includes(homeDir), false);
       assert.equal(output.includes(skillFolder), false);
       assert.equal(output.includes(skillBody), false);
@@ -160,7 +172,7 @@ test("runtime skill dispatch leaves a disappeared selected variant to the native
         };
       }
     });
-    (service as any).ensureHistoryFiles = async () => tempRoot;
+    chatParts(service).chatHistory.ensureHistoryFiles = async () => tempRoot;
 
     await service.sendMessage({
       conversationId: conversation.id,
@@ -223,7 +235,7 @@ test("inline selected skill text is preserved in storage and prompt", async () =
         };
       }
     });
-    (service as any).ensureHistoryFiles = async () => tempRoot;
+    chatParts(service).chatHistory.ensureHistoryFiles = async () => tempRoot;
 
     await service.sendMessage({
       conversationId: conversation.id,
@@ -236,8 +248,8 @@ test("inline selected skill text is preserved in storage and prompt", async () =
     const saved = storage.current as Conversation;
     const userMessage = saved.messages.find((message) => message.role === "user");
     assert.equal(userMessage?.content, "@admin /qa please");
-    assert.match(capturedPrompt, /@admin \/qa please/);
-    assert.match(capturedPrompt, /inline `\/skill-name` text as the native skill invocation/);
+    // Her words as typed, the inline `/qa` kept where she wrote it, then the selected skill.
+    assert.match(capturedPrompt, /\n\n@admin \/qa please\n\n<<<APP ([0-9a-f]{8})>>>\nSelected skill: \/qa \(skill name: qa; [^\n]*\n<<<END APP \1>>>$/);
   } finally {
     await rm(tempRoot, { recursive: true, force: true });
   }
@@ -281,7 +293,7 @@ test("Workflow Manager implementation requests do not auto-select implementation
         };
       }
     });
-    (service as any).ensureHistoryFiles = async () => tempRoot;
+    chatParts(service).chatHistory.ensureHistoryFiles = async () => tempRoot;
 
     await service.sendMessage({
       conversationId: conversation.id,
@@ -301,7 +313,7 @@ test("Workflow Manager implementation requests do not auto-select implementation
   }
 });
 
-test("prospective skill context defaults to assistant instead of all participants", async () => {
+test("prospective skill context defaults to the main session instead of all participants", async () => {
   const { service } = testService({
     conversation: chatConversation([chatParticipant()]),
     userSkills: new UserSkillsService(),
@@ -388,8 +400,8 @@ test("selected skill hashes do not change provider runtime configuration", () =>
 
   assert.equal((service as any).skillRuntimeKey, undefined);
   assert.equal(
-    (service as any).skillMentionsPromptSection(baseMessage, "codex-cli"),
-    (service as any).skillMentionsPromptSection(changedMessage, "codex-cli")
+    skillMentionsPromptSection(baseMessage as never, "codex-cli"),
+    skillMentionsPromptSection(changedMessage as never, "codex-cli")
   );
 });
 
@@ -425,27 +437,27 @@ test("skill prompt tells Codex to use inline slash invocation and direct selecte
     }
   };
 
-  const promptSection = (service as any).skillMentionsPromptSection(message, "codex-cli") as string;
-  assert.match(promptSection, /Selected skills for this turn are mandatory workflows, not advisory context/);
-  assert.match(promptSection, /Selected-skill execution overrides role brevity\/style preferences/);
-  assert.match(promptSection, /Read the skill file fully before acting/);
-  assert.match(promptSection, /Execute the workflow from its first operational step/);
-  assert.match(promptSection, /Do not answer from general expertise or use the skill only as framing/);
-  assert.match(promptSection, /inline `\/skill-name` text as the native skill invocation/);
-  assert.match(promptSection, /AskUserQuestion/);
-  assert.match(promptSection, /`User choice:` block format/);
-  assert.match(promptSection, /Do not call provider-native AskUserQuestion or interactive question tools/);
-  assert.match(promptSection, /Use `Skill blocked` only when there is no available way to continue/);
-  assert.match(promptSection, /Do not use blocked for normal user input, approval, or product decisions/);
-  assert.match(promptSection, /`Skill complete: <what was produced>`/);
-  assert.match(promptSection, /`Skill paused at required user gate: <what user must answer>`/);
-  assert.match(promptSection, /`Skill blocked: <exact missing file\/tool\/context>`/);
-  assert.match(promptSection, /~\/\.codex\/skills/);
-  assert.match(promptSection, /~\/\.agents\/skills/);
-  assert.match(promptSection, /do not call `app_permissions_request_change` just to read selected skill files/);
+  // The message names the skill; how a selected skill runs is said once, in
+  // the session's instructions.
+  const promptSection = skillMentionsPromptSection(message as never, "codex-cli") as string;
+  assert.equal(promptSection, "Selected skill: /qa (skill name: qa; codex-cli personal)");
+  const instructions = selectedSkillInstructions({ participantKind: "codex-cli" } as never).join("\n");
+  assert.match(instructions, /makes that skill a mandatory workflow for the turn, not advisory context/);
+  assert.match(instructions, /overrides role brevity or style preferences/);
+  assert.match(instructions, /Read the skill file fully, run its workflow from its first step, and do not answer from general expertise instead/);
+  assert.match(instructions, /The `\/skill-name` in her message is the skill's invocation/);
+  assert.match(instructions, /If a selected skill uses AskUserQuestion, ask with a `User choice:` block instead/);
+  assert.match(instructions, /Use `Skill blocked` only when there is no way to continue/);
+  assert.match(instructions, /`Skill complete: <what was produced>`/);
+  assert.match(instructions, /`Skill paused at required user gate: <what user must answer>`/);
+  assert.match(instructions, /`Skill blocked: <exact missing file\/tool\/context>`/);
+  assert.match(instructions, /~\/\.codex\/skills/);
+  assert.match(instructions, /~\/\.agents\/skills/);
+  assert.match(instructions, /do not call `app_permissions_request_change` just to read them/);
+  assert.doesNotMatch(selectedSkillInstructions({ participantKind: "claude-code" } as never).join("\n"), /~\/\.codex\/skills/);
 });
 
-test("current request line is conditional for selected skill prompts", () => {
+test("a skill message is User's text and its selected skill, with no request line; a plain one is her text alone", () => {
   const participant = chatParticipant();
   const conversation = chatConversation([participant]);
   const { service } = testService({
@@ -466,42 +478,21 @@ test("current request line is conditional for selected skill prompts", () => {
     }
   });
   const normalMessage = chatMessage({ content: "@admin hello" });
-
-  const skillPrompt = (service as any).buildPromptParts(
+  const build = (message: ChatMessage, continuation: boolean) => chatParts(service).turnPrompt.buildPromptParts(
     conversation,
     participant,
     session,
-    skillMessage,
+    message,
     "/tmp/accordagents-history",
-    false,
+    continuation,
     options
   ).prompt as string;
-  assert.match(skillPrompt, /Current request: execute the selected skill workflow for the triggering message/);
-  assert.doesNotMatch(skillPrompt, /Current request: answer the triggering message above/);
 
-  const normalPrompt = (service as any).buildPromptParts(
-    conversation,
-    participant,
-    session,
-    normalMessage,
-    "/tmp/accordagents-history",
-    false,
-    options
-  ).prompt as string;
-  assert.match(normalPrompt, /Current request: answer the triggering message above/);
-  assert.doesNotMatch(normalPrompt, /Current request: execute the selected skill workflow/);
-
-  const continuationPrompt = (service as any).buildPromptParts(
-    conversation,
-    participant,
-    session,
-    skillMessage,
-    "/tmp/accordagents-history",
-    true,
-    options
-  ).prompt as string;
-  assert.match(continuationPrompt, /Current request: control has returned to you after the approved participants have replied/);
-  assert.doesNotMatch(continuationPrompt, /Current request: execute the selected skill workflow/);
+  const skillPrompt = build(skillMessage, false);
+  assert.match(skillPrompt, /^@admin \/qa\n\n<<<APP ([0-9a-f]{8})>>>\nSelected skill: [^\n]*\n<<<END APP \1>>>$/, "her words outside, the app's note in its block");
+  assert.doesNotMatch(skillPrompt, /Current request/);
+  assert.equal(build(normalMessage, false), "@admin hello");
+  assert.doesNotMatch(build(skillMessage, true), /Current request/);
 });
 
 test("selected skill replies missing final status only write a debug log", () => {
@@ -527,14 +518,14 @@ test("selected skill replies missing final status only write a debug log", () =>
   });
 
   assert.doesNotThrow(() => {
-    (service as any).logMissingSelectedSkillStatus(triggerMessage, participant, pendingMessage, "run-1");
+    chatParts(service).pendingReplies.logMissingSelectedSkillStatus(triggerMessage, participant, pendingMessage, "run-1");
   });
   assert.equal(debugEvents.length, 1);
   assert.equal(debugEvents[0].event, "chat.skill.status_missing");
   assert.equal(debugEvents[0].payload.runId, "run-1");
 
   pendingMessage.content = "Skill complete: implemented";
-  (service as any).logMissingSelectedSkillStatus(triggerMessage, participant, pendingMessage, "run-2");
+  chatParts(service).pendingReplies.logMissingSelectedSkillStatus(triggerMessage, participant, pendingMessage, "run-2");
   assert.equal(debugEvents.length, 1);
 });
 
@@ -558,7 +549,7 @@ test("chat:send returns after ingest without awaiting the participant batch", as
         return { participant, ok: true, content: "done", durationMs: 1 };
       }
     });
-    (service as any).ensureHistoryFiles = async () => tempRoot;
+    chatParts(service).chatHistory.ensureHistoryFiles = async () => tempRoot;
 
     const result = await service.sendMessage({
       conversationId: conversation.id,
@@ -589,7 +580,7 @@ test("chat:send does not reject when a single participant run fails", async () =
         throw new Error("participant boom");
       }
     });
-    (service as any).ensureHistoryFiles = async () => tempRoot;
+    chatParts(service).chatHistory.ensureHistoryFiles = async () => tempRoot;
 
     const result = await service.sendMessage({
       conversationId: conversation.id,
@@ -629,7 +620,7 @@ function testService(options: {
       chatPromptContext: typeof DEFAULT_CHAT_PROMPT_CONTEXT;
     }> {
       return {
-        chatRoleConfigs: options.roles ?? [ROLE, GENERIC_ROLE],
+        chatRoleConfigs: options.roles ?? [ROLE, GENERIC_ROLE, MAIN_SESSION_ROLE],
         chatBehaviorRules: [],
         providers: [
           { kind: "codex-cli", enabled: true },
@@ -646,7 +637,7 @@ function testService(options: {
       assistantProviderKind: "codex-cli";
     }> {
       return {
-        chatRoleConfigs: options.roles ?? [ROLE, GENERIC_ROLE],
+        chatRoleConfigs: options.roles ?? [ROLE, GENERIC_ROLE, MAIN_SESSION_ROLE],
         chatBehaviorRules: [],
         providers: [
           { kind: "codex-cli", enabled: true },

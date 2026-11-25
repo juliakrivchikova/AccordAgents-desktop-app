@@ -5,6 +5,9 @@ import { machineWakeRequest, webCryptoMachineWake, type MachineWakeSubtleCrypto 
 import type { ChatAppToolApproval, ChatMessage, ChatParticipant, Conversation, ReviewProgress } from "../shared/types";
 import type { HubNotice } from "../main/services/hubStorage";
 import type { StorageService } from "../main/services/storage";
+import { mobileInterimPosts, phoneTurnTiming, timelineAttachmentsFromMessage } from "../main/services/mobileTimeline";
+import { chatViewFor } from "../shared/mainSession";
+import { isClaudeMember, phoneSessionsActivity } from "../shared/sessionsActivity";
 
 /**
  * What the hub works out for the phone, so that the phone needs no other
@@ -83,6 +86,7 @@ export class HubProgress {
  *  and the progress the desktop and the machines report. */
 export function liveTimelineEvents(conversation: Conversation, runs: ReviewProgress[]): Array<Record<string, unknown>> {
   const byRun = new Map(runs.map((progress) => [progress.runId, progress]));
+  const sessionsView = chatViewFor(conversation.metadata) === "sessions";
   const events: Array<Record<string, unknown>> = [];
   for (const message of conversation.messages) {
     if (message.role !== "participant" || message.status !== "pending") continue;
@@ -95,6 +99,15 @@ export function liveTimelineEvents(conversation: Conversation, runs: ReviewProgr
       (message.participantLabel ? `${message.participantLabel} is running...` : "Running...");
     const mobileEventId = typeof message.metadata?.mobileEventId === "string" ? message.metadata.mobileEventId : undefined;
     const sourceMessageId = typeof message.metadata?.sourceMessageId === "string" && message.metadata.sourceMessageId ? message.metadata.sourceMessageId : undefined;
+    // What the member posted so far in this turn is part of the running
+    // reply (shared/interimPosts.ts), with the pictures they carry: a live
+    // copy without them took them off the phone's row until the next page.
+    const interimPosts = mobileInterimPosts(message);
+    const attachments = interimPosts.length > 0 ? timelineAttachmentsFromMessage(message) : [];
+    // Its steps so far, as the sessions view's rows show them (short); a
+    // classic chat shows none.
+    const activity = sessionsView ? phoneSessionsActivity(agent?.activityEvents ?? message.metadata?.activityEvents,
+      { claude: isClaudeMember(conversation.metadata.participants, message.participantId), live: true }) : undefined;
     events.push({
       id: message.id,
       role: "participant",
@@ -103,6 +116,15 @@ export function liveTimelineEvents(conversation: Conversation, runs: ReviewProgr
       ...(message.participantId ? { participantId: message.participantId } : {}),
       ...(sourceMessageId ? { sourceMessageId } : {}),
       content,
+      ...(attachments.length > 0 ? { attachments } : {}),
+      ...(interimPosts.length > 0 ? { interimPosts } : {}),
+      ...(activity ?? {}),
+      // Its text is where the run stands (a machine's status, the step in
+      // progress), not words of the reply: the sessions view shows it as a
+      // step, not as the reply's text.
+      ...(!partial ? { liveStatus: true } : {}),
+      // Queued behind the member's turn before it, or when its own run began.
+      ...phoneTurnTiming(message, agent?.remoteRunStatus ?? message.metadata?.remoteRunStatus),
       status: "pending",
       createdAt: message.createdAt,
       ...(runId ? { runId } : {}),

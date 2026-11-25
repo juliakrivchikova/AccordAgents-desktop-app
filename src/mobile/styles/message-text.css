@@ -1,0 +1,182 @@
+.message-row[data-author="agent"] .message-bubble {
+  max-width: none;
+  background: transparent;
+  border-radius: 0;
+  padding: 0;
+  color: var(--fg);
+  line-height: 1.5;
+}
+
+.message-avatar {
+  width: 32px;
+  height: 32px;
+  flex-shrink: 0;
+  border-radius: 10px;
+  overflow: hidden;
+  background: var(--accs);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font: 700 13px var(--disp);
+  color: var(--acc);
+}
+
+/* Nobody has been picked yet: hold the slot so the row will not jump sideways
+   when the participant arrives, but show no identity — an accent disc with a
+   letter in it reads as a specific member. */
+.message-avatar[data-identified="0"] {
+  background: var(--s2);
+}
+
+.message-copy {
+  flex: 1;
+  min-width: 0;
+}
+
+.message-meta {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  margin-bottom: 5px;
+}
+
+.message-handle {
+  font: 600 13px var(--mono);
+  color: var(--fg1);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.message-time,
+.message-status {
+  font: 400 12px var(--sans);
+  color: var(--mut);
+  flex-shrink: 0;
+}
+
+.message-stop {
+  margin-left: auto;
+  padding: 3px 8px;
+  border: 1px solid var(--bd);
+  border-radius: 999px;
+  background: var(--surface);
+  color: var(--fg1);
+  font: 600 11px var(--sans);
+}
+
+.message-stop:disabled {
+  color: var(--mut);
+}
+
+/* Under a message its member has not taken yet: send it now or take it back,
+   a finger's target each. */
+.message-waiting {
+  display: flex;
+  flex-basis: 100%;
+  justify-content: flex-end;
+  margin-top: 2px;
+}
+
+.message-waiting-action {
+  min-width: 36px;
+  height: 36px;
+  padding: 0 8px;
+  border: 0;
+  background: transparent;
+  color: var(--mut);
+  font: 500 13px/1 var(--sans);
+  touch-action: manipulation;
+}
+
+.message-waiting-action.is-take-back {
+  font: 400 18px/1 var(--sans);
+}
+
+.message-waiting-action:disabled {
+  opacity: 0.5;
+}
+
+.message-content {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.message-content.markdown-text {
+  white-space: normal;
+}
+
+/* What a member posted during its turn, inside its reply above its final
+   words: the same text, one block after another, as in the CLI. */
+.message-interim-posts {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+
+.message-content.markdown-text p,
+.message-content.markdown-text ul,
+.message-content.markdown-text ol,
+.message-content.markdown-text pre {
+  margin: 0;
+}
+
+.message-content.markdown-text p + p,
+.message-content.markdown-text p + ul,
+.message-content.markdown-text p + ol,
+.message-content.markdown-text ul + p,
+.message-content.markdown-text ol + p,
+.message-content.markdown-text pre + p,
+.message-content.markdown-text p + pre {
+  margin-top: 8px;
+}
+
+.message-content.markdown-text ul,
+.message-content.markdown-text ol {
+  padding-left: 20px;
+}
+
+.message-content.markdown-text li + li {
+  margin-top: 4px;
+}
+
+.message-content.markdown-text code {
+  border-radius: 5px;
+  padding: 1px 4px;
+  background: var(--code-bg);
+  font: 500 13px var(--mono);
+}
+
+.message-content.markdown-text pre {
+  max-width: 100%;
+  overflow-x: auto;
+  border-radius: 9px;
+  padding: 9px 10px;
+  background: var(--pre-bg);
+  color: var(--pre-fg);
+}
+
+.message-content.markdown-text pre code {
+  display: block;
+  padding: 0;
+  background: transparent;
+  color: inherit;
+  white-space: pre;
+}
+
+.message-content.markdown-text a {
+  color: var(--link);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+.composer {
+  flex-shrink: 0;
+  padding: 10px 16px calc(14px + env(safe-area-inset-bottom));
+  border-top: 1px solid var(--bdf);
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  position: relative;
+}

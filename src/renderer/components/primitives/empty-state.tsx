@@ -1,5 +1,5 @@
 import * as React from "react";
-import type { LucideIcon } from "lucide-react";
+import type { Icon as PhosphorIcon } from "@phosphor-icons/react";
 
 import { cn } from "@/lib/utils";
 
@@ -21,7 +21,7 @@ const EmptyStateRoot = ({ size = "md", className, children, ...rest }: EmptyStat
 );
 
 interface EmptyStateIconProps {
-  icon: LucideIcon;
+  icon: PhosphorIcon;
   className?: string;
 }
 

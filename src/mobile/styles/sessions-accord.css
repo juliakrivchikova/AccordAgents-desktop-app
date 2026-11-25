@@ -1,0 +1,38 @@
+.accord-strip-icon {
+  display: inline-flex;
+  flex-shrink: 0;
+}
+
+.sessions-accord-screen {
+  flex: 1;
+  min-width: 0;
+}
+
+/* A member that left the chat, or the Accord's screen: nothing to write. */
+#timeline-screen.is-read-only .composer {
+  display: none;
+}
+
+/* A member mentioned in a message: a link chip with its logo and task. */
+.sessions-member-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  max-width: 100%;
+  margin: 0 1px;
+  padding: 1px 6px 1px 2px;
+  border: 0;
+  border-radius: 6px;
+  background: var(--s2);
+  color: var(--fg1);
+  font: inherit;
+  vertical-align: baseline;
+  cursor: pointer;
+}
+
+.sessions-member-chip > span:last-child {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}

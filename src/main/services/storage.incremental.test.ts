@@ -1,9 +1,10 @@
 import assert from "node:assert/strict";
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { mkdtemp, readFile, readdir, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { PREVIOUS_STORAGE_SCHEMA_VERSION, StorageService } from "./storage";
+import { storageDependencies, storageParts } from "./storage/test/storageParts";
 import { resolveSqliteExecutable } from "./sqliteCli";
 import type { ChatMessage, Conversation } from "../../shared/types";
 
@@ -39,8 +40,8 @@ async function openStorage(): Promise<{ storage: StorageService; directory: stri
     sqliteExecutable: SQLITE_EXECUTABLE
   });
   const sql: string[] = [];
-  const raw = storage as unknown as { runSql(statement: string, timeoutMs?: number): Promise<void> };
-  const original = raw.runSql.bind(storage);
+  const raw = storageParts(storage).sqlite as unknown as { runSql(statement: string, timeoutMs?: number): Promise<void> };
+  const original = raw.runSql.bind(raw);
   raw.runSql = async (statement: string, timeoutMs?: number) => {
     sql.push(statement);
     await original(statement, timeoutMs);
@@ -53,7 +54,7 @@ function messageWrites(statement: string): number {
 }
 
 async function storedMessageIds(storage: StorageService, id: string): Promise<string[]> {
-  const rows = await (storage as unknown as {
+  const rows = await (storageParts(storage).sqlite as unknown as {
     queryJson(sql: string): Promise<Array<{ messageId: string }>>;
   }).queryJson(
     `select message_id as messageId from conversation_messages where conversation_id = '${id}' order by sequence;`
@@ -151,7 +152,7 @@ test("a write from another app instance is not spliced into, it forces a full re
     await storage.saveConversation(conversation(messages));
 
     const other = new StorageService({
-      dbPath: (storage as unknown as { dbPath: string }).dbPath,
+      dbPath: (storageDependencies(storage) as unknown as { dbPath: string }).dbPath,
       sqliteExecutable: SQLITE_EXECUTABLE
     });
     const foreign = [...messages, message("from-other-instance", "theirs", 10)];
@@ -193,7 +194,7 @@ test("a saved conversation stops carrying a second full copy of itself", async (
       message(`m-${index}`, `a reasonably wordy message body number ${index}`, index));
     await storage.saveConversation(conversation(messages));
 
-    const rows = await (storage as unknown as {
+    const rows = await (storageParts(storage).sqlite as unknown as {
       queryJson(sql: string): Promise<Array<{ payloadLength: number; bodyLength: number }>>;
     }).queryJson(
       `select length(payload_json) as payloadLength, length(body_json) as bodyLength
@@ -226,7 +227,7 @@ test("a conversation written before the split still reads back whole", async () 
     // the schema.
     await storage.getConversation("does-not-exist");
     const legacy = conversation([message("legacy-0", "written by an older build", 0)]);
-    await (storage as unknown as { runSql(sql: string): Promise<void> }).runSql(`
+    await (storageParts(storage).sqlite as unknown as { runSql(sql: string): Promise<void> }).runSql(`
       insert into conversations (id, title, kind, created_at, updated_at, repo_path, payload_json)
       values ('legacy-chat', 'Legacy', 'chat', '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z',
         null, '${JSON.stringify({ ...legacy, id: "legacy-chat" }).replace(/'/g, "''")}');
@@ -247,10 +248,13 @@ test("no query reads the conversation payload without its body fallback", async 
   // that predate the split. Per-message `conversation_messages.payload_json` is
   // a different column and stays as it is; the backfill migration is the one
   // sanctioned reader of the legacy payload, since converting it is its job.
-  const source = await readFile(path.join(process.cwd(), "src", "main", "services", "storage.ts"), "utf8");
-  const backfillStart = source.indexOf("private async backfillConversationBodiesAndMessages");
+  const services = path.join(process.cwd(), "src", "main", "services");
+  const parts = (await readdir(path.join(services, "storage"), { recursive: true })).filter((name) => name.endsWith(".ts"));
+  const files = [path.join(services, "storage.ts"), ...parts.map((name) => path.join(services, "storage", name))];
+  const source = (await Promise.all(files.map((file) => readFile(file, "utf8")))).join("\n");
+  const backfillStart = source.indexOf("async backfillConversationBodiesAndMessages(");
   assert.ok(backfillStart > 0, "the backfill migration should still exist");
-  const backfillEnd = source.indexOf("\n  private async ", backfillStart + 1);
+  const backfillEnd = source.indexOf("\n  }\n", backfillStart + 1);
   const guarded = source.slice(0, backfillStart) + source.slice(backfillEnd);
 
   const conversationLevelReads = [
@@ -283,7 +287,7 @@ test("a failed statement rolls the whole save back instead of committing half of
     await storage.saveConversation(conversation(messages));
     const before = await storedMessageIds(storage, "chat-1");
 
-    const raw = storage as unknown as { runSql(sql: string): Promise<void> };
+    const raw = storageParts(storage).sqlite as unknown as { runSql(sql: string): Promise<void> };
     await assert.rejects(() => raw.runSql(`
       begin immediate;
       insert into conversation_messages (conversation_id, sequence, message_id, created_at, payload_json)
@@ -310,14 +314,14 @@ test("upgrading an older database leaves a copy of it next to the live one", asy
   try {
     // A database an older build left behind: schema 1, no body, no message rows.
     await storage.getConversation("does-not-exist");
-    const raw = storage as unknown as { runSql(sql: string): Promise<void>; initialized: boolean };
+    const raw = storageParts(storage).sqlite as { runSql(sql: string): Promise<void> };
     await raw.runSql(`
       update schema_meta set value = '1' where key = 'storage-schema-version';
       insert into conversations (id, title, kind, created_at, updated_at, repo_path, payload_json)
       values ('old-chat', 'Old', 'chat', '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z', null,
         '${JSON.stringify({ ...conversation([message("old-0", "from the previous version", 0)]), id: "old-chat" }).replace(/'/g, "''")}');
     `);
-    raw.initialized = false;
+    storageParts(storage).schema.initialized = false;
 
     await storage.getConversation("old-chat");
 
@@ -340,7 +344,7 @@ test("a database can be put back into the shape an older version opens", async (
     const result = await storage.prepareStorageForOlderVersion();
     assert.equal(result.schemaVersion, PREVIOUS_STORAGE_SCHEMA_VERSION);
 
-    const raw = storage as unknown as {
+    const raw = storageParts(storage).sqlite as unknown as {
       queryJson(sql: string): Promise<Array<{ payloadHex: string; storedVersion: string }>>;
     };
     const rows = await raw.queryJson(`
@@ -408,7 +412,7 @@ test("callers that open a new database at the same time share one set-up and the
     // A new database: every caller arriving during set-up used to run its own,
     // and the second "add column" stopped the app from starting.
     await Promise.all([storage.init(), storage.init(), storage.listConversations()]);
-    const columns = await (storage as unknown as {
+    const columns = await (storageParts(storage).sqlite as unknown as {
       queryJson(sql: string): Promise<Array<{ name: string }>>;
     }).queryJson("pragma table_info(conversations);");
     assert.equal(columns.filter((column) => column.name === "save_token").length, 1);
@@ -436,7 +440,7 @@ test("usage signals read each chat's member providers without reading messages",
 
     // A chat whose row is damaged is left out, an old row without a body is
     // read from its payload, and a chat without members is still a chat.
-    const raw = storage as unknown as { runSql(statement: string): Promise<void> };
+    const raw = storageParts(storage).sqlite as unknown as { runSql(statement: string): Promise<void> };
     await raw.runSql(`insert into conversations (id, title, kind, created_at, updated_at, body_json, payload_json)
       values ('broken', 'x', 'chat', '2026-01-01', '2026-01-01', '{not json', '{not json');`);
     await raw.runSql(`insert into conversations (id, title, kind, created_at, updated_at, body_json, payload_json)

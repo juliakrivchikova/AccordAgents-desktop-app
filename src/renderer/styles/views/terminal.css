@@ -64,12 +64,12 @@
 }
 
 .terminal-panel-tab:hover {
-  background: var(--app-surface-hover);
+  background: var(--ui-row-hover);
 }
 
 .terminal-panel-tab.is-selected {
-  background: var(--app-surface-active);
-  color: var(--app-text);
+  background: var(--ui-row-active);
+  color: var(--ui-select-fg);
 }
 
 .terminal-panel-tab:focus-visible {

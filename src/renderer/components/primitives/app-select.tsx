@@ -43,7 +43,7 @@ export function AppSelect(props: {
           {props.options.map((option) => (
             <SelectItem value={option.value} textValue={option.label} disabled={option.disabled} key={option.value}>
               {/* Typing a name finds the option, and it is read out once. */}
-              {option.icon && <span aria-hidden="true" className="contents">{option.icon}</span>}
+              {option.icon && <span aria-hidden="true" className="inline-flex text-ui-text-3">{option.icon}</span>}
               {option.label}
             </SelectItem>
           ))}

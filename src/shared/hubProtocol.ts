@@ -8,8 +8,10 @@
  * only devices on its roster, which the desktop that set it up keeps.
  */
 
-import type { ChatAgentMode, ChatAgentPermissions, ChatParticipant, ChatParticipantRequestPermission, ChatProviderKind, ChatSkillMention } from "./types";
-import type { NewChatMemberOption } from "./newChat";
+import type { CliStartDefaultsByKind } from "./cliStartDefaults";
+import type { ChatAgentMode, ChatAgentPermissions, ChatForkSeenReply, ChatParticipant, ChatParticipantRequestPermission, ChatProviderKind, ChatSkillMention, ChatViewMode } from "./types";
+import type { NewChatMemberOption, NewChatProviderOffer } from "./newChat";
+import type { ForkToNewChatOffer } from "./forkToNewChat";
 import type { MachineProgressFrame } from "./machineProgress";
 import { stableJson } from "./stableJson";
 
@@ -298,15 +300,64 @@ export interface HubNewChatOptions {
   projects: Array<{ path: string; label: string }>;
   /** The folder a new chat starts in; none: without a folder. */
   defaultProject?: string;
-  /** The Chat Assistant every new chat has. */
+  /** The main session every new chat has (docs/main-session.md); the phone
+   *  puts it first (newChatParticipants) and names it in the chat's metadata
+   *  (newChatMetadata). */
+  mainSession?: ChatParticipant;
+  /** The same main session, under the name a phone from before reads, so an
+   *  old phone also makes a main-session chat (it was the Chat Assistant). */
   assistant: ChatParticipant;
+  /** The view a new chat opens in, sent only by a computer from before
+   *  2026-11-22 (its Settings named one) and honoured for it alone; a
+   *  computer since sends none: every new chat opens in the sessions view. */
+  defaultChatView?: ChatViewMode;
+  /** What the phone's New chat chip offers for the main session in the
+   *  sessions view: each provider it can run on (the one `mainSession` runs
+   *  on among them), with its models and efforts. A computer from before
+   *  offers none: the chip then shows `mainSession` as it is. */
+  mainSessionProviders?: NewChatProviderOffer[];
   /** The saved members, as the computer would add each. */
   members: NewChatMemberOption[];
   /** Why no chat can be started now, in the computer's words. */
   unavailable?: string;
-  /** When the Assistant runs on another CLI than the one saved in Settings
-   *  (that one is not ready), the line the computer's New chat shows. */
+  /** When the main session runs on another CLI than the one saved in
+   *  Settings (that one is not ready), the line the computer's New chat
+   *  shows. */
   assistantNote?: string;
+  /** Fork to new chat from the phone (src/shared/forkToNewChat.ts): what the
+   *  phone needs to refuse a member with the computer's words and to make
+   *  the new chat's main session as the computer does. A computer from
+   *  before offers none: the phone says the computer must update. */
+  fork?: ForkToNewChatOffer;
+  /** Codex's Full Access and Plan mode (src/shared/chatAccessModes.ts): set
+   *  by a computer that runs them, with whether each machine's program does.
+   *  A computer from before sets none: the phone does not offer them. */
+  cliModes?: { machines: Record<string, boolean> };
+  /** What each machine's CLIs start a new session in with that machine's own
+   *  config (src/shared/cliStartDefaults.ts), by its last hello; this
+   *  computer's are with each provider (NewChatProviderOffer.start). */
+  cliStart?: { machines: Record<string, CliStartDefaultsByKind> };
+}
+
+/** What GET /v1/phone/new-chat?forkOf=<chat>&participantId=<member> adds to
+ *  the New chat offer: the member and its chat as the server holds them. */
+export interface HubPhoneForkSource {
+  conversationId: string;
+  title: string;
+  repoPath?: string;
+  /** The member (without the session a move hands over): absent when the
+   *  chat no longer has it. */
+  member?: ChatParticipant;
+  /** The chat's main session, whose rights a member it made never goes
+   *  above (memberAsItRunsNow). */
+  mainSession?: ChatParticipant;
+  /** The member has a finished reply in the chat: it ran, so it has a
+   *  session to copy (on its device). */
+  answered: boolean;
+  /** The member's last reply that ended a turn of its CLI (forkSeenReplyOf):
+   *  the copy ends with that turn (forkOrigin.seen). Absent when it has
+   *  none, and from a server from before. */
+  seen?: ChatForkSeenReply;
 }
 
 /** PUT /v1/member-rules (owner only): the User's rules for what a member may
@@ -331,6 +382,14 @@ export interface HubMemberRules {
     agentMode?: ChatAgentMode;
     permissions?: ChatAgentPermissions;
   }>;
+  /** By machine (its id, as members carry it in `homeMachineId`): whether
+   *  its program runs the CLIs' own modes as the menus set them, by the last
+   *  hello it sent the computer; a machine that never greeted it is not
+   *  listed. The server asks a machine listed false for no turn of a member
+   *  whose mode it would run otherwise (cliModesTurnRefusal) when a phone or
+   *  a machine asks; the computer refuses its own. A computer from before
+   *  lists none. */
+  machineCliModes?: Record<string, boolean>;
 }
 
 export const HUB_MEMBER_RULES_PATH = "/v1/member-rules";

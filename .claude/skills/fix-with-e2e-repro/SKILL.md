@@ -84,7 +84,7 @@ Context size alone is not the signal. Compact when most of what your context hol
 
 Judge any other case by the same question: would a short summary carry everything the next step needs?
 
-- In AccordAgents Chat a compaction you request with `app_chat_request_compaction` runs only after your turn ends. At that point report what is done and what comes next. Request compaction with instructions naming what the next step needs: branch and head, changed files, open findings, how to verify. Then end your turn. Whoever gave you the task sends the next step.
+- In AccordAgents Chat a compaction you request with `app_chat_request_compaction` runs only after your turn ends, and then the app calls you again to go on. At that point report what is done and what comes next. Request compaction with instructions naming what the next step needs: branch and head, changed files, open findings, how to verify. Then end your turn; go on with the next step when you are called again. Do not request it when nothing is left to do.
 - Outside AccordAgents, tell the user at that point that it is a good moment for `/compact`.
 - Do not compact while the details in your context are still needed. A question like "is it time to compact?" is not a reason in itself: answer it by the question above.
 

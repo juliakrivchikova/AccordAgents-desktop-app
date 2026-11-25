@@ -1,0 +1,185 @@
+.chat-composer textarea {
+  color: var(--app-text-strong);
+  font-size: 14px;
+  line-height: 1.5;
+}
+
+.mention-menu {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: calc(100% + 8px);
+  z-index: 5;
+  max-height: 260px;
+  overflow: auto;
+  border: 1px solid var(--app-border);
+  border-radius: var(--radius-control);
+  background: var(--app-surface);
+  box-shadow: var(--shadow-lg);
+}
+
+.mention-menu.skill-mention-menu.opens-below {
+  top: calc(100% + 8px);
+  bottom: auto;
+}
+
+.mention-menu button {
+  display: grid;
+  grid-template-columns: 36px minmax(120px, max-content) minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  min-height: 50px;
+  padding: 7px 10px;
+  background: transparent;
+  color: var(--app-text-strong);
+  text-align: left;
+  cursor: pointer;
+}
+
+.skill-mention-menu button {
+  grid-template-columns: 36px minmax(88px, max-content) minmax(0, 1fr) auto auto;
+}
+
+.skill-mention-menu .slash-item-copy {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.skill-mention-menu .slash-item-copy > span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.skill-mention-menu .slash-disabled-reason {
+  color: var(--app-warning);
+  font-size: 11px;
+}
+
+.skill-mention-menu .slash-provider-chips {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
+  max-width: 130px;
+}
+
+.skill-mention-menu .slash-provider-chips > span {
+  display: inline-flex;
+  min-width: 0;
+  max-width: 62px;
+  align-items: center;
+  border: 1px solid var(--app-border-subtle);
+  border-radius: 999px;
+  padding: 1px 6px;
+  color: var(--app-muted);
+  font-size: 11px;
+  line-height: 1.35;
+}
+
+.skill-mention-menu-context {
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--app-border-subtle);
+  color: var(--app-muted);
+  font-size: 12px;
+}
+
+.skill-mention-menu button:disabled {
+  cursor: not-allowed;
+  opacity: 0.62;
+}
+
+.skill-mention-menu small {
+  color: var(--app-muted);
+  font-size: 11px;
+  white-space: nowrap;
+}
+
+.mention-menu button:hover {
+  background: var(--ui-row-hover);
+}
+
+.mention-menu button.selected {
+  background: color-mix(in srgb, var(--app-accent) 10%, var(--app-surface));
+  box-shadow: inset 3px 0 0 var(--app-accent);
+}
+
+.mention-menu strong,
+.mention-menu span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.mention-menu span {
+  color: var(--app-muted);
+}
+
+.mention-menu kbd {
+  min-width: 48px;
+  padding: 3px 7px;
+  border: 1px solid var(--app-border-strong);
+  border-radius: 6px;
+  background: var(--app-surface-subtle);
+  color: var(--app-text);
+  font-family: inherit;
+  font-size: 12px;
+  text-align: center;
+}
+
+.file-mention-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  color: var(--app-success);
+}
+
+.file-mention-icon.has-image img {
+  width: 20px;
+  height: 20px;
+  border-radius: 4px;
+  object-fit: contain;
+}
+
+.repo-file-reference-footer {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 8px;
+  color: var(--app-muted);
+  font-size: 12px;
+}
+
+.repo-file-reference-footer span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.chat-image-attachments {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 10px;
+}
+
+.chat-image-attachment {
+  display: grid;
+  grid-template-rows: 96px auto auto;
+  gap: 4px;
+  width: 156px;
+  padding: 6px;
+  border: 1px solid var(--app-border);
+  border-radius: var(--radius-control);
+  background: var(--app-surface-subtle);
+  color: var(--app-text);
+  text-align: left;
+  cursor: pointer;
+}

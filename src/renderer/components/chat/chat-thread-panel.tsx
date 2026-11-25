@@ -1,5 +1,5 @@
 import { useMemo } from "react";
-import { X } from "lucide-react";
+import { XIcon } from "@phosphor-icons/react";
 
 import type {
   AgentContextUsage,
@@ -7,6 +7,7 @@ import type {
   AppSettings,
   ChatAppToolApproval,
   ChatAppToolApprovalRequest,
+  ChatClaudePlanDecision,
   ChatAppToolApprovalScope,
   ChatImageInput,
   ChatParticipant,
@@ -73,7 +74,8 @@ export function ChatThreadPanel(props: {
     approve: boolean,
     scope?: ChatAppToolApprovalScope,
     draftOverride?: ChatAppToolApprovalRequest,
-    codexDecisionId?: string
+    codexDecisionId?: string,
+    planDecision?: ChatClaudePlanDecision
   ) => Promise<void>;
 }): JSX.Element {
   const mentionDirectory = chatMentionDirectory(props.participants, props.settings.chatRoleConfigs, props.sessionsByParticipant, props.contextUsageByParticipant);
@@ -89,7 +91,7 @@ export function ChatThreadPanel(props: {
           <h2>Thread</h2>
         </div>
         <div className="thread-panel-actions">
-          <IconButton icon={X} label="Close thread" tooltip="Close thread" onClick={props.onClose} />
+          <IconButton icon={XIcon} label="Close thread" tooltip="Close thread" onClick={props.onClose} />
         </div>
       </header>
       <div className="chat-thread-body">

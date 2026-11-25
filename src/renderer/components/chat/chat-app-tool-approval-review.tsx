@@ -1,4 +1,4 @@
-import { Sparkles, UserPlus } from "lucide-react";
+import { SparkleIcon, UserPlusIcon } from "@phosphor-icons/react";
 
 import { Button } from "@/components/ui/button";
 import type {
@@ -11,14 +11,16 @@ import type {
   ChatRoleChangeRequest,
   ChatRoleConfig,
   ChatRoleParticipantChangeRequest,
-  ChatSelfCompactionRequest,
   ChatRosterChangeOperation,
   ChatToolPermissionRequest
 } from "../../../shared/types";
 import { chatParticipantReference } from "../conversation/conversation-display";
 import { chatToolPermissionAllowsChatScope } from "./chat-app-tool-data";
+import { chatToolPermissionScopeOptionLabel } from "../../../shared/toolPermissionScope";
 import { reviewResultPreview } from "./chat-app-tool-review-preview";
 import { ChatUsedApprovalLine } from "./chat-used-card-row";
+import { useSessionsViewText } from "./chat-sessions-links";
+import { useChatSessionsPresentation } from "./chat-member-mark";
 
 export function roleReviewChipLabel(request: ChatRoleChangeRequest): string {
   if (request.operations.length !== 1) {
@@ -89,6 +91,7 @@ export function approvalReason(
 }
 
 export function ChatAppToolReviewStatus({ approval }: { approval: ChatAppToolApproval }): JSX.Element {
+  const appText = useSessionsViewText();
   const label = approval.memberAdditionQueuedAt
     ? "Approved, waiting to be applied"
     : approval.status === "approved"
@@ -104,7 +107,7 @@ export function ChatAppToolReviewStatus({ approval }: { approval: ChatAppToolApp
             : "Pending";
   return (
     <div className={`chat-app-tool-review-status is-${approval.status}`}>
-      {label}{approval.error ? `: ${approval.error}` : ""}
+      {label}{approval.error ? `: ${appText(approval.error)}` : ""}
     </div>
   );
 }
@@ -116,13 +119,15 @@ export function ChatAppToolReviewResult(props: {
   combinedRequest: ChatRoleParticipantChangeRequest | undefined;
   savedParticipants: ChatParticipantConfig[];
 }): JSX.Element {
+  const sessions = useChatSessionsPresentation();
   const summary = reviewResultSummary(props.approval, props.roleRequest, props.participantChange, props.combinedRequest, props.savedParticipants);
   return (
     <ChatUsedApprovalLine
       approval={props.approval}
       kind={props.participantChange || props.combinedRequest ? "Member change" : "Role change"}
-      icon={props.participantChange || props.combinedRequest ? UserPlus : Sparkles}
-      preview={reviewResultPreview(props.approval, props.roleRequest, props.participantChange)}
+      icon={props.participantChange || props.combinedRequest ? UserPlusIcon : SparkleIcon}
+      preview={reviewResultPreview(props.approval, props.roleRequest, props.participantChange, sessions)}
+      appPreview
       ended={summary.title}
       detail={props.approval.error ? `${summary.detail.replace(/\.$/, "")}: ${props.approval.error}` : summary.detail}
     />
@@ -284,7 +289,6 @@ export function approvalOptions(
   roleRequest: ChatRoleChangeRequest | undefined,
   participantChange: ChatParticipantChangeRequest | undefined,
   participantRequest: ChatParticipantRequestApprovalRequest | undefined,
-  selfCompactionRequest: ChatSelfCompactionRequest | undefined,
   toolPermissionRequest: ChatToolPermissionRequest | undefined,
   added: ChatRosterChangeOperation[],
   inferredParticipantRequest: boolean
@@ -320,11 +324,11 @@ export function approvalOptions(
   const chatOptionLabel = permissionRequest
     ? `Yes, allow ${chatParticipantReference(approval.requesterHandle)} in this chat`
     : toolPermissionRequest
-      ? `Yes, allow ${chatParticipantReference(approval.requesterHandle)} to use ${toolPermissionRequest.toolName} in this chat`
+      ? toolPermissionRequest.chatScope
+        ? chatToolPermissionScopeOptionLabel(toolPermissionRequest.chatScope)
+        : `Yes, allow ${chatParticipantReference(approval.requesterHandle)} to use ${toolPermissionRequest.toolName} in this chat`
     : participantRequest
       ? `Yes, allow ${chatParticipantReference(approval.requesterHandle)} to ask ${participantRequest.requests.length === 1 ? chatParticipantReference(participantRequest.requests[0].target) : "these members"}`
-      : selfCompactionRequest
-        ? `Yes, always allow ${chatParticipantReference(approval.requesterHandle)} to compact its context`
       : "Yes, allow for this chat";
   return [
     { key: "once", label: "Yes, allow once", approve: true, scope: "once" },
@@ -339,7 +343,6 @@ export function approvalQuestion(
   roleRequest: ChatRoleChangeRequest | undefined,
   participantChange: ChatParticipantChangeRequest | undefined,
   participantRequest: ChatParticipantRequestApprovalRequest | undefined,
-  selfCompactionRequest: ChatSelfCompactionRequest | undefined,
   toolPermissionRequest: ChatToolPermissionRequest | undefined
 ): string {
   const requester = chatParticipantReference(approval.requesterHandle);
@@ -364,9 +367,6 @@ export function approvalQuestion(
       return `Do you want to allow ${requester} to ask ${chatParticipantReference(participantRequest.requests[0].target)}?`;
     }
     return `Do you want to allow ${requester} to ask these members?`;
-  }
-  if (selfCompactionRequest) {
-    return `Do you want to allow ${requester} to compact its context?`;
   }
   if (roleRequest) {
     if (roleRequest.operations.length === 1) {

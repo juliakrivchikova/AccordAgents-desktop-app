@@ -1,5 +1,5 @@
-import React, { useLayoutEffect, useMemo, useRef } from "react";
-import { ArrowUp, ImagePlus, RefreshCw } from "lucide-react";
+import React, { useEffect, useLayoutEffect, useMemo, useRef } from "react";
+import { ImageIcon } from "@phosphor-icons/react";
 
 import { IconButton, ResizableTextarea } from "@/renderer/components/primitives";
 import { AccordMergeIcon } from "./accord-merge-icon";
@@ -21,6 +21,7 @@ import {
 import { renderSlashHighlightedDraft } from "./chat-composer-draft-highlights";
 import { ChatActiveRunPopover, type ChatActiveRunParticipantRow } from "./chat-active-run-popover";
 import { ChatComposerMenus } from "./chat-composer-menus";
+import { ChatComposerSendButton, type ChatComposerStop } from "./chat-composer-send-button";
 import {
   revokePendingImageUrls,
   useChatComposerImages
@@ -30,6 +31,8 @@ import { useChatComposerSuggestions, type ChatComposerSuggestion } from "./use-c
 import { useComposerNoticeClearance } from "./use-composer-notice-clearance";
 import { SpeechToTextButton } from "./speech-to-text-button";
 import { DICTATION_SESSION_ATTRIBUTE } from "./dictation-target";
+import { ComposerContextStrip, ComposerFooterSlot } from "./composer-context";
+import { onComposerFocusRequest, takeComposerFocusRequest } from "../../app/composer-focus-request";
 
 /**
  * Skills, plugins and files picked for the draft's tokens. When the owner
@@ -43,6 +46,16 @@ export interface ChatComposerPicks {
   onPluginMentionsChange: React.Dispatch<React.SetStateAction<DraftPluginMention[]>>;
   fileMentions: RepoFileMention[];
   onFileMentionsChange: React.Dispatch<React.SetStateAction<RepoFileMention[]>>;
+}
+
+/** What the composer can do with a message while its member works, as its
+ *  CLI's prompt can: send it and wait (Enter), or send it now (Cmd or Ctrl
+ *  with Enter; Enter with nothing typed sends what already waits). */
+export interface ChatComposerSendNow {
+  /** The reply that makes way. */
+  runId: string;
+  waiting: boolean;
+  onSendNow: () => void;
 }
 
 export interface ChatComposerProps {
@@ -80,14 +93,35 @@ export interface ChatComposerProps {
   /** What a dictation belongs to (a chat, or a thread in it); changing it
    *  drops a dictation in progress. Defaults to the chat. */
   dictationSession?: string;
+  /** The sessions view: the member's controls (model, effort, permission
+   *  mode, Codex's Plan mode, where it runs), each with its own menu, in the
+   *  context strip above the text (Plan mode goes to the footer by Send). */
+  footerChip?: React.ReactNode;
+  /** The context strip's left side: the chat's folder and branch. */
+  contextLead?: React.ReactNode;
+  /** The sessions view: Stop for the main session's run, in the send
+   *  button's place while there is nothing to send. */
+  stop?: ChatComposerStop;
+  /** The sessions view: while its member writes a reply. */
+  sendNow?: ChatComposerSendNow;
+  /** The chat's main composer: it takes the keyboard when its chat asked
+   *  for it before it was opened (composer-focus-request.ts). */
+  takesFocusRequests?: boolean;
 }
+
+/** Enter with nothing typed this soon after a message went is the same press. */
+const SEND_AGAIN_MS = 800;
 
 export function ChatComposer(props: ChatComposerProps): JSX.Element {
   const rootRef = useRef<HTMLDivElement>(null);
+  const [footerSlot, setFooterSlot] = React.useState<HTMLElement | null>(null);
   useComposerNoticeClearance(rootRef);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const highlightRef = useRef<HTMLDivElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const latestSendNowRef = useRef(props.sendNow);
+  latestSendNowRef.current = props.sendNow;
+  const sentAtRef = useRef(0);
   const searchSource = useMemo(
     () => ({
       type: "conversation" as const,
@@ -116,10 +150,23 @@ export function ChatComposer(props: ChatComposerProps): JSX.Element {
     images.readyImages.length > 0 ||
     mentions.selectedSkillMentions.length > 0
   );
+  // Stop takes the button's place only for a truly empty draft: a picture
+  // still loading is something to send.
+  const draftEmpty = !props.draft.trim() && images.pendingImages.length === 0 && mentions.selectedSkillMentions.length === 0;
   const hasLeadingPluginToken = draftStartsWithPluginMention(props.draft, mentions.selectedPluginMentions);
   const accordTooltip = props.accordDisabledReason ?? "Start an Accord: reach agreement among chat members";
   const activeRunCount = props.activeRunCount ?? 0;
   const activeRunParticipantRows = props.activeRunParticipantRows ?? [];
+
+  useEffect(() => {
+    if (!props.takesFocusRequests) return undefined;
+    const take = (): void => {
+      if (takeComposerFocusRequest(props.conversationId)) textareaRef.current?.focus();
+    };
+    take();
+    // Asked while this chat is already on screen (its fork's notice: Open).
+    return onComposerFocusRequest(take);
+  }, [props.conversationId, props.takesFocusRequests]);
 
   useLayoutEffect(() => {
     const pendingCaret = mentions.pendingCaretRef.current;
@@ -144,9 +191,22 @@ export function ChatComposer(props: ChatComposerProps): JSX.Element {
     highlightRef.current.scrollLeft = event.currentTarget.scrollLeft;
   }
 
-  async function sendDraft(): Promise<void> {
+  async function submit(now: boolean, held: boolean): Promise<void> {
+    // The reply written when the key was pressed is the one that makes way,
+    // if it is still being written.
+    const sendNow = props.sendNow;
+    // The key held, or pressed again as a message goes, sends nothing more.
+    const pressedOnPurpose = !held && Date.now() - sentAtRef.current > SEND_AGAIN_MS;
+    if (canSend) sentAtRef.current = Date.now();
+    const sent = await sendDraft();
+    if (sent) sentAtRef.current = Date.now();
+    if (!sendNow || latestSendNowRef.current?.runId !== sendNow.runId) return;
+    if ((sent && now) || (draftEmpty && sendNow.waiting && pressedOnPurpose)) sendNow.onSendNow();
+  }
+
+  async function sendDraft(): Promise<boolean> {
     if (!canSend) {
-      return;
+      return false;
     }
     const fileMentionsToSend = mentions.selectedFileMentions;
     const skillMentionsToSend = mentions.selectedSkillMentions;
@@ -166,9 +226,10 @@ export function ChatComposer(props: ChatComposerProps): JSX.Element {
       mentions.setSelectedSkillMentions(skillMentionsToSend);
       mentions.setSelectedPluginMentions(pluginMentionsToRestore);
       images.setPendingImages(pendingImagesToSend);
-      return;
+      return false;
     }
     revokePendingImageUrls(pendingImagesToSend);
+    return true;
   }
 
   return (
@@ -187,7 +248,9 @@ export function ChatComposer(props: ChatComposerProps): JSX.Element {
         selectedFileMentions={mentions.selectedFileMentions}
         selectedSkillMentions={mentions.selectedSkillMentions}
       />
+      <ComposerFooterSlot.Provider value={footerSlot}>
       <div className="chat-composer-shell">
+        {props.footerChip && <ComposerContextStrip lead={props.contextLead}>{props.footerChip}</ComposerContextStrip>}
         <div className={["chat-input-wrap", mentions.showSkillHighlights ? "has-skill-highlights" : ""].filter(Boolean).join(" ")}>
         <ChatComposerMenus
           artifactOptions={mentions.visibleArtifactOptions}
@@ -303,7 +366,7 @@ export function ChatComposer(props: ChatComposerProps): JSX.Element {
             }
             if (event.key === "Enter" && !event.shiftKey) {
               event.preventDefault();
-              void sendDraft();
+              void submit(event.metaKey || event.ctrlKey, event.repeat);
             }
           }}
           onBlur={() => window.setTimeout(() => {
@@ -335,31 +398,7 @@ export function ChatComposer(props: ChatComposerProps): JSX.Element {
                 void images.addImageFiles(files);
               }}
             />
-            <IconButton label="Attach image" icon={ImagePlus} onClick={() => fileInputRef.current?.click()} />
-            {activeRunCount > 0 && props.onStopAllRuns && (
-              <ChatActiveRunPopover
-                activeRunCount={activeRunCount}
-                activeRunParticipantRows={activeRunParticipantRows}
-                renderParticipantAvatar={props.renderParticipantAvatar}
-                participantRoleLabel={props.participantRoleLabel}
-                onStopAllRuns={props.onStopAllRuns}
-                onStopParticipantRuns={props.onStopParticipantRuns}
-                onJumpToParticipantLastMessage={props.onJumpToParticipantLastMessage}
-              />
-            )}
-          </div>
-          <div className="chat-composer-actions">
-            {suggestions.offered && (
-              <span className="chat-composer-hint" data-testid="chat-composer-suggestion-hint">
-                <kbd>Tab</kbd> to use
-                {suggestions.count > 1 && (
-                  <>
-                    <em>·</em>
-                    <kbd>↑</kbd><kbd>↓</kbd> {suggestions.position} of {suggestions.count}
-                  </>
-                )}
-              </span>
-            )}
+            <IconButton label="Attach image" icon={ImageIcon} onClick={() => fileInputRef.current?.click()} />
             {props.onOpenAccord && (
               <Tooltip>
                 <TooltipTrigger asChild>
@@ -376,25 +415,37 @@ export function ChatComposer(props: ChatComposerProps): JSX.Element {
                 <TooltipContent side="top">{accordTooltip}</TooltipContent>
               </Tooltip>
             )}
+            {activeRunCount > 0 && props.onStopAllRuns && (
+              <ChatActiveRunPopover
+                activeRunCount={activeRunCount}
+                activeRunParticipantRows={activeRunParticipantRows}
+                renderParticipantAvatar={props.renderParticipantAvatar}
+                participantRoleLabel={props.participantRoleLabel}
+                onStopAllRuns={props.onStopAllRuns}
+                onStopParticipantRuns={props.onStopParticipantRuns}
+                onJumpToParticipantLastMessage={props.onJumpToParticipantLastMessage}
+              />
+            )}
+          </div>
+          <div className="chat-composer-actions">
+            {suggestions.offered && (
+              <span className="chat-composer-hint" data-testid="chat-composer-suggestion-hint">
+                <kbd>Tab</kbd> to use
+                {suggestions.count > 1 && <><em>·</em><kbd>↑</kbd><kbd>↓</kbd> {suggestions.position} of {suggestions.count}</>}
+              </span>
+            )}
+            <span ref={setFooterSlot} className="chat-composer-footer-slot" />
             <SpeechToTextButton
               session={props.dictationSession ?? props.conversationId}
               getTextarea={() => rootRef.current?.querySelector("textarea") ?? null}
               draft={props.draft}
               onDraftChange={props.onDraftChange}
             />
-            <button
-              type="button"
-              className="composer-send-button"
-              title="Send"
-              aria-label="Send message"
-              disabled={!canSend}
-              onClick={() => void sendDraft()}
-            >
-              {props.isRunning ? <RefreshCw size={17} className="spin" /> : <ArrowUp size={18} strokeWidth={2.4} />}
-            </button>
+            <ChatComposerSendButton canSend={canSend} draftEmpty={draftEmpty} isRunning={props.isRunning} onSend={() => void sendDraft()} stop={props.stop} />
           </div>
         </div>
       </div>
+      </ComposerFooterSlot.Provider>
     </div>
   );
 }

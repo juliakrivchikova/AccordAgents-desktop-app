@@ -1,5 +1,5 @@
 import type { CSSProperties } from "react";
-import type { LucideIcon } from "lucide-react";
+import type { Icon as PhosphorIcon } from "@phosphor-icons/react";
 
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { cn } from "@/lib/utils";
@@ -8,7 +8,7 @@ import "./segmented-tabs.css";
 export interface SegmentedTabItem<TValue extends string> {
   value: TValue;
   label: string;
-  icon?: LucideIcon;
+  icon?: PhosphorIcon;
   testId?: string;
 }
 

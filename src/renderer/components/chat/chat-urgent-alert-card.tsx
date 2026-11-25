@@ -1,4 +1,5 @@
-import { BellOff, BellRing, ChevronDown, CircleCheck, Clock, PhoneCall, PhoneMissed, Send, TriangleAlert, X, type LucideIcon } from "lucide-react";
+import { BellSlashIcon, BellRingingIcon, CaretDownIcon, CheckCircleIcon, ClockIcon, PhoneCallIcon, PhoneXIcon, PaperPlaneTiltIcon, WarningIcon, XIcon } from "@phosphor-icons/react";
+import type { Icon as PhosphorIcon } from "@phosphor-icons/react";
 import { useContext, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { Button } from "@/components/ui/button";
 import {
@@ -7,15 +8,16 @@ import {
 import type { ChatMessage, ChatParticipant } from "../../../shared/types";
 import { ChatMessageWhen } from "./chat-streaming";
 import { UrgentAlertActionsContext } from "./urgent-alert-context";
+import { useSessionsViewLabel, useSessionsViewText } from "./chat-sessions-links";
 
-const STATUS_ICONS: Record<UrgentAlertStatus["icon"], LucideIcon> = {
-  clock: Clock,
-  ringing: PhoneCall,
-  sent: Send,
-  missed: PhoneMissed,
-  check: CircleCheck,
-  off: BellOff,
-  failed: TriangleAlert
+const STATUS_ICONS: Record<UrgentAlertStatus["icon"], PhosphorIcon> = {
+  clock: ClockIcon,
+  ringing: PhoneCallIcon,
+  sent: PaperPlaneTiltIcon,
+  missed: PhoneXIcon,
+  check: CheckCircleIcon,
+  off: BellSlashIcon,
+  failed: WarningIcon
 };
 
 /**
@@ -41,6 +43,10 @@ export function ChatUrgentAlertCard(props: {
   const alert = answered ?? props.alert;
   const actions = useContext(UrgentAlertActionsContext);
   const requester = participant ? `@${participant.handle}` : message.participantLabel || "A member";
+  // The sessions view names a member by its task and the main session by
+  // nothing: its "who" line then shows only when.
+  const appText = useSessionsViewText();
+  const requesterName = useSessionsViewLabel()(requester);
   const [now, setNow] = useState(() => Date.now());
   const [closing, setClosing] = useState(false);
   const [error, setError] = useState<string | undefined>();
@@ -121,11 +127,11 @@ export function ChatUrgentAlertCard(props: {
             setExpanded(true);
           }}
         >
-          <BellRing className="chat-urgent-alert-folded-bell" size={14} aria-hidden="true" />
+          <BellRingingIcon className="chat-urgent-alert-folded-bell" size={14} aria-hidden="true" />
           <span className="sr-only">Urgent alert: </span>
           <span className="chat-urgent-alert-folded-preview">{message.content}</span>
-          <span className="chat-urgent-alert-folded-outcome">{requester} · {outcome.text}</span>
-          <ChevronDown className="chat-urgent-alert-folded-chevron" size={14} aria-hidden="true" />
+          <span className="chat-urgent-alert-folded-outcome">{requesterName ? `${requesterName} · ` : ""}{outcome.text}</span>
+          <CaretDownIcon className="chat-urgent-alert-folded-chevron" size={14} aria-hidden="true" />
         </button>
       </article>
     );
@@ -135,10 +141,10 @@ export function ChatUrgentAlertCard(props: {
   const StatusIcon = STATUS_ICONS[status.icon];
   const folds = Boolean(alert.closedAt) && !awaiting;
   return (
-    <article ref={card} data-message-id={message.id} className="chat-urgent-alert" aria-label={`Urgent alert from ${requester}`}>
+    <article ref={card} data-message-id={message.id} className="chat-urgent-alert" aria-label={appText(`Urgent alert from ${requester}`)}>
       <div className="chat-urgent-alert-panel">
         <div className="chat-urgent-alert-head">
-          <BellRing className="chat-urgent-alert-bell" size={18} aria-hidden="true" />
+          <BellRingingIcon className="chat-urgent-alert-bell" size={18} aria-hidden="true" />
           <span className="chat-urgent-alert-title">Urgent alert</span>
           {!awaiting && (
             <button
@@ -154,12 +160,12 @@ export function ChatUrgentAlertCard(props: {
                 setExpanded(false);
               }}
             >
-              <X size={18} aria-hidden="true" />
+              <XIcon size={18} aria-hidden="true" />
             </button>
           )}
         </div>
         {/* Who and when, inside the card above the message (the User, 2026-11-13). */}
-        <div className="chat-urgent-alert-from">{requester} · <ChatMessageWhen createdAt={message.createdAt} /></div>
+        <div className="chat-urgent-alert-from">{requesterName ? `${requesterName} · ` : ""}<ChatMessageWhen createdAt={message.createdAt} /></div>
         <div className="chat-urgent-alert-text">{message.content}</div>
         <div className={`chat-urgent-alert-status is-${status.tone}`}>
           <StatusIcon className="chat-urgent-alert-status-icon" size={16} aria-hidden="true" />
@@ -169,7 +175,7 @@ export function ChatUrgentAlertCard(props: {
               {status.countdown && <strong className="chat-urgent-alert-countdown">{status.countdown.text}</strong>}
               {status.tail}
             </div>
-            {status.detail && <div className="chat-urgent-alert-status-detail">{status.detail}</div>}
+            {status.detail && <div className="chat-urgent-alert-status-detail">{appText(status.detail)}</div>}
             {error && <div className="chat-urgent-alert-error" role="alert">{urgentAlertFailureText(alert, error)}</div>}
           </div>
           {status.action === "got-it" && (

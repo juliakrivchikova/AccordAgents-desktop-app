@@ -268,13 +268,17 @@ test("a weekly snapshot leaves with its numbers, and a role the person made is n
     chats_with_2plus_members: "1",
     distinct_roles_in_use: 3,
     custom_roles_count: 2,
-    builtin_roles_in_use: "product-designer,software-engineer"
+    builtin_roles_in_use: "product-designer,software-engineer",
+    chats_sessions_view_active: "3-5",
+    chats_classic_view_active: "0"
   };
   assert.deepEqual(scrubUsageLog({ level: "info", message: "weekly_snapshot", attributes: snapshot })?.attributes, snapshot);
   const leaking = {
     ...snapshot,
     builtin_roles_in_use: "software-engineer,acme-sales-closer",
     members_total: "7",
+    chats_sessions_view_active: 4,
+    chats_classic_view_active: "a few",
     distinct_roles_in_use: 2.5,
     custom_roles_count: -1,
     week: "last week",

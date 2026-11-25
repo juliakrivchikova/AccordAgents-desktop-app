@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { StorageService } from "./storage";
+import { storageParts } from "./storage/test/storageParts";
 import type { ChatMessage, Conversation } from "../../shared/types";
 
 /**
@@ -50,7 +51,7 @@ test("listPendingChoiceMessages returns the listed chats' waiting choices, whole
 
     // A row whose payload is not JSON must not take the whole query down with
     // it: the phone would then get no chat list at all.
-    await (storage as unknown as { runSql(sql: string): Promise<void> }).runSql(
+    await (storageParts(storage).sqlite as unknown as { runSql(sql: string): Promise<void> }).runSql(
       "insert into conversation_messages (conversation_id, sequence, message_id, created_at, payload_json)" +
       " values ('listed', 99, 'broken', '2026-09-20T11:00:00.000Z', 'not json');"
     );

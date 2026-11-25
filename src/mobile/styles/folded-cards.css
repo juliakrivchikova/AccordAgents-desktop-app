@@ -1,0 +1,52 @@
+/* A card folded to what was answered while it is not done yet (approved and
+   waiting to be applied, or an answer on its way); an answered question is one
+   line (.control-card-answered.card-row). */
+.control-card-folded {
+  margin-top: 8px;
+  background: var(--s2);
+  box-shadow: none;
+}
+
+/* A used choice is one line under its message, like a folded urgent alert. */
+.control-card-answered.card-row {
+  margin-top: 8px;
+}
+
+.message-cards > .control-card-folded,
+.control-cards > .control-card-folded,
+.act-detail > .control-card-folded {
+  margin-top: 0;
+}
+
+.control-card-folded .control-card-state {
+  color: var(--fg1);
+  font-weight: 600;
+}
+
+/* Approved and not done yet (a member removal waiting for running turns and
+   the Mac): the folded card, its state line muted, not yet a settled record. */
+.control-card-waiting .control-card-state {
+  color: var(--fg);
+  font-weight: 500;
+}
+
+/* ---- Home: the floating bottom bar, Activity and Settings ----------------
+   With no chat open, the phone shows Chats, Activity or Settings, switched by
+   a floating bar with New chat on its own round button beside it (a phone
+   paired for every chat; search is in the Chats header). The bar
+   floats over the lists, so each list keeps room at its end to scroll clear
+   of it. Inside a chat it is in the flow under the composer instead, and it
+   leaves while the keyboard is up. */
+.pb-dock {
+  position: absolute;
+  left: calc(16px + env(safe-area-inset-left));
+  right: calc(16px + env(safe-area-inset-right));
+  bottom: var(--dock-offset);
+  z-index: 5;
+  /* A phone held sideways is wide; the bar stays a bar, not a banner. */
+  max-width: 560px;
+  margin: 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}

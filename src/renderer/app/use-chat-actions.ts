@@ -1,9 +1,11 @@
 import type {
   ChatAppToolApprovalRequest,
+  ChatClaudePlanDecision,
   ChatAppToolApprovalScope,
   ChatImageInput,
   ChatParticipant,
   ChatParticipantConfig,
+  ChatProviderKind,
   ChatSkillMention,
   Conversation,
   RepoFileMention
@@ -19,32 +21,50 @@ import {
   activeChatRoleConfigs,
   chatParticipantConfigToDraft,
   defaultChatParticipantDraft,
-  hasChatParticipantRuntimeOverride,
-  NEW_CHAT_ASSISTANT_PARTICIPANT_ID,
-  newChatAssistantParticipantDraft,
   normalizedChatDrafts,
   selectedOrMentionedChatParticipantDrafts,
   validateChatCliAgents,
   validateChatParticipantDrafts,
   validateChatStartupDrafts
 } from "../components/chat/chat-participant-drafts";
+import { NEW_CHAT_MAIN_SESSION_PARTICIPANT_ID, newChatDesktopStartFor, newChatMainSessionParticipantDraft, newChatMainSessionPlace } from "../components/chat/chat-main-session-draft";
+import { cliStartDefaultsFor, startAccessKey } from "../components/chat/use-cli-start-defaults";
+import { newChatViewFor } from "../../shared/mainSession";
+import { sessionsViewNamesOf, sessionsViewText } from "../../shared/sessionsViewText";
+import {
+  type MainSessionProviderChoice,
+  type MainSessionProviderOption,
+  mainSessionProviderKey,
+  mainSessionProviderOptions,
+  resolveMainSessionProvider
+} from "../../shared/mainSessionProviders";
 import {
   errorText,
   mergeProgressIntoConversation
 } from "../components/review/review-conversation-data";
 import type { AppState } from "./app-state";
 import type { ConversationActions } from "./use-conversation-actions";
-import { upsertConversationSummary, withPinnedState } from "./conversation-summaries";
+import { conversationTimeValue, upsertConversationSummary, withPinnedState } from "./conversation-summaries";
 import { newChatTitle } from "../../shared/newChat";
 import { persistLastViewedAt } from "./storage";
+import { requestComposerFocus, takeComposerFocusRequest } from "./composer-focus-request";
+import { laterLoadingNotice } from "./later-loading-notice";
+import { toast } from "sonner";
 import { cleanIpcError } from "../lib/ipc-error";
 import { serializeComposerDraft } from "../components/chat/chat-composer-draft-utils";
 import { revokePendingImageUrls } from "../components/chat/use-chat-composer-images";
 import {
+  cliProviderMetadata,
   isAgentSnapshotStale,
   NO_READY_CLI_MESSAGE,
   resolveAssistantProviderKind
 } from "../../shared/cliReadiness";
+
+export interface ForkToNewChatOptions {
+  /** Opens a chat as the sidebar does, from the notice of a fork made after
+   *  she went to another chat or screen. */
+  openChat?: (conversationId: string) => void;
+}
 
 export interface ChatActions {
   startChat: (options?: StartChatOptions) => Promise<boolean>;
@@ -59,17 +79,20 @@ export interface ChatActions {
   respondToChatChoice: (sourceMessageId: string, choiceId: string, response: ChatChoiceResponse) => Promise<void>;
   addChatParticipant: () => Promise<void>;
   addSavedChatParticipant: (config: ChatParticipantConfig) => Promise<void>;
-  updateChatParticipantRuntime: (participantId: string, patch: Pick<ChatParticipant, "model" | "reasoningEffort" | "agentMode" | "permissions" | "remoteExecution" | "cloudRun" | "homeMachineId" | "skipToolchainPreflight" | "autoWatch">) => Promise<boolean>;
+  updateChatParticipantRuntime: (participantId: string, patch: ChatParticipantRuntimePatch) => Promise<boolean>;
   removeChatParticipant: (participantId: string) => Promise<void>;
   compactChatParticipant: (participantId: string, options?: ChatRunScopeOptions) => Promise<boolean>;
   restartChatParticipant: (participantId: string, stopBackgroundTasks?: boolean) => Promise<boolean>;
+  /** Fork to new chat: a new chat whose main session is a copy of this member. */
+  forkChatParticipantToNewChat: (participantId: string, options?: ForkToNewChatOptions) => Promise<boolean>;
   startChatAccord: (options: StartChatAccordOptions) => Promise<boolean>;
   respondToChatAppToolApproval: (
     approvalId: string,
     approve: boolean,
     scope?: ChatAppToolApprovalScope,
     draftOverride?: ChatAppToolApprovalRequest,
-    codexDecisionId?: string
+    codexDecisionId?: string,
+    planDecision?: ChatClaudePlanDecision
   ) => Promise<void>;
 }
 
@@ -78,6 +101,11 @@ export interface SendChatMessageOptions extends ChatRunScopeOptions {
   skillMentions?: ChatSkillMention[];
   repoFileMentions?: RepoFileMention[];
   imageAttachments?: ChatImageInput[];
+  /** Exactly these members (a member's session panel, or the sessions
+   *  view's main composer to the main session). */
+  targetParticipantIds?: string[];
+  /** Sent from the main composer: its draft is this message's. */
+  fromMainComposer?: boolean;
 }
 
 export interface StartChatOptions {
@@ -100,6 +128,48 @@ export interface StartChatAccordOptions {
 
 type ChatChoiceResponse = { cancel?: boolean; selectedOptionId?: string; customAnswer?: string; note?: string };
 
+/** A member's settings to save: the keys present are saved, the others
+ *  stay as they are. */
+export type ChatParticipantRuntimePatch = Partial<Pick<ChatParticipant,
+  "model" | "reasoningEffort" | "agentMode" | "permissions" | "remoteExecution" | "cloudRun" | "homeMachineId" | "skipToolchainPreflight" | "autoWatch">>;
+
+const RUNTIME_PATCH_KEYS = ["model", "reasoningEffort", "agentMode", "permissions", "remoteExecution", "cloudRun", "homeMachineId", "skipToolchainPreflight", "autoWatch"] as const;
+
+/** The patch's own keys, values as given (undefined included). */
+export function runtimePatchFields(patch: ChatParticipantRuntimePatch): ChatParticipantRuntimePatch {
+  const fields: Record<string, unknown> = {};
+  for (const key of RUNTIME_PATCH_KEYS) {
+    if (Object.prototype.hasOwnProperty.call(patch, key)) fields[key] = patch[key];
+  }
+  return fields as ChatParticipantRuntimePatch;
+}
+
+/**
+ * Why a sessions-view New chat refuses a send whose main session would not
+ * run where the screen said: the provider chosen on the chip is no longer
+ * ready, or the one shown (Settings → General's) gave way to another while
+ * the readiness was checked again. Undefined when it runs where shown.
+ */
+export function newChatProviderChangedRefusal(
+  chosen: MainSessionProviderChoice | undefined,
+  shown: MainSessionProviderOption | undefined,
+  resolved: MainSessionProviderOption,
+  options: readonly MainSessionProviderOption[]
+): string | undefined {
+  if (chosen && !options.some((option) => mainSessionProviderKey(option) === mainSessionProviderKey(chosen))) {
+    const name = (shown && mainSessionProviderKey(shown) === mainSessionProviderKey(chosen) ? shown.label : "") || chatProviderName(chosen.kind);
+    return `${name} is not ready any more. The chat would start on ${resolved.label || chatProviderName(resolved.kind)}: check the model chip and send again.`;
+  }
+  if (shown && mainSessionProviderKey(shown) !== mainSessionProviderKey(resolved)) {
+    return `${shown.label || chatProviderName(shown.kind)} is not ready any more. The chat would start on ${resolved.label || chatProviderName(resolved.kind)}: check the model chip and send again.`;
+  }
+  return undefined;
+}
+
+function chatProviderName(kind: ChatProviderKind): string {
+  return cliProviderMetadata(kind).label;
+}
+
 export function useChatActions(state: AppState, conversationActions: ConversationActions): ChatActions {
   async function startChat(options: StartChatOptions = {}): Promise<boolean> {
     state.setError(undefined);
@@ -113,63 +183,18 @@ export function useChatActions(state: AppState, conversationActions: Conversatio
       state.setError("Enter a message or attach an image to start a chat.");
       return false;
     }
-    const resolveProvider = (agents: typeof state.agents) => resolveAssistantProviderKind({
-      agents,
-      providers: state.settings.providers,
-      explicitKind: state.settings.assistantProviderKind
-    });
-    // The Assistant's CLI the screen showed: settings made for it in the
-    // member list do not carry over to another one.
-    const shownAssistantKind = resolveProvider(state.agents);
-    let agents = state.agents;
-    if (isAgentSnapshotStale(agents)) {
-      try {
-        agents = await conversationActions.refreshAgents({ trigger: "submit" });
-      } catch {
-        state.setError("Could not verify CLI readiness. Check again and retry.");
-        return false;
-      }
-    }
-    const assistantProviderKind = resolveProvider(agents);
-    if (!assistantProviderKind) {
-      // The saved Assistant CLI gives way to any ready one: none is ready.
-      state.setError(NO_READY_CLI_MESSAGE);
-      return false;
-    }
-    const assistantRuntimeOverride = assistantProviderKind === shownAssistantKind
-      ? state.selectedChatParticipantRuntimeOverrides[NEW_CHAT_ASSISTANT_PARTICIPANT_ID]
-      : undefined;
-    const participants = [
-      ...(hasChatParticipantRuntimeOverride(assistantRuntimeOverride)
-        ? [newChatAssistantParticipantDraft(assistantProviderKind, assistantRuntimeOverride)]
-        : []),
-      ...selectedOrMentionedChatParticipantDrafts(
-        state.settings.chatParticipantConfigs,
-        state.selectedChatParticipantConfigIds,
-        initialMessage,
-        state.selectedChatParticipantRuntimeOverrides
-      )
-    ];
-    const validation = validateChatStartupDrafts(
-      participants,
-      state.settings.chatRoleConfigs,
-      agents,
-      state.settings.chatBehaviorRules,
-      state.settings.providers,
-      state.settings.cliProviderHosts
-    );
-    if (validation) {
-      state.setError(validation);
-      return false;
-    }
     if (state.startingChatRef.current) {
       return false;
     }
+    // The send shows from the press on: the CLI check below can take seconds,
+    // and a press that changes nothing on screen reads as a send that did not
+    // happen. New chat stays on screen with its send button busy until the
+    // chat is being made (the run id below), so its choices survive a Stop or
+    // a failed check; Stop works from here on too.
     state.startingChatRef.current = true;
     const runId = crypto.randomUUID();
     const creation = new AbortController();
     state.chatCreationRef.current = creation;
-    state.setCurrentRunId(runId);
     state.setBusy(true);
     let createdConversationId: string | undefined;
     // An Activity preview opened meanwhile is the User's later choice: the new
@@ -180,13 +205,115 @@ export function useChatActions(state: AppState, conversationActions: Conversatio
     // So is a chat opened from the sidebar or search while this one was being
     // created: once it is on screen, the new chat does not take its place. An
     // empty screen (still on New chat, or back from Activity) shows the new chat.
+    // A chat still opening counts as on screen: the new one does not flash in
+    // before it (Back from Activity clears that target and lands here).
     const showCreated = (created: Conversation): void => {
-      state.setConversation((current) =>
-        current && current.id !== created.id && state.openConversationRequestRef.current !== openRequestAtStart
-          ? current
-          : created);
+      state.setConversation((current) => {
+        if (state.openConversationRequestRef.current === openRequestAtStart) return created;
+        if (current && current.id !== created.id) return current;
+        const opening = state.openConversationTargetRef.current;
+        return opening && opening !== created.id ? current : created;
+      });
     };
     try {
+      // The main session runs on what the New chat chip chose for this chat
+      // (else Settings → General → New chats' CLI), and the chat is made with
+      // it alone (every new chat opens in the sessions view).
+      const sessionsView = newChatViewFor() === "sessions";
+      const resolveProvider = (agents: typeof state.agents): MainSessionProviderOption | undefined => {
+        const kind = resolveAssistantProviderKind({
+          agents,
+          providers: state.settings.providers,
+          explicitKind: state.settings.assistantProviderKind
+        });
+        if (!sessionsView) return kind ? { kind, label: "" } : undefined;
+        const options = mainSessionProviderOptions(agents, state.settings.providers, state.settings.cliProviderHosts);
+        return resolveMainSessionProvider(state.newChatMainSessionProvider, options, kind);
+      };
+      // The main session's provider the screen showed: settings made for it
+      // there do not carry over to another one.
+      const shownProvider = resolveProvider(state.agents);
+      let agents = state.agents;
+      if (isAgentSnapshotStale(agents)) {
+        try {
+          agents = await conversationActions.refreshAgents({ trigger: "submit" });
+        } catch {
+          creation.signal.throwIfAborted();
+          state.setError("Could not verify CLI readiness. Check again and retry.");
+          return false;
+        }
+      }
+      const mainProvider = resolveProvider(agents);
+      if (!mainProvider) {
+        // The saved CLI gives way to any ready one: none is ready.
+        state.setError(NO_READY_CLI_MESSAGE);
+        return false;
+      }
+      // The provider the chip showed (or chose) stopped being ready before the
+      // send: the chat is not silently made on another one; the screen now
+      // shows the one it would take, and the next send takes it.
+      const refusal = sessionsView
+        ? newChatProviderChangedRefusal(state.newChatMainSessionProvider, shownProvider, mainProvider, mainSessionProviderOptions(agents, state.settings.providers, state.settings.cliProviderHosts))
+        : undefined;
+      if (refusal) {
+        state.setError(refusal);
+        if (state.newChatMainSessionProvider) state.setNewChatMainSessionProvider?.(undefined);
+        return false;
+      }
+      const overrideMadeFor = state.newChatMainSessionOverrideFor;
+      const mainSessionRuntimeOverride = shownProvider && mainSessionProviderKey(mainProvider) === mainSessionProviderKey(shownProvider) &&
+        !(overrideMadeFor && overrideMadeFor !== mainSessionProviderKey(mainProvider))
+        ? state.selectedChatParticipantRuntimeOverrides[NEW_CHAT_MAIN_SESSION_PARTICIPANT_ID]
+        : undefined;
+      // Every new chat has its main session first, instead of the Chat
+      // Assistant (docs/main-session.md). In the sessions view nobody else:
+      // the main session makes members itself, and an @handle in the first
+      // message picks none.
+      // The mode the User's own config starts its CLI in where it will run
+      // (this computer, or the machine chosen for it on New chat): the one the
+      // screen showed for this provider and place, else read now.
+      // How Settings → General → New chats starts it on this provider (a
+      // machine no longer set up: this computer), under what was chosen on
+      // the screen.
+      // The machines read now, as the screen reads them (none known: this computer).
+      const machines = sessionsView
+        ? await Promise.resolve(window.consensus.listMachines?.()).then((list) => list, () => undefined)
+        : undefined;
+      creation.signal.throwIfAborted();
+      const newChatStart = sessionsView
+        ? newChatDesktopStartFor(state.settings.newChatDefaults, mainProvider, { machines: machines?.machines ?? [], status: machines?.status ?? [] })
+        : undefined;
+      const place = { kind: mainProvider.kind, ...newChatMainSessionPlace(mainSessionRuntimeOverride, newChatStart) };
+      const shownStart = state.newChatMainSessionStartAccess;
+      const startAccess = !sessionsView
+        ? undefined
+        : shownStart && shownStart.key === startAccessKey(mainSessionProviderKey(mainProvider), place)
+          ? shownStart.access
+          : (await cliStartDefaultsFor(place))?.access;
+      const participants = [
+        newChatMainSessionParticipantDraft(mainProvider.kind, mainSessionRuntimeOverride, Boolean(state.repoPath.trim()), mainProvider.hostId, sessionsView, startAccess, newChatStart),
+        ...(sessionsView ? [] : selectedOrMentionedChatParticipantDrafts(
+          state.settings.chatParticipantConfigs,
+          state.selectedChatParticipantConfigIds,
+          initialMessage,
+          state.selectedChatParticipantRuntimeOverrides
+        ))
+      ];
+      const validation = validateChatStartupDrafts(
+        participants,
+        state.settings.chatRoleConfigs,
+        agents,
+        state.settings.chatBehaviorRules,
+        state.settings.providers,
+        state.settings.cliProviderHosts
+      );
+      if (validation) {
+        state.setError(validation);
+        return false;
+      }
+      // Stopped while the CLIs were being checked: no chat is made.
+      creation.signal.throwIfAborted();
+      state.setCurrentRunId(runId);
       const result = await window.consensus.createChatConversation({
         runId,
         title: initialChatTitle(initialMessage, imageAttachments),
@@ -195,6 +322,7 @@ export function useChatActions(state: AppState, conversationActions: Conversatio
         participants
       });
       createdConversationId = result.conversation.id;
+      markOwnChatSeen(result.conversation);
       creation.signal.throwIfAborted();
       state.chatCreationRef.current = undefined;
       if (!previewingElsewhere()) {
@@ -214,6 +342,7 @@ export function useChatActions(state: AppState, conversationActions: Conversatio
         skillMentions,
         imageAttachments
       });
+      markOwnChatSeen(sendResult.conversation);
       if (!previewingElsewhere()) {
         showCreated(mergeProgressIntoConversation(sendResult.conversation, state.progressLogRef.current.filter((item) => item.runId === runId)));
         state.setWarnings([...result.warnings, ...sendResult.warnings]);
@@ -228,6 +357,8 @@ export function useChatActions(state: AppState, conversationActions: Conversatio
       state.setNewChatSkillMentions([]);
       state.setNewChatPluginMentions([]);
       state.setSelectedChatParticipantRuntimeOverrides({});
+      // The chip's provider was for that chat only.
+      state.setNewChatMainSessionProvider?.(undefined);
       await conversationActions.refreshConversations().catch(() => undefined);
       return true;
     } catch (caught) {
@@ -385,14 +516,18 @@ export function useChatActions(state: AppState, conversationActions: Conversatio
       state.setError("Enter a chat message or attach an image.");
       return false;
     }
-    if (skillMentions.length > 0 && hasMultipleMentionedParticipants(content, state.conversation)) {
+    const targetParticipantIds = options.targetParticipantIds?.length ? options.targetParticipantIds : undefined;
+    // A thread or a member's panel keeps its own draft; the sessions view's
+    // main composer writes to the main session from the main draft.
+    const ownsMainDraft = !options.chatThreadRootId && (!targetParticipantIds || options.fromMainComposer === true);
+    if (skillMentions.length > 0 && !targetParticipantIds && hasMultipleMentionedParticipants(content, state.conversation)) {
       state.setError("A selected skill runs on a single member. Mention exactly one member, or remove the skill. Other members can be brought in by the running skill itself.");
       return false;
     }
     const runId = crypto.randomUUID();
     state.setError(undefined);
     state.setWarnings([]);
-    if (!options.chatThreadRootId) {
+    if (ownsMainDraft) {
       state.setChatMessageDraftForConversation(conversationId, "");
     }
     try {
@@ -405,7 +540,8 @@ export function useChatActions(state: AppState, conversationActions: Conversatio
         imageAttachments,
         threadId: options.threadId,
         parentMessageId: options.parentMessageId,
-        chatThreadRootId: options.chatThreadRootId
+        chatThreadRootId: options.chatThreadRootId,
+        ...(targetParticipantIds ? { targetParticipantIds } : {})
       });
       state.setConversation((current) => {
         if (!current || current.id !== result.conversation.id) {
@@ -423,7 +559,7 @@ export function useChatActions(state: AppState, conversationActions: Conversatio
       await refreshPersistedProviderPreference();
       return true;
     } catch (caught) {
-      if (!options.chatThreadRootId) {
+      if (ownsMainDraft) {
         state.setChatMessageDraftForConversation(conversationId, (current) => current || draftBeforeSend);
       }
       const message = errorText(caught);
@@ -509,22 +645,17 @@ export function useChatActions(state: AppState, conversationActions: Conversatio
     await commitChatParticipant(participant);
   }
 
-  async function updateChatParticipantRuntime(participantId: string, patch: Pick<ChatParticipant, "model" | "reasoningEffort" | "agentMode" | "permissions" | "remoteExecution" | "cloudRun" | "homeMachineId" | "skipToolchainPreflight" | "autoWatch">): Promise<boolean> {
+  async function updateChatParticipantRuntime(participantId: string, patch: ChatParticipantRuntimePatch): Promise<boolean> {
     if (!state.conversation || state.conversation.kind !== "chat") return false;
     state.setError(undefined);
     try {
+      // Only what the patch names is sent (a key with no value is a reset):
+      // a setting changed meanwhile by another click is never sent back as
+      // it stood when this one was made.
       const saved = await window.consensus.updateChatParticipantRuntime({
         conversationId: state.conversation.id,
         participantId,
-        model: patch.model,
-        reasoningEffort: patch.reasoningEffort,
-        agentMode: patch.agentMode,
-        permissions: patch.permissions,
-        remoteExecution: patch.remoteExecution,
-        homeMachineId: patch.homeMachineId,
-        cloudRun: patch.cloudRun,
-        skipToolchainPreflight: patch.skipToolchainPreflight,
-        autoWatch: patch.autoWatch
+        ...runtimePatchFields(patch)
       });
       if (saved) updateIfStillOpen(saved);
       await conversationActions.refreshConversations();
@@ -590,6 +721,111 @@ export function useChatActions(state: AppState, conversationActions: Conversatio
     }
   }
 
+  /**
+   * Fork to new chat (src/shared/forkToNewChat.ts): makes a new chat whose
+   * main session is a copy of this member of the open chat, opens it, and
+   * hands its empty composer the keyboard; the first message sent there
+   * makes the fork. Made through the same path as every new chat. Making it
+   * can take a moment: when she has gone to another chat or screen by then,
+   * that stays on screen with the keyboard; the new chat is listed and a
+   * notice says it is ready, with a way to open it.
+   */
+  async function forkChatParticipantToNewChat(participantId: string, options: ForkToNewChatOptions = {}): Promise<boolean> {
+    if (!state.conversation || state.conversation.kind !== "chat") return false;
+    const conversationId = state.conversation.id;
+    if (state.startingChatRef.current) return false;
+    state.startingChatRef.current = true;
+    state.setError(undefined);
+    // Still on the chat she forked from, on the same screen: no other chat
+    // opened since (from the sidebar, search, Activity or a notice), not New
+    // chat, Activity or Settings. Back from Activity and a click on the open
+    // chat count as open requests too, so the latest request is told by
+    // what it was for, never by the count alone.
+    const railViewAtClick = state.railViewRef.current;
+    const openRequestAtClick = state.openConversationRequestRef.current;
+    // A refusal said by a notice once she has gone elsewhere is worded by the
+    // chat she forked from (its sessions view names nobody by handle).
+    const source = state.conversation?.id === conversationId ? state.conversation : undefined;
+    const stillHere = (): boolean =>
+      state.railViewRef.current === railViewAtClick &&
+      (state.openConversationRequestRef.current === openRequestAtClick || state.openConversationTargetRef.current === conversationId);
+    // Checking its CLI can take a moment: said at once, gone once it is made.
+    const notice = laterLoadingNotice("Forking to a new chat…");
+    let created: Conversation;
+    try {
+      const result = await window.consensus.createChatConversation({
+        runId: crypto.randomUUID(),
+        participants: [],
+        skipDefaultParticipants: true,
+        forkOf: { conversationId, participantId }
+      });
+      created = result.conversation;
+    } catch (caught) {
+      // Said where she is: in the chat she forked from, or by a notice once
+      // she has gone elsewhere (an error banner there would be about a chat
+      // she is not looking at).
+      if (stillHere()) state.setError(cleanIpcError(caught));
+      else toast.error(sessionsViewText(cleanIpcError(caught), source ? sessionsViewNamesOf(source) : undefined));
+      return false;
+    } finally {
+      notice.end();
+      // Made or refused: a new chat she starts meanwhile (she may have gone
+      // to New chat) is not held up while this one opens or is listed.
+      state.startingChatRef.current = false;
+    }
+    state.setSummaries((current) => upsertConversationSummary(current, created));
+    markOwnChatSeen(created);
+    if (stillHere()) {
+      requestComposerFocus(created.id);
+      state.setRailView("chats");
+      const openRequest = state.openConversationRequestRef.current + 1;
+      await conversationActions.openConversation(created.id);
+      // She opened another chat meanwhile: the request must not take the
+      // keyboard whenever she opens this one later.
+      if (state.openConversationRequestRef.current !== openRequest) takeComposerFocusRequest(created.id);
+    } else {
+      const openChat = options.openChat;
+      toast.success(`Forked to a new chat: ${created.title}`, openChat ? {
+        action: {
+          label: "Open",
+          onClick: () => {
+            // A notice hands the keyboard back to what had it before, when
+            // focus leaves it or the last notice goes (sonner): let it do so
+            // now, so it does not take the keyboard from the fork's composer.
+            const focused = document.activeElement;
+            if (focused instanceof HTMLElement && focused.closest("[data-sonner-toaster]")) focused.blur();
+            openChat(created.id);
+            // Asked once its open began (an open drops a request for any
+            // other chat): taken when its composer appears, or at once when
+            // the chat is already on screen.
+            requestComposerFocus(created.id);
+          }
+        }
+      } : undefined);
+    }
+    await conversationActions.refreshConversations().catch(() => undefined);
+    return true;
+  }
+
+  /** A chat she made herself (New chat, a fork) is no news to her, wherever
+   *  she is by the time it is made: what it holds then counts as seen, so
+   *  the list shows no unread dot for it (the app announces the chat while
+   *  it is made, before it is on screen). What comes after (a member's
+   *  reply) still is news. */
+  function markOwnChatSeen(conversation: Conversation): void {
+    const seen = state.lastViewedAtRef.current[conversation.id];
+    if (!seen || conversationTimeValue(conversation.updatedAt) > conversationTimeValue(seen)) {
+      state.lastViewedAtRef.current = { ...state.lastViewedAtRef.current, [conversation.id]: conversation.updatedAt };
+      persistLastViewedAt(state.lastViewedAtRef.current);
+    }
+    state.setUnreadConversationIds((current) => {
+      if (!current.has(conversation.id)) return current;
+      const next = new Set(current);
+      next.delete(conversation.id);
+      return next;
+    });
+  }
+
   async function startChatAccord(options: StartChatAccordOptions): Promise<boolean> {
     if (!state.conversation || state.conversation.kind !== "chat") return false;
     state.setError(undefined);
@@ -618,11 +854,11 @@ export function useChatActions(state: AppState, conversationActions: Conversatio
     }
   }
 
-  async function respondToChatAppToolApproval(approvalId: string, approve: boolean, scope?: ChatAppToolApprovalScope, draftOverride?: ChatAppToolApprovalRequest, codexDecisionId?: string): Promise<void> {
+  async function respondToChatAppToolApproval(approvalId: string, approve: boolean, scope?: ChatAppToolApprovalScope, draftOverride?: ChatAppToolApprovalRequest, codexDecisionId?: string, planDecision?: ChatClaudePlanDecision): Promise<void> {
     if (!state.conversation || state.conversation.kind !== "chat") return;
     state.setError(undefined);
     try {
-      const saved = await window.consensus.respondToChatAppToolApproval({ conversationId: state.conversation.id, approvalId, approve, scope, draftOverride, codexDecisionId });
+      const saved = await window.consensus.respondToChatAppToolApproval({ conversationId: state.conversation.id, approvalId, approve, scope, draftOverride, codexDecisionId, planDecision });
       const [nextSettings] = await Promise.all([window.consensus.getSettings(), conversationActions.refreshConversations()]);
       state.setSettings(nextSettings);
       if (saved) updateIfStillOpen(saved);
@@ -700,7 +936,8 @@ export function useChatActions(state: AppState, conversationActions: Conversatio
   return {
     startChat, renameChatConversation, setChatArchived, setChatPinned, deleteChatConversation, sendChatMessage, respondToChatMentions,
     toggleChatReaction, dismissTurnFinishedNote, respondToChatChoice, addChatParticipant, addSavedChatParticipant,
-    updateChatParticipantRuntime, removeChatParticipant, compactChatParticipant, restartChatParticipant, startChatAccord, respondToChatAppToolApproval
+    updateChatParticipantRuntime, removeChatParticipant, compactChatParticipant, restartChatParticipant, forkChatParticipantToNewChat, startChatAccord,
+    respondToChatAppToolApproval
   };
 }
 

@@ -1,0 +1,1079 @@
+<!doctype html>
+<html lang="ru" data-theme="light" data-dir="b">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>AccordAgents UI refresh</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+/* ---------- Tokens: what becomes src/renderer/styles/app-theme.css ---------- */
+:root {
+  --font-sans: "Inter", system-ui, -apple-system, "Segoe UI", sans-serif;
+  --font-mono: "JetBrains Mono", ui-monospace, "SF Mono", Menlo, monospace;
+  --fs-11: 11px; --lh-11: 16px;
+  --fs-12: 12px; --lh-12: 16px;
+  --fs-13: 13px; --lh-13: 20px;
+  --fs-14: 14px; --lh-14: 22px;
+  --fs-16: 16px; --lh-16: 24px;
+  --fs-20: 20px; --lh-20: 28px;
+  --r-4: 4px; --r-6: 6px; --r-8: 8px; --r-12: 12px; --r-full: 999px;
+  --h-xs: 24px; --h-sm: 28px; --h-md: 32px;
+  --dur-fast: 120ms; --dur: 180ms; --dur-slow: 240ms;
+  --ease-out: cubic-bezier(.2, 0, 0, 1);
+  --ease-in-out: cubic-bezier(.4, 0, .2, 1);
+  --reading: 768px;
+  --sidebar-w: 256px;
+  --panel-w: 380px;
+}
+html[data-theme="light"] {
+  --bg: #ffffff; --bg-sidebar: #f7f7f8; --bg-panel: #fbfbfc; --bg-subtle: #f3f3f5; --bg-muted: #eaeaed; --bg-elevated: #ffffff; --bg-overlay: rgba(15, 15, 18, .32);
+  --border-subtle: #eeeef1; --border: #e4e4e8; --border-strong: #d0d0d6;
+  --text: #18181b; --text-2: #4f4f58; --text-3: #6c6c75; --text-disabled: #b6b6bd;
+  --success: #15803d; --warning: #b45309; --danger: #dc2626; --info: #2563eb;
+  --success-dot: #22c55e; --warning-dot: #f59e0b; --danger-dot: #ef4444; --info-dot: #3b82f6;
+  --code-bg: #f4f4f6; --kbd-bg: #f1f1f4;
+  --shadow-sm: 0 1px 2px rgba(16, 16, 20, .05);
+  --shadow-md: 0 0 0 1px var(--border), 0 8px 24px -6px rgba(16, 16, 20, .14);
+  --shadow-lg: 0 0 0 1px var(--border), 0 24px 48px -12px rgba(16, 16, 20, .24);
+  --tooltip-bg: #18181b; --tooltip-fg: #fafafa;
+}
+html[data-theme="dark"] {
+  --bg: #121214; --bg-sidebar: #0d0d0f; --bg-panel: #151518; --bg-subtle: #1c1c20; --bg-muted: #26262b; --bg-elevated: #1b1b1f; --bg-overlay: rgba(0, 0, 0, .5);
+  --border-subtle: #1f1f23; --border: #29292e; --border-strong: #3a3a41;
+  --text: #ececef; --text-2: #b0b0b9; --text-3: #8c8c96; --text-disabled: #4d4d55;
+  --success: #4ade80; --warning: #fbbf24; --danger: #f87171; --info: #60a5fa;
+  --success-dot: #22c55e; --warning-dot: #f59e0b; --danger-dot: #ef4444; --info-dot: #3b82f6;
+  --code-bg: #1d1d21; --kbd-bg: #232328;
+  --shadow-sm: 0 1px 2px rgba(0, 0, 0, .4);
+  --shadow-md: 0 0 0 1px var(--border), 0 10px 28px -6px rgba(0, 0, 0, .6);
+  --shadow-lg: 0 0 0 1px var(--border), 0 28px 56px -12px rgba(0, 0, 0, .7);
+  --tooltip-bg: #ececef; --tooltip-fg: #121214;
+}
+/* Direction A: graphite. Accent nearly invisible, like T3 Code and Codex. */
+html[data-dir="a"][data-theme="light"] { --primary: #18181b; --primary-fg: #fff; --primary-hover: #2e2e33; --select-bg: var(--bg-muted); --select-fg: var(--text); --link: #2563eb; --focus: rgba(37, 99, 235, .35); --on: #18181b; }
+html[data-dir="a"][data-theme="dark"]  { --primary: #ececef; --primary-fg: #121214; --primary-hover: #ffffff; --select-bg: var(--bg-muted); --select-fg: var(--text); --link: #7aa7ff; --focus: rgba(122, 167, 255, .4); --on: #ececef; }
+/* Direction B: brand. AccordAgents violet on focus, selection and the primary action. */
+html[data-dir="b"][data-theme="light"] { --primary: #7357d0; --primary-fg: #fff; --primary-hover: #6447c4; --select-bg: rgba(115, 87, 208, .10); --select-fg: #5a3fb8; --link: #6447c4; --focus: rgba(115, 87, 208, .35); --on: #7357d0; }
+html[data-dir="b"][data-theme="dark"]  { --primary: #8f78e8; --primary-fg: #fff; --primary-hover: #9f8bee; --select-bg: rgba(143, 120, 232, .16); --select-fg: #c7b9ff; --link: #a996f2; --focus: rgba(143, 120, 232, .45); --on: #8f78e8; }
+
+@media (prefers-reduced-motion: reduce) { *, *::before, *::after { transition-duration: 1ms !important; animation: none !important; } .shimmer { color: var(--text-2) !important; background: none !important; } }
+
+/* ---------- Page chrome (outside the app frame) ---------- */
+* { box-sizing: border-box; }
+html, body { margin: 0; }
+body { background: #e9e9ec; color: var(--text); font-family: var(--font-sans); font-size: var(--fs-13); line-height: var(--lh-13); -webkit-font-smoothing: antialiased; font-feature-settings: "cv11", "ss03"; }
+html[data-theme="dark"] body { background: #050506; }
+.toolbar { position: sticky; top: 0; z-index: 50; display: flex; flex-wrap: wrap; gap: 8px 16px; align-items: center; padding: 10px 16px; background: var(--bg); border-bottom: 1px solid var(--border); }
+.toolbar .name { font-weight: 600; margin-right: 8px; }
+.stage { padding: 20px 16px 40px; }
+.frame-wrap { width: 100%; max-width: 1440px; margin: 0 auto; }
+.frame { width: var(--fw, 1440px); height: var(--fh, 900px); transform-origin: top left; border-radius: 12px; overflow: hidden; box-shadow: 0 30px 80px -20px rgba(0,0,0,.35), 0 0 0 1px rgba(0,0,0,.08); background: var(--bg); position: relative; }
+.frame.auto { height: auto; }
+.caption { max-width: 1440px; margin: 0 auto 10px; color: var(--text-2); font-size: var(--fs-12); }
+body.capture .toolbar, body.capture .caption { display: none; }
+body.capture .stage { padding: 0; }
+body.capture .frame { border-radius: 0; box-shadow: none; }
+
+/* ---------- Kit ---------- */
+.i { width: 16px; height: 16px; flex: none; display: inline-block; vertical-align: middle; }
+.i.s14 { width: 14px; height: 14px; }
+.i.s20 { width: 20px; height: 20px; }
+.btn { display: inline-flex; align-items: center; justify-content: center; gap: 6px; height: var(--h-md); padding: 0 12px; border-radius: var(--r-6); border: 1px solid transparent; font: 500 var(--fs-13)/1 var(--font-sans); color: var(--text); background: transparent; cursor: pointer; white-space: nowrap; transition: background-color var(--dur-fast) var(--ease-out), border-color var(--dur-fast) var(--ease-out), color var(--dur-fast) var(--ease-out), transform var(--dur-fast) var(--ease-out); }
+.btn:active { transform: scale(.98); }
+.btn:focus-visible, .ibtn:focus-visible, .chip:focus-visible { outline: none; box-shadow: 0 0 0 3px var(--focus); }
+.btn.xs { height: var(--h-xs); padding: 0 8px; font-size: var(--fs-12); border-radius: var(--r-4); gap: 4px; }
+.btn.sm { height: var(--h-sm); padding: 0 10px; }
+.btn.primary { background: var(--primary); color: var(--primary-fg); }
+.btn.primary:hover { background: var(--primary-hover); }
+.btn.secondary { background: var(--bg-subtle); border-color: var(--border); }
+.btn.secondary:hover { background: var(--bg-muted); }
+.btn.outline { border-color: var(--border); background: var(--bg); }
+.btn.outline:hover { background: var(--bg-subtle); }
+.btn.ghost:hover { background: var(--bg-subtle); }
+.btn.danger { color: var(--danger); }
+.btn.danger:hover { background: color-mix(in srgb, var(--danger) 10%, transparent); }
+.ibtn { display: inline-grid; place-items: center; width: var(--h-sm); height: var(--h-sm); border-radius: var(--r-6); border: 0; background: transparent; color: var(--text-2); cursor: pointer; position: relative; transition: background-color var(--dur-fast) var(--ease-out), color var(--dur-fast) var(--ease-out); }
+.ibtn:hover { background: var(--bg-subtle); color: var(--text); }
+.ibtn.on { background: var(--select-bg); color: var(--select-fg); }
+.ibtn.xs { width: var(--h-xs); height: var(--h-xs); border-radius: var(--r-4); }
+.kbd { display: inline-flex; align-items: center; height: 18px; padding: 0 5px; border-radius: var(--r-4); background: var(--kbd-bg); border: 1px solid var(--border-subtle); color: var(--text-3); font: 500 var(--fs-11)/1 var(--font-sans); }
+.chip { display: inline-flex; align-items: center; gap: 6px; height: var(--h-sm); padding: 0 8px; border-radius: var(--r-6); border: 0; background: transparent; color: var(--text-2); font: 500 var(--fs-12)/1 var(--font-sans); white-space: nowrap; flex: none; cursor: pointer; transition: background-color var(--dur-fast) var(--ease-out), color var(--dur-fast) var(--ease-out); }
+.chip:hover, .chip.open { background: var(--bg-subtle); color: var(--text); }
+.chip .i.caret { width: 14px; height: 14px; color: var(--text-3); }
+.chip.toggle.on { color: var(--select-fg); background: var(--select-bg); }
+.status { display: inline-flex; align-items: center; gap: 6px; font-size: var(--fs-12); line-height: 1; color: var(--text-2); white-space: nowrap; }
+.status .dot { width: 6px; height: 6px; border-radius: 50%; background: var(--text-3); }
+.status.done .dot { background: var(--success-dot); } .status.done { color: var(--success); }
+.status.wait .dot { background: var(--warning-dot); } .status.wait { color: var(--warning); }
+.status.fail .dot { background: var(--danger-dot); } .status.fail { color: var(--danger); }
+.status.run { color: var(--text-2); }
+.spin { width: 12px; height: 12px; border-radius: 50%; border: 1.5px solid var(--border-strong); border-top-color: var(--text-2); animation: spin 900ms linear infinite; flex: none; }
+@keyframes spin { to { transform: rotate(360deg); } }
+.count { display: inline-flex; min-width: 18px; height: 18px; padding: 0 5px; align-items: center; justify-content: center; border-radius: var(--r-full); background: var(--bg-muted); color: var(--text-2); font: 500 var(--fs-11)/1 var(--font-sans); font-variant-numeric: tabular-nums; }
+.mono { font-family: var(--font-mono); font-size: 12px; }
+code { font-family: var(--font-mono); font-size: .86em; padding: 1px 5px; border-radius: var(--r-4); background: var(--code-bg); border: 1px solid var(--border-subtle); }
+.muted { color: var(--text-2); } .faint { color: var(--text-3); }
+.num { font-variant-numeric: tabular-nums; }
+.switch { width: 28px; height: 16px; border-radius: var(--r-full); background: var(--border-strong); position: relative; flex: none; cursor: pointer; transition: background-color var(--dur) var(--ease-out); border: 0; padding: 0; }
+.switch::after { content: ""; position: absolute; top: 2px; left: 2px; width: 12px; height: 12px; border-radius: 50%; background: #fff; box-shadow: 0 1px 2px rgba(0,0,0,.25); transition: transform var(--dur) var(--ease-out); }
+.switch.on { background: var(--on); }
+.switch.on::after { transform: translateX(12px); }
+html[data-dir="a"][data-theme="dark"] .switch.on::after { background: #121214; }
+.select { display: inline-flex; align-items: center; justify-content: space-between; gap: 8px; height: var(--h-sm); min-width: 160px; padding: 0 8px 0 10px; border-radius: var(--r-6); border: 1px solid var(--border); background: var(--bg); color: var(--text); font-size: var(--fs-13); }
+.input { display: flex; align-items: center; gap: 8px; height: var(--h-sm); padding: 0 10px; border-radius: var(--r-6); border: 1px solid var(--border); background: var(--bg); color: var(--text-3); }
+.input.focus { border-color: var(--border-strong); box-shadow: 0 0 0 3px var(--focus); color: var(--text); }
+.check { width: 16px; height: 16px; border-radius: var(--r-4); border: 1px solid var(--border-strong); display: grid; place-items: center; background: var(--bg); }
+.check.on { background: var(--on); border-color: var(--on); color: var(--primary-fg); }
+.radio { width: 16px; height: 16px; border-radius: 50%; border: 1px solid var(--border-strong); display: grid; place-items: center; }
+.radio.on::after { content: ""; width: 8px; height: 8px; border-radius: 50%; background: var(--on); }
+.seg { display: inline-flex; padding: 2px; gap: 2px; border-radius: var(--r-8); background: var(--bg-subtle); position: relative; }
+.seg button { position: relative; z-index: 1; height: 24px; padding: 0 10px; border: 0; background: transparent; color: var(--text-2); border-radius: var(--r-6); font: 500 var(--fs-12)/1 var(--font-sans); cursor: pointer; transition: color var(--dur) var(--ease-out); }
+.seg button.on { color: var(--text); }
+.seg .thumb { position: absolute; top: 2px; bottom: 2px; border-radius: var(--r-6); background: var(--bg); box-shadow: var(--shadow-sm), 0 0 0 1px var(--border-subtle); transition: left var(--dur) var(--ease-out), width var(--dur) var(--ease-out); }
+.menu { position: absolute; z-index: 30; min-width: 220px; padding: 4px; border-radius: var(--r-8); background: var(--bg-elevated); box-shadow: var(--shadow-md); transform-origin: var(--origin, bottom left); }
+.menu .label { padding: 6px 8px 4px; color: var(--text-3); font-size: var(--fs-11); line-height: var(--lh-11); font-weight: 500; }
+.menu .item { display: flex; align-items: flex-start; gap: 8px; padding: 6px 8px; border-radius: var(--r-4); color: var(--text); cursor: default; }
+.menu .item:hover, .menu .item.hl { background: var(--bg-subtle); }
+.menu .item .body { flex: 1; min-width: 0; }
+.menu .item .desc { color: var(--text-3); font-size: var(--fs-12); line-height: var(--lh-12); margin-top: 2px; }
+.menu .item .tick { color: var(--text); margin-top: 2px; }
+.menu .sep { height: 1px; margin: 4px; background: var(--border-subtle); }
+.pop-enter { animation: pop var(--dur) var(--ease-out); }
+@keyframes pop { from { opacity: 0; transform: scale(.97) translateY(2px); } to { opacity: 1; transform: none; } }
+.tooltip { position: absolute; z-index: 40; padding: 5px 8px; border-radius: var(--r-6); background: var(--tooltip-bg); color: var(--tooltip-fg); font-size: var(--fs-12); line-height: var(--lh-12); white-space: nowrap; display: flex; gap: 8px; align-items: center; }
+.tooltip .kbd { background: transparent; border-color: color-mix(in srgb, var(--tooltip-fg) 25%, transparent); color: color-mix(in srgb, var(--tooltip-fg) 70%, transparent); }
+.collapse { display: grid; grid-template-rows: 0fr; transition: grid-template-rows var(--dur) var(--ease-out), opacity var(--dur) var(--ease-out); opacity: 0; }
+.collapse > div { overflow: hidden; }
+.collapse.open { grid-template-rows: 1fr; opacity: 1; }
+.caret-rot { transition: transform var(--dur) var(--ease-out); }
+.is-open > .caret-rot, .open > .caret-rot { transform: rotate(90deg); }
+
+/* ---------- Provider glyphs (brands, not icons) ---------- */
+.pg { width: 14px; height: 14px; flex: none; display: inline-block; vertical-align: middle; }
+.pg.s16 { width: 16px; height: 16px; } .pg.s20 { width: 20px; height: 20px; }
+img.pg { object-fit: contain; }
+.pg.claude { background: #d97757; -webkit-mask: url(assets/claude-mark.png) center / contain no-repeat; mask: url(assets/claude-mark.png) center / contain no-repeat; }
+
+/* ---------- App shell ---------- */
+.app { display: grid; grid-template-columns: var(--sidebar-w) minmax(0, 1fr) var(--panel-current, 0px); grid-template-rows: minmax(0, 1fr); height: 100%; }
+.app > * { min-height: 0; }
+.app.panel-open > .panel { animation: panelIn var(--dur-slow) var(--ease-out); }
+@keyframes panelIn { from { opacity: 0; transform: translateX(12px); } to { opacity: 1; transform: none; } }
+.app.panel-open { --panel-current: var(--panel-w); }
+.sidebar { background: var(--bg-sidebar); border-right: 1px solid var(--border-subtle); display: flex; flex-direction: column; min-width: 0; }
+.side-top { height: 44px; display: flex; align-items: center; gap: 8px; padding: 0 8px 0 0; }
+.lights { display: flex; gap: 8px; width: 80px; flex: none; padding-left: 14px; }
+.lights span { width: 12px; height: 12px; border-radius: 50%; background: #ff5f57; box-shadow: inset 0 0 0 .5px rgba(0,0,0,.15); }
+.lights span:nth-child(2) { background: #febc2e; } .lights span:nth-child(3) { background: #28c840; }
+.brand { display: flex; align-items: center; gap: 6px; font-weight: 600; font-size: var(--fs-13); flex: 1; min-width: 0; }
+.brand img { width: 16px; height: 16px; }
+.side-search { margin: 4px 8px 6px; height: var(--h-sm); display: flex; align-items: center; gap: 8px; padding: 0 8px; border-radius: var(--r-6); background: var(--bg-subtle); color: var(--text-3); cursor: text; transition: background-color var(--dur-fast) var(--ease-out); }
+html[data-theme="dark"] .side-search { background: var(--bg-subtle); }
+.side-search:hover { background: var(--bg-muted); }
+.side-search .kbd { margin-left: auto; }
+.nav { padding: 0 8px; display: flex; flex-direction: column; gap: 1px; }
+.row { display: flex; align-items: center; gap: 8px; height: var(--h-sm); padding: 0 8px; border-radius: var(--r-6); color: var(--text); cursor: default; min-width: 0; transition: background-color var(--dur-fast) var(--ease-out); }
+.row:hover { background: color-mix(in srgb, var(--bg-muted) 70%, transparent); }
+.row.active { background: var(--select-bg); color: var(--select-fg); }
+.row.active .time { color: inherit; opacity: .75; }
+.row .i { color: var(--text-2); }
+.row.active .i { color: inherit; }
+.row .t { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.row .time { color: var(--text-3); font-size: var(--fs-11); font-variant-numeric: tabular-nums; }
+.row .unread { width: 6px; height: 6px; border-radius: 50%; background: var(--primary); }
+html[data-dir="a"] .row .unread { background: var(--info-dot); }
+.side-scroll { flex: 1; overflow: hidden; padding: 6px 0; }
+.sec { display: flex; align-items: center; gap: 4px; height: 24px; margin: 10px 8px 2px; padding: 0 8px; color: var(--text-3); font-size: var(--fs-12); font-weight: 500; }
+.sec .i { width: 14px; height: 14px; }
+.sec .grow { flex: 1; }
+.proj { color: var(--text-2); }
+.proj .i { color: var(--text-3); }
+.indent { padding-left: 28px; }
+.more { color: var(--text-3); font-size: var(--fs-12); }
+.side-foot { height: 44px; display: flex; align-items: center; gap: 2px; padding: 0 8px; border-top: 1px solid var(--border-subtle); }
+.side-foot .row { flex: 1; }
+
+.main { display: flex; flex-direction: column; min-width: 0; background: var(--bg); position: relative; }
+.head { height: 44px; flex: none; display: flex; align-items: center; gap: 4px; padding: 0 8px 0 16px; border-bottom: 1px solid var(--border-subtle); }
+.head .title { font-weight: 600; font-size: var(--fs-13); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.head .grow { flex: 1; }
+.head .group { display: flex; gap: 2px; }
+.scroll { flex: 1; overflow: hidden; position: relative; }
+.col { width: min(var(--reading), calc(100% - 48px)); margin: 0 auto; padding: 24px 0 16px; display: flex; flex-direction: column; gap: 16px; }
+.bubble { align-self: flex-end; max-width: 80%; padding: 8px 12px; border-radius: var(--r-12); background: var(--bg-subtle); font-size: var(--fs-14); line-height: var(--lh-14); }
+.reply { font-size: var(--fs-14); line-height: var(--lh-14); }
+.reply p { margin: 0 0 8px; } .reply p:last-child { margin-bottom: 0; }
+.worked { display: inline-flex; align-items: center; gap: 4px; color: var(--text-3); font-size: var(--fs-12); cursor: pointer; user-select: none; width: fit-content; border-radius: var(--r-4); padding: 2px 4px; margin-left: -4px; transition: color var(--dur-fast) var(--ease-out), background-color var(--dur-fast) var(--ease-out); }
+.worked:hover { color: var(--text-2); background: var(--bg-subtle); }
+.worked .i { width: 14px; height: 14px; }
+.tools { display: flex; flex-direction: column; gap: 2px; padding: 6px 0 2px 2px; border-left: 1px solid var(--border); margin: 4px 0 4px 6px; padding-left: 12px; }
+.tool { display: flex; align-items: center; gap: 8px; min-width: 0; height: 22px; color: var(--text-2); font-size: var(--fs-12); }
+.tool .i { width: 14px; height: 14px; color: var(--text-3); }
+.tool .verb { color: var(--text-3); }
+.tool .name { color: var(--text); font-weight: 500; }
+.tool .args { font-family: var(--font-mono); font-size: var(--fs-12); color: var(--text-3); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; flex: 1; }
+.block { border: 1px solid var(--border); border-radius: var(--r-8); overflow: hidden; }
+.block-head { display: flex; align-items: center; gap: 6px; height: 32px; padding: 0 10px; color: var(--text-2); font-size: var(--fs-12); background: var(--bg-panel); border-bottom: 1px solid var(--border-subtle); }
+.block-head .i { width: 14px; height: 14px; color: var(--text-3); }
+.task { display: grid; grid-template-columns: 16px minmax(0, 1fr) auto 14px; align-items: center; gap: 4px 10px; padding: 8px 10px; cursor: pointer; transition: background-color var(--dur-fast) var(--ease-out); }
+.task + .task { border-top: 1px solid var(--border-subtle); }
+.task:hover { background: var(--bg-subtle); }
+.task .ttl { font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.task .sub { grid-column: 2 / 4; color: var(--text-2); font-size: var(--fs-12); line-height: var(--lh-12); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.task .meta { display: flex; align-items: center; gap: 10px; }
+.task .dur { color: var(--text-3); font-size: var(--fs-11); font-variant-numeric: tabular-nums; }
+.task > .i { color: var(--text-3); width: 14px; height: 14px; }
+.card { border: 1px solid var(--border); border-radius: var(--r-8); background: var(--bg); box-shadow: var(--shadow-sm); }
+.approval { padding: 12px; display: flex; flex-direction: column; gap: 10px; }
+.approval .top { display: flex; align-items: center; gap: 8px; font-size: var(--fs-13); }
+.approval .top b { font-weight: 600; }
+.approval pre { margin: 0; padding: 8px 10px; border-radius: var(--r-6); background: var(--code-bg); border: 1px solid var(--border-subtle); font: 12px/18px var(--font-mono); color: var(--text); }
+.approval .acts { display: flex; gap: 6px; }
+.approval .acts .grow { flex: 1; }
+.waiting { display: flex; align-items: center; gap: 8px; color: var(--text-3); font-size: var(--fs-12); }
+
+.composer-wrap { flex: none; padding: 0 0 16px; }
+.composer { width: min(var(--reading), calc(100% - 48px)); margin: 0 auto; border: 1px solid var(--border); border-radius: var(--r-12); background: var(--bg); box-shadow: var(--shadow-sm); transition: border-color var(--dur-fast) var(--ease-out), box-shadow var(--dur-fast) var(--ease-out); }
+.composer.focus { border-color: var(--border-strong); box-shadow: 0 0 0 3px var(--focus); }
+.composer .text { padding: 12px 14px 4px; min-height: 48px; font-size: var(--fs-14); line-height: var(--lh-14); color: var(--text-3); }
+.composer .text.typed { color: var(--text); }
+.composer .bar { display: flex; align-items: center; gap: 2px; padding: 6px 8px 8px; }
+.composer .bar .grow { flex: 1; }
+.send { width: 28px; height: 28px; border-radius: var(--r-full); border: 0; display: grid; place-items: center; background: var(--primary); color: var(--primary-fg); cursor: pointer; margin-left: 4px; transition: background-color var(--dur-fast) var(--ease-out), transform var(--dur-fast) var(--ease-out); }
+.send:disabled { background: var(--bg-muted); color: var(--text-3); cursor: default; }
+.send:active:not(:disabled) { transform: scale(.94); }
+.send.stop { background: var(--text); color: var(--bg); }
+
+.panel { background: var(--bg-panel); border-left: 1px solid var(--border-subtle); display: flex; flex-direction: column; min-width: 0; overflow: hidden; }
+.panel-inner { width: var(--panel-w); display: flex; flex-direction: column; height: 100%; }
+.ph { height: 44px; flex: none; display: flex; align-items: center; gap: 6px; padding: 0 8px 0 14px; border-bottom: 1px solid var(--border-subtle); }
+.ph .ttl { font-weight: 600; font-size: var(--fs-13); }
+.ph .grow { flex: 1; }
+.ph.member { padding-left: 6px; gap: 8px; }
+.ph .who { display: flex; flex-direction: column; min-width: 0; flex: 1; }
+.ph .who .n { font-weight: 600; font-size: var(--fs-13); line-height: 18px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ph .who .d { color: var(--text-3); font-size: var(--fs-11); line-height: 14px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.agents { padding: 8px; display: flex; flex-direction: column; gap: 1px; }
+.agent { display: grid; grid-template-columns: 16px minmax(0, 1fr) auto; gap: 2px 10px; align-items: center; padding: 7px 8px; border-radius: var(--r-6); cursor: pointer; transition: background-color var(--dur-fast) var(--ease-out); position: relative; }
+.agent:hover { background: var(--bg-subtle); }
+.agent.active { background: var(--select-bg); }
+.agent .n { font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.agent .sub { grid-column: 2 / 4; display: flex; align-items: center; gap: 8px; color: var(--text-3); font-size: var(--fs-11); line-height: 14px; }
+.agent .r { display: flex; align-items: center; gap: 6px; color: var(--text-3); font-size: var(--fs-11); font-variant-numeric: tabular-nums; }
+.agent .stop { opacity: 0; transition: opacity var(--dur-fast) var(--ease-out); }
+.agent:hover .stop, .agent.show-stop .stop { opacity: 1; }
+.panel-body { flex: 1; overflow: hidden; padding: 12px 14px; display: flex; flex-direction: column; gap: 12px; }
+.taskcard { border: 1px solid var(--border); border-radius: var(--r-8); background: var(--bg); }
+.taskcard .th { display: flex; align-items: center; gap: 6px; height: 32px; padding: 0 10px; font-size: var(--fs-12); cursor: pointer; }
+.taskcard .th b { font-weight: 600; }
+.taskcard .th .p { color: var(--text-3); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1; }
+.taskcard .tb { padding: 0 10px 10px 30px; color: var(--text-2); font-size: var(--fs-12); line-height: 18px; }
+.panel .composer { width: auto; margin: 0 12px; }
+.panel .composer-wrap { padding-bottom: 12px; }
+.panel .reply { font-size: var(--fs-13); line-height: 21px; }
+
+/* New chat */
+.newchat { flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 20px; padding-bottom: 120px; }
+.newchat h1 { margin: 0; font-size: var(--fs-20); line-height: var(--lh-20); font-weight: 600; letter-spacing: -.01em; }
+.newchat .mark { width: 36px; height: 36px; }
+.newchat .composer-wrap { width: min(var(--reading), calc(100% - 48px)); padding: 0; }
+.newchat .composer { width: 100%; }
+.send, .composer .bar > .ibtn { flex: none; }
+.newchat .composer .text { min-height: 84px; }
+.newchat .hint { color: var(--text-3); font-size: var(--fs-12); display: flex; gap: 16px; }
+
+/* Settings */
+.settings-nav .row .i { color: var(--text-2); }
+.page { flex: 1; overflow: hidden; }
+.page-in { width: 720px; margin: 0 auto; padding: 28px 0; display: flex; flex-direction: column; gap: 24px; }
+.page h2 { margin: 0; font-size: var(--fs-20); line-height: var(--lh-20); font-weight: 600; letter-spacing: -.01em; }
+.group-t { display: flex; align-items: baseline; justify-content: space-between; margin-bottom: 8px; }
+.group-t h3 { margin: 0; font-size: var(--fs-13); font-weight: 600; }
+.group { border: 1px solid var(--border); border-radius: var(--r-8); background: var(--bg); }
+.srow { display: flex; align-items: center; gap: 16px; padding: 12px 14px; }
+.srow + .srow { border-top: 1px solid var(--border-subtle); }
+.srow .txt { flex: 1; min-width: 0; }
+.srow .txt .n { font-weight: 500; }
+.srow .txt .d { color: var(--text-3); font-size: var(--fs-12); line-height: 18px; margin-top: 1px; }
+.tile { width: 28px; height: 28px; border-radius: var(--r-6); border: 1px solid var(--border-subtle); background: var(--bg-subtle); display: grid; place-items: center; flex: none; }
+
+/* Provider glyph with a state dot (the only state mark in a row) */
+.gd { position: relative; display: inline-grid; place-items: center; width: 16px; height: 16px; flex: none; }
+.gd .sd { position: absolute; right: -2px; bottom: -2px; width: 7px; height: 7px; border-radius: 50%; box-shadow: 0 0 0 2px var(--dot-ring, var(--bg-panel)); }
+.gd .sd.run { background: var(--primary); animation: pulse 1.6s var(--ease-in-out) infinite; }
+html[data-dir="a"] .gd .sd.run { background: var(--info-dot); }
+.gd .sd.wait { background: var(--warning-dot); }
+@keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: .35; } }
+.shimmer { background: linear-gradient(90deg, var(--text-3) 0%, var(--text-3) 40%, var(--text) 50%, var(--text-3) 60%, var(--text-3) 100%); background-size: 200% 100%; -webkit-background-clip: text; background-clip: text; color: transparent !important; animation: shimmer 1.8s linear infinite; }
+@keyframes shimmer { from { background-position: 100% 0; } to { background-position: -100% 0; } }
+.working { display: flex; flex-direction: column; gap: 6px; }
+.working .wl { color: var(--text-3); font-size: var(--fs-12); padding-bottom: 6px; border-bottom: 1px solid var(--border-subtle); }
+.step { display: flex; align-items: center; gap: 8px; height: 22px; color: var(--text-3); font-size: var(--fs-12); min-width: 0; }
+.step .i { width: 14px; height: 14px; }
+.step span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.trow { display: grid; grid-template-columns: 16px minmax(0, 1fr) auto; gap: 2px 10px; align-items: center; padding: 6px 8px; margin: 0 -8px; border-radius: var(--r-6); cursor: pointer; --dot-ring: var(--bg); transition: background-color var(--dur-fast) var(--ease-out); }
+.trow:hover { background: var(--bg-subtle); --dot-ring: var(--bg-subtle); }
+.trow .ttl { font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.trow .tm { color: var(--text-3); font-size: var(--fs-11); font-variant-numeric: tabular-nums; }
+.trow .sub { grid-column: 2 / 4; color: var(--text-2); font-size: var(--fs-12); line-height: var(--lh-12); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.side-sec { padding: 8px; border-bottom: 1px solid var(--border-subtle); }
+.side-sec:last-child { border-bottom: 0; }
+.side-label { display: flex; align-items: center; gap: 8px; height: 24px; padding: 0 8px; color: var(--text-3); font-size: var(--fs-12); font-weight: 500; }
+.side-label .grow { flex: 1; }
+.arow { display: flex; align-items: center; gap: 10px; height: 32px; padding: 0 8px; border-radius: var(--r-6); cursor: pointer; position: relative; transition: background-color var(--dur-fast) var(--ease-out); }
+.arow:hover, .arow.hover { background: var(--bg-subtle); --dot-ring: var(--bg-subtle); }
+.arow .n { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.arow .tm { color: var(--text-3); font-size: var(--fs-11); font-variant-numeric: tabular-nums; min-width: 24px; text-align: right; }
+.arow .stopq { display: none; width: var(--h-xs); height: var(--h-xs); border-radius: var(--r-4); place-items: center; color: var(--text-2); }
+.arow.running:hover .tm, .arow.running.hover .tm { display: none; }
+.arow.running:hover .stopq, .arow.running.hover .stopq { display: grid; }
+.arow .stopq:hover { background: var(--bg-muted); color: var(--text); }
+.arow .stopq .sq, .stopq .sq { width: 8px; height: 8px; border-radius: var(--r-4); background: currentColor; }
+.arow .stopq { border: 0; background: transparent; cursor: pointer; padding: 0; }
+.arow.dim .n { color: var(--text-2); }
+.hovercard { position: absolute; z-index: 35; width: 280px; padding: 10px 12px; border-radius: var(--r-8); background: var(--bg-elevated); box-shadow: var(--shadow-md); display: flex; flex-direction: column; gap: 4px; font-size: var(--fs-12); line-height: 18px; }
+.hovercard .t { font-size: var(--fs-13); font-weight: 600; color: var(--text); }
+.hovercard .m { color: var(--text-2); }
+.hovercard .s { color: var(--text-3); }
+.hovercard .now { margin-top: 4px; padding-top: 6px; border-top: 1px solid var(--border-subtle); color: var(--text-2); display: flex; gap: 6px; align-items: center; }
+.ibtn .badge { position: absolute; top: 1px; right: 0; min-width: 14px; height: 14px; padding: 0 3px; border-radius: var(--r-full); background: var(--primary); color: var(--primary-fg); font: 600 var(--fs-11)/14px var(--font-sans); text-align: center; }
+html[data-dir="a"] .ibtn .badge { background: var(--text); color: var(--bg); }
+.dock { flex: none; height: 230px; border-top: 1px solid var(--border); background: var(--bg-panel); display: flex; flex-direction: column; }
+.dock-tabs { height: 34px; display: flex; align-items: center; gap: 2px; padding: 0 6px; border-bottom: 1px solid var(--border-subtle); }
+.dock-tab { display: inline-flex; align-items: center; gap: 6px; height: 24px; padding: 0 8px; border-radius: var(--r-4); font-size: var(--fs-12); color: var(--text-2); }
+.dock-tab.on { background: var(--bg-subtle); color: var(--text); }
+.dock pre { margin: 0; padding: 8px 12px; font: 12px/18px var(--font-mono); color: var(--text-2); }
+.dock pre b { color: var(--success); font-weight: 500; }
+.art-list { padding: 8px; display: flex; flex-direction: column; gap: 1px; }
+.art { display: grid; grid-template-columns: 16px minmax(0, 1fr) auto; gap: 2px 10px; align-items: center; padding: 7px 8px; border-radius: var(--r-6); }
+.art:hover, .art.active { background: var(--bg-subtle); }
+.art .n { font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.art .sub { grid-column: 2 / 4; color: var(--text-3); font-size: var(--fs-11); line-height: 14px; }
+.art .i { color: var(--text-3); }
+.doc { padding: 14px 16px; font-size: var(--fs-13); line-height: 21px; }
+.doc h6 { margin: 0 0 6px; font-size: var(--fs-14); font-weight: 600; }
+.doc ul { margin: 6px 0 10px; padding-left: 18px; }
+.doc li { margin: 2px 0; }
+.doc ins { text-decoration: none; background: color-mix(in srgb, var(--success-dot) 16%, transparent); border-radius: var(--r-4); padding: 0 2px; }
+.doc del { color: var(--text-3); background: color-mix(in srgb, var(--danger-dot) 12%, transparent); border-radius: var(--r-4); padding: 0 2px; }
+.doc-bar { display: flex; align-items: center; gap: 6px; padding: 8px 12px; border-bottom: 1px solid var(--border-subtle); }
+.doc-bar .grow { flex: 1; }
+
+.tools .tool .name { font-weight: 400; color: var(--text-3); }
+.deleg { display: flex; flex-direction: column; gap: 2px; padding: 4px 0 2px; }
+.deleg-sum { display: flex; align-items: center; gap: 8px; height: 22px; color: var(--text-3); font-size: var(--fs-12); }
+.deleg-sum .i { width: 14px; height: 14px; }
+.trow { grid-template-columns: 16px minmax(0, 1fr) auto 14px; }
+.trow .sub { grid-column: 2 / 4; }
+.trow > .i { color: var(--text-3); width: 14px; height: 14px; }
+.opts { display: flex; flex-direction: column; gap: 2px; }
+.opt { display: flex; align-items: flex-start; gap: 8px; padding: 6px 8px; border-radius: var(--r-6); cursor: pointer; transition: background-color var(--dur-fast) var(--ease-out); }
+.opt:hover { background: var(--bg-subtle); }
+.opt.sel { background: var(--select-bg); color: var(--select-fg); }
+.opt .num { color: var(--text-3); font-variant-numeric: tabular-nums; width: 14px; }
+.opt.sel .num { color: inherit; }
+.opt .k { margin-left: auto; }
+.approval .foot { display: flex; align-items: center; gap: 8px; }
+.approval .foot .grow { flex: 1; }
+.strip { width: min(var(--reading), calc(100% - 48px)); margin: 0 auto 8px; display: flex; align-items: center; gap: 4px; }
+.strip .arow { flex: 1; border: 1px solid var(--border); background: var(--bg); }
+.arow .kind { color: var(--text-3); }
+.arow .st { color: var(--text-3); font-size: var(--fs-12); font-variant-numeric: tabular-nums; }
+.app.has-dock { grid-template-rows: minmax(0, 1fr) 220px; }
+.app.has-dock > .sidebar { grid-row: 1 / 3; }
+.app.has-dock > .dock { grid-column: 2 / 4; grid-row: 2; height: auto; position: relative; }
+.dock .grip { position: absolute; top: -3px; left: 0; right: 0; height: 6px; cursor: row-resize; }
+.dock .grip::after { content: ""; position: absolute; left: 50%; top: 2px; width: 32px; height: 2px; margin-left: -16px; border-radius: var(--r-full); background: var(--border-strong); }
+.ph .wst { display: inline-flex; align-items: center; gap: 6px; color: var(--text-2); font-size: var(--fs-12); white-space: nowrap; }
+.ph .wst .el { color: var(--text-3); font-variant-numeric: tabular-nums; }
+.ibtn.danger:hover { color: var(--danger); background: color-mix(in srgb, var(--danger) 10%, transparent); }
+.side-foot2 { margin-top: auto; }
+
+/* Kit sheet */
+.kit { padding: 32px 40px 48px; display: grid; grid-template-columns: repeat(3, 1fr); gap: 20px; background: var(--bg); }
+.kit .cell { border: 1px solid var(--border); border-radius: var(--r-8); padding: 16px; display: flex; flex-direction: column; gap: 12px; }
+.kit .cell.wide { grid-column: span 2; }
+.kit .cell.full { grid-column: 1 / -1; }
+.kit h4 { margin: 0; font-size: var(--fs-12); color: var(--text-3); font-weight: 500; }
+.kit .line { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.kit .typerow { display: flex; align-items: baseline; gap: 16px; }
+.kit .typerow .k { width: 90px; color: var(--text-3); font-size: var(--fs-11); font-variant-numeric: tabular-nums; }
+.kit .icons { display: grid; grid-template-columns: repeat(12, 1fr); gap: 12px; color: var(--text-2); }
+.kit .icons div { display: grid; place-items: center; height: 32px; border-radius: var(--r-6); }
+.kit .icons div:hover { background: var(--bg-subtle); color: var(--text); }
+.dialog { width: 400px; border-radius: var(--r-12); background: var(--bg-elevated); box-shadow: var(--shadow-lg); padding: 16px; display: flex; flex-direction: column; gap: 12px; }
+.dialog h5 { margin: 0; font-size: var(--fs-14); font-weight: 600; }
+.dialog .acts { display: flex; justify-content: flex-end; gap: 8px; }
+.toast { display: flex; align-items: center; gap: 10px; padding: 10px 12px; border-radius: var(--r-8); background: var(--bg-elevated); box-shadow: var(--shadow-md); width: 340px; }
+.swatches { display: grid; grid-template-columns: repeat(8, 1fr); gap: 8px; }
+.sw { height: 44px; border-radius: var(--r-6); border: 1px solid var(--border-subtle); display: flex; align-items: flex-end; padding: 4px 6px; font-size: var(--fs-11); color: var(--text-3); }
+</style>
+</head>
+<body>
+<svg xmlns="http://www.w3.org/2000/svg" style="display:none">
+<symbol id="i-archive" viewBox="0 0 256 256" fill="currentColor"><path d="M224,48H32A16,16,0,0,0,16,64V88a16,16,0,0,0,16,16v88a16,16,0,0,0,16,16H208a16,16,0,0,0,16-16V104a16,16,0,0,0,16-16V64A16,16,0,0,0,224,48ZM208,192H48V104H208ZM224,88H32V64H224V88ZM96,136a8,8,0,0,1,8-8h48a8,8,0,0,1,0,16H104A8,8,0,0,1,96,136Z"/></symbol>
+<symbol id="i-arrow-bend-down-right" viewBox="0 0 256 256" fill="currentColor"><path d="M229.66,157.66l-48,48a8,8,0,0,1-11.32-11.32L204.69,160H128A104.11,104.11,0,0,1,24,56a8,8,0,0,1,16,0,88.1,88.1,0,0,0,88,88h76.69l-34.35-34.34a8,8,0,0,1,11.32-11.32l48,48A8,8,0,0,1,229.66,157.66Z"/></symbol>
+<symbol id="i-arrow-left" viewBox="0 0 256 256" fill="currentColor"><path d="M224,128a8,8,0,0,1-8,8H59.31l58.35,58.34a8,8,0,0,1-11.32,11.32l-72-72a8,8,0,0,1,0-11.32l72-72a8,8,0,0,1,11.32,11.32L59.31,120H216A8,8,0,0,1,224,128Z"/></symbol>
+<symbol id="i-arrow-square-out" viewBox="0 0 256 256" fill="currentColor"><path d="M224,104a8,8,0,0,1-16,0V59.32l-66.33,66.34a8,8,0,0,1-11.32-11.32L196.68,48H152a8,8,0,0,1,0-16h64a8,8,0,0,1,8,8Zm-40,24a8,8,0,0,0-8,8v72H48V80h72a8,8,0,0,0,0-16H48A16,16,0,0,0,32,80V208a16,16,0,0,0,16,16H176a16,16,0,0,0,16-16V136A8,8,0,0,0,184,128Z"/></symbol>
+<symbol id="i-arrow-up" viewBox="0 0 256 256" fill="currentColor"><path d="M205.66,117.66a8,8,0,0,1-11.32,0L136,59.31V216a8,8,0,0,1-16,0V59.31L61.66,117.66a8,8,0,0,1-11.32-11.32l72-72a8,8,0,0,1,11.32,0l72,72A8,8,0,0,1,205.66,117.66Z"/></symbol>
+<symbol id="i-arrows-clockwise" viewBox="0 0 256 256" fill="currentColor"><path d="M224,48V96a8,8,0,0,1-8,8H168a8,8,0,0,1,0-16h28.69L182.06,73.37a79.56,79.56,0,0,0-56.13-23.43h-.45A79.52,79.52,0,0,0,69.59,72.71,8,8,0,0,1,58.41,61.27a96,96,0,0,1,135,.79L208,76.69V48a8,8,0,0,1,16,0ZM186.41,183.29a80,80,0,0,1-112.47-.66L59.31,168H88a8,8,0,0,0,0-16H40a8,8,0,0,0-8,8v48a8,8,0,0,0,16,0V179.31l14.63,14.63A95.43,95.43,0,0,0,130,222.06h.53a95.36,95.36,0,0,0,67.07-27.33,8,8,0,0,0-11.18-11.44Z"/></symbol>
+<symbol id="i-bell-ringing" viewBox="0 0 256 256" fill="currentColor"><path d="M224,71.1a8,8,0,0,1-10.78-3.42,94.13,94.13,0,0,0-33.46-36.91,8,8,0,1,1,8.54-13.54,111.46,111.46,0,0,1,39.12,43.09A8,8,0,0,1,224,71.1ZM35.71,72a8,8,0,0,0,7.1-4.32A94.13,94.13,0,0,1,76.27,30.77a8,8,0,1,0-8.54-13.54A111.46,111.46,0,0,0,28.61,60.32,8,8,0,0,0,35.71,72Zm186.1,103.94A16,16,0,0,1,208,200H167.2a40,40,0,0,1-78.4,0H48a16,16,0,0,1-13.79-24.06C43.22,160.39,48,138.28,48,112a80,80,0,0,1,160,0C208,138.27,212.78,160.38,221.81,175.94ZM150.62,200H105.38a24,24,0,0,0,45.24,0ZM208,184c-10.64-18.27-16-42.49-16-72a64,64,0,0,0-128,0c0,29.52-5.38,53.74-16,72Z"/></symbol>
+<symbol id="i-bell" viewBox="0 0 256 256" fill="currentColor"><path d="M221.8,175.94C216.25,166.38,208,139.33,208,104a80,80,0,1,0-160,0c0,35.34-8.26,62.38-13.81,71.94A16,16,0,0,0,48,200H88.81a40,40,0,0,0,78.38,0H208a16,16,0,0,0,13.8-24.06ZM128,216a24,24,0,0,1-22.62-16h45.24A24,24,0,0,1,128,216ZM48,184c7.7-13.24,16-43.92,16-80a64,64,0,1,1,128,0c0,36.05,8.28,66.73,16,80Z"/></symbol>
+<symbol id="i-brain" viewBox="0 0 256 256" fill="currentColor"><path d="M248,124a56.11,56.11,0,0,0-32-50.61V72a48,48,0,0,0-88-26.49A48,48,0,0,0,40,72v1.39a56,56,0,0,0,0,101.2V176a48,48,0,0,0,88,26.49A48,48,0,0,0,216,176v-1.41A56.09,56.09,0,0,0,248,124ZM88,208a32,32,0,0,1-31.81-28.56A55.87,55.87,0,0,0,64,180h8a8,8,0,0,0,0-16H64A40,40,0,0,1,50.67,86.27,8,8,0,0,0,56,78.73V72a32,32,0,0,1,64,0v68.26A47.8,47.8,0,0,0,88,128a8,8,0,0,0,0,16,32,32,0,0,1,0,64Zm104-44h-8a8,8,0,0,0,0,16h8a55.87,55.87,0,0,0,7.81-.56A32,32,0,1,1,168,144a8,8,0,0,0,0-16,47.8,47.8,0,0,0-32,12.26V72a32,32,0,0,1,64,0v6.73a8,8,0,0,0,5.33,7.54A40,40,0,0,1,192,164Zm16-52a8,8,0,0,1-8,8h-4a36,36,0,0,1-36-36V80a8,8,0,0,1,16,0v4a20,20,0,0,0,20,20h4A8,8,0,0,1,208,112ZM60,120H56a8,8,0,0,1,0-16h4A20,20,0,0,0,80,84V80a8,8,0,0,1,16,0v4A36,36,0,0,1,60,120Z"/></symbol>
+<symbol id="i-caret-down" viewBox="0 0 256 256" fill="currentColor"><path d="M213.66,101.66l-80,80a8,8,0,0,1-11.32,0l-80-80A8,8,0,0,1,53.66,90.34L128,164.69l74.34-74.35a8,8,0,0,1,11.32,11.32Z"/></symbol>
+<symbol id="i-caret-right" viewBox="0 0 256 256" fill="currentColor"><path d="M181.66,133.66l-80,80a8,8,0,0,1-11.32-11.32L164.69,128,90.34,53.66a8,8,0,0,1,11.32-11.32l80,80A8,8,0,0,1,181.66,133.66Z"/></symbol>
+<symbol id="i-caret-up" viewBox="0 0 256 256" fill="currentColor"><path d="M213.66,165.66a8,8,0,0,1-11.32,0L128,91.31,53.66,165.66a8,8,0,0,1-11.32-11.32l80-80a8,8,0,0,1,11.32,0l80,80A8,8,0,0,1,213.66,165.66Z"/></symbol>
+<symbol id="i-chat-circle" viewBox="0 0 256 256" fill="currentColor"><path d="M128,24A104,104,0,0,0,36.18,176.88L24.83,210.93a16,16,0,0,0,20.24,20.24l34.05-11.35A104,104,0,1,0,128,24Zm0,192a87.87,87.87,0,0,1-44.06-11.81,8,8,0,0,0-6.54-.67L40,216,52.47,178.6a8,8,0,0,0-.66-6.54A88,88,0,1,1,128,216Z"/></symbol>
+<symbol id="i-chat-text" viewBox="0 0 256 256" fill="currentColor"><path d="M216,48H40A16,16,0,0,0,24,64V224a15.85,15.85,0,0,0,9.24,14.5A16.13,16.13,0,0,0,40,240a15.89,15.89,0,0,0,10.25-3.78l.09-.07L83,208H216a16,16,0,0,0,16-16V64A16,16,0,0,0,216,48ZM40,224h0ZM216,192H80a8,8,0,0,0-5.23,1.95L40,224V64H216ZM88,112a8,8,0,0,1,8-8h64a8,8,0,0,1,0,16H96A8,8,0,0,1,88,112Zm0,32a8,8,0,0,1,8-8h64a8,8,0,1,1,0,16H96A8,8,0,0,1,88,144Z"/></symbol>
+<symbol id="i-check-circle" viewBox="0 0 256 256" fill="currentColor"><path d="M173.66,98.34a8,8,0,0,1,0,11.32l-56,56a8,8,0,0,1-11.32,0l-24-24a8,8,0,0,1,11.32-11.32L112,148.69l50.34-50.35A8,8,0,0,1,173.66,98.34ZM232,128A104,104,0,1,1,128,24,104.11,104.11,0,0,1,232,128Zm-16,0a88,88,0,1,0-88,88A88.1,88.1,0,0,0,216,128Z"/></symbol>
+<symbol id="i-check" viewBox="0 0 256 256" fill="currentColor"><path d="M229.66,77.66l-128,128a8,8,0,0,1-11.32,0l-56-56a8,8,0,0,1,11.32-11.32L96,188.69,218.34,66.34a8,8,0,0,1,11.32,11.32Z"/></symbol>
+<symbol id="i-circle-notch" viewBox="0 0 256 256" fill="currentColor"><path d="M232,128a104,104,0,0,1-208,0c0-41,23.81-78.36,60.66-95.27a8,8,0,0,1,6.68,14.54C60.15,61.59,40,93.27,40,128a88,88,0,0,0,176,0c0-34.73-20.15-66.41-51.34-80.73a8,8,0,0,1,6.68-14.54C208.19,49.64,232,87,232,128Z"/></symbol>
+<symbol id="i-clipboard-text" viewBox="0 0 256 256" fill="currentColor"><path d="M168,152a8,8,0,0,1-8,8H96a8,8,0,0,1,0-16h64A8,8,0,0,1,168,152Zm-8-40H96a8,8,0,0,0,0,16h64a8,8,0,0,0,0-16Zm56-64V216a16,16,0,0,1-16,16H56a16,16,0,0,1-16-16V48A16,16,0,0,1,56,32H92.26a47.92,47.92,0,0,1,71.48,0H200A16,16,0,0,1,216,48ZM96,64h64a32,32,0,0,0-64,0ZM200,48H173.25A47.93,47.93,0,0,1,176,64v8a8,8,0,0,1-8,8H88a8,8,0,0,1-8-8V64a47.93,47.93,0,0,1,2.75-16H56V216H200Z"/></symbol>
+<symbol id="i-clock-counter-clockwise" viewBox="0 0 256 256" fill="currentColor"><path d="M136,80v43.47l36.12,21.67a8,8,0,0,1-8.24,13.72l-40-24A8,8,0,0,1,120,128V80a8,8,0,0,1,16,0Zm-8-48A95.44,95.44,0,0,0,60.08,60.15C52.81,67.51,46.35,74.59,40,82V64a8,8,0,0,0-16,0v40a8,8,0,0,0,8,8H72a8,8,0,0,0,0-16H49c7.15-8.42,14.27-16.35,22.39-24.57a80,80,0,1,1,1.66,114.75,8,8,0,1,0-11,11.64A96,96,0,1,0,128,32Z"/></symbol>
+<symbol id="i-clock" viewBox="0 0 256 256" fill="currentColor"><path d="M128,24A104,104,0,1,0,232,128,104.11,104.11,0,0,0,128,24Zm0,192a88,88,0,1,1,88-88A88.1,88.1,0,0,1,128,216Zm64-88a8,8,0,0,1-8,8H128a8,8,0,0,1-8-8V72a8,8,0,0,1,16,0v48h48A8,8,0,0,1,192,128Z"/></symbol>
+<symbol id="i-cloud" viewBox="0 0 256 256" fill="currentColor"><path d="M160,40A88.09,88.09,0,0,0,81.29,88.67,64,64,0,1,0,72,216h88a88,88,0,0,0,0-176Zm0,160H72a48,48,0,0,1,0-96c1.1,0,2.2,0,3.29.11A88,88,0,0,0,72,128a8,8,0,0,0,16,0,72,72,0,1,1,72,72Z"/></symbol>
+<symbol id="i-command" viewBox="0 0 256 256" fill="currentColor"><path d="M180,144H160V112h20a36,36,0,1,0-36-36V96H112V76a36,36,0,1,0-36,36H96v32H76a36,36,0,1,0,36,36V160h32v20a36,36,0,1,0,36-36ZM160,76a20,20,0,1,1,20,20H160ZM56,76a20,20,0,0,1,40,0V96H76A20,20,0,0,1,56,76ZM96,180a20,20,0,1,1-20-20H96Zm16-68h32v32H112Zm68,88a20,20,0,0,1-20-20V160h20a20,20,0,0,1,0,40Z"/></symbol>
+<symbol id="i-copy" viewBox="0 0 256 256" fill="currentColor"><path d="M216,32H88a8,8,0,0,0-8,8V80H40a8,8,0,0,0-8,8V216a8,8,0,0,0,8,8H168a8,8,0,0,0,8-8V176h40a8,8,0,0,0,8-8V40A8,8,0,0,0,216,32ZM160,208H48V96H160Zm48-48H176V88a8,8,0,0,0-8-8H96V48H208Z"/></symbol>
+<symbol id="i-desktop" viewBox="0 0 256 256" fill="currentColor"><path d="M208,40H48A24,24,0,0,0,24,64V176a24,24,0,0,0,24,24h72v16H96a8,8,0,0,0,0,16h64a8,8,0,0,0,0-16H136V200h72a24,24,0,0,0,24-24V64A24,24,0,0,0,208,40ZM48,56H208a8,8,0,0,1,8,8v80H40V64A8,8,0,0,1,48,56ZM208,184H48a8,8,0,0,1-8-8V160H216v16A8,8,0,0,1,208,184Z"/></symbol>
+<symbol id="i-dots-three" viewBox="0 0 256 256" fill="currentColor"><path d="M140,128a12,12,0,1,1-12-12A12,12,0,0,1,140,128Zm56-12a12,12,0,1,0,12,12A12,12,0,0,0,196,116ZM60,116a12,12,0,1,0,12,12A12,12,0,0,0,60,116Z"/></symbol>
+<symbol id="i-eye" viewBox="0 0 256 256" fill="currentColor"><path d="M247.31,124.76c-.35-.79-8.82-19.58-27.65-38.41C194.57,61.26,162.88,48,128,48S61.43,61.26,36.34,86.35C17.51,105.18,9,124,8.69,124.76a8,8,0,0,0,0,6.5c.35.79,8.82,19.57,27.65,38.4C61.43,194.74,93.12,208,128,208s66.57-13.26,91.66-38.34c18.83-18.83,27.3-37.61,27.65-38.4A8,8,0,0,0,247.31,124.76ZM128,192c-30.78,0-57.67-11.19-79.93-33.25A133.47,133.47,0,0,1,25,128,133.33,133.33,0,0,1,48.07,97.25C70.33,75.19,97.22,64,128,64s57.67,11.19,79.93,33.25A133.46,133.46,0,0,1,231.05,128C223.84,141.46,192.43,192,128,192Zm0-112a48,48,0,1,0,48,48A48.05,48.05,0,0,0,128,80Zm0,80a32,32,0,1,1,32-32A32,32,0,0,1,128,160Z"/></symbol>
+<symbol id="i-file-text" viewBox="0 0 256 256" fill="currentColor"><path d="M213.66,82.34l-56-56A8,8,0,0,0,152,24H56A16,16,0,0,0,40,40V216a16,16,0,0,0,16,16H200a16,16,0,0,0,16-16V88A8,8,0,0,0,213.66,82.34ZM160,51.31,188.69,80H160ZM200,216H56V40h88V88a8,8,0,0,0,8,8h48V216Zm-32-80a8,8,0,0,1-8,8H96a8,8,0,0,1,0-16h64A8,8,0,0,1,168,136Zm0,32a8,8,0,0,1-8,8H96a8,8,0,0,1,0-16h64A8,8,0,0,1,168,168Z"/></symbol>
+<symbol id="i-file" viewBox="0 0 256 256" fill="currentColor"><path d="M213.66,82.34l-56-56A8,8,0,0,0,152,24H56A16,16,0,0,0,40,40V216a16,16,0,0,0,16,16H200a16,16,0,0,0,16-16V88A8,8,0,0,0,213.66,82.34ZM160,51.31,188.69,80H160ZM200,216H56V40h88V88a8,8,0,0,0,8,8h48V216Z"/></symbol>
+<symbol id="i-files" viewBox="0 0 256 256" fill="currentColor"><path d="M213.66,66.34l-40-40A8,8,0,0,0,168,24H88A16,16,0,0,0,72,40V56H56A16,16,0,0,0,40,72V216a16,16,0,0,0,16,16H168a16,16,0,0,0,16-16V200h16a16,16,0,0,0,16-16V72A8,8,0,0,0,213.66,66.34ZM168,216H56V72h76.69L168,107.31v84.53c0,.06,0,.11,0,.16s0,.1,0,.16V216Zm32-32H184V104a8,8,0,0,0-2.34-5.66l-40-40A8,8,0,0,0,136,56H88V40h76.69L200,75.31Zm-56-32a8,8,0,0,1-8,8H88a8,8,0,0,1,0-16h48A8,8,0,0,1,144,152Zm0,32a8,8,0,0,1-8,8H88a8,8,0,0,1,0-16h48A8,8,0,0,1,144,184Z"/></symbol>
+<symbol id="i-folder-open" viewBox="0 0 256 256" fill="currentColor"><path d="M245,110.64A16,16,0,0,0,232,104H216V88a16,16,0,0,0-16-16H130.67L102.94,51.2a16.14,16.14,0,0,0-9.6-3.2H40A16,16,0,0,0,24,64V208h0a8,8,0,0,0,8,8H211.1a8,8,0,0,0,7.59-5.47l28.49-85.47A16.05,16.05,0,0,0,245,110.64ZM93.34,64,123.2,86.4A8,8,0,0,0,128,88h72v16H69.77a16,16,0,0,0-15.18,10.94L40,158.7V64Zm112,136H43.1l26.67-80H232Z"/></symbol>
+<symbol id="i-folder-simple" viewBox="0 0 256 256" fill="currentColor"><path d="M216,72H130.67L102.93,51.2a16.12,16.12,0,0,0-9.6-3.2H40A16,16,0,0,0,24,64V200a16,16,0,0,0,16,16H216.89A15.13,15.13,0,0,0,232,200.89V88A16,16,0,0,0,216,72Zm0,128H40V64H93.33L123.2,86.4A8,8,0,0,0,128,88h88Z"/></symbol>
+<symbol id="i-gauge" viewBox="0 0 256 256" fill="currentColor"><path d="M207.06,72.67A111.24,111.24,0,0,0,128,40h-.4C66.07,40.21,16,91,16,153.13V176a16,16,0,0,0,16,16H224a16,16,0,0,0,16-16V152A111.25,111.25,0,0,0,207.06,72.67ZM224,176H119.71l54.76-75.3a8,8,0,0,0-12.94-9.42L99.92,176H32V153.13c0-3.08.15-6.12.43-9.13H56a8,8,0,0,0,0-16H35.27c10.32-38.86,44-68.24,84.73-71.66V80a8,8,0,0,0,16,0V56.33A96.14,96.14,0,0,1,221,128H200a8,8,0,0,0,0,16h23.67c.21,2.65.33,5.31.33,8Z"/></symbol>
+<symbol id="i-gear-six" viewBox="0 0 256 256" fill="currentColor"><path d="M128,80a48,48,0,1,0,48,48A48.05,48.05,0,0,0,128,80Zm0,80a32,32,0,1,1,32-32A32,32,0,0,1,128,160Zm109.94-52.79a8,8,0,0,0-3.89-5.4l-29.83-17-.12-33.62a8,8,0,0,0-2.83-6.08,111.91,111.91,0,0,0-36.72-20.67,8,8,0,0,0-6.46.59L128,41.85,97.88,25a8,8,0,0,0-6.47-.6A112.1,112.1,0,0,0,54.73,45.15a8,8,0,0,0-2.83,6.07l-.15,33.65-29.83,17a8,8,0,0,0-3.89,5.4,106.47,106.47,0,0,0,0,41.56,8,8,0,0,0,3.89,5.4l29.83,17,.12,33.62a8,8,0,0,0,2.83,6.08,111.91,111.91,0,0,0,36.72,20.67,8,8,0,0,0,6.46-.59L128,214.15,158.12,231a7.91,7.91,0,0,0,3.9,1,8.09,8.09,0,0,0,2.57-.42,112.1,112.1,0,0,0,36.68-20.73,8,8,0,0,0,2.83-6.07l.15-33.65,29.83-17a8,8,0,0,0,3.89-5.4A106.47,106.47,0,0,0,237.94,107.21Zm-15,34.91-28.57,16.25a8,8,0,0,0-3,3c-.58,1-1.19,2.06-1.81,3.06a7.94,7.94,0,0,0-1.22,4.21l-.15,32.25a95.89,95.89,0,0,1-25.37,14.3L134,199.13a8,8,0,0,0-3.91-1h-.19c-1.21,0-2.43,0-3.64,0a8.08,8.08,0,0,0-4.1,1l-28.84,16.1A96,96,0,0,1,67.88,201l-.11-32.2a8,8,0,0,0-1.22-4.22c-.62-1-1.23-2-1.8-3.06a8.09,8.09,0,0,0-3-3.06l-28.6-16.29a90.49,90.49,0,0,1,0-28.26L61.67,97.63a8,8,0,0,0,3-3c.58-1,1.19-2.06,1.81-3.06a7.94,7.94,0,0,0,1.22-4.21l.15-32.25a95.89,95.89,0,0,1,25.37-14.3L122,56.87a8,8,0,0,0,4.1,1c1.21,0,2.43,0,3.64,0a8.08,8.08,0,0,0,4.1-1l28.84-16.1A96,96,0,0,1,188.12,55l.11,32.2a8,8,0,0,0,1.22,4.22c.62,1,1.23,2,1.8,3.06a8.09,8.09,0,0,0,3,3.06l28.6,16.29A90.49,90.49,0,0,1,222.9,142.12Z"/></symbol>
+<symbol id="i-git-branch" viewBox="0 0 256 256" fill="currentColor"><path d="M232,64a32,32,0,1,0-40,31v17a8,8,0,0,1-8,8H96a23.84,23.84,0,0,0-8,1.38V95a32,32,0,1,0-16,0v66a32,32,0,1,0,16,0V144a8,8,0,0,1,8-8h88a24,24,0,0,0,24-24V95A32.06,32.06,0,0,0,232,64ZM64,64A16,16,0,1,1,80,80,16,16,0,0,1,64,64ZM96,192a16,16,0,1,1-16-16A16,16,0,0,1,96,192ZM200,80a16,16,0,1,1,16-16A16,16,0,0,1,200,80Z"/></symbol>
+<symbol id="i-git-diff" viewBox="0 0 256 256" fill="currentColor"><path d="M112,152a8,8,0,0,0-8,8v28.69L66.34,151A8,8,0,0,1,64,145.37V95a32,32,0,1,0-16,0v50.38a23.85,23.85,0,0,0,7,17L92.69,200H64a8,8,0,0,0,0,16h48a8,8,0,0,0,8-8V160A8,8,0,0,0,112,152ZM40,64A16,16,0,1,1,56,80,16,16,0,0,1,40,64Zm168,97V110.63a23.85,23.85,0,0,0-7-17L163.31,56H192a8,8,0,0,0,0-16H144a8,8,0,0,0-8,8V96a8,8,0,0,0,16,0V67.31L189.66,105a8,8,0,0,1,2.34,5.66V161a32,32,0,1,0,16,0Zm-8,47a16,16,0,1,1,16-16A16,16,0,0,1,200,208Z"/></symbol>
+<symbol id="i-git-merge" viewBox="0 0 256 256" fill="currentColor"><path d="M208,112a32.05,32.05,0,0,0-30.69,23l-42.21-6a8,8,0,0,1-4.95-2.71L94.43,84.55A32,32,0,1,0,72,87v82a32,32,0,1,0,16,0V101.63l30,35a24,24,0,0,0,14.83,8.14l44,6.28A32,32,0,1,0,208,112ZM64,56A16,16,0,1,1,80,72,16,16,0,0,1,64,56ZM96,200a16,16,0,1,1-16-16A16,16,0,0,1,96,200Zm112-40a16,16,0,1,1,16-16A16,16,0,0,1,208,160Z"/></symbol>
+<symbol id="i-globe" viewBox="0 0 256 256" fill="currentColor"><path d="M128,24h0A104,104,0,1,0,232,128,104.12,104.12,0,0,0,128,24Zm88,104a87.61,87.61,0,0,1-3.33,24H174.16a157.44,157.44,0,0,0,0-48h38.51A87.61,87.61,0,0,1,216,128ZM102,168H154a115.11,115.11,0,0,1-26,45A115.27,115.27,0,0,1,102,168Zm-3.9-16a140.84,140.84,0,0,1,0-48h59.88a140.84,140.84,0,0,1,0,48ZM40,128a87.61,87.61,0,0,1,3.33-24H81.84a157.44,157.44,0,0,0,0,48H43.33A87.61,87.61,0,0,1,40,128ZM154,88H102a115.11,115.11,0,0,1,26-45A115.27,115.27,0,0,1,154,88Zm52.33,0H170.71a135.28,135.28,0,0,0-22.3-45.6A88.29,88.29,0,0,1,206.37,88ZM107.59,42.4A135.28,135.28,0,0,0,85.29,88H49.63A88.29,88.29,0,0,1,107.59,42.4ZM49.63,168H85.29a135.28,135.28,0,0,0,22.3,45.6A88.29,88.29,0,0,1,49.63,168Zm98.78,45.6a135.28,135.28,0,0,0,22.3-45.6h35.66A88.29,88.29,0,0,1,148.41,213.6Z"/></symbol>
+<symbol id="i-hammer" viewBox="0 0 256 256" fill="currentColor"><path d="M251.34,112,183.88,44.08a96.1,96.1,0,0,0-135.77,0l-.09.09L34.25,58.4A8,8,0,0,0,45.74,69.53L59.47,55.35a79.92,79.92,0,0,1,18.71-13.9L124.68,88l-96,96a16,16,0,0,0,0,22.63l20.69,20.69a16,16,0,0,0,22.63,0l96-96,14.34,14.34h0L200,163.3a16,16,0,0,0,22.63,0l28.69-28.69A16,16,0,0,0,251.34,112ZM60.68,216,40,195.31l68-68L128.68,148ZM162.34,114.32,140,136.67,119.31,116l22.35-22.35a8,8,0,0,0,0-11.32L94.32,35a80,80,0,0,1,78.23,20.41l44.22,44.51L188,128.66l-14.34-14.34A8,8,0,0,0,162.34,114.32Zm49,37.66-12-12L228,111.25l12,12Z"/></symbol>
+<symbol id="i-image" viewBox="0 0 256 256" fill="currentColor"><path d="M216,40H40A16,16,0,0,0,24,56V200a16,16,0,0,0,16,16H216a16,16,0,0,0,16-16V56A16,16,0,0,0,216,40Zm0,16V158.75l-26.07-26.06a16,16,0,0,0-22.63,0l-20,20-44-44a16,16,0,0,0-22.62,0L40,149.37V56ZM40,172l52-52,80,80H40Zm176,28H194.63l-36-36,20-20L216,181.38V200ZM144,100a12,12,0,1,1,12,12A12,12,0,0,1,144,100Z"/></symbol>
+<symbol id="i-info" viewBox="0 0 256 256" fill="currentColor"><path d="M128,24A104,104,0,1,0,232,128,104.11,104.11,0,0,0,128,24Zm0,192a88,88,0,1,1,88-88A88.1,88.1,0,0,1,128,216Zm16-40a8,8,0,0,1-8,8,16,16,0,0,1-16-16V128a8,8,0,0,1,0-16,16,16,0,0,1,16,16v40A8,8,0,0,1,144,176ZM112,84a12,12,0,1,1,12,12A12,12,0,0,1,112,84Z"/></symbol>
+<symbol id="i-key" viewBox="0 0 256 256" fill="currentColor"><path d="M216.57,39.43A80,80,0,0,0,83.91,120.78L28.69,176A15.86,15.86,0,0,0,24,187.31V216a16,16,0,0,0,16,16H72a8,8,0,0,0,8-8V208H96a8,8,0,0,0,8-8V184h16a8,8,0,0,0,5.66-2.34l9.56-9.57A79.73,79.73,0,0,0,160,176h.1A80,80,0,0,0,216.57,39.43ZM224,98.1c-1.09,34.09-29.75,61.86-63.89,61.9H160a63.7,63.7,0,0,1-23.65-4.51,8,8,0,0,0-8.84,1.68L116.69,168H96a8,8,0,0,0-8,8v16H72a8,8,0,0,0-8,8v16H40V187.31l58.83-58.82a8,8,0,0,0,1.68-8.84A63.72,63.72,0,0,1,96,95.92c0-34.14,27.81-62.8,61.9-63.89A64,64,0,0,1,224,98.1ZM192,76a12,12,0,1,1-12-12A12,12,0,0,1,192,76Z"/></symbol>
+<symbol id="i-list-checks" viewBox="0 0 256 256" fill="currentColor"><path d="M224,128a8,8,0,0,1-8,8H128a8,8,0,0,1,0-16h88A8,8,0,0,1,224,128ZM128,72h88a8,8,0,0,0,0-16H128a8,8,0,0,0,0,16Zm88,112H128a8,8,0,0,0,0,16h88a8,8,0,0,0,0-16ZM82.34,42.34,56,68.69,45.66,58.34A8,8,0,0,0,34.34,69.66l16,16a8,8,0,0,0,11.32,0l32-32A8,8,0,0,0,82.34,42.34Zm0,64L56,132.69,45.66,122.34a8,8,0,0,0-11.32,11.32l16,16a8,8,0,0,0,11.32,0l32-32a8,8,0,0,0-11.32-11.32Zm0,64L56,196.69,45.66,186.34a8,8,0,0,0-11.32,11.32l16,16a8,8,0,0,0,11.32,0l32-32a8,8,0,0,0-11.32-11.32Z"/></symbol>
+<symbol id="i-lock-simple" viewBox="0 0 256 256" fill="currentColor"><path d="M208,80H176V56a48,48,0,0,0-96,0V80H48A16,16,0,0,0,32,96V208a16,16,0,0,0,16,16H208a16,16,0,0,0,16-16V96A16,16,0,0,0,208,80ZM96,56a32,32,0,0,1,64,0V80H96ZM208,208H48V96H208V208Z"/></symbol>
+<symbol id="i-magnifying-glass" viewBox="0 0 256 256" fill="currentColor"><path d="M229.66,218.34l-50.07-50.06a88.11,88.11,0,1,0-11.31,11.31l50.06,50.07a8,8,0,0,0,11.32-11.32ZM40,112a72,72,0,1,1,72,72A72.08,72.08,0,0,1,40,112Z"/></symbol>
+<symbol id="i-monitor" viewBox="0 0 256 256" fill="currentColor"><path d="M208,40H48A24,24,0,0,0,24,64V176a24,24,0,0,0,24,24H208a24,24,0,0,0,24-24V64A24,24,0,0,0,208,40Zm8,136a8,8,0,0,1-8,8H48a8,8,0,0,1-8-8V64a8,8,0,0,1,8-8H208a8,8,0,0,1,8,8Zm-48,48a8,8,0,0,1-8,8H96a8,8,0,0,1,0-16h64A8,8,0,0,1,168,224Z"/></symbol>
+<symbol id="i-moon" viewBox="0 0 256 256" fill="currentColor"><path d="M233.54,142.23a8,8,0,0,0-8-2,88.08,88.08,0,0,1-109.8-109.8,8,8,0,0,0-10-10,104.84,104.84,0,0,0-52.91,37A104,104,0,0,0,136,224a103.09,103.09,0,0,0,62.52-20.88,104.84,104.84,0,0,0,37-52.91A8,8,0,0,0,233.54,142.23ZM188.9,190.34A88,88,0,0,1,65.66,67.11a89,89,0,0,1,31.4-26A106,106,0,0,0,96,56,104.11,104.11,0,0,0,200,160a106,106,0,0,0,14.92-1.06A89,89,0,0,1,188.9,190.34Z"/></symbol>
+<symbol id="i-note-pencil" viewBox="0 0 256 256" fill="currentColor"><path d="M229.66,58.34l-32-32a8,8,0,0,0-11.32,0l-96,96A8,8,0,0,0,88,128v32a8,8,0,0,0,8,8h32a8,8,0,0,0,5.66-2.34l96-96A8,8,0,0,0,229.66,58.34ZM124.69,152H104V131.31l64-64L188.69,88ZM200,76.69,179.31,56,192,43.31,212.69,64ZM224,128v80a16,16,0,0,1-16,16H48a16,16,0,0,1-16-16V48A16,16,0,0,1,48,32h80a8,8,0,0,1,0,16H48V208H208V128a8,8,0,0,1,16,0Z"/></symbol>
+<symbol id="i-pause" viewBox="0 0 256 256" fill="currentColor"><path d="M200,32H160a16,16,0,0,0-16,16V208a16,16,0,0,0,16,16h40a16,16,0,0,0,16-16V48A16,16,0,0,0,200,32Zm0,176H160V48h40ZM96,32H56A16,16,0,0,0,40,48V208a16,16,0,0,0,16,16H96a16,16,0,0,0,16-16V48A16,16,0,0,0,96,32Zm0,176H56V48H96Z"/></symbol>
+<symbol id="i-pencil-line" viewBox="0 0 256 256" fill="currentColor"><path d="M227.32,73.37,182.63,28.69a16,16,0,0,0-22.63,0L36.69,152A15.86,15.86,0,0,0,32,163.31V208a16,16,0,0,0,16,16H216a8,8,0,0,0,0-16H115.32l112-112A16,16,0,0,0,227.32,73.37ZM136,75.31,152.69,92,68,176.69,51.31,160ZM48,208V179.31L76.69,208Zm48-3.31L79.32,188,164,103.31,180.69,120Zm96-96L147.32,64l24-24L216,84.69Z"/></symbol>
+<symbol id="i-pencil-simple" viewBox="0 0 256 256" fill="currentColor"><path d="M227.31,73.37,182.63,28.68a16,16,0,0,0-22.63,0L36.69,152A15.86,15.86,0,0,0,32,163.31V208a16,16,0,0,0,16,16H92.69A15.86,15.86,0,0,0,104,219.31L227.31,96a16,16,0,0,0,0-22.63ZM92.69,208H48V163.31l88-88L180.69,120ZM192,108.68,147.31,64l24-24L216,84.68Z"/></symbol>
+<symbol id="i-play" viewBox="0 0 256 256" fill="currentColor"><path d="M232.4,114.49,88.32,26.35a16,16,0,0,0-16.2-.3A15.86,15.86,0,0,0,64,39.87V216.13A15.94,15.94,0,0,0,80,232a16.07,16.07,0,0,0,8.36-2.35L232.4,141.51a15.81,15.81,0,0,0,0-27ZM80,215.94V40l143.83,88Z"/></symbol>
+<symbol id="i-plug" viewBox="0 0 256 256" fill="currentColor"><path d="M237.66,66.34a8,8,0,0,0-11.32,0L192,100.69,155.31,64l34.35-34.34a8,8,0,1,0-11.32-11.32L144,52.69,117.66,26.34a8,8,0,0,0-11.32,11.32L112.69,44l-53,53a40,40,0,0,0,0,56.57l15.71,15.71L26.34,218.34a8,8,0,0,0,11.32,11.32l49.09-49.09,15.71,15.71a40,40,0,0,0,56.57,0l53-53,6.34,6.35a8,8,0,0,0,11.32-11.32L203.31,112l34.35-34.34A8,8,0,0,0,237.66,66.34ZM147.72,185a24,24,0,0,1-33.95,0L71,142.23a24,24,0,0,1,0-33.95l53-53L200.69,132Z"/></symbol>
+<symbol id="i-plus" viewBox="0 0 256 256" fill="currentColor"><path d="M224,128a8,8,0,0,1-8,8H136v80a8,8,0,0,1-16,0V136H40a8,8,0,0,1,0-16h80V40a8,8,0,0,1,16,0v80h80A8,8,0,0,1,224,128Z"/></symbol>
+<symbol id="i-push-pin" viewBox="0 0 256 256" fill="currentColor"><path d="M235.32,81.37,174.63,20.69a16,16,0,0,0-22.63,0L98.37,74.49c-10.66-3.34-35-7.37-60.4,13.14a16,16,0,0,0-1.29,23.78L85,159.71,42.34,202.34a8,8,0,0,0,11.32,11.32L96.29,171l48.29,48.29A16,16,0,0,0,155.9,224c.38,0,.75,0,1.13,0a15.93,15.93,0,0,0,11.64-6.33c19.64-26.1,17.75-47.32,13.19-60L235.33,104A16,16,0,0,0,235.32,81.37ZM224,92.69h0l-57.27,57.46a8,8,0,0,0-1.49,9.22c9.46,18.93-1.8,38.59-9.34,48.62L48,100.08c12.08-9.74,23.64-12.31,32.48-12.31A40.13,40.13,0,0,1,96.81,91a8,8,0,0,0,9.25-1.51L163.32,32,224,92.68Z"/></symbol>
+<symbol id="i-seal-check" viewBox="0 0 256 256" fill="currentColor"><path d="M225.86,102.82c-3.77-3.94-7.67-8-9.14-11.57-1.36-3.27-1.44-8.69-1.52-13.94-.15-9.76-.31-20.82-8-28.51s-18.75-7.85-28.51-8c-5.25-.08-10.67-.16-13.94-1.52-3.56-1.47-7.63-5.37-11.57-9.14C146.28,23.51,138.44,16,128,16s-18.27,7.51-25.18,14.14c-3.94,3.77-8,7.67-11.57,9.14C88,40.64,82.56,40.72,77.31,40.8c-9.76.15-20.82.31-28.51,8S41,67.55,40.8,77.31c-.08,5.25-.16,10.67-1.52,13.94-1.47,3.56-5.37,7.63-9.14,11.57C23.51,109.72,16,117.56,16,128s7.51,18.27,14.14,25.18c3.77,3.94,7.67,8,9.14,11.57,1.36,3.27,1.44,8.69,1.52,13.94.15,9.76.31,20.82,8,28.51s18.75,7.85,28.51,8c5.25.08,10.67.16,13.94,1.52,3.56,1.47,7.63,5.37,11.57,9.14C109.72,232.49,117.56,240,128,240s18.27-7.51,25.18-14.14c3.94-3.77,8-7.67,11.57-9.14,3.27-1.36,8.69-1.44,13.94-1.52,9.76-.15,20.82-.31,28.51-8s7.85-18.75,8-28.51c.08-5.25.16-10.67,1.52-13.94,1.47-3.56,5.37-7.63,9.14-11.57C232.49,146.28,240,138.44,240,128S232.49,109.73,225.86,102.82Zm-11.55,39.29c-4.79,5-9.75,10.17-12.38,16.52-2.52,6.1-2.63,13.07-2.73,19.82-.1,7-.21,14.33-3.32,17.43s-10.39,3.22-17.43,3.32c-6.75.1-13.72.21-19.82,2.73-6.35,2.63-11.52,7.59-16.52,12.38S132,224,128,224s-9.15-4.92-14.11-9.69-10.17-9.75-16.52-12.38c-6.1-2.52-13.07-2.63-19.82-2.73-7-.1-14.33-.21-17.43-3.32s-3.22-10.39-3.32-17.43c-.1-6.75-.21-13.72-2.73-19.82-2.63-6.35-7.59-11.52-12.38-16.52S32,132,32,128s4.92-9.15,9.69-14.11,9.75-10.17,12.38-16.52c2.52-6.1,2.63-13.07,2.73-19.82.1-7,.21-14.33,3.32-17.43S70.51,56.9,77.55,56.8c6.75-.1,13.72-.21,19.82-2.73,6.35-2.63,11.52-7.59,16.52-12.38S124,32,128,32s9.15,4.92,14.11,9.69,10.17,9.75,16.52,12.38c6.1,2.52,13.07,2.63,19.82,2.73,7,.1,14.33.21,17.43,3.32s3.22,10.39,3.32,17.43c.1,6.75.21,13.72,2.73,19.82,2.63,6.35,7.59,11.52,12.38,16.52S224,124,224,128,219.08,137.15,214.31,142.11ZM173.66,98.34a8,8,0,0,1,0,11.32l-56,56a8,8,0,0,1-11.32,0l-24-24a8,8,0,0,1,11.32-11.32L112,148.69l50.34-50.35A8,8,0,0,1,173.66,98.34Z"/></symbol>
+<symbol id="i-shield-check" viewBox="0 0 256 256" fill="currentColor"><path d="M208,40H48A16,16,0,0,0,32,56v56c0,52.72,25.52,84.67,46.93,102.19,23.06,18.86,46,25.26,47,25.53a8,8,0,0,0,4.2,0c1-.27,23.91-6.67,47-25.53C198.48,196.67,224,164.72,224,112V56A16,16,0,0,0,208,40Zm0,72c0,37.07-13.66,67.16-40.6,89.42A129.3,129.3,0,0,1,128,223.62a128.25,128.25,0,0,1-38.92-21.81C61.82,179.51,48,149.3,48,112l0-56,160,0ZM82.34,141.66a8,8,0,0,1,11.32-11.32L112,148.69l50.34-50.35a8,8,0,0,1,11.32,11.32l-56,56a8,8,0,0,1-11.32,0Z"/></symbol>
+<symbol id="i-sidebar-simple" viewBox="0 0 256 256" fill="currentColor"><path d="M216,40H40A16,16,0,0,0,24,56V200a16,16,0,0,0,16,16H216a16,16,0,0,0,16-16V56A16,16,0,0,0,216,40ZM40,56H80V200H40ZM216,200H96V56H216V200Z"/></symbol>
+<symbol id="i-sliders-horizontal" viewBox="0 0 256 256" fill="currentColor"><path d="M40,88H73a32,32,0,0,0,62,0h81a8,8,0,0,0,0-16H135a32,32,0,0,0-62,0H40a8,8,0,0,0,0,16Zm64-24A16,16,0,1,1,88,80,16,16,0,0,1,104,64ZM216,168H199a32,32,0,0,0-62,0H40a8,8,0,0,0,0,16h97a32,32,0,0,0,62,0h17a8,8,0,0,0,0-16Zm-48,24a16,16,0,1,1,16-16A16,16,0,0,1,168,192Z"/></symbol>
+<symbol id="i-smiley" viewBox="0 0 256 256" fill="currentColor"><path d="M128,24A104,104,0,1,0,232,128,104.11,104.11,0,0,0,128,24Zm0,192a88,88,0,1,1,88-88A88.1,88.1,0,0,1,128,216ZM80,108a12,12,0,1,1,12,12A12,12,0,0,1,80,108Zm96,0a12,12,0,1,1-12-12A12,12,0,0,1,176,108Zm-1.07,48c-10.29,17.79-27.4,28-46.93,28s-36.63-10.2-46.92-28a8,8,0,1,1,13.84-8c7.47,12.91,19.21,20,33.08,20s25.61-7.1,33.07-20a8,8,0,0,1,13.86,8Z"/></symbol>
+<symbol id="i-spinner-gap" viewBox="0 0 256 256" fill="currentColor"><path d="M136,32V64a8,8,0,0,1-16,0V32a8,8,0,0,1,16,0Zm88,88H192a8,8,0,0,0,0,16h32a8,8,0,0,0,0-16Zm-45.09,47.6a8,8,0,0,0-11.31,11.31l22.62,22.63a8,8,0,0,0,11.32-11.32ZM128,184a8,8,0,0,0-8,8v32a8,8,0,0,0,16,0V192A8,8,0,0,0,128,184ZM77.09,167.6,54.46,190.22a8,8,0,0,0,11.32,11.32L88.4,178.91A8,8,0,0,0,77.09,167.6ZM72,128a8,8,0,0,0-8-8H32a8,8,0,0,0,0,16H64A8,8,0,0,0,72,128ZM65.78,54.46A8,8,0,0,0,54.46,65.78L77.09,88.4A8,8,0,0,0,88.4,77.09Z"/></symbol>
+<symbol id="i-square" viewBox="0 0 256 256" fill="currentColor"><path d="M208,32H48A16,16,0,0,0,32,48V208a16,16,0,0,0,16,16H208a16,16,0,0,0,16-16V48A16,16,0,0,0,208,32Zm0,176H48V48H208V208Z"/></symbol>
+<symbol id="i-stop-circle" viewBox="0 0 256 256" fill="currentColor"><path d="M128,24A104,104,0,1,0,232,128,104.11,104.11,0,0,0,128,24Zm0,192a88,88,0,1,1,88-88A88.1,88.1,0,0,1,128,216ZM160,88H96a8,8,0,0,0-8,8v64a8,8,0,0,0,8,8h64a8,8,0,0,0,8-8V96A8,8,0,0,0,160,88Zm-8,64H104V104h48Z"/></symbol>
+<symbol id="i-sun" viewBox="0 0 256 256" fill="currentColor"><path d="M120,40V16a8,8,0,0,1,16,0V40a8,8,0,0,1-16,0Zm72,88a64,64,0,1,1-64-64A64.07,64.07,0,0,1,192,128Zm-16,0a48,48,0,1,0-48,48A48.05,48.05,0,0,0,176,128ZM58.34,69.66A8,8,0,0,0,69.66,58.34l-16-16A8,8,0,0,0,42.34,53.66Zm0,116.68-16,16a8,8,0,0,0,11.32,11.32l16-16a8,8,0,0,0-11.32-11.32ZM192,72a8,8,0,0,0,5.66-2.34l16-16a8,8,0,0,0-11.32-11.32l-16,16A8,8,0,0,0,192,72Zm5.66,114.34a8,8,0,0,0-11.32,11.32l16,16a8,8,0,0,0,11.32-11.32ZM48,128a8,8,0,0,0-8-8H16a8,8,0,0,0,0,16H40A8,8,0,0,0,48,128Zm80,80a8,8,0,0,0-8,8v24a8,8,0,0,0,16,0V216A8,8,0,0,0,128,208Zm112-88H216a8,8,0,0,0,0,16h24a8,8,0,0,0,0-16Z"/></symbol>
+<symbol id="i-terminal-window" viewBox="0 0 256 256" fill="currentColor"><path d="M128,128a8,8,0,0,1-3,6.25l-40,32a8,8,0,1,1-10-12.5L107.19,128,75,102.25a8,8,0,1,1,10-12.5l40,32A8,8,0,0,1,128,128Zm48,24H136a8,8,0,0,0,0,16h40a8,8,0,0,0,0-16Zm56-96V200a16,16,0,0,1-16,16H40a16,16,0,0,1-16-16V56A16,16,0,0,1,40,40H216A16,16,0,0,1,232,56ZM216,200V56H40V200H216Z"/></symbol>
+<symbol id="i-trash" viewBox="0 0 256 256" fill="currentColor"><path d="M216,48H176V40a24,24,0,0,0-24-24H104A24,24,0,0,0,80,40v8H40a8,8,0,0,0,0,16h8V208a16,16,0,0,0,16,16H192a16,16,0,0,0,16-16V64h8a8,8,0,0,0,0-16ZM96,40a8,8,0,0,1,8-8h48a8,8,0,0,1,8,8v8H96Zm96,168H64V64H192ZM112,104v64a8,8,0,0,1-16,0V104a8,8,0,0,1,16,0Zm48,0v64a8,8,0,0,1-16,0V104a8,8,0,0,1,16,0Z"/></symbol>
+<symbol id="i-users" viewBox="0 0 256 256" fill="currentColor"><path d="M117.25,157.92a60,60,0,1,0-66.5,0A95.83,95.83,0,0,0,3.53,195.63a8,8,0,1,0,13.4,8.74,80,80,0,0,1,134.14,0,8,8,0,0,0,13.4-8.74A95.83,95.83,0,0,0,117.25,157.92ZM40,108a44,44,0,1,1,44,44A44.05,44.05,0,0,1,40,108Zm210.14,98.7a8,8,0,0,1-11.07-2.33A79.83,79.83,0,0,0,172,168a8,8,0,0,1,0-16,44,44,0,1,0-16.34-84.87,8,8,0,1,1-5.94-14.85,60,60,0,0,1,55.53,105.64,95.83,95.83,0,0,1,47.22,37.71A8,8,0,0,1,250.14,206.7Z"/></symbol>
+<symbol id="i-warning" viewBox="0 0 256 256" fill="currentColor"><path d="M236.8,188.09,149.35,36.22h0a24.76,24.76,0,0,0-42.7,0L19.2,188.09a23.51,23.51,0,0,0,0,23.72A24.35,24.35,0,0,0,40.55,224h174.9a24.35,24.35,0,0,0,21.33-12.19A23.51,23.51,0,0,0,236.8,188.09ZM222.93,203.8a8.5,8.5,0,0,1-7.48,4.2H40.55a8.5,8.5,0,0,1-7.48-4.2,7.59,7.59,0,0,1,0-7.72L120.52,44.21a8.75,8.75,0,0,1,15,0l87.45,151.87A7.59,7.59,0,0,1,222.93,203.8ZM120,144V104a8,8,0,0,1,16,0v40a8,8,0,0,1-16,0Zm20,36a12,12,0,1,1-12-12A12,12,0,0,1,140,180Z"/></symbol>
+<symbol id="i-wrench" viewBox="0 0 256 256" fill="currentColor"><path d="M226.76,69a8,8,0,0,0-12.84-2.88l-40.3,37.19-17.23-3.7-3.7-17.23,37.19-40.3A8,8,0,0,0,187,29.24,72,72,0,0,0,88,96,72.34,72.34,0,0,0,94,124.94L33.79,177c-.15.12-.29.26-.43.39a32,32,0,0,0,45.26,45.26c.13-.13.27-.28.39-.42L131.06,162A72,72,0,0,0,232,96,71.56,71.56,0,0,0,226.76,69ZM160,152a56.14,56.14,0,0,1-27.07-7,8,8,0,0,0-9.92,1.77L67.11,211.51a16,16,0,0,1-22.62-22.62L109.18,133a8,8,0,0,0,1.77-9.93,56,56,0,0,1,58.36-82.31l-31.2,33.81a8,8,0,0,0-1.94,7.1L141.83,108a8,8,0,0,0,6.14,6.14l26.35,5.66a8,8,0,0,0,7.1-1.94l33.81-31.2A56.06,56.06,0,0,1,160,152Z"/></symbol>
+<symbol id="i-x" viewBox="0 0 256 256" fill="currentColor"><path d="M205.66,194.34a8,8,0,0,1-11.32,11.32L128,139.31,61.66,205.66a8,8,0,0,1-11.32-11.32L116.69,128,50.34,61.66A8,8,0,0,1,61.66,50.34L128,116.69l66.34-66.35a8,8,0,0,1,11.32,11.32L139.31,128Z"/></symbol>
+<symbol id="l-archive" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><rect width="20" height="5" x="2" y="3" rx="1" />
+  <path d="M4 8v11a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8" />
+  <path d="M10 12h4" /></g></symbol>
+<symbol id="l-arrow-bend-down-right" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><polyline points="15 10 20 15 15 20" />
+  <path d="M4 4v7a4 4 0 0 0 4 4h12" /></g></symbol>
+<symbol id="l-arrow-left" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="m12 19-7-7 7-7" />
+  <path d="M19 12H5" /></g></symbol>
+<symbol id="l-arrow-up" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="m5 12 7-7 7 7" />
+  <path d="M12 19V5" /></g></symbol>
+<symbol id="l-arrows-clockwise" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12a9 9 0 0 1 9-9 9.75 9.75 0 0 1 6.74 2.74L21 8" />
+  <path d="M21 3v5h-5" />
+  <path d="M21 12a9 9 0 0 1-9 9 9.75 9.75 0 0 1-6.74-2.74L3 16" />
+  <path d="M8 16H3v5" /></g></symbol>
+<symbol id="l-bell-ringing" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="M10.268 21a2 2 0 0 0 3.464 0" />
+  <path d="M22 8c0-2.3-.8-4.3-2-6" />
+  <path d="M3.262 15.326A1 1 0 0 0 4 17h16a1 1 0 0 0 .74-1.673C19.41 13.956 18 12.499 18 8A6 6 0 0 0 6 8c0 4.499-1.411 5.956-2.738 7.326" />
+  <path d="M4 2C2.8 3.7 2 5.7 2 8" /></g></symbol>
+<symbol id="l-bell" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="M10.268 21a2 2 0 0 0 3.464 0" />
+  <path d="M3.262 15.326A1 1 0 0 0 4 17h16a1 1 0 0 0 .74-1.673C19.41 13.956 18 12.499 18 8A6 6 0 0 0 6 8c0 4.499-1.411 5.956-2.738 7.326" /></g></symbol>
+<symbol id="l-brain" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5a3 3 0 1 0-5.997.125 4 4 0 0 0-2.526 5.77 4 4 0 0 0 .556 6.588A4 4 0 1 0 12 18Z" />
+  <path d="M12 5a3 3 0 1 1 5.997.125 4 4 0 0 1 2.526 5.77 4 4 0 0 1-.556 6.588A4 4 0 1 1 12 18Z" />
+  <path d="M15 13a4.5 4.5 0 0 1-3-4 4.5 4.5 0 0 1-3 4" />
+  <path d="M17.599 6.5a3 3 0 0 0 .399-1.375" />
+  <path d="M6.003 5.125A3 3 0 0 0 6.401 6.5" />
+  <path d="M3.477 10.896a4 4 0 0 1 .585-.396" />
+  <path d="M19.938 10.5a4 4 0 0 1 .585.396" />
+  <path d="M6 18a4 4 0 0 1-1.967-.516" />
+  <path d="M19.967 17.484A4 4 0 0 1 18 18" /></g></symbol>
+<symbol id="l-caret-down" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="m6 9 6 6 6-6" /></g></symbol>
+<symbol id="l-caret-right" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="m9 18 6-6-6-6" /></g></symbol>
+<symbol id="l-caret-up" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="m18 15-6-6-6 6" /></g></symbol>
+<symbol id="l-chat-circle" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="M7.9 20A9 9 0 1 0 4 16.1L2 22Z" /></g></symbol>
+<symbol id="l-chat-text" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" />
+  <path d="M13 8H7" />
+  <path d="M17 12H7" /></g></symbol>
+<symbol id="l-check-circle" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10" />
+  <path d="m9 12 2 2 4-4" /></g></symbol>
+<symbol id="l-check" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5" /></g></symbol>
+<symbol id="l-clipboard-text" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><rect width="8" height="4" x="8" y="2" rx="1" ry="1" />
+  <path d="M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2" />
+  <path d="M12 11h4" />
+  <path d="M12 16h4" />
+  <path d="M8 11h.01" />
+  <path d="M8 16h.01" /></g></symbol>
+<symbol id="l-clock-counter-clockwise" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8" />
+  <path d="M3 3v5h5" />
+  <path d="M12 7v5l4 2" /></g></symbol>
+<symbol id="l-clock" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10" />
+  <polyline points="12 6 12 12 16 14" /></g></symbol>
+<symbol id="l-cloud" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="M17.5 19H9a7 7 0 1 1 6.71-9h1.79a4.5 4.5 0 1 1 0 9Z" /></g></symbol>
+<symbol id="l-copy" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><rect width="14" height="14" x="8" y="8" rx="2" ry="2" />
+  <path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2" /></g></symbol>
+<symbol id="l-desktop" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><rect width="20" height="14" x="2" y="3" rx="2" />
+  <line x1="8" x2="16" y1="21" y2="21" />
+  <line x1="12" x2="12" y1="17" y2="21" /></g></symbol>
+<symbol id="l-dots-three" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="1" />
+  <circle cx="19" cy="12" r="1" />
+  <circle cx="5" cy="12" r="1" /></g></symbol>
+<symbol id="l-eye" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="M2.062 12.348a1 1 0 0 1 0-.696 10.75 10.75 0 0 1 19.876 0 1 1 0 0 1 0 .696 10.75 10.75 0 0 1-19.876 0" />
+  <circle cx="12" cy="12" r="3" /></g></symbol>
+<symbol id="l-file-text" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="M15 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7Z" />
+  <path d="M14 2v4a2 2 0 0 0 2 2h4" />
+  <path d="M10 9H8" />
+  <path d="M16 13H8" />
+  <path d="M16 17H8" /></g></symbol>
+<symbol id="l-files" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="M20 7h-3a2 2 0 0 1-2-2V2" />
+  <path d="M9 18a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h7l4 4v10a2 2 0 0 1-2 2Z" />
+  <path d="M3 7.6v12.8A1.6 1.6 0 0 0 4.6 22h9.8" /></g></symbol>
+<symbol id="l-folder-open" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="m6 14 1.5-2.9A2 2 0 0 1 9.24 10H20a2 2 0 0 1 1.94 2.5l-1.54 6a2 2 0 0 1-1.95 1.5H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h3.9a2 2 0 0 1 1.69.9l.81 1.2a2 2 0 0 0 1.67.9H18a2 2 0 0 1 2 2v2" /></g></symbol>
+<symbol id="l-folder-simple" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z" /></g></symbol>
+<symbol id="l-gauge" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="m12 14 4-4" />
+  <path d="M3.34 19a10 10 0 1 1 17.32 0" /></g></symbol>
+<symbol id="l-gear-six" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z" />
+  <circle cx="12" cy="12" r="3" /></g></symbol>
+<symbol id="l-git-diff" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><circle cx="18" cy="18" r="3" />
+  <circle cx="6" cy="6" r="3" />
+  <path d="M13 6h3a2 2 0 0 1 2 2v7" />
+  <path d="M11 18H8a2 2 0 0 1-2-2V9" /></g></symbol>
+<symbol id="l-git-merge" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><circle cx="18" cy="18" r="3" />
+  <circle cx="6" cy="6" r="3" />
+  <path d="M6 21V9a9 9 0 0 0 9 9" /></g></symbol>
+<symbol id="l-globe" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10" />
+  <path d="M12 2a14.5 14.5 0 0 0 0 20 14.5 14.5 0 0 0 0-20" />
+  <path d="M2 12h20" /></g></symbol>
+<symbol id="l-hammer" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="m15 12-8.373 8.373a1 1 0 1 1-3-3L12 9" />
+  <path d="m18 15 4-4" />
+  <path d="m21.5 11.5-1.914-1.914A2 2 0 0 1 19 8.172V7l-2.26-2.26a6 6 0 0 0-4.202-1.756L9 2.96l.92.82A6.18 6.18 0 0 1 12 8.4V10l2 2h1.172a2 2 0 0 1 1.414.586L18.5 14.5" /></g></symbol>
+<symbol id="l-image" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><rect width="18" height="18" x="3" y="3" rx="2" ry="2" />
+  <circle cx="9" cy="9" r="2" />
+  <path d="m21 15-3.086-3.086a2 2 0 0 0-2.828 0L6 21" /></g></symbol>
+<symbol id="l-info" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10" />
+  <path d="M12 16v-4" />
+  <path d="M12 8h.01" /></g></symbol>
+<symbol id="l-key" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="M2.586 17.414A2 2 0 0 0 2 18.828V21a1 1 0 0 0 1 1h3a1 1 0 0 0 1-1v-1a1 1 0 0 1 1-1h1a1 1 0 0 0 1-1v-1a1 1 0 0 1 1-1h.172a2 2 0 0 0 1.414-.586l.814-.814a6.5 6.5 0 1 0-4-4z" />
+  <circle cx="16.5" cy="7.5" r=".5" fill="currentColor" /></g></symbol>
+<symbol id="l-list-checks" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="m3 17 2 2 4-4" />
+  <path d="m3 7 2 2 4-4" />
+  <path d="M13 6h8" />
+  <path d="M13 12h8" />
+  <path d="M13 18h8" /></g></symbol>
+<symbol id="l-lock-simple" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><rect width="18" height="11" x="3" y="11" rx="2" ry="2" />
+  <path d="M7 11V7a5 5 0 0 1 10 0v4" /></g></symbol>
+<symbol id="l-magnifying-glass" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8" />
+  <path d="m21 21-4.3-4.3" /></g></symbol>
+<symbol id="l-moon" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3a6 6 0 0 0 9 9 9 9 0 1 1-9-9Z" /></g></symbol>
+<symbol id="l-note-pencil" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3H5a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7" />
+  <path d="M18.375 2.625a1 1 0 0 1 3 3l-9.013 9.014a2 2 0 0 1-.853.505l-2.873.84a.5.5 0 0 1-.62-.62l.84-2.873a2 2 0 0 1 .506-.852z" /></g></symbol>
+<symbol id="l-pencil-simple" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="M21.174 6.812a1 1 0 0 0-3.986-3.987L3.842 16.174a2 2 0 0 0-.5.83l-1.321 4.352a.5.5 0 0 0 .623.622l4.353-1.32a2 2 0 0 0 .83-.497z" />
+  <path d="m15 5 4 4" /></g></symbol>
+<symbol id="l-plug" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22v-5" />
+  <path d="M9 8V2" />
+  <path d="M15 8V2" />
+  <path d="M18 8v5a4 4 0 0 1-4 4h-4a4 4 0 0 1-4-4V8Z" /></g></symbol>
+<symbol id="l-plus" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h14" />
+  <path d="M12 5v14" /></g></symbol>
+<symbol id="l-push-pin" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="M12 17v5" />
+  <path d="M9 10.76a2 2 0 0 1-1.11 1.79l-1.78.9A2 2 0 0 0 5 15.24V16a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1v-.76a2 2 0 0 0-1.11-1.79l-1.78-.9A2 2 0 0 1 15 10.76V7a1 1 0 0 1 1-1 2 2 0 0 0 0-4H8a2 2 0 0 0 0 4 1 1 0 0 1 1 1z" /></g></symbol>
+<symbol id="l-seal-check" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="M3.85 8.62a4 4 0 0 1 4.78-4.77 4 4 0 0 1 6.74 0 4 4 0 0 1 4.78 4.78 4 4 0 0 1 0 6.74 4 4 0 0 1-4.77 4.78 4 4 0 0 1-6.75 0 4 4 0 0 1-4.78-4.77 4 4 0 0 1 0-6.76Z" />
+  <path d="m9 12 2 2 4-4" /></g></symbol>
+<symbol id="l-shield-check" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="M20 13c0 5-3.5 7.5-7.66 8.95a1 1 0 0 1-.67-.01C7.5 20.5 4 18 4 13V6a1 1 0 0 1 1-1c2 0 4.5-1.2 6.24-2.72a1.17 1.17 0 0 1 1.52 0C14.51 3.81 17 5 19 5a1 1 0 0 1 1 1z" />
+  <path d="m9 12 2 2 4-4" /></g></symbol>
+<symbol id="l-sidebar-simple" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><rect width="18" height="18" x="3" y="3" rx="2" />
+  <path d="M9 3v18" /></g></symbol>
+<symbol id="l-sliders-horizontal" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><line x1="21" x2="14" y1="4" y2="4" />
+  <line x1="10" x2="3" y1="4" y2="4" />
+  <line x1="21" x2="12" y1="12" y2="12" />
+  <line x1="8" x2="3" y1="12" y2="12" />
+  <line x1="21" x2="16" y1="20" y2="20" />
+  <line x1="12" x2="3" y1="20" y2="20" />
+  <line x1="14" x2="14" y1="2" y2="6" />
+  <line x1="8" x2="8" y1="10" y2="14" />
+  <line x1="16" x2="16" y1="18" y2="22" /></g></symbol>
+<symbol id="l-smiley" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10" />
+  <path d="M8 14s1.5 2 4 2 4-2 4-2" />
+  <line x1="9" x2="9.01" y1="9" y2="9" />
+  <line x1="15" x2="15.01" y1="9" y2="9" /></g></symbol>
+<symbol id="l-square" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><rect width="18" height="18" x="3" y="3" rx="2" /></g></symbol>
+<symbol id="l-stop-circle" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10" />
+  <rect x="9" y="9" width="6" height="6" rx="1" /></g></symbol>
+<symbol id="l-sun" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="4" />
+  <path d="M12 2v2" />
+  <path d="M12 20v2" />
+  <path d="m4.93 4.93 1.41 1.41" />
+  <path d="m17.66 17.66 1.41 1.41" />
+  <path d="M2 12h2" />
+  <path d="M20 12h2" />
+  <path d="m6.34 17.66-1.41 1.41" />
+  <path d="m19.07 4.93-1.41 1.41" /></g></symbol>
+<symbol id="l-terminal-window" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="m7 11 2-2-2-2" />
+  <path d="M11 13h4" />
+  <rect width="18" height="18" x="3" y="3" rx="2" ry="2" /></g></symbol>
+<symbol id="l-users" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2" />
+  <circle cx="9" cy="7" r="4" />
+  <path d="M22 21v-2a4 4 0 0 0-3-3.87" />
+  <path d="M16 3.13a4 4 0 0 1 0 7.75" /></g></symbol>
+<symbol id="l-warning" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="m21.73 18-8-14a2 2 0 0 0-3.48 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.73-3" />
+  <path d="M12 9v4" />
+  <path d="M12 17h.01" /></g></symbol>
+<symbol id="l-wrench" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z" /></g></symbol>
+<symbol id="l-x" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="M18 6 6 18" />
+  <path d="m6 6 12 12" /></g></symbol>
+</svg>
+<div class="toolbar" role="toolbar" aria-label="Mockup controls">
+  <span class="name">AccordAgents UI refresh</span>
+  <div class="seg" data-seg="screen">
+    <span class="thumb"></span>
+    <button data-v="sessions">Sessions</button>
+    <button data-v="member">Member</button>
+    <button data-v="compact">1080x720</button>
+    <button data-v="newchat">New chat</button>
+    <button data-v="artifacts">Artifacts</button>
+    <button data-v="settings">Settings</button>
+    <button data-v="menus">Menus</button>
+    <button data-v="kit">Kit</button>
+  </div>
+  <div class="seg" data-seg="theme">
+    <span class="thumb"></span>
+    <button data-v="light">Light</button>
+    <button data-v="dark">Dark</button>
+  </div>
+  <div class="seg" data-seg="dir">
+    <span class="thumb"></span>
+    <button data-v="a">A Graphite</button>
+    <button data-v="b">B Brand</button>
+  </div>
+  <div class="seg" data-seg="icons">
+    <span class="thumb"></span>
+    <button data-v="phosphor">Phosphor</button>
+    <button data-v="lucide">Lucide</button>
+  </div>
+</div>
+<div class="stage">
+  <div class="caption" id="caption"></div>
+  <div class="frame-wrap" id="wrap"><div class="frame" id="frame"></div></div>
+</div>
+<script>
+const params = new URLSearchParams(location.hash.slice(1));
+const state = { screen: params.get("screen") || "sessions", theme: params.get("theme") || "light", dir: params.get("dir") || "b", icons: params.get("icons") || "phosphor" };
+const capture = !!params.get("capture");
+if (capture) document.body.classList.add("capture");
+
+const MARK = "assets/accordagents-mark.png";
+const AGY = "assets/antigravity-logo.png";
+const icon = (name, cls = "") => `<svg class="i ${cls}" aria-hidden="true"><use href="#${state.icons === "lucide" ? "l" : "i"}-${name}"/></svg>`;
+const codex = (s = "") => `<svg class="pg ${s}" viewBox="0 0 24 24" aria-hidden="true"><defs><linearGradient id="cg" x1="12" x2="12" y1="0" y2="24" gradientUnits="userSpaceOnUse"><stop stop-color="#b1a7ff"/><stop offset=".5" stop-color="#7a9dff"/><stop offset="1" stop-color="#3941ff"/></linearGradient></defs><path fill="url(#cg)" fill-rule="evenodd" d="M8.086.457a6.105 6.105 0 013.046-.415c1.333.153 2.521.72 3.564 1.7a.117.117 0 00.107.029c1.408-.346 2.762-.224 4.061.366l.063.03.154.076c1.357.703 2.33 1.77 2.918 3.198.278.679.418 1.388.421 2.126a5.655 5.655 0 01-.18 1.631.167.167 0 00.04.155 5.982 5.982 0 011.578 2.891c.385 1.901-.01 3.615-1.183 5.14l-.182.22a6.063 6.063 0 01-2.934 1.851.162.162 0 00-.108.102c-.255.736-.511 1.364-.987 1.992-1.199 1.582-2.962 2.462-4.948 2.451-1.583-.008-2.986-.587-4.21-1.736a.145.145 0 00-.14-.032c-.518.167-1.04.191-1.604.185a5.924 5.924 0 01-2.595-.622 6.058 6.058 0 01-2.146-1.781c-.203-.269-.404-.522-.551-.821a7.74 7.74 0 01-.495-1.283 6.11 6.11 0 01-.017-3.064.166.166 0 00.008-.074.115.115 0 00-.037-.064 5.958 5.958 0 01-1.38-2.202 5.196 5.196 0 01-.333-1.589 6.915 6.915 0 01.188-2.132c.45-1.484 1.309-2.648 2.577-3.493.282-.188.55-.334.802-.438.286-.12.573-.22.861-.304a.129.129 0 00.087-.087A6.016 6.016 0 015.635 2.31C6.315 1.464 7.132.846 8.086.457zm-.804 7.85a.848.848 0 00-1.473.842l1.694 2.965-1.688 2.848a.849.849 0 001.46.864l1.94-3.272a.849.849 0 00.007-.854l-1.94-3.393zm5.446 6.24a.849.849 0 000 1.695h4.848a.849.849 0 000-1.696h-4.848z"/></svg>`;
+/** The app's own Claude mark (claude-avatar.png as a mask in the brand color), as chat-sessions.css draws it. */
+const claude = (s = "") => `<span class="pg claude ${s}" aria-hidden="true"></span>`;
+const agy = (s = "") => `<img class="pg ${s}" src="${AGY}" alt="">`;
+const G = { codex, claude, agy };
+/** Bare provider glyph with the row's only state mark: a dot while the state matters. */
+const gd = (kind, st) => `<span class="gd">${G[kind]("s16")}${st ? `<span class="sd ${st}"></span>` : ""}</span>`;
+const isDark = () => document.documentElement.dataset.theme === "dark";
+
+/* ---------- Shell ---------- */
+function sidebar({ active = "chat", settings = false } = {}) {
+  const top = `<div class="side-top" data-titlebar><div class="lights"><span></span><span></span><span></span></div><div class="brand"><img src="${MARK}" alt="">AccordAgents</div><button class="ibtn" aria-label="Hide sidebar">${icon("sidebar-simple")}</button></div>`;
+  const foot = (left) => `<div class="side-foot">${left}<button class="ibtn" aria-label="Theme">${icon(isDark() ? "sun" : "moon")}</button><button class="ibtn" aria-label="Refresh">${icon("arrows-clockwise")}</button></div>`;
+  if (settings) {
+    const items = [["sliders-horizontal", "General", true], ["cloud", "AWS"], ["key", "Environment"], ["clock", "Scheduled Tasks"], ["bell-ringing", "Alerts"], ["users", "Roles"], ["list-checks", "Rules"], ["chat-text", "Prompts"], ["plug", "Plugins & Skills"], ["brain", "Memory"], ["users", "Members"]];
+    return `<aside class="sidebar settings-nav">${top}
+      <div class="nav"><div class="row">${icon("arrow-left")}<span class="t">Chats</span></div></div>
+      <div class="sec">Settings</div>
+      <div class="nav">${items.map(([ic, t, on]) => `<div class="row ${on ? "active" : ""}">${icon(ic)}<span class="t">${t}</span></div>`).join("")}</div>
+      <div style="flex:1"></div>${foot(`<div style="flex:1"></div>`)}</aside>`;
+  }
+  const chat = (t, time, o = {}) => `<div class="row ${o.indent ? "indent" : ""} ${o.active ? "active" : ""}">${o.run ? `<span class="spin"></span>` : ""}<span class="t">${t}</span>${o.unread ? `<span class="unread"></span>` : ""}<span class="time">${time}</span></div>`;
+  const proj = (name, open, n) => `<div class="row proj">${icon(open ? "caret-down" : "caret-right", "s14")}${icon("folder-simple", "s14")}<span class="t">${name}</span>${n ? `<span class="time">${n}</span>` : ""}</div>`;
+  return `<aside class="sidebar">${top}
+    <div class="side-search">${icon("magnifying-glass", "s14")}<span>Search chats</span><span class="kbd">⌘K</span></div>
+    <div class="nav">
+      <div class="row ${active === "new" ? "active" : ""}">${icon("note-pencil")}<span class="t">New chat</span></div>
+      <div class="row">${icon("bell")}<span class="t">Activity</span><span class="count">2</span></div>
+    </div>
+    <div class="side-scroll">
+      <div class="sec"><span>Pinned</span>${icon("caret-down")}</div>
+      <div class="nav">${chat("Релиз 1.12: чеклист", "1d")}</div>
+      <div class="sec"><span>Recents</span>${icon("caret-down")}</div>
+      <div class="nav">
+        ${chat("Проверка интерфейса с тремя агентами", "now", { active: active === "chat", run: true })}
+        ${chat("Аудит производительности my-app", "12m", { unread: true })}
+        ${chat("Миграция настроек на v2", "2h")}
+        ${chat("Разбор падения сборки в CI", "1d")}
+      </div>
+      <div class="sec"><span>Projects</span><span class="grow"></span><button class="ibtn xs" aria-label="New chat in a project">${icon("plus", "s14")}</button></div>
+      <div class="nav">
+        ${proj("demo-project", true)}
+        ${chat("Проверка интерфейса с тремя агентами", "now", { indent: true, active: active === "chat", run: true })}
+        ${proj("my-app", true)}
+        ${chat("Аудит производительности my-app", "12m", { indent: true, unread: true })}
+        ${chat("Ленивая загрузка графиков", "5d", { indent: true })}
+        ${proj("ai-consensus", false, 6)}
+        ${proj("No project", false, 2)}
+      </div>
+      <div class="sec"><span>Archived</span>${icon("caret-right")}<span class="grow"></span><span class="faint num" style="font-size:11px">14</span></div>
+    </div>
+    ${foot(`<div class="row">${icon("gear-six")}<span class="t">Settings</span></div>`)}
+  </aside>`;
+}
+
+/* Header: title, its menu (the view switch lives there), rename; one icon per panel, more than one can be open. */
+function header(title, { on = ["side"], running = 1, accord = true } = {}) {
+  const b = (id, ic, label, extra = "") => `<button class="ibtn ${on.includes(id) ? "on" : ""}" data-panel="${id}" aria-label="${label}">${icon(ic)}${extra}</button>`;
+  const badge = running ? `<span class="badge">${running}</span>` : accord ? `<span class="badge" style="min-width:8px;height:8px;padding:0;top:3px;right:3px"></span>` : "";
+  return `<div class="head" data-titlebar><span class="title">${title}</span><button class="ibtn xs" aria-label="Chat menu">${icon("caret-down", "s14")}</button><button class="ibtn xs" aria-label="Edit chat name">${icon("pencil-simple", "s14")}</button><span class="grow"></span>
+    <div class="group">${b("side", "sidebar-simple", "Side panel", badge)}${b("terminal", "terminal-window", "Terminal")}${b("artifacts", "files", "Artifacts")}</div></div>`;
+}
+
+/* One composer presentation for the main session, a member and New chat.
+   running: the main session's own turn runs. density: "full", "partial" (effort and mode as icons), "icons" (everything but the model). */
+function composer({ placeholder = "Ask anything. / commands, # files", typed = "", focus = false, member = "", running = false, newChat = false, density = "full", machine = false, effort = "Extra High" } = {}) {
+  const asIcon = density !== "full";
+  const chip = (inner, label, menu = "") => `<button class="chip" ${menu} aria-label="${label}">${inner}${icon("caret-down", "caret")}</button>`;
+  const model = member === "claude" ? chip(`${claude()}Opus 5.5`, "Model: Opus 5.5") : chip(`${codex()}GPT-6.2-Astra`, "Model: GPT-6.2-Astra", `data-menu="model"`);
+  const eff = asIcon ? chip(icon("gauge", "s14"), `Effort: ${effort}`) : chip(effort, `Effort: ${effort}`);
+  const modeLabel = member === "claude" ? "Manual" : "Ask for approval";
+  const mode = asIcon ? chip(icon("lock-simple", "s14"), `Mode: ${modeLabel}`) : chip(`${icon("lock-simple", "s14")}${modeLabel}`, `Mode: ${modeLabel}`);
+  const plan = member === "claude" ? "" : `<button class="chip toggle" aria-label="Plan mode">${icon("clipboard-text", "s14")}${density === "icons" ? "" : "Plan mode"}</button>`;
+  const where = machine ? (density === "icons" ? chip(icon("desktop", "s14"), "Runs on: Local") : chip(`${icon("desktop", "s14")}Local`, "Runs on: Local")) : "";
+  // Main session running and nothing typed: Send becomes Stop. Typed: a secondary Stop beside Send.
+  const send = running && !typed
+    ? `<button class="send stop" aria-label="Stop">${icon("square", "s14")}</button>`
+    : `${running ? `<button class="ibtn" aria-label="Stop">${icon("stop-circle")}</button>` : ""}<button class="send" ${typed ? "" : "disabled"} aria-label="Send">${icon("arrow-up", "s14")}</button>`;
+  const leading = newChat
+    ? `<button class="ibtn" aria-label="Attach image">${icon("image")}</button><button class="chip">${icon("folder-simple", "s14")}demo-project${icon("caret-down", "caret")}</button>`
+    : `<button class="ibtn" aria-label="Attach image">${icon("image")}</button>${member ? "" : `<button class="ibtn" aria-label="Start an Accord">${icon("git-merge")}</button>`}`;
+  return `<div class="composer-wrap"><div class="composer ${focus ? "focus" : ""}">
+    <div class="text ${typed ? "typed" : ""}">${typed || placeholder}</div>
+    <div class="bar">${leading}<span class="grow"></span>${where}${model}${eff}${mode}${plan}${send}</div>
+  </div></div>`;
+}
+
+/* The chat's open Accord, one line above the composer. */
+const accordStrip = () => `<div class="strip"><div class="arow">${icon("git-merge")}<span class="kind">Accord</span><span class="n">кэш для графиков</span><span class="st">v2 · 1/3 signed</span>${icon("caret-right", "s14")}</div><button class="ibtn xs" aria-label="Close">${icon("x", "s14")}</button></div>`;
+
+/* ---------- Timeline ---------- */
+const fold = (label, open, inner) => `<div class="wk ${open ? "is-open" : ""}"><div class="worked ${open ? "open" : ""}" data-toggle>${icon("caret-right", "caret-rot")}<span>${label}</span></div><div class="collapse ${open ? "open" : ""}"><div>${inner}</div></div></div>`;
+/* The same muted step rows the turn showed while it ran: an icon by kind and the CLI's own words. */
+const steps = (list) => `<div class="tools">${list.map(([ic, text]) => `<div class="tool">${icon(ic)}<span class="name" style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${text}</span></div>`).join("")}</div>`;
+const taskRow = (kind, st, title, sub, time, member) => `<div class="trow" ${member ? `data-open-member="${member}"` : ""}>${gd(kind, st)}<span class="ttl">${title}</span><span class="tm">${time}</span>${icon("caret-right")}<span class="sub">${sub}</span></div>`;
+const MAIN_STEPS = [
+  ["wrench", 'Called accord_agents.app_chat_set_title({"title":"Проверка интерфейса с тремя агентами"})'],
+  ["wrench", 'Called accord_agents.app_memory_search({"scope":"chat","limit":2})'],
+  ["wrench", 'Called accord_agents.app_chat_delegate_task({"title":"Краткий пересказ README","start":"clean",…})'],
+  ["wrench", 'Called accord_agents.app_chat_delegate_task({"title":"Цвета из заметок","start":"clean",…})'],
+  ["wrench", 'Called accord_agents.app_chat_delegate_task({"title":"Проверка ссылок в docs","start":"fork",…})']
+];
+const DELEGATIONS = () => `<div class="deleg"><div class="deleg-sum">${icon("hammer")}<span>Delegated 3 tasks</span></div>
+  ${taskRow("codex", "", "Краткий пересказ README", "README описывает небольшой демопроект для проверки интерфейса AccordAgents.", "15s", "readme")}
+  ${taskRow("codex", "wait", "Цвета из заметок", "Waiting for you", "9s", "colors")}
+  ${taskRow("claude", "run", "Проверка ссылок в docs", "Reading docs/main-session.md", "1m 12s", "links")}
+</div>`;
+
+function timeline({ open = true, short = false } = {}) {
+  return `<div class="scroll"><div class="col">
+    <div class="bubble">Создай трёх агентов: первый пусть перескажет README.md одной фразой, второй назовёт цвета из notes.txt, третий на Claude проверит ссылки в docs. Сам задачи не выполняй, дождись ответов и подведи итог.</div>
+    ${fold("Worked for 30s", open, `${steps(short ? MAIN_STEPS.slice(2) : MAIN_STEPS)}<p class="reply" style="margin:6px 0 2px;color:var(--text-2);font-size:13px">Раздаю три задачи и жду ответов.</p>${DELEGATIONS()}`)}
+    <div class="reply"><p>Раздал три задачи: пересказ <code>README.md</code>, цвета из <code>notes.txt</code> и проверку ссылок в <code>docs/</code>. Подведу итог, когда все ответят.</p></div>
+    <div class="card approval">
+      <div class="top">${codex("s16")}<span><b>Цвета из заметок</b> <span class="muted">wants to run a command</span></span></div>
+      <pre>cat notes.txt</pre>
+      <div class="opts" role="listbox" aria-label="Approval options">
+        <div class="opt sel"><span class="num">1.</span><span>Yes</span><span class="kbd k">1</span></div>
+        <div class="opt"><span class="num">2.</span><span>Yes, and don't ask again for cat commands in this chat</span><span class="kbd k">2</span></div>
+        <div class="opt"><span class="num">3.</span><span>No, and tell Codex what to do differently</span><span class="kbd k">3</span></div>
+      </div>
+      <div class="foot"><span class="faint" style="font-size:12px">↑↓ to choose, ⏎ to submit</span><span class="grow"></span><button class="btn sm ghost">Skip</button><button class="btn sm primary">Submit</button></div>
+    </div>
+  </div></div>`;
+}
+
+/* ---------- Side panel: no title, only Close; sections by a hairline ---------- */
+function sidePanel({ hover = false } = {}) {
+  const row = (kind, st, title, time, member, cls = "") => `<div class="arow ${st === "run" ? "running" : ""} ${cls}" data-open-member="${member}">${gd(kind, st)}<span class="n">${title}</span><span class="tm">${time}</span><button class="stopq" aria-label="Stop ${title}"><span class="sq"></span></button></div>`;
+  return `<aside class="panel"><div class="panel-inner">
+    <div class="ph"><span class="grow"></span><button class="ibtn" aria-label="Close" data-close-panel>${icon("x")}</button></div>
+    <div class="side-sec"><div class="arow">${icon("git-merge")}<span class="kind">Accord</span><span class="n">кэш для графиков</span><span class="st">v2 · 1/3 signed</span>${icon("caret-right", "s14")}</div></div>
+    <div class="side-sec">
+      <div class="side-label"><span>Agents · 1 running</span></div>
+      ${row("claude", "run", "Проверка ссылок в docs", "1m 12s", "links", hover ? "hover" : "")}
+      ${row("codex", "wait", "Цвета из заметок", "9s", "colors")}
+    </div>
+    <div class="side-sec"><div class="side-label" style="cursor:pointer">${icon("caret-right", "s14")}<span>Previous agents</span><span class="count">1</span></div></div>
+  </div></aside>`;
+}
+
+const MEMBERS = {
+  links: { kind: "claude", st: "run", title: "Проверка ссылок в docs", detail: "Claude Code · Opus 5.5 · High", status: "Running", elapsed: "1m 12s", running: true,
+    task: "Пройди по ссылкам в docs/ и проверь, что они открываются. Файлы не меняй. Пришли список битых ссылок с файлом и строкой.",
+    body: () => `<div class="working"><span class="wl">Working for 1m 12s</span>
+        <div class="step">${icon("magnifying-glass")}<span>Searching for https:// in docs</span></div>
+        <div class="step">${icon("file-text")}<span>Reading docs/parity-requirements.md</span></div>
+        <div class="step">${icon("terminal-window")}<span>Running curl -sI https://t3.codes</span></div>
+        <div class="step">${icon("globe")}<span>Fetching https://openai.com/codex</span></div>
+        <div class="step">${icon("file-text")}<span class="shimmer">Reading docs/main-session.md</span></div>
+      </div>
+      <div class="reply"><p>Проверил 9 из 14 ссылок, пока все открываются. Осталось пять в <code>docs/main-session.md</code>.</p></div>` },
+  readme: { kind: "codex", st: "", title: "Краткий пересказ README", detail: "Codex CLI · GPT-6.2-Astra · Extra High", status: "Done", elapsed: "", running: false,
+    task: "Прочитай README.md в корне выбранного репозитория. Ответь мне по-русски одной фразой о том, что в нём сказано. Файлы только читай.",
+    body: () => `${fold("Worked for 15s", true, steps([["terminal-window", "Ran cat README.md"], ["file-text", "Read README.md"]]))}<div class="reply"><p>README описывает небольшой демопроект для проверки интерфейса AccordAgents и упоминает, что в <code>notes.txt</code> перечислены три цвета.</p></div>` },
+  colors: { kind: "codex", st: "wait", title: "Цвета из заметок", detail: "Codex CLI · GPT-6.2-Astra · Extra High", status: "Waiting for you", elapsed: "9s", running: true,
+    task: "Прочитай файл notes.txt в корне выбранного репозитория. Перечисли мне упомянутые в нём цвета по-русски.",
+    body: () => `<div class="working"><span class="wl">Working for 9s</span><div class="step">${icon("terminal-window")}<span>Running cat notes.txt</span></div></div><div class="faint" style="font-size:12px">Ждёт вашего ответа на подтверждение в ленте чата.</div>` }
+};
+
+function memberPanel(id = "links") {
+  const m = MEMBERS[id];
+  return `<aside class="panel"><div class="panel-inner">
+    <div class="ph member" data-titlebar><button class="ibtn" aria-label="Back" data-back>${icon("arrow-left")}</button>${gd(m.kind, m.st)}<div class="who"><span class="n">${m.title}</span><span class="d">${m.detail}</span></div>
+      <span class="wst">${m.status}${m.elapsed ? `<span class="el">${m.elapsed}</span>` : ""}</span>
+      <button class="ibtn" aria-label="Session menu">${icon("dots-three")}</button>${m.running ? `<button class="ibtn danger" aria-label="Stop ${m.title}">${icon("square", "s14")}</button>` : ""}<button class="ibtn" aria-label="Close" data-close-panel>${icon("x")}</button></div>
+    <div class="panel-body">
+      <div class="taskcard"><div class="th" data-toggle>${icon("caret-right", "s14 caret-rot")}<b>Task</b><span class="p">${m.task}</span></div>
+        <div class="collapse"><div><div class="tb">${m.task}</div></div></div></div>
+      ${m.body()}
+    </div>
+    ${composer({ placeholder: `Message ${m.title}`, member: m.kind === "claude" ? "claude" : "codex", density: "partial", effort: m.kind === "claude" ? "High" : "Extra High" })}
+  </div></aside>`;
+}
+
+const ART = [
+  ["file-text", "План редизайна интерфейса", "v3", "Изменён 2 мин назад, подписан"],
+  ["list-checks", "QA-сценарии Sessions", "v1", "Черновик"],
+  ["file-text", "Решения по токенам", "v2", "Изменён вчера"]
+];
+function artifactsPanel(detail) {
+  if (!detail) {
+    return `<aside class="panel"><div class="panel-inner">
+      <div class="ph"><span class="ttl">Artifacts</span><span class="grow"></span><div class="seg" style="margin-right:4px"><span class="thumb"></span><button class="on">Active</button><button>Archived</button></div><button class="ibtn" aria-label="New artifact">${icon("plus")}</button><button class="ibtn" aria-label="Close" data-close-panel>${icon("x")}</button></div>
+      <div class="art-list">${ART.map(([ic, n, v, sub]) => `<div class="art" data-open-artifact>${icon(ic)}<span class="n">${n}</span><span class="faint num" style="font-size:11px">${v}</span><span class="sub">${sub}</span></div>`).join("")}</div>
+    </div></aside>`;
+  }
+  return `<aside class="panel"><div class="panel-inner" style="position:relative">
+    <div class="ph member"><button class="ibtn" aria-label="Back" data-back-artifacts>${icon("arrow-left")}</button><div class="who"><span class="n">План редизайна интерфейса</span><span class="d">v3 · Signed 3/3 · changes since v2</span></div><button class="ibtn on" aria-label="Versions, changes and signing">${icon("caret-down")}</button><button class="ibtn" aria-label="Close" data-close-panel>${icon("x")}</button></div>
+    <div class="doc"><h6>План редизайна интерфейса</h6>
+      <p style="margin:0 0 6px">Один кит на Radix, шрифт <ins>Inter Variable</ins><del>Geist</del>, иконки Phosphor.</p>
+      <ul><li>Терминал остаётся доком под чатом.</li><li><ins>Боковая панель без заголовка, только Close.</ins></li><li>Токены добавляются рядом со старыми, старые становятся алиасами.</li></ul>
+      <p style="margin:0" class="muted">3 изменения относительно v2</p>
+    </div>
+    <div class="menu pop-enter" style="right:44px;top:44px;width:240px;--origin:top right">
+      <div class="label">Version</div>
+      <div class="item"><div class="body">v3, current</div>${icon("check", "s14 tick")}</div>
+      <div class="item"><div class="body">v2<div class="desc">Yesterday</div></div></div>
+      <div class="sep"></div>
+      <div class="item hl">${icon("git-diff", "s14")}<div class="body">Show changes since v2</div>${icon("check", "s14 tick")}</div>
+      <div class="item">${icon("seal-check", "s14")}<div class="body">Signed 3/3</div></div>
+    </div>
+  </div></aside>`;
+}
+
+function terminalDock() {
+  return `<div class="dock"><span class="grip" aria-label="Resize terminal"></span><div class="dock-tabs"><span class="dock-tab on">${icon("terminal-window", "s14")}demo-project${icon("x", "s14")}</span><button class="ibtn xs" aria-label="New terminal">${icon("plus", "s14")}</button><span style="flex:1"></span><button class="ibtn xs" aria-label="Close terminal">${icon("x", "s14")}</button></div>
+    <pre>~/demo-project <b>main</b> $ git status --short
+ M notes.txt
+~/demo-project <b>main</b> $ ▍</pre></div>`;
+}
+
+/* ---------- Screens ---------- */
+const TITLE = "Проверка интерфейса с тремя агентами";
+const chatMain = (o = {}) => `<main class="main">${header(TITLE, o.head)}${timeline(o.timeline)}${accordStrip()}${composer(o.composer)}${o.extra || ""}</main>`;
+const SCREENS = {
+  sessions: { cap: "Sessions 1440x900: шаги и задачи внутри «Worked for», подтверждение участника с выбором и Submit, полоса Accord над композером, боковая панель без заголовка. Кликабельно: Worked for, задачи и агенты, кнопки панелей, Back и Close.",
+    html: () => `<div class="app panel-open" data-app>${sidebar()}${chatMain()}${sidePanel()}</div>` },
+  member: { cap: "Сессия участника в боковой панели: состояние, время и Stop в её шапке, шаги словами CLI, новейший мерцает, композер участника с Send.",
+    html: () => `<div class="app panel-open" data-app>${sidebar()}${chatMain({ timeline: { open: false } })}${memberPanel(state.member || "links")}</div>` },
+  compact: { size: [1080, 720], cap: "Окно 1080x720: открыты боковая панель и терминал (док под всей рабочей областью, ручка сверху), контролы композера свёрнуты в иконки, модель с глифом; главная сессия работает и набран текст: вторичный Stop рядом с Send.",
+    html: () => `<div class="app panel-open has-dock" data-app style="--panel-w:300px">${sidebar()}${chatMain({ head: { on: ["side", "terminal"] }, timeline: { open: true, short: true }, composer: { typed: "И проверь заодно README на опечатки", running: true, density: "icons", machine: true } })}${sidePanel()}${terminalDock()}</div>` },
+  newchat: { cap: "New chat: те же места; то же поле и те же контролы, что в чате, слева свои действия (вложение, папка проекта), без Accord.",
+    html: () => `<div class="app" data-app>${sidebar({ active: "new" })}<main class="main"><div class="head" data-titlebar><span class="grow"></span><button class="ibtn" aria-label="Terminal">${icon("terminal-window")}</button></div>
+      <div class="newchat"><img class="mark" src="${MARK}" alt=""><h1>Start a new chat</h1>${composer({ placeholder: "What are you working on?", newChat: true, focus: true })}<div class="hint"><span><span class="kbd">/</span> commands</span><span><span class="kbd">#</span> files</span><span><span class="kbd">⏎</span> send</span></div></div></main><aside></aside></div>` },
+  artifacts: { cap: "Артефакты: открыт документ (Back к списку), меню заголовка с версиями, изменениями и подписью, подсветка изменений с v2.",
+    html: () => `<div class="app panel-open" data-app style="--panel-w:440px">${sidebar()}${chatMain({ head: { on: ["artifacts"] }, timeline: { open: false } })}${artifactsPanel(!state.artifactList)}</div>` },
+  settings: { cap: "Settings, General: одна строка настройки, Switch и Select из кита, группы одного вида.",
+    html: () => `<div class="app" data-app>${sidebar({ settings: true })}<main class="main"><div class="head" data-titlebar><span class="grow"></span><button class="ibtn" aria-label="Close settings">${icon("x")}</button></div><div class="page"><div class="page-in">
+      <h2>General</h2>
+      <section><div class="group-t"><h3>Local CLI setup</h3><span class="faint num">3 of 3 ready</span></div><div class="group">
+        <div class="srow"><span class="tile">${codex("s16")}</span><div class="txt"><div class="n">Codex</div><div class="d">Ready · 0.170.0</div></div><button class="switch on" aria-label="Codex"></button></div>
+        <div class="srow"><span class="tile">${claude("s16")}</span><div class="txt"><div class="n">Claude Code</div><div class="d">Ready · 2.1.329</div></div><button class="switch on" aria-label="Claude Code"></button></div>
+        <div class="srow"><span class="tile">${agy("s16")}</span><div class="txt"><div class="n">Antigravity</div><div class="d">Ready · 1.5.14</div></div><button class="switch on" aria-label="Antigravity"></button></div>
+        <div class="srow"><button class="btn sm outline">${icon("plus", "s14")}Add provider</button><span class="faint" style="font-size:12px">Reach another vendor's models through Claude Code, Codex or Antigravity with your own API key.</span></div>
+        <div class="srow"><div class="txt"><div class="n">Claude in Chrome</div><div class="d">Lets members on Claude on this computer use your Chrome, as “Enabled by default” in /chrome does in Claude Code.</div></div><button class="switch on" aria-label="Claude in Chrome"></button></div>
+      </div></section>
+      <section><div class="group-t"><h3>General</h3></div><div class="group">
+        <div class="srow"><div class="txt"><div class="n">Default provider for new chats</div><div class="d">The CLI a new chat starts on.</div></div><span class="select"><span style="display:flex;gap:6px;align-items:center">${codex()}Codex</span>${icon("caret-down", "s14")}</span></div>
+        <div class="srow"><div class="txt"><div class="n">Default view for new chats</div><div class="d">How a new chat opens. Each chat can switch its view in its header.</div></div><span class="select">Sessions${icon("caret-down", "s14")}</span></div>
+        <div class="srow"><div class="txt"><div class="n">Default file open destination</div><div class="d">What happens when you click an inside-workspace file reference in chat.</div></div><span class="select"><span style="display:flex;gap:6px;align-items:center">${icon("sidebar-simple", "s14")}Open in side panel</span>${icon("caret-down", "s14")}</span></div>
+        <div class="srow"><div class="txt"><div class="n">Speech to text</div><div class="d">Dictate messages with the microphone, in any language. Recognized on this Mac; needs a one-time 1.6 GB download.</div></div><button class="switch" aria-label="Speech to text"></button></div>
+        <div class="srow"><div class="txt"><div class="n">Hold to dictate</div><div class="d">While AccordAgents is in front, hold this key and speak; release it to put the text where the cursor is.</div></div><span class="select" style="min-width:120px">Option${icon("caret-down", "s14")}</span></div>
+      </div></section>
+    </div></div></main><aside></aside></div>` },
+  menus: { cap: "Меню модели в открытом чате (только модели, провайдер меняется в New chat), карточка агента при наведении слева от строки, тултип.",
+    html: () => `<div class="app panel-open" data-app>${sidebar()}<main class="main">${header(TITLE)}${timeline()}${accordStrip()}${composer({ typed: "Подведи итог, когда все закончат", focus: true })}
+      <div class="tooltip pop-enter" style="left:262px;top:48px">Edit chat name</div>
+    </main>${sidePanel({ hover: true })}
+      <div class="menu pop-enter" style="left:${1440 - 380 - 360}px;bottom:66px;width:300px;--origin:bottom right">
+        <div class="label">Model</div>
+        <div class="item"><div class="body">GPT-6.2-Astra<div class="desc">Default. Our most capable model for complex coding and professional work.</div></div>${icon("check", "s14 tick")}</div>
+        <div class="item hl"><div class="body">GPT-6.2-Sol<div class="desc">Fast, go-to model for coding and everyday work.</div></div></div>
+        <div class="item"><div class="body">GPT-6-Luna<div class="desc">Fast and affordable model for easier tasks.</div></div></div>
+        <div class="item"><div class="body muted">More models</div>${icon("caret-right", "s14")}</div>
+      </div>
+      <div class="hovercard pop-enter" style="right:392px;top:112px">
+        <span class="t">Проверка ссылок в docs</span>
+        <span class="m">Claude Code · Opus 5.5 · High</span>
+        <span class="s"><span style="color:var(--select-fg)">Running</span> · 1m 12s · 1 background task</span>
+        <span class="now">${icon("file-text", "s14")}Reading docs/main-session.md</span>
+      </div></div>` },
+  kit: { auto: true, cap: "Лист кита: всё, из чего собираются экраны, по одному варианту каждого вида.", html: () => KIT() }
+};
+
+function KIT() {
+  return `<div class="kit">
+    <div class="cell wide"><h4>Typography, Inter and JetBrains Mono</h4>
+      <div class="typerow"><span class="k">20 / 28, 600</span><span style="font-size:20px;line-height:28px;font-weight:600">Проверка интерфейса</span></div>
+      <div class="typerow"><span class="k">16 / 24, 600</span><span style="font-size:16px;line-height:24px;font-weight:600">Local CLI setup</span></div>
+      <div class="typerow"><span class="k">14 / 22, 400</span><span style="font-size:14px;line-height:22px">Текст сообщений: главная сессия раздала три задачи.</span></div>
+      <div class="typerow"><span class="k">13 / 20, 500</span><span style="font-weight:500">Основной текст интерфейса и кнопки</span></div>
+      <div class="typerow"><span class="k">12 / 16, 400</span><span class="muted" style="font-size:12px">Вторичный текст, контролы композера</span></div>
+      <div class="typerow"><span class="k">11 / 16, 500</span><span class="faint" style="font-size:11px;font-weight:500">Подписи, время, счётчики 1m 12s</span></div>
+      <div class="typerow"><span class="k">mono 12</span><span class="mono">app_chat_delegate_task({"title":"…"})</span></div>
+    </div>
+    <div class="cell"><h4>Color and state</h4><div class="swatches">
+      <div class="sw" style="background:var(--bg)">bg</div><div class="sw" style="background:var(--bg-sidebar)">sidebar</div><div class="sw" style="background:var(--bg-panel)">panel</div><div class="sw" style="background:var(--bg-subtle)">subtle</div>
+      <div class="sw" style="background:var(--bg-muted)">muted</div><div class="sw" style="background:var(--primary);color:var(--primary-fg)">primary</div><div class="sw" style="background:var(--select-bg);color:var(--select-fg)">select</div><div class="sw" style="background:var(--text);color:var(--bg)">text</div>
+    </div>
+    <div class="line">${gd("claude", "run")}<span class="faint" style="font-size:12px">Running</span>${gd("codex", "wait")}<span class="faint" style="font-size:12px">Waiting for you</span>${gd("agy", "")}<span class="faint" style="font-size:12px">Ended</span></div>
+    <div class="line"><span class="status done"><span class="dot"></span>Done</span><span class="status fail"><span class="dot"></span>Failed</span><span class="status"><span class="dot"></span>Stopped</span></div></div>
+    <div class="cell wide"><h4>Buttons: default, secondary, outline, ghost, destructive; default 32, sm 28, xs 24</h4>
+      <div class="line"><button class="btn primary">Start chat</button><button class="btn sm primary">Submit</button><button class="btn xs primary">Apply</button><button class="btn sm secondary">Secondary</button><button class="btn sm outline">${icon("plus", "s14")}Add provider</button><button class="btn sm ghost">Skip</button><button class="btn sm ghost danger">Delete</button></div>
+      <div class="line"><button class="ibtn">${icon("sidebar-simple")}</button><button class="ibtn on">${icon("terminal-window")}</button><button class="ibtn">${icon("files")}</button><button class="ibtn xs">${icon("copy", "s14")}</button><button class="ibtn xs">${icon("dots-three", "s14")}</button><span class="kbd">⌘K</span><span class="count">3</span><button class="send" aria-label="Send">${icon("arrow-up", "s14")}</button><button class="send stop" aria-label="Stop">${icon("square", "s14")}</button></div>
+    </div>
+    <div class="cell"><h4>Controls</h4>
+      <div class="line"><button class="switch on" aria-label="On"></button><button class="switch" aria-label="Off"></button><span class="check on">${icon("check", "s14")}</span><span class="check"></span><span class="radio on"></span><span class="radio"></span></div>
+      <div class="seg"><span class="thumb"></span><button class="on">Active</button><button>Archived</button></div>
+      <div class="line"><button class="chip">${codex()}GPT-6.2-Astra${icon("caret-down", "caret")}</button><button class="chip toggle on">${icon("clipboard-text", "s14")}Plan mode</button><button class="chip">${icon("gauge", "s14")}${icon("caret-down", "caret")}</button></div>
+    </div>
+    <div class="cell"><h4>Inputs</h4>
+      <div class="input">${icon("magnifying-glass", "s14")}Search chats</div>
+      <div class="input focus">Проверка интерфейса</div>
+      <span class="select">Sessions${icon("caret-down", "s14")}</span>
+    </div>
+    <div class="cell" style="position:relative;min-height:230px"><h4>Menu (ComposerMenu and DropdownMenu share this look)</h4>
+      <div class="menu" style="position:relative;width:260px">
+        <div class="label">Permissions</div>
+        <div class="item">${icon("lock-simple", "s14")}<div class="body">Ask for approval<div class="desc">Approval is required to access the internet or edit other files.</div></div>${icon("check", "s14 tick")}</div>
+        <div class="item hl">${icon("shield-check", "s14")}<div class="body">Approve for me<div class="desc">Only ask for actions detected as potentially unsafe.</div></div></div>
+      </div>
+    </div>
+    <div class="cell"><h4>Tooltip, toast</h4>
+      <div style="position:relative;height:28px"><div class="tooltip" style="left:0;top:0">Terminal<span class="kbd">⌃\`</span></div></div>
+      <div class="toast">${icon("check-circle")}<span style="flex:1">Copied to clipboard</span><button class="btn xs ghost">Undo</button></div>
+    </div>
+    <div class="cell wide"><h4>Rows: sidebar 28px, agent 32px, task inside Worked for</h4>
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px">
+        <div style="background:var(--bg-sidebar);border-radius:8px;padding:6px">
+          <div class="row active"><span class="spin"></span><span class="t">Проверка интерфейса</span><span class="time">now</span></div>
+          <div class="row"><span class="t">Аудит производительности</span><span class="unread"></span><span class="time">12m</span></div>
+          <div class="row proj">${icon("caret-down", "s14")}${icon("folder-simple", "s14")}<span class="t">demo-project</span></div>
+        </div>
+        <div style="background:var(--bg-panel);border-radius:8px;padding:6px">
+          <div class="arow running hover">${gd("claude", "run")}<span class="n">Проверка ссылок в docs</span><span class="tm">1m 12s</span><button class="stopq" aria-label="Stop"><span class="sq"></span></button></div>
+          <div class="arow">${gd("codex", "wait")}<span class="n">Цвета из заметок</span><span class="tm">9s</span></div>
+          <div class="arow dim">${gd("agy", "")}<span class="n">Сверка переводов</span><span class="tm">3m</span></div>
+        </div>
+      </div>
+      ${taskRow("codex", "", "Краткий пересказ README", "README описывает небольшой демопроект для проверки интерфейса AccordAgents.", "15s")}
+    </div>
+    <div class="cell" style="background:var(--bg-overlay);align-items:center;justify-content:center"><div class="dialog"><h5>Rename chat</h5><div class="input focus">Проверка интерфейса</div><div class="acts"><button class="btn sm ghost">Cancel</button><button class="btn sm primary">Rename</button></div></div></div>
+    <div class="cell full"><h4>Icons: ${state.icons === "lucide" ? "Lucide, stroke 1.75" : "Phosphor regular"}, 16px; 14px inside dense rows</h4><div class="icons">${["note-pencil", "magnifying-glass", "bell", "gear-six", "sidebar-simple", "terminal-window", "files", "folder-simple", "wrench", "hammer", "brain", "globe", "file-text", "git-merge", "image", "clipboard-text", "lock-simple", "eye", "shield-check", "gauge", "desktop", "copy", "smiley", "dots-three", "arrows-clockwise", "push-pin", "archive", "git-diff", "seal-check", "clock-counter-clockwise", "cloud", "key", "bell-ringing", "list-checks", "plug", "users"].map((n) => `<div title="${n}">${icon(n)}</div>`).join("")}</div></div>
+  </div>`;
+}
+
+/* ---------- Rendering and interactions ---------- */
+function placeThumb(seg) {
+  const on = seg.querySelector("button.on"); const th = seg.querySelector(".thumb");
+  if (on && th) { th.style.left = on.offsetLeft + "px"; th.style.width = on.offsetWidth + "px"; }
+}
+function render() {
+  document.documentElement.dataset.theme = state.theme;
+  document.documentElement.dataset.dir = state.dir;
+  for (const seg of document.querySelectorAll(".toolbar .seg")) {
+    for (const b of seg.querySelectorAll("button")) b.classList.toggle("on", b.dataset.v === state[seg.dataset.seg]);
+    placeThumb(seg);
+  }
+  const s = SCREENS[state.screen] || SCREENS.sessions;
+  const frame = document.getElementById("frame");
+  const [w, h] = s.size || [1440, 900];
+  frame.style.setProperty("--fw", w + "px");
+  frame.style.setProperty("--fh", s.auto ? "auto" : h + "px");
+  frame.classList.toggle("auto", !!s.auto);
+  frame.innerHTML = s.html();
+  document.getElementById("caption").textContent = s.cap + (state.dir === "a" ? " Направление A, графит." : " Направление B, фирменный.") + (state.icons === "lucide" ? " Иконки Lucide." : " Иконки Phosphor.");
+  for (const seg of frame.querySelectorAll(".seg")) placeThumb(seg);
+  for (const sc of frame.querySelectorAll(".scroll")) sc.scrollTop = sc.scrollHeight;
+  fit();
+  history.replaceState(null, "", "#" + new URLSearchParams({ screen: state.screen, theme: state.theme, dir: state.dir, icons: state.icons }).toString() + (capture ? "&capture=1" : ""));
+}
+function fit() {
+  const wrap = document.getElementById("wrap"); const frame = document.getElementById("frame");
+  if (capture) { frame.style.transform = ""; wrap.style.height = ""; return; }
+  const w = parseFloat(getComputedStyle(frame).width);
+  const k = Math.min(1, wrap.clientWidth / w);
+  frame.style.transform = `scale(${k})`;
+  wrap.style.height = frame.offsetHeight * k + "px";
+}
+document.querySelector(".toolbar").addEventListener("click", (e) => {
+  const b = e.target.closest("button"); const seg = b && b.closest(".seg");
+  if (!b || !seg) return; state[seg.dataset.seg] = b.dataset.v; state.member = null; state.artifactList = false; render();
+});
+document.getElementById("frame").addEventListener("click", (e) => {
+  const t = e.target.closest("[data-toggle]");
+  if (t) { const host = t.parentElement; host.classList.toggle("is-open"); t.classList.toggle("open"); host.querySelector(".collapse").classList.toggle("open"); return; }
+  if (e.target.closest(".stopq")) return;
+  const om = e.target.closest("[data-open-member]");
+  if (om) { state.member = om.dataset.openMember; state.screen = "member"; render(); return; }
+  if (e.target.closest("[data-back]")) { state.screen = "sessions"; render(); return; }
+  if (e.target.closest("[data-back-artifacts]")) { state.artifactList = true; render(); return; }
+  if (e.target.closest("[data-open-artifact]")) { state.artifactList = false; render(); return; }
+  if (e.target.closest("[data-close-panel]")) { document.querySelector("[data-app]").classList.remove("panel-open"); document.querySelectorAll("[data-panel]").forEach((x) => { if (x.dataset.panel !== "terminal") x.classList.remove("on"); }); return; }
+  const pb = e.target.closest("[data-panel]");
+  if (pb) {
+    const id = pb.dataset.panel;
+    if (id === "terminal") { pb.classList.toggle("on"); return; }
+    if (pb.classList.contains("on")) { document.querySelector("[data-app]").classList.remove("panel-open"); pb.classList.remove("on"); return; }
+    state.screen = id === "artifacts" ? "artifacts" : "sessions"; state.artifactList = id === "artifacts"; render(); return;
+  }
+  const seg = e.target.closest(".frame .seg button");
+  if (seg) { seg.parentElement.querySelectorAll("button").forEach((x) => x.classList.toggle("on", x === seg)); placeThumb(seg.parentElement); }
+});
+window.addEventListener("resize", fit);
+document.fonts.ready.then(render);
+render();
+
+</script>
+</body>
+</html>

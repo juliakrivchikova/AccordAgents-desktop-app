@@ -1,6 +1,10 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { test } from "node:test";
+import { fileURLToPath } from "node:url";
+import { sourceText } from "./source-parts.mjs";
+
+const repoRoot = fileURLToPath(new URL("..", import.meta.url));
 
 function read(path) {
   return readFileSync(new URL(`../${path}`, import.meta.url), "utf8");
@@ -14,7 +18,7 @@ const app = read("src/renderer/App.tsx");
 const activityView = read("src/renderer/components/activity/activity-view.tsx");
 const conversationPanel = read("src/renderer/components/conversation/conversation-panel.tsx");
 const activityStyles = read("src/renderer/styles/views/activity.css");
-const chatStyles = read("src/renderer/styles/views/chat-conversation.css");
+const chatStyles = sourceText(repoRoot, "src/renderer/styles/views/chat-conversation.css");
 
 test("Activity focus intent is registered before opening the target conversation", () => {
   const actionStart = conversationActions.indexOf("async function openConversationAndFocusActivityItem");

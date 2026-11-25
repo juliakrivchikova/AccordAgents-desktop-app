@@ -1,0 +1,300 @@
+.artifact-detail {
+  gap: 0;
+  overflow-y: auto;
+}
+
+.artifact-draft-empty {
+  padding: 12px 16px;
+}
+
+.artifact-secondary-action.is-signed {
+  border-color: var(--app-success-border);
+  background: var(--app-success-soft);
+  color: var(--app-success);
+}
+
+.artifact-content-surface {
+  flex: 1 1 auto;
+  min-height: 0;
+}
+
+.artifact-detail > .artifact-content-surface {
+  min-height: 180px;
+}
+
+.artifact-content-surface > .artifact-content-markdown {
+  padding: 18px 48px 28px 22px;
+  border: 0;
+  border-radius: 0;
+  background: var(--app-surface);
+}
+
+.artifact-edit-surface {
+  flex-direction: column;
+  background: var(--app-surface);
+  overflow: hidden;
+}
+
+.artifact-content-edit-textarea {
+  flex: 1 1 auto;
+  width: 100%;
+  min-height: 180px;
+  padding: 15px 48px 18px 17px;
+  border: 0;
+  border-radius: 0;
+  outline: 0;
+  resize: none;
+  background: var(--app-surface);
+  color: var(--app-text-strong);
+  font-family: var(--font-body);
+  font-size: 14px;
+  line-height: 1.55;
+}
+
+.artifact-revision-note {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 13px;
+  border-top: 1px solid var(--app-border);
+  background: var(--app-surface);
+  color: var(--app-muted);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.artifact-revision-note input {
+  min-width: 0;
+  flex: 1;
+  height: 30px;
+  border: 1px solid var(--app-border);
+  border-radius: 8px;
+  padding: 0 9px;
+  background: var(--app-surface);
+  color: var(--app-text);
+  font: inherit;
+  font-size: 12px;
+}
+
+.artifact-content-edit-textarea:focus-visible {
+  box-shadow: var(--focus-ring);
+}
+
+.artifact-version-note {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  margin-top: 28px;
+  border-radius: 8px;
+  padding: 11px 14px;
+  background: var(--app-success-soft);
+  color: var(--app-text);
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.artifact-version-note svg {
+  flex: 0 0 auto;
+  margin-top: 3px;
+  color: var(--app-success);
+}
+
+.artifact-version-note strong {
+  color: var(--app-text-strong);
+  font-weight: 700;
+}
+
+.artifact-content-fabs {
+  position: absolute;
+  z-index: 3;
+  top: 12px;
+  right: 14px;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+/* Artifact document typography. Everything uses the app's body face, like the chat
+   timeline (15/1.6, --app-text); headings differ by size, weight and color only. */
+.artifact-content-markdown .markdown-text {
+  gap: 0;
+  color: var(--app-text);
+  font-family: var(--font-body);
+  font-size: 14px;
+  line-height: 1.6;
+}
+
+.artifact-content-markdown .markdown-text > * + * {
+  margin-top: 12px;
+}
+
+.artifact-revise-preview-empty {
+  color: var(--app-muted);
+}
+
+/* Keep the first block clear of the floating Revise / Copy buttons. */
+.artifact-content-surface .markdown-text > :first-child {
+  margin-right: 32px;
+}
+
+/* A third floating button (Sign) needs a little more room. */
+.artifact-content-surface.has-sign .markdown-text > :first-child {
+  margin-right: 64px;
+}
+
+.artifact-content-markdown .markdown-heading {
+  color: var(--app-text-strong);
+  font-family: var(--font-body);
+  font-weight: 650;
+}
+
+.artifact-content-markdown .markdown-heading-1 {
+  font-size: 20px;
+  font-weight: 700;
+  line-height: 1.25;
+  letter-spacing: -0.015em;
+}
+
+.artifact-content-markdown .markdown-heading-2 {
+  font-size: 16px;
+  line-height: 1.3;
+  letter-spacing: -0.01em;
+}
+
+.artifact-content-markdown .markdown-heading-3 {
+  font-size: 14px;
+  line-height: 1.35;
+}
+
+.artifact-content-markdown .markdown-text > .markdown-heading-1 + *,
+.artifact-content-markdown .markdown-text > .markdown-heading-2 + * {
+  margin-top: 8px;
+}
+
+.artifact-content-markdown .markdown-text > .markdown-heading-3 + * {
+  margin-top: 6px;
+}
+
+.artifact-content-markdown .markdown-text > .markdown-heading-1:not(:first-child) {
+  margin-top: 32px;
+}
+
+.artifact-content-markdown .markdown-text > .markdown-heading-2:not(:first-child) {
+  margin-top: 28px;
+}
+
+.artifact-content-markdown .markdown-text > .markdown-heading-3:not(:first-child) {
+  margin-top: 20px;
+}
+
+.artifact-content-markdown .markdown-text > .markdown-heading-1 + .markdown-heading-2,
+.artifact-content-markdown .markdown-text > .markdown-heading-1 + .markdown-heading-3,
+.artifact-content-markdown .markdown-text > .markdown-heading-2 + .markdown-heading-3 {
+  margin-top: 12px;
+}
+
+.artifact-content-markdown .markdown-text strong {
+  color: var(--app-text-strong);
+  font-weight: 650;
+}
+
+.artifact-content-markdown .markdown-list {
+  padding-left: 22px;
+}
+
+.artifact-content-markdown .markdown-list li::marker {
+  color: var(--app-muted-subtle);
+}
+
+.artifact-content-markdown ol.markdown-list li::marker {
+  color: var(--app-muted);
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+
+.artifact-content-markdown .markdown-text code,
+.artifact-content-markdown .markdown-text .file-link-inline-code {
+  padding: 1.5px 5px;
+  border: 1px solid var(--app-border);
+  border-radius: 6px;
+  background: var(--app-surface-subtle);
+  font-size: 12px;
+}
+
+.artifact-content-markdown .markdown-text code {
+  color: var(--app-text-strong);
+}
+
+.artifact-content-markdown .markdown-code {
+  padding: 10px 12px;
+  border-color: var(--app-border);
+  border-radius: 8px;
+  background: var(--app-surface-subtle);
+  color: var(--app-text-strong);
+  font-size: 12px;
+  line-height: 1.55;
+}
+
+.artifact-content-markdown .markdown-code code {
+  padding: 0;
+  border: 0;
+  background: transparent;
+  font-size: inherit;
+}
+
+/* Tables fit the panel; only genuinely wide tables scroll sideways. */
+.artifact-content-markdown .markdown-table-wrap {
+  width: auto;
+  border-color: var(--app-border);
+  border-radius: 8px;
+}
+
+.artifact-content-markdown .markdown-table {
+  min-width: 0;
+  color: var(--app-text);
+  font-size: 13px;
+  line-height: 1.45;
+}
+
+.artifact-content-markdown .markdown-table th,
+.artifact-content-markdown .markdown-table td {
+  padding: 9px 12px;
+  border-right: 0;
+  border-bottom-color: var(--app-border-subtle);
+}
+
+.artifact-content-markdown .markdown-table th {
+  padding-block: 8px;
+  border-bottom-color: var(--app-border);
+  background: var(--app-surface-subtle);
+  color: var(--app-text-strong);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.artifact-diff-pre {
+  flex: 1 1 auto;
+  border: 0;
+  border-radius: 0;
+  background: var(--app-surface);
+}
+
+/* ------------------------------------------------------------------
+   Detail header: the title opens the actions menu, the line under it
+   picks the version or draft. Both menus render in a portal.
+   ------------------------------------------------------------------ */
+.artifact-title-trigger {
+  display: inline-flex;
+  min-width: 0;
+  max-width: 100%;
+  align-items: center;
+  gap: 4px;
+  margin-left: -6px;
+  padding: 1px 6px;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--app-text-strong);
+  font: inherit;
+  cursor: pointer;
+}

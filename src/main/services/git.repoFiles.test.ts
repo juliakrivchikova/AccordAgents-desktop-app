@@ -110,3 +110,46 @@ test("searchRepoFiles ranks basename matches and refreshes when index mtime is u
     await rm(repoPath, { recursive: true, force: true });
   }
 });
+
+async function repoWithTwoBranches(): Promise<string> {
+  const repoPath = await mkdtemp(path.join(tmpdir(), "accordagents-git-switch-"));
+  const git = (args: string[]) => runCommand("git", ["-c", "user.email=qa@example.com", "-c", "user.name=QA", ...args], { cwd: repoPath, timeoutMs: 8000 });
+  await git(["init", "-b", "main"]);
+  await writeFile(path.join(repoPath, "notes.md"), "main\n", "utf8");
+  await git(["add", "."]);
+  await git(["commit", "-m", "main"]);
+  await git(["switch", "-c", "feature"]);
+  await writeFile(path.join(repoPath, "notes.md"), "feature\n", "utf8");
+  await git(["commit", "-am", "feature"]);
+  await git(["switch", "main"]);
+  return repoPath;
+}
+
+test("switchBranch moves the folder to one of its own branches and refuses a name it does not have", async () => {
+  const repoPath = await repoWithTwoBranches();
+  try {
+    const service = new GitService();
+    const before = await service.inspectRepo(repoPath);
+    assert.deepEqual(before.localBranches?.sort(), ["feature", "main"]);
+    const after = await service.switchBranch(repoPath, "feature");
+    assert.equal(after.currentBranch, "feature");
+    await assert.rejects(service.switchBranch(repoPath, "--orphan"), /has no branch --orphan/);
+    assert.equal((await service.inspectRepo(repoPath)).currentBranch, "feature");
+  } finally {
+    await rm(repoPath, { recursive: true, force: true });
+  }
+});
+
+test("switchBranch keeps the branch and the uncommitted change when git refuses, with git's own words", async () => {
+  const repoPath = await repoWithTwoBranches();
+  try {
+    await writeFile(path.join(repoPath, "notes.md"), "work in progress\n", "utf8");
+    const service = new GitService();
+    await assert.rejects(service.switchBranch(repoPath, "feature"), /would be overwritten/);
+    const info = await service.inspectRepo(repoPath);
+    assert.equal(info.currentBranch, "main");
+    assert.deepEqual(info.statusLines, ["M notes.md"]);
+  } finally {
+    await rm(repoPath, { recursive: true, force: true });
+  }
+});

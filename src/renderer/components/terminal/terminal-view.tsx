@@ -6,6 +6,8 @@ import "@xterm/xterm/css/xterm.css";
 import { TERMINAL_SCROLLBACK_LINES } from "../../../shared/terminal";
 import { terminalPort } from "./terminal-port";
 
+const MONO_SAMPLE = "Aa0Яя";
+
 export interface TerminalViewProps {
   terminalId: string;
   /** The tab is the selected one, the panel is open and the shell is alive. */
@@ -44,9 +46,28 @@ export function TerminalView({ terminalId, shown, focusRequest }: TerminalViewPr
     });
     const fit = new FitAddon();
     terminal.loadAddon(fit);
+    // The bundled mono faces load on first use (Latin and Cyrillic, upright and
+    // italic, are separate files). A terminal opened before they arrive measured its cells and drew
+    // its glyphs with the fallback font: once it lands, measure again (xterm
+    // ignores setting an option to its current value, hence the size nudge)
+    // and redraw the glyphs.
+    const monoFaces = [`${terminal.options.fontSize}px "JetBrains Mono Variable"`, `italic ${terminal.options.fontSize}px "JetBrains Mono Variable"`];
+    const monoReady = monoFaces.every((face) => document.fonts.check(face, MONO_SAMPLE));
     terminal.open(container);
     terminalRef.current = terminal;
     fitRef.current = fit;
+    let disposed = false;
+    if (!monoReady) {
+      void Promise.all(monoFaces.map((face) => document.fonts.load(face, MONO_SAMPLE))).then(() => {
+        if (disposed) return;
+        const size = terminal.options.fontSize ?? 12;
+        terminal.options.fontSize = size + 1;
+        terminal.options.fontSize = size;
+        terminal.clearTextureAtlas();
+        // A hidden tab has no size to fit to; showing it fits it.
+        if (container.getClientRects().length > 0) safeFit(fit);
+      }).catch(() => undefined);
+    }
 
     const input = terminal.onData((data) => terminalPort.send({ type: "input", terminalId, data }));
     const resize = terminal.onResize(({ cols, rows }) => terminalPort.send({ type: "resize", terminalId, cols, rows }));
@@ -60,6 +81,7 @@ export function TerminalView({ terminalId, shown, focusRequest }: TerminalViewPr
     themeObserver.observe(document.documentElement, { attributes: true, attributeFilter: ["class"] });
 
     return () => {
+      disposed = true;
       themeObserver.disconnect();
       input.dispose();
       resize.dispose();

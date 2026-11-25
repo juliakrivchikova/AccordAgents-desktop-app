@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { Check, ChevronDown } from "lucide-react";
+import { CheckIcon, CaretDownIcon } from "@phosphor-icons/react";
 
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 
@@ -23,7 +23,7 @@ export function StudioSelect(props: {
           disabled={props.disabled}
         >
           <span>{props.display}</span>
-          <ChevronDown size={13} aria-hidden />
+          <CaretDownIcon size={13} aria-hidden />
         </button>
       </PopoverTrigger>
       <PopoverContent align="start" sideOffset={6} className="chat-app-tool-inline-menu">
@@ -38,7 +38,7 @@ export function StudioSelect(props: {
             }}
           >
             <span>{option.label}</span>
-            {option.value === props.value && <Check size={14} aria-hidden />}
+            {option.value === props.value && <CheckIcon size={14} aria-hidden />}
           </button>
         ))}
       </PopoverContent>

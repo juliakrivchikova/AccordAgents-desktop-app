@@ -1,4 +1,4 @@
-import { AlertTriangle } from "lucide-react";
+import { WarningIcon } from "@phosphor-icons/react";
 import {
   chatParticipantRequestPermissionExceeds,
   normalizeChatAgentMode,
@@ -7,11 +7,13 @@ import {
 } from "../../../shared/agentPermissions";
 import { chatReasoningEffortLabel, normalizeChatReasoningEffort, reasoningEffortOptionsForProvider } from "../../../shared/reasoningEffort";
 import type { ChatAgentMode, ChatExistingParticipantOverrides, ChatParticipantChangeRequest, ChatParticipantConfig, ChatRoleConfig, ChatRosterChangeParticipantInput, CliProviderHost } from "../../../shared/types";
-import { Avatar, avatarForParticipant } from "../avatar/avatar";
+import { avatarForParticipant } from "../avatar/avatar";
 import { chatParticipantDisplayName, chatParticipantReference } from "../conversation/conversation-display";
 import { avatarForChatParticipant, mapChatAvatarIdToKind } from "./chat-avatars";
+import { ChatMemberMark, ChatProviderMark, useChatSessionsPresentation } from "./chat-member-mark";
 import { CHAT_AGENT_MODE_OPTIONS, chatAgentModeLabel, chatProviderOptionId, chatProviderOptionPatch, chatProviderOptions } from "./chat-participant-drafts";
 import { cliProviderHostDefaultModel, cliProviderHostForParticipant } from "../../../shared/cliProviderHosts";
+import { isRoleOfferedForNewMembers } from "../../../shared/mainSession";
 import {
   ChatParticipantAvatarField as ChatAppToolAvatarField,
   ChatParticipantInlineAutoWatchRow as ChatAppToolInlineAutoWatchRow,
@@ -36,6 +38,9 @@ export function ChatAppToolParticipantChangeOperation(props: {
   onChange: (request: ChatParticipantChangeRequest) => void;
 }): JSX.Element {
   const hosts = props.cliProviderHosts ?? [];
+  // The sessions view has no handles and no avatars: a member added here is
+  // its provider's logo and its role; its handle is still made underneath.
+  const sessions = useChatSessionsPresentation();
   function updateNewParticipant(
     index: number,
     patch: { saveAsPreset?: boolean; participant?: Partial<ChatRosterChangeParticipantInput> }
@@ -97,9 +102,9 @@ export function ChatAppToolParticipantChangeOperation(props: {
           return (
             <div className="chat-app-tool-review-block is-participant-review" key={`${operation.type}-${operation.participantConfigId}`}>
               <div className="chat-app-tool-review-participant-head">
-                <Avatar className="chat-app-tool-review-avatar" spec={savedAvatar} />
+                <ChatMemberMark className="chat-app-tool-review-avatar" markClassName="is-large" avatar={savedAvatar} member={savedParticipant} />
                 <div>
-                  <strong>{savedParticipant ? chatParticipantReference(savedParticipant.handle) : operation.participantConfigId}</strong>
+                  {!sessions && <strong>{savedParticipant ? chatParticipantReference(savedParticipant.handle) : operation.participantConfigId}</strong>}
                   <span>{displayChatRoleLabel(savedRole, savedParticipant?.roleConfigId ?? "Saved member preset")}</span>
                 </div>
               </div>
@@ -133,14 +138,16 @@ export function ChatAppToolParticipantChangeOperation(props: {
         return (
           <div className="chat-app-tool-review-block is-participant-review" key={`${operation.type}-${operation.participant.handle}-${index}`}>
             <div className="chat-app-tool-review-participant-head">
-              <ChatAppToolAvatarField
-                kind={participant.kind}
-                handle={participant.handle}
-                avatarId={participant.avatarId}
-                onSelect={(avatarId) => patchParticipant({ avatarId })}
-              />
+              {sessions ? <ChatProviderMark className="is-large" member={participant} /> : (
+                <ChatAppToolAvatarField
+                  kind={participant.kind}
+                  handle={participant.handle}
+                  avatarId={participant.avatarId}
+                  onSelect={(avatarId) => patchParticipant({ avatarId })}
+                />
+              )}
               <div>
-                <ChatAppToolHandleField handle={participant.handle} onChange={(handle) => patchParticipant({ handle })} />
+                {!sessions && <ChatAppToolHandleField handle={participant.handle} onChange={(handle) => patchParticipant({ handle })} />}
                 <span>{displayChatRoleLabel(role, participant.roleConfigId)}</span>
               </div>
             </div>
@@ -150,7 +157,7 @@ export function ChatAppToolParticipantChangeOperation(props: {
                 value={displayChatRoleLabel(role, participant.roleConfigId)}
                 current={participant.roleConfigId}
                 options={props.roles
-                  .filter((item) => !item.archivedAt || item.id === participant.roleConfigId)
+                  .filter((item) => (!item.archivedAt && isRoleOfferedForNewMembers(item.id)) || item.id === participant.roleConfigId)
                   .map((item) => ({ value: item.id, label: item.archivedAt ? `${displayChatRoleLabel(item)} (deleted)` : displayChatRoleLabel(item) }))}
                 searchable
                 searchPlaceholder="Filter roles"
@@ -235,7 +242,7 @@ export function ChatAppToolParticipantChangeOperation(props: {
             </div>
             {broaderThanDefault && (
               <div className="chat-app-tool-review-warning">
-                <AlertTriangle size={14} aria-hidden />
+                <WarningIcon size={14} aria-hidden />
                 <span>Permissions are broader than the read-only default.</span>
               </div>
             )}
@@ -375,7 +382,7 @@ function ParticipantManagementReview(props: {
       </div>
       {showWarning && (
         <div className="chat-app-tool-review-warning">
-          <AlertTriangle size={14} aria-hidden />
+          <WarningIcon size={14} aria-hidden />
           <span>
             Management escalation: role default {participantRequestPermissionLabel(resolution.roleDefault)}
             {resolution.participantExplicit ? `, member override ${participantRequestPermissionLabel(resolution.participantExplicit)}` : ""}

@@ -152,6 +152,38 @@ export class HubClientOpsStore {
     return rows.map(fromRow);
   }
 
+  /** Members' replies this device created on the server as running (or
+   *  still waits to create so) and never ended there by an operation it still
+   *  holds (answered ones are kept ANSWERED_KEEP_MS): an end saved while no
+   *  link stood was never queued before 2026-11-22, and the server shows such
+   *  a reply running for good. Read in slices of `batch` operations, so the
+   *  database the chats save through is never held long. */
+  async repliesLeftRunning(batch = 500): Promise<Array<{ conversationId: string; messageId: string }>> {
+    await this.init();
+    const slices = async <T extends { id: number }>(sql: (after: number) => string, take: (row: T) => void): Promise<void> => {
+      for (let after = 0; ;) {
+        const rows = await this.database.query<T>(sql(after));
+        rows.forEach(take);
+        if (rows.length < batch) return;
+        after = Number(rows[rows.length - 1].id);
+      }
+    };
+    const created: Array<{ conversationId: string; messageId: string }> = [];
+    await slices<{ id: number; conversationId: string; messageId: string; running: number }>((after) => `select rowid as id,
+        conversation_id as conversationId, message_id as messageId,
+        (json_extract(op_json, '$.message.role') = 'participant' and json_extract(op_json, '$.message.status') = 'pending') as running
+      from hub_client_ops where rowid > ${after} and kind = 'message.create' and status in ('accepted', 'queued') and message_id is not null
+      order by rowid limit ${batch};`, (row) => { if (Number(row.running) === 1) created.push({ conversationId: row.conversationId, messageId: row.messageId }); });
+    if (!created.length) return [];
+    const ended = new Set<string>();
+    await slices<{ id: number; messageId: string | null }>((after) => `select rowid as id,
+        case when kind = 'message.remove' then json_extract(op_json, '$.messageId')
+          when coalesce(json_extract(op_json, '$.message.status'), '') != 'pending' then json_extract(op_json, '$.message.id') end as messageId
+      from hub_client_ops where rowid > ${after} and kind in ('message.update', 'message.remove') and status in ('accepted', 'queued')
+      order by rowid limit ${batch};`, (row) => { if (typeof row.messageId === "string") ended.add(row.messageId); });
+    return created.filter((row) => !ended.has(row.messageId));
+  }
+
   /** The newest operation that writes this message. */
   async forMessage(conversationId: string, messageId: string): Promise<HubClientOpRow | undefined> {
     await this.init();
@@ -381,11 +413,6 @@ export class HubOpsClient {
     for (const waiter of [...this.appliedWaiters]) waiter.resolve(false);
     await this.flushing?.catch(() => undefined);
     await this.reading?.catch(() => undefined);
-  }
-
-  /** The statements that queue operations with a local save (alsoCommit). */
-  queueSql(ops: HubOp[], condition?: string): string {
-    return this.options.store.insertSql(ops, new Date(this.now()).toISOString(), condition);
   }
 
   async enqueue(ops: HubOp[]): Promise<void> {

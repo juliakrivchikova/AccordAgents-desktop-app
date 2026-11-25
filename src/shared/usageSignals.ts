@@ -75,27 +75,33 @@ export const USAGE_BUILTIN_ROLE_IDS: ReadonlySet<string> = new Set([
   "security-reviewer",
   "release-engineer",
   "code-reviewer",
-  "workflow-manager"
+  "workflow-manager",
+  "main-session"
 ]);
 
 /** The Assistant's role: every chat has it without anyone adding it. */
 export const USAGE_ASSISTANT_ROLE_ID = "administrator";
 /** The role the app gives a member it adds on its own ("Generic Member"). */
 export const USAGE_DEFAULT_MEMBER_ROLE_ID = "generic-participant";
+/** The main session's role: every chat made since 2026-11-20 has it without
+ *  anyone choosing it, as chats before had the Assistant (docs/main-session.md). */
+export const USAGE_MAIN_SESSION_ROLE_ID = "main-session";
 
 /** Whether a member's role is one someone chose, not the app's default. */
 export function usageRoleChosen(roleConfigId: unknown): boolean {
   return typeof roleConfigId === "string" && roleConfigId !== "" &&
-    roleConfigId !== USAGE_ASSISTANT_ROLE_ID && roleConfigId !== USAGE_DEFAULT_MEMBER_ROLE_ID;
+    roleConfigId !== USAGE_ASSISTANT_ROLE_ID && roleConfigId !== USAGE_DEFAULT_MEMBER_ROLE_ID &&
+    roleConfigId !== USAGE_MAIN_SESSION_ROLE_ID;
 }
 
 /** Whether a chat has two or more members a person added with different
- *  roles (the Assistant not counted). */
+ *  roles (the Assistant and the main session, which the app adds, not
+ *  counted). */
 export function usageMultiRoleChat(members: ReadonlyArray<{ roleConfigId?: unknown } | null | undefined>): boolean {
   const roles = new Set<string>();
   let added = 0;
   for (const member of members) {
-    if (!member || member.roleConfigId === USAGE_ASSISTANT_ROLE_ID) continue;
+    if (!member || member.roleConfigId === USAGE_ASSISTANT_ROLE_ID || member.roleConfigId === USAGE_MAIN_SESSION_ROLE_ID) continue;
     added += 1;
     if (typeof member.roleConfigId === "string" && member.roleConfigId) roles.add(member.roleConfigId);
   }
@@ -137,7 +143,9 @@ export const USAGE_WEEKLY_SNAPSHOT_KEYS = [
   "chats_with_2plus_members",
   "distinct_roles_in_use",
   "custom_roles_count",
-  "builtin_roles_in_use"
+  "builtin_roles_in_use",
+  "chats_sessions_view_active",
+  "chats_classic_view_active"
 ] as const;
 
 /** The numbers a weekly snapshot carries. */
@@ -150,7 +158,20 @@ export interface UsageWeeklySnapshot {
   custom_roles_count: number;
   /** Built-in role ids members have, sorted and comma-separated; "none". */
   builtin_roles_in_use: string;
+  /** Chats with a User message in the seven days before the snapshot, by
+   *  the view each is shown in (docs/main-session.md): whether anyone still
+   *  works in the classic view before it is removed. */
+  chats_sessions_view_active: UsageCountBucket;
+  chats_classic_view_active: UsageCountBucket;
 }
+
+/** A chat's view, as chatViewFor (shared/mainSession.ts) reads it. */
+export type UsageChatView = "classic" | "sessions";
+
+/** How long before the snapshot a User message makes a chat active. The
+ *  snapshot goes at the first chance in an ISO week, so the week it names
+ *  has barely begun: the seven days before it are the week of use. */
+export const USAGE_ACTIVE_CHAT_WINDOW_MS = 7 * 24 * 60 * 60_000;
 
 /** Roles the person made that are still in use (not deleted). */
 export function usageCustomRoleCount(roles: ReadonlyArray<{ id: string; builtIn?: boolean; archivedAt?: string }>): number {
@@ -163,7 +184,9 @@ export function usageCustomRoleCount(roles: ReadonlyArray<{ id: string; builtIn?
 export function usageWeeklySnapshot(
   week: string,
   chats: ReadonlyArray<ReadonlyArray<{ roleConfigId?: unknown; participantConfigId?: unknown; handle?: unknown }>>,
-  customRolesCount: number
+  customRolesCount: number,
+  /** The view of each chat with a User message in the week of use. */
+  activeChatViews: ReadonlyArray<UsageChatView> = []
 ): UsageWeeklySnapshot {
   const members = new Set<string>();
   const roles = new Set<string>();
@@ -189,7 +212,9 @@ export function usageWeeklySnapshot(
     chats_with_2plus_members: usageCountBucket(chatsWithTwoPlus),
     distinct_roles_in_use: roles.size,
     custom_roles_count: Math.max(0, Math.floor(customRolesCount)),
-    builtin_roles_in_use: builtIn.length > 0 ? builtIn.join(",") : "none"
+    builtin_roles_in_use: builtIn.length > 0 ? builtIn.join(",") : "none",
+    chats_sessions_view_active: usageCountBucket(activeChatViews.filter((view) => view === "sessions").length),
+    chats_classic_view_active: usageCountBucket(activeChatViews.filter((view) => view === "classic").length)
   };
 }
 

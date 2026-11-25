@@ -1,6 +1,6 @@
 import { useState } from "react";
-import { ChevronDown, FileText, Globe2, Pencil, Terminal } from "lucide-react";
-import type { LucideIcon } from "lucide-react";
+import { CaretDownIcon, FileTextIcon, GlobeIcon, PencilSimpleIcon, TerminalIcon } from "@phosphor-icons/react";
+import type { Icon as PhosphorIcon } from "@phosphor-icons/react";
 
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import {
@@ -10,6 +10,7 @@ import {
   normalizeOptionalChatParticipantRequestPermission
 } from "../../../shared/agentPermissions";
 import { reasoningEffortOptionsForProvider } from "../../../shared/reasoningEffort";
+import { withClassicChatPermissions } from "../../../shared/chatAccessModes";
 import { modelDetectionFailureText, useProviderModelCatalog, type ProviderModelCatalogHost } from "./use-provider-model-catalog";
 import { savedModelId } from "../../../shared/geminiModels";
 import type {
@@ -25,6 +26,7 @@ import type {
 import { chatParticipantDisplayName } from "../conversation/conversation-display";
 import {
   CHAT_AGENT_MODE_OPTIONS,
+  chatAgentModeLabel,
   chatCliProviderLabel,
   chatInheritedCliSettingLabel,
   chatModelDefaultLabel
@@ -153,7 +155,10 @@ export function ParticipantRuntimeControls(props: {
             ariaLabel="Mode"
             value={mode}
             disabled={controlsDisabled}
-            options={CHAT_AGENT_MODE_OPTIONS}
+            // Codex's Full Access, set from the sessions view, is shown as it is.
+            options={CHAT_AGENT_MODE_OPTIONS.some((option) => option.value === mode)
+              ? CHAT_AGENT_MODE_OPTIONS
+              : [...CHAT_AGENT_MODE_OPTIONS, { value: mode, label: chatAgentModeLabel(mode) }]}
             onChange={(value) => update({ agentMode: value as ChatAgentMode })}
           />
         </div>
@@ -265,7 +270,7 @@ function GhostSelect(props: {
     <span className={`chat-rt-ghost${props.muted ? " is-muted" : ""}${props.disabled ? " is-disabled" : ""}`}>
       {props.prefix && <span className="chat-rt-ghost-prefix">{props.prefix}</span>}
       <span className="chat-rt-ghost-val">{label}</span>
-      <ChevronDown size={11} aria-hidden />
+      <CaretDownIcon size={11} aria-hidden />
       <select
         className="chat-rt-ghost-native"
         value={props.value}
@@ -364,14 +369,15 @@ function PermissionsToggleRow(props: {
   onChange: (permissions: ChatAgentPermissions) => void;
 }): JSX.Element {
   const permissions = normalizeChatAgentPermissions(props.participant.permissions);
+  // Classic toggles mean what they say: a CLI mode chosen in the picker ends.
   function set(patch: Partial<ChatAgentPermissions>): void {
-    props.onChange({ ...permissions, ...patch });
+    props.onChange(withClassicChatPermissions(permissions, patch, props.participant.kind));
   }
-  const toggles: Array<{ label: string; icon: LucideIcon; checked: boolean; onChange: (value: boolean) => void }> = [
-    { label: "Read Files", icon: FileText, checked: permissions.repoRead, onChange: (value) => set({ repoRead: value }) },
-    { label: "Edit Files", icon: Pencil, checked: permissions.workspaceWrite, onChange: (value) => set({ workspaceWrite: value }) },
-    { label: "Run Shell", icon: Terminal, checked: permissions.shell.enabled, onChange: (value) => set({ shell: { ...permissions.shell, enabled: value } }) },
-    { label: "Access Web", icon: Globe2, checked: permissions.webAccess, onChange: (value) => set({ webAccess: value }) }
+  const toggles: Array<{ label: string; icon: PhosphorIcon; checked: boolean; onChange: (value: boolean) => void }> = [
+    { label: "Read Files", icon: FileTextIcon, checked: permissions.repoRead, onChange: (value) => set({ repoRead: value }) },
+    { label: "Edit Files", icon: PencilSimpleIcon, checked: permissions.workspaceWrite, onChange: (value) => set({ workspaceWrite: value }) },
+    { label: "Run Shell", icon: TerminalIcon, checked: permissions.shell.enabled, onChange: (value) => set({ shell: { ...permissions.shell, enabled: value } }) },
+    { label: "Access Web", icon: GlobeIcon, checked: permissions.webAccess, onChange: (value) => set({ webAccess: value }) }
   ];
   return (
     <div className="chat-rt-perms">

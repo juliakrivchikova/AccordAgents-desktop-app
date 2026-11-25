@@ -3,6 +3,7 @@ import { readdir, readFile } from "node:fs/promises";
 import path from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
+import { sourceParts } from "./source-parts.mjs";
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const participantTermPattern = /\b[Pp]articipants?\b/;
@@ -12,7 +13,8 @@ const mainUserFacingFiles = [
   "src/main/services/chat.ts",
   "src/main/services/settings.ts",
   "src/main/services/userSkills.ts"
-];
+].flatMap((file) => sourceParts(repoRoot, file));
+const isPartOf = (relative, subject) => relative === `${subject}.ts` || relative.startsWith(`${subject}/`);
 const exactCheckFiles = [
   ...mainUserFacingFiles,
   "src/main/appSkills/accord/SKILL.md",
@@ -343,7 +345,7 @@ async function sourceFiles(directory) {
 }
 
 function isLegacyImplementationPlanSurface(relative) {
-  return relative === "src/main/services/consensus.ts" ||
+  return isPartOf(relative, "src/main/services/consensus") ||
     relative.startsWith("src/renderer/components/review/");
 }
 
@@ -370,10 +372,10 @@ function isAllowedRendererLine(relative, line) {
 }
 
 function isAllowedMainLine(relative, line) {
-  if (relative === "src/main/services/chat.ts" && internalMainSnippets.some((snippet) => line.includes(snippet))) {
+  if (isPartOf(relative, "src/main/services/chat") && internalMainSnippets.some((snippet) => line.includes(snippet))) {
     return true;
   }
-  if (relative === "src/main/services/settings.ts" && internalMainSnippets.some((snippet) => line.includes(snippet))) {
+  if (isPartOf(relative, "src/main/services/settings") && internalMainSnippets.some((snippet) => line.includes(snippet))) {
     return true;
   }
   return hasInternalShape(line);
@@ -383,7 +385,7 @@ function isAllowedExactPhraseLine(relative, line, snippet) {
   if (relative === "src/renderer/components/chat/chat-role-labels.ts" && snippet === "Generic Participant") {
     return true;
   }
-  if (relative === "src/main/services/settings.ts" && isDefaultRoleInstructionLine(line)) {
+  if (isPartOf(relative, "src/main/services/settings") && isDefaultRoleInstructionLine(line)) {
     return true;
   }
   return isAllowedMainLine(relative, line) || isAllowedRendererLine(relative, line);

@@ -14,6 +14,7 @@ import { HubOps } from "../../hub/hubOps";
 import { HubServer } from "../../hub/hubServer";
 import { APP_MEMORY_ARCHIVE_TOOL, APP_MEMORY_READ_TOOL, APP_MEMORY_SEARCH_TOOL, APP_MEMORY_TAGS_TOOL, APP_MEMORY_WRITE_TOOL } from "./appMcp";
 import { ChatService } from "./chat";
+import { chatParts } from "./chat/test/chatParts";
 import { ChatSearchService } from "./chatSearch";
 import { DeviceIdentityService } from "./deviceIdentity";
 import { signHubRequest } from "./hubAuth";
@@ -50,7 +51,7 @@ function chatService(storage: StorageService, device: string): ChatService {
   };
   const cliRunner = { async detectAgents() { return []; }, async contextUsageForSession() { return undefined; }, async closeConversationSessions() { return undefined; } };
   const chat = new ChatService(storage as never, settings as never, cliRunner as never, { async write(event: string, payload: Record<string, unknown>) { trace(device, event, payload); } } as never);
-  (chat as unknown as { ensureHistoryFiles: () => Promise<string> }).ensureHistoryFiles = async () => tmpdir();
+  (chatParts(chat).chatHistory as unknown as { ensureHistoryFiles: () => Promise<string> }).ensureHistoryFiles = async () => tmpdir();
   return chat;
 }
 
@@ -63,7 +64,7 @@ function chat(id: string, repoPath: string | undefined, participants: ChatPartic
   } as Conversation;
 }
 
-const save = (service: ChatService, conversation: Conversation) => (service as unknown as { saveConversation(c: Conversation): Promise<void> }).saveConversation(conversation);
+const save = (service: ChatService, conversation: Conversation) => (chatParts(service).store as unknown as { saveConversation(c: Conversation): Promise<void> }).saveConversation(conversation);
 
 async function until<T>(read: () => Promise<T>, done: (value: T) => boolean, ms = 15_000): Promise<T> {
   const deadline = Date.now() + ms;

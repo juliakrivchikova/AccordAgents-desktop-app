@@ -1,6 +1,7 @@
 import type { ChatParticipantRequestApprovalRequest, ChatPermissionChangeRequest, ChatToolPermissionRequest } from "../../../shared/types";
 import { chatParticipantReference } from "../conversation/conversation-display";
 import { chatPermissionGrantDescription, chatPermissionGrantLabel } from "./chat-conversation-data";
+import { useSessionsViewText } from "./chat-sessions-links";
 
 export function ChatAppToolPermissionOperation({ request }: { request: ChatPermissionChangeRequest }): JSX.Element {
   if (request.kind === "shellRules") {
@@ -72,11 +73,12 @@ export function ChatAppToolPermissionPromptOperation({ request }: { request: Cha
 }
 
 export function ChatAppToolParticipantRequestOperation({ request, requesterHandle }: { request: ChatParticipantRequestApprovalRequest; requesterHandle: string }): JSX.Element {
+  const appText = useSessionsViewText();
   return (
     <div className="chat-app-tool-roster-list">
       {request.requests.map((item, index) => (
         <div className="chat-app-tool-roster-item" key={`${item.target}-${index}`}>
-          <strong>{chatParticipantReference(requesterHandle)} asks {chatParticipantReference(item.target)}</strong>
+          <strong>{appText(`${chatParticipantReference(requesterHandle)} asks ${chatParticipantReference(item.target)}`)}</strong>
           <span>{item.prompt}</span>
         </div>
       ))}

@@ -1,0 +1,179 @@
+/* The tasks a main-session turn gave: its "Worked for …" fold. */
+.sessions-worked {
+  margin: 2px 0 6px;
+}
+
+.sessions-worked.is-live {
+  margin: 6px 0 2px;
+}
+
+.sessions-worked-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 0;
+  border: 0;
+  background: transparent;
+  color: var(--mut);
+  font: 400 13px var(--sans);
+  cursor: pointer;
+}
+
+.sessions-worked-label {
+  display: inline-block;
+  padding: 2px 0;
+  color: var(--mut);
+  font: 400 13px var(--sans);
+}
+
+.sessions-worked-body {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin-top: 4px;
+}
+
+.sessions-worked-summary {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 2px 0 4px;
+  color: var(--mut);
+  font: 400 13px var(--sans);
+}
+
+.sessions-delegations {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.sessions-delegation {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 6px 2px;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+  -webkit-tap-highlight-color: transparent;
+}
+
+.sessions-delegation:active {
+  background: var(--press);
+}
+
+.sessions-delegation > svg {
+  flex-shrink: 0;
+  color: var(--mut);
+}
+
+.sessions-logo {
+  position: relative;
+  flex-shrink: 0;
+  display: inline-flex;
+}
+
+.sessions-logo-dot {
+  position: absolute;
+  right: -3px;
+  bottom: -3px;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  border: 1.5px solid var(--surface);
+  background: var(--mut);
+}
+
+.sessions-logo-dot.is-done { background: var(--ok); }
+.sessions-logo-dot.is-failed { background: var(--danger); }
+.sessions-logo-dot.is-stopped { background: var(--mut); }
+.sessions-logo-dot.is-waiting { background: var(--warn); }
+.sessions-logo-dot.is-running { background: var(--acc); }
+
+.sessions-delegation-main {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+
+.sessions-delegation-title,
+.sessions-delegation-result {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.sessions-delegation-title {
+  font: 600 14px var(--sans);
+  color: var(--fg1);
+}
+
+.sessions-delegation-result {
+  font: 400 13px var(--sans);
+  color: var(--mut);
+}
+
+/* A stopped task's line ("Stopped"): quieter than a result. */
+.sessions-delegation-result.is-muted {
+  font-style: italic;
+  opacity: 0.8;
+}
+
+.sessions-delegation-time {
+  flex-shrink: 0;
+  font: 400 12px var(--sans);
+  font-variant-numeric: tabular-nums;
+  color: var(--mut);
+}
+
+/* The sessions view keeps the main timeline unboxed: quiet lines, muted. */
+.sessions-choice-from .provider-logo {
+  margin-right: 2px;
+}
+
+.member-session-head {
+  background: transparent;
+  padding: 4px 0;
+}
+
+/* The one panel in the sessions view: main session, Accord, members. */
+.members-sheet-section {
+  padding: 10px 8px 4px;
+  font: 600 12px var(--sans);
+  color: var(--mut);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.sessions-member-row,
+.sessions-main-row,
+.sessions-accord-row {
+  gap: 10px;
+}
+
+.sessions-member-row.is-former {
+  opacity: 0.75;
+}
+
+/* A running reply of the sessions view (T3 Code's turn in progress): a quiet
+   "Working for 4s" over a hairline, then one muted row per step with its
+   outline icon, the newest shimmering. Its "Worked for …" opens to the same
+   rows once it is done. */
+.message-row.is-sessions .message-status:empty {
+  display: none;
+}
+
+.message-row.is-sessions[data-status="Running"] .message-meta:not(:has(> :not(:empty))) {
+  display: none;
+}

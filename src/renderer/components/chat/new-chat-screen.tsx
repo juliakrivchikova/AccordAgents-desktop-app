@@ -1,4 +1,5 @@
 import {
+  useCallback,
   useEffect,
   useLayoutEffect,
   useMemo,
@@ -6,20 +7,10 @@ import {
   useState,
   type Dispatch,
   type ReactNode,
-  type RefObject,
   type SetStateAction,
   type UIEvent
 } from "react";
-import {
-  ArrowUp,
-  Check,
-  ChevronDown,
-  FolderOpen,
-  ImagePlus,
-  Plus,
-  RefreshCw,
-  XCircle
-} from "lucide-react";
+import { ArrowUpIcon, SquareIcon, CheckIcon, CaretDownIcon, FolderOpenIcon, FolderSimpleIcon, ImageIcon, PlusIcon, XCircleIcon } from "@phosphor-icons/react";
 
 import type {
   AgentHealth,
@@ -38,13 +29,18 @@ import {
   type AddableSavedParticipantConfig,
   type ChatParticipantRuntimeOverride,
   addableSavedParticipantConfigs,
-  hasChatParticipantRuntimeOverride,
-  NEW_CHAT_ASSISTANT_PARTICIPANT_ID,
-  newChatAssistantParticipantConfig,
-  newChatAssistantParticipantDraft,
   selectedOrMentionedChatParticipantDrafts,
   validateChatStartupDrafts
 } from "./chat-participant-drafts";
+import {
+  isNewChatMainSessionOption,
+  NEW_CHAT_MAIN_SESSION_PARTICIPANT_ID,
+  newChatMainSessionParticipantConfig,
+  newChatDesktopStartFor,
+  newChatMainSessionParticipantDraft,
+  newChatMainSessionPlace
+} from "./chat-main-session-draft";
+import { startAccessKey, useCliStartDefaults, useMachineList, type NewChatStartAccess } from "./use-cli-start-defaults";
 import { participantOptionInvalidReason } from "./chat-cli-readiness";
 import {
   assistantSubstituteNote,
@@ -65,14 +61,34 @@ import { DICTATION_SESSION_ATTRIBUTE } from "./dictation-target";
 import { useChatComposerImages } from "./use-chat-composer-images";
 import { useChatComposerMentions } from "./use-chat-composer-mentions";
 import { sortSavedParticipantOptionsByUsage } from "./new-chat-participant-usage";
+import { useCloseOnOutside, useNewChatMenuMaxHeight } from "./new-chat-menu-hooks";
+import { NewChatModelChip } from "./new-chat-model-chip";
+import { NewChatRecent } from "./new-chat-recent";
+import { ChatCreationStatusLine } from "./chat-creation-state";
+import { ComposerBranchMenu, ComposerContextStrip, ComposerFooterSlot } from "./composer-context";
+import { FOLDER_BUSY_REASON, folderBusy, normalizeProjectPath, projectLabelForPath } from "../../../shared/newChat";
+import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
+import { AccordMergeIcon } from "./accord-merge-icon";
+import type { ChatModelAccessPatch } from "./chat-model-access-picker";
+import { newChatViewFor } from "../../../shared/mainSession";
 import {
-  isChatAssistantParticipant
-} from "../conversation/conversation-display";
+  type MainSessionProviderChoice,
+  type MainSessionProviderOption,
+  mainSessionProviderKey,
+  mainSessionProviderOptions,
+  resolveMainSessionProvider
+} from "../../../shared/mainSessionProviders";
+import { Spinner } from "@/components/ui/spinner";
+
+/** Whether the main session's settings on the New chat screen were made for
+ *  another provider than the one it is on now (none recorded: made before
+ *  any provider was, they are its own). */
+export function mainSessionOverrideForOtherProvider(madeFor: string | undefined, providerKey: string | undefined): boolean {
+  return Boolean(madeFor) && Boolean(providerKey) && madeFor !== providerKey;
+}
 
 const ACCORDAGENTS_MARK_URL = new URL("../../assets/accordagents-mark.png", import.meta.url).href;
-const NEW_CHAT_MENU_OFFSET = 8;
-const NEW_CHAT_PARTICIPANT_MENU_OVERLAP = 80;
-const NEW_CHAT_MENU_VIEWPORT_MARGIN = 16;
+const NO_MENTIONS: ChatParticipant[] = [];
 
 export function NewChatScreen(props: {
   prompt: string;
@@ -88,6 +104,17 @@ export function NewChatScreen(props: {
   repoInfo?: GitRepoInfo;
   selectedParticipantIds: Set<string>;
   selectedParticipantRuntimeOverrides: Record<string, ChatParticipantRuntimeOverride>;
+  /** The provider the sessions view's model chip chose for this chat's main
+   *  session; none: the one Settings → General names. */
+  mainSessionProvider?: MainSessionProviderChoice;
+  onMainSessionProviderChange?: (choice: MainSessionProviderChoice | undefined) => void;
+  /** The provider (mainSessionProviderKey) the main session's settings on
+   *  this screen were made for; settings made for another one are dropped. */
+  mainSessionOverrideFor?: string;
+  onMainSessionOverrideForChange?: (key: string | undefined) => void;
+  /** Told the mode the main session is shown starting in (her CLI config's
+   *  where it runs): the chat is made in what was shown. */
+  onMainSessionStartAccessChange?: (shown: NewChatStartAccess | undefined) => void;
   settings: AppSettings;
   summaries: ConversationSummary[];
   agents: AgentHealth[];
@@ -105,6 +132,14 @@ export function NewChatScreen(props: {
   onSelectedParticipantIdsChange: Dispatch<SetStateAction<Set<string>>>;
   onSelectedParticipantRuntimeOverridesChange: Dispatch<SetStateAction<Record<string, ChatParticipantRuntimeOverride>>>;
   onOpenParticipantsSettings: () => void;
+  /** What a branch switch returns: the folder as it is now. */
+  onRepoInfoChange?: (info: GitRepoInfo) => void;
+  /** Stops a chat being made (its CLI check or its creation). */
+  onStopStart?: () => void;
+  /** While the chat is being made: what its preparation is doing. */
+  creationStatus?: string;
+  /** Opens one of the folder's recent chats listed under the heading. */
+  onOpenChat?: (conversationId: string) => void;
   onOpenProviderSettings: () => void;
   onRefreshAgents: () => Promise<AgentHealth[]>;
   onStart: (repoFileMentions?: RepoFileMention[], imageAttachments?: ChatImageInput[], skillMentions?: ChatSkillMention[]) => boolean | void | Promise<boolean | void>;
@@ -112,6 +147,15 @@ export function NewChatScreen(props: {
   const promptRef = useRef<HTMLTextAreaElement>(null);
   const highlightRef = useRef<HTMLDivElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  // A branch switch answers for the folder it was asked for: kept only while
+  // that folder is still the one on screen.
+  const repoPathRef = useRef(props.repoPath);
+  repoPathRef.current = props.repoPath;
+  const keepRepoInfo = (info: GitRepoInfo): void => {
+    if (normalizeProjectPath(info.repoPath) === normalizeProjectPath(repoPathRef.current)) props.onRepoInfoChange?.(info);
+  };
+  const shownRepoInfo = props.repoInfo && normalizeProjectPath(props.repoInfo.repoPath) === normalizeProjectPath(props.repoPath) ? props.repoInfo : undefined;
+  const [footerSlot, setFooterSlot] = useState<HTMLElement | null>(null);
   const handledPrefillCaretKeyRef = useRef<number | undefined>();
   const images = useChatComposerImages(undefined, {
     pendingImages: props.pendingImages,
@@ -129,7 +173,29 @@ export function NewChatScreen(props: {
     }),
     [props.agents, props.settings.assistantProviderKind, props.settings.providers]
   );
-  // The saved Assistant CLI is not ready: this chat takes a ready one, and says so.
+  // Every new chat opens in the sessions view, whose New chat has no members
+  // picker: its composer's controls choose the main session's provider,
+  // model, effort and access, as T3 Code's does (the User, 2026-11-21),
+  // starting from Settings → General → New chats. The classic branches
+  // below are no longer reached (newChatViewFor).
+  const sessionsView = newChatViewFor() === "sessions";
+  const providerOptions = useMemo(
+    () => mainSessionProviderOptions(props.agents, props.settings.providers, props.settings.cliProviderHosts),
+    [props.agents, props.settings.cliProviderHosts, props.settings.providers]
+  );
+  const mainProvider = useMemo<MainSessionProviderOption | undefined>(
+    () => sessionsView
+      ? resolveMainSessionProvider(props.mainSessionProvider, providerOptions, assistantProviderKind)
+      : assistantProviderKind ? { kind: assistantProviderKind, label: "" } : undefined,
+    [assistantProviderKind, props.mainSessionProvider, providerOptions, sessionsView]
+  );
+  const mainKind = mainProvider?.kind;
+  const mainHostId = mainProvider?.hostId;
+  const chosenProviderInEffect = sessionsView && Boolean(props.mainSessionProvider) && Boolean(mainProvider) &&
+    mainSessionProviderKey(mainProvider!) === mainSessionProviderKey(props.mainSessionProvider!);
+  // The provider chosen on the chip stopped being ready: said, never taken silently.
+  const chosenProviderGone = sessionsView && Boolean(props.mainSessionProvider) && !chosenProviderInEffect;
+  // The main session's saved CLI is not ready: this chat takes a ready one, and says so.
   const assistantNote = useMemo(
     () => assistantSubstituteNote({
       agents: props.agents,
@@ -138,68 +204,136 @@ export function NewChatScreen(props: {
     }),
     [props.agents, props.settings.assistantProviderKind, props.settings.providers]
   );
-  // The Assistant moved to another CLI (its saved one signed in or out):
-  // model, effort and where it runs were chosen for the one before.
-  const assistantKindShown = useRef(assistantProviderKind);
+  // The main session moved to another provider (its saved CLI signed in or
+  // out, another one chosen on the chip, or Settings changed while this
+  // screen was closed): what was set for it here (model, effort, access,
+  // where it runs) was for the one before and is dropped, as the classic
+  // New chat always did; another provider's model never reaches a CLI.
+  const mainProviderKey = mainProvider ? mainSessionProviderKey(mainProvider) : undefined;
   const { onSelectedParticipantRuntimeOverridesChange } = props;
+  // Kept by App so it holds between visits; a screen given no keeper keeps
+  // it itself while it is open.
+  const ownOverrideFor = useRef<string | undefined>();
+  const mainSessionOverrideFor = props.onMainSessionOverrideForChange ? props.mainSessionOverrideFor : ownOverrideFor.current;
+  const onMainSessionOverrideForChange = useMemo(
+    () => props.onMainSessionOverrideForChange ?? ((key: string | undefined) => { ownOverrideFor.current = key; }),
+    [props.onMainSessionOverrideForChange]
+  );
+  const overrideForOtherProvider = mainSessionOverrideForOtherProvider(mainSessionOverrideFor, mainProviderKey);
   useEffect(() => {
-    const before = assistantKindShown.current;
-    assistantKindShown.current = assistantProviderKind;
-    if (!before || !assistantProviderKind || before === assistantProviderKind) return;
-    onSelectedParticipantRuntimeOverridesChange((current) => {
-      if (!(NEW_CHAT_ASSISTANT_PARTICIPANT_ID in current)) return current;
-      const { [NEW_CHAT_ASSISTANT_PARTICIPANT_ID]: _forTheOtherCli, ...rest } = current;
+    if (!mainProviderKey || mainSessionOverrideFor === mainProviderKey) return;
+    if (mainSessionOverrideFor !== undefined) {
+      onSelectedParticipantRuntimeOverridesChange((current) => {
+        if (!(NEW_CHAT_MAIN_SESSION_PARTICIPANT_ID in current)) return current;
+        const { [NEW_CHAT_MAIN_SESSION_PARTICIPANT_ID]: _forTheOtherProvider, ...rest } = current;
+        return rest;
+      });
+    }
+    onMainSessionOverrideForChange?.(mainProviderKey);
+  }, [mainProviderKey, mainSessionOverrideFor, onMainSessionOverrideForChange, onSelectedParticipantRuntimeOverridesChange]);
+  // Leaving New chat without sending: the chip choice was for the chat about
+  // to be made, so the next New chat starts from Settings again.
+  const leaveRef = useRef({ sessionsView, onSelectedParticipantRuntimeOverridesChange, onMainSessionProviderChange: props.onMainSessionProviderChange });
+  leaveRef.current = { sessionsView, onSelectedParticipantRuntimeOverridesChange, onMainSessionProviderChange: props.onMainSessionProviderChange };
+  useEffect(() => () => {
+    const leaving = leaveRef.current;
+    if (!leaving.sessionsView) return;
+    leaving.onMainSessionProviderChange?.(undefined);
+    leaving.onSelectedParticipantRuntimeOverridesChange((current) => {
+      if (!(NEW_CHAT_MAIN_SESSION_PARTICIPANT_ID in current)) return current;
+      const { [NEW_CHAT_MAIN_SESSION_PARTICIPANT_ID]: _chosenForThatChat, ...rest } = current;
       return rest;
     });
-  }, [assistantProviderKind, onSelectedParticipantRuntimeOverridesChange]);
-  const assistantParticipant = useMemo(
-    () => assistantProviderKind ? newChatAssistantParticipantConfig(assistantProviderKind) : undefined,
-    [assistantProviderKind]
+  }, []);
+  const mainSessionOverride = overrideForOtherProvider ? undefined : props.selectedParticipantRuntimeOverrides[NEW_CHAT_MAIN_SESSION_PARTICIPANT_ID];
+  const machineList = useMachineList();
+  // How Settings → General → New chats starts it on this provider: the
+  // controls start from it (a machine no longer set up: this computer).
+  // (useMachineList keeps the same list while nothing it reads changed.)
+  const newChatStart = useMemo(
+    () => mainKind ? newChatDesktopStartFor(props.settings.newChatDefaults, { kind: mainKind, hostId: mainHostId }, machineList) : undefined,
+    [mainHostId, mainKind, machineList, props.settings.newChatDefaults]
   );
+  // The mode the User's own config starts its CLI in where the main session
+  // runs (this computer, or the machine chosen for it): it starts there.
+  const place = newChatMainSessionPlace(mainSessionOverride, newChatStart);
+  const startAccess = useCliStartDefaults(mainKind
+    ? { kind: mainKind, homeMachineId: place.homeMachineId, cloudRun: place.cloudRun }
+    : undefined, machineList)?.access;
+  const mainSessionParticipant = useMemo(
+    () => mainKind ? newChatMainSessionParticipantConfig(mainKind, Boolean(props.repoPath.trim()), mainHostId, sessionsView, startAccess, newChatStart) : undefined,
+    [mainHostId, mainKind, newChatStart, props.repoPath, sessionsView, startAccess]
+  );
+  const { onMainSessionStartAccessChange } = props;
+  const startShownKey = mainProviderKey ? startAccessKey(mainProviderKey, place) : undefined;
+  useEffect(() => {
+    if (!sessionsView) return;
+    onMainSessionStartAccessChange?.(startShownKey ? { key: startShownKey, ...(startAccess ? { access: startAccess } : {}) } : undefined);
+  }, [onMainSessionStartAccessChange, sessionsView, startAccess, startShownKey]);
   const savedParticipantOptions = useMemo(
     () => sortSavedParticipantOptionsByUsage(
       addableSavedParticipantConfigs(props.settings, props.agents, new Set())
-        .filter(({ config }) => !isChatAssistantParticipant(config)),
+        .filter(({ config }) => !isNewChatMainSessionOption(config)),
       props.summaries
     ),
     [props.agents, props.settings, props.summaries]
   );
   const mentionParticipants = useMemo<ChatParticipant[]>(
-    () => [
-      ...(assistantParticipant ? [assistantParticipant] : []),
+    () => sessionsView ? NO_MENTIONS : [
+      ...(mainSessionParticipant ? [mainSessionParticipant] : []),
       ...savedParticipantOptions
         .filter((option) => !participantOptionInvalidReason(option, props.selectedParticipantRuntimeOverrides[option.config.id]))
         .map(({ config }) => config)
     ],
-    [assistantParticipant, savedParticipantOptions, props.selectedParticipantRuntimeOverrides]
+    [mainSessionParticipant, savedParticipantOptions, props.selectedParticipantRuntimeOverrides, sessionsView]
   );
+  const mainSessionDraft = useMemo(
+    () => mainKind
+      ? newChatMainSessionParticipantDraft(mainKind, mainSessionOverride, Boolean(props.repoPath.trim()), mainHostId, sessionsView, startAccess, newChatStart)
+      : undefined,
+    [mainHostId, mainKind, mainSessionOverride, newChatStart, props.repoPath, sessionsView, startAccess]
+  );
+  const mainSessionRemote = Boolean(mainSessionDraft?.homeMachineId || mainSessionDraft?.cloudRun);
   const prospectiveParticipantDrafts = useMemo(() => {
-    const drafts = selectedOrMentionedChatParticipantDrafts(
+    // In the sessions view the chat is made with its main session alone: it
+    // makes members itself, and an @handle in the first message picks none.
+    const drafts = sessionsView ? [] : selectedOrMentionedChatParticipantDrafts(
       props.settings.chatParticipantConfigs,
       props.selectedParticipantIds,
       props.prompt,
       props.selectedParticipantRuntimeOverrides
     );
-    const assistantRuntimeOverride = props.selectedParticipantRuntimeOverrides[NEW_CHAT_ASSISTANT_PARTICIPANT_ID];
-    if (!assistantProviderKind || !hasChatParticipantRuntimeOverride(assistantRuntimeOverride)) {
-      return drafts;
-    }
-    return [newChatAssistantParticipantDraft(assistantProviderKind, assistantRuntimeOverride), ...drafts];
+    // Every new chat has its main session first (docs/main-session.md).
+    return mainSessionDraft ? [mainSessionDraft, ...drafts] : drafts;
   }, [
-    assistantProviderKind,
+    mainSessionDraft,
+    sessionsView,
     props.prompt,
     props.selectedParticipantIds,
     props.selectedParticipantRuntimeOverrides,
     props.settings.chatParticipantConfigs
   ]);
+  const changeMainSession = useCallback((patch: ChatModelAccessPatch) => {
+    // "" is the picker's reset to the CLI's own model or effort: none here.
+    const settled = Object.fromEntries(Object.entries(patch).map(([key, value]) => [key, value === "" ? undefined : value])) as ChatModelAccessPatch;
+    onSelectedParticipantRuntimeOverridesChange((current) => ({
+      ...current,
+      [NEW_CHAT_MAIN_SESSION_PARTICIPANT_ID]: { ...current[NEW_CHAT_MAIN_SESSION_PARTICIPANT_ID], ...settled }
+    }));
+    if (mainProviderKey) onMainSessionOverrideForChange?.(mainProviderKey);
+  }, [mainProviderKey, onMainSessionOverrideForChange, onSelectedParticipantRuntimeOverridesChange]);
+  const { onMainSessionProviderChange } = props;
+  const chooseMainProvider = useCallback((option: MainSessionProviderOption) => {
+    onMainSessionProviderChange?.({ kind: option.kind, ...(option.hostId ? { hostId: option.hostId } : {}) });
+  }, [onMainSessionProviderChange]);
   const searchSource = useMemo(
     () => ({
       type: "pre-chat" as const,
       repoPath: props.repoPath.trim() || undefined,
       participants: prospectiveParticipantDrafts,
-      assistantProviderKind
+      assistantProviderKind: mainKind
     }),
-    [assistantProviderKind, props.repoPath, prospectiveParticipantDrafts]
+    [mainKind, props.repoPath, prospectiveParticipantDrafts]
   );
   const mentions = useChatComposerMentions({
     draft: props.prompt,
@@ -217,7 +351,7 @@ export function NewChatScreen(props: {
     onSelectedPluginMentionsChange: props.onSelectedPluginMentionsChange,
     onSelectedSkillMentionsChange: props.onSelectedSkillMentionsChange,
     onMentionInserted: (participant) => {
-      if (!isNewChatAssistantOption(participant)) {
+      if (!isNewChatMainSessionOption(participant)) {
         props.onSelectedParticipantIdsChange((current) => new Set(current).add(participant.id));
       }
     }
@@ -231,7 +365,7 @@ export function NewChatScreen(props: {
     props.settings.cliProviderHosts
   );
   const hasPrompt = props.prompt.trim().length > 0;
-  const canSubmit = Boolean(assistantProviderKind) && (hasPrompt || images.readyImages.length > 0 || mentions.selectedSkillMentions.length > 0) && !images.hasInvalidImages && !props.busy && !validation;
+  const canSubmit = Boolean(mainKind) && (hasPrompt || images.readyImages.length > 0 || mentions.selectedSkillMentions.length > 0) && !images.hasInvalidImages && !props.busy && !validation;
   const hasLeadingPluginToken = draftStartsWithPluginMention(props.prompt, mentions.selectedPluginMentions);
   const needsProviderSetup = readyKinds.length === 0;
 
@@ -328,27 +462,45 @@ export function NewChatScreen(props: {
 
   return (
     <div className={["new-chat-screen", needsProviderSetup ? "has-cli-readiness" : ""].filter(Boolean).join(" ")} data-testid="new-chat-screen">
-      <div className="new-chat-hero">
-        <div className="new-chat-logo" aria-hidden="true">
-          <span className="new-chat-logo-glow" />
-          <span className="new-chat-logo-ring" />
-          <img src={ACCORDAGENTS_MARK_URL} alt="" draggable="false" />
-        </div>
-        <h1>Start a new chat</h1>
-        <p>Coordinate AI agents in one workspace</p>
+      <div className="new-chat-center">
+        {needsProviderSetup ? (
+          <CliReadinessSetupPanel
+            agents={props.agents}
+            settings={props.settings}
+            checking={props.agents.some((agent) => agent.checking)}
+            onRefresh={props.onRefreshAgents}
+            onOpenSettings={props.onOpenProviderSettings}
+          />
+        ) : (
+          <>
+            <img className="new-chat-mark" src={ACCORDAGENTS_MARK_URL} alt="" aria-hidden="true" draggable="false" />
+            <h1 className="new-chat-title">{props.repoPath ? `New chat in ${projectLabelForPath(props.repoPath)}` : "New chat"}</h1>
+            <p className="new-chat-hint">Describe the task. / runs a command, # adds a file.</p>
+            {props.repoPath && props.onOpenChat && <NewChatRecent summaries={props.summaries} repoPath={props.repoPath} onOpen={props.onOpenChat} />}
+          </>
+        )}
       </div>
 
-      {needsProviderSetup && (
-        <CliReadinessSetupPanel
-          agents={props.agents}
-          settings={props.settings}
-          checking={props.agents.some((agent) => agent.checking)}
-          onRefresh={props.onRefreshAgents}
-          onOpenSettings={props.onOpenProviderSettings}
-        />
-      )}
+      {/* The composer stands where the chat keeps its own, with the same
+          strip, so nothing moves when the chat starts. */}
+      <div className="new-chat-dock" hidden={needsProviderSetup}>
+        {props.repoInfo && !props.repoInfo.isRepo && props.repoInfo.error && (
+          <div className="repo-status new-chat-repo-status bad">
+            <XCircleIcon size={16} aria-hidden />
+            {props.repoInfo.error}
+          </div>
+        )}
 
-      <div className="new-chat-card" hidden={needsProviderSetup}>
+        {readyKinds.length > 0 && validation && <div className="inline-error new-chat-error">{validation}</div>}
+        {!needsProviderSetup && chosenProviderGone && mainProvider && (
+          <p className="new-chat-assistant-note" data-testid="new-chat-assistant-note">
+            {`The provider chosen on the model chip is not ready now: this chat would start on ${mainProvider.label || mainProvider.kind}.`}
+          </p>
+        )}
+        {!needsProviderSetup && !chosenProviderGone && assistantNote && !chosenProviderInEffect && (
+          <p className="new-chat-assistant-note" data-testid="new-chat-assistant-note">{assistantNote}</p>
+        )}
+        {props.creationStatus !== undefined && <ChatCreationStatusLine text={props.creationStatus} />}
         <ChatComposerAttachmentChips
           pendingImages={images.pendingImages}
           removeFileMention={mentions.removeFileMention}
@@ -357,7 +509,48 @@ export function NewChatScreen(props: {
           selectedFileMentions={mentions.selectedFileMentions}
           selectedSkillMentions={mentions.selectedSkillMentions}
         />
-        <div className={["new-chat-input-wrap", mentions.showSkillHighlights ? "has-skill-highlights" : ""].filter(Boolean).join(" ")} {...{ [DICTATION_SESSION_ATTRIBUTE]: "new-chat" }}>
+        <ComposerFooterSlot.Provider value={footerSlot}>
+        <div className="chat-composer-shell">
+        <ComposerContextStrip lead={(
+          <>
+            <FolderPicker
+              repoPath={props.repoPath}
+              settings={props.settings}
+              onRepoPathChange={props.onRepoPathChange}
+              onRepoBlur={props.onRepoBlur}
+              onSelectRepo={props.onSelectRepo}
+            />
+            {/* The folder on screen only (a stale one from before Browse
+                must not be switched), and only for a main session on this
+                computer: a machine's copy is not this checkout. */}
+            {!mainSessionRemote && (
+              <ComposerBranchMenu repo={shownRepoInfo} onRepoChange={keepRepoInfo}
+                lockedReason={folderBusy(props.summaries, props.repoPath) ? FOLDER_BUSY_REASON : undefined} />
+            )}
+          </>
+        )}>
+          {sessionsView ? (mainProvider && mainSessionDraft && (
+            <NewChatModelChip
+              draft={mainSessionDraft}
+              provider={mainProvider}
+              providers={providerOptions}
+              onProviderChange={chooseMainProvider}
+              onChange={changeMainSession}
+            />
+          )) : <ParticipantPicker
+            mainSessionParticipant={mainSessionParticipant}
+            savedParticipantOptions={savedParticipantOptions}
+            cliProviderHosts={props.settings.cliProviderHosts}
+            selectedParticipantIds={props.selectedParticipantIds}
+            selectedParticipantRuntimeOverrides={props.selectedParticipantRuntimeOverrides}
+            renderParticipantAvatar={props.renderParticipantAvatar}
+            participantRoleLabel={props.participantRoleLabel}
+            onSelectedParticipantIdsChange={props.onSelectedParticipantIdsChange}
+            onSelectedParticipantRuntimeOverridesChange={props.onSelectedParticipantRuntimeOverridesChange}
+            onOpenParticipantsSettings={props.onOpenParticipantsSettings}
+          />}
+        </ComposerContextStrip>
+        <div className={["chat-input-wrap", "new-chat-input-wrap", mentions.showSkillHighlights ? "has-skill-highlights" : ""].filter(Boolean).join(" ")} {...{ [DICTATION_SESSION_ATTRIBUTE]: "new-chat" }}>
           <ChatComposerMenus
             fileIndex={mentions.fileIndex}
             insertCommand={mentions.insertCommand}
@@ -370,7 +563,6 @@ export function NewChatScreen(props: {
             mentionOptions={mentions.mentionOptions}
             participantRoleLabel={props.participantRoleLabel}
             renderParticipantAvatar={props.renderParticipantAvatar}
-            slashMenuPlacement="below"
             skillIndex={mentions.skillIndex}
             skillQuery={mentions.skillQuery}
             skillTargetLabel={mentions.skillTargetLabel}
@@ -385,8 +577,10 @@ export function NewChatScreen(props: {
               hasLeadingPluginToken ? "has-leading-plugin-token" : ""
             ].filter(Boolean).join(" ")}
             value={props.prompt}
+            // What was sent at Enter is what the chat starts with.
+            readOnly={props.busy}
             placeholder="What are you working on?"
-            rows={3}
+            rows={1}
             data-testid="new-chat-prompt"
             spellCheck={!mentions.showSkillHighlights}
             onChange={(event) => mentions.updateDraft(event.target.value)}
@@ -479,7 +673,8 @@ export function NewChatScreen(props: {
             </div>
           )}
         </div>
-        <div className="new-chat-toolbar">
+        <div className="chat-composer-toolbar">
+          <div className="chat-composer-tools">
           <input
             ref={fileInputRef}
             type="file"
@@ -492,57 +687,47 @@ export function NewChatScreen(props: {
               void images.addImageFiles(files);
             }}
           />
-          <IconButton label="Attach image" icon={ImagePlus} onClick={() => fileInputRef.current?.click()} />
-          <FolderPicker
-            repoPath={props.repoPath}
-            settings={props.settings}
-            onRepoPathChange={props.onRepoPathChange}
-            onRepoBlur={props.onRepoBlur}
-            onSelectRepo={props.onSelectRepo}
-          />
-          <span className="new-chat-toolbar-spacer" />
-          <ParticipantPicker
-            assistantParticipant={assistantParticipant}
-            savedParticipantOptions={savedParticipantOptions}
-            cliProviderHosts={props.settings.cliProviderHosts}
-            selectedParticipantIds={props.selectedParticipantIds}
-            selectedParticipantRuntimeOverrides={props.selectedParticipantRuntimeOverrides}
-            renderParticipantAvatar={props.renderParticipantAvatar}
-            participantRoleLabel={props.participantRoleLabel}
-            onSelectedParticipantIdsChange={props.onSelectedParticipantIdsChange}
-            onSelectedParticipantRuntimeOverridesChange={props.onSelectedParticipantRuntimeOverridesChange}
-            onOpenParticipantsSettings={props.onOpenParticipantsSettings}
-          />
+          <IconButton label="Attach image" icon={ImageIcon} disabled={props.busy} onClick={() => fileInputRef.current?.click()} />
+          {/* Where the chat has Start Accord: offered once the chat exists. */}
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <span className="composer-accord-tooltip-trigger">
+                <IconButton label="Start Accord" icon={AccordMergeIcon} disabled data-testid="new-chat-accord-button" onClick={() => undefined} />
+              </span>
+            </TooltipTrigger>
+            <TooltipContent side="top">Start a chat first: Accord runs in a chat.</TooltipContent>
+          </Tooltip>
+          </div>
+          <div className="chat-composer-actions">
+          <span ref={setFooterSlot} className="chat-composer-footer-slot" />
           <SpeechToTextButton
             getTextarea={() => promptRef.current}
             draft={props.prompt}
             onDraftChange={props.onPromptChange}
           />
-          <button
-            type="button"
-            className="new-chat-send"
-            disabled={!canSubmit}
-            title="Start chat"
-            aria-label="Start chat"
-            data-testid="new-chat-start"
-            onClick={() => void startChat()}
-          >
-            {props.busy ? <RefreshCw className="spin" size={18} aria-hidden /> : <ArrowUp size={18} strokeWidth={2.25} aria-hidden />}
-          </button>
+          {props.busy && props.onStopStart ? (
+            // While the chat is being made: Stop, where the chat keeps it.
+            <button type="button" className="composer-send-button is-stop" aria-label="Stop" data-testid="new-chat-stop" onClick={props.onStopStart}>
+              <SquareIcon size={10} weight="fill" />
+            </button>
+          ) : (
+            <button
+              type="button"
+              className="composer-send-button"
+              disabled={!canSubmit}
+              aria-label="Start chat"
+              data-testid="new-chat-start"
+              onClick={() => void startChat()}
+            >
+              {props.busy ? <Spinner size={14} /> : <ArrowUpIcon size={14} weight="bold" aria-hidden />}
+            </button>
+          )}
+          </div>
         </div>
+        </div>
+        </ComposerFooterSlot.Provider>
       </div>
 
-      {props.repoInfo && !props.repoInfo.isRepo && props.repoInfo.error && (
-        <div className="repo-status new-chat-repo-status bad">
-          <XCircle size={16} aria-hidden />
-          {props.repoInfo.error}
-        </div>
-      )}
-
-      {readyKinds.length > 0 && validation && <div className="inline-error new-chat-error">{validation}</div>}
-      {!needsProviderSetup && assistantNote && (
-        <p className="new-chat-assistant-note" data-testid="new-chat-assistant-note">{assistantNote}</p>
-      )}
     </div>
   );
 }
@@ -591,9 +776,9 @@ function FolderPicker(props: {
         title={repoPath || "Choose a folder"}
         onClick={() => setOpen((current) => !current)}
       >
-        <FolderOpen size={15} aria-hidden />
+        <FolderSimpleIcon size={14} aria-hidden />
         <span>{label}</span>
-        <ChevronDown size={14} aria-hidden />
+        <CaretDownIcon size={14} className="text-ui-text-3" aria-hidden />
       </button>
       {open && (
         <div className="new-chat-menu new-chat-folder-menu" role="menu">
@@ -602,9 +787,9 @@ function FolderPicker(props: {
               <div className="new-chat-menu-section">Recent folders</div>
               {recentOptions.map((path) => (
                 <button key={path} type="button" className="new-chat-menu-item" role="menuitem" onClick={() => selectPath(path)}>
-                  <FolderOpen size={15} aria-hidden />
+                  <FolderOpenIcon size={15} aria-hidden />
                   <span>{folderName(path)}</span>
-                  {repoPath === path && <Check size={14} className="new-chat-menu-check" aria-hidden />}
+                  {repoPath === path && <CheckIcon size={14} className="new-chat-menu-check" aria-hidden />}
                 </button>
               ))}
               <div className="new-chat-menu-divider" />
@@ -619,7 +804,7 @@ function FolderPicker(props: {
               props.onSelectRepo();
             }}
           >
-            <Plus size={15} aria-hidden />
+            <PlusIcon size={15} aria-hidden />
             <span>Browse for a folder...</span>
           </button>
           <button
@@ -631,9 +816,9 @@ function FolderPicker(props: {
               setOpen(false);
             }}
           >
-            <XCircle size={15} aria-hidden />
+            <XCircleIcon size={15} aria-hidden />
             <span>Work without a folder</span>
-            {!repoPath && <Check size={14} className="new-chat-menu-check" aria-hidden />}
+            {!repoPath && <CheckIcon size={14} className="new-chat-menu-check" aria-hidden />}
           </button>
         </div>
       )}
@@ -642,7 +827,7 @@ function FolderPicker(props: {
 }
 
 function ParticipantPicker(props: {
-  assistantParticipant?: ChatParticipantConfig;
+  mainSessionParticipant?: ChatParticipantConfig;
   cliProviderHosts: CliProviderHost[];
   savedParticipantOptions: AddableSavedParticipantConfig[];
   selectedParticipantIds: Set<string>;
@@ -657,7 +842,7 @@ function ParticipantPicker(props: {
   const rootRef = useCloseOnOutside<HTMLDivElement>(open, () => setOpen(false));
   const participantMenuMaxHeight = useNewChatMenuMaxHeight(rootRef, open);
   const participantOptions: Array<AddableSavedParticipantConfig & { locked?: boolean }> = [
-    ...(props.assistantParticipant ? [{ config: props.assistantParticipant, locked: true }] : []),
+    ...(props.mainSessionParticipant ? [{ config: props.mainSessionParticipant, locked: true }] : []),
     ...props.savedParticipantOptions
   ];
   const selectedOptions = participantOptions.filter(({ config, locked }) => locked || props.selectedParticipantIds.has(config.id));
@@ -705,7 +890,7 @@ function ParticipantPicker(props: {
     }));
     // Changing a member's settings adds it, once it can run where they put it.
     const option = participantOptions.find(({ config }) => config.id === participant.id);
-    if (option && !isNewChatAssistantOption(participant) && !participantOptionInvalidReason(option, runtimeOverride)) {
+    if (option && !isNewChatMainSessionOption(participant) && !participantOptionInvalidReason(option, runtimeOverride)) {
       props.onSelectedParticipantIdsChange((current) => new Set(current).add(participant.id));
     }
   }
@@ -727,7 +912,7 @@ function ParticipantPicker(props: {
           ))}
         </span>
         <span>{label}</span>
-        <ChevronDown size={14} aria-hidden />
+        <CaretDownIcon size={14} aria-hidden />
       </button>
       {open && (
         <div
@@ -780,56 +965,6 @@ function ParticipantPicker(props: {
       )}
     </div>
   );
-}
-
-function isNewChatAssistantOption(participant: Pick<ChatParticipantConfig, "id" | "handle" | "roleConfigId">): boolean {
-  return participant.id === NEW_CHAT_ASSISTANT_PARTICIPANT_ID || isChatAssistantParticipant(participant);
-}
-
-function useCloseOnOutside<T extends HTMLElement>(open: boolean, onClose: () => void): RefObject<T> {
-  const ref = useRef<T>(null);
-
-  useEffect(() => {
-    if (!open) return;
-    const onPointerDown = (event: MouseEvent): void => {
-      if (ref.current && !ref.current.contains(event.target as Node)) {
-        onClose();
-      }
-    };
-    document.addEventListener("mousedown", onPointerDown);
-    return () => document.removeEventListener("mousedown", onPointerDown);
-  }, [onClose, open]);
-
-  return ref;
-}
-
-function useNewChatMenuMaxHeight<T extends HTMLElement>(rootRef: RefObject<T>, open: boolean): number | undefined {
-  const [maxHeight, setMaxHeight] = useState<number | undefined>();
-
-  useLayoutEffect(() => {
-    if (!open) {
-      setMaxHeight(undefined);
-      return;
-    }
-
-    function updateMaxHeight(): void {
-      const rect = rootRef.current?.getBoundingClientRect();
-      if (!rect) return;
-      const topbarBottom = document.querySelector<HTMLElement>("[data-shell='topbar']")?.getBoundingClientRect().bottom ?? 0;
-      const safeTop = Math.max(NEW_CHAT_MENU_VIEWPORT_MARGIN, topbarBottom + NEW_CHAT_MENU_VIEWPORT_MARGIN);
-      setMaxHeight(Math.max(0, Math.floor(rect.top - NEW_CHAT_MENU_OFFSET + NEW_CHAT_PARTICIPANT_MENU_OVERLAP - safeTop)));
-    }
-
-    updateMaxHeight();
-    window.addEventListener("resize", updateMaxHeight);
-    window.addEventListener("scroll", updateMaxHeight, true);
-    return () => {
-      window.removeEventListener("resize", updateMaxHeight);
-      window.removeEventListener("scroll", updateMaxHeight, true);
-    };
-  }, [open, rootRef]);
-
-  return maxHeight;
 }
 
 function folderName(path: string): string {

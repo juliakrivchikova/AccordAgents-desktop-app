@@ -1,4 +1,5 @@
 import { useCallback, useRef, useState } from "react";
+import type { NewChatStartAccess } from "../components/chat/use-cli-start-defaults";
 import type {
   AgentHealth,
   AppSettings,
@@ -16,6 +17,7 @@ import type {
 import type { SettingsSection } from "../components/settings/settings-view";
 import type { ChatMessageFocusRequest } from "../components/chat/chat-conversation-view";
 import type { ChatParticipantDraft, ChatParticipantRuntimeOverride } from "../components/chat/chat-participant-drafts";
+import type { MainSessionProviderChoice } from "../../shared/mainSessionProviders";
 import type { DraftPluginMention } from "../components/chat/chat-composer-draft-utils";
 import type { PendingChatImage } from "../components/chat/use-chat-composer-images";
 import { DEFAULT_SETTINGS } from "./constants";
@@ -117,6 +119,19 @@ export interface AppState {
   setSelectedChatParticipantConfigIds: StateSetter<Set<string>>;
   selectedChatParticipantRuntimeOverrides: Record<string, ChatParticipantRuntimeOverride>;
   setSelectedChatParticipantRuntimeOverrides: StateSetter<Record<string, ChatParticipantRuntimeOverride>>;
+  /** The provider the New chat model chip chose for the next chat's main
+   *  session (sessions view); none: Settings → General's. */
+  newChatMainSessionProvider: MainSessionProviderChoice | undefined;
+  setNewChatMainSessionProvider: StateSetter<MainSessionProviderChoice | undefined>;
+  /** The provider (mainSessionProviderKey) the main session's settings on
+   *  the New chat screen were made for. */
+  newChatMainSessionOverrideFor: string | undefined;
+  setNewChatMainSessionOverrideFor: StateSetter<string | undefined>;
+  /** The mode the New chat screen showed the main session starting in (her
+   *  CLI config's where it runs, none: the CLI's built-in), and for which
+   *  provider and place: the chat is made in what was shown. */
+  newChatMainSessionStartAccess: NewChatStartAccess | undefined;
+  setNewChatMainSessionStartAccess: StateSetter<NewChatStartAccess | undefined>;
   /** Unsent composer text of the open chat; each chat keeps its own. */
   chatMessageDraft: string;
   /** Changes the open chat's unsent text; does nothing when no chat is open. */
@@ -145,6 +160,11 @@ export interface AppState {
   setUnreadConversationIds: StateSetter<Set<string>>;
   progressLogRef: React.MutableRefObject<ReviewProgress[]>;
   openConversationRequestRef: React.MutableRefObject<number>;
+  // The chat the latest open request is for (undefined: a request that took
+  // the chat off screen), set with each new openConversationRequestRef. The
+  // count alone does not say she opened another chat: Back from Activity
+  // and a click on the chat already open count too.
+  openConversationTargetRef: React.MutableRefObject<string | undefined>;
   chatMessageFocusNonceRef: React.MutableRefObject<number>;
   activityRefreshRequestRef: React.MutableRefObject<number>;
   summaryRefreshRequestRef: React.MutableRefObject<number>;
@@ -222,6 +242,9 @@ export function useAppState(): AppState {
   const [planCorrectionDraft, setPlanCorrectionDraft] = useState("");
   const [selectedChatParticipantConfigIds, setSelectedChatParticipantConfigIds] = useState<Set<string>>(new Set());
   const [selectedChatParticipantRuntimeOverrides, setSelectedChatParticipantRuntimeOverrides] = useState<Record<string, ChatParticipantRuntimeOverride>>({});
+  const [newChatMainSessionProvider, setNewChatMainSessionProvider] = useState<MainSessionProviderChoice | undefined>();
+  const [newChatMainSessionOverrideFor, setNewChatMainSessionOverrideFor] = useState<string | undefined>();
+  const [newChatMainSessionStartAccess, setNewChatMainSessionStartAccess] = useState<NewChatStartAccess | undefined>();
   const openConversationId = conversation?.id;
   const messageDrafts = usePerChatState<string>(openConversationId, NO_DRAFT_TEXT, isEmptyDraftText);
   const skillMentionDrafts = usePerChatState<ChatSkillMention[]>(openConversationId, NO_SKILL_MENTIONS, isEmptyList);
@@ -252,6 +275,7 @@ export function useAppState(): AppState {
   const [unreadConversationIds, setUnreadConversationIds] = useState<Set<string>>(new Set());
   const progressLogRef = useRef<ReviewProgress[]>([]);
   const openConversationRequestRef = useRef(0);
+  const openConversationTargetRef = useRef<string | undefined>();
   const chatMessageFocusNonceRef = useRef(0);
   const activityRefreshRequestRef = useRef(0);
   const summaryRefreshRequestRef = useRef(0);
@@ -299,11 +323,14 @@ export function useAppState(): AppState {
     setPendingClarifications, planItemReviewDrafts, setPlanItemReviewDrafts, planCorrectionDraft,
     setPlanCorrectionDraft, selectedChatParticipantConfigIds, setSelectedChatParticipantConfigIds,
     selectedChatParticipantRuntimeOverrides, setSelectedChatParticipantRuntimeOverrides,
+    newChatMainSessionProvider, setNewChatMainSessionProvider,
+    newChatMainSessionOverrideFor, setNewChatMainSessionOverrideFor,
+    newChatMainSessionStartAccess, setNewChatMainSessionStartAccess,
     chatMessageDraft, setChatMessageDraft, setChatMessageDraftForConversation, chatComposerSkillMentions,
     setChatComposerSkillMentions, chatComposerPluginMentions, setChatComposerPluginMentions, chatComposerFileMentions,
     setChatComposerFileMentions, clearChatMessageDraft, chatAddParticipantDraft, setChatAddParticipantDraft,
     chatMessageFocusRequest, setChatMessageFocusRequest, error, setError, unreadConversationIds,
-    setUnreadConversationIds, progressLogRef, openConversationRequestRef, chatMessageFocusNonceRef,
+    setUnreadConversationIds, progressLogRef, openConversationRequestRef, openConversationTargetRef, chatMessageFocusNonceRef,
     activityRefreshRequestRef, summaryRefreshRequestRef, agentRefreshRequestRef, activityRevisionByConversationRef, activityItemPreferencesRef, archivedConversationIdsRef,
     lastViewedAtRef, startingChatRef, chatCreationRef, railViewRef, chatBeforeActivityRef, previewLoadedAtRef
   };
