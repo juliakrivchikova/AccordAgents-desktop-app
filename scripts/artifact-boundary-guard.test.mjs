@@ -51,7 +51,10 @@ test("generic artifact surfaces contain no workflow-specific terminology", () =>
     "src/main/services/artifactRevisions.ts",
     "src/main/services/artifactToolRequest.ts",
     "src/shared/artifacts.ts",
-    "src/main/services/artifacts.test.ts",
+    "src/main/services/artifacts.documents.test.ts",
+    "src/main/services/artifacts.drafts.test.ts",
+    "src/main/services/artifacts.draftAccess.test.ts",
+    "src/main/services/artifacts.notes.test.ts",
     "src/main/services/appMcp.artifacts.test.ts",
     "src/renderer/components/artifacts/artifact-drafts.test.tsx",
     "src/renderer/styles/views/artifacts.css"
