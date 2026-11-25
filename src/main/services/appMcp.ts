@@ -1,1172 +1,175 @@
-import { randomUUID } from "node:crypto";
-import http from "node:http";
-import type { AddressInfo } from "node:net";
-import type { ChatAgentMode, ChatAgentPermissions, ChatAppToolCapability } from "../../shared/types";
-import { normalizeChatAgentMode, normalizeChatAgentPermissions } from "../../shared/agentPermissions";
-import { hasChatAppToolCapability } from "../../shared/appTools";
+import type {
+  AppArtifactToolHandler, AppChatAttachmentExportHandler, AppChatAttachmentListHandler, AppChatAttachmentReadHandler,
+  AppChatCompactionRequestHandler, AppChatContextHandler, AppChatDelegateTaskHandler, AppChatMessagesHandler,
+  AppChatParticipantActivityHandler, AppChatParticipantRequestHandler, AppChatParticipantRequestStatusHandler,
+  AppChatParticipantsHandler, AppChatReactHandler, AppChatSendMessageHandler, AppChatSetTitleHandler, AppChatStartAccordHandler,
+  AppMemoryToolHandler, AppParticipantChangeHandler, AppParticipantOptionsHandler, AppPermissionChangeHandler,
+  AppRoleChangeHandler, AppRoleOptionsHandler, AppRosterChangeHandler, AppRosterOptionsHandler, AppScriptToolHandler,
+  AppToolPermissionHandler, AppUrgentAlertToolHandler, AppWaitingToolHandler, ScriptApiHandler
+} from "./appMcp/handlerTypes";
+import type { AppMcpClientStatus, AppMcpConnection, AppMcpDebugLogger, AppMcpTokenGrant, ScriptApiContext } from "./appMcp/types";
+import { createAppMcpModules, type AppMcpModules } from "./appMcp/modules";
 
-import {
-  APP_ROSTER_REQUEST_CHANGE_TOOL,
-  APP_ROSTER_DESCRIBE_OPTIONS_TOOL,
-  APP_ROLES_REQUEST_CHANGE_TOOL,
-  APP_ROLES_DESCRIBE_OPTIONS_TOOL,
-  APP_PARTICIPANTS_REQUEST_CHANGE_TOOL,
-  APP_PARTICIPANTS_DESCRIBE_OPTIONS_TOOL,
-  APP_PERMISSIONS_REQUEST_CHANGE_TOOL,
-  APP_TOOL_PERMISSION_TOOL,
-  APP_CHAT_REQUEST_PARTICIPANTS_TOOL,
-  APP_CHAT_REQUEST_COMPACTION_TOOL,
-  APP_CONNECTOR_SIGN_IN_TOOL,
-  APP_CHAT_GET_PARTICIPANT_REQUEST_STATUS_TOOL,
-  APP_CHAT_GET_CONTEXT_TOOL,
-  APP_CHAT_GET_PARTICIPANTS_TOOL,
-  APP_CHAT_GET_PARTICIPANT_ACTIVITY_TOOL,
-  APP_CHAT_READ_MESSAGES_TOOL,
-  APP_CHAT_LIST_ATTACHMENTS_TOOL,
-  APP_CHAT_READ_ATTACHMENT_TOOL,
-  APP_CHAT_EXPORT_ATTACHMENT_TOOL,
-  APP_CHAT_REACT_TOOL,
-  APP_CHAT_SEND_MESSAGE_TOOL,
-  APP_CHAT_SET_TITLE_TOOL,
-  APP_CHAT_DELEGATE_TASK_TOOL,
-  APP_CHAT_START_ACCORD_TOOL,
-  APP_ARTIFACT_LIST_TOOL,
-  APP_ARTIFACT_READ_TOOL,
-  APP_ARTIFACT_DIFF_TOOL,
-  APP_ARTIFACT_CREATE_TOOL,
-  APP_ARTIFACT_REVISE_TOOL,
-  APP_ARTIFACT_RENAME_TOOL,
-  APP_ARTIFACT_SIGN_TOOL,
-  APP_ARTIFACT_SET_ACCESS_TOOL,
-  APP_ARTIFACT_SET_ARCHIVED_TOOL,
-  APP_ARTIFACT_DRAFT_LIST_TOOL,
-  APP_ARTIFACT_DRAFT_READ_TOOL,
-  APP_ARTIFACT_DRAFT_SAVE_TOOL,
-  APP_ARTIFACT_DRAFT_SUBMIT_TOOL,
-  APP_ARTIFACT_DRAFT_REPLACE_TOOL,
-  APP_ARTIFACT_DRAFT_WITHDRAW_TOOL,
-  APP_ARTIFACT_DRAFT_SET_ROSTER_TOOL,
-  APP_ARTIFACT_PUBLISH_TOOL,
-  APP_ARTIFACT_TOOL_NAMES,
-  APP_SCRIPT_TOOL_NAMES,
-  APP_MEMORY_TOOL_NAMES,
-  APP_URGENT_ALERT_TOOL,
-  APP_MCP_TOOL_POLICIES,
-  appMcpToolDefinitionsForCapabilities
-} from "../../shared/appMcpToolContracts";
+export type { AppMcpActor, AppMcpConnection, AppMcpTokenGrant, AppMcpClientStatus, ScriptApiContext } from "./appMcp/types";
 export * from "../../shared/appMcpToolContracts";
 
-export interface AppMcpActor {
-  conversationId: string;
-  participantId: string;
-  roleConfigId: string;
-  roleConfigVersion: number;
-  capabilities: ChatAppToolCapability[];
-  clientGenerationId?: string;
-  expectedToolNames?: string[];
-  triggerMessageId?: string;
-  triggerThreadId?: string;
-  triggerParentMessageId?: string;
-  triggerChatThreadRootId?: string;
-  snapshotMaxSequence?: number;
-  continuation?: boolean;
-  runId?: string;
-  turnSegmentId?: string;
-  participantRequestDepth?: number;
-  participantRequestBatchId?: string;
-  chainRootId?: string;
-  historyMarkdownPath?: string;
-  historyJsonPath?: string;
-  agentMode?: ChatAgentMode;
-  runPermissions?: ChatAgentPermissions;
-}
-
-export interface AppMcpConnection {
-  url: string;
-  token: string;
-}
-
-export interface AppMcpTokenGrant extends AppMcpActor {}
-
-export interface AppMcpClientStatus {
-  clientGenerationId: string;
-  initialized: boolean;
-  listedTools: boolean;
-  requiredToolsPresent: boolean;
-  missingToolNames: string[];
-  errored: boolean;
-  errorMessage?: string;
-  updatedAt: string;
-}
-
-interface AppMcpClientState extends AppMcpClientStatus {
-  expectedToolNames: string[];
-  listedToolNames: string[];
-}
-
-interface AppMcpDebugLogger {
-  write(event: string, payload: Record<string, unknown>): Promise<void>;
-}
-
-type AppRosterChangeHandler = (actor: AppMcpActor, request: unknown) => Promise<unknown>;
-type AppRosterOptionsHandler = (actor: AppMcpActor) => Promise<unknown>;
-type AppRoleChangeHandler = (actor: AppMcpActor, request: unknown) => Promise<unknown>;
-type AppRoleOptionsHandler = (actor: AppMcpActor) => Promise<unknown>;
-type AppParticipantChangeHandler = (actor: AppMcpActor, request: unknown) => Promise<unknown>;
-type AppParticipantOptionsHandler = (actor: AppMcpActor) => Promise<unknown>;
-type AppPermissionChangeHandler = (actor: AppMcpActor, request: unknown) => Promise<unknown>;
-type AppToolPermissionHandler = (actor: AppMcpActor, request: unknown, signal?: AbortSignal) => Promise<unknown>;
-/** A tool call that waits for the User: given a signal that aborts when the
- *  member's CLI gives up on the call. */
-type AppWaitingToolHandler = (actor: AppMcpActor, request: unknown, signal?: AbortSignal) => Promise<unknown>;
-
-/** How often a waiting tool call tells the CLI it is still running. Claude
- *  Code drops a plain JSON answer after 60 s and an idle stream after 5 min
- *  (2.1.280), so a call that waits for the User answers as a stream and
- *  reports progress well inside that. */
-const APP_MCP_WAITING_PROGRESS_MS = 20_000;
-type AppChatContextHandler = (actor: AppMcpActor) => Promise<unknown>;
-type AppChatParticipantsHandler = (actor: AppMcpActor) => Promise<unknown>;
-type AppChatParticipantActivityHandler = (actor: AppMcpActor) => Promise<unknown>;
-type AppChatMessagesHandler = (actor: AppMcpActor, request: unknown) => Promise<unknown>;
-type AppChatAttachmentListHandler = (actor: AppMcpActor, request: unknown) => Promise<unknown>;
-type AppChatAttachmentReadHandler = (actor: AppMcpActor, request: unknown) => Promise<unknown>;
-type AppChatAttachmentExportHandler = (actor: AppMcpActor, request: unknown) => Promise<unknown>;
-type AppChatParticipantRequestHandler = (actor: AppMcpActor, request: unknown) => Promise<unknown>;
-type AppChatCompactionRequestHandler = (actor: AppMcpActor, request: unknown) => Promise<unknown>;
-type AppChatParticipantRequestStatusHandler = (actor: AppMcpActor, request: unknown) => Promise<unknown>;
-type AppChatReactHandler = (actor: AppMcpActor, request: unknown) => Promise<unknown>;
-type AppChatSendMessageHandler = (actor: AppMcpActor, request: unknown) => Promise<unknown>;
-type AppChatSetTitleHandler = (actor: AppMcpActor, request: unknown) => Promise<unknown>;
-type AppChatDelegateTaskHandler = (actor: AppMcpActor, request: unknown) => Promise<unknown>;
-type AppChatStartAccordHandler = (actor: AppMcpActor, request: unknown) => Promise<unknown>;
-type AppArtifactToolHandler = (actor: AppMcpActor, toolName: string, request: unknown) => Promise<unknown>;
-type AppScriptToolHandler = (actor: AppMcpActor, toolName: string, request: unknown) => Promise<unknown>;
-type AppMemoryToolHandler = (actor: AppMcpActor, toolName: string, request: unknown) => Promise<unknown>;
-type AppUrgentAlertToolHandler = (actor: AppMcpActor, request: unknown) => Promise<unknown>;
-/** A scheduled script's run, identified by its per-run script token. */
-export interface ScriptApiContext {
-  scriptId: string;
-  runId: string;
-}
-/** Answers the plain-HTTP script API; a thrown error with a numeric
- *  `status` becomes that HTTP status. */
-type ScriptApiHandler = (context: ScriptApiContext, route: "messages", body: unknown) => Promise<unknown>;
-
-interface JsonRpcRequest {
-  jsonrpc?: unknown;
-  id?: unknown;
-  method?: unknown;
-  params?: unknown;
-}
-
-interface JsonRpcResponse {
-  jsonrpc: "2.0";
-  id: unknown;
-  result?: unknown;
-  error?: {
-    code: number;
-    message: string;
-  };
-}
-
-const MCP_PROTOCOL_VERSION = "2025-06-18";
-const MAX_MCP_BODY_BYTES = 1_000_000;
-
+/** The app tools members call. The work is done by the parts in ./appMcp. */
 export class AppMcpService {
-  private server?: http.Server;
-  private url?: string;
-  private readonly tokens = new Map<string, AppMcpActor>();
-  private readonly clientStates = new Map<string, AppMcpClientState>();
-  private rosterChangeHandler?: AppRosterChangeHandler;
-  private rosterOptionsHandler?: AppRosterOptionsHandler;
-  private roleChangeHandler?: AppRoleChangeHandler;
-  private roleOptionsHandler?: AppRoleOptionsHandler;
-  private participantChangeHandler?: AppParticipantChangeHandler;
-  private participantOptionsHandler?: AppParticipantOptionsHandler;
-  private permissionChangeHandler?: AppPermissionChangeHandler;
-  private toolPermissionHandler?: AppToolPermissionHandler;
-  private connectorSignInHandler?: AppWaitingToolHandler;
-  /** How often a waiting tool call reports progress (tests shorten it). */
-  waitingProgressMs = APP_MCP_WAITING_PROGRESS_MS;
-  /** Calls that wait for the User, by their member's grant and request id:
-   *  a `notifications/cancelled` for one ends its wait. */
-  private readonly waitingCalls = new WeakMap<AppMcpActor, Map<string, AbortController>>();
-  private chatContextHandler?: AppChatContextHandler;
-  private chatParticipantsHandler?: AppChatParticipantsHandler;
-  private chatParticipantActivityHandler?: AppChatParticipantActivityHandler;
-  private chatMessagesHandler?: AppChatMessagesHandler;
-  private chatAttachmentListHandler?: AppChatAttachmentListHandler;
-  private chatAttachmentReadHandler?: AppChatAttachmentReadHandler;
-  private chatAttachmentExportHandler?: AppChatAttachmentExportHandler;
-  private chatParticipantRequestHandler?: AppChatParticipantRequestHandler;
-  private chatCompactionRequestHandler?: AppChatCompactionRequestHandler;
-  private chatParticipantRequestStatusHandler?: AppChatParticipantRequestStatusHandler;
-  private chatReactHandler?: AppChatReactHandler;
-  private chatSendMessageHandler?: AppChatSendMessageHandler;
-  private chatSetTitleHandler?: AppChatSetTitleHandler;
-  private chatDelegateTaskHandler?: AppChatDelegateTaskHandler;
-  private chatStartAccordHandler?: AppChatStartAccordHandler;
-  private artifactToolHandler?: AppArtifactToolHandler;
-  private scriptToolHandler?: AppScriptToolHandler;
-  private memoryToolHandler?: AppMemoryToolHandler;
-  private urgentAlertToolHandler?: AppUrgentAlertToolHandler;
-  private scriptApiHandler?: ScriptApiHandler;
-  /** Script tokens live apart from agent tokens: a script token opens only
-   *  the script API, and an agent token never opens it. */
-  private readonly scriptTokens = new Map<string, ScriptApiContext>();
+  private readonly modules: AppMcpModules;
 
-  constructor(private readonly debugLogs?: AppMcpDebugLogger) {}
+  constructor(
+    debugLogs?: AppMcpDebugLogger
+  ) {
+    this.modules = createAppMcpModules({ debugLogs });
+  }
 
   setRosterChangeHandler(handler: AppRosterChangeHandler): void {
-    this.rosterChangeHandler = handler;
+    this.modules.toolHandlers.setRosterChangeHandler(handler);
   }
 
   setRosterOptionsHandler(handler: AppRosterOptionsHandler): void {
-    this.rosterOptionsHandler = handler;
+    this.modules.toolHandlers.setRosterOptionsHandler(handler);
   }
 
   setRoleChangeHandler(handler: AppRoleChangeHandler): void {
-    this.roleChangeHandler = handler;
+    this.modules.toolHandlers.setRoleChangeHandler(handler);
   }
 
   setRoleOptionsHandler(handler: AppRoleOptionsHandler): void {
-    this.roleOptionsHandler = handler;
+    this.modules.toolHandlers.setRoleOptionsHandler(handler);
   }
 
   setParticipantChangeHandler(handler: AppParticipantChangeHandler): void {
-    this.participantChangeHandler = handler;
+    this.modules.toolHandlers.setParticipantChangeHandler(handler);
   }
 
   setParticipantOptionsHandler(handler: AppParticipantOptionsHandler): void {
-    this.participantOptionsHandler = handler;
+    this.modules.toolHandlers.setParticipantOptionsHandler(handler);
   }
 
   setPermissionChangeHandler(handler: AppPermissionChangeHandler): void {
-    this.permissionChangeHandler = handler;
+    this.modules.toolHandlers.setPermissionChangeHandler(handler);
   }
 
   setToolPermissionHandler(handler: AppToolPermissionHandler): void {
-    this.toolPermissionHandler = handler;
+    this.modules.toolHandlers.setToolPermissionHandler(handler);
   }
 
   /** The member asks the User to sign in to an MCP server its task needs. */
   setConnectorSignInHandler(handler: AppWaitingToolHandler): void {
-    this.connectorSignInHandler = handler;
+    this.modules.toolHandlers.setConnectorSignInHandler(handler);
   }
 
   setChatContextHandler(handler: AppChatContextHandler): void {
-    this.chatContextHandler = handler;
+    this.modules.toolHandlers.setChatContextHandler(handler);
   }
 
   setChatParticipantsHandler(handler: AppChatParticipantsHandler): void {
-    this.chatParticipantsHandler = handler;
+    this.modules.toolHandlers.setChatParticipantsHandler(handler);
   }
 
   setChatParticipantActivityHandler(handler: AppChatParticipantActivityHandler): void {
-    this.chatParticipantActivityHandler = handler;
+    this.modules.toolHandlers.setChatParticipantActivityHandler(handler);
   }
 
   setChatMessagesHandler(handler: AppChatMessagesHandler): void {
-    this.chatMessagesHandler = handler;
+    this.modules.toolHandlers.setChatMessagesHandler(handler);
   }
 
   setChatAttachmentListHandler(handler: AppChatAttachmentListHandler): void {
-    this.chatAttachmentListHandler = handler;
+    this.modules.toolHandlers.setChatAttachmentListHandler(handler);
   }
 
   setChatAttachmentReadHandler(handler: AppChatAttachmentReadHandler): void {
-    this.chatAttachmentReadHandler = handler;
+    this.modules.toolHandlers.setChatAttachmentReadHandler(handler);
   }
 
   setChatAttachmentExportHandler(handler: AppChatAttachmentExportHandler): void {
-    this.chatAttachmentExportHandler = handler;
+    this.modules.toolHandlers.setChatAttachmentExportHandler(handler);
   }
 
   setChatParticipantRequestHandler(handler: AppChatParticipantRequestHandler): void {
-    this.chatParticipantRequestHandler = handler;
+    this.modules.toolHandlers.setChatParticipantRequestHandler(handler);
   }
 
   setChatCompactionRequestHandler(handler: AppChatCompactionRequestHandler): void {
-    this.chatCompactionRequestHandler = handler;
+    this.modules.toolHandlers.setChatCompactionRequestHandler(handler);
   }
 
   setChatParticipantRequestStatusHandler(handler: AppChatParticipantRequestStatusHandler): void {
-    this.chatParticipantRequestStatusHandler = handler;
+    this.modules.toolHandlers.setChatParticipantRequestStatusHandler(handler);
   }
 
   setChatReactHandler(handler: AppChatReactHandler): void {
-    this.chatReactHandler = handler;
+    this.modules.toolHandlers.setChatReactHandler(handler);
   }
 
   setChatSendMessageHandler(handler: AppChatSendMessageHandler): void {
-    this.chatSendMessageHandler = handler;
+    this.modules.toolHandlers.setChatSendMessageHandler(handler);
   }
 
   setChatSetTitleHandler(handler: AppChatSetTitleHandler): void {
-    this.chatSetTitleHandler = handler;
+    this.modules.toolHandlers.setChatSetTitleHandler(handler);
   }
 
   setChatDelegateTaskHandler(handler: AppChatDelegateTaskHandler): void {
-    this.chatDelegateTaskHandler = handler;
+    this.modules.toolHandlers.setChatDelegateTaskHandler(handler);
   }
 
   setChatStartAccordHandler(handler: AppChatStartAccordHandler): void {
-    this.chatStartAccordHandler = handler;
+    this.modules.toolHandlers.setChatStartAccordHandler(handler);
   }
 
   setArtifactToolHandler(handler: AppArtifactToolHandler): void {
-    this.artifactToolHandler = handler;
+    this.modules.toolHandlers.setArtifactToolHandler(handler);
   }
+
   setUrgentAlertToolHandler(handler: AppUrgentAlertToolHandler | undefined): void {
-    this.urgentAlertToolHandler = handler;
+    this.modules.toolHandlers.setUrgentAlertToolHandler(handler);
   }
 
   setMemoryToolHandler(handler: AppMemoryToolHandler | undefined): void {
-    this.memoryToolHandler = handler;
+    this.modules.toolHandlers.setMemoryToolHandler(handler);
   }
 
   setScriptToolHandler(handler: AppScriptToolHandler | undefined): void {
-    this.scriptToolHandler = handler;
+    this.modules.toolHandlers.setScriptToolHandler(handler);
   }
+
   setScriptApiHandler(handler: ScriptApiHandler | undefined): void {
-    this.scriptApiHandler = handler;
+    this.modules.toolHandlers.setScriptApiHandler(handler);
   }
 
   /** Base URL of the script API, e.g. http://127.0.0.1:PORT/script-api. */
   scriptApiUrl(): string | undefined {
-    return this.url ? this.url.replace(/\/mcp$/, "/script-api") : undefined;
+    return this.modules.accessTokens.scriptApiUrl();
   }
 
   issueScriptToken(context: ScriptApiContext): string {
-    const token = randomUUID();
-    this.scriptTokens.set(token, { ...context });
-    return token;
+    return this.modules.accessTokens.issueScriptToken(context);
   }
 
   revokeScriptToken(token: string): void {
-    this.scriptTokens.delete(token);
+    this.modules.accessTokens.revokeScriptToken(token);
   }
 
-  async start(): Promise<void> {
-    if (this.server) {
-      return;
-    }
-    this.server = http.createServer((request, response) => {
-      void this.handleHttpRequest(request, response);
-    });
-    await new Promise<void>((resolve, reject) => {
-      this.server?.once("error", reject);
-      this.server?.listen(0, "127.0.0.1", () => {
-        this.server?.off("error", reject);
-        const address = this.server?.address() as AddressInfo | null;
-        if (!address) {
-          reject(new Error("App MCP server did not expose a listen address."));
-          return;
-        }
-        this.url = `http://127.0.0.1:${address.port}/mcp`;
-        resolve();
-      });
-    });
+  start(): Promise<void> {
+    return this.modules.mcpServer.start();
   }
 
-  async stop(): Promise<void> {
-    const server = this.server;
-    this.server = undefined;
-    this.url = undefined;
-    this.tokens.clear();
-    this.scriptTokens.clear();
-    this.clientStates.clear();
-    if (!server) {
-      return;
-    }
-    await new Promise<void>((resolve) => server.close(() => resolve()));
+  stop(): Promise<void> {
+    return this.modules.mcpServer.stop();
   }
 
   issueToken(grant: AppMcpTokenGrant): AppMcpConnection | undefined {
-    if (!this.url) {
-      return undefined;
-    }
-    const token = randomUUID();
-    const actor = this.actorFromGrant(grant);
-    this.tokens.set(token, actor);
-    this.ensureClientState(actor);
-    return { url: this.url, token };
+    return this.modules.accessTokens.issueToken(grant);
   }
 
   updateToken(token: string, grant: AppMcpTokenGrant): AppMcpConnection | undefined {
-    if (!this.url || !this.tokens.has(token)) {
-      return undefined;
-    }
-    const actor = this.actorFromGrant(grant);
-    this.tokens.set(token, actor);
-    this.ensureClientState(actor);
-    return { url: this.url, token };
+    return this.modules.accessTokens.updateToken(token, grant);
   }
 
   clientStatus(clientGenerationId: string): AppMcpClientStatus | undefined {
-    const state = this.clientStates.get(clientGenerationId);
-    return state ? this.publicClientStatus(state) : undefined;
-  }
-
-  private actorFromGrant(grant: AppMcpTokenGrant): AppMcpActor {
-    return {
-      conversationId: grant.conversationId,
-      participantId: grant.participantId,
-      roleConfigId: grant.roleConfigId,
-      roleConfigVersion: grant.roleConfigVersion,
-      capabilities: [...grant.capabilities],
-      clientGenerationId: grant.clientGenerationId,
-      expectedToolNames: Array.from(new Set(grant.expectedToolNames ?? [])).sort(),
-      triggerMessageId: grant.triggerMessageId,
-      triggerThreadId: grant.triggerThreadId,
-      triggerParentMessageId: grant.triggerParentMessageId,
-      triggerChatThreadRootId: grant.triggerChatThreadRootId,
-      snapshotMaxSequence: grant.snapshotMaxSequence,
-      continuation: grant.continuation,
-      runId: grant.runId,
-      turnSegmentId: grant.turnSegmentId,
-      participantRequestDepth: grant.participantRequestDepth,
-      participantRequestBatchId: grant.participantRequestBatchId,
-      chainRootId: grant.chainRootId,
-      historyMarkdownPath: grant.historyMarkdownPath,
-      historyJsonPath: grant.historyJsonPath,
-      agentMode: grant.agentMode ? normalizeChatAgentMode(grant.agentMode) : undefined,
-      runPermissions: grant.runPermissions ? normalizeChatAgentPermissions(grant.runPermissions) : undefined
-    };
-  }
-
-  private async handleHttpRequest(request: http.IncomingMessage, response: http.ServerResponse): Promise<void> {
-    const pathname = request.url?.split("?")[0];
-    if (request.method === "POST" && pathname === "/script-api/messages") {
-      await this.handleScriptApiRequest(request, response, "messages");
-      return;
-    }
-    if (request.method !== "POST" || pathname !== "/mcp") {
-      this.writeHttp(response, 404, "text/plain", "Not found");
-      return;
-    }
-
-    const actor = this.actorFromRequest(request);
-    if (!actor) {
-      this.writeHttp(response, 401, "application/json", JSON.stringify({ error: "Unauthorized" }));
-      return;
-    }
-
-    let payload: unknown;
-    try {
-      payload = await this.readJsonBody(request);
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      this.writeJson(response, this.rpcError(null, -32700, message));
-      return;
-    }
-
-    if (this.isWaitingToolCall(payload) && /text\/event-stream/i.test(String(request.headers.accept ?? ""))) {
-      await this.streamWaitingToolCall(actor, payload as JsonRpcRequest, response);
-      return;
-    }
-
-    const requests = Array.isArray(payload) ? payload : [payload];
-    const results: JsonRpcResponse[] = [];
-    for (const item of requests) {
-      const result = await this.handleRpcRequest(actor, item);
-      if (result) {
-        results.push(result);
-      }
-    }
-    if (results.length === 0) {
-      response.writeHead(202);
-      response.end();
-      return;
-    }
-    this.writeJson(response, Array.isArray(payload) ? results : results[0]);
-  }
-
-  private async handleRpcRequest(actor: AppMcpActor, raw: unknown): Promise<JsonRpcResponse | undefined> {
-    if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
-      return this.rpcError(null, -32600, "Invalid JSON-RPC request.");
-    }
-    const request = raw as JsonRpcRequest;
-    const id = request.id;
-    const method = typeof request.method === "string" ? request.method : "";
-    const isNotification = id === undefined;
-
-    try {
-      if (method === "initialize") {
-        this.markClientInitialized(actor);
-        return isNotification ? undefined : this.rpcResult(id, this.initializeResult());
-      }
-      if (method === "notifications/initialized") {
-        return undefined;
-      }
-      if (method === "notifications/cancelled") {
-        // The CLI gave up on a call that waits for the User without closing
-        // its stream: the wait ends as if it had (its card is expired).
-        const params = request.params && typeof request.params === "object" ? request.params as { requestId?: unknown } : {};
-        if (typeof params.requestId === "string" || typeof params.requestId === "number") {
-          this.waitingCalls.get(actor)?.get(String(params.requestId))?.abort();
-        }
-        return undefined;
-      }
-      if (method === "tools/list") {
-        const tools = this.toolsForActor(actor);
-        this.markClientToolsListed(actor, tools);
-        return isNotification ? undefined : this.rpcResult(id, { tools });
-      }
-      if (method === "tools/call") {
-        return isNotification ? undefined : this.rpcResult(id, await this.callTool(actor, request.params));
-      }
-      return isNotification ? undefined : this.rpcError(id, -32601, `Unsupported MCP method: ${method || "unknown"}.`);
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      if (method === "initialize" || method === "tools/list") {
-        this.markClientError(actor, message);
-      }
-      return isNotification ? undefined : this.rpcError(id, -32603, message);
-    }
-  }
-
-  private ensureClientState(actor: AppMcpActor): AppMcpClientState | undefined {
-    const clientGenerationId = actor.clientGenerationId;
-    if (!clientGenerationId) {
-      return undefined;
-    }
-    const expectedToolNames = Array.from(new Set(actor.expectedToolNames ?? [])).sort();
-    const existing = this.clientStates.get(clientGenerationId);
-    if (existing) {
-      existing.expectedToolNames = expectedToolNames;
-      existing.missingToolNames = this.missingToolNames(expectedToolNames, existing.listedToolNames);
-      existing.requiredToolsPresent = existing.missingToolNames.length === 0;
-      existing.updatedAt = new Date().toISOString();
-      return existing;
-    }
-    const state: AppMcpClientState = {
-      clientGenerationId,
-      expectedToolNames,
-      listedToolNames: [],
-      initialized: false,
-      listedTools: false,
-      requiredToolsPresent: expectedToolNames.length === 0,
-      missingToolNames: expectedToolNames,
-      errored: false,
-      updatedAt: new Date().toISOString()
-    };
-    this.clientStates.set(clientGenerationId, state);
-    return state;
-  }
-
-  private markClientInitialized(actor: AppMcpActor): void {
-    const state = this.ensureClientState(actor);
-    if (!state) {
-      return;
-    }
-    state.initialized = true;
-    state.updatedAt = new Date().toISOString();
-  }
-
-  private markClientToolsListed(actor: AppMcpActor, tools: unknown[]): void {
-    const state = this.ensureClientState(actor);
-    if (!state) {
-      return;
-    }
-    const listedToolNames = new Set(tools.flatMap((tool) => {
-      if (!tool || typeof tool !== "object" || Array.isArray(tool)) {
-        return [];
-      }
-      const name = (tool as { name?: unknown }).name;
-      return typeof name === "string" ? [name] : [];
-    }));
-    state.listedTools = true;
-    state.listedToolNames = Array.from(listedToolNames).sort();
-    state.missingToolNames = this.missingToolNames(state.expectedToolNames, listedToolNames);
-    state.requiredToolsPresent = state.missingToolNames.length === 0;
-    state.updatedAt = new Date().toISOString();
-  }
-
-  private markClientError(actor: AppMcpActor, message: string): void {
-    const state = this.ensureClientState(actor);
-    if (!state) {
-      return;
-    }
-    state.errored = true;
-    state.errorMessage = message.slice(0, 240);
-    state.updatedAt = new Date().toISOString();
-  }
-
-  private missingToolNames(expectedToolNames: string[], listedToolNames: Set<string> | string[] | undefined): string[] {
-    const listed = listedToolNames instanceof Set ? listedToolNames : new Set(listedToolNames ?? []);
-    return expectedToolNames.filter((toolName) => !listed.has(toolName));
-  }
-
-  private publicClientStatus(state: AppMcpClientState): AppMcpClientStatus {
-    return {
-      clientGenerationId: state.clientGenerationId,
-      initialized: state.initialized,
-      listedTools: state.listedTools,
-      requiredToolsPresent: state.requiredToolsPresent,
-      missingToolNames: [...state.missingToolNames],
-      errored: state.errored,
-      errorMessage: state.errorMessage,
-      updatedAt: state.updatedAt
-    };
-  }
-
-  private initializeResult(): unknown {
-    return {
-      protocolVersion: MCP_PROTOCOL_VERSION,
-      capabilities: {
-        tools: {
-          listChanged: false
-        }
-      },
-      serverInfo: {
-        name: "accordagents-app",
-        version: "0.1.0"
-      }
-    };
-  }
-
-  private toolsForActor(actor: AppMcpActor): unknown[] {
-    return appMcpToolDefinitionsForCapabilities(actor.capabilities);
-  }
-
-  private async callTool(actor: AppMcpActor, params: unknown, signal?: AbortSignal): Promise<unknown> {
-    const toolName = this.diagnosticToolName(params);
-    try {
-      const result = await this.callToolUnchecked(actor, params, signal);
-      const denialCode = this.structuredToolDenialCode(result);
-      if (denialCode) {
-        this.logToolDenial(actor, toolName, "first-party-app-server-policy", denialCode);
-      }
-      return result;
-    } catch (error) {
-      const denialCode = this.appToolPolicyDenialCode(error);
-      if (denialCode) {
-        this.logToolDenial(actor, toolName, "first-party-app-server-policy", denialCode);
-      } else {
-        this.logToolDenial(
-          actor,
-          toolName,
-          "unknown-provider-or-runtime-behavior",
-          "APP_TOOL_UNCLASSIFIED_FAILURE",
-          ["stable app error code"]
-        );
-      }
-      throw error;
-    }
-  }
-
-  private async callToolUnchecked(actor: AppMcpActor, params: unknown, signal?: AbortSignal): Promise<unknown> {
-    if (!params || typeof params !== "object" || Array.isArray(params)) {
-      throw new Error("Tool call params are required.");
-    }
-    const record = params as { name?: unknown; arguments?: unknown };
-    if (typeof record.name === "string" && (APP_ARTIFACT_TOOL_NAMES as readonly string[]).includes(record.name)) {
-      if (!this.artifactToolHandler) {
-        throw new Error("Artifact tools are not available.");
-      }
-      return this.toolTextResult(await this.artifactToolHandler(actor, record.name, record.arguments));
-    }
-    if (record.name === APP_URGENT_ALERT_TOOL) {
-      if (!this.urgentAlertToolHandler) {
-        throw new Error("Urgent alerts are not available on this host yet.");
-      }
-      return this.toolTextResult(await this.urgentAlertToolHandler(actor, record.arguments));
-    }
-    if (typeof record.name === "string" && (APP_MEMORY_TOOL_NAMES as readonly string[]).includes(record.name)) {
-      if (!this.memoryToolHandler) {
-        throw new Error("Memory is not available on this host yet.");
-      }
-      return this.toolTextResult(await this.memoryToolHandler(actor, record.name, record.arguments));
-    }
-    if (typeof record.name === "string" && (APP_SCRIPT_TOOL_NAMES as readonly string[]).includes(record.name)) {
-      if (!this.scriptToolHandler) {
-        throw new Error("Scheduled tasks are not available on this host yet.");
-      }
-      return this.toolTextResult(await this.scriptToolHandler(actor, record.name, record.arguments));
-    }
-    if (
-      record.name !== APP_ROSTER_DESCRIBE_OPTIONS_TOOL &&
-      record.name !== APP_ROSTER_REQUEST_CHANGE_TOOL &&
-      record.name !== APP_ROLES_DESCRIBE_OPTIONS_TOOL &&
-      record.name !== APP_ROLES_REQUEST_CHANGE_TOOL &&
-      record.name !== APP_PARTICIPANTS_DESCRIBE_OPTIONS_TOOL &&
-      record.name !== APP_PARTICIPANTS_REQUEST_CHANGE_TOOL &&
-      record.name !== APP_PERMISSIONS_REQUEST_CHANGE_TOOL &&
-      record.name !== APP_TOOL_PERMISSION_TOOL &&
-      record.name !== APP_CONNECTOR_SIGN_IN_TOOL &&
-      record.name !== APP_CHAT_REQUEST_PARTICIPANTS_TOOL &&
-      record.name !== APP_CHAT_REQUEST_COMPACTION_TOOL &&
-      record.name !== APP_CHAT_GET_PARTICIPANT_REQUEST_STATUS_TOOL &&
-      record.name !== APP_CHAT_GET_CONTEXT_TOOL &&
-      record.name !== APP_CHAT_GET_PARTICIPANTS_TOOL &&
-      record.name !== APP_CHAT_GET_PARTICIPANT_ACTIVITY_TOOL &&
-      record.name !== APP_CHAT_READ_MESSAGES_TOOL &&
-      record.name !== APP_CHAT_LIST_ATTACHMENTS_TOOL &&
-      record.name !== APP_CHAT_READ_ATTACHMENT_TOOL &&
-      record.name !== APP_CHAT_EXPORT_ATTACHMENT_TOOL &&
-      record.name !== APP_CHAT_REACT_TOOL &&
-      record.name !== APP_CHAT_SEND_MESSAGE_TOOL &&
-      record.name !== APP_CHAT_SET_TITLE_TOOL &&
-      record.name !== APP_CHAT_DELEGATE_TASK_TOOL &&
-      record.name !== APP_CHAT_START_ACCORD_TOOL
-    ) {
-      throw new Error(`Unknown app tool: ${String(record.name ?? "")}.`);
-    }
-    if (record.name === APP_TOOL_PERMISSION_TOOL) {
-      if (!hasChatAppToolCapability(actor.capabilities, "permissions.request")) {
-        throw new Error("This member is not allowed to request tool permissions.");
-      }
-      if (!this.toolPermissionHandler) {
-        throw new Error("Tool permission handling is not available.");
-      }
-      return this.toolTextResult(await this.toolPermissionHandler(actor, record.arguments, signal));
-    }
-    if (record.name === APP_CONNECTOR_SIGN_IN_TOOL) {
-      if (!hasChatAppToolCapability(actor.capabilities, "permissions.request")) {
-        throw new Error("This member is not allowed to ask for sign-ins.");
-      }
-      if (!this.connectorSignInHandler) {
-        throw new Error("Connector sign-in is not available.");
-      }
-      return this.toolTextResult(await this.connectorSignInHandler(actor, record.arguments, signal));
-    }
-    if (record.name === APP_CHAT_GET_CONTEXT_TOOL) {
-      if (!this.chatContextHandler) {
-        throw new Error("Chat context discovery is not available.");
-      }
-      return this.toolTextResult(await this.chatContextHandler(actor));
-    }
-    if (record.name === APP_CHAT_GET_PARTICIPANTS_TOOL) {
-      if (!this.chatParticipantsHandler) {
-        throw new Error("Chat member discovery is not available.");
-      }
-      return this.toolTextResult(await this.chatParticipantsHandler(actor));
-    }
-    if (record.name === APP_CHAT_GET_PARTICIPANT_ACTIVITY_TOOL) {
-      if (!this.chatParticipantActivityHandler) {
-        throw new Error("Chat member activity is not available.");
-      }
-      return this.toolTextResult(await this.chatParticipantActivityHandler(actor));
-    }
-    if (record.name === APP_CHAT_READ_MESSAGES_TOOL) {
-      if (!this.chatMessagesHandler) {
-        throw new Error("Chat message reading is not available.");
-      }
-      return this.toolTextResult(await this.chatMessagesHandler(actor, record.arguments));
-    }
-    if (record.name === APP_CHAT_LIST_ATTACHMENTS_TOOL) {
-      if (!this.chatAttachmentListHandler) {
-        throw new Error("Chat attachment listing is not available.");
-      }
-      return this.toolTextResult(await this.chatAttachmentListHandler(actor, record.arguments));
-    }
-    if (record.name === APP_CHAT_READ_ATTACHMENT_TOOL) {
-      if (!this.chatAttachmentReadHandler) {
-        throw new Error("Chat attachment reading is not available.");
-      }
-      return this.toolImageResult(await this.chatAttachmentReadHandler(actor, record.arguments));
-    }
-    if (record.name === APP_CHAT_EXPORT_ATTACHMENT_TOOL) {
-      if (!this.chatAttachmentExportHandler) {
-        throw new Error("Chat attachment exporting is not available.");
-      }
-      return this.toolTextResult(await this.chatAttachmentExportHandler(actor, record.arguments));
-    }
-    if (record.name === APP_CHAT_REACT_TOOL) {
-      if (!this.chatReactHandler) {
-        throw new Error("Chat reaction handling is not available.");
-      }
-      return this.toolTextResult(await this.chatReactHandler(actor, record.arguments));
-    }
-    if (record.name === APP_CHAT_SEND_MESSAGE_TOOL) {
-      if (!this.chatSendMessageHandler) {
-        throw new Error("Chat message sending is not available.");
-      }
-      return this.toolTextResult(await this.chatSendMessageHandler(actor, record.arguments));
-    }
-    if (record.name === APP_CHAT_SET_TITLE_TOOL) {
-      if (!this.chatSetTitleHandler) {
-        throw new Error("Chat title setting is not available.");
-      }
-      return this.toolTextResult(await this.chatSetTitleHandler(actor, record.arguments));
-    }
-    if (record.name === APP_CHAT_DELEGATE_TASK_TOOL) {
-      if (!hasChatAppToolCapability(actor.capabilities, "participants.delegate")) {
-        throw new Error("Only the chat's main session can delegate tasks to new members.");
-      }
-      if (!this.chatDelegateTaskHandler) {
-        throw new Error("Task delegation is not available.");
-      }
-      return this.toolTextResult(await this.chatDelegateTaskHandler(actor, record.arguments));
-    }
-    if (record.name === APP_CHAT_START_ACCORD_TOOL) {
-      if (!hasChatAppToolCapability(actor.capabilities, "accord.start")) {
-        throw new Error("Only the chat's main session can start an Accord; ask it to.");
-      }
-      if (!this.chatStartAccordHandler) {
-        throw new Error("Starting an Accord is not available.");
-      }
-      return this.toolTextResult(await this.chatStartAccordHandler(actor, record.arguments));
-    }
-    if (record.name === APP_CHAT_REQUEST_PARTICIPANTS_TOOL) {
-      if (!hasChatAppToolCapability(actor.capabilities, "participants.request")) {
-        throw new Error("This member is not allowed to request other members.");
-      }
-      if (!this.chatParticipantRequestHandler) {
-        throw new Error("Chat member request handling is not available.");
-      }
-      return this.toolTextResult(await this.chatParticipantRequestHandler(actor, record.arguments));
-    }
-    if (record.name === APP_CHAT_REQUEST_COMPACTION_TOOL) {
-      if (!hasChatAppToolCapability(actor.capabilities, "compaction.request")) {
-        throw new Error("This member is not allowed to request context compaction.");
-      }
-      if (!this.chatCompactionRequestHandler) {
-        throw new Error("Chat compaction request handling is not available.");
-      }
-      return this.toolTextResult(await this.chatCompactionRequestHandler(actor, record.arguments));
-    }
-    if (record.name === APP_CHAT_GET_PARTICIPANT_REQUEST_STATUS_TOOL) {
-      if (!this.chatParticipantRequestStatusHandler) {
-        throw new Error("Chat member request status is not available.");
-      }
-      return this.toolTextResult(await this.chatParticipantRequestStatusHandler(actor, record.arguments));
-    }
-    if (record.name === APP_PERMISSIONS_REQUEST_CHANGE_TOOL) {
-      if (!hasChatAppToolCapability(actor.capabilities, "permissions.request")) {
-        throw new Error("This member is not allowed to request permission changes.");
-      }
-      if (!this.permissionChangeHandler) {
-        throw new Error("Permission request handling is not available.");
-      }
-      return this.toolTextResult(await this.permissionChangeHandler(actor, record.arguments));
-    }
-    if (record.name === APP_ROSTER_DESCRIBE_OPTIONS_TOOL) {
-      if (!hasChatAppToolCapability(actor.capabilities, "participants.manage")) {
-        throw new Error("This member is not allowed to manage chat members.");
-      }
-      if (!this.rosterOptionsHandler) {
-        throw new Error("Roster option discovery is not available.");
-      }
-      return this.toolTextResult(await this.rosterOptionsHandler(actor));
-    }
-    if (record.name === APP_ROLES_DESCRIBE_OPTIONS_TOOL) {
-      if (!hasChatAppToolCapability(actor.capabilities, "participants.manage")) {
-        throw new Error("This member is not allowed to manage chat members.");
-      }
-      if (!this.roleOptionsHandler) {
-        throw new Error("Role option discovery is not available.");
-      }
-      return this.toolTextResult(await this.roleOptionsHandler(actor));
-    }
-    if (record.name === APP_ROLES_REQUEST_CHANGE_TOOL) {
-      if (!hasChatAppToolCapability(actor.capabilities, "participants.manage")) {
-        throw new Error("This member is not allowed to manage chat members.");
-      }
-      if (!this.roleChangeHandler) {
-        throw new Error("Role management is not available.");
-      }
-      return this.toolTextResult(await this.roleChangeHandler(actor, record.arguments));
-    }
-    if (record.name === APP_PARTICIPANTS_DESCRIBE_OPTIONS_TOOL) {
-      if (!hasChatAppToolCapability(actor.capabilities, "participants.manage")) {
-        throw new Error("This member is not allowed to manage chat members.");
-      }
-      if (!this.participantOptionsHandler) {
-        throw new Error("Member option discovery is not available.");
-      }
-      return this.toolTextResult(await this.participantOptionsHandler(actor));
-    }
-    if (record.name === APP_PARTICIPANTS_REQUEST_CHANGE_TOOL) {
-      if (!hasChatAppToolCapability(actor.capabilities, "participants.manage")) {
-        throw new Error("This member is not allowed to manage chat members.");
-      }
-      if (!this.participantChangeHandler) {
-        throw new Error("Member management is not available.");
-      }
-      return this.toolTextResult(await this.participantChangeHandler(actor, record.arguments));
-    }
-    if (!hasChatAppToolCapability(actor.capabilities, "participants.manage")) {
-      throw new Error("This member is not allowed to manage chat members.");
-    }
-    if (!this.rosterChangeHandler) {
-      throw new Error("Roster management is not available.");
-    }
-    return this.toolTextResult(await this.rosterChangeHandler(actor, record.arguments));
-  }
-
-  private diagnosticToolName(params: unknown): string {
-    if (!params || typeof params !== "object" || Array.isArray(params)) {
-      return "unknown-tool";
-    }
-    const name = (params as { name?: unknown }).name;
-    return typeof name === "string" && APP_MCP_TOOL_POLICIES.some((policy) => policy.name === name)
-      ? name
-      : "unknown-tool";
-  }
-
-  private structuredToolDenialCode(result: unknown): string | undefined {
-    if (!result || typeof result !== "object" || Array.isArray(result)) {
-      return undefined;
-    }
-    const content = (result as { content?: unknown }).content;
-    if (!Array.isArray(content)) {
-      return undefined;
-    }
-    const text = content.flatMap((item) => {
-      if (!item || typeof item !== "object" || Array.isArray(item)) {
-        return [];
-      }
-      const value = (item as { text?: unknown }).text;
-      return typeof value === "string" ? [value] : [];
-    })[0];
-    if (!text) {
-      return undefined;
-    }
-    try {
-      const parsed = JSON.parse(text) as unknown;
-      if (!parsed || typeof parsed !== "object" || Array.isArray(parsed) || (parsed as { ok?: unknown }).ok !== false) {
-        return undefined;
-      }
-      const error = (parsed as { error?: unknown }).error;
-      const code = error && typeof error === "object" && !Array.isArray(error)
-        ? (error as { code?: unknown }).code
-        : undefined;
-      return typeof code === "string" && /^[A-Za-z0-9_.:-]{1,80}$/.test(code)
-        ? code
-        : "APP_TOOL_REQUEST_DENIED";
-    } catch {
-      return undefined;
-    }
-  }
-
-  private appToolPolicyDenialCode(error: unknown): string | undefined {
-    const message = error instanceof Error ? error.message : String(error);
-    if (/not allowed/i.test(message)) {
-      return "APP_TOOL_CAPABILITY_DENIED";
-    }
-    if (/unauthorized/i.test(message)) {
-      return "APP_TOOL_UNAUTHORIZED";
-    }
-    return undefined;
-  }
-
-  private logToolDenial(
-    actor: AppMcpActor,
-    toolName: string,
-    layer: "first-party-app-server-policy" | "unknown-provider-or-runtime-behavior",
-    code: string,
-    missingEvidence: string[] = []
-  ): void {
-    void this.debugLogs?.write("app.mcp.denial", {
-      layer,
-      code,
-      toolName,
-      conversationId: actor.conversationId,
-      participantId: actor.participantId,
-      runId: actor.runId ?? null,
-      missingEvidence
-    });
-  }
-
-  private toolTextResult(result: unknown): unknown {
-    return {
-      content: [
-        {
-          type: "text",
-          text: JSON.stringify(result, null, 2)
-        }
-      ]
-    };
-  }
-
-  private toolImageResult(result: unknown): unknown {
-    const record = result && typeof result === "object" && !Array.isArray(result)
-      ? result as { attachment?: unknown; dataBase64?: unknown }
-      : {};
-    const attachment = record.attachment && typeof record.attachment === "object" && !Array.isArray(record.attachment)
-      ? record.attachment as { mimeType?: unknown }
-      : undefined;
-    const data = typeof record.dataBase64 === "string" ? record.dataBase64 : "";
-    const mimeType = typeof attachment?.mimeType === "string" ? attachment.mimeType : "image/png";
-    const summary = {
-      ...record,
-      dataBase64: data ? "[omitted: returned as MCP image content]" : undefined
-    };
-    return {
-      content: [
-        {
-          type: "text",
-          text: JSON.stringify(summary, null, 2)
-        },
-        ...(data
-          ? [{
-              type: "image",
-              data,
-              mimeType
-            }]
-          : [])
-      ]
-    };
-  }
-
-  private async handleScriptApiRequest(request: http.IncomingMessage, response: http.ServerResponse, route: "messages"): Promise<void> {
-    const context = this.scriptContextFromRequest(request);
-    if (!context) {
-      this.writeHttp(response, 401, "application/json", JSON.stringify({ ok: false, error: "Unauthorized" }));
-      return;
-    }
-    const handler = this.scriptApiHandler;
-    if (!handler) {
-      this.writeHttp(response, 503, "application/json", JSON.stringify({ ok: false, error: "Scheduled scripts are not available on this host." }));
-      return;
-    }
-    let body: unknown;
-    try {
-      body = await this.readJsonBody(request);
-    } catch (error) {
-      this.writeHttp(response, 400, "application/json", JSON.stringify({ ok: false, error: error instanceof Error ? error.message : String(error) }));
-      return;
-    }
-    try {
-      const result = await handler(context, route, body);
-      this.writeJson(response, result);
-    } catch (error) {
-      const status = typeof (error as { status?: unknown })?.status === "number" ? (error as { status: number }).status : 500;
-      const message = error instanceof Error ? error.message : String(error);
-      void this.debugLogs?.write("app-mcp.script-api.error", { scriptId: context.scriptId, runId: context.runId, status, message }).catch(() => undefined);
-      this.writeHttp(response, status, "application/json", JSON.stringify({ ok: false, error: message }));
-    }
-  }
-
-  private scriptContextFromRequest(request: http.IncomingMessage): ScriptApiContext | undefined {
-    const authorization = Array.isArray(request.headers.authorization)
-      ? request.headers.authorization[0]
-      : request.headers.authorization;
-    const match = authorization?.match(/^Bearer\s+(.+)$/i);
-    if (!match) {
-      return undefined;
-    }
-    return this.scriptTokens.get(match[1].trim());
-  }
-
-  private actorFromRequest(request: http.IncomingMessage): AppMcpActor | undefined {
-    const authorization = Array.isArray(request.headers.authorization)
-      ? request.headers.authorization[0]
-      : request.headers.authorization;
-    const match = authorization?.match(/^Bearer\s+(.+)$/i);
-    if (!match) {
-      return undefined;
-    }
-    return this.tokens.get(match[1].trim());
-  }
-
-  private readJsonBody(request: http.IncomingMessage): Promise<unknown> {
-    return new Promise((resolve, reject) => {
-      let body = "";
-      let bytes = 0;
-      request.setEncoding("utf8");
-      request.on("data", (chunk: string) => {
-        bytes += Buffer.byteLength(chunk);
-        if (bytes > MAX_MCP_BODY_BYTES) {
-          reject(new Error("MCP request body is too large."));
-          request.destroy();
-          return;
-        }
-        body += chunk;
-      });
-      request.on("error", reject);
-      request.on("end", () => {
-        try {
-          resolve(body.trim() ? JSON.parse(body) : {});
-        } catch {
-          reject(new Error("Invalid JSON body."));
-        }
-      });
-    });
-  }
-
-  private rpcResult(id: unknown, result: unknown): JsonRpcResponse {
-    return { jsonrpc: "2.0", id, result };
-  }
-
-  private rpcError(id: unknown, code: number, message: string): JsonRpcResponse {
-    return {
-      jsonrpc: "2.0",
-      id,
-      error: {
-        code,
-        message
-      }
-    };
-  }
-
-  /** A call of a tool that waits for the User (a sign-in card, Claude
-   *  Code's permission prompt). */
-  private isWaitingToolCall(payload: unknown): boolean {
-    if (!payload || typeof payload !== "object" || Array.isArray(payload)) return false;
-    const request = payload as JsonRpcRequest;
-    const params = request.params && typeof request.params === "object" ? request.params as { name?: unknown } : undefined;
-    return request.method === "tools/call" && request.id !== undefined &&
-      (params?.name === APP_CONNECTOR_SIGN_IN_TOOL || params?.name === APP_TOOL_PERMISSION_TOOL);
-  }
-
-  /** Answers a waiting tool call as an event stream (MCP Streamable HTTP):
-   *  progress while the User decides, then the result. When the CLI gives up
-   *  on the call (the connection closes first) the wait is aborted, so its
-   *  card does not stay open for an answer nobody reads. */
-  private async streamWaitingToolCall(actor: AppMcpActor, request: JsonRpcRequest, response: http.ServerResponse): Promise<void> {
-    const abandoned = new AbortController();
-    let finished = false;
-    response.on("close", () => {
-      if (!finished) abandoned.abort();
-    });
-    const callKey = String(request.id);
-    const calls = this.waitingCalls.get(actor) ?? new Map<string, AbortController>();
-    calls.set(callKey, abandoned);
-    this.waitingCalls.set(actor, calls);
-    response.writeHead(200, { "content-type": "text/event-stream", "cache-control": "no-store" });
-    response.flushHeaders();
-    const send = (message: unknown): void => {
-      if (!response.writableEnded && !response.destroyed) response.write(`event: message\ndata: ${JSON.stringify(message)}\n\n`);
-    };
-    const meta = request.params && typeof request.params === "object" ? (request.params as { _meta?: { progressToken?: unknown } })._meta : undefined;
-    const progressToken = typeof meta?.progressToken === "string" || typeof meta?.progressToken === "number" ? meta.progressToken : undefined;
-    let progress = 0;
-    const ticker = setInterval(() => {
-      progress++;
-      if (progressToken !== undefined) {
-        send({ jsonrpc: "2.0", method: "notifications/progress", params: { progressToken, progress, message: "Waiting for the User." } });
-      } else if (!response.writableEnded && !response.destroyed) {
-        response.write(": waiting\n\n");
-      }
-    }, this.waitingProgressMs);
-    ticker.unref();
-    let answer: JsonRpcResponse;
-    try {
-      answer = this.rpcResult(request.id, await this.callTool(actor, request.params, abandoned.signal));
-    } catch (error) {
-      answer = this.rpcError(request.id, -32603, error instanceof Error ? error.message : String(error));
-    } finally {
-      clearInterval(ticker);
-      if (calls.get(callKey) === abandoned) calls.delete(callKey);
-    }
-    finished = true;
-    send(answer);
-    if (!response.writableEnded) response.end();
-  }
-
-  private writeJson(response: http.ServerResponse, payload: unknown): void {
-    this.writeHttp(response, 200, "application/json", JSON.stringify(payload));
-  }
-
-  private writeHttp(response: http.ServerResponse, statusCode: number, contentType: string, body: string): void {
-    response.writeHead(statusCode, {
-      "content-type": contentType,
-      "cache-control": "no-store"
-    });
-    response.end(body);
+    return this.modules.clientStates.clientStatus(clientGenerationId);
   }
 }

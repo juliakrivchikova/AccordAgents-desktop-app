@@ -26,6 +26,8 @@ import {
   autoPreauthorizedAppMcpToolNames,
   AppMcpService
 } from "./appMcp";
+import { appMcpParts } from "./appMcp/test/appMcpParts";
+import { toolsForActor } from "./appMcp/protocol";
 import { ChatService } from "./chat";
 import { chatDependencies, chatParts } from "./chat/test/chatParts";
 import { applyPreparedPermissionChange, consumeOneTimePermissionApprovals, preparePermissionChange } from "./chat/approvals/permissionGrants";
@@ -3308,7 +3310,7 @@ test("a Claude member's app tools keep acting for the running reply until the CL
   const participant = chatParticipant("claude-code");
   const conversation = chatConversation([participant]);
   const appMcp = new AppMcpService();
-  (appMcp as any).url = "http://127.0.0.1:1/mcp";
+  appMcpParts(appMcp).mcpServer.url = "http://127.0.0.1:1/mcp";
   const runs: any[] = [];
   let releaseFirst!: () => void;
   const firstBlocked = new Promise<void>((resolve) => { releaseFirst = resolve; });
@@ -3329,7 +3331,7 @@ test("a Claude member's app tools keep acting for the running reply until the CL
     }
   });
   chatParts(service).chatHistory.ensureHistoryFiles = async () => tempRoot;
-  const actorRunId = (token: string): string | undefined => (appMcp as any).tokens.get(token)?.runId;
+  const actorRunId = (token: string): string | undefined => appMcpParts(appMcp).accessTokens.tokens.get(token)?.runId;
 
   await service.sendMessage({ conversationId: conversation.id, runId: "grant-first", content: `@${participant.handle} first` });
   await waitFor(() => runs.length === 1);
@@ -9463,7 +9465,7 @@ test("member tools describe the removal operation", async () => {
   assert.doesNotMatch(options.participantChange.removalPolicy, /on their own|always approves/);
 
   const appMcp = new AppMcpService();
-  const tools = (appMcp as any).toolsForActor({ ...actor, roleConfigVersion: 1 }) as Array<{ name: string; description: string; inputSchema: any }>;
+  const tools = toolsForActor({ ...actor, roleConfigVersion: 1 }) as Array<{ name: string; description: string; inputSchema: any }>;
   const tool = tools.find((item) => item.name === APP_PARTICIPANTS_REQUEST_CHANGE_TOOL);
   assert.ok(tool);
   assert.ok(tool.inputSchema.properties.operations.items.properties.type.enum.includes("remove_participant_from_chat"));
@@ -12849,7 +12851,7 @@ test("a declined late result does not spawn an implicit participant request", as
 
 test("app MCP advertises attachment and reaction tools to chat participants", () => {
   const appMcp = new AppMcpService();
-  const tools = (appMcp as any).toolsForActor({
+  const tools = toolsForActor({
     conversationId: "conversation-1",
     participantId: "participant-1",
     roleConfigId: ROLE.id,
@@ -12943,7 +12945,7 @@ test("app MCP policy registry exhaustively drives exposure and Auto preauthoriza
   assert.equal(eligible.some((toolName) => toolName.startsWith("app_skill_")), false);
 
   const appMcp = new AppMcpService();
-  const listedNames = ((appMcp as any).toolsForActor({
+  const listedNames = (toolsForActor({
     conversationId: "conversation-1",
     participantId: "participant-1",
     roleConfigId: ROLE.id,
@@ -12961,7 +12963,7 @@ test("ChatService constructs classified Auto app MCP launch options for cold, re
   const appMcp = new AppMcpService();
   // Exercise the real grant/token and ChatService option construction without opening
   // a listener in the unit-test sandbox.
-  (appMcp as any).url = "http://127.0.0.1:1/mcp";
+  appMcpParts(appMcp).mcpServer.url = "http://127.0.0.1:1/mcp";
   try {
     const requester: ChatParticipant = {
       ...chatParticipant("codex-cli", { requestParticipants: "allow" }),
@@ -12993,7 +12995,7 @@ test("ChatService constructs classified Auto app MCP launch options for cold, re
           participantId: participant.id,
           repoPath,
           options,
-          tokenAgentMode: (appMcp as any).tokens.get(options.appMcp.token)?.agentMode
+          tokenAgentMode: appMcpParts(appMcp).accessTokens.tokens.get(options.appMcp.token)?.agentMode
         });
         return {
           participant,
@@ -13038,7 +13040,7 @@ test("ChatService constructs classified Auto app MCP launch options for cold, re
       assert.equal(run.tokenAgentMode, "auto", `run ${index}`);
     }
   } finally {
-    (appMcp as any).url = undefined;
+    appMcpParts(appMcp).mcpServer.url = undefined;
   }
 });
 
@@ -13062,12 +13064,12 @@ test("app MCP denial diagnostics keep stable app-server codes without request co
     capabilities: []
   };
 
-  await (appMcp as any).callTool(actor, {
+  await appMcpParts(appMcp).toolCalls.callTool(actor, {
     name: APP_ARTIFACT_CREATE_TOOL,
     arguments: { content: secretCanary }
   });
   await assert.rejects(
-    () => (appMcp as any).callTool(actor, {
+    () => appMcpParts(appMcp).toolCalls.callTool(actor, {
       name: APP_PERMISSIONS_REQUEST_CHANGE_TOOL,
       arguments: { reason: secretCanary }
     }),
@@ -13090,8 +13092,8 @@ test("app MCP advertises self-compaction only with compaction permission", () =>
     roleConfigId: ROLE.id,
     roleConfigVersion: ROLE.version
   };
-  const without = (appMcp as any).toolsForActor({ ...actor, capabilities: [] }) as Array<{ name: string }>;
-  const withCapability = (appMcp as any).toolsForActor({
+  const without = toolsForActor({ ...actor, capabilities: [] }) as Array<{ name: string }>;
+  const withCapability = toolsForActor({
     ...actor,
     capabilities: ["compaction.request"]
   }) as Array<{ name: string; inputSchema?: { properties?: Record<string, unknown> } }>;
@@ -13117,7 +13119,7 @@ test("app MCP tracks client generation setup and required tools", async () => {
     ]
   };
 
-  await (appMcp as any).handleRpcRequest(actor, {
+  await appMcpParts(appMcp).mcpServer.handleRpcRequest(actor, {
     jsonrpc: "2.0",
     id: 1,
     method: "initialize",
@@ -13127,7 +13129,7 @@ test("app MCP tracks client generation setup and required tools", async () => {
   assert.equal(status?.initialized, true);
   assert.equal(status?.listedTools, false);
 
-  await (appMcp as any).handleRpcRequest(actor, {
+  await appMcpParts(appMcp).mcpServer.handleRpcRequest(actor, {
     jsonrpc: "2.0",
     id: 2,
     method: "tools/list",
@@ -13151,7 +13153,7 @@ test("app MCP client generation records missing expected tools", async () => {
     expectedToolNames: ["missing-tool"]
   };
 
-  await (appMcp as any).handleRpcRequest(actor, {
+  await appMcpParts(appMcp).mcpServer.handleRpcRequest(actor, {
     jsonrpc: "2.0",
     id: 1,
     method: "tools/list",
@@ -13166,7 +13168,7 @@ test("app MCP client generation records missing expected tools", async () => {
 
 test("app MCP role request tool is not provider-destructive because app approval gates deletion", () => {
   const appMcp = new AppMcpService();
-  const tools = (appMcp as any).toolsForActor({
+  const tools = toolsForActor({
     conversationId: "conversation-1",
     participantId: "participant-1",
     roleConfigId: ADMIN_ROLE.id,
@@ -13187,7 +13189,7 @@ test("app MCP role request tool is not provider-destructive because app approval
 
 test("app MCP participant permissions schema exposes visible role management overrides", () => {
   const appMcp = new AppMcpService();
-  const tools = (appMcp as any).toolsForActor({
+  const tools = toolsForActor({
     conversationId: "conversation-1",
     participantId: "participant-1",
     roleConfigId: ADMIN_ROLE.id,

@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import http from "node:http";
 import test from "node:test";
 import { APP_CONNECTOR_SIGN_IN_TOOL, APP_TOOL_PERMISSION_TOOL, AppMcpService } from "./appMcp";
+import { appMcpParts } from "./appMcp/test/appMcpParts";
 
 const GRANT = {
   conversationId: "c1", participantId: "p1", roleConfigId: "r1", roleConfigVersion: 1, capabilities: ["permissions.request" as const]
@@ -24,7 +25,7 @@ function call(id: number, progressToken?: number) {
 
 test("a call that waits for the User answers as a stream: progress while it waits, then its result", async () => {
   const service = new AppMcpService();
-  service.waitingProgressMs = 20;
+  appMcpParts(service).mcpServer.waitingProgressMs = 20;
   let release!: () => void;
   service.setConnectorSignInHandler(() => new Promise((resolve) => { release = () => resolve({ status: "connected" }); }));
   await service.start();
@@ -50,7 +51,7 @@ test("a call that waits for the User answers as a stream: progress while it wait
 
 test("the CLI giving up on a waiting call aborts the wait", async () => {
   const service = new AppMcpService();
-  service.waitingProgressMs = 20;
+  appMcpParts(service).mcpServer.waitingProgressMs = 20;
   let aborted!: () => void;
   const abortedSeen = new Promise<void>((resolve) => { aborted = resolve; });
   service.setConnectorSignInHandler((_actor, _request, signal) => new Promise((resolve) => {
@@ -87,7 +88,7 @@ test("a client that takes only JSON gets a plain JSON answer", async () => {
 
 test("Claude Code's permission prompt waits as a stream too, and its CLI giving up aborts the wait (the card is then expired)", async () => {
   const service = new AppMcpService();
-  service.waitingProgressMs = 20;
+  appMcpParts(service).mcpServer.waitingProgressMs = 20;
   let seen: AbortSignal | undefined;
   const aborted = new Promise<void>((resolve) => {
     service.setToolPermissionHandler((_actor, _request, signal) => new Promise((settle) => {
@@ -115,7 +116,7 @@ test("Claude Code's permission prompt waits as a stream too, and its CLI giving 
 
 test("a notifications/cancelled for a waiting call ends its wait, as the stream closing does", async () => {
   const service = new AppMcpService();
-  service.waitingProgressMs = 20;
+  appMcpParts(service).mcpServer.waitingProgressMs = 20;
   const aborted = new Promise<void>((resolve) => {
     service.setToolPermissionHandler((_actor, _request, signal) => new Promise((settle) => {
       signal?.addEventListener("abort", () => { resolve(); settle({ behavior: "deny", message: "gone" }); });

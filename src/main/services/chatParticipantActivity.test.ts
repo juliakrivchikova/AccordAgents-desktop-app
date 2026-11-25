@@ -15,6 +15,8 @@ import {
   APP_CHAT_GET_PARTICIPANT_ACTIVITY_TOOL,
   AppMcpService
 } from "./appMcp";
+import { appMcpParts } from "./appMcp/test/appMcpParts";
+import { toolsForActor } from "./appMcp/protocol";
 import { ChatService } from "./chat";
 import { chatParts } from "./chat/test/chatParts";
 
@@ -674,13 +676,13 @@ test("app MCP dispatches participant activity as capability-free read-only JSON"
     capabilities: []
   };
 
-  const result = await (appMcp as any).callTool(actor, {
+  const result = await appMcpParts(appMcp).toolCalls.callTool(actor, {
     name: APP_CHAT_GET_PARTICIPANT_ACTIVITY_TOOL,
     arguments: {}
   });
   const text = result.content[0].text;
   assert.deepEqual(JSON.parse(text), expected);
-  const tool = ((appMcp as any).toolsForActor(actor) as Array<Record<string, any>>)
+  const tool = (toolsForActor(actor) as Array<Record<string, any>>)
     .find((item) => item.name === APP_CHAT_GET_PARTICIPANT_ACTIVITY_TOOL);
   assert.deepEqual(tool?.inputSchema, {
     type: "object",
@@ -719,7 +721,7 @@ test("ChatService activity handler is actor-scoped, live past snapshotMaxSequenc
     snapshotMaxSequence: 0
   };
 
-  const result = await (appMcp as any).callTool(actor, {
+  const result = await appMcpParts(appMcp).toolCalls.callTool(actor, {
     name: APP_CHAT_GET_PARTICIPANT_ACTIVITY_TOOL,
     arguments: {}
   });
