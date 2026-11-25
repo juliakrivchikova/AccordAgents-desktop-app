@@ -29,6 +29,9 @@ const at = (minutesAgo) => new Date(Date.now() - minutesAgo * 60_000).toISOStrin
 const row = (id) => `document.querySelector('#message-list .message-row[data-thread-root="${id}"]')`;
 const step = (n, kind, label, detail) => ({ id: `a${n}`, sequence: n, kind, label, createdAt: at(1), ...(detail ? { detail } : {}) });
 
+/** The main session on Codex: its steps are a row each. */
+const CODEX_MAIN = { ...MAIN, kind: "codex-cli" };
+
 /** A turn as T3 Code's work log shows it. */
 const WORK = [
   step(1, "status", "Thinking", "I need the current exchange rate, so I'll run a standard web search."),
@@ -78,7 +81,7 @@ test("a running reply on the phone: Working for, one row per step, the newest sh
     await rm(profile, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
   });
   await hub.createChat("conv-work", {
-    title: "Work", participants: [MAIN], createdAt: at(31),
+    title: "Work", participants: [CODEX_MAIN], createdAt: at(31),
     metadata: { mainSessionParticipantId: MAIN.id, chatView: "sessions" }, messages: messages()
   });
   app = await attachApp({ port: 9545 });
@@ -194,6 +197,10 @@ test("a message its member has not taken yet is sent now or taken back from the 
     title: "Queued", participants: [MAIN, DREW], createdAt: at(31),
     metadata: { mainSessionParticipantId: MAIN.id, chatView: "sessions" },
     messages: [
+      { id: "u0", role: "user", content: "What is there?", status: "done", createdAt: at(5), metadata: { deliveryTargets: [MAIN.id] } },
+      // A Claude Code member's steps are folded as its CLI folds them.
+      { id: "r0", role: "participant", participantId: MAIN.id, participantLabel: "@main", content: "Two pages.", status: "done", createdAt: at(4),
+        metadata: { sourceMessageId: "u0", workedMs: 4_000, activityEvents: [step(1, "tool", "Reading src/login.ts"), step(2, "command", "Listing the pages", "node pages.mjs"), step(3, "file-edit", "Update(src/login.css)")] } },
       { id: "u1", role: "user", content: "Fix the login page", status: "done", createdAt: at(3), metadata: { deliveryTargets: [MAIN.id] } },
       // Made two minutes ago, its run on a machine began seconds ago.
       running({ createdAt: at(2), metadata: { remoteRunStatus: { phase: "waiting-for-response", label: "Working", startedAt: runStarted, updatedAt: runStarted } } }),
@@ -210,6 +217,12 @@ test("a message its member has not taken yet is sent now or taken back from the 
   await pairPage(app, { hub, siteOrigin: site.origin, query: "qa=1" });
   await openChat(app, "conv-queued");
   await app.waitFor(`Boolean(${row("r1")}?.querySelector(".sessions-working")) && Boolean(${row("u2")}?.querySelector(".message-waiting"))`, "the running reply and the waiting message");
+
+  // --- a Claude Code member's steps: one line, no icon; an edit on its own
+  await app.evaluate(`${row("r0")}.querySelector(".sessions-worked-toggle").click()`);
+  await app.waitFor(`${row("r0")}.querySelectorAll(".sessions-activity-row").length === 2`, "its Worked for, opened");
+  assert.deepEqual(await app.evaluate(`[...${row("r0")}.querySelectorAll(".sessions-activity-row")].map((node) => [node.dataset.activityKind, node.textContent, node.querySelectorAll("svg").length])`),
+    [["status", "Read 1 file, ran 1 shell command", 0], ["edit", "Update(src/login.css)", 1]]);
 
   // --- its Working for counts from when its own run began, not when it was made
   const seconds = await app.evaluate(`Number((${row("r1")}.querySelector(".sessions-working-head").textContent.match(/(\\d+)s$/) || [])[1])`);

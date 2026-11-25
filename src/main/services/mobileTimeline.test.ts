@@ -628,7 +628,9 @@ test("a reply's step rows travel to the phone only for a chat in the sessions vi
     return conversation;
   };
   const rowsOf = (conversation: Conversation) => timelineEventsFromSnapshot(conversation).find((event) => event.id === "worked");
-  assert.deepEqual(rowsOf(withReply({ chatView: "sessions" }))?.activity, [{ kind: "shell", text: "npm test" }, { kind: "read", text: "src/a.ts" }]);
+  assert.deepEqual(rowsOf(withReply({ chatView: "sessions" }))?.activity, [{ kind: "status", folded: true, text: "Read 1 file, ran 1 shell command" }], "folded as Claude Code folds them");
+  const codex = (requestConversation("Task", 1).metadata.participants as Array<{ id: string }>).map((item) => item.id === "main" ? { ...item, kind: "codex-cli" } : item);
+  assert.deepEqual(rowsOf(withReply({ chatView: "sessions", participants: codex }))?.activity, [{ kind: "shell", text: "npm test" }, { kind: "read", text: "src/a.ts" }]);
   const classic = rowsOf(withReply({ chatView: "classic" }));
   assert.equal(classic?.activity, undefined, "the classic view shows no step rows");
   assert.equal(classic?.activityMore, undefined);

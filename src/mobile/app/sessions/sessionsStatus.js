@@ -239,13 +239,17 @@ export function sessionsActivityElement(entry, live) {
     const line = document.createElement("div");
     line.className = "sessions-activity-row is-" + row.kind + (live && index === rows.length - 1 ? " is-current" : "");
     line.dataset.activityKind = row.kind;
-    const icon = lineIcon(SESSIONS_ACTIVITY_ICONS[row.kind] || SESSIONS_ACTIVITY_ICONS.tool, 14);
-    icon.setAttribute("stroke-width", "1.75");
-    icon.classList.add("sessions-activity-icon");
+    // Steps folded into one line, as Claude Code folds them, are words alone.
+    if (!row.folded) {
+      const icon = lineIcon(SESSIONS_ACTIVITY_ICONS[row.kind] || SESSIONS_ACTIVITY_ICONS.tool, 14);
+      icon.setAttribute("stroke-width", "1.75");
+      icon.classList.add("sessions-activity-icon");
+      line.append(icon);
+    }
     const text = document.createElement("span");
     text.className = "sessions-activity-text";
     text.textContent = row.text;
-    line.append(icon, text);
+    line.append(text);
     list.append(line);
   });
   return list;

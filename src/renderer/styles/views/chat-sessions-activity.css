@@ -88,6 +88,41 @@
   }
 }
 
+/* Steps folded into one line, as Claude Code folds them: muted words that
+   open to their rows. */
+.chat-sessions-step-fold {
+  width: fit-content;
+  max-width: 100%;
+  padding: 0;
+  border: 0;
+  background: none;
+  text-align: left;
+  cursor: pointer;
+}
+
+.chat-sessions-step-fold:hover .chat-sessions-activity-text {
+  color: var(--app-text-strong);
+}
+
+.chat-sessions-step-fold:focus-visible {
+  border-radius: 8px;
+  outline: 2px solid var(--ui-focus-ring);
+}
+
+.chat-sessions-step-fold-caret {
+  flex: 0 0 auto;
+  color: var(--app-muted);
+  transition: transform var(--ui-duration-fast) var(--ui-ease-out);
+}
+
+.chat-sessions-step-fold[aria-expanded="true"] .chat-sessions-step-fold-caret {
+  transform: rotate(90deg);
+}
+
+.chat-sessions-step-fold-rows {
+  padding-left: 14px;
+}
+
 /* What the member writes between its steps: its own words, at text size. */
 .chat-sessions-activity-words {
   margin: 4px 0;

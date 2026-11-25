@@ -448,7 +448,14 @@ switch is disabled.
     and what it is about (`sessionsActivityRow`, from the activity events
     the run already reports): thinking (brain), web search (globe), shell
     (terminal), file read (file), edit (pencil), any other tool (wrench);
-    the newest one shimmers (still for reduced motion). A step says what
+    the newest one shimmers (still for reduced motion). A Claude Code
+    member's reads, searches, listings, shell commands and MCP calls in a
+    row are folded into one line, as its CLI folds them (the User,
+    2026-11-25; `claudeStepFold.ts`): the step it is at while they run,
+    then how many of each ("Read 2 files, called accord_agents 4 times, ran
+    3 shell commands"); on the desktop the line opens to their rows. Edits,
+    new files, fetches, web searches and subagents stay rows of their own.
+    A step says what
     the member's own CLI says for it (`cliToolActivity.ts`, 2026-11-22: "Using
     Bash" told the User nothing): Claude Code's "Running <description in its
     -ing form, or the command cut to 50 columns>", "Reading src/a.ts",

@@ -52,7 +52,7 @@ function activityOfEvent(event) {
   if (!event || !Array.isArray(event.activity)) return {};
   const activity = event.activity.filter(function (row) {
     return row && SESSIONS_ACTIVITY_KINDS.has(row.kind) && typeof row.text === "string" && row.text.trim();
-  }).slice(-24).map(function (row) { return { kind: row.kind, text: row.text.slice(0, 200) }; });
+  }).slice(-24).map(function (row) { return { kind: row.kind, text: row.text.slice(0, 200), ...(row.folded === true ? { folded: true } : {}) }; });
   if (activity.length === 0) return {};
   const more = Number.isFinite(event.activityMore) && event.activityMore > 0 ? Math.floor(event.activityMore) : 0;
   return more > 0 ? { activity: activity, activityMore: more } : { activity: activity };

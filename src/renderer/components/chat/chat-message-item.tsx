@@ -292,8 +292,9 @@ export const ChatMessageItem = memo(function ChatMessageItem(props: {
   // its turn showed while it ran, in place, not to the full stream instead
   // of its text.
   const sessionsFoldView = hasProcessingTranscript ? processingTranscriptView : undefined;
+  const foldSteps = participant?.kind === "claude-code";
   const sessionsFoldActivity = props.presentation === "sessions" && !isStreaming && sessionsReplyHasActivity(activityEvents, sessionsFoldView)
-    ? <ChatSessionsFinishedActivity view={sessionsFoldView} activityEvents={activityEvents} />
+    ? <ChatSessionsFinishedActivity view={sessionsFoldView} activityEvents={activityEvents} foldSteps={foldSteps} />
     : undefined;
   // A part of a turn the User's next message joined (turnContinues): as in
   // the CLI's transcript its steps stay open with no "Worked for" of its own,
@@ -464,6 +465,7 @@ export const ChatMessageItem = memo(function ChatMessageItem(props: {
                 posts={interimPosts}
                 attachments={allImageAttachments}
                 conversationId={props.conversationId}
+                foldSteps={foldSteps}
                 tasks={props.sessionsWork?.length ? <ChatDelegationRows bare entries={props.sessionsWork} participants={props.participants} onOpenTask={props.onOpenTask} /> : undefined}
               />
             ) : isStreaming ? (

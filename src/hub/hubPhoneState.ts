@@ -7,7 +7,7 @@ import type { HubNotice } from "../main/services/hubStorage";
 import type { StorageService } from "../main/services/storage";
 import { mobileInterimPosts, phoneTurnTiming, timelineAttachmentsFromMessage } from "../main/services/mobileTimeline";
 import { chatViewFor } from "../shared/mainSession";
-import { phoneSessionsActivity } from "../shared/sessionsActivity";
+import { isClaudeMember, phoneSessionsActivity } from "../shared/sessionsActivity";
 
 /**
  * What the hub works out for the phone, so that the phone needs no other
@@ -106,7 +106,8 @@ export function liveTimelineEvents(conversation: Conversation, runs: ReviewProgr
     const attachments = interimPosts.length > 0 ? timelineAttachmentsFromMessage(message) : [];
     // Its steps so far, as the sessions view's rows show them (short); a
     // classic chat shows none.
-    const activity = sessionsView ? phoneSessionsActivity(agent?.activityEvents ?? message.metadata?.activityEvents) : undefined;
+    const activity = sessionsView ? phoneSessionsActivity(agent?.activityEvents ?? message.metadata?.activityEvents,
+      { claude: isClaudeMember(conversation.metadata.participants, message.participantId), live: true }) : undefined;
     events.push({
       id: message.id,
       role: "participant",

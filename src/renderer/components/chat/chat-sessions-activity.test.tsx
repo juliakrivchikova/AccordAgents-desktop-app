@@ -25,6 +25,10 @@ const textOf = (node: ReactTestInstance | string): string =>
 const hasClass = (name: string) => (node: ReactTestInstance): boolean =>
   typeof node.type === "string" && typeof node.props.className === "string" && node.props.className.split(/\s+/).includes(name);
 
+/** The main session on Codex: its steps are a row each (a Claude Code
+ *  member's are folded, below). */
+const CODEX_MAIN = PARTICIPANTS.map((item) => item.id === MAIN.id ? { ...item, kind: "codex-cli" as const } : item);
+
 const STATUSES = new Map<string, ChatParticipantRosterStatus>([[DREW.id, "running"], [GERA.id, "idle"], [TAYLOR.id, "pending"]]);
 
 function sessionsOf(conversation: Conversation): ChatSessionsView {
@@ -48,7 +52,7 @@ function itemProps(message: ChatMessage, extra: Partial<Parameters<typeof ChatMe
     activityDisclosure: disclosure(),
     message,
     conversationId: "chat-sessions",
-    participants: PARTICIPANTS,
+    participants: CODEX_MAIN,
     participantStatusById: STATUSES,
     busy: false,
     onOpenThread: noop,
@@ -233,6 +237,34 @@ test("the classic view's running reply is as it was: its status line and its sto
   assert.equal(rowsOf(root).length, 0);
   assert.equal(root.findAll((node) => node.props?.["data-testid"] === "chat-sessions-working").length, 0);
   act(() => renderer!.unmount());
+});
+
+test("a Claude Code member's steps are one line as its CLI folds them: the step it is at, then how many of each; pressed, their rows", () => {
+  const sessions = sessionsOf(sessionsConversation());
+  const steps = [
+    activity("a1", "tool", "accord_agents - app_artifact_read (MCP)", 0),
+    activity("a2", "command", "Listing the old chat's artifacts", 0, "sqlite3 -readonly app.db '.tables'"),
+    activity("a3", "tool", "Reading /tmp/known-issues.md", 0),
+    activity("a4", "file-edit", "Update(/tmp/known-issues.md)", 0),
+    activity("a5", "command", "Running the affected tests", 0, "npm test")
+  ];
+  const lines = (root: ReactTestInstance): string[] => root.findAll((node) => typeof node.type === "string" &&
+    (node.props["data-testid"] === "chat-sessions-step-fold" || node.props["data-testid"] === "chat-sessions-activity-row"))
+    .map((node) => `${node.props["data-testid"] === "chat-sessions-step-fold" ? "fold" : "row"}${node.props.className.includes("is-current") ? " current" : ""}: ${textOf(node)}`);
+  const running = chatMessage("main-claude", "participant", 12, { participantId: MAIN.id, status: "pending", content: "", metadata: { runId: "run-claude" } });
+  const live = (count: number) => renderSessionsRow(running, sessions, { participants: PARTICIPANTS,
+    liveProgress: { participantLabel: "main", state: "running" as const, partialContent: "", activityEvents: steps.slice(0, count) } } as Partial<Parameters<typeof ChatMessageItem>[0]>);
+  assert.deepEqual(lines(live(2)), ["fold current: Listing the old chat's artifacts"]);
+  assert.deepEqual(lines(live(5)), ["fold: Read 1 file, called accord_agents, ran 1 shell command", "row: Update(/tmp/known-issues.md)", "fold current: Running the affected tests"]);
+
+  const done = chatMessage("main-claude-done", "participant", 14, { participantId: MAIN.id, content: "Done.", metadata: { workedMs: 4_000, activityEvents: steps } } as Partial<ChatMessage>);
+  const root = renderSessionsRow(done, sessions, { participants: PARTICIPANTS, activityDisclosure: { ...disclosure(), expandedProcessingTranscriptMessageIds: new Set(["main-claude-done"]) } });
+  assert.deepEqual(lines(root), ["fold: Read 1 file, called accord_agents, ran 1 shell command", "row: Update(/tmp/known-issues.md)", "fold: Ran 1 shell command"]);
+  const fold = root.findAll((node) => node.type === "button" && node.props["data-testid"] === "chat-sessions-step-fold")[0]!;
+  act(() => fold.props.onClick());
+  assert.deepEqual(lines(root).slice(0, 4), [
+    "fold: Read 1 file, called accord_agents, ran 1 shell command", "row: accord_agents - app_artifact_read (MCP)", "row: Listing the old chat's artifacts", "row: Reading /tmp/known-issues.md"
+  ]);
 });
 
 test("a message its member has not taken yet is sent now or taken back from the message itself; its reply has no row", () => {
