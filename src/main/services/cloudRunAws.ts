@@ -1,1729 +1,228 @@
-// AWS-managed Cloud Runs worker ownership and reconciliation. AWS tags are the
-// source of truth; persisted handles are local caches, while guarded automatic
-// stop is authorized by worker-side registered activity across upgraded apps.
-import { createHash, randomUUID } from "node:crypto";
-import { isDeepStrictEqual } from "node:util";
-import type {
-  AwsWorkerActualSpec,
-  AwsWorkerAutoStop,
-  AwsWorkerAutoStopProblem,
-  SetAwsAutoStopRequest,
-  AwsWorkerHandleInfo,
-  AwsWorkerOperationSnapshot,
-  AwsWorkerSpec,
-  AwsWorkerSpecMismatch,
-  AwsWorkerStatus,
-  CloudRunWorkerSettings
-} from "../../shared/types";
-import { awsRootVolumeSizeError, normalizeAwsInstanceType, normalizeAwsRootVolumeSizeGb } from "../../shared/cloudRuns";
-import { assertAwsMachinePowerConfig, machineIdleWarningKind, type AwsMachinePowerConfig } from "../../shared/machinePower";
-import { isAutoUpgradeOf, isMachineInstallTerminalPhase, MACHINE_POWER_MAX_ATTEMPTS, type MachineInstallRecord } from "../../shared/machineInstall";
-import type { MachineRecord } from "../../shared/machineLink";
-import { buildBootstrapCommand, parseWorkerBlob } from "./awsWorkerProvisioning";
-import type { AwsWorkerCredentials } from "./awsWorkerProvisioning";
-import { AwsWorkerLifecycle } from "./awsWorkerLifecycle";
-import { forgetLaunchHostKey, hostKeyForLaunch, pinWorkerHostKey, type WorkerHostKey } from "./awsWorkerHostKeys";
-import { awsWorkerKeyDir } from "./awsWorkerKeyMaterial";
-import { userDataPath } from "../platform";
-
-type StoredAwsWorkerOperation = Awaited<ReturnType<SettingsService["getAwsWorkerOperation"]>>;
-import type {
-  AwsWorkerDeleteResult,
-  AwsWorkerHandle,
-  AwsWorkerInstanceInfo,
-  AwsWorkerKeyMaterial,
-  Ec2Client
-} from "./awsWorkerLifecycle";
-import {
-  awsAuthorizationErrorDetails,
-  createAwsEc2Client,
-  deleteGeneratedAwsWorkerKeyMaterial,
-  generateAwsWorkerKeyMaterial,
-  isAwsAuthorizationError,
-  resolveAwsWorkerPrivateKeyPath,
-  resolveCurrentPublicIp
-} from "./awsEc2Client";
+import type { AwsWorkerActualSpec, SetAwsAutoStopRequest, AwsWorkerStatus, CloudRunWorkerSettings } from "../../shared/types";
+import type { AwsMachinePowerConfig } from "../../shared/machinePower";
+import type { MachineInstallRecord } from "../../shared/machineInstall";
+import type { PrepareAwsWorkerRequest, PreparedAwsWorker } from "./cloudRunAws/types";
+import { randomUUID } from "node:crypto";
+import { createAwsEc2Client, generateAwsWorkerKeyMaterial, resolveAwsWorkerPrivateKeyPath } from "./awsEc2Client";
 import { AwsWorkerAccess } from "./awsWorkerAccess";
-import { buildCloudRunSshTarget, cloudRunSshOptionArgs } from "./cloudRunWorkers";
-import { runCommand } from "./command";
-import type { LeavingMachine, SettingsService } from "./settings";
-import type { MachineRecoveryFailure } from "./machineRecovery";
-import type {
-  RemoteRunWorkerTarget,
-  RemoteWorkerStopAuthorization,
-  RemoteWorkerStopLease
-} from "./remoteWorkerTarget";
+import type { SettingsService } from "./settings";
+import { defaultSshExec } from "./cloudRunAws/access/sshExec";
+import { createWorkerLifecycle } from "./cloudRunAws/access/workerLifecycle";
+import type { CloudRunAwsServiceOptions } from "./cloudRunAws/types";
+import { createAwsModules, type AwsModules } from "./cloudRunAws/modules";
 
-const WORKER_SSH_USER = "ubuntu";
-const WORKER_ROOT = "~/.accordagents/remote-runs";
-const AWS_AUTHORIZATION_RETRY_DELAYS_MS = [250, 1_000, 2_500] as const;
-/** How soon after a switch change a machine's report can still predate it. */
-const SWITCH_REPORT_MARGIN_MS = 2_000;
-/** AWS can miss an instance it has just launched for a moment; only an
- *  instance older than this is gone when AWS has no such id. */
-const INSTANCE_VISIBILITY_GRACE_MS = 10 * 60_000;
-/** A setup or check that is running owns the instance meanwhile. */
-const RUNNING_OPERATION_PHASES: ReadonlySet<AwsWorkerOperationSnapshot["phase"]> = new Set(["starting", "waiting-running", "setting-up"]);
-/** How long a status read waits for the removal of a gone instance. */
-const STATUS_FORGET_WAIT_MS = 10_000;
-/** How long a machine removal that failed waits before a look tries it again. */
-const FORGET_RETRY_MS = 5 * 60_000;
-/** What the AWS page says after the app removed an instance AWS no longer has. */
-export const AWS_INSTANCE_GONE_NOTICE = "Your cloud machine no longer exists in AWS, so it was removed.";
-/** How the AWS page begins the line about an old machine still here. */
-const OLD_MACHINE_NOT_REMOVED = "Your old cloud machine could not be removed from this computer yet";
-const OLD_MACHINE_UNCONFIRMED = "We couldn't confirm your old cloud machine is gone, so it is still listed on this computer";
-const UNVERIFIED_REASON: Record<"refused" | "unreadable", string> = {
-  refused: "AWS refused the keys its instance was made with",
-  unreadable: "this computer can no longer read the keys its instance was made with"
-};
-/** What a look that found the instance gone came to. */
-type ForgetOutcome = { kind: "forgotten" } | { kind: "kept" } | { kind: "changed" } | { kind: "pending" };
-type ForgetResult = { forgotten: boolean; machineIds: string[]; error?: string };
-/** Why an instance's machines leave: the User deleted it, she replaced it
- *  with a new one, or the app found it gone by itself. */
-type ForgetReason = "deleted" | "replaced" | "gone";
+export { AWS_INSTANCE_GONE_NOTICE } from "./cloudRunAws/constants";
+export type { CloudRunAwsServiceOptions, PreparedAwsWorker } from "./cloudRunAws/types";
 
-export interface CloudRunAwsServiceOptions {
-  /** This desktop's version: an automatic update of it that already failed
-   *  on a machine is not repeated by itself. */
-  appVersion?: string;
-  /** Whether the machine's runtime is connected to this desktop now;
-   *  undefined while that is not known yet (the link is still starting). */
-  machineConnected?: (machineId: string) => boolean | undefined;
-  /** Why the machine's program is still not back, after the app tried. */
-  machineRecoveryFailure?: (machineId: string) => MachineRecoveryFailure | undefined;
-  createEc2Client?: (credentials: AwsWorkerCredentials) => Ec2Client;
-  generateKeyMaterial?: typeof generateAwsWorkerKeyMaterial;
-  deleteKeyMaterial?: typeof deleteGeneratedAwsWorkerKeyMaterial;
-  privateKeyPathForKeyName?: (keyName: string) => string;
-  currentPublicIp?: () => Promise<string>;
-  /** Tests: a new machine's host key is made and pinned by these instead. */
-  workerHostKey?: { generate: (launchToken?: string) => Promise<WorkerHostKey>; pin: (alias: string, publicKey: string, launchToken?: string) => Promise<void> };
-  workerAccess?: AwsWorkerAccess;
-  logger?: (event: string, payload: Record<string, unknown>) => void;
-  /** Removes a machine from this desktop the way Settings → Remove does. An
-   *  instance that can never come back takes the machines on it along. */
-  removeMachine?: (machineId: string) => Promise<void>;
-  /** Resolves once the desktop's machine link has started (or could not):
-   *  a machine is removed only after the link knows its machines, so a look
-   *  in the first moments after start does not race the link's own start. */
-  machinesReady?: () => Promise<void>;
-  now?: () => number;
-  idleStopMs?: number;
-  idleStopRetryMs?: number;
-  automaticStopGate?: {
-    authorizeAutomaticWorkerStop(worker: RemoteRunWorkerTarget, ownerId: string): Promise<RemoteWorkerStopAuthorization>;
-    renewAutomaticWorkerStopLease(worker: RemoteRunWorkerTarget, lease: RemoteWorkerStopLease): Promise<RemoteWorkerStopLease>;
-    releaseAutomaticWorkerStopLease(worker: RemoteRunWorkerTarget, lease: RemoteWorkerStopLease): Promise<void>;
-  };
-  wait?: (delayMs: number) => Promise<void>;
-  sshExec?: (worker: CloudRunWorkerSettings, command: string, timeoutMs: number) => Promise<void>;
-  /** Whose Terminal the setup command is spelled for. */
-  platform?: NodeJS.Platform;
-}
-
-export interface PreparedAwsWorker {
-  credentials: AwsWorkerCredentials;
-  handle: AwsWorkerHandleInfo;
-  info: AwsWorkerInstanceInfo;
-  actualSpec: AwsWorkerActualSpec;
-  desiredSpec: AwsWorkerSpec;
-  mismatch?: AwsWorkerSpecMismatch;
-  created: boolean;
-}
-
-interface PrepareAwsWorkerRequest {
-  blob?: string;
-  instanceType?: string;
-  rootVolumeSizeGb?: number;
-  operationId: string;
-  clientToken?: string;
-  expectedInstanceId?: string;
-}
-
+/** The User's own AWS machine. The work is done by the parts in ./cloudRunAws. */
 export class CloudRunAwsService {
-  private readonly lifecycle: AwsWorkerLifecycle;
-  private readonly createEc2Client: (credentials: AwsWorkerCredentials) => Ec2Client;
-  private readonly generateKeyMaterial: typeof generateAwsWorkerKeyMaterial;
-  private readonly workerAccess: AwsWorkerAccess;
-  private readonly privateKeyPathForKeyName: (keyName: string) => string;
-  private readonly logger?: (event: string, payload: Record<string, unknown>) => void;
-  private readonly appVersion?: string;
-  private readonly machineConnected?: (machineId: string) => boolean | undefined;
-  private readonly machineRecoveryFailure?: (machineId: string) => MachineRecoveryFailure | undefined;
-  private readonly automaticStopOwnerId = randomUUID();
-  private readonly activeRunIds = new Set<string>();
-  private readonly wait: (delayMs: number) => Promise<void>;
-  private readonly sshExec: (worker: CloudRunWorkerSettings, command: string, timeoutMs: number) => Promise<void>;
-  private readonly platform: NodeJS.Platform;
-  private prepareActive: Promise<PreparedAwsWorker> | undefined;
-  private prepareRequest: PrepareAwsWorkerRequest | undefined;
-  private readonly removeMachine?: (machineId: string) => Promise<void>;
-  private readonly machinesReady?: () => Promise<void>;
-  private readonly now: () => number;
-  /** Instances Delete or Recreate is taking down, with how many of each. */
-  private readonly deleting = new Map<string, number>();
-  /** Instances the User deleted in this session. */
-  private readonly deletedByUser = new Set<string>();
-  /** The last removal of a leaving machine that failed, and why. */
-  private leavingFailure: { at: number; error: string } | undefined;
-  /** A background pass over the leaving machines, while one runs. */
-  private leavingPass: Promise<unknown> | undefined;
-  /** When old instances the app could not check were last looked at again. */
-  private unverifiedCheckedAt: number | undefined;
-  /** The AWS account the keys in use belong to, once AWS has said. */
-  private keysAccount: { accessKeyId: string; accountId: string } | undefined;
-  /** Forgetting an instance, one at a time; a preparation waits for it. */
-  private forgetting: Promise<unknown> = Promise.resolve();
+  private readonly modules: AwsModules;
 
-  constructor(
-    private readonly settings: SettingsService,
-    options: CloudRunAwsServiceOptions = {}
-  ) {
-    this.appVersion = options.appVersion;
-    this.machineConnected = options.machineConnected;
-    this.machineRecoveryFailure = options.machineRecoveryFailure;
-    this.logger = options.logger;
-    this.removeMachine = options.removeMachine;
-    this.machinesReady = options.machinesReady;
-    this.now = options.now ?? (() => Date.now());
-    this.createEc2Client = options.createEc2Client ?? createAwsEc2Client;
-    this.generateKeyMaterial = options.generateKeyMaterial ?? generateAwsWorkerKeyMaterial;
-    this.lifecycle = new AwsWorkerLifecycle({
-      createEc2Client: this.createEc2Client,
-      generateKeyMaterial: this.generateKeyMaterial,
-      deleteKeyMaterial: async (keyName) => (options.deleteKeyMaterial ?? deleteGeneratedAwsWorkerKeyMaterial)(keyName),
-      currentPublicIp: options.currentPublicIp ?? resolveCurrentPublicIp,
-      hostKey: options.workerHostKey ?? {
-        generate: (launchToken) => hostKeyForLaunch(awsWorkerKeyDir(userDataPath()), launchToken),
-        pin: async (alias, publicKey, launchToken) => {
-          await pinWorkerHostKey(awsWorkerKeyDir(userDataPath()), alias, publicKey);
-          await forgetLaunchHostKey(awsWorkerKeyDir(userDataPath()), launchToken);
-        }
-      },
-      // The User's switch governs this desktop's own idle stop too.
-      automaticStopEnabled: () => this.autoStopSwitchedOn(),
-      authorizeAutomaticStop: async (info) => {
-        const gate = options.automaticStopGate;
-        if (!gate || !info.publicIp) {
-          return undefined;
-        }
-        const publicSettings = await this.settings.getPublicSettings();
-        const handle = publicSettings.cloudRuns.awsHandle;
-        if (!handle) {
-          return undefined;
-        }
-        const worker: RemoteRunWorkerTarget = {
-          host: info.publicIp,
-          user: WORKER_SSH_USER,
-          identityFile: this.privateKeyPath(handle),
-          hostKeyAlias: `accordagents-${info.instanceId}`,
-          workerRoot: WORKER_ROOT
-        };
-        const authorization = await gate.authorizeAutomaticWorkerStop(worker, this.automaticStopOwnerId);
-        if (!authorization.allowed || !authorization.lease) {
-          return undefined;
-        }
-        let lease = authorization.lease;
-        return {
-          renew: async () => {
-            lease = await gate.renewAutomaticWorkerStopLease(worker, lease);
-          },
-          release: async () => {
-            await gate.releaseAutomaticWorkerStopLease(worker, lease);
-          }
-        };
-      },
-      idleStopMs: options.idleStopMs,
-      idleStopRetryMs: options.idleStopRetryMs,
-      logger: options.logger
+  constructor(settings: SettingsService, options: CloudRunAwsServiceOptions = {}) {
+    const createEc2Client = options.createEc2Client ?? createAwsEc2Client;
+    const generateKeyMaterial = options.generateKeyMaterial ?? generateAwsWorkerKeyMaterial;
+    const automaticStopOwnerId = randomUUID();
+    this.modules = createAwsModules({
+      settings,
+      appVersion: options.appVersion,
+      machineConnected: options.machineConnected,
+      machineRecoveryFailure: options.machineRecoveryFailure,
+      logger: options.logger,
+      removeMachine: options.removeMachine,
+      machinesReady: options.machinesReady,
+      now: options.now ?? (() => Date.now()),
+      createEc2Client,
+      generateKeyMaterial,
+      automaticStopOwnerId,
+      lifecycle: createWorkerLifecycle({ settings, options, createEc2Client, generateKeyMaterial, automaticStopOwnerId, parts: () => this.modules }),
+      workerAccess: options.workerAccess ?? new AwsWorkerAccess(),
+      privateKeyPathForKeyName: options.privateKeyPathForKeyName ?? resolveAwsWorkerPrivateKeyPath,
+      wait: options.wait ?? ((delayMs) => new Promise((resolve) => setTimeout(resolve, delayMs))),
+      sshExec: options.sshExec ?? defaultSshExec,
+      platform: options.platform ?? process.platform
     });
-    this.workerAccess = options.workerAccess ?? new AwsWorkerAccess();
-    this.privateKeyPathForKeyName = options.privateKeyPathForKeyName ?? resolveAwsWorkerPrivateKeyPath;
-    this.wait = options.wait ?? ((delayMs) => new Promise((resolve) => setTimeout(resolve, delayMs)));
-    this.sshExec = options.sshExec ?? defaultSshExec;
-    this.platform = options.platform ?? process.platform;
   }
 
-  async bootstrapCommand(region: string, recoveryOperationId?: string): Promise<string> {
-    const deviceId = await this.settings.getCloudRunsDeviceId();
-    let targetUserName: string | undefined;
-    if (recoveryOperationId !== undefined) {
-      const operation = await this.settings.getAwsWorkerOperation();
-      if (operation?.operationId !== recoveryOperationId || operation.phase !== "error" || operation.remediation !== "refresh-aws-authorization") {
-        throw new Error("That AWS permission error is no longer current. Try again first; update permissions only from a current error.");
-      }
-      targetUserName = operation.awsPrincipalUserName;
-    }
-    if (targetUserName) return buildBootstrapCommand(region, deviceId, { targetUserName }, this.platform);
-    // The stop and start keys belong to the instance's region: a command for
-    // another region must not rewrite the policies of keys already in use.
-    const handle = (await this.settings.getPublicSettings()).cloudRuns.awsHandle;
-    const otherRegion = Boolean(handle && handle.region !== region.trim());
-    return buildBootstrapCommand(region, deviceId, { ...await this.keysInUse(), ...(otherRegion ? { machineKeys: false } : {}) }, this.platform);
-  }
-
-  /** The keys a rerun of the setup command must leave valid: the app's own,
-   *  the stop key it has not handed over yet, and the stop key each machine
-   *  on its instance runs with. A read failure fails the command instead of
-   *  producing one that could delete a key still in use. */
-  private async keysInUse(): Promise<{ keepWorkerKeyId?: string; keepPowerKeyIds: string[]; keepWakeKeyId?: string }> {
-    const credentials = await this.settings.getAwsWorkerCredentials();
-    const handle = (await this.settings.getPublicSettings()).cloudRuns.awsHandle;
-    const records = handle ? (await this.installsOnInstance(handle)).records : [];
-    const held = records.flatMap((record) => record.power ? [record.power.keyId] : []);
-    // A stop key a machine refused, and no machine holds, is not in use: the
-    // rerun that sets automatic stop up again may replace it.
-    const pending = credentials?.power?.accessKeyId;
-    const refused = pending !== undefined && !held.includes(pending) && records.some((record) => record.powerError?.keyId === pending);
-    return {
-      keepWorkerKeyId: credentials?.accessKeyId,
-      keepPowerKeyIds: [...(pending && !refused ? [pending] : []), ...held],
-      keepWakeKeyId: credentials?.wake?.accessKeyId
-    };
+  bootstrapCommand(region: string, recoveryOperationId?: string): Promise<string> {
+    return this.modules.bootstrap.bootstrapCommand(region, recoveryOperationId);
   }
 
   /** The phone's start key for this app's instance, as a paired phone uses it,
    *  with the machine it wakes; undefined when the setup command has not made
    *  one, or made it for another region. It only ever leaves this desktop
    *  inside a pairing link. */
-  async deviceWakePower(): Promise<{ machineId?: string; config: AwsMachinePowerConfig } | undefined> {
-    const credentials = await this.settings.getAwsWorkerCredentials();
-    const handle = (await this.settings.getPublicSettings()).cloudRuns.awsHandle;
-    if (!credentials?.wake || !handle) return undefined;
-    const config = powerConfigFor({ ...credentials, power: credentials.wake }, handle);
-    if (!config) return undefined;
-    const { machines } = await this.installsOnInstance(handle);
-    return { ...(machines.length === 1 ? { machineId: machines[0].id } : {}), config };
-  }
-
-  /** This app's machines on its instance, and their install records. A
-   *  machine counts when its record names the instance, or when it was
-   *  installed over the instance's own pinned host key. */
-  private async installsOnInstance(handle: AwsWorkerHandleInfo): Promise<{ machines: MachineRecord[]; records: MachineInstallRecord[] }> {
-    const [machines, installs] = await Promise.all([this.settings.listMachines(), this.settings.listMachineInstalls()]);
-    const pinned = new Set(installs.filter((record) => record.target?.hostKeyAlias === `accordagents-${handle.instanceId}`).map((record) => record.machineId));
-    const onInstance = machines.filter((machine) => machine.awsInstanceId === handle.instanceId || (!machine.awsInstanceId && pinned.has(machine.id)));
-    const ids = new Set(onInstance.map((machine) => machine.id));
-    return { machines: onInstance, records: installs.filter((record) => ids.has(record.machineId)) };
+  deviceWakePower(): Promise<{ machineId?: string; config: AwsMachinePowerConfig } | undefined> {
+    return this.modules.autoStop.deviceWakePower();
   }
 
   /** Whether this desktop's cloud program is on that instance and has
    *  connected at least once: one installed that never reached this desktop
    *  is not set up yet. */
-  async programInstalledOn(instanceId: string): Promise<boolean> {
-    const { machines, records } = await this.installsOnInstance({ instanceId } as AwsWorkerHandleInfo);
-    return records.some((record) => Boolean(record.installedVersion)
-      && Boolean(machines.find((machine) => machine.id === record.machineId)?.lastHello));
+  programInstalledOn(instanceId: string): Promise<boolean> {
+    return this.modules.installedPrograms.programInstalledOn(instanceId);
   }
 
   // Compatibility entry point for older renderer callers. The new UI calls
   // AwsWorkerSetupService, which continues through running + doctor setup.
-  async connectWorker(blob: string, instanceType?: string, rootVolumeSizeGb?: number): Promise<AwsWorkerStatus> {
-    await this.prepareWorker({ blob, instanceType, rootVolumeSizeGb, operationId: `legacy-${Date.now()}` });
-    return this.status();
+  connectWorker(blob: string, instanceType?: string, rootVolumeSizeGb?: number): Promise<AwsWorkerStatus> {
+    return this.modules.preparation.connectWorker(blob, instanceType, rootVolumeSizeGb);
   }
 
-  async prepareWorker(request: PrepareAwsWorkerRequest): Promise<PreparedAwsWorker> {
-    if (this.prepareActive) {
-      if (isDeepStrictEqual(this.prepareRequest, request)) return this.prepareActive;
-      throw new Error("Another AWS preparation is still running. Wait for it to finish, then try again.");
-    }
-    this.prepareRequest = structuredClone(request);
-    this.prepareActive = this.prepareWorkerUnlocked(this.prepareRequest).finally(() => {
-      this.prepareActive = undefined;
-      this.prepareRequest = undefined;
-    });
-    return this.prepareActive;
-  }
-
-  private async prepareWorkerUnlocked(request: PrepareAwsWorkerRequest): Promise<PreparedAwsWorker> {
-    // A gone instance being forgotten is finished first: its forget must not
-    // land on the connection this preparation saves.
-    await this.forgetting;
-    if (request.rootVolumeSizeGb !== undefined) {
-      const invalidSize = awsRootVolumeSizeError(request.rootVolumeSizeGb);
-      if (invalidSize) throw new Error(invalidSize);
-    }
-    const credentials = request.blob?.trim()
-      ? withRetainedKeys(parseWorkerBlob(request.blob), await this.settings.getAwsWorkerCredentials())
-      : await this.settings.getAwsWorkerCredentials();
-    if (!credentials) {
-      throw new Error("Connect the AWS account before starting the worker.");
-    }
-    const publicSettings = await this.settings.getPublicSettings();
-    const desiredType = normalizeAwsInstanceType(request.instanceType ?? publicSettings.cloudRuns.awsInstanceType);
-    const desiredDisk = normalizeAwsRootVolumeSizeGb(request.rootVolumeSizeGb ?? publicSettings.cloudRuns.awsRootVolumeSizeGb);
-    let matches = await this.discoverWorkers(credentials, false);
-    if (matches.length > 1) throw multipleWorkerError(matches);
-    if (request.expectedInstanceId && matches[0]?.instanceId !== request.expectedInstanceId) {
-      throw new Error("The instance changed after the size editor opened. Refresh and review it before applying.");
-    }
-    let replacedInstanceId: string | undefined;
-    if (matches.length === 0 && request.blob?.trim()) {
-      const previousCredentials = await this.settings.getAwsWorkerCredentials();
-      const previousHandle = publicSettings.cloudRuns.awsHandle;
-      if (previousCredentials && previousHandle && previousCredentials.accessKeyId !== credentials.accessKeyId) {
-        let previous: AwsWorkerInstanceInfo | undefined;
-        try {
-          previous = await this.clientForRegion(previousCredentials, previousHandle.region).describeInstance(previousHandle.instanceId);
-        } catch (error) {
-          throw new Error(`Could not verify the existing AWS worker before replacing credentials: ${errorMessage(error)}. Delete the existing worker first.`);
-        }
-        if (previous && previous.state !== "terminated" && previous.state !== "absent") {
-          throw new Error("An AWS worker is already configured but is not visible to the new credentials. Delete the existing worker first.");
-        }
-        replacedInstanceId = previousHandle.instanceId;
-      }
-    }
-    // Another instance takes the saved one's place: its machines go first,
-    // once AWS says it can never come back.
-    const savedHandle = publicSettings.cloudRuns.awsHandle;
-    if (savedHandle && matches[0]?.instanceId !== savedHandle.instanceId) {
-      await this.replacedInstanceMachinesLeave(savedHandle, await this.settings.getAwsWorkerCredentials(), credentials);
-    }
-    let created = false;
-    let info = matches[0];
-    let handle: AwsWorkerHandleInfo;
-    if (!info) {
-      const persistedToken = await (this.settings as SettingsService & {
-        getAwsWorkerProvisioningToken?: () => Promise<string | undefined>;
-        saveAwsWorkerProvisioningToken?: (token: string | undefined) => Promise<void>;
-      }).getAwsWorkerProvisioningToken?.();
-      const clientToken = replacedInstanceId
-        ? replacementLaunchToken(request.operationId, replacedInstanceId)
-        : persistedToken ?? request.clientToken ?? request.operationId;
-      await (this.settings as SettingsService & {
-        saveAwsWorkerProvisioningToken?: (token: string | undefined) => Promise<void>;
-      }).saveAwsWorkerProvisioningToken?.(clientToken);
-      const deviceId = await (this.settings as SettingsService & { getCloudRunsDeviceId?: () => Promise<string> }).getCloudRunsDeviceId?.() ?? "legacy";
-      const createdHandle = await this.lifecycle.createWorker(credentials, {
-        instanceType: desiredType,
-        rootVolumeSizeGb: desiredDisk,
-        clientToken: clientToken.slice(0, 64),
-        deviceId
-      });
-      created = true;
-      info = await this.reconcileCreatedWorker(credentials, createdHandle.instanceId);
-      info = {
-        ...info,
-        region: info.region ?? credentials.region,
-        instanceType: info.instanceType ?? desiredType,
-        rootVolumeSizeGb: info.rootVolumeSizeGb ?? desiredDisk,
-        securityGroupId: info.securityGroupId ?? createdHandle.securityGroupId,
-        keyName: info.keyName ?? createdHandle.keyName
-      };
-      handle = this.handleFromInfo(info, {
-        keyName: createdHandle.keyName,
-        privateKeyPath: createdHandle.privateKeyPath,
-        securityGroupId: createdHandle.securityGroupId,
-        created: true
-      });
-    } else {
-      const key = await this.generateKeyMaterial();
-      handle = this.handleFromInfo(info, {
-        keyName: key.keyName,
-        privateKeyPath: key.privateKeyPath,
-        securityGroupId: info.securityGroupId,
-        created: false
-      });
-    }
-    await this.settings.saveCloudRunsSettings({
-      awsInstanceType: desiredType,
-      awsRootVolumeSizeGb: desiredDisk
-    });
-    const connectionSaver = (this.settings as SettingsService & {
-      saveAwsWorkerConnection?: (nextCredentials: AwsWorkerCredentials, nextHandle: AwsWorkerHandleInfo) => Promise<void>;
-    }).saveAwsWorkerConnection;
-    if (connectionSaver) {
-      await connectionSaver.call(this.settings, credentials, handle);
-    } else {
-      await this.settings.saveAwsWorkerCredentials(credentials);
-      await this.settings.saveAwsWorkerHandle(handle);
-      await this.settings.setCloudRunsMode("aws");
-    }
-    await (this.settings as SettingsService & {
-      saveAwsWorkerProvisioningToken?: (token: string | undefined) => Promise<void>;
-    }).saveAwsWorkerProvisioningToken?.(undefined);
-    const actualSpec = actualSpecFrom(info, handle);
-    const desiredCapacity = await this.capacityFor(credentials, desiredType);
-    const desiredSpec: AwsWorkerSpec = {
-      instanceType: desiredType,
-      rootVolumeSizeGb: desiredDisk,
-      ...desiredCapacity
-    };
-    const mismatch = specMismatch(actualSpec, desiredSpec);
-    return { credentials, handle, info, actualSpec, desiredSpec, mismatch, created };
+  prepareWorker(request: PrepareAwsWorkerRequest): Promise<PreparedAwsWorker> {
+    return this.modules.preparation.prepareWorker(request);
   }
 
   /** Keeping a size cancels the new request, not a reason to provision, enroll
    *  keys or resume a previously interrupted disk expansion. */
-  async keepCurrentSize(expectedInstanceId: string): Promise<AwsWorkerActualSpec> {
-    const { info, handle } = await this.existingWorker(expectedInstanceId);
-    const actual = actualSpecFrom(info, handle);
-    await this.settings.saveCloudRunsSettings({
-      awsInstanceType: actual.instanceType,
-      awsRootVolumeSizeGb: actual.rootVolumeSizeGb
-    });
-    return actual;
+  keepCurrentSize(expectedInstanceId: string): Promise<AwsWorkerActualSpec> {
+    return this.modules.preparation.keepCurrentSize(expectedInstanceId);
   }
 
-  async acceptMismatch(prepared: PreparedAwsWorker): Promise<void> {
-    await (this.settings as SettingsService & {
-      saveAwsWorkerSpecAcceptance?: (instanceId: string, desired: AwsWorkerSpec) => Promise<void>;
-    }).saveAwsWorkerSpecAcceptance?.(prepared.info.instanceId, prepared.desiredSpec);
+  acceptMismatch(prepared: PreparedAwsWorker): Promise<void> {
+    return this.modules.preparation.acceptMismatch(prepared);
   }
 
-  async hasAcceptedMismatch(prepared: PreparedAwsWorker): Promise<boolean> {
-    return await (this.settings as SettingsService & {
-      hasAwsWorkerSpecAcceptance?: (instanceId: string, desired: AwsWorkerSpec) => Promise<boolean>;
-    }).hasAwsWorkerSpecAcceptance?.(prepared.info.instanceId, prepared.desiredSpec) ?? false;
+  hasAcceptedMismatch(prepared: PreparedAwsWorker): Promise<boolean> {
+    return this.modules.preparation.hasAcceptedMismatch(prepared);
   }
 
-  async growDisk(prepared: PreparedAwsWorker): Promise<PreparedAwsWorker> {
-    return this.finishVolumeExpansion(prepared);
+  growDisk(prepared: PreparedAwsWorker): Promise<PreparedAwsWorker> {
+    return this.modules.diskGrowth.growDisk(prepared);
   }
 
-  async resumePendingVolumeExpansion(prepared: PreparedAwsWorker): Promise<PreparedAwsWorker> {
-    const marker = await (this.settings as SettingsService & {
-      getAwsWorkerVolumeExpansion?: () => Promise<{ instanceId: string; volumeId: string; targetSizeGb: number } | undefined>;
-    }).getAwsWorkerVolumeExpansion?.();
-    if (!marker) return prepared;
-    if (marker.instanceId !== prepared.info.instanceId) {
-      await (this.settings as SettingsService & { saveAwsWorkerVolumeExpansion?: (value: undefined) => Promise<void> })
-        .saveAwsWorkerVolumeExpansion?.(undefined);
-      return prepared;
-    }
-    return this.finishVolumeExpansion(prepared, marker);
+  resumePendingVolumeExpansion(prepared: PreparedAwsWorker): Promise<PreparedAwsWorker> {
+    return this.modules.diskGrowth.resumePendingVolumeExpansion(prepared);
   }
 
-  private async finishVolumeExpansion(
-    prepared: PreparedAwsWorker,
-    existingMarker?: { instanceId: string; volumeId: string; targetSizeGb: number }
-  ): Promise<PreparedAwsWorker> {
-    const volumeId = existingMarker?.volumeId ?? prepared.info.rootVolumeId ?? prepared.handle.rootVolumeId;
-    if (!volumeId) throw new Error("Could not identify the AWS worker root volume.");
-    const client = this.clientForRegion(prepared.credentials, prepared.handle.region);
-    const targetSizeGb = existingMarker?.targetSizeGb ?? prepared.desiredSpec.rootVolumeSizeGb;
-    await (this.settings as SettingsService & {
-      saveAwsWorkerVolumeExpansion?: (value: { instanceId: string; volumeId: string; targetSizeGb: number; updatedAt: string } | undefined) => Promise<void>;
-    }).saveAwsWorkerVolumeExpansion?.({
-      instanceId: prepared.info.instanceId,
-      volumeId,
-      targetSizeGb,
-      updatedAt: new Date().toISOString()
-    });
-    const before = await client.describeInstance(prepared.info.instanceId) ?? prepared.info;
-    const requestedModification = (before.rootVolumeSizeGb ?? 0) < targetSizeGb;
-    if (requestedModification) {
-      if (!client.modifyVolumeSize) throw new Error("These AWS credentials cannot grow the worker disk. Re-run the AWS setup command.");
-      await client.modifyVolumeSize(volumeId, targetSizeGb);
-    }
-    if (client.describeVolumeModification) {
-      const deadline = Date.now() + 10 * 60_000;
-      let expandable = false;
-      while (Date.now() < deadline) {
-        const state = await client.describeVolumeModification(volumeId);
-        if (state === "optimizing" || state === "completed" || state === undefined && !requestedModification) {
-          expandable = true;
-          break;
-        }
-        if (state === "failed") throw new Error("AWS failed to grow the worker disk.");
-        await this.wait(5_000);
-      }
-      if (!expandable) throw new Error("Timed out waiting for the enlarged AWS volume to become usable.");
-    }
-    const worker = await this.ensurePreparedRunning(prepared);
-    await this.sshExec(worker, growRootFilesystemCommand(targetSizeGb), 5 * 60_000);
-    const refreshed = await client.describeInstance(prepared.info.instanceId) ?? prepared.info;
-    const handle = this.handleFromInfo(refreshed, {
-      keyName: prepared.handle.accessKeyName ?? prepared.handle.keyName,
-      privateKeyPath: this.privateKeyPath(prepared.handle),
-      securityGroupId: prepared.handle.securityGroupId,
-      created: !prepared.handle.adopted
-    });
-    await this.settings.saveAwsWorkerHandle(handle);
-    await (this.settings as SettingsService & { saveAwsWorkerVolumeExpansion?: (value: undefined) => Promise<void> })
-      .saveAwsWorkerVolumeExpansion?.(undefined);
-    return {
-      ...prepared,
-      info: refreshed,
-      handle,
-      actualSpec: actualSpecFrom(refreshed, prepared.handle),
-      mismatch: specMismatch(actualSpecFrom(refreshed, prepared.handle), prepared.desiredSpec)
-    };
+  recreateWorker(prepared: PreparedAwsWorker, expectedInstanceId: string, operationId: string): Promise<PreparedAwsWorker> {
+    return this.modules.preparation.recreateWorker(prepared, expectedInstanceId, operationId);
   }
 
-  async recreateWorker(prepared: PreparedAwsWorker, expectedInstanceId: string, operationId: string): Promise<PreparedAwsWorker> {
-    if (prepared.info.instanceId !== expectedInstanceId) {
-      throw new Error("The shared worker changed after confirmation. Refresh and choose again.");
-    }
-    // The replacement owns the old instance until its handle is dropped: a
-    // status read meanwhile must not forget the whole connection.
-    await this.whileDeleting(expectedInstanceId, async () => {
-      const result = await this.lifecycle.deleteWorker(this.credentialsForHandle(prepared.credentials, prepared.handle), this.toHandle(prepared.handle));
-      if (result.terminateFailed || !result.terminationConfirmed) {
-        throw new Error(`The existing shared worker could not be confirmed terminated: ${result.terminateFailed ?? "unknown termination state"}`);
-      }
-      // The old instance's program can never come back: its machines leave
-      // with it, and the new instance enrolls as a new machine. A removal cut
-      // short is finished later; the replacement goes on.
-      await this.oneForgetAtATime(() => this.machinesLeave(prepared.handle, "replaced"));
-      await this.settings.saveAwsWorkerHandle(undefined);
-    });
-    return this.prepareWorker({
-      operationId,
-      instanceType: prepared.desiredSpec.instanceType,
-      rootVolumeSizeGb: prepared.desiredSpec.rootVolumeSizeGb
-    });
-  }
-
-  async ensurePreparedRunning(prepared: Pick<PreparedAwsWorker, "credentials" | "handle">,
+  ensurePreparedRunning(prepared: Pick<PreparedAwsWorker, "credentials" | "handle">,
     options: { start?: boolean } = {}): Promise<CloudRunWorkerSettings> {
-    const deviceId = await (this.settings as SettingsService & { getCloudRunsDeviceId?: () => Promise<string> }).getCloudRunsDeviceId?.() ?? "legacy";
-    const running = await this.lifecycle.ensureRunning(this.credentialsForHandle(prepared.credentials, prepared.handle), this.toHandle(prepared.handle),
-      deviceId, options);
-    const key = await this.keyForHandle(prepared.handle);
-    await this.workerAccess.ensureAccess(this.clientForRegion(prepared.credentials, prepared.handle.region), running, key);
-    const keyChanged = key.keyName !== prepared.handle.keyName;
-    if (keyChanged) {
-      prepared.handle.keyName = key.keyName;
-      prepared.handle.accessKeyName = key.keyName;
-    }
-    // Record where the box actually is. Run and session handles keep the address
-    // they were created with, and a stop/start hands out a new one; without this
-    // the app keeps dialling dead addresses and pays an SSH timeout each time.
-    const publicIp = typeof running.publicIp === "string" ? running.publicIp.trim() : "";
-    const hostChanged = publicIp.length > 0 && prepared.handle.lastKnownHost !== publicIp;
-    if (hostChanged) {
-      prepared.handle.lastKnownHost = publicIp;
-    }
-    if (keyChanged || hostChanged) {
-      await this.settings.saveAwsWorkerHandle(prepared.handle);
-    }
-    return workerSettings(running.publicIp as string, key.privateKeyPath, deviceId, running.instanceId);
+    return this.modules.preparation.ensurePreparedRunning(prepared, options);
   }
 
-  async status(): Promise<AwsWorkerStatus> {
-    return this.readStatus(true);
-  }
-
-  private async readStatus(again: boolean): Promise<AwsWorkerStatus> {
-    // Machines of an instance that can never come back, whose removal was
-    // cut short, are finished in the background whatever this look finds.
-    this.finishLeavingMachines();
-    const context = await this.workerContext();
-    if (!context.credentials || !context.handle) return this.notConfigured(context.operation);
-    let status: AwsWorkerStatus;
-    let info: AwsWorkerInstanceInfo | undefined;
-    try {
-      ({ status, info } = await this.describeWorker(context.credentials, context.handle, context.operation));
-    } catch (error) {
-      status = { configured: true, handle: context.handle, operation: context.operation, message: errorMessage(error) };
-      return this.withLeavingNotices(await this.withMachineState(context.credentials, context.handle, status));
-    }
-    // Removing the machines can take a while on a long chat history: the
-    // page is answered meanwhile, and its next look shows the result.
-    const outcome = await this.forgetIfObservedGone(context.handle, info, STATUS_FORGET_WAIT_MS);
-    if (outcome.kind === "forgotten") return this.notConfigured(undefined);
-    // Another look, Delete or a new instance got there first: what is saved
-    // now is the answer, not this look.
-    if (outcome.kind === "changed" && again) return this.readStatus(false);
-    return this.withLeavingNotices(await this.withMachineState(context.credentials, context.handle, status));
-  }
-
-  private async savedInstanceId(): Promise<string | undefined> {
-    return (await this.settings.getPublicSettings().catch(() => undefined))?.cloudRuns.awsHandle?.instanceId;
-  }
-
-  /** A running instance's page says too when an old machine is still here. */
-  private async withLeavingNotices(status: AwsWorkerStatus): Promise<AwsWorkerStatus> {
-    const notices = await this.leavingNotices();
-    return notices.length ? { ...status, notices } : status;
-  }
-
-  /** The lines about old cloud machines still on this computer, counting
-   *  only machines that still exist: ones whose removal failed, and ones
-   *  whose old instance the app could not confirm is gone. */
-  private async leavingNotices(): Promise<string[]> {
-    const leaving = await this.settings.listLeavingMachines().catch(() => []);
-    if (!leaving.length) return [];
-    const present = new Set((await this.settings.listMachines().catch(() => [])).map((machine) => machine.id));
-    const saved = await this.savedInstanceId();
-    // An instance the app could not check that is the saved one again is not
-    // an old instance: its machines are this computer's current ones.
-    const left = leaving.filter((entry) => present.has(entry.machineId) && !(entry.unverified && entry.instanceId === saved));
-    const notices: string[] = [];
-    if (this.leavingFailure && left.some((entry) => !entry.unverified)) {
-      notices.push(`${OLD_MACHINE_NOT_REMOVED}: ${this.leavingFailure.error}. The app tries again by itself.`);
-    }
-    const unverified = left.find((entry) => entry.unverified)?.unverified;
-    if (unverified) notices.push(`${OLD_MACHINE_UNCONFIRMED}: ${UNVERIFIED_REASON[unverified]}.`);
-    return notices;
+  status(): Promise<AwsWorkerStatus> {
+    return this.modules.workerStatus.status();
   }
 
   /** At start-up, once the desktop's machines are up: what a removal left
    *  unfinished is finished, then one look whether AWS still has this app's
    *  instance; one it terminated or no longer has is forgotten with the
    *  machines on it. An AWS error changes nothing. */
-  async forgetInstanceIfGone(): Promise<boolean> {
-    await this.sharedLeavingPass();
-    const { credentials, handle } = await this.workerContext();
-    if (!credentials || !handle) return false;
-    let info: AwsWorkerInstanceInfo | undefined;
-    try {
-      info = await this.clientForRegion(credentials, handle.region).describeInstance(handle.instanceId);
-    } catch (error) {
-      this.log("aws-worker.gone-check.error", { instanceId: handle.instanceId, ...this.safeAwsErrorLogFields(error) });
-      return false;
-    }
-    return (await this.forgetIfObservedGone(handle, info)).kind === "forgotten";
-  }
-
-  /** No instance, and what the AWS page says about the last one: that AWS
-   *  no longer had it, and any old machine of it still on this computer. */
-  private async notConfigured(operation: StoredAwsWorkerOperation): Promise<AwsWorkerStatus> {
-    const [gone, leaving] = await Promise.all([
-      this.settings.getAwsWorkerGoneNotice().catch(() => undefined),
-      this.leavingNotices()
-    ]);
-    // Both lines, each while it holds.
-    const notices = [...(gone ? [AWS_INSTANCE_GONE_NOTICE] : []), ...leaving];
-    return { configured: false, operation, ...(notices.length ? { notices } : {}) };
-  }
-
-  /** AWS says the instance can never come back: it is terminated, or AWS no
-   *  longer has it at all. A stopped or stopping instance is not gone, and a
-   *  failed look never reaches here. */
-  private instanceGone(info: AwsWorkerInstanceInfo | undefined, handle: AwsWorkerHandleInfo): boolean {
-    if (info) return info.state === "terminated";
-    const since = Date.parse(handle.createdAt);
-    return Number.isFinite(since) && this.now() - since >= INSTANCE_VISIBILITY_GRACE_MS;
-  }
-
-  /** What one look at the instance means for this desktop: nothing while
-   *  AWS has it; otherwise it is forgotten, waited for at most `waitMs`. */
-  private async forgetIfObservedGone(handle: AwsWorkerHandleInfo, info: AwsWorkerInstanceInfo | undefined,
-    waitMs?: number): Promise<ForgetOutcome | { kind: "present" }> {
-    if (!this.instanceGone(info, handle)) return { kind: "present" };
-    const forgetting = this.forgetGoneInstance(handle, info ? "terminated" : "not-found");
-    if (waitMs === undefined) return forgetting;
-    let timer: ReturnType<typeof setTimeout> | undefined;
-    const later = new Promise<ForgetOutcome>((resolve) => {
-      timer = setTimeout(() => resolve({ kind: "pending" }), waitMs);
-      timer.unref?.();
-    });
-    try {
-      return await Promise.race([forgetting, later]);
-    } finally {
-      clearTimeout(timer);
-    }
-  }
-
-  /** The app saw by itself that its instance is gone: the instance is
-   *  forgotten with its machines, and the AWS page says so. Not while Delete,
-   *  a setup or a new instance owns it, and not when the instance changed
-   *  since the look. */
-  private forgetGoneInstance(observed: AwsWorkerHandleInfo, observation: "terminated" | "not-found"): Promise<ForgetOutcome> {
-    return this.oneForgetAtATime(async (): Promise<ForgetOutcome> => {
-      if (this.deleting.has(observed.instanceId) || this.prepareActive) return { kind: "kept" };
-      const { credentials, handle, operation } = await this.workerContext();
-      if (!credentials || !handle || handle.instanceId !== observed.instanceId || handle.region !== observed.region) return { kind: "changed" };
-      if (operation && RUNNING_OPERATION_PHASES.has(operation.phase)) return { kind: "kept" };
-      // The User's own Delete that could not finish ends the way she asked
-      // for: keys and all, and with nothing to tell her.
-      const reason: ForgetReason = this.deletedByUser.has(handle.instanceId) ? "deleted" : "gone";
-      this.log("aws-worker.instance-gone", { instanceId: handle.instanceId, region: handle.region, observed: observation, reason });
-      return (await this.forgetInstance(handle, reason)).forgotten ? { kind: "forgotten" } : { kind: "changed" };
-    }).catch((error: unknown): ForgetOutcome => {
-      this.log("aws-worker.instance-gone.error", { instanceId: observed.instanceId, message: errorMessage(error).slice(0, 500) });
-      return { kind: "kept" };
-    });
-  }
-
-  /**
-   * What this desktop keeps for an instance that can never come back: its
-   * machines leave (see `machinesLeave`), then the instance is forgotten in
-   * one settings write, only while it is still the saved one. Delete forgets
-   * this app's AWS keys with it, as it always did. An instance the app found
-   * gone by itself leaves the keys: they still work for a new instance, and
-   * dropping them would mean running the administrator's setup command again.
-   */
-  private async forgetInstance(handle: AwsWorkerHandleInfo, reason: ForgetReason): Promise<ForgetResult> {
-    const machines = await this.machinesLeave(handle, reason);
-    const forgotten = await this.settings.forgetAwsWorkerInstance(handle.instanceId, reason === "deleted"
-      ? { keepCredentials: false, mode: "ssh" }
-      : { keepCredentials: true, ...(reason === "gone" ? { notice: { instanceId: handle.instanceId, at: new Date(this.now()).toISOString() } } : {}) });
-    this.log("aws-worker.forgotten", { instanceId: handle.instanceId, region: handle.region, reason, machineIds: machines.machineIds, forgotten });
-    return { ...machines, forgotten };
-  }
-
-  /**
-   * The machines on an instance whose program can never come back leave this
-   * desktop, each the way Settings → Remove removes one. They are recorded
-   * first, so a removal cut short, by a failure or a restart, is finished on
-   * a later look; nothing waits for that.
-   */
-  private async machinesLeave(handle: AwsWorkerHandleInfo, reason: ForgetReason): Promise<{ machineIds: string[]; error?: string }> {
-    const machineIds = await this.recordLeaving(handle);
-    const error = await this.removeLeavingMachines();
-    this.log("aws-worker.machines-leave", { instanceId: handle.instanceId, reason, machineIds, ...(error ? { error } : {}) });
-    return { machineIds, ...(error ? { error } : {}) };
-  }
-
-  /** Records the machines on an instance as leaving; with `unverified`, as
-   *  machines the app may not remove because it could not check the instance. */
-  private async recordLeaving(handle: AwsWorkerHandleInfo, unverified?: "refused" | "unreadable", accountId?: string): Promise<string[]> {
-    const machineIds = (await this.installsOnInstance(handle)).machines.map((machine) => machine.id);
-    const at = new Date(this.now()).toISOString();
-    const dropped = await this.settings.addLeavingMachines(machineIds.map((machineId) => ({
-      machineId, instanceId: handle.instanceId, at,
-      ...(unverified ? { unverified, region: handle.region, ...(accountId ? { accountId } : {}) } : {})
-    })));
-    if (dropped.length) {
-      this.log("aws-worker.machine-leave.dropped", { machineIds: dropped.map((entry) => entry.machineId), instanceIds: dropped.map((entry) => entry.instanceId) });
-    }
-    return machineIds;
-  }
-
-  /** Removes the machines recorded as leaving. One that fails stays recorded
-   *  and the others go on; returns why the first failed, in plain words. A
-   *  machine already gone (the User removed it) is no longer recorded. One
-   *  whose old instance the app could not check stays until AWS confirms
-   *  that instance is gone (`confirmedGone`); the confirmation is saved
-   *  before anything is removed, so a removal that fails keeps it. */
-  private async removeLeavingMachines(confirmedGone: ReadonlySet<string> = new Set()): Promise<string | undefined> {
-    let leaving = await this.settings.listLeavingMachines();
-    if (!leaving.length) {
-      this.leavingFailure = undefined;
-      return undefined;
-    }
-    const saved = await this.savedInstanceId();
-    const confirmed = leaving.filter((entry) => entry.unverified && confirmedGone.has(entry.instanceId) && entry.instanceId !== saved);
-    if (confirmed.length) {
-      await this.settings.addLeavingMachines(confirmed.map((entry) => ({ machineId: entry.machineId, instanceId: entry.instanceId, at: entry.at })));
-      leaving = await this.settings.listLeavingMachines();
-    }
-    await this.machinesReady?.();
-    const present = new Set((await this.settings.listMachines()).map((machine) => machine.id));
-    let first: string | undefined;
-    for (const entry of leaving) {
-      // One the app could not check stays, unless its instance is the saved
-      // one again (then it is no longer leaving), AWS now confirms it gone,
-      // or its machine is gone.
-      if (entry.unverified && entry.instanceId === saved) {
-        await this.settings.clearLeavingMachine(entry.machineId).catch(() => undefined);
-        continue;
-      }
-      if (entry.unverified && present.has(entry.machineId)) continue;
-      try {
-        if (present.has(entry.machineId)) await this.removeMachine?.(entry.machineId);
-        await this.settings.clearLeavingMachine(entry.machineId);
-      } catch (error) {
-        first ??= plainReason(errorMessage(error)).replace(/[.!?…]$/, "");
-        this.log("aws-worker.machine-leave.error", { machineId: entry.machineId, instanceId: entry.instanceId, message: errorMessage(error).slice(0, 500) });
-      }
-    }
-    this.leavingFailure = first ? { at: this.now(), error: first } : undefined;
-    return first;
-  }
-
-  /**
-   * Looks again at old instances the app could not check, with the keys in
-   * use, at most every five minutes. One is gone when AWS says terminated,
-   * or says it has no such instance to keys of the account it belongs to;
-   * keys of another account are told the same about any instance, so that
-   * alone proves nothing. Any other answer, or an error, keeps it listed.
-   */
-  private async recheckUnverifiedInstances(): Promise<Set<string>> {
-    const gone = new Set<string>();
-    if (this.unverifiedCheckedAt !== undefined && this.now() - this.unverifiedCheckedAt < FORGET_RETRY_MS) return gone;
-    const leaving = await this.settings.listLeavingMachines().catch((): LeavingMachine[] => []);
-    if (!leaving.some((entry) => entry.unverified)) return gone;
-    const present = new Set((await this.settings.listMachines().catch(() => [])).map((machine) => machine.id));
-    const { credentials, handle } = await this.workerContext();
-    const waiting = leaving.filter((entry) => entry.unverified && entry.instanceId !== handle?.instanceId && present.has(entry.machineId));
-    if (!waiting.length) return gone;
-    this.unverifiedCheckedAt = this.now();
-    if (!credentials) return gone;
-    // Which account these keys belong to is learned from the saved instance
-    // first, so a look right after start-up can already use it.
-    if (handle && this.keysAccount?.accessKeyId !== credentials.accessKeyId) {
-      try {
-        this.noteKeysAccount(credentials, await this.clientForRegion(credentials, handle.region).describeInstance(handle.instanceId));
-      } catch (error) {
-        this.log("aws-worker.unconfirmed.account-error", { ...this.safeAwsErrorLogFields(error) });
-      }
-    }
-    for (const instanceId of new Set(waiting.map((entry) => entry.instanceId))) {
-      const entry = waiting.find((item) => item.instanceId === instanceId)!;
-      if (!entry.region) continue;
-      let info: AwsWorkerInstanceInfo | undefined;
-      try {
-        info = await this.clientForRegion(credentials, entry.region).describeInstance(instanceId);
-      } catch (error) {
-        this.log("aws-worker.unconfirmed.check-error", { instanceId, ...this.safeAwsErrorLogFields(error) });
-        continue;
-      }
-      this.noteKeysAccount(credentials, info);
-      const sameAccount = Boolean(entry.accountId) && this.keysAccount?.accessKeyId === credentials.accessKeyId
-        && this.keysAccount.accountId === entry.accountId;
-      const confirmed = info ? info.state === "terminated" : sameAccount;
-      this.log("aws-worker.unconfirmed.checked", { instanceId, state: info?.state ?? "not-found", sameAccount, confirmed });
-      if (confirmed) gone.add(instanceId);
-    }
-    return gone;
-  }
-
-  /** Remembers which account the keys in use belong to, from an instance
-   *  AWS described to them. */
-  private noteKeysAccount(credentials: AwsWorkerCredentials, info: AwsWorkerInstanceInfo | undefined): void {
-    if (info?.ownerId) this.keysAccount = { accessKeyId: credentials.accessKeyId, accountId: info.ownerId };
-  }
-
-  /** One pass over the leaving machines: old instances the app could not
-   *  check are looked at again outside the one-at-a-time queue, so nothing
-   *  waits on AWS; only the removal itself runs in it. */
-  private async leavingPassOnce(): Promise<string | undefined> {
-    const confirmedGone = await this.recheckUnverifiedInstances();
-    return this.oneForgetAtATime(() => this.removeLeavingMachines(confirmedGone));
-  }
-
-  /** A look finishes, in the background, what a removal left unfinished: at
-   *  most every five minutes after a failure, and one pass at a time. */
-  private finishLeavingMachines(): void {
-    if (this.leavingPass || this.leavingFailure && this.now() - this.leavingFailure.at < FORGET_RETRY_MS) return;
-    this.sharedLeavingPass();
-  }
-
-  /** The pass in flight, or a new one: never two at once. */
-  private sharedLeavingPass(): Promise<unknown> {
-    if (this.leavingPass) return this.leavingPass;
-    this.leavingPass = this.leavingPassOnce()
-      .catch((error: unknown) => { this.log("aws-worker.machine-leave.error", { message: errorMessage(error).slice(0, 500) }); return undefined; })
-      .finally(() => { this.leavingPass = undefined; });
-    return this.leavingPass;
-  }
-
-  /**
-   * A new instance takes the place of the saved one: the machines on the
-   * old one leave first, once AWS says it is terminated or no longer has it.
-   * A stopped or running old instance keeps them, as do keys this computer
-   * can no longer read. When the old instance cannot be checked, nothing is
-   * replaced: a new instance would leave its machines behind for good.
-   */
-  private async replacedInstanceMachinesLeave(previous: AwsWorkerHandleInfo, saved: AwsWorkerCredentials | undefined,
-    current: AwsWorkerCredentials): Promise<void> {
-    // The old instance belongs to keys this computer cannot use any more:
-    // its machines are kept and shown, never judged by other keys.
-    const keep = async (why: "refused" | "unreadable", accountId?: string): Promise<void> => {
-      const machineIds = await this.oneForgetAtATime(() => this.recordLeaving(previous, why, accountId));
-      this.log("aws-worker.replaced.kept", { instanceId: previous.instanceId, state: `keys-${why}`, machineIds, accountKnown: Boolean(accountId) });
-    };
-    if (!saved) return keep("unreadable");
-    let info: AwsWorkerInstanceInfo | undefined;
-    try {
-      info = await this.clientForRegion(saved, previous.region).describeInstance(previous.instanceId);
-    } catch (error) {
-      this.log("aws-worker.replaced.check-error", { instanceId: previous.instanceId, ...this.safeAwsErrorLogFields(error) });
-      // New keys were pasted and AWS refuses the old ones: the new keys work,
-      // so the replacement goes on as it always did.
-      if (isAwsAuthorizationError(error) && saved.accessKeyId !== current.accessKeyId) {
-        // The refusal names the old keys' user, and with it their account.
-        return keep("refused", /^arn:aws:iam::(\d{12}):/.exec(awsAuthorizationErrorDetails(error).principalArn ?? "")?.[1]);
-      }
-      if (isAwsAuthorizationError(error)) throw error;
-      throw new Error(`Could not check the previous instance ${previous.instanceId} in AWS: ${plainReason(errorMessage(error)).replace(/[.!?…]$/, "")}. Nothing was changed; try again.`);
-    }
-    if (!info && !this.instanceGone(info, previous)) {
-      throw new Error(`AWS does not show the previous instance ${previous.instanceId} yet. Nothing was changed; try again in a few minutes.`);
-    }
-    if (!this.instanceGone(info, previous)) {
-      this.log("aws-worker.replaced.kept", { instanceId: previous.instanceId, state: info?.state });
-      return;
-    }
-    await this.oneForgetAtATime(() => this.machinesLeave(previous, "replaced"));
-  }
-
-  private oneForgetAtATime<T>(action: () => Promise<T>): Promise<T> {
-    const run = this.forgetting.then(action);
-    this.forgetting = run.catch(() => undefined);
-    return run;
-  }
-
-  /** Delete and Recreate take their instance down; nothing forgets it by
-   *  itself meanwhile. Counted, so overlapping ones do not end each other's. */
-  private async whileDeleting<T>(instanceId: string, action: () => Promise<T>): Promise<T> {
-    this.deleting.set(instanceId, (this.deleting.get(instanceId) ?? 0) + 1);
-    try {
-      return await action();
-    } finally {
-      const left = (this.deleting.get(instanceId) ?? 1) - 1;
-      if (left > 0) this.deleting.set(instanceId, left);
-      else this.deleting.delete(instanceId);
-    }
-  }
-
-  /** The switch and the program's state added to an instance status. A
-   *  settings read that fails leaves the switch unknown, never "on". */
-  private async withMachineState(credentials: AwsWorkerCredentials, handle: AwsWorkerHandleInfo,
-    status: AwsWorkerStatus): Promise<AwsWorkerStatus> {
-    const machineProblem = status.state === "running" ? await this.machineDown(handle).catch(() => undefined) : undefined;
-    const autoStop = await this.autoStopFor(credentials, handle, status.state, Boolean(machineProblem)).catch(() => undefined);
-    return { ...status, ...(autoStop ? { autoStop } : {}), ...(machineProblem ? { machineProblem } : {}) };
+  forgetInstanceIfGone(): Promise<boolean> {
+    return this.modules.goneInstances.forgetInstanceIfGone();
   }
 
   /** The stop key for a machine that runs on this app's instance, or
    *  undefined when the machine is elsewhere or no stop key was set up. The
    *  key only ever covers the instance's own region. */
-  async machinePowerFor(machineId: string): Promise<AwsMachinePowerConfig | undefined> {
-    const [credentials, publicSettings] = await Promise.all([this.settings.getAwsWorkerCredentials(), this.settings.getPublicSettings()]);
-    const handle = publicSettings.cloudRuns.awsHandle;
-    if (!credentials?.power || !handle) return undefined;
-    const { machines } = await this.installsOnInstance(handle);
-    if (!machines.some((machine) => machine.id === machineId)) return undefined;
-    return powerConfigFor(credentials, handle);
-  }
-
-  private async autoStopFor(credentials: AwsWorkerCredentials, handle: AwsWorkerHandleInfo,
-    state: AwsWorkerStatus["state"], machineDown = false): Promise<AwsWorkerAutoStop> {
-    const power = powerConfigFor(credentials, handle);
-    if (!power) return { enabled: false, needsSetup: true };
-    // A program that is not back is shown as itself, not as a detail of
-    // automatic stop: nothing else about the switch can be fixed meanwhile.
-    if (state === "running" && machineDown) return { enabled: await this.settings.getMachineAutoStopEnabled(), needsSetup: false };
-    if (!await this.settings.getMachineAutoStopEnabled()) {
-      // Off must hold on the machine too: it is the one that stops.
-      const problem = state === "running" ? await this.switchNotTaken(power, handle, false) : undefined;
-      return { enabled: false, needsSetup: false, ...(problem ? { problem } : {}) };
-    }
-    // A stopped instance has nothing to stop; what keeps a running one up is
-    // only worth showing while it runs.
-    const problem = state === "running" ? await this.autoStopProblem(power, handle) : undefined;
-    // Switched-on scheduled scripts keep it up on purpose, and that costs money: said, not hidden.
-    const keptOnByScripts = state === "running"
-      ? (await this.installsOnInstance(handle)).machines.reduce((sum, machine) => sum + (machine.lastHello?.keepAwakeScripts ?? 0), 0)
-      : 0;
-    return { enabled: true, needsSetup: false, ...(problem ? { problem } : {}), ...(keptOnByScripts > 0 ? { keptOnByScripts } : {}) };
-  }
-
-  /**
-   * Why a running instance will not stop by itself although the switch is on,
-   * for the Automatic stop row, or nothing. Agents working keep it up by design and are
-   * not a problem. Each answer says what fixes it.
-   */
-  private async autoStopProblem(power: AwsMachinePowerConfig, handle: AwsWorkerHandleInfo): Promise<AwsWorkerAutoStopProblem | undefined> {
-    const keyId = power.credentials.accessKeyId;
-    const { machines, records: all } = await this.installsOnInstance(handle);
-    const records = all.filter((record) => record.installedVersion);
-    if (!records.length) {
-      // The cloud program does the stopping; its own section installs it.
-      return { message: "Works once the cloud program is installed (see Cloud program)." };
-    }
-    const machineOf = (machineId: string) => machines.find((machine) => machine.id === machineId);
-    const warningOf = (machineId: string) => machineOf(machineId)?.lastHello?.idleStopWarning;
-    const taken = records.find((record) => record.power?.keyId === keyId);
-    const takenWarning = taken ? warningOf(taken.machineId) : undefined;
-    const refused = records.find((record) => record.powerError?.keyId === keyId)
-      ?? (takenWarning && machineIdleWarningKind(takenWarning) === "refused" ? taken : undefined);
-    if (refused) {
-      return { message: "AWS does not accept the automatic-stop key.", action: "set-up-again", actionLabel: "Set up again" };
-    }
-    if (!taken) {
-      // The key goes over by an update that waits for the machine to be idle.
-      // Only an update that gave up needs the User; one that waits does not.
-      const appVersion = this.appVersion;
-      const stalled = appVersion ? records.find((item) => {
-        const last = item.lastOperation;
-        return last && last.phase !== "ready" && isMachineInstallTerminalPhase(last.phase) && last.recovery?.kind !== "machine-busy"
-          && !last.interrupted && isAutoUpgradeOf(last.operationId, appVersion) && item.installedVersion !== appVersion;
-      }) : undefined;
-      const exhausted = records.find((item) => item.powerRetry?.keyId === keyId && (item.powerRetry.attempts ?? 1) >= MACHINE_POWER_MAX_ATTEMPTS);
-      const failed = stalled ?? exhausted;
-      if (failed) {
-        return { message: "The cloud machine could not take its automatic-stop key.", action: "reconnect", actionLabel: "Try again",
-          machineId: failed.machineId };
-      }
-      return undefined;
-    }
-    const notTaken = await this.switchNotTaken(power, handle, true);
-    if (notTaken) return notTaken;
-    const warning = warningOf(taken.machineId);
-    const kind = warning ? machineIdleWarningKind(warning) : undefined;
-    if (kind === "unconfirmed") {
-      return { message: "The cloud machine is stopping the instance and has not finished yet; it keeps trying. Stop above stops it now." };
-    }
-    if (kind !== "fault") return undefined;
-    return { message: "The cloud machine could not finish its check, so it stays on for now and tries again by itself. If this stays, stop the instance when you finish." };
-  }
-
-  /** Why the program on the instance's machine is still not back although
-   *  the app tried to bring it back itself, or nothing. */
-  private async machineDown(handle: AwsWorkerHandleInfo): Promise<string | undefined> {
-    const { records } = await this.installsOnInstance(handle);
-    for (const record of records) {
-      if (!record.installedVersion || this.machineConnected?.(record.machineId) !== false) continue;
-      const failure = this.machineRecoveryFailure?.(record.machineId);
-      if (failure) return machineRecoveryMessage(failure);
-    }
-    return undefined;
+  machinePowerFor(machineId: string): Promise<AwsMachinePowerConfig | undefined> {
+    return this.modules.autoStop.machinePowerFor(machineId);
   }
 
   /** When the instance last started, while it is running; 0 when it runs
    *  but AWS does not say since when. Reads only. */
-  async instanceRunningSince(): Promise<number | undefined> {
-    const context = await this.workerContext();
-    if (!context.credentials || !context.handle) return undefined;
-    const { status, info } = await this.describeWorker(context.credentials, context.handle, context.operation);
-    if (status.state !== "running") return undefined;
-    const launched = info?.launchedAt ? Date.parse(info.launchedAt) : Number.NaN;
-    return Number.isFinite(launched) ? launched : 0;
-  }
-
-  /**
-   * The machine holding the key reports a different switch than the User set,
-   * in a report made after the change: the change did not arrive. A runtime
-   * from before the switch reports none and always stops when idle, which
-   * matters only while the switch is off.
-   */
-  private async switchNotTaken(power: AwsMachinePowerConfig, handle: AwsWorkerHandleInfo,
-    enabled: boolean): Promise<AwsWorkerAutoStopProblem | undefined> {
-    const { machines, records } = await this.installsOnInstance(handle);
-    const holder = records.find((record) => record.power?.keyId === power.credentials.accessKeyId);
-    const machine = holder ? machines.find((item) => item.id === holder.machineId) : undefined;
-    if (!machine?.lastHello || this.machineConnected?.(machine.id) !== true) return undefined;
-    const reported = machine.lastHello.autoStopEnabled;
-    if (reported === undefined) {
-      return enabled ? undefined : { message: "The program on the cloud machine is older and still stops the instance by itself; it takes the switch after its next update." };
-    }
-    const changedAt = Date.parse(await this.settings.getMachineAutoStopChangedAt() ?? "");
-    // A report within moments of the change may predate the settings it is
-    // about; only a later one says the change did not arrive.
-    const reportedAfterChange = !Number.isFinite(changedAt) || Date.parse(machine.lastSeenAt ?? "") > changedAt + SWITCH_REPORT_MARGIN_MS;
-    if (reported === enabled || !reportedAfterChange) return undefined;
-    return { message: enabled
-      ? "The cloud machine still has automatic stop switched off. Switch it off and on again to send it once more."
-      : "The cloud machine still has automatic stop switched on, so it may stop the instance. Switch it on and off again to send it once more." };
+  instanceRunningSince(): Promise<number | undefined> {
+    return this.modules.workerStatus.instanceRunningSince();
   }
 
   /** Saves the stop key from a pasted setup result. The result must carry
    *  one: a result from an older command would turn the switch on with
    *  nothing that can stop the instance. */
-  async adoptAutoStopKey(blob: string): Promise<void> {
-    if (!parseWorkerBlob(blob).power) {
-      throw new Error("This result has no automatic-stop key. Copy the command shown here again and run it; it makes one.");
-    }
-    await this.adoptCredentials(blob);
+  adoptAutoStopKey(blob: string): Promise<void> {
+    return this.modules.autoStop.adoptAutoStopKey(blob);
   }
 
   /** The switch. On with a pasted result saves its stop key first; on
    *  without one needs a usable key already saved. Off keeps the key. */
-  async setAutoStop(request: SetAwsAutoStopRequest): Promise<{ keyAdded: boolean }> {
-    const enabled = request?.enabled === true;
-    const blob = typeof request?.blob === "string" ? request.blob.trim() : "";
-    if (blob) await this.adoptAutoStopKey(blob);
-    else if (enabled && !await this.hasAutoStopKey()) {
-      throw new Error("Run the setup command first: there is no automatic-stop key yet.");
-    }
-    await this.settings.setMachineAutoStopEnabled(enabled);
-    return { keyAdded: Boolean(blob) };
+  setAutoStop(request: SetAwsAutoStopRequest): Promise<{ keyAdded: boolean }> {
+    return this.modules.autoStop.setAutoStop(request);
   }
 
   /** The install record of the machine on this instance that holds, or is
    *  to take, the stop key: the one the Automatic stop row's fix acts on. */
-  async autoStopMachineRecord(): Promise<MachineInstallRecord | undefined> {
-    const [credentials, publicSettings] = await Promise.all([this.settings.getAwsWorkerCredentials(), this.settings.getPublicSettings()]);
-    const handle = publicSettings.cloudRuns.awsHandle;
-    if (!handle) return undefined;
-    const records = (await this.installsOnInstance(handle)).records.filter((record) => record.installedVersion);
-    const keyId = credentials?.power?.accessKeyId;
-    return records.find((record) => keyId && record.power?.keyId === keyId) ?? records[0];
+  autoStopMachineRecord(): Promise<MachineInstallRecord | undefined> {
+    return this.modules.autoStop.autoStopMachineRecord();
   }
 
   /** Where this desktop's program and its data live on the instance, as
    *  its setup recorded them; undefined before the first setup. */
-  async programFoldersOnInstance(): Promise<{ installRoot: string; userDataDir?: string } | undefined> {
-    const record = await this.programRecordOnInstance();
-    return record ? { installRoot: record.installRoot, userDataDir: record.userDataDir || undefined } : undefined;
+  programFoldersOnInstance(): Promise<{ installRoot: string; userDataDir?: string } | undefined> {
+    return this.modules.installedPrograms.programFoldersOnInstance();
   }
 
   /** This desktop's cloud program on the instance, as its setup recorded
    *  it: the machine whose project copies Settings manages. */
-  async programRecordOnInstance(): Promise<MachineInstallRecord | undefined> {
-    const handle = (await this.settings.getPublicSettings()).cloudRuns.awsHandle;
-    if (!handle) return undefined;
-    // The newest install, the same one whichever record was saved last.
-    return (await this.installsOnInstance(handle)).records.filter((item) => item.installRoot && item.installedVersion)
-      .sort((left, right) => (right.installedAt ?? "").localeCompare(left.installedAt ?? ""))[0];
+  programRecordOnInstance(): Promise<MachineInstallRecord | undefined> {
+    return this.modules.installedPrograms.programRecordOnInstance();
   }
 
   /** The install record of one machine on this instance. */
-  async machineRecordOnInstance(machineId: string): Promise<MachineInstallRecord | undefined> {
-    const handle = (await this.settings.getPublicSettings()).cloudRuns.awsHandle;
-    if (!handle) return undefined;
-    return (await this.installsOnInstance(handle)).records.find((record) => record.machineId === machineId && record.installedVersion);
+  machineRecordOnInstance(machineId: string): Promise<MachineInstallRecord | undefined> {
+    return this.modules.installedPrograms.machineRecordOnInstance(machineId);
   }
 
   /** A stop key for the instance's own region is saved. */
-  async hasAutoStopKey(): Promise<boolean> {
-    const [credentials, publicSettings] = await Promise.all([this.settings.getAwsWorkerCredentials(), this.settings.getPublicSettings()]);
-    const handle = publicSettings.cloudRuns.awsHandle;
-    return Boolean(credentials && handle && powerConfigFor(credentials, handle));
+  hasAutoStopKey(): Promise<boolean> {
+    return this.modules.autoStop.hasAutoStopKey();
   }
 
   /** The switch reads on: a usable key, and the User left it on. */
-  async autoStopSwitchedOn(): Promise<boolean> {
-    return await this.hasAutoStopKey() && await this.settings.getMachineAutoStopEnabled();
+  autoStopSwitchedOn(): Promise<boolean> {
+    return this.modules.autoStop.autoStopSwitchedOn();
   }
 
   /** The status read with AWS's refusal left intact: a caller that must tell a
    *  revoked permission from a network failure needs the raw error. Reads only. */
-  async probeAccess(): Promise<AwsWorkerStatus> {
-    const context = await this.workerContext();
-    if (!context.credentials || !context.handle) return { configured: false, operation: context.operation };
-    const { status } = await this.describeWorker(context.credentials, context.handle, context.operation);
-    return this.withLeavingNotices(await this.withMachineState(context.credentials, context.handle, status));
+  probeAccess(): Promise<AwsWorkerStatus> {
+    return this.modules.bootstrap.probeAccess();
   }
 
   /** Replace the saved credentials with pasted ones once they prove, read-only,
    *  that they can see the existing instance. Nothing else is touched. */
-  async adoptCredentials(blob: string): Promise<void> {
-    const credentials = withRetainedKeys(parseWorkerBlob(blob), await this.settings.getAwsWorkerCredentials());
-    const handle = (await this.settings.getPublicSettings()).cloudRuns.awsHandle;
-    if (!handle) throw new Error("Connect the AWS account before updating its credentials.");
-    // The stop key only covers the region the command was run for.
-    if (credentials.power && credentials.region !== handle.region) {
-      throw new Error(`The setup command was run for ${credentials.region}, but the instance is in ${handle.region}. The pasted result was not used; run the command again with region ${handle.region}.`);
-    }
-    const info = await this.clientForRegion(credentials, handle.region).describeInstance(handle.instanceId);
-    if (!info || info.instanceId !== handle.instanceId) {
-      throw new Error(`These credentials cannot see the existing instance ${handle.instanceId} in ${handle.region}. The saved credentials were kept.`);
-    }
-    await this.settings.saveAwsWorkerCredentials(credentials);
-  }
-
-  private async workerContext(): Promise<{
-    credentials: AwsWorkerCredentials | undefined;
-    handle: AwsWorkerHandleInfo | undefined;
-    operation: StoredAwsWorkerOperation;
-  }> {
-    const credentials = await this.settings.getAwsWorkerCredentials();
-    const settings = await this.settings.getPublicSettings();
-    const operation = await (this.settings as SettingsService & { getAwsWorkerOperation?: () => Promise<StoredAwsWorkerOperation> }).getAwsWorkerOperation?.();
-    return { credentials, handle: settings.cloudRuns.awsHandle, operation };
-  }
-
-  private async describeWorker(
-    credentials: AwsWorkerCredentials,
-    handle: AwsWorkerHandleInfo,
-    operation: StoredAwsWorkerOperation
-  ): Promise<{ status: AwsWorkerStatus; info?: AwsWorkerInstanceInfo }> {
-    // Polling status intentionally describes only the cached worker. Account
-    // fan-out is reserved for Start/recovery paths.
-    const info = await this.clientForRegion(credentials, handle.region).describeInstance(handle.instanceId);
-    this.noteKeysAccount(credentials, info);
-    return { info, status: {
-      configured: true,
-      handle,
-      state: info?.state ?? "absent",
-      publicIp: info?.publicIp,
-      persistentStorage: info
-        ? {
-            rootVolumeBackedByEbs: info.rootVolumeBackedByEbs === true,
-            rootDeviceName: info.rootDeviceName,
-            rootVolumeId: info.rootVolumeId
-          }
-        : undefined,
-      message: info?.rootVolumeBackedByEbs === false
-        ? "Worker root storage is not backed by EBS; remote session continuity is unsafe."
-        : undefined,
-      actualSpec: info ? actualSpecFrom(info, handle) : undefined,
-      operation
-    } };
+  adoptCredentials(blob: string): Promise<void> {
+    return this.modules.bootstrap.adoptCredentials(blob);
   }
 
   /** Settings → AWS → Delete: the instance is terminated (or found already
    *  gone), what the app made for it is removed, and so are the machines on
    *  it and the AWS connection. */
-  async deleteWorker(): Promise<AwsWorkerStatus> {
-    const credentials = await this.settings.getAwsWorkerCredentials();
-    const settings = await this.settings.getPublicSettings();
-    const handle = settings.cloudRuns.awsHandle;
-    if (!credentials || !handle) return { configured: false };
-    return this.whileDeleting(handle.instanceId, () => this.deleteInstance(credentials, handle));
+  deleteWorker(): Promise<AwsWorkerStatus> {
+    return this.modules.instanceRemoval.deleteWorker();
   }
 
-  private async deleteInstance(credentials: AwsWorkerCredentials, handle: AwsWorkerHandleInfo): Promise<AwsWorkerStatus> {
-    // An instance AWS already terminated or no longer has is deleted as it
-    // is. A look that fails is not "gone": the terminate below answers then.
-    const alreadyGone = await this.clientForRegion(credentials, handle.region).describeInstance(handle.instanceId)
-      .then((info) => this.instanceGone(info, handle), () => false);
-    let result: AwsWorkerDeleteResult;
-    try {
-      result = await this.lifecycle.deleteWorker(this.credentialsForHandle(credentials, handle), this.toHandle(handle), { alreadyGone });
-    } catch (error) {
-      const current = await this.status();
-      return {
-        ...current,
-        configured: true,
-        handle,
-        actionError: errorMessage(error),
-        message: retainedActionFailure("deleted", current.state, errorMessage(error))
-      };
-    }
-    if (result.terminateFailed || !result.terminationConfirmed) {
-      const current = await this.status();
-      return {
-        ...current,
-        configured: true,
-        handle,
-        actionError: result.terminateFailed ?? "Termination was not confirmed.",
-        message: retainedActionFailure("deleted", current.state, result.terminateFailed ?? "Termination was not confirmed.")
-      };
-    }
-    this.deletedByUser.add(handle.instanceId);
-    try {
-      await this.oneForgetAtATime(() => this.forgetInstance(handle, "deleted"));
-    } catch (error) {
-      // Terminated, but this computer could not record it: the instance stays
-      // saved, and the next look at it finishes the Delete.
-      return { configured: true, handle, state: "terminated", actionError: errorMessage(error),
-        message: `The instance is terminated, but this computer could not forget it yet: ${plainReason(errorMessage(error)).replace(/[.!?…]$/, "")}. The app tries again by itself.` };
-    }
-    // An old machine that could not be removed yet is said by the page's
-    // notice, as on every later look.
-    const notices = await this.leavingNotices();
-    return {
-      configured: false,
-      message: result.cleanupFailures.length > 0 ? `Worker terminated with ${result.cleanupFailures.length} cleanup warning(s).` : undefined,
-      ...(notices.length ? { notices } : {})
-    };
-  }
-
-  async stopWorker(): Promise<AwsWorkerStatus> {
-    const credentials = await this.settings.getAwsWorkerCredentials();
-    const settings = await this.settings.getPublicSettings();
-    const handle = settings.cloudRuns.awsHandle;
-    if (!credentials || !handle) return { configured: false };
-    try {
-      await this.lifecycle.stopWorker(this.credentialsForHandle(credentials, handle), this.toHandle(handle));
-    } catch (error) {
-      const current = await this.status();
-      return {
-        ...current,
-        configured: true,
-        handle,
-        actionError: errorMessage(error),
-        message: retainedActionFailure("stopped", current.state, errorMessage(error))
-      };
-    }
-    return this.status();
+  stopWorker(): Promise<AwsWorkerStatus> {
+    return this.modules.instanceRemoval.stopWorker();
   }
 
   /** With `start: false`, the way to a running instance only, for looking
    *  at or setting up the program on it: this device's SSH access is renewed,
    *  as its address may have changed, and nothing is started, grown or held
    *  to the configured size. Bringing a program back must never undo a stop. */
-  async ensureExistingWorkerForRun(instanceId: string, options: { start?: boolean } = {}): Promise<CloudRunWorkerSettings> {
-    if (options.start !== false) return this.ensureWorkerForRun(instanceId);
-    const { credentials, handle } = await this.workerContext();
-    if (!credentials || !handle) throw new Error("The AWS instance is not configured. Connect it in Settings first.");
-    if (handle.instanceId !== instanceId) throw new Error("The selected AWS instance changed. Select Cloud run again.");
-    return this.ensurePreparedRunning({ credentials, handle }, { start: false });
+  ensureExistingWorkerForRun(instanceId: string, options: { start?: boolean } = {}): Promise<CloudRunWorkerSettings> {
+    return this.modules.workerRuns.ensureExistingWorkerForRun(instanceId, options);
   }
 
   /** Inspecting an instance (its setup, its disk) must never wake or prepare it. */
-  async workerForInspection(): Promise<CloudRunWorkerSettings> {
-    const { info, handle } = await this.existingWorker();
-    if (info.state !== "running") {
-      throw new Error(`The AWS instance is ${info.state}. Start the instance and wait until it is running before checking its runtime.`);
-    }
-    if (!info.publicIp?.trim()) throw new Error("No public IP address is available for the running instance. Refresh its status before checking the runtime.");
-    const deviceId = await this.settings.getCloudRunsDeviceId();
-    return workerSettings(info.publicIp.trim(), this.privateKeyPath(handle), deviceId, info.instanceId);
+  workerForInspection(): Promise<CloudRunWorkerSettings> {
+    return this.modules.workerStatus.workerForInspection();
   }
 
-  private async existingWorker(expectedInstanceId?: string): Promise<{ info: AwsWorkerInstanceInfo; handle: AwsWorkerHandleInfo }> {
-    const { credentials, handle } = await this.workerContext();
-    if (!credentials || !handle) throw new Error("The AWS instance is not configured. Connect it in Settings first.");
-    if (expectedInstanceId && handle.instanceId !== expectedInstanceId) {
-      throw new Error("The instance changed. Refresh and review it before continuing.");
-    }
-    const info = await this.clientForRegion(credentials, handle.region).describeInstance(handle.instanceId);
-    if (!info || info.instanceId !== handle.instanceId || info.state === "terminated" || info.state === "absent") {
-      throw new Error("The selected AWS instance is no longer available. Refresh its status in Settings.");
-    }
-    return { info, handle };
-  }
-
-  async ensureWorkerForRun(expectedInstanceId?: string): Promise<CloudRunWorkerSettings> {
-    const credentials = await this.settings.getAwsWorkerCredentials();
-    const settings = await this.settings.getPublicSettings();
-    if (!credentials) throw new Error("The AWS worker is not configured. Start it in Settings first.");
-    let handle = settings.cloudRuns.awsHandle;
-    if (expectedInstanceId && handle?.instanceId !== expectedInstanceId) {
-      throw new Error("The selected AWS instance changed. Select Cloud run again.");
-    }
-    let info = handle
-      ? await this.clientForRegion(credentials, handle.region).describeInstance(handle.instanceId)
-      : undefined;
-    if (!handle || !info || info.state === "terminated") {
-      if (expectedInstanceId) throw new Error("The selected AWS instance is no longer available. Check it in Settings.");
-      const prepared = await this.resumePendingVolumeExpansion(
-        await this.prepareWorker({ operationId: `run-${Date.now()}` })
-      );
-      handle = prepared.handle;
-      info = prepared.info;
-      if (prepared.mismatch && !await this.hasAcceptedMismatch(prepared)) {
-        throw new Error("The shared AWS worker is smaller than the configured requirement. Open Settings and choose Keep, Grow disk, or Recreate.");
-      }
-      return this.ensurePreparedRunning(prepared);
-    }
-    const prepared: PreparedAwsWorker = {
-      credentials,
-      handle,
-      info,
-      actualSpec: actualSpecFrom(info, handle),
-      desiredSpec: {
-        instanceType: settings.cloudRuns.awsInstanceType,
-        rootVolumeSizeGb: settings.cloudRuns.awsRootVolumeSizeGb,
-        ...await this.capacityFor(credentials, settings.cloudRuns.awsInstanceType)
-      },
-      mismatch: undefined,
-      created: false
-    };
-    prepared.mismatch = specMismatch(prepared.actualSpec, prepared.desiredSpec);
-    const resumed = await this.resumePendingVolumeExpansion(prepared);
-    if (resumed.mismatch && !await this.hasAcceptedMismatch(resumed)) {
-      throw new Error("The shared AWS worker is smaller than the configured requirement. Open Settings and choose what to do.");
-    }
-    return this.ensurePreparedRunning(resumed);
+  ensureWorkerForRun(expectedInstanceId?: string): Promise<CloudRunWorkerSettings> {
+    return this.modules.workerRuns.ensureWorkerForRun(expectedInstanceId);
   }
 
   noteRunStarted(runId: string): void {
-    if (!runId || this.activeRunIds.has(runId)) {
-      return;
-    }
-    this.activeRunIds.add(runId);
-    this.lifecycle.runStarted();
+    this.modules.workerRuns.noteRunStarted(runId);
   }
 
-  async noteRunEnded(runId: string): Promise<void> {
-    if (!this.activeRunIds.delete(runId)) {
-      return;
-    }
-    const credentials = await this.settings.getAwsWorkerCredentials();
-    const settings = await this.settings.getPublicSettings();
-    const handle = settings.cloudRuns.awsHandle;
-    if (credentials && handle) {
-      this.lifecycle.runEnded(credentials, this.toHandle(handle));
-    }
+  noteRunEnded(runId: string): Promise<void> {
+    return this.modules.workerRuns.noteRunEnded(runId);
   }
 
-  private async discoverWorkers(credentials: AwsWorkerCredentials, forceAll: boolean): Promise<AwsWorkerInstanceInfo[]> {
-    const configured = this.createEc2Client(credentials);
-    if (!configured.findWorkerInstances) return [];
-    const local = await this.withAuthorizationRetry(
-      "find-worker-instances",
-      () => configured.findWorkerInstances?.() ?? Promise.resolve([])
-    );
-    if (!forceAll && local.length > 0) return local;
-    const regions = await this.listEnabledRegions(configured, credentials.region);
-    const others = await Promise.all(regions
-      .filter((region) => region !== credentials.region)
-      .map((region) => {
-        const regional = this.clientForRegion(credentials, region);
-        return this.withAuthorizationRetry(
-          "find-worker-instances",
-          () => regional.findWorkerInstances?.() ?? Promise.resolve([])
-        );
-      }));
-    return [...local, ...others.flat()];
+  withRunReference<T>(runId: string, action: () => Promise<T>): Promise<T> {
+    return this.modules.workerRuns.withRunReference(runId, action);
   }
-
-  private async listEnabledRegions(client: Ec2Client, fallbackRegion: string): Promise<string[]> {
-    if (!client.listEnabledRegions) return [fallbackRegion];
-    return this.withAuthorizationRetry("list-enabled-regions", () => client.listEnabledRegions?.() ?? Promise.resolve([fallbackRegion]));
-  }
-
-  private async withAuthorizationRetry<T>(operation: string, action: () => Promise<T>): Promise<T> {
-    for (let attempt = 0; ; attempt += 1) {
-      try {
-        return await action();
-      } catch (error) {
-        const delayMs = AWS_AUTHORIZATION_RETRY_DELAYS_MS[attempt];
-        if (!isAwsAuthorizationError(error) || delayMs === undefined) throw error;
-        this.log("aws-worker.discovery.authorization-retry", {
-          operation,
-          attempt: attempt + 1,
-          delayMs,
-          ...this.safeAwsErrorLogFields(error)
-        });
-        await this.wait(delayMs);
-      }
-    }
-  }
-
-  private safeAwsErrorLogFields(error: unknown): Record<string, unknown> {
-    const record = error && typeof error === "object"
-      ? error as { name?: unknown; code?: unknown; Code?: unknown; message?: unknown }
-      : undefined;
-    const message = error instanceof Error
-      ? error.message
-      : typeof record?.message === "string"
-        ? record.message
-        : String(error ?? "");
-    return {
-      errorName: typeof record?.name === "string" ? record.name : undefined,
-      errorCode: typeof record?.code === "string" ? record.code : typeof record?.Code === "string" ? record.Code : undefined,
-      errorMessage: message.slice(0, 500)
-    };
-  }
-
-  private async reconcileCreatedWorker(
-    credentials: AwsWorkerCredentials,
-    instanceId: string
-  ): Promise<AwsWorkerInstanceInfo> {
-    let stableMatches = 0;
-    for (let attempt = 0; attempt < 12; attempt += 1) {
-      const matches = await this.discoverWorkers(credentials, true);
-      if (matches.length > 1) throw multipleWorkerError(matches);
-      const created = matches.find((worker) => worker.instanceId === instanceId);
-      if (created && matches.length === 1) {
-        stableMatches += 1;
-        if (stableMatches >= 2) return created;
-      } else {
-        stableMatches = 0;
-      }
-      await this.wait(5_000);
-    }
-    throw new Error("The new AWS worker was launched but could not be reconciled safely. Retry with the same operation.");
-  }
-
-  private async capacityFor(credentials: AwsWorkerCredentials, instanceType: string): Promise<{ vCpu?: number; memoryMiB?: number }> {
-    try {
-      const described = await this.createEc2Client(credentials).describeInstanceType?.(instanceType);
-      if (described) return described;
-    } catch (error) {
-      if (!isAwsAuthorizationError(error)) throw error;
-      this.log("aws-worker.capacity.authorization-fallback", {
-        instanceType,
-        ...this.safeAwsErrorLogFields(error)
-      });
-    }
-    return knownInstanceCapacity(instanceType);
-  }
-
-  private clientForRegion(credentials: AwsWorkerCredentials, region: string): Ec2Client {
-    return this.createEc2Client({ ...credentials, region });
-  }
-
-  private credentialsForHandle(credentials: AwsWorkerCredentials, handle: AwsWorkerHandleInfo): AwsWorkerCredentials {
-    return { ...credentials, region: handle.region };
-  }
-
-  private handleFromInfo(info: AwsWorkerInstanceInfo, options: {
-    keyName: string;
-    privateKeyPath: string;
-    securityGroupId?: string;
-    created: boolean;
-  }): AwsWorkerHandleInfo {
-    const securityGroupId = info.securityGroupId ?? options.securityGroupId;
-    if (!securityGroupId) {
-      throw new Error("The tagged worker has no app-managed security group. Re-run the AWS setup command to migrate it safely, then retry.");
-    }
-    return {
-      instanceId: info.instanceId,
-      securityGroupId,
-      keyName: options.keyName,
-      accessKeyName: options.keyName,
-      launchKeyName: info.keyName,
-      region: info.region ?? "us-east-1",
-      instanceType: normalizeAwsInstanceType(info.instanceType),
-      rootVolumeSizeGb: info.rootVolumeSizeGb,
-      rootVolumeId: info.rootVolumeId,
-      availabilityZone: info.availabilityZone,
-      vCpu: info.vCpu,
-      memoryMiB: info.memoryMiB,
-      adopted: !options.created,
-      createdAt: info.launchedAt ?? new Date().toISOString()
-    };
-  }
-
-  async withRunReference<T>(runId: string, action: () => Promise<T>): Promise<T> {
-    this.noteRunStarted(runId);
-    try {
-      return await action();
-    } finally {
-      await this.noteRunEnded(runId);
-    }
-  }
-
-  private toHandle(info: AwsWorkerHandleInfo): AwsWorkerHandle {
-    return {
-      instanceId: info.instanceId,
-      securityGroupId: info.securityGroupId,
-      keyName: info.accessKeyName ?? info.keyName,
-      privateKeyPath: this.privateKeyPath(info),
-      region: info.region
-    };
-  }
-
-  private async keyForHandle(handle: AwsWorkerHandleInfo): Promise<AwsWorkerKeyMaterial> {
-    const key = await this.generateKeyMaterial();
-    if ((handle.accessKeyName ?? handle.keyName) === key.keyName) return key;
-    return key;
-  }
-
-  private privateKeyPath(info: AwsWorkerHandleInfo): string {
-    return this.privateKeyPathForKeyName(info.accessKeyName ?? info.keyName);
-  }
-
-  private log(event: string, payload: Record<string, unknown>): void {
-    this.logger?.(event, payload);
-  }
-}
-
-function actualSpecFrom(info: AwsWorkerInstanceInfo, handle: AwsWorkerHandleInfo): AwsWorkerActualSpec {
-  return {
-    instanceId: info.instanceId,
-    region: info.region ?? handle.region,
-    availabilityZone: info.availabilityZone ?? handle.availabilityZone,
-    rootVolumeId: info.rootVolumeId ?? handle.rootVolumeId,
-    instanceType: normalizeAwsInstanceType(info.instanceType ?? handle.instanceType),
-    rootVolumeSizeGb: normalizeAwsRootVolumeSizeGb(info.rootVolumeSizeGb ?? handle.rootVolumeSizeGb),
-    vCpu: info.vCpu ?? handle.vCpu,
-    memoryMiB: info.memoryMiB ?? handle.memoryMiB
-  };
-}
-
-function specMismatch(actual: AwsWorkerActualSpec, desired: AwsWorkerSpec): AwsWorkerSpecMismatch | undefined {
-  const diskTooSmall = actual.rootVolumeSizeGb < desired.rootVolumeSizeGb;
-  const computeTooSmall = typeof actual.vCpu === "number" && typeof actual.memoryMiB === "number"
-    && typeof desired.vCpu === "number" && typeof desired.memoryMiB === "number"
-    ? actual.vCpu < desired.vCpu || actual.memoryMiB < desired.memoryMiB
-    : actual.instanceType !== desired.instanceType;
-  return diskTooSmall || computeTooSmall
-    ? { instanceId: actual.instanceId, actual, desired, diskTooSmall, computeTooSmall }
-    : undefined;
-}
-
-function workerSettings(publicIp: string, identityFile: string, deviceId: string, instanceId: string): CloudRunWorkerSettings {
-  const safeDeviceId = deviceId.replace(/[^A-Za-z0-9._-]/g, "_");
-  return {
-    host: publicIp,
-    user: WORKER_SSH_USER,
-    identityFile,
-    hostKeyAlias: `accordagents-${instanceId}`,
-    workerRoot: `${WORKER_ROOT}/devices/${safeDeviceId}`
-  };
-}
-
-function knownInstanceCapacity(instanceType: string): { vCpu?: number; memoryMiB?: number } {
-  const known: Record<string, { vCpu: number; memoryMiB: number }> = {
-    "t3.small": { vCpu: 2, memoryMiB: 2048 },
-    "t3.medium": { vCpu: 2, memoryMiB: 4096 },
-    "t3.large": { vCpu: 2, memoryMiB: 8192 },
-    "t3.xlarge": { vCpu: 4, memoryMiB: 16384 }
-  };
-  return known[instanceType] ?? {};
-}
-
-/** A pasted result without a stop key (the account refused to make one, or
- *  both slots were in use) keeps the one the app has: it is still valid, and
- *  the machine may run with it. The phone's start key is made only once, so a
- *  later result never carries it and the app keeps the one phones hold. */
-function withRetainedKeys(pasted: AwsWorkerCredentials, saved: AwsWorkerCredentials | undefined): AwsWorkerCredentials {
-  if (!saved || saved.region !== pasted.region) return pasted;
-  return {
-    ...pasted,
-    ...(!pasted.power && saved.power ? { power: saved.power } : {}),
-    ...(!pasted.wake && saved.wake ? { wake: saved.wake } : {})
-  };
-}
-
-function powerConfigFor(credentials: AwsWorkerCredentials, handle: AwsWorkerHandleInfo): AwsMachinePowerConfig | undefined {
-  if (!credentials.power || handle.region !== credentials.region) return undefined;
-  const config: AwsMachinePowerConfig = {
-    version: 1,
-    instanceId: handle.instanceId,
-    credentials: { accessKeyId: credentials.power.accessKeyId, secretAccessKey: credentials.power.secretAccessKey, region: handle.region }
-  };
-  try {
-    assertAwsMachinePowerConfig(config);
-  } catch {
-    return undefined;
-  }
-  return config;
-}
-
-function multipleWorkerError(workers: AwsWorkerInstanceInfo[]): Error {
-  const ids = workers.map((worker) => `${worker.instanceId} (${worker.region ?? "unknown region"})`).join(", ");
-  return new Error(`Multiple tagged AccordAgents workers exist: ${ids}. Resolve the conflict in AWS before retrying; nothing was changed.`);
-}
-
-function growRootFilesystemCommand(targetSizeGb: number): string {
-  const minimumBytes = Math.floor(targetSizeGb * 1024 * 1024 * 1024 * 0.85);
-  return [
-    "set -eu",
-    "root=$(findmnt -n -o SOURCE /)",
-    "parent=$(lsblk -n -o PKNAME \"$root\" | head -1 | tr -d '[:space:]')",
-    "if [ -n \"$parent\" ]; then part=$(lsblk -n -o PARTN \"$root\" | head -1 | tr -d '[:space:]'); sudo -n env TMPDIR=/run growpart \"/dev/$parent\" \"$part\" || true; fi",
-    "fstype=$(findmnt -n -o FSTYPE /)",
-    "if [ \"$fstype\" = ext4 ]; then sudo -n resize2fs \"$root\"; elif [ \"$fstype\" = xfs ]; then sudo -n xfs_growfs -d /; else echo \"Unsupported root filesystem: $fstype\" >&2; exit 2; fi",
-    `size=$(df -B1 --output=size / | tail -1 | tr -d ' '); [ \"$size\" -ge ${minimumBytes} ] || { echo \"Root filesystem did not reach the requested size.\" >&2; exit 3; }`
-  ].join("; ");
-}
-
-async function defaultSshExec(worker: CloudRunWorkerSettings, command: string, timeoutMs: number): Promise<void> {
-  const target = buildCloudRunSshTarget(worker as CloudRunWorkerSettings & { host: string });
-  await runCommand("ssh", [...cloudRunSshOptionArgs(worker as CloudRunWorkerSettings & { host: string }), target, command], { timeoutMs });
-}
-
-function errorMessage(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
-}
-
-function replacementLaunchToken(operationId: string, instanceId: string): string {
-  return createHash("sha256")
-    .update(`accordagents:replacement:${operationId}:${instanceId}`)
-    .digest("hex");
-}
-
-function retainedActionFailure(
-  action: "stopped" | "deleted",
-  state: AwsWorkerStatus["state"],
-  detail: string
-): string {
-  const observed = state ? ` Observed state: ${state}.` : " Observed state is unknown.";
-  return `The shared worker was not ${action}; settings were retained.${observed} ${detail}`;
-}
-
-const MACHINE_DOWN_EFFECT = "Until it is, cloud members don't run and the instance does not stop by itself.";
-
-/** What the Connection row says when the program on the cloud machine is not back. */
-function machineRecoveryMessage(failure: MachineRecoveryFailure): string {
-  const reason = failure.reason ? ` ${plainReason(failure.reason)}` : "";
-  switch (failure.kind) {
-    case "check":
-      return `The AccordAgents program on the cloud machine is out of touch, and the app could not reach the machine to check it.${reason} `
-        + `It tries again by itself. ${MACHINE_DOWN_EFFECT}`;
-    case "setup":
-      return `The AccordAgents program on the cloud machine is not running, and the app could not start it again.${reason} `
-        + `It tries again by itself. ${MACHINE_DOWN_EFFECT}`;
-    case "agents":
-      return "The AccordAgents program on the cloud machine is not running, but agents it started are still running there. "
-        + `The app starts it again once they finish. ${MACHINE_DOWN_EFFECT}`;
-    case "running":
-      return "The AccordAgents program on the cloud machine is running, but this computer has not heard from it for over half an hour. "
-        + "Cloud members wait until it does.";
-  }
-}
-
-/** The first line of a failure, as one sentence of reasonable length. */
-function plainReason(reason: string): string {
-  const line = reason.split(/\r?\n/).map((part) => part.trim()).find(Boolean) ?? "";
-  const short = line.length > 200 ? `${line.slice(0, 197)}…` : line;
-  return !short || /[.!?…]$/.test(short) ? short : `${short}.`;
 }

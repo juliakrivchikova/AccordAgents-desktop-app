@@ -4,6 +4,7 @@ import test from "node:test";
 import type { AppSettings, AwsWorkerHandleInfo, AwsWorkerOperationSnapshot } from "../../shared/types";
 import type { MachineInstallRecord } from "../../shared/machineInstall";
 import { AWS_INSTANCE_GONE_NOTICE, CloudRunAwsService } from "./cloudRunAws";
+import { awsDependencies } from "./cloudRunAws/test/awsParts";
 import type { CloudRunAwsServiceOptions, PreparedAwsWorker } from "./cloudRunAws";
 import { resolveCurrentWorkerAddress } from "./cloudRunWorkers";
 import { encodeWorkerBlob } from "./awsWorkerProvisioning";
@@ -576,10 +577,10 @@ test("AWS run references are acquired and released exactly once per run id", asy
 
   service.noteRunStarted("run-1");
   service.noteRunStarted("run-1");
-  assert.equal((service as any).lifecycle.activeRuns, 1);
+  assert.equal(awsDependencies(service).lifecycle.activeRuns, 1);
   await service.noteRunEnded("run-1");
   await service.noteRunEnded("run-1");
-  assert.equal((service as any).lifecycle.activeRuns, 0);
+  assert.equal(awsDependencies(service).lifecycle.activeRuns, 0);
 });
 
 test("a Settings-only AWS operation rearms automatic idle stop", async () => {
@@ -604,9 +605,9 @@ test("a Settings-only AWS operation rearms automatic idle stop", async () => {
 
   await service.withRunReference("settings-operation", async () => {
     await service.ensureWorkerForRun();
-    assert.equal((service as any).lifecycle.activeRuns, 1);
+    assert.equal(awsDependencies(service).lifecycle.activeRuns, 1);
   });
-  assert.equal((service as any).lifecycle.activeRuns, 0);
+  assert.equal(awsDependencies(service).lifecycle.activeRuns, 0);
   await waitFor(() => client.state?.state === "stopped");
 });
 
