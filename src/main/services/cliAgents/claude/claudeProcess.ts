@@ -610,9 +610,16 @@ export class ClaudeProcess {
       } else {
         this.cli.claudeReplyFlow.trackClaudeBackgroundTasks(record, subtype, state, participant);
       }
-    } else if (!state.stepActive && claudeWarmEventShowsModelStep(type)) {
-      // Output only a running step produces: a step this copy did not see start.
+    } else if (!state.stepActive && claudeWarmEventShowsModelStep(type) && !record.parent_tool_use_id) {
+      // Output only a running step produces: a step this copy did not see
+      // start. A subagent working in the background is not one: its messages
+      // come while the model is idle.
       this.startClaudeWarmStep(state, participant, hooks);
+    }
+    if (state.active?.offer && !record.parent_tool_use_id &&
+      (claudeWarmEventShowsModelStep(type) || (type === "system" && subtype === "status" && stringField(record, "status") === "requesting"))) {
+      // The model works on the step the CLI started itself.
+      state.active.offer();
     }
     if (type === "result") {
       this.cli.claudeReplyFlow.finishClaudeWarmStep(event, record, state, participant, fallbackSessionId, hooks);

@@ -22,6 +22,10 @@ const CLAUDE_WARM_STOP_ACK_TIMEOUT_MS = 15_000;
 // step of its own within milliseconds; until it does, the process is not idle.
 const CLAUDE_WARM_SELF_RESUME_EXPECTED_MS = 30_000;
 
+// How long a step the CLI starts on its own may be silent before the app is
+// told of it anyway (a CLI that does not report its model request).
+const CLAUDE_SELF_RESUMED_QUIET_MS = 1_500;
+
 /** Replies of a live Claude Code process: started, stopped, finished, and what they leave running. */
 export class ClaudeReplyFlow {
   /** Overridable in tests; see CLAUDE_WARM_STOP_ACK_TIMEOUT_MS. */
@@ -32,8 +36,11 @@ export class ClaudeReplyFlow {
   /** The CLI started a step with no message of ours pending: a background task
    *  finished while the model was idle (or a scheduled task fired). In the
    *  dedicated CLI that continuation appears as a new turn of the transcript;
-   *  here it is offered to the caller as a new reply. Its output is buffered
-   *  until the caller attaches, so nothing produced before then is lost. */
+   *  here it is offered to the caller as a new reply, once the model works on
+   *  it: a notification whose report the CLI has already handed to the model
+   *  starts a step that ends at once with nothing (num_turns 0), and the
+   *  dedicated CLI shows nothing for it. Its output is buffered until the
+   *  caller attaches, so nothing produced before then is lost. */
   startClaudeSelfResumedReply(
     state: ClaudeWarmProcessState,
     participant: ParticipantConfig,
@@ -111,15 +118,33 @@ export class ClaudeReplyFlow {
         return settled;
       }
     };
-    try {
-      handler(turn);
-    } catch (error) {
-      void this.cli.cliRuns.writeDebugLog("cli-agent-claude-self-resumed-handler-error", {
-        participantId: participant.id,
-        error: errorText(error)
-      });
-    }
+    const quiet = setTimeout(() => reply.offer?.(), CLAUDE_SELF_RESUMED_QUIET_MS);
+    quiet.unref();
+    reply.offer = () => {
+      reply.offer = undefined;
+      clearTimeout(quiet);
+      try {
+        handler(turn);
+      } catch (error) {
+        void this.cli.cliRuns.writeDebugLog("cli-agent-claude-self-resumed-handler-error", {
+          participantId: participant.id,
+          error: errorText(error)
+        });
+      }
+    };
     return reply;
+  }
+
+  /** Ends a reply the CLI started itself and then had nothing to do in: the
+   *  app was never told of it. Its rows (a background task finished) go to
+   *  the reply that comes next. */
+  private dropUnofferedReply(state: ClaudeWarmProcessState, reply: ClaudeWarmReply, participant: ParticipantConfig): void {
+    reply.offer = undefined;
+    state.pendingNotices.unshift(...(reply.buffered ?? []));
+    reply.buffered = undefined;
+    removeClaudeWarmReply(state, reply);
+    void this.cli.cliRuns.writeDebugLog("cli-agent-claude-self-resumed-empty", { participantId: participant.id });
+    reply.resolve({ participant, ok: true, content: "", durationMs: Date.now() - reply.startedAt });
   }
 
   /** `command_lifecycle`: `queued` when a message enters the CLI's queue,
@@ -153,7 +178,8 @@ export class ClaudeReplyFlow {
         // CLI's transcript, which shows the message at that point and the rest
         // of the step after it, the reply so far ends here and everything the
         // step produces from now on answers the new message.
-        this.finishClaudeWarmReply(state, previous, claudeWarmSegmentText(previous, undefined), undefined, participant, { allowEmpty: true, turnContinues: true });
+        if (previous.offer) this.dropUnofferedReply(state, previous, participant);
+        else this.finishClaudeWarmReply(state, previous, claudeWarmSegmentText(previous, undefined), undefined, participant, { allowEmpty: true, turnContinues: true });
         void this.cli.cliRuns.writeDebugLog("cli-agent-claude-message-joined-step", { participantId: participant.id });
         // A step the CLI started on its own carries the origin of the work
         // that finished, an older reply: its own start is the step's.
@@ -244,6 +270,14 @@ export class ClaudeReplyFlow {
     noteClaudeWarmReplyIdentity(reply, event, state);
     reply.sessionId = reply.sessionId ?? fallbackSessionId;
     reply.resultEvents.push(event);
+    if (reply.offer) {
+      if (record.is_error !== true && !claudeWarmSegmentText(reply, event).trim()) {
+        this.dropUnofferedReply(state, reply, participant);
+        hooks.settled();
+        return;
+      }
+      reply.offer();
+    }
     this.noteClaudeBackgroundWorkStillRunning(state, reply);
     const interruptTarget = state.interruptTarget;
     // An interrupt the CLI has answered has done whatever it did by the end

@@ -372,6 +372,8 @@ export interface ClaudeWarmReply {
   detachSignal?: () => void;
   /** Output of a self-started reply produced before the app attached to it. */
   buffered?: CliAgentOutputEvent[];
+  /** A self-started reply the app has not been told of yet: tells it. */
+  offer?: () => void;
   /** When the CLI step this reply is answering began (epoch ms): when the CLI
    *  started its message, or, for one handed to a running step, that step's. */
   stepStartedAt?: number;

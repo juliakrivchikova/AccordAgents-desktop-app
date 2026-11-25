@@ -175,6 +175,8 @@ export function removeClaudeWarmReply(state: ClaudeWarmProcessState, reply: Clau
 
 export function settleClaudeWarmReply(reply: ClaudeWarmReply): void {
   reply.settled = true;
+  // A reply that ended before the app was told of it is not told of later.
+  reply.offer = undefined;
   if (reply.timer) {
     clearTimeout(reply.timer);
     reply.timer = undefined;

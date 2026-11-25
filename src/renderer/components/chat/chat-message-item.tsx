@@ -1,7 +1,7 @@
 import { CloudProviderAuth } from "../cloud-provider-auth";
 import { memo, useState, type ReactNode } from "react";
 import { messageDelivery } from "../../../shared/messageDelivery";
-import { isEmptyContinuedTurnPart } from "../../../shared/turnContinues";
+import { isEmptyFinishedReply } from "../../../shared/turnContinues";
 import { ChatMessageRefusal } from "./chat-message-refusal";
 import { WarningIcon, CheckCircleIcon, CaretDownIcon, CaretUpIcon, CopyIcon, FileTextIcon, ListChecksIcon, ArrowsClockwiseIcon, ArrowBendUpLeftIcon, SmileyIcon, XIcon } from "@phosphor-icons/react";
 
@@ -294,7 +294,7 @@ export const ChatMessageItem = memo(function ChatMessageItem(props: {
   // the CLI's transcript its steps stay open with no "Worked for" of its own,
   // and a part with nothing in it is not drawn at all.
   const continued = message.role === "participant" && message.status === "done" && message.metadata?.turnContinues === true;
-  if (isEmptyContinuedTurnPart(message) && !props.sessionsWork?.length) return null;
+  if (isEmptyFinishedReply(message) && !props.sessionsWork?.length) return null;
 
   async function copyMessage(): Promise<void> {
     if (!canCopy) {
