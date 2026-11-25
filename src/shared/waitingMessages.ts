@@ -31,15 +31,18 @@ export function runningReplyOf<T extends WaitingSource>(messages: readonly T[], 
     Boolean(message.metadata?.runId) && !isWaitingReply(message));
 }
 
-/** The waiting messages, by the id of the User's message. */
-export function waitingMessages(messages: readonly WaitingSource[]): ReadonlyMap<string, WaitingMessage> {
+/** The User's messages one member has not taken yet, by the message's id (a
+ *  message to several members waits in each one's session on its own). */
+export function waitingMessages(messages: readonly WaitingSource[], participantId: string): ReadonlyMap<string, WaitingMessage> {
   const waiting = new Map<string, WaitingMessage>();
-  for (const reply of messages) {
-    const metadata = reply.metadata;
-    if (!isWaitingReply(reply) || !reply.participantId || !metadata?.runId || !metadata.sourceMessageId) continue;
-    const running = runningReplyOf(messages, reply.participantId);
+  const replies = messages.filter((message) => message.participantId === participantId && isWaitingReply(message));
+  if (replies.length === 0) return waiting;
+  const users = new Set(messages.filter((message) => message.role === "user").map((message) => message.id));
+  const running = runningReplyOf(messages, participantId);
+  for (const { metadata } of replies) {
+    if (!metadata?.runId || !metadata.sourceMessageId || !users.has(metadata.sourceMessageId)) continue;
     waiting.set(metadata.sourceMessageId, {
-      participantId: reply.participantId,
+      participantId,
       runId: metadata.runId,
       ...(running ? { behind: { runId: running.metadata!.runId!, ...(running.metadata!.sourceMessageId ? { messageId: running.metadata!.sourceMessageId } : {}) } } : {})
     });

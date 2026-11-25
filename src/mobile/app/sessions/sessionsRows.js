@@ -17,7 +17,7 @@ import {
 export function sessionsMainRows(state) {
   const shared = sessionsRules();
   const rows = [];
-  const waiting = waitingMessagesOf(state.messages);
+  const waiting = waitingMessagesOf(state.messages, state.mainId);
   state.rows.forEach(function (row, position) {
     const message = state.messages[position];
     if (isWaitingReplyRow(message)) return;
@@ -90,7 +90,7 @@ export function sessionsMemberSessionRows(state, member) {
     }
   }];
   let shown = 0;
-  const waiting = waitingMessagesOf(state.messages);
+  const waiting = waitingMessagesOf(state.messages, participantId);
   state.rows.forEach(function (drawn, position) {
     const message = state.messages[position];
     if (!ids.has(message.id)) return;

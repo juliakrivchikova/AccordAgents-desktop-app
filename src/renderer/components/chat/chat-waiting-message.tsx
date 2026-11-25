@@ -18,7 +18,14 @@ interface ChatWaitingMessageActionsProps {
  *  interrupts the step the member is in, or take it back. Left alone, the
  *  member takes it itself. */
 export const ChatWaitingMessageActions = ({ runId, behindRunId, onStopRun }: ChatWaitingMessageActionsProps): JSX.Element => {
-  const [pressed, setPressed] = useState<"now" | "back">();
+  // The run that was told to stop: what waits behind another one later can be
+  // sent now again.
+  const [stopped, setStopped] = useState<string>();
+  const pressed = stopped !== undefined && (stopped === runId || stopped === behindRunId);
+  const stop = (stoppedRunId: string): void => {
+    setStopped(stoppedRunId);
+    onStopRun(stoppedRunId);
+  };
   return (
     <div className="chat-waiting-message" data-testid="chat-waiting-message">
       {behindRunId && (
@@ -26,12 +33,9 @@ export const ChatWaitingMessageActions = ({ runId, behindRunId, onStopRun }: Cha
           variant="ghost"
           size="xs"
           className="text-ui-text-2"
-          disabled={Boolean(pressed)}
+          disabled={pressed}
           data-testid="chat-waiting-send-now"
-          onClick={() => {
-            setPressed("now");
-            onStopRun(behindRunId);
-          }}
+          onClick={() => stop(behindRunId)}
         >
           Send now
         </Button>
@@ -41,12 +45,9 @@ export const ChatWaitingMessageActions = ({ runId, behindRunId, onStopRun }: Cha
         icon={XIcon}
         label="Take this message back"
         tooltip="Take back"
-        disabled={Boolean(pressed)}
+        disabled={pressed}
         data-testid="chat-waiting-take-back"
-        onClick={() => {
-          setPressed("back");
-          onStopRun(runId);
-        }}
+        onClick={() => stop(runId)}
       />
     </div>
   );
@@ -60,9 +61,9 @@ export function composerSendNow(
   onStopRun: ((runId: string) => void) | undefined
 ): ChatComposerSendNow | undefined {
   const runId = participantId && onStopRun ? runningReplyOf(messages, participantId)?.metadata?.runId : undefined;
-  if (!runId || !onStopRun) return undefined;
+  if (!participantId || !runId || !onStopRun) return undefined;
   return {
-    waiting: [...waitingMessages(messages).values()].some((waiting) => waiting.behind?.runId === runId),
+    waiting: waitingMessages(messages, participantId).size > 0,
     onSendNow: () => onStopRun(runId)
   };
 }

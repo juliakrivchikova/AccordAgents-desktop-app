@@ -86,35 +86,46 @@ function ChatSessionsEarlierSteps(props: { count: number; onOpen?: () => void })
   );
 }
 
+/** The lines steps are drawn as: each its own, or folded as Claude Code folds them. */
+function stepLines(events: readonly ChatAgentActivityEvent[], foldSteps: boolean | undefined): ChatAgentActivityEvent[][] {
+  return foldSteps ? claudeStepBlocks(events).map((block) => block.fold ? block.events : [block.event]) : events.map((event) => [event]);
+}
+
+/** Lines of steps without their first `count`, and how many steps those were. */
+function withoutFirstLines(lines: ChatAgentActivityEvent[][], count: number): { events: ChatAgentActivityEvent[]; hidden: number } {
+  return { events: lines.slice(count).flat(), hidden: lines.slice(0, count).reduce((sum, line) => sum + line.length, 0) };
+}
+
 /**
- * The blocks drawn when only the newest `max` steps are: everything from the
- * first kept step on, and how many steps came before it (the words between
- * them go with them).
+ * The blocks drawn when only the newest `max` lines of steps are: everything
+ * from the first kept line on, and how many steps came before it (the words
+ * between them go with them).
  */
 export function newestActivityBlocks<T extends { kind: string; event?: ChatAgentActivityEvent; events?: ChatAgentActivityEvent[] }>(
   blocks: readonly T[],
-  max: number
+  max: number,
+  foldSteps?: boolean
 ): { blocks: T[]; hidden: number } {
-  const stepsOf = (block: T): number => block.kind === "activity" ? 1 : block.kind === "activity-group" ? block.events?.length ?? 0 : 0;
-  const total = blocks.reduce((sum, block) => sum + stepsOf(block), 0);
-  if (total <= max) return { blocks: [...blocks], hidden: 0 };
-  let toHide = total - max;
+  const counted = blocks.map((block) => ({
+    block,
+    lines: block.kind === "activity" ? [[block.event!]] : block.kind === "activity-group" ? stepLines(block.events ?? [], foldSteps) : []
+  }));
+  let toHide = counted.reduce((sum, { lines }) => sum + lines.length, 0) - max;
+  if (toHide <= 0) return { blocks: [...blocks], hidden: 0 };
   const kept: T[] = [];
-  for (const block of blocks) {
+  let hidden = 0;
+  for (const { block, lines } of counted) {
     if (toHide <= 0) {
       kept.push(block);
       continue;
     }
-    const steps = stepsOf(block);
-    if (steps === 0) continue;
-    if (block.kind === "activity-group" && steps > toHide) {
-      kept.push({ ...block, events: block.events!.slice(toHide) });
-      toHide = 0;
-      continue;
-    }
-    toHide -= steps;
+    if (lines.length === 0) continue;
+    const rest = withoutFirstLines(lines, Math.min(toHide, lines.length));
+    if (rest.events.length > 0) kept.push({ ...block, events: rest.events });
+    toHide -= lines.length;
+    hidden += rest.hidden;
   }
-  return { blocks: kept, hidden: total - max };
+  return { blocks: kept, hidden };
 }
 
 /** Steps Claude Code folds: one line, the step it is at while `live`, then
@@ -192,8 +203,9 @@ export const ChatSessionsTranscript = memo(function ChatSessionsTranscript(props
   activityEvents: readonly ChatAgentActivityEvent[];
   segment?: ChatTranscriptSegment;
   live?: boolean;
-  /** Draw only the newest steps this many (SESSIONS_ACTIVITY_ROWS_MAX); the
-   *  finished fold lets the earlier ones be opened. */
+  /** Draw only the newest lines of steps this many
+   *  (SESSIONS_ACTIVITY_ROWS_MAX); the finished fold lets the earlier ones be
+   *  opened. */
   maxSteps?: number;
   expandable?: boolean;
   foldSteps?: boolean;
@@ -204,8 +216,7 @@ export const ChatSessionsTranscript = memo(function ChatSessionsTranscript(props
     [props.content, props.activityEvents, props.segment]
   );
   const { blocks, hidden } = useMemo(
-    // Folded steps are few lines: none of them is left out.
-    () => props.maxSteps && !expanded && !props.foldSteps ? newestActivityBlocks(allBlocks, props.maxSteps) : { blocks: allBlocks, hidden: 0 },
+    () => props.maxSteps && !expanded ? newestActivityBlocks(allBlocks, props.maxSteps, props.foldSteps) : { blocks: allBlocks, hidden: 0 },
     [allBlocks, expanded, props.foldSteps, props.maxSteps]
   );
   if (blocks.length === 0) {
@@ -309,15 +320,18 @@ export function ChatSessionsFinishedActivity(props: {
   );
 }
 
-/** A finished reply's rows: the newest SESSIONS_ACTIVITY_ROWS_MAX, the
+/** A finished reply's rows: the newest SESSIONS_ACTIVITY_ROWS_MAX lines, the
  *  earlier ones behind "N earlier steps", which opens them. */
 function ChatSessionsCappedRows(props: { events: readonly ChatAgentActivityEvent[]; foldSteps?: boolean }): JSX.Element | null {
   const [expanded, setExpanded] = useState(false);
-  const hidden = expanded || props.foldSteps ? 0 : Math.max(0, props.events.length - SESSIONS_ACTIVITY_ROWS_MAX);
+  const lines = useMemo(() => stepLines(props.events, props.foldSteps), [props.events, props.foldSteps]);
+  const { events, hidden } = expanded || lines.length <= SESSIONS_ACTIVITY_ROWS_MAX
+    ? { events: props.events, hidden: 0 }
+    : withoutFirstLines(lines, lines.length - SESSIONS_ACTIVITY_ROWS_MAX);
   return (
     <>
       {hidden > 0 && <ChatSessionsEarlierSteps count={hidden} onOpen={() => setExpanded(true)} />}
-      <ChatSessionsActivityRows events={hidden > 0 ? props.events.slice(hidden) : props.events} foldSteps={props.foldSteps} />
+      <ChatSessionsActivityRows events={events} foldSteps={props.foldSteps} />
     </>
   );
 }

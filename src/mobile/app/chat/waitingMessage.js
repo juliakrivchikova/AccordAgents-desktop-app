@@ -1,11 +1,11 @@
 import { stopRequestedRunIds, stopRunFromPhone } from "../outbox/sending.js";
 import { sessionsRules } from "../sessions/sessionsState.js";
 
-/** The User's messages their member has not taken yet, by message id, by the
+/** The User's messages a member has not taken yet, by message id, by the
  *  desktop's rule (shared/waitingMessages.ts). */
-export function waitingMessagesOf(messages) {
+export function waitingMessagesOf(messages, participantId) {
   const shared = sessionsRules();
-  return shared && typeof shared.waitingMessages === "function" ? shared.waitingMessages(messages) : new Map();
+  return shared && typeof shared.waitingMessages === "function" ? shared.waitingMessages(messages, participantId) : new Map();
 }
 
 /** A reply that has not started: the sessions view draws no row for it, the

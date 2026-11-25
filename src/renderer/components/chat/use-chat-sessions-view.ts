@@ -76,7 +76,7 @@ export interface ChatSessionsView {
   memberTitle: (participantId: string) => string;
   isFormerMember: (participantId: string) => boolean;
   laneOf: (message: ChatMessage) => SessionsViewLane;
-  /** The User's messages their member has not taken yet, by message id. */
+  /** The User's messages the main session has not taken yet, by message id. */
   waiting: ReadonlyMap<string, WaitingMessage>;
   /** A card the sessions view does not show: the member a delegation added. */
   hidesApproval: (approval: ChatAppToolApproval) => boolean;
@@ -133,7 +133,7 @@ export function useChatSessionsView(input: {
       mainMessages: lane.filter((message) => !tasks.placedTaskIds.has(message.id)),
       tasks,
       openCardMessageIds,
-      waiting: waitingMessages(messages),
+      waiting: waitingMessages(messages, mainId),
       messagesById: new Map(messages.map((message) => [message.id, message])),
       tasksByMember: latestTaskByMember(messages),
       titleTasksByMember: titleTaskByMember(messages),

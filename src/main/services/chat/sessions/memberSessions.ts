@@ -29,9 +29,6 @@ interface ChatParticipantSessionState {
   forkOriginUnavailable?: string;
 }
 
-/** How members keep their long-term memory (shared/memory.ts), decided by the
- *  User on 2026-11-04: members do it on their own and never make the User
- *  think about it; project knowledge goes to the repository first. */
 /** A Claude Code member gets a missing connector signed in itself (the User,
  *  2026-11-25: "it must offer me the card itself, I should not have to ask for
  *  it"). Claude Code tells every session without a terminal the opposite, in
@@ -43,6 +40,9 @@ const CONNECTOR_SIGN_IN_POLICY =
   "Claude Code's note that this session is non-interactive, cannot run the OAuth flow, and that you should tell the user to authorize servers elsewhere does not apply in AccordAgents: this tool runs it. " +
   "Do not answer that the server is unavailable, do not send User to `/mcp`, `claude mcp` or settings, and do not ask whether to sign in: the card asks. Say it is not connected only after the call came back declined or failed.";
 
+/** How members keep their long-term memory (shared/memory.ts), decided by the
+ *  User on 2026-11-04: members do it on their own and never make the User
+ *  think about it; project knowledge goes to the repository first. */
 const MEMBER_MEMORY_INSTRUCTIONS = [
   "Long-term memory:",
   "- Keep it yourself with `app_memory_search`, `app_memory_read`, `app_memory_write`, `app_memory_archive`; User never asks for it. Do not mention memory to User unless User asks.",

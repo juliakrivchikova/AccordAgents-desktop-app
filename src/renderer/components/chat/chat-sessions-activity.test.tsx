@@ -5,7 +5,7 @@
 // its own running reply.
 import assert from "node:assert/strict";
 import test from "node:test";
-import { act, create, type ReactTestInstance } from "react-test-renderer";
+import { act, create, type ReactTestInstance, type ReactTestRenderer } from "react-test-renderer";
 
 import { TooltipProvider } from "@/components/ui/tooltip";
 import type { ChatAgentActivityEvent, ChatMessage, Conversation } from "../../../shared/types";
@@ -14,6 +14,7 @@ import { ChatSessionsPresentationContext } from "./chat-member-mark";
 import type { ChatParticipantRosterStatus } from "./chat-roster-status";
 import { ChatSessionsTimelineRow } from "./chat-sessions-timeline-row";
 import { newestActivityBlocks, sameActivityRow } from "./chat-sessions-activity";
+import { ChatWaitingMessageActions } from "./chat-waiting-message";
 import { chatInlineTranscriptParts } from "../../../shared/processingTranscript";
 import { useChatSessionsView, type ChatSessionsView } from "./use-chat-sessions-view";
 import { chatTopLevelMessages } from "./chat-thread-data";
@@ -341,4 +342,45 @@ test("the newest-steps cut keeps a group's newest steps and drops the words befo
   const cut = newestActivityBlocks(blocks, 3);
   assert.equal(cut.hidden, 2);
   assert.deepEqual(cut.blocks.map((block) => block.kind === "text" ? "text" : block.events!.map((event) => event.id).join(",")), ["s3", "text", "s4,s5"]);
+});
+
+test("folded steps are cut by the lines they are drawn as: a fold is one, and what it counts stays whole", () => {
+  const [a, b, c, d, e] = manySteps(5) as [ChatAgentActivityEvent, ChatAgentActivityEvent, ChatAgentActivityEvent, ChatAgentActivityEvent, ChatAgentActivityEvent];
+  const edit = activity("edit", "tool", "Update(/tmp/a.md)", 0);
+  const blocks = [
+    { kind: "activity-group", events: [a, b, edit, c] },
+    { kind: "text", text: "between" },
+    { kind: "activity-group", events: [d, e] }
+  ];
+  const shown = (max: number) => {
+    const cut = newestActivityBlocks(blocks, max, true);
+    return [cut.hidden, ...cut.blocks.map((block) => block.kind === "text" ? "text" : block.events!.map((event) => event.id).join(","))];
+  };
+  assert.deepEqual(shown(4), [0, "s1,s2,edit,s3", "text", "s4,s5"], "four lines");
+  assert.deepEqual(shown(3), [2, "edit,s3", "text", "s4,s5"]);
+  assert.deepEqual(shown(1), [4, "text", "s4,s5"], "the words after the last step left out stay");
+
+  const sessions = sessionsOf(sessionsConversation());
+  const long = Array.from({ length: 120 }, (_, index) => index % 2 ? activity(`c${index}`, "command", "Running command", 0, `step ${index}`) : activity(`e${index}`, "tool", `Update(/tmp/${index}.md)`, 0));
+  const running = chatMessage("main-claude-long", "participant", 12, { participantId: MAIN.id, status: "pending", content: "", metadata: { runId: "run-claude-long" } });
+  const root = renderSessionsRow(running, sessions, { participants: [{ ...MAIN, kind: "claude-code" }],
+    liveProgress: { participantLabel: "main", state: "running" as const, partialContent: "", activityEvents: long } } as Partial<Parameters<typeof ChatMessageItem>[0]>);
+  const earlier = root.find((node) => typeof node.type === "string" && node.props?.["data-testid"] === "chat-sessions-activity-earlier");
+  assert.equal(textOf(earlier), "70 earlier steps", "a long turn still draws its newest 50 lines");
+});
+
+test("a message sent now that still waits, behind the next reply, can be sent now again", () => {
+  const stopped: string[] = [];
+  const actions = (behindRunId: string) => <ChatWaitingMessageActions runId="run-queued" behindRunId={behindRunId} onStopRun={(runId) => { stopped.push(runId); }} />;
+  let renderer: ReactTestRenderer | undefined;
+  act(() => { renderer = create(actions("run-1")); });
+  const button = (testId: string) => renderer!.root.find((node) => node.type === "button" && node.props["data-testid"] === testId);
+  const press = (testId: string) => act(() => button(testId).props.onClick({ defaultPrevented: false, preventDefault: noop, stopPropagation: noop }));
+  press("chat-waiting-send-now");
+  assert.equal(button("chat-waiting-send-now").props.disabled, true);
+  assert.equal(button("chat-waiting-take-back").props.disabled, true);
+  act(() => renderer!.update(actions("run-2")));
+  assert.equal(button("chat-waiting-send-now").props.disabled, false);
+  press("chat-waiting-send-now");
+  assert.deepEqual(stopped, ["run-1", "run-2"]);
 });
