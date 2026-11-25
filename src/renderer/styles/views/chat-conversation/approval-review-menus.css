@@ -1,0 +1,674 @@
+.chat-app-tool-inline-model-menu {
+  overflow: hidden;
+}
+
+.chat-app-tool-inline-model-menu > .chat-app-tool-inline-options {
+  max-height: min(220px, calc(100vh - 104px));
+}
+
+.chat-app-tool-inline-menu.is-searchable {
+  max-height: min(340px, calc(100vh - 32px));
+  overflow: hidden;
+}
+
+.chat-app-tool-inline-search {
+  flex: 0 0 auto;
+  padding: 2px 2px 6px;
+  border-bottom: 1px solid var(--app-border);
+}
+
+.chat-app-tool-inline-search input {
+  width: 100%;
+  height: 32px;
+  padding: 0 9px;
+  border: 1px solid var(--app-border);
+  border-radius: 8px;
+  background: var(--app-surface);
+  color: var(--app-text-strong);
+  font: inherit;
+  font-size: 13px;
+}
+
+.chat-app-tool-inline-search input:focus {
+  border-color: var(--app-border-strong);
+  outline: none;
+  box-shadow: none;
+}
+
+.chat-app-tool-inline-options {
+  display: flex;
+  flex-direction: column;
+  flex: 1 1 auto;
+  gap: 1px;
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-gutter: stable;
+}
+
+.chat-app-tool-inline-menu.is-searchable .chat-app-tool-inline-options {
+  max-height: min(260px, calc(100vh - 104px));
+}
+
+.chat-app-tool-inline-options-scroll {
+  flex: 1 1 auto;
+  height: min(260px, calc(100vh - 104px));
+  min-height: 0;
+}
+
+.chat-app-tool-inline-options-scroll .chat-app-tool-inline-options {
+  max-height: none;
+  padding-right: 10px;
+  overflow: visible;
+  scrollbar-gutter: auto;
+}
+
+/* Its scrollbar shows on hover, as every other one (app-foundation.css). */
+.chat-app-tool-inline-option {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  width: 100%;
+  padding: 7px 9px;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--app-text);
+  font: inherit;
+  font-size: 13px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.chat-app-tool-inline-option:hover {
+  background: var(--ui-row-hover);
+}
+
+.chat-app-tool-inline-option:focus-visible {
+  background: var(--app-surface-hover);
+  outline: none;
+  box-shadow: none;
+}
+
+.chat-app-tool-inline-option.selected {
+  color: var(--app-text-strong);
+  font-weight: 500;
+}
+
+.chat-app-tool-inline-option > span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.chat-app-tool-inline-option > svg {
+  flex: 0 0 auto;
+  color: var(--app-text-strong);
+}
+
+.chat-app-tool-inline-empty {
+  padding: 9px;
+  color: var(--app-muted);
+  font-size: 13px;
+}
+
+.chat-app-tool-inline-check {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 9px;
+  border-radius: 8px;
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.chat-app-tool-inline-check:hover {
+  background: var(--ui-row-hover);
+}
+
+.chat-app-tool-inline-check input {
+  width: 15px;
+  height: 15px;
+}
+
+.chat-app-tool-inline-select {
+  display: grid;
+  gap: 6px;
+  padding: 7px 9px 9px;
+}
+
+.chat-app-tool-inline-select > span {
+  color: var(--app-muted);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.chat-app-tool-inline-manual {
+  display: flex;
+  gap: 6px;
+  margin-top: 4px;
+  padding-top: 6px;
+  border-top: 1px solid var(--app-border);
+}
+
+.chat-app-tool-inline-manual input {
+  flex: 1;
+  min-width: 0;
+  height: 30px;
+  padding: 0 8px;
+  border: 1px solid var(--app-border);
+  border-radius: var(--ui-radius-8);
+  background: var(--app-surface);
+  color: var(--app-text);
+  font: inherit;
+  font-size: 13px;
+}
+
+.chat-app-tool-inline-manual button {
+  flex: 0 0 auto;
+  height: 30px;
+  padding: 0 12px;
+  border: 1px solid var(--app-border);
+  border-radius: var(--ui-radius-8);
+  background: var(--app-surface);
+  color: var(--app-text-strong);
+  font: inherit;
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.chat-app-tool-inline-avatar {
+  position: relative;
+  display: inline-flex;
+  padding: 0;
+  border: 0;
+  border-radius: 999px;
+  background: transparent;
+  cursor: pointer;
+}
+
+.chat-app-tool-inline-avatar-badge {
+  position: absolute;
+  right: -2px;
+  bottom: -2px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  height: 16px;
+  border: 1px solid var(--app-border);
+  border-radius: 999px;
+  background: var(--app-surface);
+  color: var(--app-muted);
+}
+
+.chat-app-tool-avatar-menu {
+  width: auto;
+  padding: 8px;
+}
+
+.chat-app-tool-avatar-grid {
+  display: grid;
+  grid-template-columns: repeat(5, 1fr);
+  justify-items: center;
+  gap: 6px;
+}
+
+.chat-app-tool-avatar-choice {
+  display: inline-flex;
+  padding: 0;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  cursor: pointer;
+}
+
+/* Selection/hover is an outset ring that hugs the avatar — no inset border,
+   padding gap, or competing background layer. */
+.chat-app-tool-avatar-choice:hover {
+  box-shadow: 0 0 0 1.5px var(--app-border);
+}
+
+.chat-app-tool-avatar-choice.selected {
+  box-shadow: 0 0 0 2px var(--app-accent);
+}
+
+.chat-app-tool-avatar-choice-img {
+  width: 36px;
+  height: 36px;
+  border-radius: 8px;
+}
+
+.chat-app-tool-inline-handle {
+  display: inline-flex;
+  align-items: center;
+  gap: 1px;
+  color: var(--app-text-strong);
+  font-weight: 600;
+}
+
+.chat-app-tool-inline-handle input {
+  width: auto;
+  min-width: 0;
+  padding: 2px 4px;
+  border: 1px solid transparent;
+  border-radius: var(--ui-radius-8);
+  background: transparent;
+  color: var(--app-text-strong);
+  font: inherit;
+  font-weight: 600;
+}
+
+.chat-app-tool-inline-handle input:hover {
+  border-color: var(--app-border);
+}
+
+.chat-app-tool-inline-handle input:focus {
+  border-color: var(--app-border);
+  background: var(--app-surface);
+  outline: none;
+}
+.chat-app-tool-review-instructions {
+  max-height: 7.6em;
+  overflow: hidden;
+  padding: 11px 13px;
+  border: 1px solid var(--app-border);
+  border-radius: 8px;
+  background: var(--app-surface-subtle);
+  color: var(--app-text);
+  font-size: 13px;
+  line-height: 1.6;
+  white-space: pre-wrap;
+}
+
+.chat-app-tool-review-warning {
+  display: flex;
+  gap: 10px;
+  align-items: flex-start;
+  padding: 10px 12px;
+  border: 1px solid var(--app-warning-border);
+  border-radius: 8px;
+  background: var(--app-warning-soft);
+  color: var(--app-text-strong);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.chat-app-tool-review-warning svg {
+  flex: 0 0 auto;
+  margin-top: 1px;
+  color: var(--app-warning);
+}
+
+.chat-app-tool-review-field {
+  display: grid;
+  gap: 5px;
+  min-width: 0;
+}
+
+.chat-app-tool-review-field span,
+.chat-app-tool-review-check span {
+  color: var(--app-muted);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.chat-app-tool-review-field input,
+.chat-app-tool-review-field select,
+.chat-app-tool-review-field textarea {
+  width: 100%;
+  min-width: 0;
+  border: 1px solid var(--app-border);
+  border-radius: var(--ui-radius-8);
+  background: var(--app-surface);
+  color: var(--app-text);
+  font: inherit;
+}
+
+.chat-app-tool-review-field input,
+.chat-app-tool-review-field select {
+  height: var(--ui-control-sm);
+  padding: 0 9px;
+}
+
+.chat-app-tool-review-field textarea {
+  min-height: 116px;
+  resize: vertical;
+  padding: 8px 9px;
+  line-height: 1.4;
+}
+
+.chat-app-tool-review-block.is-role-review .chat-app-tool-review-field {
+  gap: 6px;
+}
+
+.chat-app-tool-review-block.is-role-review .chat-app-tool-review-field input,
+.chat-app-tool-review-block.is-role-review .chat-app-tool-review-field textarea {
+  border-color: var(--app-border-strong);
+  border-radius: 8px;
+  color: var(--app-text-strong);
+  font-size: 14px;
+}
+
+.chat-app-tool-review-block.is-role-review .chat-app-tool-review-field input {
+  height: auto;
+  padding: 8px 11px;
+}
+
+.chat-app-tool-review-block.is-role-review .chat-app-tool-review-field textarea {
+  min-height: 96px;
+  padding: 8px 11px;
+  color: var(--app-text-strong);
+  font-size: 14px;
+  line-height: 1.6;
+}
+
+.chat-app-tool-review-block.is-role-review .chat-app-tool-review-field.is-instructions textarea,
+.chat-app-tool-review-instructions-preview {
+  box-sizing: border-box;
+  height: 168px;
+  min-height: 168px;
+  max-height: 168px;
+  overflow-y: auto;
+}
+
+.chat-app-tool-review-block.is-role-review .chat-app-tool-review-field.is-instructions textarea {
+  resize: none;
+}
+
+.chat-app-tool-review-field-head,
+.chat-app-tool-review-field.is-instructions > span {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  min-width: 0;
+}
+
+.chat-app-tool-review-field-head > span,
+.chat-app-tool-review-field.is-instructions > span > span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.chat-app-tool-review-field-head em,
+.chat-app-tool-review-field.is-instructions em {
+  flex: 0 0 auto;
+  color: var(--app-muted);
+  font-family: var(--font-code);
+  font-size: 11px;
+  font-style: normal;
+  font-weight: 500;
+  font-variant-numeric: tabular-nums;
+}
+
+.chat-app-tool-review-instructions-meta {
+  display: inline-flex;
+  align-items: center;
+  gap: 12px;
+  min-width: 0;
+}
+
+.chat-app-tool-review-preview-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  padding: 2px;
+  border: 1px solid var(--app-border);
+  border-radius: 8px;
+  background: var(--app-surface-subtle);
+}
+
+.chat-app-tool-review-preview-toggle button {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 4px 10px;
+  border: 0;
+  border-radius: var(--ui-radius-8);
+  background: transparent;
+  color: var(--app-muted);
+  font-family: var(--font-sans);
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.chat-app-tool-review-preview-toggle button.is-active {
+  background: var(--app-surface);
+  color: var(--app-text-strong);
+  box-shadow: 0 1px 2px var(--app-shadow);
+}
+
+.chat-app-tool-review-preview-toggle svg {
+  color: currentColor;
+}
+
+.chat-app-tool-review-instructions-preview {
+  padding: 11px 13px;
+  border: 1px solid var(--app-border);
+  border-radius: 8px;
+  background: var(--app-surface-subtle);
+  color: var(--app-text);
+  font-size: 13px;
+  line-height: 1.6;
+  white-space: pre-wrap;
+}
+
+.chat-app-tool-review-check {
+  display: inline-flex;
+  gap: 7px;
+  align-items: center;
+}
+
+.chat-app-tool-review-check input {
+  width: 14px;
+  height: 14px;
+  margin: 0;
+}
+
+.chat-app-tool-review-toggle {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-width: 0;
+  padding: 11px 13px;
+  border: 1px solid var(--app-border);
+  border-radius: 8px;
+  background: var(--app-surface);
+  color: var(--app-text);
+  cursor: pointer;
+}
+
+.chat-app-tool-review-toggle:hover {
+  border-color: var(--app-border-strong);
+  background: var(--ui-row-hover);
+}
+
+.chat-app-tool-review-toggle.is-disabled,
+.chat-app-tool-review-fieldset:disabled .chat-app-tool-review-toggle {
+  cursor: default;
+  opacity: 0.72;
+}
+
+.chat-app-tool-review-toggle.is-disabled:hover,
+.chat-app-tool-review-fieldset:disabled .chat-app-tool-review-toggle:hover {
+  border-color: var(--app-border);
+  background: var(--app-surface);
+}
+
+.chat-app-tool-review-toggle input {
+  position: absolute;
+  opacity: 0;
+  pointer-events: none;
+}
+
+.chat-app-tool-review-toggle:focus-within {
+  box-shadow: var(--focus-ring);
+}
+
+.chat-app-tool-review-switch {
+  position: relative;
+  flex: 0 0 auto;
+  width: 36px;
+  height: 21px;
+  border: 1px solid var(--app-border-strong);
+  border-radius: var(--radius-pill);
+  background: var(--app-surface-hover);
+  transition: background 150ms ease, border-color 150ms ease;
+}
+
+.chat-app-tool-review-toggle input:not(:checked):not(:disabled) + .chat-app-tool-review-switch {
+  border-color: var(--app-muted);
+  background: var(--app-muted);
+}
+
+.chat-app-tool-review-switch.on {
+  border-color: var(--app-accent);
+  background: var(--app-accent);
+}
+
+.chat-app-tool-review-switch span {
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 15px;
+  height: 15px;
+  border-radius: 50%;
+  background: var(--ui-switch-knob);
+  box-shadow: 0 1px 2px color-mix(in srgb, var(--shadow-color) 24%, transparent);
+  transition: transform 150ms ease;
+}
+
+.chat-app-tool-review-switch.on span {
+  transform: translateX(15px);
+}
+
+.chat-app-tool-review-toggle-text {
+  display: grid;
+  flex: 1 1 auto;
+  gap: 2px;
+  min-width: 0;
+}
+
+.chat-app-tool-review-toggle-text strong {
+  color: var(--app-text-strong);
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.chat-app-tool-review-toggle-text span {
+  color: var(--app-muted);
+  font-size: 12px;
+}
+
+.chat-app-tool-review-toggle > svg {
+  flex: 0 0 auto;
+  color: var(--app-muted);
+}
+
+.chat-app-tool-review-toggle > svg.on {
+  color: var(--ui-link);
+}
+
+.chat-app-tool-review-fieldset {
+  display: contents;
+  min-width: 0;
+  margin: 0;
+  padding: 0;
+  border: 0;
+}
+
+.chat-app-tool-review-fieldset:disabled {
+  cursor: progress;
+}
+
+.chat-app-tool-review-footer {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 6px;
+}
+
+.chat-app-tool-approval-panel.is-review-change .chat-app-tool-approval-reason {
+  padding: 0 12px 10px;
+}
+
+.chat-app-tool-approval-panel.is-review-change .chat-app-tool-review-footer {
+  gap: 8px;
+  margin-top: 0;
+  padding: 8px 12px;
+  border-top: 1px solid var(--ui-border-subtle);
+  background: transparent;
+}
+
+.chat-app-tool-review-cancel {
+  height: var(--ui-control-sm);
+  padding: 0 8px;
+  border: 0;
+  border-radius: var(--ui-radius-8);
+  background: transparent;
+  color: var(--ui-text-2);
+  font-family: var(--font-sans);
+  font-size: 13px;
+  cursor: pointer;
+  transition: background-color var(--ui-duration-fast) var(--ui-ease-out), color var(--ui-duration-fast) var(--ui-ease-out);
+}
+
+.chat-app-tool-review-cancel:hover:not(:disabled) {
+  background: var(--ui-row-hover);
+  color: var(--ui-text);
+}
+
+.chat-app-tool-review-cancel:focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring);
+}
+
+.chat-app-tool-review-edit,
+.chat-app-tool-review-submit {
+  gap: 6px;
+}
+
+.chat-app-tool-scope-note {
+  grid-column: 1 / -1;
+  display: none;
+  max-width: 860px;
+  overflow: hidden;
+  color: var(--app-muted-subtle) !important;
+  font-size: 12px !important;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.chat-app-tool-approval-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.chat-codex-approval-operation {
+  display: grid;
+  gap: 10px;
+}
+
+.chat-codex-approval-command {
+  max-height: 180px;
+  margin: 0;
+  padding: 8px 10px;
+  overflow: auto;
+  border: 1px solid var(--ui-border-subtle);
+  border-radius: var(--ui-radius-8);
+  background: var(--ui-bg-subtle);
+  color: var(--ui-text);
+  font-family: var(--font-code);
+  font-size: 12px;
+  line-height: 18px;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}

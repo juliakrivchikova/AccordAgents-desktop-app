@@ -11,6 +11,7 @@ import {
   chatSidePanelWidthLimits,
   clampChatSidePanelWidth
 } from "./chat-split-sizing";
+import { styleSource } from "./style-source-fixtures.test";
 
 const css = (file: string): string => readFileSync(resolve(process.cwd(), "src/renderer/styles/views", file), "utf8");
 
@@ -49,7 +50,7 @@ test("JS limits and the CSS grid agree at every container width", () => {
 });
 
 test("the CSS grid uses the same main minimum and fallback split as the JS", () => {
-  const chat = css("chat-conversation.css");
+  const chat = styleSource("chat-conversation");
   assert.equal(Number(chat.match(/--chat-main-min-width:\s*(\d+)px/)?.[1]), CHAT_MAIN_MIN_WIDTH);
   const mainShare = Math.round((1 - CHAT_SIDE_PANEL_FALLBACK_SHARE) * 100);
   assert.match(chat, new RegExp(`--chat-main-floor: min\\(var\\(--chat-main-min-width\\), calc\\(${mainShare}% - 1px\\)\\);`));

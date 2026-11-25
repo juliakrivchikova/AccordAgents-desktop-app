@@ -60,15 +60,19 @@ This is an Electron desktop app for coordinating AI agents in one shared project
 - `src/renderer` (ESNext, DOM target) — React app bundled by Vite into `dist/renderer`.
 - `src/shared` — Imported by all three; this is where the wire format lives.
 
+### How the code is cut into files
+
+No source file is longer than 1000 lines; a service that outgrew one file is a facade (`chat.ts`) and a folder of parts (`chat/`), each owning its state. Read `docs/code-structure.md` before adding to a service, `main.ts`, the phone app or a big test: new code goes to the part whose subject it is.
+
 ### The `src/shared/types.ts` contract
 
-`src/shared/types.ts` defines `AppBridge`, the complete IPC surface. Every IPC handler in `src/main/main.ts`, every method in `src/preload/index.ts`, and every renderer call site must stay in sync with this file. When adding an IPC route, update all three layers plus the type. Renderer code reaches the main process exclusively via `window.consensus` (typed by `src/preload/global.d.ts`); there is no direct Node access from the renderer (`contextIsolation: true`, `sandbox: true`, `nodeIntegration: false`).
+`src/shared/types.ts` is the entry of `src/shared/types/`, one file per subject; `types/appBridge.ts` defines `AppBridge`, the complete IPC surface. Every IPC handler in `src/main/desktopApp/ipc/`, every method in `src/preload/index.ts`, and every renderer call site must stay in sync with this file. When adding an IPC route, update all three layers plus the type. Renderer code reaches the main process exclusively via `window.consensus` (typed by `src/preload/global.d.ts`); there is no direct Node access from the renderer (`contextIsolation: true`, `sandbox: true`, `nodeIntegration: false`).
 
 ### Service layout (main process)
 
-`src/main/main.ts` instantiates services once at startup and wires them to IPC handlers. Chat runs, participant compaction, mention continuations, and legacy review/plan flows accept a per-run `AbortController` keyed by `runId` in the `activeReviews` map; `conversations:cancel-review` aborts that controller. Progress is streamed back to the renderer via the legacy-named `conversations:review-progress` channel and snapshot updates via `conversations:updated`.
+`src/main/main.ts` starts the app step by step through `src/main/desktopApp/`, which instantiates services once and wires them to IPC handlers (`desktopApp/ipc/`). Chat runs, participant compaction, mention continuations, and legacy review/plan flows accept a per-run `AbortController` keyed by `runId` in the `activeReviews` map; `conversations:cancel-review` aborts that controller. Progress is streamed back to the renderer via the legacy-named `conversations:review-progress` channel and snapshot updates via `conversations:updated`.
 
-Services in `src/main/services`:
+Services in `src/main/services` (most are a facade file and a folder of parts):
 
 - `chat.ts` — The current product orchestration service for the `chat` conversation kind. Maintains per-participant CLI sessions (`ChatParticipantSession`) with persistent `sessionId`s so Codex/Claude resume context across turns. Mention approvals (`ChatPendingMention`) gate when an `@handle` triggers another agent. Chat sends ingest the user message synchronously, then fan out mentioned participants in the background. Each target run has its own `runId`/`AbortController`; `metadata.activeRunIds` is the active-run source of truth, with `metadata.running`/`metadata.runId` kept for compatibility. Concurrent chat writes must go through `withChatMutation`, which waits for queued saves and refreshes/merges storage before mutating. Do not emit `queueSnapshot` or call `saveConversation` directly from long-running chat-turn code. Same-participant turns serialize via `participantTurnQueues`, while different participants can run concurrently. `cancelRun(runId)` may abort multiple controllers because resume flows can share a run id, so active run bookkeeping is ref-counted.
 - `consensus.ts` — Legacy review/consensus and implementation-plan orchestration. It still backs stored non-chat conversations and remaining IPC paths, but it is not the current user-facing product surface. Be careful around `ConversationKind` branching because `general`, `code-review`, and `implementation-plan` data may still exist in storage or compatibility code.
@@ -94,7 +98,7 @@ Conversations are append-mostly. Chat conversations store timeline messages plus
 ## Code conventions
 
 - 2-space indent, double quotes, semicolons, named imports. `PascalCase` for components/classes, `camelCase` for everything else.
-- Strict TS everywhere; keep types explicit at IPC, service, and shared boundaries. Add new shapes to `src/shared/types.ts` rather than redefining them on either side of the bridge.
+- Strict TS everywhere; keep types explicit at IPC, service, and shared boundaries. Add new shapes to the subject's file in `src/shared/types/` rather than redefining them on either side of the bridge.
 - Do not commit provider API keys, local repo paths, generated logs, `node_modules`, or `dist`. Treat saved conversations and `debug-logs/` as sensitive — they contain prompts, diffs, and raw model responses.
 
 ## MANDATORY: a change is done only after end-to-end QA and review

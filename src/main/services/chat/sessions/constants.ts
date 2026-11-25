@@ -1,0 +1,1 @@
+export const CHAT_EXECUTOR_LEASE_TTL_MS = 15 * 60_000;

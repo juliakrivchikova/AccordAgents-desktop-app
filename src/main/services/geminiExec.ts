@@ -458,7 +458,7 @@ function geminiPrompt(
   }
   // A chat turn is the member's message as ChatService built it: its mode,
   // workspace and what print mode cannot ask are in its session's
-  // instructions, said once (ChatService.antigravityAccessLines), and a
+  // instructions, said once (antigravityAccessLines), and a
   // read-only member is reminded with every message (ANTIGRAVITY_READ_ONLY_NOTE).
   return prompt;
 }

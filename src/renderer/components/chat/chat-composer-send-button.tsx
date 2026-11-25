@@ -18,6 +18,8 @@ export interface ChatComposerStop {
  * message to the member at work (its CLI takes it as it would).
  */
 export function ChatComposerSendButton(props: {
+  /** What it sends, for screen readers. */
+  label?: string;
   canSend: boolean;
   /** Nothing in the draft at all: no text, no pictures (loading included). */
   draftEmpty: boolean;
@@ -43,7 +45,7 @@ export function ChatComposerSendButton(props: {
     <button
       type="button"
       className="composer-send-button"
-      aria-label="Send message"
+      aria-label={props.label ?? "Send message"}
       disabled={!props.canSend}
       onClick={props.onSend}
     >

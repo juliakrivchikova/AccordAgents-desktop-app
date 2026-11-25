@@ -1,0 +1,233 @@
+.chat-choice-row.in-thread {
+  grid-template-columns: 34px minmax(0, 1fr);
+  gap: 8px;
+}
+
+.chat-choice-row-body {
+  width: min(100%, 640px);
+  min-width: 0;
+  max-width: 640px;
+}
+
+.chat-choice-row .chat-choice-card {
+  margin-top: 0;
+}
+
+.chat-choice-card {
+  display: grid;
+  gap: 10px;
+  position: relative;
+  margin-top: 10px;
+  padding: 12px;
+  border: 1px solid var(--ui-border);
+  border-radius: var(--ui-radius-8);
+  background: var(--ui-bg);
+  box-sizing: border-box;
+  box-shadow: var(--ui-shadow-sm);
+}
+
+/* Used: one line, like a folded urgent alert (.chat-card-row). */
+.chat-choice-card.is-folded {
+  display: block;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  box-shadow: none;
+}
+
+.chat-choice-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 9px;
+}
+
+.chat-choice-title-block {
+  flex: 1 1 300px;
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+}
+
+.chat-choice-title-block h3 {
+  margin: 0;
+  color: var(--ui-text);
+  font-size: var(--chat-decision-title-size);
+  font-weight: var(--chat-decision-title-weight);
+  line-height: var(--chat-decision-title-line-height);
+  letter-spacing: 0;
+  overflow-wrap: anywhere;
+}
+
+.chat-choice-option-title small {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  width: fit-content;
+  padding: 0;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--ui-text-3);
+  font-size: 11px;
+  font-weight: 500;
+  letter-spacing: 0;
+  line-height: 1;
+  white-space: nowrap;
+}
+
+.chat-choice-question {
+  margin: 0;
+  color: var(--ui-text-2);
+  font-size: 12px;
+  line-height: 18px;
+  overflow-wrap: anywhere;
+}
+
+.chat-choice-options {
+  display: grid;
+  gap: 2px;
+}
+
+.chat-choice-option {
+  display: grid;
+  grid-template-columns: 20px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 8px;
+  position: relative;
+  padding: 4px 8px;
+  border: 0;
+  border-radius: var(--ui-radius-8);
+  background: transparent;
+  cursor: pointer;
+  transition: background-color var(--ui-duration-fast) var(--ui-ease-out), color var(--ui-duration-fast) var(--ui-ease-out);
+  min-height: 28px;
+}
+
+.chat-choice-option:hover {
+  background: var(--ui-row-hover);
+}
+
+.chat-choice-option.selected {
+  background: var(--ui-select-bg);
+  color: var(--ui-select-fg);
+}
+
+.chat-choice-option input {
+  position: absolute;
+  opacity: 0;
+  pointer-events: none;
+}
+
+.chat-choice-num {
+  padding-top: 0;
+  color: var(--ui-text-3);
+  font-size: 13px;
+  font-variant-numeric: tabular-nums;
+  line-height: 20px;
+  text-align: left;
+}
+
+.chat-choice-option.selected .chat-choice-num {
+  color: inherit;
+}
+
+.chat-choice-option-body {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+
+.chat-choice-option-title {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 7px;
+  min-width: 0;
+}
+
+.chat-choice-option-title strong {
+  min-width: 0;
+  color: inherit;
+  font-size: 13px;
+  line-height: 20px;
+  overflow-wrap: anywhere;
+  font-weight: 500;
+}
+
+.chat-choice-option-description {
+  color: var(--ui-text-3);
+  font-size: 12px;
+  line-height: 18px;
+  overflow-wrap: anywhere;
+}
+
+/* Set the "write your own" row apart from the suggestion list with a faint divider. */
+.chat-choice-card .custom-answer-option {
+  margin-top: 2px;
+  padding-top: 4px;
+  border-top: 0;
+  border-radius: var(--ui-radius-8);
+}
+
+.chat-choice-custom-icon {
+  width: 16px;
+  height: 16px;
+  margin-top: 0;
+  background: transparent;
+  color: var(--ui-text-3);
+  padding-top: 0;
+}
+
+/* A card's own answer, written as in the composer: one rounded field with the
+   round button in it, and no ring while typing. */
+.chat-card-field {
+  display: grid;
+  gap: 4px;
+  padding: 8px 8px 8px 12px;
+  border: 1px solid var(--ui-border);
+  border-radius: var(--ui-radius-12);
+  background: var(--ui-bg);
+}
+
+.chat-card-field-actions,
+.chat-choice-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 4px;
+}
+
+.chat-choice-cancel {
+  height: var(--ui-control-sm);
+  border: 0;
+  background: transparent;
+  padding: 0 8px;
+  cursor: pointer;
+  color: var(--ui-text-2);
+  font-size: 13px;
+  font-family: var(--font-sans);
+  border-radius: var(--ui-radius-8);
+}
+
+.chat-choice-cancel:hover:not(:disabled),
+.chat-choice-cancel:focus-visible {
+  color: var(--ui-text);
+  background: var(--ui-row-hover);
+}
+
+.chat-choice-cancel:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.chat-composer {
+  display: flex;
+  flex-direction: column;
+  position: relative;
+  z-index: 20;
+  gap: var(--space-2);
+  padding: 10px 28px 18px;
+  background: var(--app-surface);
+}

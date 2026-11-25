@@ -1,0 +1,262 @@
+.chat-message.message-focused .message-body {
+  border-color: transparent;
+  background: transparent;
+  box-shadow: none;
+}
+
+.chat-message.message-flash .message-body {
+  animation: none;
+}
+
+/* Grouped icon-only hover toolbar, floating top-right (design handoff §4). */
+.chat-message .message-actions {
+  position: absolute;
+  top: -10px;
+  right: 0;
+  z-index: 3;
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  padding: 2px;
+  border: 1px solid var(--app-border);
+  border-radius: 8px;
+  background: var(--app-surface);
+  box-shadow: 0 2px 8px color-mix(in srgb, var(--shadow-color) 8%, transparent);
+  opacity: 0;
+  pointer-events: none;
+  transform: translateY(-2px);
+  transition: opacity 120ms ease, transform 120ms ease;
+}
+
+.chat-message .message-body:hover .message-actions,
+.chat-message .message-actions:focus-within,
+.chat-message.is-running .message-actions {
+  opacity: 1;
+  pointer-events: auto;
+  transform: translateY(0);
+}
+
+@media (hover: none) {
+  .chat-message .message-actions {
+    opacity: 1;
+    pointer-events: auto;
+    transform: none;
+  }
+}
+
+/* Meta row: provider sub-label + short HH:MM timestamp (design handoff §4). */
+.chat-message .message-provider {
+  color: var(--app-muted);
+  font-size: 11px;
+  font-weight: 500;
+}
+
+.chat-message .message-when {
+  color: var(--app-muted);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+}
+
+/* The User's message her server has not taken yet: faded, nothing more
+   (the User, 2026-10-29). */
+.chat-message.is-unsent .message-body > :not(.message-actions) {
+  opacity: 0.6;
+}
+
+/* One the server refused: why, under it. */
+.chat-message .message-refused {
+  margin-top: 4px;
+  color: var(--app-danger);
+  font-size: 12px;
+}
+
+/* Thread pill — stacked reply summary at the bottom of a message. */
+.chat-thread-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 9px;
+  padding: 5px 11px 5px 6px;
+  border: 1px solid var(--app-border);
+  border-radius: var(--radius-pill);
+  background: var(--app-surface);
+  color: var(--app-muted);
+  font-size: 12px;
+  font-weight: 500;
+  white-space: nowrap;
+  cursor: pointer;
+  transition: border-color 120ms ease, background 120ms ease, color 120ms ease;
+}
+
+.chat-thread-pill:hover {
+  border-color: var(--app-border-strong);
+  background: var(--ui-row-hover);
+  color: var(--app-text-strong);
+}
+
+.chat-thread-avatars {
+  display: inline-flex;
+  align-items: center;
+}
+
+.chat-thread-avatar {
+  width: 20px;
+  height: 20px;
+  border-radius: 6px;
+  font-size: 11px;
+  box-shadow: 0 0 0 2px var(--app-surface);
+}
+
+.chat-thread-avatar + .chat-thread-avatar {
+  margin-left: -6px;
+}
+
+.chat-thread-count {
+  color: inherit;
+}
+
+.chat-thread-pill small {
+  color: var(--app-muted);
+  font-weight: 400;
+}
+
+.chat-reaction-popover {
+  width: auto;
+  min-width: 0;
+  padding: 6px;
+  border-radius: var(--radius-control);
+}
+
+.chat-reaction-picker {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.chat-reaction-option {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  border: 1px solid transparent;
+  border-radius: 8px;
+  background: transparent;
+  font-size: 16px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.chat-reaction-option:hover,
+.chat-reaction-option:focus-visible {
+  border-color: var(--app-border-strong);
+  background: var(--ui-row-hover);
+  outline: none;
+}
+
+.chat-message-reactions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  margin-top: 9px;
+}
+
+.chat-reaction-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  min-width: 42px;
+  height: 26px;
+  padding: 0 8px;
+  border: 1px solid var(--app-border);
+  border-radius: 8px;
+  background: var(--app-surface-subtle);
+  color: var(--app-text);
+  font-size: 13px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.chat-reaction-chip:hover,
+.chat-reaction-chip:focus-visible {
+  border-color: var(--app-focus-border);
+  background: var(--ui-row-hover);
+  outline: none;
+}
+
+.chat-reaction-chip.selected {
+  border-color: var(--app-accent-border);
+  background: var(--app-accent-soft);
+  color: var(--app-text-strong);
+}
+
+.chat-reaction-chip strong {
+  font-size: 12px;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+}
+
+.chat-message .message-meta {
+  gap: 8px;
+  margin-bottom: 5px;
+  line-height: 1.25;
+}
+
+.chat-message .message-meta strong {
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.chat-message .message-content {
+  display: grid;
+  gap: 9px;
+  align-items: start;
+  max-height: none !important;
+  overflow: visible !important;
+}
+
+.chat-processing-expanded-prefix {
+  display: grid;
+}
+
+.chat-message .markdown-text {
+  gap: 8px;
+  font-size: 14px;
+  line-height: 22px;
+}
+
+.chat-message .markdown-text h4 {
+  font-size: 14px;
+  line-height: 1.28;
+}
+
+.chat-message .markdown-list {
+  padding-left: 20px;
+}
+
+.chat-message .markdown-list li + li {
+  margin-top: 3px;
+}
+
+.chat-message .markdown-code {
+  padding: 8px 9px;
+  font-size: 12px;
+  line-height: 1.34;
+}
+
+/* Inline code token — hairline-bordered chip per design (.aa-inline-code). */
+.chat-message .markdown-text code {
+  padding: 1.5px 5px;
+  border: 1px solid var(--app-border);
+  border-radius: 6px;
+  background: var(--app-surface-subtle);
+  font-size: 12px;
+}
+
+.chat-message .markdown-code code {
+  padding: 0;
+  border: 0;
+  background: transparent;
+  font-size: inherit;
+}

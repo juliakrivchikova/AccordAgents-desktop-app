@@ -19,6 +19,7 @@ import { AccessArtifactForm } from "./artifact-forms";
 import { artifactPickerEntries, selectArtifactPickerEntry } from "./artifact-version-selector";
 import { ArtifactDetailView } from "./artifact-detail";
 import { TooltipProvider } from "@/components/ui/tooltip";
+import { styleSource } from "../../lib/style-source-fixtures.test";
 
 const NOW = "2026-07-13T12:00:00.000Z";
 
@@ -79,7 +80,7 @@ test("published artifact selector keeps initial draft content available", () => 
   assert.match(panelSource, /loadArtifactDetail/);
   assert.match(loaderSource, /listArtifactDrafts/);
   assert.match(panelSource, /drafts=\{drafts\}/);
-  const styles = readFileSync(resolve("src/renderer/styles/views/artifacts.css"), "utf8");
+  const styles = styleSource("artifacts");
   assert.match(styles, /\.artifact-detail\s*\{[^}]*overflow-y:\s*auto/s);
 });
 

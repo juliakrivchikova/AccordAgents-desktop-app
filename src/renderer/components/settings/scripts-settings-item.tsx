@@ -3,6 +3,7 @@ import { Switch } from "@/components/ui/switch";
 import { ClockCounterClockwiseIcon, PlayIcon, TrashIcon } from "@phosphor-icons/react";
 
 import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
 import { scriptHealthLabel, type ScheduledScriptSummary, type ScriptRunRow } from "../../../shared/scripts";
 import { errorText } from "../review/review-conversation-data";
 
@@ -119,10 +120,10 @@ export function ScriptSettingsItem(props: {
                       )}
                     </span>
                   ) : (
-                    <span className="chat-script-approval-key-entry">
-                      <input type="password" autoComplete="off" spellCheck={false} aria-label={`Value for ${name}`} placeholder="Paste value"
+                    <span className="scripts-settings-key-entry">
+                      <Input type="password" autoComplete="off" spellCheck={false} aria-label={`Value for ${name}`} placeholder="Paste value"
                         value={draft} onChange={(event) => setKeyDrafts((current) => ({ ...current, [name]: event.target.value }))} />
-                      <button type="button" className="chat-script-approval-save-key" disabled={busy || !draft.trim()}
+                      <Button variant="outline" size="sm" disabled={busy || !draft.trim()}
                         onClick={() => void act(async () => {
                           await window.consensus.setScriptSecret({ ...target, name, value: draft });
                           setKeyDrafts((current) => {
@@ -132,7 +133,7 @@ export function ScriptSettingsItem(props: {
                           });
                         })}>
                         Save
-                      </button>
+                      </Button>
                     </span>
                   )}
                 </div>

@@ -371,7 +371,7 @@ export function applyChatAccessOptionById(
  * edits, Codex's Ask for approval or Read Only, Antigravity's Default or
  * Accept-edits mode), every other right kept as it was. Without its own mode
  * Codex runs a stored Full Access as Approve for me and a stored Plan as Read
- * Only with Plan mode off (CliAgentRunner.codexRunAccess): those are the
+ * Only with Plan mode off (codexRunAccess): those are the
  * modes it gets, never Full Access or Plan mode. Never wider: what it was not
  * granted its CLI now asks about instead of refusing it silently.
  */

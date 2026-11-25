@@ -1,0 +1,250 @@
+.mobile-chats-header h1 {
+  flex: 1;
+  min-width: 0;
+  margin: 0;
+  font: 700 30px var(--disp);
+  letter-spacing: -0.028em;
+  color: var(--fg1);
+}
+
+.mobile-chat-list {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding-bottom: calc(18px + env(safe-area-inset-bottom));
+}
+
+/* A project's header folds the project, so it is a real tap target: 44px
+   tall, with the label where the plain heading used to sit. */
+.mobile-chat-group-title {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  width: 100%;
+  min-height: 44px;
+  margin: 0;
+  padding: 12px 20px 4px;
+  border: 0;
+  border-radius: 0;
+  background: none;
+  font: 600 12.5px var(--mono);
+  letter-spacing: 0.02em;
+  color: var(--mut);
+  text-align: left;
+  cursor: pointer;
+  -webkit-tap-highlight-color: transparent;
+}
+
+button.mobile-chat-group-title:active {
+  background: var(--s2);
+}
+
+/* The desktop's chevron (a 14px stroke icon): right when folded, down when
+   open. */
+.mobile-chat-group-chevron {
+  width: 8px;
+  height: 8px;
+  flex: 0 0 auto;
+  border-right: 2px solid currentColor;
+  border-bottom: 2px solid currentColor;
+  transform: translateY(-3px) rotate(45deg);
+  transition: transform 120ms ease;
+}
+
+.mobile-chat-group-title[aria-expanded="false"] .mobile-chat-group-chevron {
+  transform: translateX(-2px) rotate(-45deg);
+}
+
+.mobile-chat-group-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.mobile-chat-group-count {
+  font: 500 11.5px var(--mono);
+}
+
+.mobile-chat-group {
+  display: flex;
+  flex-direction: column;
+}
+
+.mobile-chat-row {
+  min-height: 72px;
+  width: 100%;
+  border: 0;
+  padding: 12px 20px;
+  display: flex;
+  align-items: center;
+  gap: 13px;
+  color: inherit;
+  background: transparent;
+  text-align: left;
+  cursor: pointer;
+}
+
+.mobile-chat-row:active,
+.mobile-chat-row.is-active {
+  background: var(--s2);
+}
+
+.mobile-chat-avatar {
+  width: 38px;
+  height: 38px;
+  border-radius: 11px;
+  border: 2px solid var(--surface);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  overflow: hidden;
+  background: var(--accs);
+  color: var(--acc);
+  font: 700 14px var(--disp);
+}
+
+/* One avatar contract, the desktop's: the element is the disc and takes its
+   size and radius from the surface's own class; the picture inside is either a
+   glyph (75%, contained) or a photo (100%, covering); each kind's disc colour
+   is stated once, below (paired with .avatar-icon so it outranks a surface's
+   own base tint). No per-surface or per-member geometry beyond that — that is
+   exactly what drifted on the desktop until it was unified. */
+.avatar-icon {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  overflow: hidden;
+  box-sizing: border-box;
+}
+
+.avatar-icon .avatar-media {
+  display: block;
+  flex: 0 0 auto;
+}
+
+.avatar-icon .avatar-media-glyph {
+  width: 75%;
+  height: 75%;
+  object-fit: contain;
+}
+
+.avatar-icon .avatar-media-photo {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.avatar-icon span.avatar-media {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  line-height: 1;
+}
+
+.avatar-icon.avatar-anthropic {
+  background: var(--brand-anthropic);
+  color: var(--surface);
+}
+
+.avatar-icon.avatar-codex {
+  background: var(--accs);
+  background: color-mix(in srgb, var(--accs) 72%, var(--avatar-bg));
+  color: var(--brand-codex);
+}
+
+.avatar-icon.avatar-gemini {
+  background: var(--info-soft);
+  color: var(--brand-gemini);
+}
+
+.avatar-icon.avatar-custom {
+  background: var(--avatar-bg);
+  color: var(--acc);
+}
+
+.avatar-icon.avatar-generic {
+  background: var(--accs);
+  background: color-mix(in srgb, var(--accs) 58%, var(--avatar-bg));
+  color: var(--acc);
+}
+
+.mobile-chat-copy {
+  flex: 1;
+  min-width: 0;
+}
+
+.mobile-chat-title-line {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+
+.mobile-chat-title-line strong {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font: 600 15.5px var(--disp);
+  letter-spacing: -0.012em;
+  color: var(--fg1);
+}
+
+.mobile-live-dot {
+  width: 7px;
+  height: 7px;
+  flex-shrink: 0;
+  border-radius: 50%;
+  background: #24c17b;
+  box-shadow: 0 0 0 3px rgba(36, 193, 123, 0.14);
+}
+
+.mobile-chat-snippet {
+  margin-top: 4px;
+  display: flex;
+  min-width: 0;
+  gap: 4px;
+  font: 400 13.5px var(--sans);
+  color: var(--mut);
+}
+
+.mobile-chat-snippet span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.mobile-chat-snippet b {
+  flex-shrink: 0;
+  font-weight: 600;
+  color: var(--fg);
+}
+
+.mobile-chat-time {
+  flex-shrink: 0;
+  align-self: flex-start;
+  padding-top: 2px;
+  font: 400 12.5px var(--sans);
+  color: var(--mut);
+}
+
+.mobile-empty {
+  margin: 34px 20px 0;
+  padding: 18px;
+  border-radius: 18px;
+  background: var(--s2);
+  color: var(--mut);
+  font: 400 14px var(--sans);
+  line-height: 1.45;
+}
+
+.mobile-chat-header {
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: calc(2px + env(safe-area-inset-top)) 16px 12px;
+  border-bottom: 1px solid var(--bdf);
+}

@@ -1,0 +1,133 @@
+/* The message that starts an Accord: her message row, with the artifact
+   note's card and the Start Accord icon as its content. */
+.chat-accord-launch-card {
+  display: flex;
+  max-width: 560px;
+  margin-top: 2px;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 10px 12px;
+  border-radius: var(--ui-radius-8);
+  background: var(--ui-bg);
+  color: var(--app-text);
+  border: 1px solid var(--ui-border);
+}
+
+/* The glyph keeps its own three colors, so its tile stays neutral. */
+.chat-accord-launch-icon {
+  display: flex;
+  flex: none;
+  align-items: center;
+  justify-content: center;
+  width: 44px;
+  height: 44px;
+  border: 1px solid var(--app-border);
+  border-radius: 8px;
+  background: var(--app-surface);
+}
+
+.chat-accord-launch-glyph {
+  width: 22px;
+  height: 22px;
+}
+
+.chat-accord-launch-text {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+/* The subject is her own words: drawn as message text, not as a heading. */
+.chat-accord-launch-title {
+  font-size: 14px;
+  font-weight: 400;
+  line-height: 1.42;
+  overflow-wrap: anywhere;
+}
+
+.chat-accord-launch-meta {
+  margin-top: 4px;
+  color: var(--app-text-secondary);
+  font-size: 13px;
+  line-height: 1.6;
+}
+
+/* The dot between two facts stays at the end of a line. */
+.chat-accord-launch-meta > :first-child,
+.chat-accord-launch-meta > :last-child {
+  white-space: nowrap;
+}
+
+/* A word joiner keeps the dot on the line of what it follows, also after a
+   member's picture; the space after it is where the line may break. */
+.chat-accord-launch-meta > :not(:last-child)::after {
+  content: "\2060\00a0·  " / "";
+  white-space: pre-wrap;
+}
+
+.chat-accord-launch-kind {
+  color: var(--app-text);
+  font-weight: 500;
+}
+
+.chat-accord-launch-meta .message-when {
+  color: inherit;
+  font-size: inherit;
+}
+
+/* A member is one piece; a handle longer than the card is cut short. */
+.chat-accord-launch-member {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  max-width: 100%;
+  vertical-align: bottom;
+}
+
+.chat-accord-launch-member .chat-mention {
+  min-width: 0;
+  overflow: hidden;
+  cursor: default;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.chat-accord-launch-avatar-slot {
+  display: inline-flex;
+  flex: none;
+}
+
+.chat-accord-launch-avatar {
+  width: 18px;
+  height: 18px;
+  border-radius: 6px;
+  font-size: 11px;
+}
+
+/* The rest of her subject, in the same text as its first line. */
+.chat-accord-launch-body {
+  margin-top: 2px;
+  font-size: 14px;
+  line-height: 1.42;
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+}
+
+/* The chat's newest Accord, pinned between the timeline and the composer:
+   a framed card as the mockup has it, its head folding it into one line. */
+.chat-accord-dock-wrap {
+  position: relative;
+  z-index: 20;
+  padding: 8px 28px 0;
+  background: var(--app-surface);
+}
+
+/* A closed card leaves no band above the composer. */
+.chat-accord-dock-wrap:not(:has(.chat-accord-dock)) {
+  padding-top: 0;
+}
+
+/* The jump to the latest message keeps to the timeline, above the card. */
+.chat-accord-dock-wrap > .chat-jump-to-latest {
+  bottom: calc(100% + 12px);
+}

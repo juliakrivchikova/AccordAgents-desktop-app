@@ -6,6 +6,7 @@ import { create } from "react-test-renderer";
 
 import { markdownBlocks } from "./markdown-blocks";
 import { MarkdownText } from "./markdown-text";
+import { styleSource } from "../../lib/style-source-fixtures.test";
 
 test("markdown headings keep their level", () => {
   const blocks = markdownBlocks(["# Plan", "## Goals", "### Risks", "#### Not a heading"].join("\n"));
@@ -28,7 +29,7 @@ test("rendered headings expose their level", () => {
 });
 
 test("artifact content styles every heading level and fits tables to the panel", () => {
-  const css = readFileSync(resolve("src/renderer/styles/views/artifacts.css"), "utf8");
+  const css = styleSource("artifacts");
 
   for (const level of [1, 2, 3]) {
     assert.match(css, new RegExp(`\\.artifact-content-markdown \\.markdown-heading-${level} \\{`));

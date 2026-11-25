@@ -6,21 +6,22 @@ import {
 } from "../../../shared/chatParticipantRequestThreads";
 import { accordFoldedMessageIds, isRepeatedAccordClosedLine } from "../../../shared/accordProgress";
 import { turnFinishedNoteOf } from "../../../shared/turnFinishedNoteSource";
-import { isEmptyContinuedTurnPart } from "../../../shared/turnContinues";
+import { isEmptyFinishedReply } from "../../../shared/turnContinues";
 import type { ChatParticipantRequestBatch, Conversation } from "../../../shared/types";
 
 const SHOW_CHAT_SYSTEM_MESSAGES = import.meta.env.VITE_ACCORD_AGENTS_SHOW_SYSTEM_MESSAGES === "1";
 
 /** A message the chat draws no row for, on the timeline or in a thread. A
  *  note of an Accord's document is one: its steps are on the Accord's card or
- *  in the document (accordProgress.ts). So is an empty part of a turn her
- *  next message joined (shared/turnContinues.ts). */
+ *  in the document (accordProgress.ts). So is a finished reply with nothing
+ *  in it (shared/turnContinues.ts). */
 export function isChatMessageHiddenInChat(conversation: Pick<Conversation, "messages">, message: Conversation["messages"][number]): boolean {
   return chatMessageHiddenFromTimeline(conversation, message, { showSystemMessages: SHOW_CHAT_SYSTEM_MESSAGES }) ||
     (message.role === "system" && accordFoldedMessageIds(conversation.messages).has(message.id)) ||
     // An Accord closed on two devices at once: its first line is the one.
     (message.role === "system" && isRepeatedAccordClosedLine(conversation.messages, message)) ||
-    isEmptyContinuedTurnPart(message);
+    // Kept when a thread starts at it: nothing else opens that thread.
+    (isEmptyFinishedReply(message) && !conversation.messages.some((reply) => reply.metadata?.chatThreadRootId === message.id && reply.id !== message.id));
 }
 
 /** A message drawn as a row of the chat's main timeline: shown, and not a thread reply. */

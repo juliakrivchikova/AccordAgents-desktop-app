@@ -58,11 +58,14 @@ export function ChatSessionsTimelineRow(props: {
       />
     );
   }
+  const waiting = sessions.waiting.get(message.id);
   return (
     <ChatMessageItem
       {...itemProps}
       presentation="sessions"
       onOpenThread={undefined}
+      waitingRunId={waiting?.runId}
+      waitingBehindRunId={waiting?.behind?.runId}
       sessionsWork={sessions.workByReplyId.get(message.id)}
       onOpenTask={context.onOpenTask}
     />

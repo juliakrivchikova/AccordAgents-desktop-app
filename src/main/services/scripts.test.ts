@@ -6,6 +6,7 @@ import { spawn } from "node:child_process";
 import test from "node:test";
 import { AppMcpService } from "./appMcp";
 import { ScriptService, handleScriptsOperation, type ScriptChatGateway, type ScriptServiceOptions } from "./scripts";
+import { scriptDependencies } from "./scripts/test/scriptParts";
 import { ScriptHub } from "./scriptHub";
 import { ScriptSecretStore, ScriptStore } from "./scriptStore";
 import type { ChatScriptChangeRequest } from "../../shared/scripts";
@@ -473,13 +474,13 @@ test("releasing held messages keeps the ones that could not be posted", async (t
   await h.service.runNow(request.scriptId);
   await finishedRuns(h, request.scriptId);
   assert.equal((await h.service.summary(request.scriptId)).heldMessageCount, 2);
-  const original = (h.service as any).options.chat.postScriptMessage;
-  (h.service as any).options.chat.postScriptMessage = async () => {
+  const original = scriptDependencies(h.service).options.chat.postScriptMessage;
+  scriptDependencies(h.service).options.chat.postScriptMessage = async () => {
     throw new Error("A member the script mentions is no longer in this chat.");
   };
   await assert.rejects(h.service.releaseHeld(request.scriptId), /no longer in this chat/);
   assert.equal((await h.service.summary(request.scriptId)).heldMessageCount, 2, "nothing is lost");
-  (h.service as any).options.chat.postScriptMessage = original;
+  scriptDependencies(h.service).options.chat.postScriptMessage = original;
   await h.service.releaseHeld(request.scriptId);
   assert.equal((await h.service.summary(request.scriptId)).heldMessageCount, 0);
 });

@@ -1,0 +1,39 @@
+.finished-note-text {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.finished-note-title {
+  color: color-mix(in srgb, var(--fg) 70%, var(--mut));
+  font-size: 13.5px;
+  line-height: 1.4;
+}
+
+.finished-note-actor {
+  color: var(--warn);
+}
+
+.finished-note-preview {
+  margin-top: 1px;
+  overflow: hidden;
+  color: var(--fg);
+  font-size: 14.5px;
+  line-height: 1.4;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.finished-note-close {
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 44px;
+  height: 44px;
+  border: 0;
+  border-radius: 10px;
+  background: transparent;
+  color: var(--mut);
+  -webkit-tap-highlight-color: transparent;
+}

@@ -5,7 +5,7 @@
 // its own running reply.
 import assert from "node:assert/strict";
 import test from "node:test";
-import { act, create, type ReactTestInstance } from "react-test-renderer";
+import { act, create, type ReactTestInstance, type ReactTestRenderer } from "react-test-renderer";
 
 import { TooltipProvider } from "@/components/ui/tooltip";
 import type { ChatAgentActivityEvent, ChatMessage, Conversation } from "../../../shared/types";
@@ -14,6 +14,7 @@ import { ChatSessionsPresentationContext } from "./chat-member-mark";
 import type { ChatParticipantRosterStatus } from "./chat-roster-status";
 import { ChatSessionsTimelineRow } from "./chat-sessions-timeline-row";
 import { newestActivityBlocks, sameActivityRow } from "./chat-sessions-activity";
+import { ChatWaitingMessageActions } from "./chat-waiting-message";
 import { chatInlineTranscriptParts } from "../../../shared/processingTranscript";
 import { useChatSessionsView, type ChatSessionsView } from "./use-chat-sessions-view";
 import { chatTopLevelMessages } from "./chat-thread-data";
@@ -24,6 +25,10 @@ const textOf = (node: ReactTestInstance | string): string =>
   typeof node === "string" ? node : node.children.map(textOf).join("");
 const hasClass = (name: string) => (node: ReactTestInstance): boolean =>
   typeof node.type === "string" && typeof node.props.className === "string" && node.props.className.split(/\s+/).includes(name);
+
+/** The main session on Codex: its steps are a row each (a Claude Code
+ *  member's are folded, below). */
+const CODEX_MAIN = PARTICIPANTS.map((item) => item.id === MAIN.id ? { ...item, kind: "codex-cli" as const } : item);
 
 const STATUSES = new Map<string, ChatParticipantRosterStatus>([[DREW.id, "running"], [GERA.id, "idle"], [TAYLOR.id, "pending"]]);
 
@@ -48,7 +53,7 @@ function itemProps(message: ChatMessage, extra: Partial<Parameters<typeof ChatMe
     activityDisclosure: disclosure(),
     message,
     conversationId: "chat-sessions",
-    participants: PARTICIPANTS,
+    participants: CODEX_MAIN,
     participantStatusById: STATUSES,
     busy: false,
     onOpenThread: noop,
@@ -235,15 +240,56 @@ test("the classic view's running reply is as it was: its status line and its sto
   act(() => renderer!.unmount());
 });
 
-test("a queued reply of the sessions view can be cancelled from its own row", () => {
+test("a Claude Code member's steps are one line as its CLI folds them: the step it is at, then how many of each; pressed, their rows", () => {
   const sessions = sessionsOf(sessionsConversation());
+  const steps = [
+    activity("a1", "tool", "accord_agents - app_artifact_read (MCP)", 0),
+    activity("a2", "command", "Listing the old chat's artifacts", 0, "sqlite3 -readonly app.db '.tables'"),
+    activity("a3", "tool", "Reading /tmp/known-issues.md", 0),
+    activity("a4", "file-edit", "Update(/tmp/known-issues.md)", 0),
+    activity("a5", "command", "Running the affected tests", 0, "npm test")
+  ];
+  const lines = (root: ReactTestInstance): string[] => root.findAll((node) => typeof node.type === "string" &&
+    (node.props["data-testid"] === "chat-sessions-step-fold" || node.props["data-testid"] === "chat-sessions-activity-row"))
+    .map((node) => `${node.props["data-testid"] === "chat-sessions-step-fold" ? "fold" : "row"}${node.props.className.includes("is-current") ? " current" : ""}: ${textOf(node)}`);
+  const running = chatMessage("main-claude", "participant", 12, { participantId: MAIN.id, status: "pending", content: "", metadata: { runId: "run-claude" } });
+  const live = (count: number) => renderSessionsRow(running, sessions, { participants: PARTICIPANTS,
+    liveProgress: { participantLabel: "main", state: "running" as const, partialContent: "", activityEvents: steps.slice(0, count) } } as Partial<Parameters<typeof ChatMessageItem>[0]>);
+  assert.deepEqual(lines(live(2)), ["fold current: Listing the old chat's artifacts"]);
+  assert.deepEqual(lines(live(5)), ["fold: Read 1 file, called accord_agents, ran 1 shell command", "row: Update(/tmp/known-issues.md)", "fold current: Running the affected tests"]);
+
+  const done = chatMessage("main-claude-done", "participant", 14, { participantId: MAIN.id, content: "Done.", metadata: { workedMs: 4_000, activityEvents: steps } } as Partial<ChatMessage>);
+  const root = renderSessionsRow(done, sessions, { participants: PARTICIPANTS, activityDisclosure: { ...disclosure(), expandedProcessingTranscriptMessageIds: new Set(["main-claude-done"]) } });
+  assert.deepEqual(lines(root), ["fold: Read 1 file, called accord_agents, ran 1 shell command", "row: Update(/tmp/known-issues.md)", "fold: Ran 1 shell command"]);
+  const fold = root.findAll((node) => node.type === "button" && node.props["data-testid"] === "chat-sessions-step-fold")[0]!;
+  act(() => fold.props.onClick());
+  assert.deepEqual(lines(root).slice(0, 4), [
+    "fold: Read 1 file, called accord_agents, ran 1 shell command", "row: accord_agents - app_artifact_read (MCP)", "row: Listing the old chat's artifacts", "row: Reading /tmp/known-issues.md"
+  ]);
+});
+
+test("a message its member has not taken yet is sent now or taken back from the message itself; its reply has no row", () => {
+  const base = sessionsConversation();
+  const running = chatMessage("main-running", "participant", 12, { participantId: MAIN.id, status: "pending", content: "", metadata: { runId: "run-running", sourceMessageId: "u-first" } } as Partial<ChatMessage>);
+  const waiting = chatMessage("u-waiting", "user", 13, { content: "And the docs?" });
+  const queued = chatMessage("main-queued", "participant", 13, { participantId: MAIN.id, status: "pending", content: "", metadata: { runId: "run-queued", sourceMessageId: "u-waiting", queuedBehind: { handle: "main" } } } as Partial<ChatMessage>);
+  const sessions = sessionsOf({ ...base, messages: [...base.messages, running, waiting, queued] });
+  const shown = sessions.mainMessages.map((message) => message.id);
+  assert.ok(shown.includes("main-running") && shown.includes("u-waiting"));
+  assert.ok(!shown.includes("main-queued"), "no Queued row");
   const stopped: string[] = [];
-  const queued = chatMessage("main-queued", "participant", 13, { participantId: MAIN.id, status: "pending", content: "", metadata: { runId: "run-queued", queuedBehind: { handle: "drew" } } } as Partial<ChatMessage>);
-  const root = renderSessionsRow(queued, sessions, { onStopRun: (runId: string) => { stopped.push(runId); } } as Partial<Parameters<typeof ChatMessageItem>[0]>);
-  const cancel = root.find((node) => typeof node.type === "string" && node.props?.["data-testid"] === "chat-sessions-reply-stop");
-  assert.equal(cancel.props["aria-label"], "Cancel queued reply");
-  act(() => cancel.props.onClick({ defaultPrevented: false, preventDefault: noop, stopPropagation: noop }));
-  assert.deepEqual(stopped, ["run-queued"]);
+  const row = (message: ChatMessage) => renderSessionsRow(message, sessions, { onStopRun: (runId: string) => { stopped.push(runId); } } as Partial<Parameters<typeof ChatMessageItem>[0]>);
+  const press = (root: ReactTestInstance, testId: string): void => {
+    const button = root.find((node) => node.type === "button" && node.props?.["data-testid"] === testId);
+    act(() => button.props.onClick({ defaultPrevented: false, preventDefault: noop, stopPropagation: noop }));
+  };
+  const root = row(waiting);
+  assert.doesNotMatch(textOf(root), /Queued/);
+  press(root, "chat-waiting-send-now");
+  assert.deepEqual(stopped, ["run-running"], "the step being worked on makes way, the message stays in line");
+  press(row(waiting), "chat-waiting-take-back");
+  assert.deepEqual(stopped, ["run-running", "run-queued"]);
+  assert.equal(row(running).findAll((node) => node.props?.["data-testid"] === "chat-waiting-message").length, 0);
 });
 
 /** A long turn: `count` steps, each a command. */
@@ -296,4 +342,45 @@ test("the newest-steps cut keeps a group's newest steps and drops the words befo
   const cut = newestActivityBlocks(blocks, 3);
   assert.equal(cut.hidden, 2);
   assert.deepEqual(cut.blocks.map((block) => block.kind === "text" ? "text" : block.events!.map((event) => event.id).join(",")), ["s3", "text", "s4,s5"]);
+});
+
+test("folded steps are cut by the lines they are drawn as: a fold is one, and what it counts stays whole", () => {
+  const [a, b, c, d, e] = manySteps(5) as [ChatAgentActivityEvent, ChatAgentActivityEvent, ChatAgentActivityEvent, ChatAgentActivityEvent, ChatAgentActivityEvent];
+  const edit = activity("edit", "tool", "Update(/tmp/a.md)", 0);
+  const blocks = [
+    { kind: "activity-group", events: [a, b, edit, c] },
+    { kind: "text", text: "between" },
+    { kind: "activity-group", events: [d, e] }
+  ];
+  const shown = (max: number) => {
+    const cut = newestActivityBlocks(blocks, max, true);
+    return [cut.hidden, ...cut.blocks.map((block) => block.kind === "text" ? "text" : block.events!.map((event) => event.id).join(","))];
+  };
+  assert.deepEqual(shown(4), [0, "s1,s2,edit,s3", "text", "s4,s5"], "four lines");
+  assert.deepEqual(shown(3), [2, "edit,s3", "text", "s4,s5"]);
+  assert.deepEqual(shown(1), [4, "text", "s4,s5"], "the words after the last step left out stay");
+
+  const sessions = sessionsOf(sessionsConversation());
+  const long = Array.from({ length: 120 }, (_, index) => index % 2 ? activity(`c${index}`, "command", "Running command", 0, `step ${index}`) : activity(`e${index}`, "tool", `Update(/tmp/${index}.md)`, 0));
+  const running = chatMessage("main-claude-long", "participant", 12, { participantId: MAIN.id, status: "pending", content: "", metadata: { runId: "run-claude-long" } });
+  const root = renderSessionsRow(running, sessions, { participants: [{ ...MAIN, kind: "claude-code" }],
+    liveProgress: { participantLabel: "main", state: "running" as const, partialContent: "", activityEvents: long } } as Partial<Parameters<typeof ChatMessageItem>[0]>);
+  const earlier = root.find((node) => typeof node.type === "string" && node.props?.["data-testid"] === "chat-sessions-activity-earlier");
+  assert.equal(textOf(earlier), "70 earlier steps", "a long turn still draws its newest 50 lines");
+});
+
+test("a message sent now that still waits, behind the next reply, can be sent now again", () => {
+  const stopped: string[] = [];
+  const actions = (behindRunId: string) => <ChatWaitingMessageActions runId="run-queued" behindRunId={behindRunId} onStopRun={(runId) => { stopped.push(runId); }} />;
+  let renderer: ReactTestRenderer | undefined;
+  act(() => { renderer = create(actions("run-1")); });
+  const button = (testId: string) => renderer!.root.find((node) => node.type === "button" && node.props["data-testid"] === testId);
+  const press = (testId: string) => act(() => button(testId).props.onClick({ defaultPrevented: false, preventDefault: noop, stopPropagation: noop }));
+  press("chat-waiting-send-now");
+  assert.equal(button("chat-waiting-send-now").props.disabled, true);
+  assert.equal(button("chat-waiting-take-back").props.disabled, true);
+  act(() => renderer!.update(actions("run-2")));
+  assert.equal(button("chat-waiting-send-now").props.disabled, false);
+  press("chat-waiting-send-now");
+  assert.deepEqual(stopped, ["run-1", "run-2"]);
 });

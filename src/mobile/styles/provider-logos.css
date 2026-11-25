@@ -1,0 +1,125 @@
+.provider-logo[data-provider-kind="claude-code"] {
+  background: var(--provider-claude-bg);
+  box-shadow: none;
+}
+
+.provider-logo svg,
+.provider-logo-mark {
+  display: block;
+  width: 15px;
+  height: 15px;
+}
+
+.provider-logo-mark.is-claude {
+  background: url("./assets/providers/claude.png") center / contain no-repeat;
+}
+
+.provider-logo-mark.is-antigravity {
+  background: url("./assets/providers/antigravity.png") center / contain no-repeat;
+}
+
+.provider-codex-stop.is-top { stop-color: var(--provider-codex-top); }
+.provider-codex-stop.is-mid { stop-color: var(--provider-codex-mid); }
+.provider-codex-stop.is-bottom { stop-color: var(--provider-codex-bottom); }
+
+.provider-logo.is-chip {
+  width: 16px;
+  height: 16px;
+  border-radius: 4px;
+}
+
+.provider-logo.is-chip svg,
+.provider-logo.is-chip .provider-logo-mark {
+  width: 11px;
+  height: 11px;
+}
+
+.provider-logo.is-small {
+  width: 18px;
+  height: 18px;
+  border-radius: 5px;
+}
+
+.provider-logo.is-small svg,
+.provider-logo.is-small .provider-logo-mark {
+  width: 12px;
+  height: 12px;
+}
+
+.provider-logo.is-mini,
+.provider-logo.is-note {
+  width: 28px;
+  height: 28px;
+  border-radius: 8px;
+}
+
+.provider-logo.is-mini svg,
+.provider-logo.is-mini .provider-logo-mark,
+.provider-logo.is-note svg,
+.provider-logo.is-note .provider-logo-mark {
+  width: 18px;
+  height: 18px;
+}
+
+/* The bare glyph (the sessions view, T3 Code's way): no tile, no rounded
+   square, sized to the text line. Claude's asterisk is its own orange; the
+   tile's white asterisk is its shape. */
+.provider-logo.is-bare,
+.provider-logo.is-bare[data-provider-kind="claude-code"] {
+  width: 16px;
+  height: 16px;
+  border-radius: 0;
+  background: none;
+  box-shadow: none;
+}
+
+.provider-logo.is-bare svg,
+.provider-logo.is-bare .provider-logo-mark {
+  width: 100%;
+  height: 100%;
+}
+
+.provider-logo.is-bare.is-chip {
+  width: 13px;
+  height: 13px;
+}
+
+.provider-logo.is-bare.is-small {
+  width: 14px;
+  height: 14px;
+}
+
+.provider-logo.is-bare.is-mini,
+.provider-logo.is-bare.is-note {
+  width: 18px;
+  height: 18px;
+}
+
+.provider-logo.is-bare .provider-logo-mark.is-claude {
+  background: var(--brand-anthropic);
+  -webkit-mask: url("./assets/providers/claude.png") center / contain no-repeat;
+  mask: url("./assets/providers/claude.png") center / contain no-repeat;
+}
+
+/* The header in the sessions view: the title's menu holds the view; the
+   members icon carries a count and a dot instead of words. */
+.mobile-chat-header {
+  position: relative;
+}
+
+.mobile-title.has-menu .mobile-title-name {
+  display: inline-block;
+  max-width: calc(100% - 20px);
+  vertical-align: middle;
+}
+
+.mobile-title-chevron {
+  display: inline-flex;
+  vertical-align: middle;
+  margin-left: 4px;
+  color: var(--mut);
+}
+
+.mobile-title-chevron[hidden] {
+  display: none;
+}

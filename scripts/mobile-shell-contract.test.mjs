@@ -5,6 +5,7 @@ import path from "node:path";
 import { pathToFileURL } from "node:url";
 import { promisify } from "node:util";
 import test from "node:test";
+import { phoneAppSource } from "./phone-app-source.mjs";
 import { assetVersion as parseAssetVersion } from "./phone-app-stable-deploy.mjs";
 
 const execFileAsync = promisify(execFile);
@@ -17,7 +18,8 @@ test("mobile shell builds static installable PWA assets", async () => {
 
   const manifest = JSON.parse(await readFile(path.join(repoRoot, "dist/mobile/manifest.webmanifest"), "utf8"));
   const worker = await readFile(path.join(repoRoot, "dist/mobile/service-worker.js"), "utf8");
-  const app = await readFile(path.join(repoRoot, "dist/mobile/mobile-app.js"), "utf8");
+  assert.ok((await stat(path.join(repoRoot, "dist/mobile/mobile-app.js"))).size > 0);
+  const app = await phoneAppSource(repoRoot);
   // The database description both the page and the worker load. They each
   // carried their own copy of it and drifted far enough that the worker could
   // no longer open the database at all.
@@ -652,13 +654,13 @@ test("mobile shell gives scaffolding one row and every real message its own", as
 });
 
 test("mobile shell opens a running member's row at its turn in progress", async () => {
-  const app = await readFile(path.join(repoRoot, "src/mobile/mobile-app.js"), "utf8");
+  const app = await phoneAppSource(repoRoot);
   // The Running row hands its member's turn to the chat it opens.
   assert.match(app, /openConversation\(row\.conversationId, row\.openMessageId\s*\?\s*\{ threadRootId: row\.openThreadRootId, messageId: row\.openMessageId \}/);
   // The chat lands on that row instead of its end, and gives up after a bounded read.
   assert.match(app, /pendingMessageFocus = focusRequest;/);
   assert.match(app, /const FOCUS_EARLIER_PAGE_LIMIT = \d+;/);
-  assert.match(app, /const target = messageRowFor\(list, pendingMessageFocus\.messageId\);\s*if \(target\) \{\s*pendingMessageFocus = undefined;\s*focusMessageRow\(activeId, target\);\s*return;/);
+  assert.match(app, /const target = messageRowFor\(list, openChatState\.pendingMessageFocus\.messageId\);\s*if \(target\) \{\s*openChatState\.pendingMessageFocus = undefined;\s*focusMessageRow\(activeId, target\);\s*return;/);
   // "Show earlier messages" and the read towards the turn share one reader.
   assert.match(app, /async function loadEarlierMessages\(\) \{[\s\S]*?await fetchEarlierPage\(conversationId\)/);
   assert.match(app, /if \(await fetchEarlierPage\(conversationId\) !== "read"\) break;/);

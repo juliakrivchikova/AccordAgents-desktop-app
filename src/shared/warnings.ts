@@ -65,6 +65,13 @@ export interface CliFailureNoticeOptions {
   forceTimeout?: boolean;
 }
 
+/**
+ * What a failed reply says happened (the User, 2026-11-25: "a meaningful
+ * message of what happened, not just a fail"). What the CLI itself said — a
+ * usage limit and when it resets, an API error, a refused model — is shown in
+ * its own words, as its terminal shows it; what the app knows better (a
+ * missing program, a timeout, a Stop) in the app's.
+ */
 export function cliFailureNoticeText(diagnostic: string, options: CliFailureNoticeOptions): string {
   const label = options.label;
   const authProvider = authRequiredProviderLabel(diagnostic);
@@ -80,19 +87,99 @@ export function cliFailureNoticeText(diagnostic: string, options: CliFailureNoti
     return `${label} was cancelled before it returned a response.`;
   }
 
-  if (/ENOENT|not found|command not found|no such file or directory/i.test(diagnostic)) {
+  // How a process ended is told first: what it wrote may name a missing file.
+  const ended = cliProcessEnd(diagnostic);
+  if (ended) {
+    return ended.reason
+      ? `${label} stopped before it returned a response: ${ended.reason}`
+      : `${label} stopped before it returned a response.`;
+  }
+
+  if (/\bspawn\b[^\n]*\bENOENT\b|\bENOENT\b[^\n]*\bspawn\b|command not found|\b(?:sh|bash|zsh|env): [^\n]*(?:not found|no such file or directory)/i.test(diagnostic)) {
     return `${label} could not start because the CLI executable is unavailable.`;
   }
 
-  if (/session limit|rate limit|quota/i.test(diagnostic)) {
-    return `${label} could not finish because the CLI account hit a usage limit.`;
-  }
+  const reason = cliFailureReason(diagnostic);
+  return reason ? `${label}: ${reason}` : `${label} failed before it returned a response.`;
+}
 
-  if (/transport channel closed|stdin is closed|process exited|process is not running|worker quit with fatal/i.test(diagnostic)) {
-    return `${label} stopped before it returned a response.`;
-  }
+/** The longest reason a failed reply quotes. */
+const MAX_FAILURE_REASON_CHARS = 360;
+const ANSI_SEQUENCE = /\u001b\[[0-?]*[ -/]*[@-~]/g;
+/** Our own words for a turn that failed without the CLI saying why. */
+const UNEXPLAINED_FAILURES: ReadonlyArray<readonly [RegExp, string]> = [
+  [/^claude (?:warm process|code) completed without response content/i, "Claude Code ended the turn without a reply."],
+  [/^antigravity (?:cli|native goal) completed without response content/i, "Antigravity ended the turn without a reply."],
+  [/^claude warm process (?:returned an error result|reported an error)/i, "Claude Code reported an error without saying what it was."],
+  [/^codex app-server (?:reported an error|turn failed)/i, "Codex reported an error without saying what it was."],
+  [/^claude warm process emitted invalid JSON/i, "Claude Code wrote output that could not be read."]
+];
 
-  return `${label} failed before it returned a response.`;
+/** A CLI process that ended under its turn, and what it said (its last words,
+ *  else how it ended); undefined when the diagnostic is not that. */
+function cliProcessEnd(diagnostic: string): { reason?: string } | undefined {
+  const exit = /process exited(?: with code (\d+)| after signal (SIG[A-Z0-9]+))?(?::\s*([\s\S]*))?/i.exec(diagnostic);
+  if (!exit) {
+    return /\bwrite EPIPE\b|transport channel closed|stdin is closed|process is not running|worker quit with fatal/i.test(diagnostic) ? {} : undefined;
+  }
+  const said = exit[3] ? cliFailureReason(exit[3]) : undefined;
+  if (said) {
+    return { reason: said };
+  }
+  const cli = /codex/i.test(diagnostic) ? "Codex" : /claude/i.test(diagnostic) ? "Claude Code" : "The CLI";
+  if (exit[2]) {
+    return { reason: `${cli} was ended by ${exit[2]}.` };
+  }
+  return exit[1] ? { reason: `${cli} exited with code ${exit[1]}.` } : {};
+}
+
+/** What the app adds to a failed command for its own logs, the CLI's last
+ *  events (outputText.ts commandErrorText). */
+const LAST_EVENTS_TAIL = /\.? No stderr was reported[;.][\s\S]*$/;
+/** Where a diagnostic goes on as raw JSON (cut, or it would have been read). */
+const RAW_JSON_TAIL = /[\s:]*[{[]\s*["{[][\s\S]*$/;
+
+/** The sentence of a diagnostic that says what went wrong, on one line; ""
+ *  when it holds none (raw CLI events and output are never shown). */
+function cliFailureReason(diagnostic: string): string {
+  const text = providerErrorMessage(diagnostic.replace(ANSI_SEQUENCE, "").replace(LAST_EVENTS_TAIL, ".").replace(/\. Output: /, ": ").trim());
+  const unexplained = UNEXPLAINED_FAILURES.find(([pattern]) => pattern.test(text));
+  if (unexplained) {
+    return unexplained[1];
+  }
+  if (looksLikeRawCliDiagnostic(text.replace(/\\"/g, '"')) || /^[{[]/.test(text)) {
+    return "";
+  }
+  const lines = text.replace(RAW_JSON_TAIL, "").split(/\r?\n/).map((line) => line.trim()).filter((line) => line && !/^at\s/.test(line));
+  if (lines.length > 3) {
+    // A log, not a message: the line that says what went wrong.
+    const telling = lines.find((line) => /\b(?:error|failed|cannot|could not|limit|denied|refused|invalid|not supported)\b/i.test(line));
+    return truncateOneLine(telling ?? lines[lines.length - 1]!, MAX_FAILURE_REASON_CHARS);
+  }
+  const telling = lines.length > 1 ? lines.find((line) => /^(?:[a-z]*error|fatal)\b/i.test(line)) : undefined;
+  return truncateOneLine(telling ?? lines.join(" "), MAX_FAILURE_REASON_CHARS);
+}
+
+/** A provider's error given as its JSON body: the message inside it. */
+function providerErrorMessage(text: string): string {
+  const start = text.indexOf("{");
+  if (start < 0 || !text.endsWith("}")) {
+    return text;
+  }
+  let body: unknown;
+  try {
+    body = JSON.parse(text.slice(start));
+  } catch {
+    return text;
+  }
+  const record = body as { message?: unknown; error?: unknown } | null;
+  const error = record?.error as { message?: unknown } | string | undefined;
+  const message = typeof error === "string" ? error : error?.message ?? record?.message;
+  if (typeof message !== "string" || !message.trim()) {
+    return text;
+  }
+  // "API Error: 400 {…}" keeps its own words before the body.
+  return `${text.slice(0, start).trim()} ${message.trim()}`.trim();
 }
 
 export function sanitizeConversationWarnings(conversation: Conversation, maxChars = DEFAULT_NOTICE_CHARS): boolean {
@@ -119,7 +206,7 @@ function looksLikePlainCliFailure(diagnostic: string): boolean {
   return (
     /AuthRequired|www_authenticate|oauth-protected-resource/i.test(diagnostic) ||
     /\b(?:codex|claude|gemini|agy|antigravity)(?:\s+\S+){0,4}\s+timed out after \d+ms\b/i.test(diagnostic) ||
-    /transport channel closed|stdin is closed|process exited|process is not running|worker quit with fatal/i.test(diagnostic) ||
+    /write EPIPE|transport channel closed|stdin is closed|process exited|process is not running|worker quit with fatal/i.test(diagnostic) ||
     /session limit|rate limit|quota/i.test(diagnostic) ||
     /ENOENT|command not found|no such file or directory/i.test(diagnostic)
   );

@@ -14,7 +14,7 @@ import { remoteRunStreamingStartedAt } from "../../shared/remoteRunStreaming";
 import { firstTextLine, sessionsTaskTitle } from "../../shared/mainSessionView";
 import { APP_CHAT_SEND_MESSAGE_TOOL } from "../../shared/appMcpToolContracts";
 import { chatInterimPostsOf } from "../../shared/interimPosts";
-import { phoneSessionsActivity, type SessionsActivityRow } from "../../shared/sessionsActivity";
+import { isClaudeMember, phoneSessionsActivity, type PhoneActivityRow } from "../../shared/sessionsActivity";
 import { turnFinishedNoteOf } from "../../shared/turnFinishedNoteSource";
 import { accordClosedLaunchId, accordClosedLineTitle } from "../../shared/accordProgress";
 import {
@@ -192,7 +192,7 @@ export interface MobileTimelineEvent {
   /** A member's reply: its newest steps as the sessions view's rows show
    *  them (shared/sessionsActivity.ts), short; how many earlier ones there
    *  were besides. */
-  activity?: SessionsActivityRow[];
+  activity?: PhoneActivityRow[];
   activityMore?: number;
 }
 
@@ -412,7 +412,9 @@ function timelineEventFromMessage(
   const request = message.role === "participant" && !hidden ? mobileTaskBatch(message.metadata?.participantRequest) : undefined;
   const interimPosts = message.role === "participant" && !hidden ? mobileInterimPosts(message) : [];
   const activity = message.role === "participant" && !hidden && !midTurn && showsSteps
-    ? phoneSessionsActivity(message.metadata?.activityEvents) : undefined;
+    ? phoneSessionsActivity(message.metadata?.activityEvents, {
+        claude: isClaudeMember(conversation!.metadata.participants, message.participantId), live: message.status === "pending"
+      }) : undefined;
   const turnTiming = message.role === "participant" && message.status === "pending" ? phoneTurnTiming(message) : {};
   return {
     id: message.id,

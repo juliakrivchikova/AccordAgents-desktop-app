@@ -1,0 +1,301 @@
+.chat-participant-menu summary {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  min-height: 32px;
+  padding: 5px 9px;
+  border: 1px solid var(--app-border);
+  border-radius: var(--radius-control);
+  background: var(--app-surface);
+  color: var(--app-text-strong);
+  cursor: pointer;
+  font-weight: 700;
+}
+
+.chat-participant-menu {
+  position: relative;
+}
+
+.chat-participant-menu summary {
+  list-style: none;
+}
+
+.chat-participant-menu summary::-webkit-details-marker {
+  display: none;
+}
+
+.chat-participant-menu summary:focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring);
+}
+
+.chat-participant-popover {
+  z-index: var(--z-popover) !important;
+  border: 1px solid var(--app-border) !important;
+  border-radius: 12px !important;
+  background: var(--app-surface) !important;
+  color: var(--app-text) !important;
+  box-shadow: var(--shadow-lg) !important;
+  font-family: var(--font-body);
+}
+
+.new-chat-participant-menu.chat-participant-popover {
+  bottom: calc(100% - 72px);
+  width: min(460px, calc(100vw - 32px));
+  padding: 6px;
+}
+
+.new-chat-participant-menu.chat-participant-popover .chat-participant-row {
+  gap: 10px;
+  padding: 9px 10px;
+  border-radius: 8px;
+}
+
+.new-chat-participant-menu.chat-participant-popover .chat-participant-row .mini-avatar {
+  width: 32px !important;
+  height: 32px !important;
+  border-radius: 8px !important;
+}
+
+.new-chat-participant-menu.chat-participant-popover .chat-participant-row-body {
+  gap: 5px;
+}
+
+.new-chat-participant-menu.chat-participant-popover .chat-participant-name {
+  font-size: 13px;
+}
+
+.new-chat-participant-menu.chat-participant-popover .chat-participant-provider,
+.new-chat-participant-menu.chat-participant-popover .chat-participant-role-line {
+  font-size: 12px;
+}
+
+.new-chat-participant-menu.chat-participant-popover .chat-participant-select-check {
+  margin-top: 2px;
+}
+
+.new-chat-participant-menu.chat-participant-popover .chat-participant-footer {
+  margin-top: 4px;
+  padding: 8px 10px 6px;
+}
+
+.chat-menu-divider {
+  height: 1px;
+  margin: 10px 0;
+  background: var(--app-border);
+}
+
+.chat-participant-popover-list {
+  display: flex;
+  flex-direction: column;
+}
+
+.chat-participant-popover .chat-participant-row {
+  display: flex;
+  gap: 12px;
+  align-items: flex-start;
+  min-width: 0;
+  padding: 12px;
+  border: 0;
+  border-radius: 12px;
+  background: transparent;
+  color: var(--app-text);
+}
+
+.chat-participant-popover .chat-participant-row + .chat-participant-row {
+  margin-top: 6px;
+}
+
+.chat-participant-popover .chat-participant-row:hover {
+  background: var(--ui-row-hover);
+}
+
+.chat-participant-popover .chat-participant-row.is-expanded {
+  background: var(--app-surface-subtle);
+}
+
+/* Only the member itself dims: its Run on can still move it where it runs. */
+.chat-participant-popover .chat-participant-row.is-disabled > .chat-participant-avatar-slot,
+.chat-participant-popover .chat-participant-row.is-disabled .chat-participant-row-head {
+  opacity: 0.6;
+}
+
+.chat-participant-avatar-slot {
+  display: inline-flex;
+  flex: 0 0 auto;
+}
+
+.chat-participant-popover .chat-participant-row .mini-avatar {
+  width: 38px !important;
+  height: 38px !important;
+  border-radius: 8px !important;
+  font-size: 12px;
+}
+
+.chat-participant-row-body {
+  display: flex;
+  min-width: 0;
+  flex: 1 1 auto;
+  flex-direction: column;
+  gap: 7px;
+}
+
+.chat-participant-row-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 10px;
+  min-width: 0;
+}
+
+.chat-participant-identity {
+  display: grid;
+  min-width: 0;
+  flex: 1 1 auto;
+  gap: 1px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+  font: inherit;
+  text-align: left;
+}
+
+.chat-participant-identity:focus-visible {
+  outline: none;
+}
+
+.chat-participant-name-line {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 9px;
+}
+
+.chat-participant-name {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--app-text-strong);
+  font-size: 14px;
+  font-weight: 600;
+  letter-spacing: 0;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.chat-participant-meta-sep {
+  width: 4.3px;
+  height: 4.3px;
+  flex: 0 0 auto;
+  border-radius: 50%;
+  background: var(--app-muted);
+  opacity: 0.65;
+}
+
+.chat-participant-provider {
+  flex: 0 0 auto;
+  color: var(--app-muted);
+  font-size: 12px;
+  font-weight: 500;
+  white-space: nowrap;
+}
+
+.chat-participant-status-slot {
+  display: inline-flex;
+  min-width: 0;
+  flex: 0 1 auto;
+}
+
+.chat-participant-role-line {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 6px;
+  color: var(--app-muted);
+  font-size: 12px;
+  line-height: 1.2;
+}
+
+.chat-participant-role-label {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.chat-participant-role-archived {
+  flex: 0 0 auto;
+  color: var(--app-muted);
+  font-size: 11px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.chat-participant-row-actions {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 2px;
+}
+
+.chat-participant-select-check {
+  display: inline-flex;
+  width: 22px;
+  height: 22px;
+  flex: 0 0 22px;
+  align-items: center;
+  justify-content: center;
+  margin: 4px 4px 0 2px;
+  border: 1.5px solid var(--app-border-strong);
+  border-radius: 6px;
+  background: transparent;
+  color: var(--app-on-dark);
+  cursor: pointer;
+}
+
+.chat-participant-select-check.is-on {
+  border-color: var(--app-accent);
+  background: var(--app-accent);
+}
+
+.chat-participant-select-check:disabled {
+  cursor: not-allowed;
+  opacity: 0.65;
+}
+
+.chat-participant-select-check:focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring);
+}
+
+.chat-runtime-controls {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 14px;
+  margin-top: 2px;
+}
+
+.chat-rt-toggleline,
+.chat-rt-toggleinline {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.chat-rt-toggleline {
+  align-self: flex-start;
+}
+
+.chat-rt-toggleinline {
+  padding: 0 6px;
+}
+
+.chat-rt-toggle-label {
+  color: var(--app-muted);
+  font-size: 12px;
+  font-weight: 500;
+  white-space: nowrap;
+}

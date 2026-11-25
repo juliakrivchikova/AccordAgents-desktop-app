@@ -9,6 +9,8 @@ import { approvalHasCard, controlCardFromApproval } from "../../shared/mobileCon
 import { wantedHubCards } from "../../shared/hubCards";
 import { APP_CONNECTOR_SIGN_IN_TOOL } from "../../shared/appMcpToolContracts";
 import { ChatService } from "./chat";
+import { chatParts } from "./chat/test/chatParts";
+import { isChatAppToolApproval } from "./chat/approvals/approvalRecords";
 
 const NOW = "2026-01-01T00:00:00.000Z";
 const ROLE: ChatRoleConfig = { id: "engineer", label: "Engineer", instructions: "Answer directly.", version: 1, updatedAt: NOW };
@@ -148,7 +150,7 @@ test("a turn that ends closes its card as closed, never as the User's Not now", 
   const asking = service.requestConnectorSignInFromTool(actor({ runId: "run-2" }), { connector: "claude.ai Sentry" });
   await waitForCard(storage);
   const chat = clone(storage.current);
-  (service as any).markPendingAppToolApprovalsForRunTerminal(chat, "run-2", "Stopped by user.");
+  chatParts(service).approvalDecisions.markPendingAppToolApprovalsForRunTerminal(chat, "run-2", "Stopped by user.");
   storage.current = chat;
   const result = await asking;
   assert.equal(result.status, "expired");
@@ -161,7 +163,7 @@ test("a member removed while its card waits: the card closes and the call ends",
   const asking = service.requestConnectorSignInFromTool(actor(), { connector: "claude.ai Sentry" });
   await waitForCard(storage);
   const chat = clone(storage.current);
-  (service as any).cleanupRemovedParticipantState(chat, (chat.metadata.participants as ChatParticipant[])[0], NOW);
+  chatParts(service).members.cleanupRemovedParticipantState(chat, (chat.metadata.participants as ChatParticipant[])[0], NOW);
   storage.current = chat;
   assert.equal((await asking).status, "expired");
   assert.equal(approvals(storage)[0].status, "expired");
@@ -183,7 +185,7 @@ test("a server whose own sign-in returns to the member's computer says so where 
 test("a member's turn stopping closes its card unanswered", async () => {
   const { service, storage } = testService({ "claude.ai Sentry": "needs-auth" });
   const controller = new AbortController();
-  (service as any).chatRunControllers.set("run-1", new Set([controller]));
+  chatParts(service).activeRuns.chatRunControllers.set("run-1", new Set([controller]));
   const asking = service.requestConnectorSignInFromTool(actor({ runId: "run-1" }), { connector: "claude.ai Sentry" });
   await waitForCard(storage);
   controller.abort();
@@ -227,7 +229,7 @@ test("a sign-in card survives the chat being read back from storage", async () =
   const { service, storage } = testService({ "claude.ai Sentry": "needs-auth" });
   const asking = service.requestConnectorSignInFromTool(actor(), { connector: "claude.ai Sentry" });
   const card = await waitForCard(storage);
-  assert.equal((service as any).isChatAppToolApproval(card), true);
+  assert.equal(isChatAppToolApproval(card), true);
   await service.respondToAppToolApproval({ conversationId: CHAT_ID, approvalId: card.id, approve: false });
   await asking;
 });

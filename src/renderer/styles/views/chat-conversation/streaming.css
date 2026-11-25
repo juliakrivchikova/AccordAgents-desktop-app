@@ -1,0 +1,315 @@
+@keyframes streaming-status-transfusion {
+  0% {
+    background-position: 120% 0;
+  }
+  100% {
+    background-position: -120% 0;
+  }
+}
+
+.chat-thinking-activity {
+  max-width: min(720px, 100%);
+  overflow: hidden;
+  color: var(--app-muted-subtle);
+  font-size: 13px;
+  line-height: 1.4;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.streaming-message-content {
+  display: grid;
+  gap: 8px;
+}
+
+.streaming-message-text {
+  color: var(--app-text-strong);
+  word-wrap: break-word;
+}
+
+.streaming-message-text .markdown-text {
+  gap: 8px;
+  font-size: 14px;
+  line-height: 22px;
+}
+
+.streaming-message-tail {
+  color: var(--app-text-strong);
+  font-size: 14px;
+  line-height: 22px;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.streaming-tail-transcript {
+  display: grid;
+  gap: 8px;
+}
+
+.streaming-message-text .markdown-text + .streaming-message-tail,
+.streaming-message-text .chat-inline-transcript + .streaming-tail-transcript {
+  margin-top: 8px;
+}
+
+.streaming-caret {
+  display: inline-block;
+  width: 2px;
+  height: 1em;
+  margin-left: 2px;
+  background: var(--app-text-strong);
+  vertical-align: text-bottom;
+  animation: streaming-caret-blink 1s steps(2, start) infinite;
+}
+
+@keyframes streaming-caret-blink {
+  to {
+    visibility: hidden;
+  }
+}
+
+.streaming-message-thinking {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--app-muted);
+  font-size: 14px;
+}
+
+.streaming-message-thinking.is-compact {
+  gap: 6px;
+  font-size: 12px;
+}
+
+.streaming-message-activity {
+  color: var(--app-muted-subtle);
+  font-family: var(--font-code);
+  font-size: 12px;
+  line-height: 1.4;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .streaming-status-label {
+    background: none;
+    color: var(--app-muted);
+    -webkit-text-fill-color: currentColor;
+    animation: none;
+  }
+
+  .streaming-caret {
+    animation: none;
+  }
+}
+
+.chat-inline-transcript {
+  display: grid;
+  gap: 8px;
+  max-width: min(760px, 100%);
+}
+
+.chat-inline-activity-event,
+.chat-inline-activity-group {
+  display: grid;
+  width: 100%;
+  gap: 5px;
+  justify-self: start;
+  max-width: min(760px, 100%);
+  color: var(--app-muted);
+  font-size: 13px;
+  line-height: 1.35;
+}
+
+.chat-inline-activity-group {
+  gap: 8px;
+}
+
+.chat-inline-activity-group-list {
+  display: grid;
+  min-width: 0;
+  gap: 8px;
+  margin-left: 23px;
+}
+
+/* The in-progress activity shimmers like "Thinking" without the label's heavier weight. */
+.chat-inline-activity-heading .streaming-status-label {
+  font-weight: inherit;
+}
+
+.chat-inline-activity-toggle:hover .streaming-status-label,
+.chat-inline-activity-toggle:focus-visible .streaming-status-label {
+  color: inherit;
+  -webkit-text-fill-color: currentColor;
+}
+
+.chat-inline-activity-heading {
+  display: inline-grid;
+  grid-template-columns: 16px minmax(0, auto);
+  align-items: center;
+  justify-self: start;
+  gap: 7px;
+  max-width: 100%;
+}
+
+.chat-inline-activity-heading svg {
+  color: var(--app-muted-subtle);
+}
+
+.chat-inline-activity-heading span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.chat-inline-activity-toggle {
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.chat-inline-activity-toggle:hover {
+  color: var(--app-text);
+}
+
+.chat-inline-activity-toggle:hover .chat-inline-activity-disclosure-icon,
+.chat-inline-activity-toggle:focus-visible .chat-inline-activity-disclosure-icon {
+  color: currentColor;
+}
+
+.chat-inline-activity-toggle:focus-visible {
+  border-radius: var(--ui-radius-8);
+  box-shadow: var(--focus-ring);
+  outline: none;
+}
+
+.chat-inline-activity-content {
+  display: grid;
+  min-width: 0;
+  gap: 5px;
+}
+
+.chat-inline-activity-content[hidden] {
+  display: none;
+}
+
+.chat-inline-activity-detail {
+  max-width: 100%;
+  margin: 0 0 0 23px;
+  padding: 2px 0 0;
+  overflow-x: auto;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  color: var(--app-muted-subtle);
+  font: 12px/1.4 var(--font-code, ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.chat-inline-activity-detail.is-collapsed {
+  max-height: calc(6 * 1.4em);
+  overflow: hidden;
+}
+
+.chat-inline-activity-actions {
+  display: inline-flex;
+  width: calc(100% - 23px);
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 12px;
+  margin-left: 23px;
+}
+
+.chat-inline-activity-action {
+  display: inline-flex;
+  align-items: center;
+  min-height: 0;
+  padding: 2px 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  color: var(--app-muted-subtle);
+  font: inherit;
+  cursor: pointer;
+}
+
+.chat-inline-activity-action:hover {
+  color: var(--app-muted);
+}
+
+.chat-inline-activity-action:focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring);
+}
+
+.chat-processing-transcript-notices {
+  display: grid;
+  gap: 4px;
+  max-width: min(760px, 100%);
+  color: var(--app-muted-subtle);
+  font-size: 12px;
+  line-height: 1.4;
+}
+
+.chat-jump-to-latest {
+  position: absolute;
+  left: 50%;
+  bottom: 104px;
+  z-index: 5;
+  transform: translateX(-50%);
+}
+
+.chat-worked-wrap {
+  margin-bottom: 8px;
+}
+
+.chat-worked {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 10px;
+  border: 1px solid var(--app-border);
+  border-radius: 999px;
+  background: var(--app-surface);
+  color: var(--app-muted);
+  font-size: 12px;
+  font-weight: 500;
+  line-height: 1.2;
+  white-space: nowrap;
+}
+
+.chat-worked svg {
+  flex: 0 0 auto;
+}
+
+.chat-message.in-thread + .chat-message.in-thread {
+  margin-top: 6px;
+}
+
+.chat-message .message-body {
+  padding: 10px 76px 10px 12px;
+  background: var(--app-surface);
+  overflow: visible;
+}
+
+.chat-message.message-focused {
+  position: relative;
+  isolation: isolate;
+  background: transparent;
+}
+
+.chat-message.message-focused::before {
+  position: absolute;
+  z-index: -1;
+  inset: -16px;
+  border-radius: 12px;
+  /* Half the accent wash: it marks where you landed without shouting (the User, 2026-11-01). */
+  background: color-mix(in srgb, var(--app-accent-soft) 45%, transparent);
+  content: "";
+}

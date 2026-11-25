@@ -1,0 +1,88 @@
+.pull-refresh-spinner {
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  border: 2.5px solid var(--bd);
+  border-top-color: var(--mut);
+  opacity: 0.55;
+  transform: rotate(0deg);
+}
+
+.pull-refresh.is-armed .pull-refresh-spinner {
+  opacity: 1;
+  border-top-color: var(--fg1);
+}
+
+.pull-refresh.is-refreshing .pull-refresh-spinner {
+  opacity: 1;
+  border-top-color: var(--fg1);
+  animation: pull-refresh-spin 0.8s linear infinite;
+}
+
+@keyframes pull-refresh-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+/* --- Looking for new messages ---------------------------------------------- */
+
+.timeline-syncing {
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  padding: 8px 12px;
+  font-size: 13px;
+  color: var(--mut);
+  background: var(--s2);
+  border-top: 1px solid var(--bd);
+}
+
+.timeline-syncing[hidden] {
+  display: none;
+}
+
+.timeline-syncing-spinner {
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  border: 2px solid var(--bd);
+  border-top-color: var(--fg1);
+  animation: pull-refresh-spin 0.8s linear infinite;
+}
+
+/* --- Earlier messages ------------------------------------------------------ */
+
+.load-earlier {
+  display: block;
+  margin: 12px auto 0;
+  min-height: 36px;
+  border: 1px solid var(--bd);
+  border-radius: 999px;
+  padding: 0 16px;
+  background: var(--surface);
+  color: var(--fg);
+  font: 500 13.5px var(--sans);
+  cursor: pointer;
+}
+
+.load-earlier[hidden] {
+  display: none;
+}
+
+.load-earlier:disabled {
+  color: var(--mut);
+}
+
+/* --- Members sheet --------------------------------------------------------- */
+
+.members-sheet {
+  position: absolute;
+  inset: 0;
+  z-index: 12;
+  display: flex;
+  flex-direction: column;
+  justify-content: flex-end;
+}

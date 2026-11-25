@@ -1,0 +1,148 @@
+/* The sessions view of a chat with a main session (docs/main-session.md):
+   the header's view switch and members button, the main timeline without
+   avatars, task cards, and the members and member-session panels. */
+
+/* Header: view switch and members button */
+
+.chat-view-header-controls {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  margin-right: 4px;
+}
+
+.chat-view-switch {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  height: 28px;
+  padding: 2px;
+  border: 1px solid var(--app-border);
+  border-radius: var(--radius-control);
+  background: var(--app-surface-subtle);
+}
+
+.chat-view-switch.is-disabled {
+  opacity: 0.55;
+}
+
+.chat-view-switch-option {
+  height: 22px;
+  padding: 0 9px;
+  border: 0;
+  border-radius: calc(var(--radius-control) - 2px);
+  background: transparent;
+  color: var(--app-muted);
+  font-size: 12px;
+  font-weight: 500;
+  line-height: 22px;
+  cursor: pointer;
+}
+
+.chat-view-switch-option:hover:not(:disabled) {
+  color: var(--app-text-strong);
+}
+
+.chat-view-switch-option[aria-pressed="true"] {
+  background: var(--app-surface);
+  color: var(--app-text-strong);
+  box-shadow: var(--shadow-sm);
+}
+
+.chat-view-switch-option:disabled {
+  cursor: not-allowed;
+}
+
+.chat-view-switch-option:focus-visible,
+.chat-members-button:focus-visible,
+.chat-delegation-row:focus-visible,
+.chat-worked-fold-toggle:focus-visible,
+.chat-member-chip:focus-visible,
+.chat-model-chip:focus-visible,
+.chat-agent-row-main:focus-visible,
+.chat-agents-group-toggle:focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring);
+}
+
+.chat-members-button {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 28px;
+  padding: 0 10px;
+  border: 1px solid var(--app-border);
+  border-radius: var(--radius-control);
+  background: var(--app-surface);
+  color: var(--app-text);
+  font-size: 12px;
+  font-weight: 500;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.chat-members-button:hover,
+.chat-members-button.is-open {
+  background: var(--ui-row-hover);
+  color: var(--app-text-strong);
+}
+
+.chat-view-switch-option {
+  display: inline-flex;
+  align-items: center;
+}
+
+.chat-view-switch-icon,
+.chat-members-button-count {
+  display: none;
+}
+
+/* The chat's header keeps its title when a right panel narrows it: the
+   title side keeps a readable width and truncates with an ellipsis, and
+   the view controls compact first: Members to its icon and how many run,
+   then the view switch to its icons. */
+.chat-view > [data-shell="topbar"] {
+  container: chat-topbar / inline-size;
+}
+
+/* The title side's min-w-0 is a utility class, which wins over this layer
+   unless marked. */
+.chat-view > [data-shell="topbar"] > div:first-child {
+  min-width: min(150px, 45%) !important;
+}
+
+@container chat-topbar (max-width: 680px) {
+  .chat-members-button {
+    gap: 4px;
+    padding: 0 8px;
+  }
+
+  .chat-members-button-label {
+    display: none;
+  }
+
+  .chat-members-button-count {
+    display: inline;
+    font-variant-numeric: tabular-nums;
+  }
+}
+
+@container chat-topbar (max-width: 540px) {
+  .chat-view-switch-option {
+    padding: 0 6px;
+  }
+
+  .chat-view-switch-label {
+    display: none;
+  }
+
+  .chat-view-switch-icon {
+    display: block;
+  }
+}
+
+/* Main timeline: no avatars; the User's messages are bubbles on the right */
+
+.message.chat-message.is-sessions {
+  grid-template-columns: minmax(0, 1fr);
+}

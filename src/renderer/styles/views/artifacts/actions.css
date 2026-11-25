@@ -1,0 +1,146 @@
+.artifact-primary-action,
+.artifact-secondary-action {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 5px 11px;
+  border-radius: 8px;
+  font-size: 12px;
+  font-weight: 500;
+  cursor: pointer;
+  border: 1px solid var(--app-border);
+  background: var(--app-surface);
+  color: var(--app-text);
+}
+
+.artifact-primary-action {
+  background: var(--app-primary);
+  border-color: var(--app-primary);
+  color: var(--app-primary-fg);
+}
+
+.artifact-primary-action:hover:not(:disabled) {
+  background: var(--app-primary-hover);
+}
+
+.artifact-secondary-action:hover:not(:disabled) {
+  background: var(--ui-row-hover);
+}
+
+.artifact-primary-action:disabled {
+  border-color: var(--app-border);
+  background: var(--app-surface-subtle);
+  color: var(--app-muted);
+  cursor: default;
+}
+
+.artifact-secondary-action:disabled {
+  opacity: 0.55;
+  cursor: default;
+}
+
+.artifact-draft-unavailable {
+  display: grid;
+  min-height: 180px;
+  flex: 1 1 auto;
+  margin: 12px 16px 16px;
+  place-items: center;
+  border: 1px solid var(--app-border);
+  border-radius: 8px;
+  background: var(--app-surface-subtle);
+  color: var(--app-muted);
+  font-size: 12px;
+}
+
+.artifact-content-markdown,
+.artifact-diff-pre {
+  margin: 0;
+  padding: 10px 12px;
+  border: 1px solid var(--app-border);
+  border-radius: 8px;
+  background: var(--app-surface-subtle);
+  overflow-wrap: anywhere;
+  max-height: 46vh;
+  overflow-y: auto;
+}
+
+.artifact-content-surface {
+  position: relative;
+  display: flex;
+  min-height: 0;
+}
+
+.artifact-detail > .artifact-content-surface {
+  min-height: 180px;
+  flex: 1 1 auto;
+}
+
+.artifact-content-surface > .artifact-content-markdown {
+  min-height: 0;
+  max-height: none;
+  flex: 1 1 auto;
+  padding-right: 48px;
+}
+
+.artifact-content-markdown .markdown-text {
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.artifact-diff-pre {
+  font-family: var(--font-code);
+  font-size: 12px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+}
+
+.artifact-detail > .artifact-diff-pre {
+  flex: 1 1 auto;
+  min-height: 180px;
+  max-height: none;
+}
+
+.artifact-diff-loading {
+  display: grid;
+  min-height: 180px;
+  flex: 1 1 auto;
+  place-items: center;
+  border: 1px solid var(--app-border);
+  border-radius: 8px;
+  background: var(--app-surface-subtle);
+  color: var(--app-muted);
+  font-size: 12px;
+}
+
+.artifact-diff-add {
+  color: var(--app-success);
+}
+
+.artifact-diff-del {
+  color: var(--app-danger);
+}
+
+.artifact-diff-hunk {
+  color: var(--app-muted);
+}
+
+.artifact-draft-inbox {
+  overflow-y: auto;
+}
+
+.artifact-error {
+  margin: 8px 12px 0;
+  padding: 8px 10px;
+  border: 1px solid var(--app-border-strong);
+  border-radius: 8px;
+  background: var(--app-surface-muted);
+  color: var(--app-text);
+  font-size: 12px;
+}
+
+.artifact-stale-actions {
+  margin-top: 6px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}

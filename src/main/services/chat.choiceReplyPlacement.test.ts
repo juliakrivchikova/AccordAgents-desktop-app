@@ -6,6 +6,7 @@ import { chatMessageHiddenFromTimeline, chatMessageVisualThreadRootId } from "..
 import { DEFAULT_CHAT_PROMPT_CONTEXT } from "../../shared/chatPromptContext";
 import type { ChatMessage, ChatParticipant, ChatRoleConfig, Conversation, ParticipantConfig } from "../../shared/types";
 import { ChatService } from "./chat";
+import { chatParts } from "./chat/test/chatParts";
 import { timelineEventsFromSnapshot } from "./mobileTimeline";
 
 /**
@@ -59,11 +60,8 @@ function harness(replies: Record<string, string[]>, messages: ChatMessage[] = []
     }
   };
   const service = new ChatService(storage as never, settings as never, cliRunner as never, { async write() {} } as never);
-  const internals = service as unknown as {
-    ensureHistoryFiles: () => Promise<string>;
-    choiceExpiryTimers: Map<string, { timer: NodeJS.Timeout }>;
-  };
-  internals.ensureHistoryFiles = async () => tmpdir();
+  const internals = chatParts(service);
+  internals.chatHistory.ensureHistoryFiles = async () => tmpdir();
   const stored = () => storage.current;
   const settle = async () => {
     await until(() => !stored().messages.some((message) => message.status === "pending") && stored().metadata.running !== true);
@@ -94,8 +92,8 @@ function harness(replies: Record<string, string[]>, messages: ChatMessage[] = []
   const rootOf = (message: ChatMessage) => chatMessageVisualThreadRootId(stored(), message);
   const visible = (message: ChatMessage) => !chatMessageHiddenFromTimeline(stored(), message);
   const stopTimers = () => {
-    for (const { timer } of internals.choiceExpiryTimers.values()) clearTimeout(timer);
-    internals.choiceExpiryTimers.clear();
+    for (const { timer } of internals.choiceExpiry.choiceExpiryTimers.values()) clearTimeout(timer);
+    internals.choiceExpiry.choiceExpiryTimers.clear();
   };
   const phoneEvents = () => timelineEventsFromSnapshot(stored(), 1_000);
   return { stored, runs, send, asking, answerChoice, choiceAnswer, rootOf, visible, phoneEvents, stopTimers };

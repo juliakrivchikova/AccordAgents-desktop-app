@@ -4,6 +4,7 @@
 // command, the file). The desktop and the phone read the same rows; the phone
 // gets them already made (mobileTimeline.ts, hubPhoneState.ts), short.
 
+import { claudeStepBlocks, claudeStepSummary } from "./claudeStepFold";
 import type { ChatAgentActivityEvent } from "./types";
 
 /** What a row is about: its icon. */
@@ -14,6 +15,11 @@ export interface SessionsActivityRow {
   /** One line: what the step is about. */
   text: string;
 }
+
+/** A phone's row: a step, or steps folded into one line as Claude Code folds
+ *  them (claudeStepFold.ts), drawn without an icon. A phone app from before
+ *  folding draws such a line as the status row its kind says. */
+export type PhoneActivityRow = SessionsActivityRow & { folded?: true };
 
 /** The rows a phone gets of one reply at most (the newest), and each row's
  *  length: a reply that ran hundreds of tools stays a few lines on the wire. */
@@ -77,18 +83,40 @@ export function sessionsActivityRow(event: Pick<ChatAgentActivityEvent, "kind" |
   }
 }
 
+type PhoneActivityEvent = Pick<ChatAgentActivityEvent, "kind" | "label" | "detail">;
+
+/** A Claude Code member's steps, folded; the newest fold says the step it is
+ *  at while the reply is being written. */
+function foldedPhoneRows(events: readonly PhoneActivityEvent[], live: boolean): PhoneActivityRow[] {
+  const blocks = claudeStepBlocks(events);
+  return blocks.map((block, index): PhoneActivityRow => {
+    if (!block.fold) return sessionsActivityRow(block.event);
+    const newest = block.events[block.events.length - 1]!;
+    return { kind: "status", folded: true, text: live && index === blocks.length - 1 ? sessionsActivityRow(newest).text : claudeStepSummary(block.events) };
+  });
+}
+
 /** A reply's newest rows as the phone gets them, and how many earlier ones
- *  were left out. */
+ *  were left out. `claude`: its member runs on Claude Code. `live`: it is
+ *  being written. */
 export function phoneSessionsActivity(
-  events: ReadonlyArray<Pick<ChatAgentActivityEvent, "kind" | "label" | "detail">> | undefined
-): { activity: SessionsActivityRow[]; activityMore?: number } | undefined {
+  events: readonly PhoneActivityEvent[] | undefined,
+  options: { claude?: boolean; live?: boolean } = {}
+): { activity: PhoneActivityRow[]; activityMore?: number } | undefined {
   if (!Array.isArray(events) || events.length === 0) return undefined;
-  const rows = events.map(sessionsActivityRow).filter((row) => row.text);
+  const all: PhoneActivityRow[] = options.claude ? foldedPhoneRows(events, options.live === true) : events.map(sessionsActivityRow);
+  const rows = all.filter((row) => row.text);
   if (rows.length === 0) return undefined;
   const kept = rows.slice(-PHONE_ACTIVITY_ROWS_MAX).map((row) => ({
-    kind: row.kind,
+    ...row,
     text: row.text.length > PHONE_ACTIVITY_ROW_CHARS ? `${row.text.slice(0, PHONE_ACTIVITY_ROW_CHARS - 1).trimEnd()}…` : row.text
   }));
   const more = rows.length - kept.length;
   return more > 0 ? { activity: kept, activityMore: more } : { activity: kept };
+}
+
+/** Whether a reply's member runs on Claude Code (its steps are folded). */
+export function isClaudeMember(participants: unknown, participantId: string | undefined): boolean {
+  return Boolean(participantId) && Array.isArray(participants) &&
+    participants.some((member: { id?: unknown; kind?: unknown }) => member?.id === participantId && member.kind === "claude-code");
 }

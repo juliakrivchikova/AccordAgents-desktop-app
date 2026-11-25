@@ -1,0 +1,483 @@
+.act-swipe-actions {
+  position: absolute;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  display: flex;
+  align-items: stretch;
+}
+
+.act-swipe-action {
+  width: 88px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  border: 0;
+  padding: 0;
+  background: var(--s2);
+  color: var(--fg);
+  font: 600 12px var(--sans);
+  cursor: pointer;
+}
+
+.act-swipe-cancel,
+.act-swipe-clear {
+  color: var(--danger);
+}
+
+/* The pressed state of a tappable row is 0,2,0 and would otherwise win over
+   this while the finger is on it, leaving the row the same colour as the
+   action behind it — the row would read as transparent mid-swipe. */
+.act-swipe .act-swipe-surface,
+.act-swipe .act-swipe-surface:active {
+  position: relative;
+  background: var(--surface);
+  transition: transform 160ms ease;
+  touch-action: pan-y;
+}
+
+.act-swipe[data-swiped="1"] .act-swipe-surface {
+  transform: translateX(-88px);
+}
+
+/* The press still shows on a row that can be opened: laid over the opaque
+   surface rather than replacing it, so the row never reads as transparent. */
+.act-swipe .act-swipe-surface[data-tappable="1"]:active::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background: var(--press);
+  pointer-events: none;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .act-swipe .act-swipe-surface {
+    transition: none;
+  }
+}
+
+/* ---- Activity ---- */
+#activity-screen {
+  position: relative;
+}
+
+.act-tabs {
+  flex-shrink: 0;
+  display: flex;
+  gap: 24px;
+  padding: 0 20px;
+  border-bottom: 1px solid var(--bdf);
+}
+
+.act-tab {
+  position: relative;
+  min-height: 44px;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  border: 0;
+  padding: 0;
+  background: transparent;
+  color: var(--mut);
+  font: 600 14.5px var(--sans);
+  cursor: pointer;
+}
+
+.act-tab[data-active="true"] {
+  color: var(--fg1);
+}
+
+.act-tab-count {
+  font: 700 12px var(--sans);
+  color: var(--mut);
+}
+
+.act-tab-bar {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: -1px;
+  height: 3px;
+  border-radius: 999px 999px 0 0;
+  background: var(--acc);
+}
+
+.act-list {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 4px 0 18px;
+}
+
+.act-empty {
+  margin-top: 18px;
+}
+
+.act-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 13px;
+  padding: 13px 20px;
+}
+
+.act-avatar {
+  flex-shrink: 0;
+}
+
+/* A sessions-view chat's row: its provider's logo, no avatar picture. */
+.act-avatar-glyph {
+  width: 38px;
+  height: 38px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.act-col {
+  flex: 1;
+  min-width: 0;
+}
+
+.act-main {
+  display: block;
+  width: 100%;
+  border: 0;
+  padding: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.act-top {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+
+.act-chat-title {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font: 600 15px var(--disp);
+  letter-spacing: -0.012em;
+  color: var(--fg1);
+}
+
+/* "by @drew": who, in the plain weight, after the chat it happened in. */
+.act-by {
+  font: 400 14px var(--sans);
+  letter-spacing: 0;
+  color: var(--mut);
+}
+
+.act-time {
+  flex-shrink: 0;
+  font: 400 12.5px var(--sans);
+  color: var(--mut);
+}
+
+.act-elapsed {
+  flex-shrink: 0;
+  font: 400 13px var(--mono);
+  color: var(--mut);
+}
+
+.act-dot {
+  width: 8px;
+  height: 8px;
+  flex-shrink: 0;
+  border-radius: 50%;
+  background: var(--acc);
+}
+
+.act-dot-pending {
+  background: var(--warn);
+  box-shadow: 0 0 0 3px var(--warn-soft);
+}
+
+/* How many finished updates the row stands for: accent while unseen. */
+.act-badge {
+  min-width: 18px;
+  height: 18px;
+  flex-shrink: 0;
+  padding: 0 5px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 999px;
+  background: var(--acc);
+  color: var(--surface-fg);
+  font: 700 11px var(--sans);
+}
+
+.act-badge-read {
+  background: var(--s2);
+  color: var(--mut);
+}
+
+.act-preview {
+  display: -webkit-box;
+  margin-top: 3px;
+  overflow: hidden;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  font: 400 13.5px var(--sans);
+  line-height: 1.4;
+  color: var(--mut);
+  overflow-wrap: anywhere;
+}
+
+.act-row.is-unread .act-preview {
+  color: var(--fg);
+}
+
+/* A permission is answered in the row, so every word of it is shown, line
+   breaks kept, as the chat's card shows it. */
+.act-preview.act-preview-full {
+  display: block;
+  overflow: visible;
+  -webkit-line-clamp: unset;
+  white-space: pre-wrap;
+}
+
+.act-row[data-tappable="1"] {
+  cursor: pointer;
+}
+
+.act-row[data-tappable="1"]:active {
+  background: var(--s2);
+}
+
+.act-actions {
+  margin-top: 10px;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.act-pill,
+.set-button {
+  position: relative;
+  min-height: 36px;
+  padding: 0 15px;
+  border: 1px solid var(--bd);
+  border-radius: 999px;
+  background: var(--surface);
+  color: var(--fg1);
+  font: 600 13.5px var(--sans);
+  cursor: pointer;
+}
+
+/* The pill is drawn 36px tall; what a finger can hit is 44px. */
+.act-pill::after,
+.set-button::after {
+  content: "";
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: -4px;
+  bottom: -4px;
+}
+
+.set-button[disabled] {
+  opacity: 0.5;
+}
+
+.act-pill-primary {
+  border-color: var(--fg1);
+  background: var(--fg1);
+  color: var(--surface-fg);
+}
+
+.act-pill[disabled] {
+  opacity: 0.5;
+}
+
+.act-state {
+  margin: 8px 0 0;
+  font: 400 12.5px var(--sans);
+  color: var(--mut);
+}
+
+.act-chevron {
+  flex-shrink: 0;
+  align-self: center;
+  margin-right: -4px;
+  display: flex;
+  color: var(--mut);
+}
+
+/* A small round stop, with the full 44px to tap. */
+.act-stop {
+  width: 44px;
+  height: 44px;
+  flex-shrink: 0;
+  align-self: center;
+  margin-right: -8px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: 0;
+  padding: 0;
+  background: transparent;
+  cursor: pointer;
+}
+
+.act-stop-ring {
+  width: 30px;
+  height: 30px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: 1.5px solid var(--bd);
+  border-radius: 50%;
+  background: var(--surface);
+}
+
+.act-stop-square {
+  width: 10px;
+  height: 10px;
+  border-radius: 2.5px;
+  background: var(--fg1);
+}
+
+.act-stop[disabled] {
+  opacity: 0.45;
+}
+
+/* ---- One choice, opened from Activity ---- */
+.act-item {
+  position: absolute;
+  inset: 0;
+  z-index: 6;
+  display: flex;
+  flex-direction: column;
+  padding-left: env(safe-area-inset-left);
+  padding-right: env(safe-area-inset-right);
+  background: var(--surface);
+}
+
+.act-item[hidden] {
+  display: none;
+}
+
+.act-open-chat {
+  width: 44px;
+  height: 44px;
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: 0;
+  padding: 0;
+  background: transparent;
+  color: var(--fg1);
+  cursor: pointer;
+}
+
+.act-detail {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 18px 18px calc(24px + env(safe-area-inset-bottom));
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+}
+
+.act-item-message-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 8px;
+}
+
+.act-item-message-head .mobile-chat-avatar {
+  width: 32px;
+  height: 32px;
+}
+
+.act-item-message .message-content {
+  font: 400 15px var(--sans);
+  line-height: 1.5;
+  color: var(--fg1);
+}
+
+/* The chat's own card, laid out for reading: options are whole sentences, so
+   they stack at full width instead of wrapping as pills. */
+.act-detail .control-card {
+  border: 1px solid var(--bd);
+  border-radius: 18px;
+  padding: 16px;
+  background: var(--surface);
+  box-shadow: var(--pill-shadow);
+}
+
+.act-detail .control-card-head {
+  flex-wrap: wrap;
+  margin-bottom: 6px;
+}
+
+.act-detail .control-card-title {
+  font: 600 17px var(--disp);
+  letter-spacing: -0.015em;
+  color: var(--fg1);
+}
+
+.act-detail .control-card-who {
+  font: 400 12.5px var(--sans);
+  color: var(--mut);
+  opacity: 1;
+}
+
+.act-detail .control-card-summary {
+  margin: 0;
+  font: 400 15px var(--sans);
+  line-height: 1.45;
+  color: var(--fg);
+}
+
+.act-detail .control-card-options {
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 14px;
+}
+
+.act-detail .control-card-option {
+  min-height: 48px;
+  padding: 12px 16px;
+  border: 1px solid var(--bd);
+  border-radius: 14px;
+  background: var(--surface);
+  color: var(--fg1);
+  font: 500 15px var(--sans);
+  line-height: 1.35;
+  text-align: left;
+}
+
+.act-detail .control-card-option[data-option-id="cancel"] {
+  align-self: flex-start;
+  min-height: 44px;
+  border-color: transparent;
+  padding: 0 12px;
+  color: var(--acc);
+  font-weight: 600;
+}
+
+/* ---- Settings ---- */
+.set-list {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 4px 16px 24px;
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+}

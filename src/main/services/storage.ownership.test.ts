@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { StorageService } from "./storage";
+import { storageParts } from "./storage/test/storageParts";
 import { resolveSqliteExecutable } from "./sqliteCli";
 import type { ChatMessage, Conversation } from "../../shared/types";
 
@@ -39,8 +40,8 @@ async function openStorage(): Promise<{ storage: StorageService; directory: stri
     dbPath: path.join(directory, "accordagents.sqlite3"),
     sqliteExecutable: SQLITE_EXECUTABLE
   });
-  const raw = storage as unknown as { runSql(statement: string, timeoutMs?: number): Promise<void> };
-  return { storage, directory, runSql: (sql) => raw.runSql.call(storage, sql) };
+  const raw = storageParts(storage).sqlite as unknown as { runSql(statement: string, timeoutMs?: number): Promise<void> };
+  return { storage, directory, runSql: (sql) => raw.runSql.call(raw, sql) };
 }
 
 test("a save returns the token it stamped, and the row is owned by that token until anyone else writes it", async () => {

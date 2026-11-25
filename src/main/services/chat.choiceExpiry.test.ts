@@ -7,6 +7,7 @@ import { DEFAULT_CHAT_PROMPT_CONTEXT } from "../../shared/chatPromptContext";
 import { choiceCardId } from "../../shared/hubCards";
 import type { ChatMessage, ChatParticipant, ChatRoleConfig, Conversation, ParticipantConfig } from "../../shared/types";
 import { ChatService } from "./chat";
+import { chatParts } from "./chat/test/chatParts";
 
 /**
  * A member's choice card closes (the User, 2026-11-15) as soon as a message
@@ -65,19 +66,10 @@ function harness(initial: Conversation, replies: Record<string, string[]> = {}) 
   };
   const events: string[] = [];
   const service = new ChatService(storage as never, settings as never, cliRunner as never, { async write(event: string) { events.push(event); } } as never);
-  const internals = service as unknown as {
-    ensureHistoryFiles: () => Promise<string>;
-    choiceExpiryNow: () => number;
-    choiceExpiryTimers: Map<string, { atMs: number; timer: NodeJS.Timeout }>;
-    sweepChoiceExpiry(conversationId: string): Promise<void>;
-    withChatMutation(conversation: Conversation, mutate: () => Promise<void>): Promise<void>;
-    saveConversation(conversation: Conversation): Promise<void>;
-    serverLink?: unknown;
-    serverCards: { reconciled: boolean; noteServer(card: unknown, seq: number): boolean };
-  };
-  internals.ensureHistoryFiles = async () => tmpdir();
+  const internals = chatParts(service);
+  internals.chatHistory.ensureHistoryFiles = async () => tmpdir();
   let offsetMs = 0;
-  internals.choiceExpiryNow = () => Date.now() + offsetMs;
+  internals.choiceExpiry.choiceExpiryNow = () => Date.now() + offsetMs;
   const advance = (ms: number) => { offsetMs += ms; };
   const stored = () => storage.current;
   const choiceOf = (messageId: string) => stored().messages.find((message) => message.id === messageId)?.metadata?.pendingChoice;
@@ -96,7 +88,7 @@ function harness(initial: Conversation, replies: Record<string, string[]> = {}) 
   };
   const askingMessage = () => stored().messages.find((message) => message.metadata?.pendingChoice)!;
   return { service, internals, storage, runs, prompts, events, advance, stored, choiceOf, send, settle, askingMessage,
-    stopTimers: () => { for (const { timer } of internals.choiceExpiryTimers.values()) clearTimeout(timer); internals.choiceExpiryTimers.clear(); } };
+    stopTimers: () => { for (const { timer } of internals.choiceExpiry.choiceExpiryTimers.values()) clearTimeout(timer); internals.choiceExpiry.choiceExpiryTimers.clear(); } };
 }
 
 async function until(done: () => boolean, ms = 5_000): Promise<void> {
@@ -150,13 +142,13 @@ test("a choice closed at once is not brought back by a copy read before, and the
   const stale = clone(h.stored());
   await h.send("@taylor actually, one more thing");
   await until(() => Boolean(h.choiceOf(asking.id)?.expiredAt));
-  assert.equal(h.internals.choiceExpiryTimers.has("chat-expiry"), false, "nothing more to wait for");
+  assert.equal(h.internals.choiceExpiry.choiceExpiryTimers.has("chat-expiry"), false, "nothing more to wait for");
   await h.send("@taylor and another");
   assert.equal(h.prompts.at(-1)?.includes("closed without an answer"), false, "said once, by the message that closed it");
   // A longer flow saves the copy it read while the card still waited.
-  await h.internals.withChatMutation(stale, async () => {
+  await h.internals.store.withChatMutation(stale, async () => {
     stale.updatedAt = new Date().toISOString();
-    await h.internals.saveConversation(stale);
+    await h.internals.store.saveConversation(stale);
   });
   assert.ok(h.choiceOf(asking.id)?.expiredAt, "still expired");
 });
@@ -167,7 +159,7 @@ test("a card this device heard was answered is not reported to the member as clo
   await h.send("@taylor which store?");
   const asking = h.askingMessage();
   // Her answer from the phone is on its way here while she types on the desktop.
-  h.internals.serverCards.noteServer({ cardId: choiceCardId(asking.id), conversationId: "chat-expiry", cardKind: "choice", state: "answered", card: {} }, 1);
+  h.internals.serverCards.book.noteServer({ cardId: choiceCardId(asking.id), conversationId: "chat-expiry", cardKind: "choice", state: "answered", card: {} }, 1);
   await h.send("@taylor and one more thing");
   assert.equal(h.prompts.at(-1)?.includes("closed without an answer"), false, "her answer closes it, not her message");
   assert.equal(h.choiceOf(asking.id)?.status, "pending", "left to the answer");
@@ -218,12 +210,12 @@ test("a choice does not expire when the User only wrote to another member, or ne
   t.after(h.stopTimers);
   await h.send("@taylor which store?");
   const asking = h.askingMessage();
-  await h.internals.sweepChoiceExpiry("chat-expiry");
+  await h.internals.choiceExpiry.sweepChoiceExpiry("chat-expiry");
   assert.equal(h.choiceOf(asking.id)?.status, "pending", "nobody was asked after it");
   await h.send("@drew what do you think?");
-  await h.internals.sweepChoiceExpiry("chat-expiry");
+  await h.internals.choiceExpiry.sweepChoiceExpiry("chat-expiry");
   assert.equal(h.choiceOf(asking.id)?.status, "pending", "she went on with another member");
-  assert.equal(h.internals.choiceExpiryTimers.size, 0);
+  assert.equal(h.internals.choiceExpiry.choiceExpiryTimers.size, 0);
 });
 
 test("answering another of the member's cards goes on with it: the older card expires", async (t) => {
@@ -265,54 +257,54 @@ test("at a start, choices that expired while the app was closed are closed, neve
   // this device has not heard of yet (it was off, or out of reach).
   let serverState: "pending" | "answered" = "answered";
   let reads = 0;
-  h.internals.serverLink = { deviceId: () => "this-device", openCards: async () => {
+  h.internals.serverLink.current = { deviceId: () => "this-device", openCards: async () => {
     reads += 1;
     return { cards: [{ cardId, conversationId: "chat-expiry", cardKind: "choice", state: serverState, card: {} }], head: 1 };
   } };
   await h.service.resumeChoiceExpiry(["chat-expiry"]);
   assert.equal(h.choiceOf("ask")?.status, "pending", "not before the server's open cards were read");
   assert.equal(reads, 0);
-  h.internals.serverCards.reconciled = true;
+  h.internals.serverCards.book.reconciled = true;
   await h.service.resumeChoiceExpiry(["chat-expiry"]);
   assert.equal(h.choiceOf("ask")?.status, "pending", "the server holds an answer: left to it");
   assert.equal(reads, 1, "the server was asked");
   assert.equal(h.events.includes("chat.choice.expired"), false, "not closed, not even unsaved");
-  assert.ok(h.internals.choiceExpiryTimers.has("chat-expiry"), "looked at again later");
+  assert.ok(h.internals.choiceExpiry.choiceExpiryTimers.has("chat-expiry"), "looked at again later");
   // This device heard of the answer (it is being applied): left to it too,
   // whatever the server's list said.
   serverState = "pending";
-  h.internals.serverCards.noteServer({ cardId, conversationId: "chat-expiry", cardKind: "choice", state: "answered", card: {} }, 1);
+  h.internals.serverCards.book.noteServer({ cardId, conversationId: "chat-expiry", cardKind: "choice", state: "answered", card: {} }, 1);
   await h.service.resumeChoiceExpiry(["chat-expiry"]);
   assert.equal(h.choiceOf("ask")?.status, "pending");
   // The server cannot be asked: nothing is closed.
-  h.internals.serverCards.noteServer({ cardId, conversationId: "chat-expiry", cardKind: "choice", state: "pending", card: {} }, 2);
-  h.internals.serverLink = { deviceId: () => "this-device", openCards: async () => { throw new Error("The hub could not be reached."); } };
+  h.internals.serverCards.book.noteServer({ cardId, conversationId: "chat-expiry", cardKind: "choice", state: "pending", card: {} }, 2);
+  h.internals.serverLink.current = { deviceId: () => "this-device", openCards: async () => { throw new Error("The hub could not be reached."); } };
   await h.service.resumeChoiceExpiry(["chat-expiry"]);
   assert.equal(h.choiceOf("ask")?.status, "pending", "unreachable: not decided");
   assert.ok(h.events.includes("chat.choice.expiry-error"));
   // Between two links (one stopped, the next not installed yet): not decided.
   h.service.setServerLink(undefined);
-  (h.service as unknown as { serverLinkInstalled: boolean }).serverLinkInstalled = true;
-  await h.internals.sweepChoiceExpiry("chat-expiry");
+  (chatParts(h.service).serverLink as unknown as { serverLinkInstalled: boolean }).serverLinkInstalled = true;
+  await h.internals.choiceExpiry.sweepChoiceExpiry("chat-expiry");
   assert.equal(h.choiceOf("ask")?.status, "pending", "between links: not decided");
   // A device that never had a server (only in tests: the desktop always
   // runs one, its own when the User has none). Expired, from its reply's time.
-  (h.service as unknown as { serverLinkInstalled: boolean }).serverLinkInstalled = false;
-  await h.internals.sweepChoiceExpiry("chat-expiry");
+  (chatParts(h.service).serverLink as unknown as { serverLinkInstalled: boolean }).serverLinkInstalled = false;
+  await h.internals.choiceExpiry.sweepChoiceExpiry("chat-expiry");
   assert.ok(h.choiceOf("ask")?.expiredAt, "a card saved before its asking time was kept expires as well");
 });
 
 test("a far-off expiry time does not overflow the chat's timer", async (t) => {
   const h = harness(conversation());
   t.after(h.stopTimers);
-  const schedule = (h.service as unknown as { scheduleChoiceExpiry(id: string, atMs: number | undefined, options?: { replace?: boolean }): void }).scheduleChoiceExpiry
-    .bind(h.service);
+  const schedule = (id: string, atMs: number | undefined, options?: { replace?: boolean }): void =>
+    h.internals.choiceExpiry.scheduleChoiceExpiry(id, atMs, options);
   schedule("chat-expiry", Date.now() + 40 * 24 * HOUR, { replace: true });
-  const entry = h.internals.choiceExpiryTimers.get("chat-expiry");
+  const entry = h.internals.choiceExpiry.choiceExpiryTimers.get("chat-expiry");
   assert.ok(entry);
   assert.ok((entry!.timer as unknown as { _idleTimeout: number })._idleTimeout <= 5 * 60_000 + 1_000, "fires within a retry and looks again");
   schedule("chat-expiry", undefined, { replace: true });
-  assert.equal(h.internals.choiceExpiryTimers.has("chat-expiry"), false, "none when nothing waits");
+  assert.equal(h.internals.choiceExpiry.choiceExpiryTimers.has("chat-expiry"), false, "none when nothing waits");
 });
 
 test("a cancel that crosses the expiry is the User's: the card says Cancelled", async (t) => {
@@ -340,17 +332,17 @@ test("an expired choice the User answered on the server stays open there until h
   const h = harness(conversation([expired]));
   t.after(h.stopTimers);
   const cardId = choiceCardId("ask");
-  h.internals.serverLink = { deviceId: () => "this-device" };
-  h.internals.serverCards.reconciled = true;
-  const opsFor = () => (h.service as unknown as { serverCardOpsFor(c: Conversation): { ops: Array<{ kind: string; cardId?: string }> } })
+  h.internals.serverLink.current = { deviceId: () => "this-device" };
+  h.internals.serverCards.book.reconciled = true;
+  const opsFor = () => (chatParts(h.service).serverCards as unknown as { serverCardOpsFor(c: Conversation): { ops: Array<{ kind: string; cardId?: string }> } })
     .serverCardOpsFor(clone(h.stored())).ops.filter((op) => op.cardId === cardId);
   // Known open and unanswered here: closed, saying nobody answered it.
-  h.internals.serverCards.noteServer({ cardId, conversationId: "chat-expiry", cardKind: "choice", state: "pending", raisedBy: "this-device", card: {} }, 1);
+  h.internals.serverCards.book.noteServer({ cardId, conversationId: "chat-expiry", cardKind: "choice", state: "pending", raisedBy: "this-device", card: {} }, 1);
   const closing = opsFor();
   assert.deepEqual(closing.map((op) => op.kind), ["card.settle"]);
   assert.equal(((closing[0] as unknown as { outcome: { result: string; unanswered?: boolean } }).outcome).unanswered, true, "only while nobody answered it");
   // Answered on the server (her answer crossed the expiry): kept open for it.
-  h.internals.serverCards.noteServer({ cardId, conversationId: "chat-expiry", cardKind: "choice", state: "answered", raisedBy: "this-device", card: {} }, 2);
+  h.internals.serverCards.book.noteServer({ cardId, conversationId: "chat-expiry", cardKind: "choice", state: "answered", raisedBy: "this-device", card: {} }, 2);
   assert.deepEqual(opsFor(), [], "not settled as applied before her answer is");
 });
 

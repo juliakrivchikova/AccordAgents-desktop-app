@@ -18,6 +18,7 @@ import { createRequire } from "node:module";
 import fs from "node:fs";
 import path from "node:path";
 import test from "node:test";
+import { sourceParts } from "./source-parts.mjs";
 
 const require = createRequire(import.meta.url);
 const repoRoot = path.resolve(path.dirname(new URL(import.meta.url).pathname), "..");
@@ -31,12 +32,10 @@ const MESSAGING_MODULES = [
 ];
 
 test("no messaging module reaches the SSH installer", () => {
-  for (const relative of MESSAGING_MODULES) {
-    const file = path.join(repoRoot, relative);
-    if (!fs.existsSync(file)) continue;
-    const source = fs.readFileSync(file, "utf8");
+  for (const relative of MESSAGING_MODULES.flatMap((module) => sourceParts(repoRoot, module))) {
+    const source = fs.readFileSync(path.join(repoRoot, relative), "utf8");
     assert.ok(
-      !/from "\.\/machineInstaller"|from "\.\/machineInstallScripts"|machineInstaller"/.test(source),
+      !/from "[^"]*\/(machineInstaller|machineInstallScripts)(\/[^"]*)?"/.test(source),
       `${relative} must not import the machine installer: ordinary messaging never uses SSH.`
     );
   }

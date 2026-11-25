@@ -1,0 +1,126 @@
+.mobile-icon-button {
+  width: 44px;
+  height: 44px;
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: 0;
+  padding: 0;
+  color: var(--fg1);
+  background: transparent;
+  cursor: pointer;
+}
+
+.mobile-icon-button.is-muted {
+  color: var(--fg);
+}
+
+/* The author rule above sets display, which outranks the browser's own
+   [hidden] rule; state it here so a hidden button is really gone. */
+.mobile-icon-button[hidden] {
+  display: none;
+}
+
+.mobile-header-spacer {
+  width: 44px;
+  height: 44px;
+  flex-shrink: 0;
+}
+
+.mobile-header-spacer[hidden] {
+  display: none;
+}
+
+/* The way to the send log: before the members button, in the warning colour,
+   only while something sent has not reached the server or was refused. */
+.send-log-button {
+  color: var(--warn);
+}
+
+/* The way to the members, at the header's end: people and how many. The
+   button is the header's 44px tall, so the whole height takes the tap; the
+   pill inside is what is drawn. */
+.chat-members-button {
+  height: 44px;
+  min-width: 44px;
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: 0;
+  padding: 0;
+  background: transparent;
+  color: var(--fg1);
+  cursor: pointer;
+  -webkit-tap-highlight-color: transparent;
+}
+
+.chat-members-button[hidden] {
+  display: none;
+}
+
+.chat-members-pill {
+  height: 36px;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 0 11px;
+  border: 1px solid var(--bd);
+  border-radius: 18px;
+  background: var(--s2);
+  font: 600 14px var(--sans);
+  font-variant-numeric: tabular-nums;
+}
+
+.chat-members-button:active .chat-members-pill {
+  background: var(--press);
+}
+
+.chat-members-button:focus-visible {
+  outline: none;
+}
+
+.chat-members-button:focus-visible .chat-members-pill {
+  outline: 2px solid var(--fg1);
+  outline-offset: 1px;
+}
+
+#chat-members-count:empty {
+  display: none;
+}
+
+.mobile-title {
+  flex: 1;
+  min-width: 0;
+  /* It is a button now: the way to the members sheet. It must keep looking
+     like the title it always was. */
+  border: 0;
+  padding: 0;
+  margin: 0;
+  background: transparent;
+  color: inherit;
+  text-align: left;
+  font: inherit;
+  cursor: pointer;
+  -webkit-tap-highlight-color: transparent;
+}
+
+.mobile-title-name {
+  display: block;
+  margin: 0;
+  font: 600 16.5px var(--disp);
+  letter-spacing: -0.018em;
+  color: var(--fg1);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.mobile-title-state {
+  display: block;
+  margin: 1px 0 0;
+  min-height: 1.2em;
+  font: 400 13px var(--sans);
+  color: var(--mut);
+}

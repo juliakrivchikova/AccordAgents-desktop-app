@@ -39,7 +39,7 @@ verbatim there). Modelled on T3 Code (`~/reference/t3code`,
 - **In the sessions view an @handle in a member's reply starts nobody**
   (the User, 2026-11-22), as a mention in text wakes nobody in Claude Code:
   no turn, no task row, whoever wrote it (the main session included) and
-  wherever it runs (`ChatService.createImplicitParticipantRequestApproval`,
+  wherever it runs (`InferredRequests.createImplicitParticipantRequestApproval`,
   the same code on this computer and on a cloud machine). Its posts
   (`app_chat_send_message`) are the same; a main session's "@x /accord"
   starts no Accord and no warning. Members are asked with
@@ -370,7 +370,7 @@ switch is disabled.
     (the phone shows it under the message; the computer posts the message
     and refuses that member alone), and a phone or machine asking it any
     turn but a compaction, a restart or a move is refused too
-    (`HubOps.cliModesRefusal`), by each machine's program as the computer
+    (`MemberRules.cliModesRefusal`), by each machine's program as the computer
     last said it with her member rules (`HubMemberRules.machineCliModes`,
     published again when a hello changes it; an entry in another shape is
     left out). A machine that never greeted the computer is not held back:
@@ -448,7 +448,14 @@ switch is disabled.
     and what it is about (`sessionsActivityRow`, from the activity events
     the run already reports): thinking (brain), web search (globe), shell
     (terminal), file read (file), edit (pencil), any other tool (wrench);
-    the newest one shimmers (still for reduced motion). A step says what
+    the newest one shimmers (still for reduced motion). A Claude Code
+    member's reads, searches, listings, shell commands and MCP calls in a
+    row are folded into one line, as its CLI folds them (the User,
+    2026-11-25; `claudeStepFold.ts`): the step it is at while they run,
+    then how many of each ("Read 2 files, called accord_agents 4 times, ran
+    3 shell commands"); on the desktop the line opens to their rows. Edits,
+    new files, fetches, web searches and subagents stay rows of their own.
+    A step says what
     the member's own CLI says for it (`cliToolActivity.ts`, 2026-11-22: "Using
     Bash" told the User nothing): Claude Code's "Running <description in its
     -ing form, or the command cut to 50 columns>", "Reading src/a.ts",
@@ -465,18 +472,22 @@ switch is disabled.
     the call), while a refusal keeps its reason. Claude's ExitPlanMode and
     EnterPlanMode get no row: the CLI draws nothing at the call, and the
     plan card is ExitPlanMode's dialog.
-    A message the User sends while a Claude member works is "Queued" (no
-    clock) until its CLI hands it to the running step at the next tool
-    result; from then its reply is the turn's one "Working for", counted
+    A message the User sends while a Claude member works waits until its
+    CLI hands it to the running step at the next tool result; from then its
+    reply is the turn's one "Working for", counted
     from the start of the step it joined, as the CLI's one spinner is. The member's words and its posts
     stay its words, in order between the rows; its turn's tasks follow as
     their rows. No status label, no "Thinking" word, no grouped boxes, no
     Stop or copy on a running reply (the composer stops it, also with
-    text typed; a member's session head stops the member); a queued one is
-    taken back from a small × on hover (always on a touch screen, the
-    phone's at least 32px) and shows "Queued", no clock. A long turn
-    draws its newest 50 steps under a muted "N earlier steps" (a finished
-    fold opens them); a reply that waited in the queue counts its
+    text typed; a member's session head stops the member). A reply that
+    has not started has no row (the User, 2026-11-25: as Claude does, no
+    "Queued"); the message it answers has "Send now", which interrupts the
+    reply being written so the member takes what waits, and a × that takes
+    the message back (`waitingMessages.ts`, desktop and phone). In the
+    composer Enter sends and waits, Cmd or Ctrl with Enter sends now, and
+    Enter with nothing typed sends what already waits. A long turn
+    draws its newest 50 steps (a folded line is one) under a muted "N
+    earlier steps" (a finished fold opens them); a reply that waited in the queue counts its
     "Working for" from its own turn's start (`turnStartedAt`). A run on a
     machine shows where it stands ("Preparing the workspace") as its
     current step until its first own step. The phone gets a reply's newest 12 steps, each one
@@ -536,8 +547,7 @@ switch is disabled.
     main session's answer to a member's question is in that member's
     session from its first token (placed by the request it answers);
   - a finished message shows no member state; its time is with its controls
-    on hover. A reply still being written has its "Working for …" (above),
-    one still queued keeps "Queued";
+    on hover. A reply still being written has its "Working for …" (above);
   - a task's state is not taken from the member's earlier stopped or failed
     turn while the task waits (queued, a machine preparing);
   - no turn-finished note ("<X> finished answering"), the main session's

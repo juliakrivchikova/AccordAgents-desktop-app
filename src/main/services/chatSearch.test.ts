@@ -8,8 +8,28 @@ import type { ChatMessage, ChatParticipant, ChatSearchMessageMatch, ChatSearchRe
 import { buildChatSearchMatchQuery, ChatSearchService } from "./chatSearch";
 import { resolveSqliteExecutable } from "./sqliteCli";
 import { StorageService, type ChatSearchConversationSnapshot } from "./storage";
+import type { Sqlite } from "./storage/database/sqlite";
+import { storageParts } from "./storage/test/storageParts";
 
 const SQLITE_EXECUTABLE = resolveSqliteExecutable({ appPath: process.cwd() });
+
+test("chat search reads no reply's stream or steps, which are most of a chat's bytes", async () => {
+  await withStorage(async (storage) => {
+    await storage.saveConversation(conversation("long", "Long chat", false, [
+      message("u", "user", "Needle plan", "2026-01-01T00:00:01.000Z"),
+      message("r", "participant", "Visible answer", "2026-01-01T00:00:02.000Z", {
+        processingTranscript: { content: "x".repeat(400_000), originalLength: 400_000, capturedAt: "2026-01-01T00:00:03.000Z" },
+        activityEvents: [{ id: "a", sequence: 1, kind: "command", label: "Running tests", createdAt: "2026-01-01T00:00:02.000Z" }]
+      })
+    ]));
+    const [read] = await storage.readChatSearchConversations(["long"]);
+    assert.deepEqual(read!.conversation.messages.map((item) => item.content), ["Needle plan", "Visible answer"]);
+    assert.equal(read!.conversation.messages[1]!.metadata?.processingTranscript, undefined);
+    assert.equal(read!.conversation.messages[1]!.metadata?.activityEvents, undefined);
+    assert.equal(read!.snapshot.messageCount, 2);
+    assert.equal((await storage.getConversation("long"))!.messages[1]!.metadata?.processingTranscript?.content.length, 400_000, "the chat itself keeps them");
+  });
+});
 
 test("chat search rebuilds a derived index and excludes non-chat, hidden, control, raw, and debug content", async () => {
   await withStorage(async (storage) => {
@@ -85,7 +105,7 @@ test("chat search rebuilds a derived index and excludes non-chat, hidden, contro
     assert.equal(threadReply?.snippetText.includes("Needle"), true);
     assert.deepEqual(threadReply?.highlightRanges.map((range) => threadReply.snippetText.slice(range.start, range.end)), ["Needle"]);
 
-    await (storage as unknown as { runSql(sql: string): Promise<void> }).runSql(`
+    await (storageParts(storage).sqlite as unknown as { runSql(sql: string): Promise<void> }).runSql(`
       drop table chat_search_fts;
       drop table chat_search_state;
       delete from schema_meta where key = 'chat-search-index-version';
@@ -218,7 +238,7 @@ test("participant scope ignores unreadable foreign chats without leaking their i
     const preindexed = await new ChatSearchService(storage).search({ requester: { kind: "user" }, query: "isolatedword" });
     assert.equal(preindexed.status, "ok");
     assert.equal(preindexed.matches.length, 3);
-    await (storage as unknown as { runSql(sql: string): Promise<void> }).runSql(`
+    await (storageParts(storage).sqlite as unknown as { runSql(sql: string): Promise<void> }).runSql(`
       update conversations
       set body_json = '{invalid-json', payload_json = '{invalid-json'
       where id = 'scope-foreign';
@@ -238,7 +258,7 @@ test("participant scope ignores unreadable foreign chats without leaking their i
     assert.equal("failure" in isolated, false);
     assert.deepEqual(events, []);
 
-    await (storage as unknown as { runSql(sql: string): Promise<void> }).runSql(`
+    await (storageParts(storage).sqlite as unknown as { runSql(sql: string): Promise<void> }).runSql(`
       update conversations
       set body_json = '{invalid-json', payload_json = '{invalid-json'
       where id = 'scope-current';
@@ -332,6 +352,42 @@ test("chat search cursor pagination returns every result exactly once and reject
   });
 });
 
+test("chat search reads stale chats one at a time, each chat's members once", async () => {
+  await withStorage(async (storage) => {
+    const participants = Array.from({ length: 100 }, (_, index) => ({
+      ...participant(`member-${index}`, undefined, `@member-${index}`),
+      notes: "n".repeat(1_000)
+    } as ChatParticipant));
+    for (const id of ["first", "second"]) {
+      const chat = conversation(id, `Chat ${id}`, false, Array.from({ length: 50 }, (_, index) =>
+        message(`${id}-${index}`, "user", `oncepersearch ${index}`, `2026-06-01T00:00:${String(index).padStart(2, "0")}.000Z`)));
+      chat.metadata.participants = participants;
+      await storage.saveConversation(chat);
+    }
+    const reads: string[][] = [];
+    const originalRead = storage.readChatSearchConversations.bind(storage);
+    storage.readChatSearchConversations = async (conversationIds) => {
+      reads.push(conversationIds);
+      return originalRead(conversationIds);
+    };
+    const internals: Sqlite = storageParts(storage).sqlite;
+    const originalQuery = internals.queryJson.bind(internals);
+    let largest = 0;
+    internals.queryJson = async <T>(sql: string) => {
+      const rows = await originalQuery<T>(sql);
+      largest = Math.max(largest, JSON.stringify(rows).length);
+      return rows;
+    };
+    const result = await new ChatSearchService(storage).search({ requester: { kind: "user" }, query: "oncepersearch", limit: 200 });
+    assert.equal(result.status, "ok");
+    assert.equal(messageMatches(result).length, 100);
+    assert.deepEqual(reads.map((ids) => ids.length), [1, 1]);
+    // The members take about 250 KB as hex (twice, in the chat's body and by
+    // themselves); on each of the 50 messages they would be 12 MB.
+    assert.ok(largest < 1_500_000, `one read returned ${largest} characters`);
+  });
+});
+
 test("chat search retries a source race against the exact read snapshot", async () => {
   await withStorage(async (storage) => {
     const chat = conversation("race", "Race", false, [
@@ -352,6 +408,33 @@ test("chat search retries a source race against the exact read snapshot", async 
     assert.equal(result.status, "ok");
     assert.deepEqual(messageMatches(result).map((match) => match.messageId), ["race-new"]);
     assert.equal(result.coverage.messagePeriod?.to, "2026-06-01T00:00:01.000Z");
+  });
+});
+
+test("chat search keeps what it read when another chat changes or goes meanwhile", async () => {
+  await withStorage(async (storage) => {
+    const chats = ["kept", "changed", "deleted"].map((id, index) => {
+      const chat = conversation(id, `Chat ${id}`, false, [message(`${id}-first`, "user", `meanwhileword ${id}`, "2026-06-01T00:00:00.000Z")]);
+      chat.updatedAt = `2026-06-01T00:0${9 - index}:00.000Z`;
+      return chat;
+    });
+    for (const chat of chats) await storage.saveConversation(chat);
+    const reads: string[] = [];
+    const originalRead = storage.readChatSearchConversations.bind(storage);
+    storage.readChatSearchConversations = async (conversationIds) => {
+      const result = await originalRead(conversationIds);
+      reads.push(...conversationIds);
+      if (reads.length === 1) {
+        chats[1].messages.push(message("changed-second", "participant", "meanwhileword again", "2026-06-01T00:00:01.000Z"));
+        await storage.saveConversation(chats[1]);
+        await storage.deleteConversation("deleted");
+      }
+      return result;
+    };
+    const result = await new ChatSearchService(storage).search({ requester: { kind: "user" }, query: "meanwhileword" });
+    assert.equal(result.status, "ok");
+    assert.deepEqual(messageMatches(result).map((match) => match.messageId).sort(), ["changed-first", "changed-second", "kept-first"]);
+    assert.deepEqual(reads, ["kept", "changed", "deleted", "changed"]);
   });
 });
 
@@ -392,7 +475,7 @@ test("chat search repairs a wrong derived schema and preserves literal legacy ma
     const service = new ChatSearchService(storage);
     const initial = await service.search({ requester: { kind: "user" }, query: "repairword" });
     assert.equal(initial.status, "ok");
-    await (storage as unknown as { runSql(sql: string): Promise<void> }).runSql(`
+    await (storageParts(storage).sqlite as unknown as { runSql(sql: string): Promise<void> }).runSql(`
       drop table chat_search_state;
       create table chat_search_state (conversation_id text primary key);
     `);
@@ -406,7 +489,7 @@ test("chat search repairs a wrong derived schema and preserves literal legacy ma
       ["repairword"]
     );
 
-    await (storage as unknown as { runSql(sql: string): Promise<void> }).runSql(`
+    await (storageParts(storage).sqlite as unknown as { runSql(sql: string): Promise<void> }).runSql(`
       drop table chat_search_fts;
       create table chat_search_fts (
         conversation_id text,
@@ -434,7 +517,7 @@ test("canonical corruption fails closed with a safe detail and recovers after re
     const service = new ChatSearchService(storage, {
       write: async (event, payload) => { events.push({ event, payload }); }
     });
-    await (storage as unknown as { runSql(sql: string): Promise<void> }).runSql(`
+    await (storageParts(storage).sqlite as unknown as { runSql(sql: string): Promise<void> }).runSql(`
       update conversations set body_json = '{invalid-json', payload_json = '{invalid-json' where id = 'corrupt';
     `);
     const unavailable = await service.search({ requester: { kind: "user" }, query: "corruptword" });

@@ -8,6 +8,7 @@ import test from "node:test";
 import { createDeviceIdentity } from "../main/services/deviceIdentity";
 import { hubCertificateCrypto, sha256Hex, signHubRequest, signHubText } from "../main/services/hubAuth";
 import { StorageService } from "../main/services/storage";
+import { storageParts } from "../main/services/storage/test/storageParts";
 import { createHubDeviceClient, enrollHubPhone, createHubDeviceIdentity, hubTurnRunId, signHubRequestWeb } from "../shared/hubDeviceClient";
 import type { HubOp, HubOpsResponse } from "../shared/hubOps";
 import { hubPhoneInviteSigningText, verifyHubPhoneCertificate, verifyHubPhoneEnrollment, type HubPhoneCertificate, type HubPhoneInvite, type HubRosterResponse } from "../shared/hubProtocol";
@@ -835,7 +836,7 @@ test("only turns taken by a device that still exists count as running for the ph
     const turn = (runId: string, conversationId: string, state: string, executor: string | null, claimedAt = new Date().toISOString()) =>
       `insert into hub_turns(run_id, conversation_id, message_id, participant_id, state, executor_device_id, claimed_at)
         values ('${runId}', '${conversationId}', 'ask-${runId}', 'taylor', '${state}', ${executor ? `'${executor}'` : "null"}, '${claimedAt}');`;
-    await (storage as unknown as { runSql(sql: string): Promise<void> }).runSql([
+    await (storageParts(storage).sqlite as unknown as { runSql(sql: string): Promise<void> }).runSql([
       turn("live", "chat-a", "claimed", owner.originId),
       turn("orphan", "chat-b", "claimed", "device-removed-long-ago"),
       turn("waiting", "chat-c", "requested", null),

@@ -1,0 +1,132 @@
+/* Inside a chat the bar is not floating over anything: it sits in the column
+   under the composer, as Slack does it (the User, 2026-09-20). In the flow it
+   needs no offset of its own — the composer ends where the bar begins — and
+   the safe area at the bottom is the bar's margin instead of the composer's. */
+.mobile-phone[data-dock="chat"] .pb-dock {
+  position: static;
+  flex-shrink: 0;
+  /* A definite width, not stretch: the auto side margins that centre the bar
+     on a wide screen override stretch, and the bar shrank to fit its labels —
+     248px instead of 361px, with 32px tap targets. */
+  width: 100%;
+  margin: 0 auto var(--dock-offset);
+  padding-left: calc(16px + env(safe-area-inset-left));
+  padding-right: calc(16px + env(safe-area-inset-right));
+}
+
+/* The composer's own bottom room is the base rule's 14px; the safe area below
+   it belongs to the bar now, as its margin. It also outranks the bar: when the
+   column is too short for both (landscape with a card and an attachments row),
+   the composer is the one that must stay whole, so the bar is what gets
+   covered rather than the other way round. */
+.mobile-phone[data-dock="chat"] .composer {
+  padding-bottom: 14px;
+  position: relative;
+  z-index: 6;
+}
+
+/* Last, so hiding always wins: these have the same specificity as the
+   placement rules above and would otherwise depend on what those declare.
+   Search only takes the bar off the home screens: a chat opened from the
+   results keeps its bar, and the composer above it keeps the safe area. */
+.pb-dock[hidden],
+.mobile-phone[data-searching="1"][data-dock="1"] .pb-dock {
+  display: none;
+}
+
+.pb-bar {
+  flex: 1;
+  height: 64px;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 6px;
+  border: 1px solid var(--bd);
+  border-radius: 32px;
+  background: var(--surface);
+  box-shadow: var(--menu-shadow);
+}
+
+.pb-tab {
+  position: relative;
+  flex: 1;
+  height: 52px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 2px;
+  border: 0;
+  border-radius: 26px;
+  padding: 0;
+  background: transparent;
+  color: var(--mut);
+  font: 600 11px var(--sans);
+  cursor: pointer;
+}
+
+.pb-tab[data-active="true"] {
+  background: var(--s2);
+  color: var(--fg1);
+}
+
+.pa-badge {
+  position: absolute;
+  top: 2px;
+  left: calc(50% + 4px);
+  min-width: 19px;
+  height: 19px;
+  padding: 0 5px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 2px solid var(--surface);
+  border-radius: 999px;
+  background: var(--acc);
+  /* The surface colour reads on the accent in both themes; white on the dark
+     theme's lighter accent did not. */
+  color: var(--surface-fg);
+  font: 700 11px var(--sans);
+}
+
+.pa-badge[hidden] {
+  display: none;
+}
+
+/* New chat, round, beside the bar. A phone paired for one chat starts none,
+   and the bar then takes the whole width. */
+.pb-action {
+  width: 64px;
+  height: 64px;
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid var(--bd);
+  border-radius: 50%;
+  padding: 0;
+  background: var(--surface);
+  box-shadow: var(--menu-shadow);
+  color: var(--fg1);
+  cursor: pointer;
+}
+
+.pb-action[hidden] {
+  display: none;
+}
+
+/* Room at the end of every list to scroll clear of the bar: its offset, its
+   64px, and a gap. */
+.mobile-phone[data-dock="1"] .mobile-chat-list,
+.mobile-phone[data-dock="1"] .act-list,
+.mobile-phone[data-dock="1"] .set-list {
+  padding-bottom: calc(var(--dock-offset) + 80px);
+}
+
+/* A row with one action behind it: swipe left and the row slides off it.
+   The action is a real button, so a screen reader reaches it without the
+   gesture (the User asked for the gesture, 2026-09-20). */
+.act-swipe {
+  position: relative;
+  overflow: hidden;
+}

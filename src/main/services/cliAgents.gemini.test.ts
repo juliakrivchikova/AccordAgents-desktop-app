@@ -20,6 +20,7 @@ import {
   parseAgyModelList,
   syncGeminiMcpConfig
 } from "./cliAgents";
+import { cliParts } from "./cliAgents/test/cliParts";
 import {
   buildGeminiExecInvocation,
   buildGeminiInteractiveGoalInvocation,
@@ -118,7 +119,7 @@ test("buildGeminiExecInvocation: auto mode and granted write skip tool confirmat
   });
   assert.equal(write.args.includes("--dangerously-skip-permissions"), true);
   // A chat turn is the member's message as it is; where it may write is said
-  // once, in its session's instructions (ChatService.antigravityAccessLines).
+  // once, in its session's instructions (antigravityAccessLines).
   assert.equal(flagValue(auto.args, "--print"), "Create exactly /outside/explicit-target.txt with the text parity-proof.");
   assert.doesNotMatch(JSON.stringify(auto.args), /writable_roots|sandbox\.filesystem\.allowWrite/);
   assert.equal(flagValue(write.args, "--print"), "Do work");
@@ -219,7 +220,7 @@ test("a Gemini API key provider's model list is read from agy on that key, once 
   const runner = new CliAgentRunner();
   const calls: Array<{ env: Record<string, string>; settings: Readonly<Record<string, unknown>> } | undefined> = [];
   let fail = false;
-  (runner as any).listGeminiModelCatalog = async (fetchedAt: string, apiKey?: { env: Record<string, string>; settings: Readonly<Record<string, unknown>> }) => {
+  cliParts(runner).modelCatalogs.listGeminiModelCatalog = async (fetchedAt: string, apiKey?: { env: Record<string, string>; settings: Readonly<Record<string, unknown>> }) => {
     calls.push(apiKey);
     await new Promise((resolve) => setTimeout(resolve, 5));
     if (fail) {
@@ -253,7 +254,7 @@ test("a Gemini API key provider's model list is read from agy on that key, once 
   const fixed = await runner.listHostModelCatalog({ host: edited, apiKey: "other-key" });
   assert.equal(calls.length, 3);
   assert.deepEqual(fixed.models.map((model) => model.id), ["gemini-4-carbon-low"]);
-  assert.deepEqual([...(runner as any).hostModelCatalogs.keys()], ["host-google|2026-11-18T01:00:00.000Z"], "the old version's list is dropped");
+  assert.deepEqual([...cliParts(runner).modelCatalogs.hostModelCatalogs.keys()], ["host-google|2026-11-18T01:00:00.000Z"], "the old version's list is dropped");
 
   const noKey = await runner.listHostModelCatalog({ host, apiKey: undefined });
   assert.deepEqual(noKey.models, []);
@@ -566,7 +567,7 @@ test("geminiMcpProxyLaunchArgs: packaged and default-app launches use the dedica
 test("compactGeminiSession: aborts when resume recovery started a fresh conversation", async () => {
   const runner = new CliAgentRunner();
   let calls = 0;
-  (runner as any).runGeminiOneShot = async () => {
+  cliParts(runner).geminiRuns.runGeminiOneShot = async () => {
     calls += 1;
     return {
       participant,
@@ -576,7 +577,7 @@ test("compactGeminiSession: aborts when resume recovery started a fresh conversa
       sessionRestarted: true
     };
   };
-  const result = await (runner as any).compactGeminiSession(
+  const result = await cliParts(runner).geminiRuns.compactGeminiSession(
     participant,
     undefined,
     "chat",

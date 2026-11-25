@@ -1,0 +1,90 @@
+/* Fork to new chat in the classic view's members sheet: a small action at
+   the member's row end, as on the computer's roster card; its item (the
+   title menu's) opens under the member, its words lined up with the name. */
+.members-sheet-fork-toggle {
+  margin-left: auto;
+  border-radius: 12px;
+}
+
+.members-sheet-fork-toggle:active,
+.members-sheet-fork-toggle[aria-expanded="true"] {
+  background: var(--press);
+}
+
+.members-sheet-fork-item {
+  width: calc(100% - 46px);
+  max-width: none;
+  margin: -2px 0 6px 46px;
+  border: 1px solid var(--bd);
+  border-radius: 12px;
+}
+
+.members-sheet-fork-item::before {
+  display: none;
+}
+
+.chat-members-button[data-view="sessions"] .chat-members-pill {
+  position: relative;
+  padding: 0 9px;
+  border-color: transparent;
+  background: transparent;
+}
+
+.chat-members-button[data-view="sessions"] #chat-members-count:not(:empty) {
+  position: absolute;
+  top: 1px;
+  right: 1px;
+  min-width: 16px;
+  height: 16px;
+  padding: 0 4px;
+  border-radius: 8px;
+  background: var(--sessions-running);
+  color: var(--surface-fg);
+  font: 700 10.5px/16px var(--sans);
+  text-align: center;
+}
+
+.chat-members-button[data-view="sessions"].is-running #chat-members-count::before {
+  display: none;
+}
+
+.chat-members-dot {
+  position: absolute;
+  bottom: 4px;
+  right: 4px;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--acc);
+}
+
+.chat-members-dot[hidden] {
+  display: none;
+}
+
+/* The Accord in the sessions view: one quiet line above the composer. */
+.accord-dock.is-strip {
+  padding: 4px 16px 0;
+}
+
+.accord-strip {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 0;
+  border: 0;
+  background: transparent;
+  color: var(--mut);
+  font: 400 13px var(--sans);
+  text-align: left;
+  cursor: pointer;
+}
+
+.accord-strip-text {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}

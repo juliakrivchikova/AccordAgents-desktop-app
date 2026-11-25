@@ -21,6 +21,7 @@ import { ArtifactClient } from "./artifactClient";
 import { ArtifactService } from "./artifacts";
 import { ArtifactStore } from "./artifactStore";
 import { ChatService } from "./chat";
+import { chatParts } from "./chat/test/chatParts";
 import { DeviceIdentityService } from "./deviceIdentity";
 import { ChatSearchService } from "./chatSearch";
 import { signHubRequest } from "./hubAuth";
@@ -55,7 +56,7 @@ function chatService(storage: StorageService, device: string): ChatService {
   };
   const cliRunner = { async detectAgents() { return []; }, async contextUsageForSession() { return undefined; }, async closeConversationSessions() { return undefined; } };
   const chat = new ChatService(storage as never, settings as never, cliRunner as never, { async write(event: string, payload: Record<string, unknown>) { trace(device, event, payload); } } as never);
-  (chat as unknown as { ensureHistoryFiles: () => Promise<string> }).ensureHistoryFiles = async () => tmpdir();
+  (chatParts(chat).chatHistory as unknown as { ensureHistoryFiles: () => Promise<string> }).ensureHistoryFiles = async () => tmpdir();
   return chat;
 }
 
@@ -82,7 +83,7 @@ function localChat(id: string): Conversation {
   } as Conversation;
 }
 
-const save = (chat: ChatService, conversation: Conversation) => (chat as unknown as { saveConversation(c: Conversation): Promise<void> }).saveConversation(conversation);
+const save = (chat: ChatService, conversation: Conversation) => (chatParts(chat).store as unknown as { saveConversation(c: Conversation): Promise<void> }).saveConversation(conversation);
 
 async function until<T>(read: () => Promise<T>, done: (value: T) => boolean, ms = 15_000): Promise<T> {
   const deadline = Date.now() + ms;

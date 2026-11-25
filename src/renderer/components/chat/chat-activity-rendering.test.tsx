@@ -14,6 +14,7 @@ import {
   svgClassNames,
   textContent
 } from "./chat-activity-harness.test";
+import { styleSource } from "../../lib/style-source-fixtures.test";
 
 test("activity detail masks secrets and independently preserves reveal and length state", async () => {
   const detail = [
@@ -197,7 +198,7 @@ test("long activity detail uses a six-line preview and keeps Show more at the fa
   const actions = renderer!.root.findByProps({ className: "chat-inline-activity-actions" });
   assert.deepEqual(actions.findAllByType("button").map(textContent), ["Show less"]);
 
-  const css = readFileSync("src/renderer/styles/views/chat-conversation.css", "utf8");
+  const css = styleSource("chat-conversation");
   assert.match(css, /chat-inline-activity-detail\.is-collapsed\s*{[^}]*max-height:\s*calc\(6 \* 1\.4em\)/s);
   assert.match(css, /chat-inline-activity-actions\s*{[^}]*justify-content:\s*flex-end/s);
   assert.match(css, /chat-inline-activity-action\s*{[^}]*border:\s*0[^}]*background:\s*transparent/s);

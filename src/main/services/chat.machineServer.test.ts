@@ -16,6 +16,7 @@ import { ACCORD_CLOSED_SOURCE, accordClosedLaunchId, accordRefusedLines } from "
 import { HubOps } from "../../hub/hubOps";
 import { HubServer } from "../../hub/hubServer";
 import { ChatService } from "./chat";
+import { chatParts } from "./chat/test/chatParts";
 import { buildChatParticipantStatusMap } from "../../shared/chatRosterStatus";
 import { DeviceIdentityService } from "./deviceIdentity";
 import { ChatSearchService } from "./chatSearch";
@@ -61,8 +62,8 @@ function chatService(storage: StorageService, turns: Turn[], device: Turn["devic
   const cliRunner = { async detectAgents() { return []; }, async contextUsageForSession() { return undefined; },
     async closeConversationSessions(conversationId: string) { control.closed?.push(conversationId); } };
   const chat = new ChatService(storage as never, settings as never, cliRunner as never, { async write(event: string, payload: Record<string, unknown>) { trace(device, event, payload); } } as never);
-  (chat as unknown as { ensureHistoryFiles: () => Promise<string> }).ensureHistoryFiles = async () => tmpdir();
-  (chat as unknown as { runParticipantTurn: (...args: unknown[]) => Promise<ChatMessage[]> }).runParticipantTurn = async (_conversation, participant, trigger, runId, signal, _progress, options) => {
+  (chatParts(chat).chatHistory as unknown as { ensureHistoryFiles: () => Promise<string> }).ensureHistoryFiles = async () => tmpdir();
+  (chatParts(chat).participantTurn as unknown as { runParticipantTurn: (...args: unknown[]) => Promise<ChatMessage[]> }).runParticipantTurn = async (_conversation, participant, trigger, runId, signal, _progress, options) => {
     const turn: Turn = { device, participantId: (participant as ChatParticipant).id, triggerId: (trigger as ChatMessage).id, runId: runId as string,
       signal: signal as AbortSignal, settingsAtStart: control.settingsApplied?.() };
     turns.push(turn);
@@ -234,7 +235,7 @@ function localChat(id: string, extra: Partial<Conversation> = {}): Conversation 
   } as Conversation;
 }
 
-const save = (chat: ChatService, conversation: Conversation) => (chat as unknown as { saveConversation(c: Conversation): Promise<void> }).saveConversation(conversation);
+const save = (chat: ChatService, conversation: Conversation) => (chatParts(chat).store as unknown as { saveConversation(c: Conversation): Promise<void> }).saveConversation(conversation);
 
 async function linked(t: test.TestContext, conversation: Conversation) {
   const h = await setup(t);
@@ -467,7 +468,7 @@ test("an unpin made while a member's turn holds an older copy of the chat stays 
   await h.desktopChat.setPinned({ conversationId: "chat-pin-run", pinned: false });
   await until(() => h.page("chat-pin-run"), (page) => page.conversation?.metadata?.pinned === undefined);
   // ...and the flow saves its copy.
-  const internals = h.desktopChat as unknown as { withChatMutation(conversation: unknown, mutate: () => Promise<void>): Promise<void>; saveConversation(conversation: unknown): Promise<void> };
+  const internals = chatParts(h.desktopChat).store as unknown as { withChatMutation(conversation: unknown, mutate: () => Promise<void>): Promise<void>; saveConversation(conversation: unknown): Promise<void> };
   await internals.withChatMutation(stale, async () => {
     stale.updatedAt = new Date().toISOString();
     await internals.saveConversation(stale);
@@ -523,7 +524,7 @@ async function ownPictureFolders(t: test.TestContext, h: Awaited<ReturnType<type
   const root = await mkdtemp(path.join(tmpdir(), "accord-pictures-"));
   t.after(() => rm(root, { recursive: true, force: true }));
   for (const [chat, device] of [[h.desktopChat, "desktop"], [h.machineChat, "machine"]] as const) {
-    (chat as unknown as { attachmentPath(conversationId: string, storageKey: string): string }).attachmentPath =
+    (chatParts(chat).attachments as unknown as { attachmentPath(conversationId: string, storageKey: string): string }).attachmentPath =
       (conversationId, storageKey) => path.join(root, device, conversationId, storageKey);
   }
   return root;
@@ -551,7 +552,7 @@ function watchPictureOrder(t: test.TestContext, h: Awaited<ReturnType<typeof set
 }
 
 const persistPicture = (chat: ChatService, conversationId: string, bytes: Buffer) =>
-  (chat as unknown as { persistChatImageAttachment(id: string, input: { bytes: Buffer; filename?: string }, index: number): Promise<{ attachment: ChatImageAttachment }> })
+  (chatParts(chat).attachments as unknown as { persistChatImageAttachment(id: string, input: { bytes: Buffer; filename?: string }, index: number): Promise<{ attachment: ChatImageAttachment }> })
     .persistChatImageAttachment(conversationId, { bytes, filename: "mockup.png" }, 0);
 
 test("a picture a machine member sends goes up to the User's server before its message, and the computer opens it from there", async (t) => {
@@ -907,19 +908,16 @@ test("a cloud member's reply that failed here before its turn started stays wher
 
 test("a fork's line a machine writes during its member's turn reaches the server and the computer once, and is not written again when said again on a later turn", async (t) => {
   // Fork to new chat and a delegated fork say what became of the copy as a
-  // line in the chat (ChatService.postForkNotice) as well as a chat warning:
+  // line in the chat (ChatForks.postForkNotice) as well as a chat warning:
   // a warning stays on the device that raised it, here the machine.
   const notice = "@drew could not start from a copy of @main's session, so it started a clean session from the saved chat context.";
   const h = await linked(t, localChat("chat-fork-line"));
-  const machine = h.machineChat as unknown as {
-    runParticipantTurn: (conversation: Conversation, participant: ChatParticipant, ...rest: unknown[]) => Promise<ChatMessage[]>;
-    postForkNotice: (conversation: Conversation, participant: ChatParticipant, kind: string, text: string) => void;
-  };
-  const turn = machine.runParticipantTurn.bind(machine);
-  machine.runParticipantTurn = async (conversation, participant, ...rest) => {
+  const { participantTurn, forks } = chatParts(h.machineChat);
+  const turn = participantTurn.runParticipantTurn.bind(participantTurn);
+  participantTurn.runParticipantTurn = async (conversation: Conversation, participant: ChatParticipant, ...rest: unknown[]): Promise<ChatMessage[]> => {
     // Twice, as a turn handed over again after a restart would say it.
-    machine.postForkNotice(conversation, participant, "started-clean", notice);
-    machine.postForkNotice(conversation, participant, "started-clean", notice);
+    forks.postForkNotice(conversation, participant, "started-clean", notice);
+    forks.postForkNotice(conversation, participant, "started-clean", notice);
     return turn(conversation, participant, ...rest);
   };
   const lines = (messages: ChatMessage[] | undefined) => (messages ?? []).filter((message) => message.role === "system" && message.content === notice);

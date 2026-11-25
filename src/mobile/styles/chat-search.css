@@ -1,0 +1,87 @@
+.mobile-chat-search input:focus {
+  outline: none;
+  border-color: var(--acc);
+}
+
+.mobile-chat-search-close {
+  flex-shrink: 0;
+  border: 0;
+  padding: 0 2px;
+  background: transparent;
+  color: var(--acc);
+  font: 500 15px var(--sans);
+  cursor: pointer;
+}
+
+/* --- Unread ---------------------------------------------------------------- */
+
+.mobile-unread-dot {
+  width: 8px;
+  height: 8px;
+  flex-shrink: 0;
+  border-radius: 50%;
+  background: var(--acc);
+}
+
+/* A member's question waits for the User's answer (a choice card). */
+.mobile-waiting-dot {
+  width: 8px;
+  height: 8px;
+  flex-shrink: 0;
+  border-radius: 50%;
+  background: var(--warn);
+}
+
+/* A long press opens the chat's actions: no text selection or system callout. */
+.mobile-chat-row {
+  -webkit-touch-callout: none;
+  -webkit-user-select: none;
+  user-select: none;
+}
+
+.chat-actions-sheet {
+  position: fixed;
+  z-index: 30;
+}
+
+.chat-actions-list {
+  display: flex;
+  flex-direction: column;
+  padding: 2px 10px 6px;
+}
+
+.chat-actions-row {
+  min-height: 52px;
+  border: 0;
+  border-radius: 12px;
+  padding: 0 10px;
+  background: transparent;
+  color: var(--fg1);
+  font: 500 16px var(--sans);
+  text-align: left;
+  cursor: pointer;
+}
+
+.chat-actions-row:active {
+  background: var(--s2);
+}
+
+.mobile-chat-row.is-unread .mobile-chat-title-line strong {
+  font-weight: 700;
+}
+
+.mobile-chat-row.is-unread .mobile-chat-snippet {
+  color: var(--fg);
+}
+
+/* --- Pull to refresh ------------------------------------------------------- */
+
+.pull-refresh {
+  flex-shrink: 0;
+  height: 0;
+  overflow: hidden;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: height 160ms ease-out;
+}

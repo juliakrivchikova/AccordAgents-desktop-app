@@ -1,0 +1,95 @@
+.send-log-row {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 10px 8px;
+  border-radius: 12px;
+}
+
+.send-log-row + .send-log-row {
+  border-top: 1px solid var(--bdf);
+  border-radius: 0;
+}
+
+.send-log-when {
+  font: 400 12.5px var(--sans);
+  color: var(--mut);
+}
+
+.send-log-what {
+  font: 600 14.5px var(--disp);
+  letter-spacing: -0.01em;
+  color: var(--fg1);
+  overflow-wrap: anywhere;
+}
+
+.send-log-why {
+  font: 400 13.5px var(--sans);
+  color: var(--fg);
+  overflow-wrap: anywhere;
+}
+
+.send-log-row[data-cause="refused"] .send-log-why {
+  color: var(--danger);
+}
+
+.send-log-count {
+  font: 400 12.5px var(--sans);
+  color: var(--mut);
+}
+
+.send-log-footer {
+  padding: 10px 8px 4px;
+  font: 400 12.5px var(--sans);
+  color: var(--mut);
+}
+
+/* --- Picture at full size -------------------------------------------------- */
+
+.image-viewer {
+  position: absolute;
+  inset: 0;
+  z-index: 14;
+  background: rgba(0, 0, 0, 0.94);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.image-viewer[hidden] {
+  display: none;
+}
+
+.image-viewer-body {
+  width: 100%;
+  height: 100%;
+  overflow: auto;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 12px;
+}
+
+.image-viewer-body img {
+  max-width: 100%;
+  max-height: 100%;
+  object-fit: contain;
+  border-radius: 6px;
+}
+
+.image-viewer-close {
+  position: absolute;
+  top: calc(8px + env(safe-area-inset-top));
+  right: 8px;
+  z-index: 1;
+  width: 44px;
+  height: 44px;
+  border: 0;
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(255, 255, 255, 0.14);
+  color: #ffffff;
+  cursor: pointer;
+}

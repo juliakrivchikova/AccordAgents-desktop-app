@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { StorageService } from "./storage";
+import { storageParts } from "./storage/test/storageParts";
 import type { ChatMessage, Conversation } from "../../shared/types";
 
 /**
@@ -67,10 +68,10 @@ test("the list's own query finds pending replies through the partial index, with
   const storage = new StorageService({ dbPath: path.join(directory, "accordagents.sqlite3") });
   try {
     await storage.saveConversation(chat("machine-turn", [asked, replying]));
-    const internals = storage as unknown as { queryJson(sql: string): Promise<unknown[]>; queryText(sql: string): Promise<string> };
+    const internals = storageParts(storage).sqlite as unknown as { queryJson(sql: string): Promise<unknown[]>; queryText(sql: string): Promise<string> };
     // The SQL the list really runs, not a copy of it.
     let listSql = "";
-    const queryJson = internals.queryJson.bind(storage);
+    const queryJson = internals.queryJson.bind(internals);
     internals.queryJson = async (sql: string) => {
       if (sql.includes("as replyPending")) listSql = sql;
       return queryJson(sql);

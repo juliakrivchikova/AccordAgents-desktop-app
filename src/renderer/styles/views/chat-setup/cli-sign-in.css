@@ -1,0 +1,93 @@
+.cli-sign-in-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.cli-sign-in-row p {
+  color: var(--cli-fg1);
+}
+
+.cli-sign-in-hint {
+  color: var(--cli-fg3);
+}
+
+.cli-sign-in-link {
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--cli-fg1);
+  font: inherit;
+  font-weight: 600;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+  cursor: pointer;
+}
+
+.cli-sign-in-code {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.cli-sign-in-code label {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.cli-sign-in-code input {
+  min-width: 0;
+  padding: 7px 10px;
+  border: 1px solid var(--cli-border);
+  border-radius: 8px;
+  background: var(--cli-surface);
+  color: var(--cli-fg1);
+  font: 400 12.5px/1.4 var(--font-code);
+}
+
+.cli-sign-in-code input:focus-visible {
+  outline: none;
+  border-color: var(--app-focus-border);
+}
+
+.cli-readiness-steps .cli-sign-in-error {
+  margin: 0;
+}
+
+.cli-readiness-steps .cli-sign-in-fallback {
+  margin-top: 2px;
+  color: var(--cli-fg3);
+  font-size: 12px;
+}
+
+@media (max-width: 520px) {
+  .cli-readiness-heading {
+    flex-direction: column;
+  }
+}
+
+.new-chat-input-wrap {
+  /* Keep this wrapper out of a stacking context so downward menus paint above the toolbar. */
+  position: relative;
+  min-width: 0;
+}
+
+/* One line to start, as the chat's own composer: the composer has the same
+   height before and after Enter. */
+.new-chat-prompt {
+  display: block;
+  width: 100%;
+  min-height: 27px;
+  max-height: 220px;
+  padding: 3px 4px;
+  border: 0;
+  outline: 0;
+  overflow-y: hidden;
+  resize: none;
+  background: transparent;
+  color: var(--app-text-strong);
+  font-family: var(--font-body);
+  font-size: 14px;
+  line-height: 1.5;
+}

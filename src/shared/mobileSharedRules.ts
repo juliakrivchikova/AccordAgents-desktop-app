@@ -71,6 +71,8 @@ export {
   sessionsMemberStatus, sessionsMemberTitle, sessionsMembersWaitingForUser, sessionsMembersWaitingSince, sessionsRunningCount, sessionsTaskEntries, titleTaskByMember,
   sessionsCompactDuration, sessionsTaskDurationMs, sessionsTaskGroupLabel, sessionsTaskReplyLine, sessionsTaskRunningSince, sessionsTaskStatus
 } from "./mainSessionView";
+// The User's messages a member has not taken yet, by the desktop's rule.
+export { isWaitingReply, waitingMessages } from "./waitingMessages";
 // A member's handle in a message, in code and outside it: which `@handle`
 // is the member's chip and what stays as written, by the desktop's rule.
 export { sessionsMentionPieces } from "./mainSessionView";

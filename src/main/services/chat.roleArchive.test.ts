@@ -7,7 +7,7 @@ import {
 import { CHAT_AUTO_WATCH_WAKE_LIMIT_DEFAULT } from "../../shared/chatAutoWatch";
 import { DEFAULT_CHAT_PROMPT_CONTEXT } from "../../shared/chatPromptContext";
 import { EMPTY_MOBILE_CONTROL_SETTINGS } from "../../shared/mobilePairing";
-import { ChatService } from "./chat";
+import { AgentEnvironment } from "./chat/host/agentEnvironment";
 import type { AppSettings, ChatParticipant, ChatRoleConfig } from "../../shared/types";
 
 function role(over: Partial<ChatRoleConfig> & { id: string }): ChatRoleConfig {
@@ -21,11 +21,9 @@ function role(over: Partial<ChatRoleConfig> & { id: string }): ChatRoleConfig {
   };
 }
 
-// Build a ChatService without its constructor; only role resolution is exercised,
-// which depends solely on this.settings.getPublicSettings plus prototype helpers.
+// Only role resolution is exercised, which reads the settings' roles alone.
 function chatServiceWithRoles(roles: ChatRoleConfig[]) {
-  const service = Object.create(ChatService.prototype) as any;
-  service.settings = {
+  const settings = {
     async getPublicSettings(): Promise<AppSettings> {
       return {
         roundLimitDefault: 1,
@@ -58,7 +56,7 @@ function chatServiceWithRoles(roles: ChatRoleConfig[]) {
       };
     }
   };
-  return service;
+  return new AgentEnvironment({} as never, { settings } as never);
 }
 
 function participant(roleConfigId: string): ChatParticipant {

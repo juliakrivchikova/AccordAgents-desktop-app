@@ -70,13 +70,13 @@ not there yet.
 ## How members use it
 
 - App MCP tools `app_memory_search`, `app_memory_tags`, `app_memory_read`,
-  `app_memory_write`, `app_memory_archive` (`src/shared/appMcpToolContracts.ts`),
+  `app_memory_write`, `app_memory_archive` (`src/shared/appMcpToolContracts/memoryTools.ts`),
   available to every member and auto-approved like documents.
   `app_memory_tags` lists the tags in use on the notes the member sees, most
   used first, so a new note takes a tag already in use instead of a new
   spelling of it (members are told to reuse tags).
 - The way to keep memory is part of every member's static instructions
-  (`MEMBER_MEMORY_INSTRUCTIONS` in `chat.ts`).
+  (`MEMBER_MEMORY_INSTRUCTIONS` in `chat/`).
 - A session's first turn, a turn that sends the instructions again, and the
   first turn after a compaction carry a short list of relevant notes (titles
   and tags, at most 25): the member's own open statuses first, then project
