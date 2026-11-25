@@ -37,6 +37,9 @@ const CLAUDE_BACKGROUND_PROCESS_URGENT_WINDOW_MS = 3_000;
 // the next held message is written.
 const CLAUDE_WARM_LEGACY_FLUSH_QUIET_MS = 400;
 
+// How long a CLI that closed its input may take to end and say why.
+const CLAUDE_INPUT_CLOSED_EXIT_WAIT_MS = 5_000;
+
 /** A member's live Claude Code process. */
 export class ClaudeProcess {
   constructor(private readonly cli: Pick<CliModules, "claudeReplyFlow" | "claudeSettings" | "cliRuns" | "warmAgentClose" | "warmAgents">) {}
@@ -95,6 +98,7 @@ export class ClaudeProcess {
     let stdoutBuffer = "";
     let stderr = "";
     let closed = false;
+    let ended = false;
     const state: ClaudeWarmProcessState = {
       replies: [],
       stepActive: false,
@@ -211,8 +215,7 @@ export class ClaudeProcess {
       }
       child.stdin.write(`${JSON.stringify(message)}\n`, (error) => {
         if (error) {
-          closed = true;
-          failProcess(error);
+          inputFailed(error);
         }
       });
     };
@@ -231,6 +234,19 @@ export class ClaudeProcess {
         reply.reject(error);
       }
       notifyIfIdle();
+    };
+
+    /** The CLI closed its input: it is ending, and how it ends says why ("No
+     *  conversation found", exit code 1), so its replies fail with that. One
+     *  that never ends fails with the write's own error. */
+    let inputFailure: NodeJS.Timeout | undefined;
+    const inputFailed = (error: Error): void => {
+      closed = true;
+      if (inputFailure || ended) {
+        return;
+      }
+      inputFailure = setTimeout(() => failProcess(error), CLAUDE_INPUT_CLOSED_EXIT_WAIT_MS);
+      inputFailure.unref();
     };
 
     /** Writes messages that were held back: all of them once the CLI is known
@@ -297,10 +313,7 @@ export class ClaudeProcess {
       stderr = truncateText(`${stderr}${chunk}`, MAX_CLI_ERROR_CHARS);
     });
 
-    child.stdin.on("error", (error) => {
-      closed = true;
-      failProcess(error);
-    });
+    child.stdin.on("error", inputFailed);
 
     child.stdout.on("data", (chunk: string) => {
       stdoutBuffer += chunk;
@@ -326,9 +339,13 @@ export class ClaudeProcess {
       // supervisor died); its background work is gone either way.
       this.cli.claudeReplyFlow.reportClaudeBackgroundTasks(state, participant, true);
     });
-    child.on("close", (exitCode) => {
+    child.on("close", (exitCode, signal) => {
       closed = true;
-      failProcess(new Error(`claude warm process exited${exitCode === null ? "" : ` with code ${exitCode}`}${stderr ? `: ${stderr}` : ""}`));
+      ended = true;
+      clearTimeout(inputFailure);
+      const how = signal ? ` after signal ${signal}` : exitCode === null ? "" : ` with code ${exitCode}`;
+      const said = stderr.trim() || state.errorOutsideReply;
+      failProcess(new Error(`claude warm process exited${how}${said ? `: ${said}` : ""}`));
       // Its background tasks ended with it (stdin EOF or a kill).
       this.cli.claudeReplyFlow.reportClaudeBackgroundTasks(state, participant, true);
       if (!entry.closed) {
@@ -635,6 +652,7 @@ export class ClaudeProcess {
   private startClaudeWarmStep(state: ClaudeWarmProcessState, participant: ParticipantConfig, hooks: ClaudeWarmProcessHooks): void {
     state.stepActive = true;
     state.everStartedStep = true;
+    state.errorOutsideReply = undefined;
     state.promptSuggestionTarget = undefined;
     if (state.active && !state.active.settled) {
       return;

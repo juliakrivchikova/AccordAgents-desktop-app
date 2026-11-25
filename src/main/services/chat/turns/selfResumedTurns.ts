@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import type { ChatExecutionLeaseMetadata, Conversation } from "../../../../shared/types";
 import type { CliAgentReplyOrigin, CliAgentSelfResumedTurn } from "../../cliAgents";
-import { sanitizeWarningText } from "../../../../shared/warnings";
+import { cliFailureNoticeText } from "../../../../shared/warnings";
 import { pendingChoiceFromAgentReply } from "../choices/choiceRecords";
 import { updateParticipantContextUsage } from "../compaction/contextUsage";
 import { INSTRUCTIONS_ACCESS_RESTATE } from "../constants";
@@ -163,9 +163,12 @@ export class SelfResumedTurns {
         pendingMessage.status = "done";
       } else {
         pendingMessage.status = "error";
-        pendingMessage.content = result.error
-          ? `@${participant.handle}: ${sanitizeWarningText(result.error)}`
-          : `@${participant.handle} run failed.`;
+        // What the run says happened, as for any other turn.
+        if (!pendingMessage.content.trim()) {
+          pendingMessage.content = result.error
+            ? cliFailureNoticeText(result.error, { label: `@${participant.handle}` })
+            : `@${participant.handle} run failed.`;
+        }
         this.chat.approvalDecisions.markPendingAppToolApprovalsForRunTerminal(conversation, runId, pendingMessage.content, true);
       }
       if (result.ok && result.turnContinues && !controller.signal.aborted) {

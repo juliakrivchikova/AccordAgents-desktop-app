@@ -158,7 +158,9 @@ export function claudeWarmStreamError(event: unknown): string | undefined {
     return stringField(errorRecord ?? {}, "message") ?? stringField(record, "message") ?? "claude warm process reported an error";
   }
   if (type === "result" && record.is_error === true) {
-    return stringField(record, "result") ?? stringField(record, "error") ?? "claude warm process returned an error result";
+    const errors = Array.isArray(record.errors) ? record.errors.filter((item): item is string => typeof item === "string" && item.trim().length > 0) : [];
+    return stringField(record, "result") ?? stringField(record, "error") ??
+      (errors.length > 0 ? errors.join(" ") : "claude warm process returned an error result");
   }
   return undefined;
 }

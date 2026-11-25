@@ -235,6 +235,9 @@ export class ClaudeReplyFlow {
     const reply = state.active;
     state.active = undefined;
     if (!reply || reply.settled) {
+      if (!reply && record.is_error === true) {
+        state.errorOutsideReply = claudeWarmStreamError(event);
+      }
       hooks.settled();
       return;
     }
