@@ -8,6 +8,7 @@ import type { ChatMessage, ChatParticipant, ChatSearchMessageMatch, ChatSearchRe
 import { buildChatSearchMatchQuery, ChatSearchService } from "./chatSearch";
 import { resolveSqliteExecutable } from "./sqliteCli";
 import { StorageService, type ChatSearchConversationSnapshot } from "./storage";
+import type { Sqlite } from "./storage/database/sqlite";
 import { storageParts } from "./storage/test/storageParts";
 
 const SQLITE_EXECUTABLE = resolveSqliteExecutable({ appPath: process.cwd() });
@@ -348,6 +349,42 @@ test("chat search cursor pagination returns every result exactly once and reject
     });
     assert.equal(stale.status, "unavailable");
     assert.equal(stale.errorCode, "invalid-request");
+  });
+});
+
+test("chat search reads stale chats one at a time, each chat's members once", async () => {
+  await withStorage(async (storage) => {
+    const participants = Array.from({ length: 100 }, (_, index) => ({
+      ...participant(`member-${index}`, undefined, `@member-${index}`),
+      notes: "n".repeat(1_000)
+    } as ChatParticipant));
+    for (const id of ["first", "second"]) {
+      const chat = conversation(id, `Chat ${id}`, false, Array.from({ length: 50 }, (_, index) =>
+        message(`${id}-${index}`, "user", `oncepersearch ${index}`, `2026-06-01T00:00:${String(index).padStart(2, "0")}.000Z`)));
+      chat.metadata.participants = participants;
+      await storage.saveConversation(chat);
+    }
+    const reads: string[][] = [];
+    const originalRead = storage.readChatSearchConversations.bind(storage);
+    storage.readChatSearchConversations = async (conversationIds) => {
+      reads.push(conversationIds);
+      return originalRead(conversationIds);
+    };
+    const internals: Sqlite = storageParts(storage).sqlite;
+    const originalQuery = internals.queryJson.bind(internals);
+    let largest = 0;
+    internals.queryJson = async <T>(sql: string) => {
+      const rows = await originalQuery<T>(sql);
+      largest = Math.max(largest, JSON.stringify(rows).length);
+      return rows;
+    };
+    const result = await new ChatSearchService(storage).search({ requester: { kind: "user" }, query: "oncepersearch", limit: 200 });
+    assert.equal(result.status, "ok");
+    assert.equal(messageMatches(result).length, 100);
+    assert.deepEqual(reads.map((ids) => ids.length), [1, 1]);
+    // The members take about 250 KB as hex (twice, in the chat's body and by
+    // themselves); on each of the 50 messages they would be 12 MB.
+    assert.ok(largest < 1_500_000, `one read returned ${largest} characters`);
   });
 });
 

@@ -154,19 +154,17 @@ export class ConversationReads {
   }
 
   private async readAllConversationMessages(id: string): Promise<ChatMessage[]> {
-    // By lines: a long chat's messages are more than one string can hold.
-    const lines = await this.storage.sqlite.queryLines(
+    const rows = await this.storage.sqlite.queryJson<{ sequence: number; payloadHex: string }>(
       `
-        select sequence || '|' || hex(payload_json)
+        select sequence, hex(payload_json) as payloadHex
         from conversation_messages
         where conversation_id = ${sqlString(id)}
         order by sequence;
       `
     );
-    return lines.map((line) => {
-      const mark = line.indexOf("|");
-      return parseHexJson<ChatMessage>(line.slice(mark + 1), `conversation message ${id}:${line.slice(0, mark)}`);
-    });
+    return rows.map((row) =>
+      parseHexJson<ChatMessage>(row.payloadHex, `conversation message ${id}:${row.sequence}`)
+    );
   }
 
   async openConversation(

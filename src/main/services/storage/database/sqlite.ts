@@ -50,21 +50,15 @@ export class Sqlite {
   }
 
   async queryJson<T>(sql: string): Promise<T[]> {
-    const text = (await this.databaseSession().run(sql, "json", SQLITE_COMMAND_TIMEOUT_MS)).trim();
-    return text ? (JSON.parse(text) as T[]) : [];
-  }
-
-  /** A read too large for one string: its rows, a line each. */
-  queryLines(sql: string): Promise<string[]> {
-    return this.databaseSession().runLines(sql, SQLITE_COMMAND_TIMEOUT_MS);
+    return this.databaseSession().rows<T>(sql, SQLITE_COMMAND_TIMEOUT_MS);
   }
 
   async queryText(sql: string): Promise<string> {
-    return (await this.databaseSession().run(sql, "list", SQLITE_COMMAND_TIMEOUT_MS)).trim();
+    return (await this.databaseSession().run(sql, SQLITE_COMMAND_TIMEOUT_MS)).trim();
   }
 
   async runSql(sql: string, timeoutMs = SQLITE_COMMAND_TIMEOUT_MS): Promise<void> {
-    await this.databaseSession().run(sql, "list", timeoutMs);
+    await this.databaseSession().run(sql, timeoutMs);
   }
 
   private databaseSession(): SqliteSession {

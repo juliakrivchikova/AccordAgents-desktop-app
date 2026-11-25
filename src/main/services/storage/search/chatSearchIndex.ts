@@ -109,42 +109,38 @@ export class ChatSearchIndex {
 
   /** The chats' rows as search reads them: each chat's body once, then its
    *  messages without what search does not look in (a reply's stream and its
-   *  steps are most of a chat's bytes), read by lines in one transaction. In
-   *  one string, with the chat's columns repeated on every message, 24 chats
-   *  outgrew what a string can hold (2026-11-25). */
-  private async chatSearchSourceRows(conversationIds: string[]): Promise<ChatSearchSourceRow[]> {
+   *  steps are most of a chat's bytes). With the chat's columns repeated on
+   *  every message, 24 chats outgrew what a string can hold (2026-11-25). */
+  private chatSearchSourceRows(conversationIds: string[]): Promise<ChatSearchSourceRow[]> {
     const ids = sqlStringList(conversationIds);
     const body = "coalesce(nullif(c.body_json, ''), c.payload_json)";
-    const lines = await this.storage.sqlite.queryLines(`
-      begin;
-      select json_object(
-        'rowKind', 'body',
-        'conversationId', c.id,
-        'title', c.title,
-        'repoPath', c.repo_path,
-        'archived', case when json_valid(${body}) then json_extract(${body}, '$.metadata.archived') end,
-        'updatedAt', c.updated_at,
-        'messageCount', (select count(*) from conversation_messages m where m.conversation_id = c.id),
-        'oldestMessageAt', (select min(m.created_at) from conversation_messages m where m.conversation_id = c.id),
-        'newestMessageAt', (select max(m.created_at) from conversation_messages m where m.conversation_id = c.id),
-        'payloadValid', json_valid(${body}),
-        'payloadHex', case when json_valid(${body}) then hex(json_set(${body}, '$.messages', json_array())) else '' end
+    return this.storage.sqlite.queryJson<ChatSearchSourceRow>(`
+      select * from (
+        select
+          'body' as rowKind,
+          c.id as conversationId,
+          -1 as sequence,
+          c.title as title,
+          c.repo_path as repoPath,
+          case when json_valid(${body}) then json_extract(${body}, '$.metadata.archived') end as archived,
+          c.updated_at as updatedAt,
+          (select count(*) from conversation_messages m where m.conversation_id = c.id) as messageCount,
+          (select min(m.created_at) from conversation_messages m where m.conversation_id = c.id) as oldestMessageAt,
+          (select max(m.created_at) from conversation_messages m where m.conversation_id = c.id) as newestMessageAt,
+          json_valid(${body}) as payloadValid,
+          case when json_valid(${body}) then hex(json_set(${body}, '$.messages', json_array())) else '' end as payloadHex
+        from conversations c
+        where c.kind = 'chat' and c.id in ${ids}
+        union all
+        select
+          'message', conversation_id, sequence, null, null, null, null, null, null, null, null,
+          hex(case when json_valid(payload_json)
+            then json_remove(payload_json, '$.metadata.processingTranscript', '$.metadata.activityEvents') else payload_json end)
+        from conversation_messages
+        where conversation_id in ${ids}
       )
-      from conversations c
-      where c.kind = 'chat' and c.id in ${ids};
-      select json_object(
-        'rowKind', 'message',
-        'conversationId', conversation_id,
-        'sequence', sequence,
-        'payloadHex', hex(case when json_valid(payload_json)
-          then json_remove(payload_json, '$.metadata.processingTranscript', '$.metadata.activityEvents') else payload_json end)
-      )
-      from conversation_messages
-      where conversation_id in ${ids}
-      order by conversation_id, sequence;
-      commit;
+      order by conversationId, sequence;
     `);
-    return lines.map((line) => JSON.parse(line) as ChatSearchSourceRow);
   }
 
   async readChatSearchConversations(conversationIds: string[]): Promise<ChatSearchConversationRead[]> {
