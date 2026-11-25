@@ -20,6 +20,7 @@ import {
   redactKeyLikeText,
   type MachineSshExecRequest
 } from "./machineInstaller";
+import { installerDependencies } from "./machineInstaller/test/installerParts";
 import {
   machineDrainScript,
   machineInstallDependenciesScript,
@@ -1338,8 +1339,8 @@ test("a runtime whose drain is not proven is never started again beside what is 
   const same = runningSameBundle();
   let drains = 0;
   const h = harness({ bundleDir: same.dir, probe: same.probe, machinePower: async () => POWER, connectedSequence: [false, true] });
-  const original = (h.service as unknown as { sshExec: (request: { script: string }) => Promise<string> }).sshExec;
-  (h.service as unknown as { sshExec: (request: { script: string }) => Promise<string> }).sshExec = async (request) => {
+  const original = (installerDependencies(h.service) as unknown as { sshExec: (request: { script: string }) => Promise<string> }).sshExec;
+  (installerDependencies(h.service) as unknown as { sshExec: (request: { script: string }) => Promise<string> }).sshExec = async (request) => {
     if (request.script.includes("printf 'drained=") && ++drains === 2) {
       h.calls.push(request as never);
       return "drained=no\nruntime-pids=4242\nsupervisor-pids=\nprovider-pids=\n";
@@ -1377,8 +1378,8 @@ test("a runtime that will not start after taking the key gets its previous key b
   let starts = 0;
   const h = harness({ bundleDir: same.dir, probe: same.probe, machinePower: async () => POWER, connectedSequence: [true] });
   h.records.set("m1", installedRecord({ power: PREVIOUS_KEY }));
-  const original = (h.service as unknown as { sshExec: (request: { script: string }) => Promise<string> }).sshExec;
-  (h.service as unknown as { sshExec: (request: { script: string }) => Promise<string> }).sshExec = async (request) => {
+  const original = (installerDependencies(h.service) as unknown as { sshExec: (request: { script: string }) => Promise<string> }).sshExec;
+  (installerDependencies(h.service) as unknown as { sshExec: (request: { script: string }) => Promise<string> }).sshExec = async (request) => {
     if (/systemctl.* start /.test(request.script) && ++starts === 1) throw new Error("Job for accordagents-machine.service failed");
     return original(request);
   };
