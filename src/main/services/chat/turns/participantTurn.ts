@@ -45,10 +45,6 @@ import type { ChatAppMcpTokenGrant, ChatMemberAccess, ChatPromptContextScope, Pr
 import type { ChatModules } from "../modules";
 import type { ChatDependencies } from "../dependencies";
 
-/** How far a phone's clock may be off from this device's. */
-/** The newest messages a Stop for a phone turn not running here is checked
- *  against. */
-
 function mobileEventIdFromChatTrigger(triggerMessage: ChatMessage): string | undefined {
   if (triggerMessage.metadata?.appMessageSource !== "mobile-relay") {
     return undefined;

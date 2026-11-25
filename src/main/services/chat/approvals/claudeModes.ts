@@ -12,7 +12,7 @@ import type { ChatModules } from "../modules";
 import type { ChatDependencies } from "../dependencies";
 
 /** Claude Code's tools that edit files (a once-only grant of file edits
- *  answers one of them; ChatService.takeClaudeOnceEdit). */
+ *  answers one of them; ClaudeModes.takeClaudeOnceEdit). */
 const CLAUDE_FILE_EDIT_TOOLS: ReadonlySet<string> = new Set(["Edit", "Write", "MultiEdit", "NotebookEdit"]);
 
 /** Claude Code's permission mode of each member: saved, followed and applied to its live CLI. */

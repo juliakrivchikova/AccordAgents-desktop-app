@@ -4,7 +4,7 @@ import type {
 } from "../../../../shared/types";
 import type { ChatExecutorLeaseKey } from "../../../../shared/chatExecutionLeases";
 import { CHAT_EXECUTOR_LEASE_TTL_MS } from "./constants";
-import { isMetadataRecord } from "../store/mergeStoredMetadata";
+import { isMetadataRecord } from "../compaction/contextUsage";
 
 function normalizeExecutionLeaseMetadata(value: unknown): ChatExecutionLeaseMetadata | undefined {
   if (!value || typeof value !== "object" || Array.isArray(value)) {

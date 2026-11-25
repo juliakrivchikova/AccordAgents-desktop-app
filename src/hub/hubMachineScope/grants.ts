@@ -1,13 +1,12 @@
 import {
-  APP_CHAT_REQUEST_PARTICIPANTS_TOOL, APP_PERMISSIONS_REQUEST_CHANGE_TOOL, APP_TOOL_PERMISSION_TOOL
+  APP_CHAT_REQUEST_PARTICIPANTS_TOOL, APP_PARTICIPANTS_REQUEST_CHANGE_TOOL, APP_PERMISSIONS_REQUEST_CHANGE_TOOL,
+  APP_ROSTER_REQUEST_CHANGE_TOOL, APP_TOOL_PERMISSION_TOOL
 } from "../../shared/appMcpToolContracts";
 import { isClaudePlanApprovalRequest } from "../../shared/claudePlanApproval";
 import type { HubCard, HubUserApproval } from "../../shared/hubOps";
 import { chatViewFor, mainSessionParticipantId } from "../../shared/mainSession";
 import type { ChatAppToolApproval, ChatMessage, ChatParticipant, ChatParticipantRequestPermission, Conversation } from "../../shared/types";
-import { requestRight } from "./askRights";
-import { memberChangeTool } from "./memberChanges";
-import { handleKey, participantsOf, rank, withoutCode } from "./records";
+import { handleKey, participantsOf, rank, requestRight, withoutCode } from "./records";
 import type { Approved, Leave } from "./types";
 
 /** How a used approval or `/accord` is noted on the server. */
@@ -147,4 +146,8 @@ export function keptApproval(card: HubCard): HubCard | undefined {
     answer,
     card: { approval: { ...approval, request: (typeof tool === "string" ? { toolName: tool } : {}) as ChatAppToolApproval["request"] } }
   };
+}
+
+export function memberChangeTool(toolName: string): boolean {
+  return toolName === APP_PARTICIPANTS_REQUEST_CHANGE_TOOL || toolName === APP_ROSTER_REQUEST_CHANGE_TOOL;
 }

@@ -92,7 +92,7 @@ export const stopRequestedRunIds = new Set();
  * two themselves (`known`); a run reached from somewhere else (the live
  * reply, Activity) is looked up in what this phone holds of the chat. A
  * device's own name for a run is the turn's id with "turn-" before it, as
- * every device names a turn it opens (ChatService.openServerTurn).
+ * every device names a turn it opens (ServerTurns.openServerTurn).
  */
 export async function turnOfRun(conversationId, runId, known) {
   let messageId = known && typeof known.messageId === "string" && known.messageId ? known.messageId : undefined;

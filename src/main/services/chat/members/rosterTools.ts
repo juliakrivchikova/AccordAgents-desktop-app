@@ -15,11 +15,11 @@ import { readinessForProvider, resolveAssistantProviderKind } from "../../../../
 import { matchingAppToolApprovalPolicy, newAppToolApproval, upsertAppToolApproval } from "../approvals/approvalRecords";
 import { HANDLE_PATTERN } from "../constants";
 import { CHAT_ROSTER_CHANGE_MAX_OPERATIONS } from "./constants";
-import { chatParticipants } from "./identity";
+import { chatParticipants, delegatedMemberCeiling } from "./identity";
 import { markAddedWithoutCard, prepareParticipantRemoval } from "./removalRules";
 import { manageRolesParticipantsResolutionForRole } from "./roleRuntime";
 import {
-  delegatedMemberCeiling, normalizeParticipantChangeRequest, normalizeRoleChangeRequest, normalizeRosterChangeRequest,
+  normalizeParticipantChangeRequest, normalizeRoleChangeRequest, normalizeRosterChangeRequest,
   pendingRoleApprovalForParticipantRequest, rosterParticipantSummary, splitParticipantRemovalInput
 } from "./rosterRequests";
 import type { ParticipantRemovalInput } from "./types";

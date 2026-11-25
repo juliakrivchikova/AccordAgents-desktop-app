@@ -1,6 +1,5 @@
 import type { AgentContextUsage, Conversation } from "../../../../shared/types";
 import { normalizeAgentContextUsage } from "../../../../shared/agentContext";
-import { isMetadataRecord } from "../store/mergeStoredMetadata";
 
 export function updateParticipantContextUsage(
   conversation: Conversation,
@@ -121,4 +120,8 @@ export function agentContextUsageByParticipant(conversation: Conversation): Reco
     }
   }
   return usageByParticipant;
+}
+
+export function isMetadataRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(value && typeof value === "object" && !Array.isArray(value));
 }

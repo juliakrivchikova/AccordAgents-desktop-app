@@ -16,10 +16,9 @@ import { normalizeAutoChatTitle } from "../../../../shared/chatTitles";
 import { NO_READY_CLI_MESSAGE, readyProviderKinds, resolveAssistantProviderKind } from "../../../../shared/cliReadiness";
 import { CHAT_ADMINISTRATOR_ROLE_ID, HANDLE_PATTERN } from "../constants";
 import {
-  assertParticipantProvidersReady, chatParticipants, normalizeParticipantPermissionsForRole, participantHostFields,
-  seededParticipantInputs, splitMainSessionInput, uniqueHandle
+  assertParticipantProvidersReady, chatParticipants, normalizeBehaviorRuleIds, normalizeParticipantPermissionsForRole,
+  participantHostFields, seededParticipantInputs, splitMainSessionInput, uniqueHandle
 } from "../members/identity";
-import { normalizeBehaviorRuleIds } from "../members/roleRuntime";
 import { rebuildLastMessagesByParticipant } from "../store/lastMessages";
 import { chatCreateLogPayload, createChatMessage } from "../store/messages";
 import { chatIntro, newChatBlockedReason } from "../store/titles";

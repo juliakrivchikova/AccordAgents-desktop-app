@@ -1,8 +1,7 @@
 import type { ChatLastMessageByParticipant, ChatMessage, Conversation } from "../../../../shared/types";
 import { isChatMessageHiddenFromTimeline } from "../../../../shared/chatTimelineVisibility";
 import { withInterimPostsFrom } from "../../../../shared/interimPosts";
-import { hasStaleRunRecoveryMarker } from "../runs/runOwnerRecords";
-import { mergeChatMessageReactions } from "./mergeStoredChat";
+import { hasStaleRunRecoveryMarker, mergeChatMessageReactions } from "./messages";
 
 // Single finalize/upsert path: append a completed message, or repair a
 // placeholder we created for the same id (a still-pending bubble, or an error

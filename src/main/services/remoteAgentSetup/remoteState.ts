@@ -6,8 +6,8 @@ import type { RemoteRunWorkerTarget } from "../remoteWorkerTarget";
 import { remoteProfileCommand } from "../remoteWorkerTarget";
 import { remotePortableSetupActivationScript } from "./activationScript";
 import { PORTABLE_SETUP_DIRNAME } from "./constants";
-import { isRecord } from "./portableConfig";
 import type { PortableAgentSetupManifest, PortableCommandRunner, PortableSetupRemoteState } from "./types";
+import { isRecord } from "./configSecrets";
 
 export async function resolvePortableSetupRoot(
   worker: RemoteRunWorkerTarget,

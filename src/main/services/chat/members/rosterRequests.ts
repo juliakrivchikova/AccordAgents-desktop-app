@@ -1,15 +1,13 @@
-import { mainSessionParticipantId } from "../../../../shared/mainSession";
 import { randomUUID } from "node:crypto";
 import type {
-  ChatAgentMode, ChatAgentPermissions, ChatAppToolApproval, ChatParticipant, ChatExistingParticipantOverrides,
-  ChatParticipantChangeRequest, ChatParticipantChangeOperation, ChatProviderKind, ChatRoleChangeRequest, ChatRoleChangeOperation,
-  ChatRoleConfig, ChatRoleParticipantChangeRequest, ChatRosterCurrentParticipant, ChatRosterChangeRequest, Conversation
+  ChatAgentPermissions, ChatAppToolApproval, ChatExistingParticipantOverrides, ChatParticipant, ChatParticipantChangeOperation,
+  ChatParticipantChangeRequest, ChatProviderKind, ChatRoleChangeOperation, ChatRoleChangeRequest, ChatRoleConfig,
+  ChatRoleParticipantChangeRequest, ChatRosterChangeRequest, ChatRosterCurrentParticipant, Conversation
 } from "../../../../shared/types";
 import { normalizeChatReasoningEffort } from "../../../../shared/reasoningEffort";
 import {
-  effectiveChatAgentPermissionsForProvider, normalizeChatAgentMode, normalizeChatAgentPermissions,
-  normalizeChatRoleManagementPermission, normalizeOptionalChatParticipantRequestPermission,
-  chatParticipantRequestPermissionExceeds, chatAgentModeFromAgent, chatAgentPermissionsFromAgent
+  chatAgentModeFromAgent, chatAgentPermissionsFromAgent, chatParticipantRequestPermissionExceeds, normalizeChatAgentMode,
+  normalizeChatAgentPermissions, normalizeChatRoleManagementPermission, normalizeOptionalChatParticipantRequestPermission
 } from "../../../../shared/agentPermissions";
 import { normalizeChatAppToolCapabilities } from "../../../../shared/appTools";
 import { preservedRemoteExecution } from "../../../../shared/chatParticipantHome";
@@ -17,8 +15,8 @@ import { APP_ROLES_REQUEST_CHANGE_TOOL } from "../../appMcp";
 import { chatAppToolApprovals, isRoleChangeRequest, isRoleParticipantChangeRequest } from "../approvals/approvalRecords";
 import { GENERIC_PARTICIPANT_ROLE_ID } from "../constants";
 import { CHAT_ROSTER_CHANGE_MAX_OPERATIONS } from "./constants";
-import { chatParticipants, normalizeRoleParticipantDefaults, roleLabelForParticipant } from "./identity";
-import { manageRolesParticipantsResolutionForRole, normalizeBehaviorRuleIds } from "./roleRuntime";
+import { chatParticipants, normalizeBehaviorRuleIds, normalizeRoleParticipantDefaults, roleLabelForParticipant } from "./identity";
+import { manageRolesParticipantsResolutionForRole } from "./roleRuntime";
 import type { ParticipantRemovalInput } from "./types";
 
 const CHAT_ROLE_LABEL_MAX_CHARS = 80;
@@ -61,26 +59,6 @@ export function delegatedMemberHandleBase(role: ChatRoleConfig, kind: ChatProvid
   }
   const slug = role.label.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 24);
   return slug || "member";
-}
-
-/** What a member added without a card in a chat with a main session may
- *  have at its turn: the main session's mode and effective rights as they
- *  are now (docs/main-session.md), so lowering the main session lowers
- *  them too. Undefined for every other member. */
-export function delegatedMemberCeiling(conversation: Conversation, participant: ChatParticipant): { mode: ChatAgentMode; permissions: ChatAgentPermissions; mainSession: ChatParticipant } | undefined {
-  if (!participant.delegatedByParticipantId) {
-    return undefined;
-  }
-  const mainId = mainSessionParticipantId(conversation.metadata);
-  if (!mainId || mainId === participant.id) {
-    return undefined;
-  }
-  const mainSession = chatParticipants(conversation).find((item) => item.id === mainId);
-  if (!mainSession) {
-    return undefined;
-  }
-  const mode = normalizeChatAgentMode(mainSession.agentMode);
-  return { mode, permissions: effectiveChatAgentPermissionsForProvider(mainSession.kind, mode, normalizeChatAgentPermissions(mainSession.permissions)), mainSession };
 }
 
 /** The removals of a member change request and the rest of it (additions),

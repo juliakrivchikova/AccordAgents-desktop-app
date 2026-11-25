@@ -39,7 +39,7 @@ verbatim there). Modelled on T3 Code (`~/reference/t3code`,
 - **In the sessions view an @handle in a member's reply starts nobody**
   (the User, 2026-11-22), as a mention in text wakes nobody in Claude Code:
   no turn, no task row, whoever wrote it (the main session included) and
-  wherever it runs (`ChatService.createImplicitParticipantRequestApproval`,
+  wherever it runs (`InferredRequests.createImplicitParticipantRequestApproval`,
   the same code on this computer and on a cloud machine). Its posts
   (`app_chat_send_message`) are the same; a main session's "@x /accord"
   starts no Accord and no warning. Members are asked with
@@ -370,7 +370,7 @@ switch is disabled.
     (the phone shows it under the message; the computer posts the message
     and refuses that member alone), and a phone or machine asking it any
     turn but a compaction, a restart or a move is refused too
-    (`HubOps.cliModesRefusal`), by each machine's program as the computer
+    (`MemberRules.cliModesRefusal`), by each machine's program as the computer
     last said it with her member rules (`HubMemberRules.machineCliModes`,
     published again when a hello changes it; an entry in another shape is
     left out). A machine that never greeted the computer is not held back:

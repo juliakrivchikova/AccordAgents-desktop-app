@@ -13,12 +13,12 @@ import {
 import { isConnectorSignInRequest } from "../../../../shared/connectorSignIn";
 import {
   chatAppToolApprovals, isCodexApprovalRequest, isParticipantRemovalRequest, isParticipantRequestApprovalRequest,
-  isRoleParticipantChangeRequest, isScriptChangeRequest, isToolPermissionRequest, permissionApprovalResumeRunId,
-  upsertAppToolApproval
+  isRoleParticipantChangeRequest, isScriptChangeRequest, isSelfCompactionRequest, isToolPermissionRequest,
+  permissionApprovalResumeRunId, upsertAppToolApproval
 } from "./approvalRecords";
 import { applyPreparedPermissionChange, formatPermissionChangeGrantList, preparePermissionChange } from "./permissionGrants";
 import type { PreparedPermissionChange } from "./types";
-import { isSelfCompactionRequest, recordSelfCompactionRequested, selfCompactionRequestGuard } from "../compaction/compactionText";
+import { recordSelfCompactionRequested, selfCompactionRequestGuard } from "../compaction/compactionText";
 import { selfCompactionResumeFrom } from "../compaction/selfCompactionMarks";
 import { chatParticipants, formatHandleList, setParticipantCompactionPermission } from "../members/identity";
 import { memberRemovalHandles, upsertRosterChatPolicy } from "../members/removalRules";

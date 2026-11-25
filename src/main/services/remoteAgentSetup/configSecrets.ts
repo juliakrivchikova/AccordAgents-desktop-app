@@ -1,4 +1,3 @@
-import { isRecord } from "./portableConfig";
 
 export function isSensitiveConfigKey(key: string): boolean {
   return /(?:^|_)(?:api_?key|authorization|bearer|credential|password|secret|token)(?:$|_)/i.test(key);
@@ -57,4 +56,8 @@ export function containsEmbeddedSecretValue(value: unknown): boolean {
   return typeof value === "string" &&
     !isPortableEnvironmentReference(value) &&
     containsEmbeddedSecret(value);
+}
+
+export function isRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(value) && typeof value === "object" && !Array.isArray(value);
 }

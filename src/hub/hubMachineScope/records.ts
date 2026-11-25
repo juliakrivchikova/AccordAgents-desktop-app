@@ -39,3 +39,11 @@ export function withoutCode(content: string): string {
 /** The Chat Assistant's role (chat.ts CHAT_ADMINISTRATOR_ROLE_ID): every chat
  *  keeps it. */
 export const CHAT_ASSISTANT_ROLE_ID = "administrator";
+
+export function requestRight(participant: Pick<ChatParticipant, "permissions">): ChatParticipantRequestPermission {
+  return normalizeChatParticipantRequestPermission(permissionsOf(participant).requestParticipants);
+}
+
+export function lowerRight(left: ChatParticipantRequestPermission, right: ChatParticipantRequestPermission): ChatParticipantRequestPermission {
+  return rank(left) <= rank(right) ? left : right;
+}

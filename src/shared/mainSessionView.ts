@@ -250,7 +250,7 @@ function knownMentionPattern(handle: string): RegExp {
 }
 
 /** The words a task the app made from a member's reply quotes from it
- *  (ChatService.inferredParticipantRequestPrompt: its first line says who
+ *  (inferredParticipantRequestPrompt: its first line says who
  *  appeared to ask, the next one quotes the reply); undefined for any other
  *  task. */
 function inferredTaskExcerpt(prompt: unknown): string | undefined {

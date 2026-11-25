@@ -9,7 +9,7 @@ import {
   resolveChatManageRolesParticipantsPermission
 } from "../../../../shared/agentPermissions";
 import { chatAppToolCapabilitiesEqual, normalizeChatAppToolCapabilities } from "../../../../shared/appTools";
-import { normalizedModel, participantHostDefaultModel } from "./identity";
+import { normalizeBehaviorRuleIds, normalizedModel, participantHostDefaultModel } from "./identity";
 import type { ResolvedChatParticipantRole } from "../types";
 
 /** 23: the session's instructions carry everything said once (how messages
@@ -242,26 +242,6 @@ export function roleInstructionsWithBehaviorRules(roleInstructions: string, beha
 
 function behaviorRuleSnapshotsEqual(left: ChatBehaviorRuleSnapshot[] | undefined, right: ChatBehaviorRuleSnapshot[] | undefined): boolean {
   return JSON.stringify(left ?? []) === JSON.stringify(right ?? []);
-}
-
-export function normalizeBehaviorRuleIds(value: unknown): string[] {
-  if (!Array.isArray(value)) {
-    return [];
-  }
-  const ids: string[] = [];
-  const seen = new Set<string>();
-  for (const item of value) {
-    if (typeof item !== "string") {
-      continue;
-    }
-    const id = item.trim();
-    if (!id || seen.has(id)) {
-      continue;
-    }
-    seen.add(id);
-    ids.push(id);
-  }
-  return ids;
 }
 
 export function shortHash(value: string): string {

@@ -87,16 +87,6 @@ export function normalizeSelfCompactionRequest(value: unknown): ChatSelfCompacti
   };
 }
 
-export function isSelfCompactionRequest(value: unknown): value is ChatSelfCompactionRequest {
-  if (!value || typeof value !== "object" || Array.isArray(value)) {
-    return false;
-  }
-  const request = value as Partial<ChatSelfCompactionRequest>;
-  return request.type === "self_compaction" &&
-    (request.instructions === undefined || typeof request.instructions === "string") &&
-    (request.contextPercentage === undefined || typeof request.contextPercentage === "number");
-}
-
 export function selfCompactionRequestGuard(
   conversation: Conversation,
   participant: ChatParticipant,

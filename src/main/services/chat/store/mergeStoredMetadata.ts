@@ -4,7 +4,7 @@ import { normalizeChatAgentPermissions } from "../../../../shared/agentPermissio
 import { PARTICIPANT_COMPACTIONS_KEY, readActiveRunIds, readParticipantCompactions } from "../../../../shared/chatRunState";
 import { sanitizeWarningList } from "../../../../shared/warnings";
 import { isTerminalAppToolApprovalStatus } from "../approvals/approvalRecords";
-import { mergeAgentContextUsageRecords } from "../compaction/contextUsage";
+import { isMetadataRecord, mergeAgentContextUsageRecords } from "../compaction/contextUsage";
 import { mergeRemovedChatMessageIds } from "./mergeStoredChat";
 import { mergePromptContextPointers } from "../turns/promptContextRecords";
 
@@ -323,6 +323,3 @@ function metadataStringKey(item: Record<string, unknown>, key: string): string |
   return typeof value === "string" && value.trim() ? value : undefined;
 }
 
-export function isMetadataRecord(value: unknown): value is Record<string, unknown> {
-  return Boolean(value && typeof value === "object" && !Array.isArray(value));
-}

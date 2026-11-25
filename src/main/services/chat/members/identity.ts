@@ -1,29 +1,27 @@
 import { cloudRunSelection } from "../../../../shared/cloudRunPreparation";
 import { memberAsItRunsNow } from "../../../../shared/forkToNewChat";
 import { inCliOwnMode } from "../../../../shared/chatAccessModes";
-import { MAIN_SESSION_ROLE_ID, isMainSessionChat, mainSessionParticipantId } from "../../../../shared/mainSession";
+import { isMainSessionChat, MAIN_SESSION_ROLE_ID, mainSessionParticipantId } from "../../../../shared/mainSession";
 import { randomUUID } from "node:crypto";
 import path from "node:path";
 import { tmpdir } from "node:os";
 import { hasConfiguredHostPlatform, userDataPath } from "../../../platform";
 import type {
-  AgentHealth, ChatAgentPermissions, ChatMessage, ChatParticipant, ChatParticipantConfig, ChatParticipantInput, CliProviderHost,
-  ChatParticipantSession, ChatProviderKind, ChatRoleConfig, ChatRoleParticipantDefaults, Conversation,
+  AgentHealth, ChatAgentMode, ChatAgentPermissions, ChatMessage, ChatParticipant, ChatParticipantConfig, ChatParticipantInput,
+  ChatParticipantSession, ChatProviderKind, ChatRoleConfig, ChatRoleParticipantDefaults, CliProviderHost, Conversation,
   CreateChatConversationRequest, ParticipantConfig, ProviderSettings, UpdateChatParticipantRuntimeRequest
 } from "../../../../shared/types";
 import { turnFinishedNoteOf } from "../../../../shared/turnFinishedNoteSource";
 import { accordClosedLaunchId } from "../../../../shared/accordProgress";
 import { cliProviderHostDefaultModel, cliProviderHostForParticipant } from "../../../../shared/cliProviderHosts";
 import {
-  normalizeChatParticipantRequestPermission, normalizeChatAgentPermissions, normalizeOptionalChatParticipantRequestPermission
+  effectiveChatAgentPermissionsForProvider, normalizeChatAgentMode, normalizeChatAgentPermissions,
+  normalizeChatParticipantRequestPermission, normalizeOptionalChatParticipantRequestPermission
 } from "../../../../shared/agentPermissions";
 import { chatParticipantHome } from "../../../../shared/chatParticipantHome";
 import { claudeCodePermissionMode, type ClaudePermissionMode } from "../../cliAgents";
 import { agentReadinessReason, cliProviderMetadata, providerEnabled, readinessForParticipant } from "../../../../shared/cliReadiness";
 import { CHAT_ADMINISTRATOR_ROLE_ID } from "../constants";
-import { normalizeBehaviorRuleIds } from "./roleRuntime";
-import { delegatedMemberCeiling } from "./rosterRequests";
-import { storedRemoteRunParticipantIds } from "../store/messages";
 
 /** Whether the computer moved a sessions-view chat's members into their
  *  CLI's own mode already: its shared mark, or its own record of it (kept
@@ -488,4 +486,54 @@ export function claudeMemberMode(conversation: Conversation, member: ChatPartici
   const asRun = participantForRun(conversation, member);
   const permissions = normalizeChatAgentPermissions(asRun.permissions);
   return permissions.cliApprovals === true ? claudeCodePermissionMode(asRun.agentMode, permissions) : undefined;
+}
+
+export function storedRemoteRunParticipantIds(value: unknown): Set<string> {
+  const participantIds = new Set<string>();
+  if (!value || typeof value !== "object" || Array.isArray(value)) return participantIds;
+  for (const handle of Object.values(value as Record<string, unknown>)) {
+    const participantId = handle && typeof handle === "object" ? (handle as { participantId?: unknown }).participantId : undefined;
+    if (typeof participantId === "string" && participantId) participantIds.add(participantId);
+  }
+  return participantIds;
+}
+
+export function normalizeBehaviorRuleIds(value: unknown): string[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+  const ids: string[] = [];
+  const seen = new Set<string>();
+  for (const item of value) {
+    if (typeof item !== "string") {
+      continue;
+    }
+    const id = item.trim();
+    if (!id || seen.has(id)) {
+      continue;
+    }
+    seen.add(id);
+    ids.push(id);
+  }
+  return ids;
+}
+
+/** What a member added without a card in a chat with a main session may
+ *  have at its turn: the main session's mode and effective rights as they
+ *  are now (docs/main-session.md), so lowering the main session lowers
+ *  them too. Undefined for every other member. */
+export function delegatedMemberCeiling(conversation: Conversation, participant: ChatParticipant): { mode: ChatAgentMode; permissions: ChatAgentPermissions; mainSession: ChatParticipant } | undefined {
+  if (!participant.delegatedByParticipantId) {
+    return undefined;
+  }
+  const mainId = mainSessionParticipantId(conversation.metadata);
+  if (!mainId || mainId === participant.id) {
+    return undefined;
+  }
+  const mainSession = chatParticipants(conversation).find((item) => item.id === mainId);
+  if (!mainSession) {
+    return undefined;
+  }
+  const mode = normalizeChatAgentMode(mainSession.agentMode);
+  return { mode, permissions: effectiveChatAgentPermissionsForProvider(mainSession.kind, mode, normalizeChatAgentPermissions(mainSession.permissions)), mainSession };
 }

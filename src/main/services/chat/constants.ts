@@ -1,7 +1,7 @@
 export const HANDLE_PATTERN = /^[A-Za-z0-9_-]{1,32}$/;
 
 /** ChatParticipantSession.instructionsAccessHash after a compaction: the
- *  member's next turn says its access again (ChatService.accessRestateDue). */
+ *  member's next turn says its access again (MemberSessions.accessRestateDue). */
 export const INSTRUCTIONS_ACCESS_RESTATE = "restate";
 
 export const CHAT_WARM_AGENT_IDLE_TIMEOUT_MS = 10 * 60_000;

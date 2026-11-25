@@ -3,9 +3,7 @@ import type {
 } from "../../../../shared/types";
 import { participantRequestVisibleRootId } from "../../../../shared/chatParticipantRequestThreads";
 import { APP_CHAT_SEND_MESSAGE_TOOL } from "../../appMcp";
-import {
-  isSelfCompactionRequest, repliesOfRun, selfCompactionRequestMessage, selfCompactionResumeKey, selfCompactionResumeText
-} from "./compactionText";
+import { repliesOfRun, selfCompactionRequestMessage, selfCompactionResumeKey, selfCompactionResumeText } from "./compactionText";
 import {
   furthestSelfCompactionMark, runIdBase, type SelfCompactionEnd, type SelfCompactionResume, selfCompactionResumeFrom,
   selfCompactionResumeRunId
@@ -16,6 +14,7 @@ import { createChatMessage } from "../store/messages";
 import { emitChatRunFailure } from "../turns/replyMessages";
 import type { ChatModules } from "../modules";
 import type { ChatDependencies } from "../dependencies";
+import { isSelfCompactionRequest } from "../approvals/approvalRecords";
 
 /** The turn a member goes on with after its own compaction. */
 export class SelfCompactionResumes {

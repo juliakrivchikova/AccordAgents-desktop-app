@@ -1,8 +1,8 @@
 import type { ChatMessage, ChatParticipant, ChatParticipantWatcherState, Conversation } from "../../../../shared/types";
 import { isAutoWatchStableMessage } from "../../../../shared/chatTimelineVisibility";
 import { participantRequestMessages } from "../requests/requestRecords";
-import { isMetadataRecord } from "../store/mergeStoredMetadata";
 import { askedParticipantIdsOf } from "../turns/deliveryTargets";
+import { isMetadataRecord } from "../compaction/contextUsage";
 
 export function normalizeParticipantWatchers(value: unknown): Record<string, ChatParticipantWatcherState> {
   if (!isMetadataRecord(value)) {

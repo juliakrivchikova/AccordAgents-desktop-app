@@ -1,19 +1,11 @@
-import { chatParticipantRequestPermissionExceeds, normalizeChatParticipantRequestPermission } from "../../shared/agentPermissions";
+import { chatParticipantRequestPermissionExceeds } from "../../shared/agentPermissions";
 import { APP_CHAT_REQUEST_PARTICIPANTS_TOOL } from "../../shared/appMcpToolContracts";
 import type { HubUserApproval } from "../../shared/hubOps";
 import { mainSessionParticipantId } from "../../shared/mainSession";
 import type { ChatMessage, ChatParticipant, ChatParticipantRequestPermission, Conversation } from "../../shared/types";
 import { approvedRequests, askGrantKey } from "./grants";
-import { handleKey, participantsOf, permissionsOf, rank, runsOnMachine } from "./records";
+import { handleKey, lowerRight, participantsOf, permissionsOf, rank, requestRight, runsOnMachine } from "./records";
 import type { Leave } from "./types";
-
-export function requestRight(participant: Pick<ChatParticipant, "permissions">): ChatParticipantRequestPermission {
-  return normalizeChatParticipantRequestPermission(permissionsOf(participant).requestParticipants);
-}
-
-export function lowerRight(left: ChatParticipantRequestPermission, right: ChatParticipantRequestPermission): ChatParticipantRequestPermission {
-  return rank(left) <= rank(right) ? left : right;
-}
 
 export function withRequestRight(member: ChatParticipant, right: ChatParticipantRequestPermission | undefined): ChatParticipant {
   const permissions = { ...permissionsOf(member) };

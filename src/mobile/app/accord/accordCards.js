@@ -34,7 +34,7 @@ export function accordLaunchCardForEntry(entry) {
 }
 
 // The desktop's Start Accord glyph: a merge whose three branches keep their
-// own colors (mobile-app.css), so the icon ignores currentColor.
+// own colors (styles/accord.css), so the icon ignores currentColor.
 const ACCORD_ICON_PATHS = [
   ["m8 6 4-4 4 4", "top"],
   ["M12 2v10.3", "top"],

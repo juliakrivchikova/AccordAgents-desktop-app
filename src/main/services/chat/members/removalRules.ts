@@ -23,7 +23,7 @@ import { createChatMessage } from "../store/messages";
 import type { ChatTaskDelegationInput } from "../types";
 
 /** Whether this desktop can confirm the User's answer behind a machine
- *  member's approved roster change (see ChatService.machineRosterDecision). */
+ *  member's approved roster change (see machineRosterDecision). */
 export type MachineRosterDecision = { ok: true } | { ok: false; waiting: true } | { ok: false; waiting: false; problem: string };
 
 /** Why the main session cannot be taken out of its chat, in words that name

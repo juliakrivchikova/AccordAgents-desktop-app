@@ -72,7 +72,7 @@ export interface ClaudeWarmProcessState {
   /** The session's folder and MCP servers, as its `system/init` said: a tool
    *  row names paths and servers the way the CLI's transcript does. */
   toolContext: ClaudeToolActivityContext;
-  /** The member this process runs (CliAgentRunner.claudeCompactionsUnreported). */
+  /** The member this process runs (WarmAgents.claudeCompactionsUnreported). */
   scopeKey: string;
   /** The session's permission mode (WarmAgentEntry.permissionMode). */
   permissionMode?: string;

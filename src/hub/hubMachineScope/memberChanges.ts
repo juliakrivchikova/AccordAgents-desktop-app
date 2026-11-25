@@ -15,6 +15,7 @@ import type { ChatAgentPermissions, ChatAppToolApprovalPolicy, ChatParticipant }
 import { permissionsWithin, startingPermissions } from "./memberRights";
 import { CHAT_ASSISTANT_ROLE_ID, handleKey, rank } from "./records";
 import type { Approved, ApprovedMember, MemberChanges, RoleRule, Update } from "./types";
+import { memberChangeTool } from "./grants";
 
 function manageRight(rule: RoleRule | undefined, permissions: unknown) {
   return resolveChatManageRolesParticipantsPermission(rule?.manageRolesParticipants,
@@ -56,10 +57,6 @@ function roleRuleFrom(defaults: unknown): RoleRule {
     ...(perm(record.requestParticipants) ? { requestParticipants: perm(record.requestParticipants) } : {}),
     ...(perm(record.requestCompaction) ? { requestCompaction: perm(record.requestCompaction) } : {})
   };
-}
-
-export function memberChangeTool(toolName: string): boolean {
-  return toolName === APP_PARTICIPANTS_REQUEST_CHANGE_TOOL || toolName === APP_ROSTER_REQUEST_CHANGE_TOOL;
 }
 
 /** The members an approved member request adds, as the app adds each. */

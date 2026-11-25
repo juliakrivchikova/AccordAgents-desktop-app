@@ -20,10 +20,6 @@ export function metadataWithInterruptedRunWarning(metadata: Record<string, unkno
   return { ...metadata, warnings: [...warnings, INTERRUPTED_RUN_WARNING] };
 }
 
-export function hasStaleRunRecoveryMarker(message: ChatMessage): boolean {
-  return Boolean(message.metadata?.staleRunRecovery);
-}
-
 export function chatRunId(conversation: Conversation): string | undefined {
   const runId = conversation.metadata.runId;
   return typeof runId === "string" && runId.trim() ? runId : undefined;

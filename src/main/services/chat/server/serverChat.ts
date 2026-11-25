@@ -10,9 +10,9 @@ import { chatParticipants, membersDroppedFrom } from "../members/identity";
 import { REPLIES_REPAIRED_KEY } from "../runs/interruptions";
 import { markServerTurn } from "../runs/runOwnerRecords";
 import { recordLastMessageByParticipant } from "../store/lastMessages";
-import { normalizedRemovedChatMessageIds } from "../store/mergeStoredChat";
 import type { ChatModules } from "../modules";
 import type { ChatDependencies } from "../dependencies";
+import { normalizedRemovedChatMessageIds } from "../store/messages";
 
 /** What the server accepted, applied to this device's copy of the chat. */
 export class ServerChat {

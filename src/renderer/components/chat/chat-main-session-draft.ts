@@ -59,7 +59,7 @@ export function newChatMainSessionParticipantConfig(
     ...(start?.cloudRun ? { cloudRun: start.cloudRun } : {}),
     // The rights an ordinary member starts with in this chat (reading its
     // project when it has one), asking members without a card as its role
-    // does; the app makes the same one (ChatService.ensureMainSessionParticipant).
+    // does; the app makes the same one (ChatCreation.ensureMainSessionParticipant).
     // In the sessions view the mode its CLI starts in on top: what it is not
     // granted, the CLI asks about.
     agentMode: access.agentMode,

@@ -3,7 +3,6 @@ import type { ConversationKind, ParticipantConfig } from "../../../../shared/typ
 import { normalizedExtraReadableDirs } from "../runs/runEnvironment";
 import type { CliAgentRunOptions, CliAgentWarmOptions } from "../types";
 
-/** Whether a warm process key was started with Claude in Chrome. */
 /** The agent environment version a member process was started with. */
 export function warmKeyAgentEnvKey(key: string): string | undefined {
   try {
@@ -14,6 +13,7 @@ export function warmKeyAgentEnvKey(key: string): string | undefined {
   }
 }
 
+/** Whether a warm process key was started with Claude in Chrome. */
 export function warmKeyClaudeChrome(key: string): boolean | undefined {
   try {
     const parsed = JSON.parse(key) as { claudeChrome?: unknown; providerKind?: unknown };

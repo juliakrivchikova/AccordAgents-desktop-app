@@ -150,11 +150,6 @@ export class ChatDeletion {
     }
   }
 
-  /** Machines transport, machine side: stores a conversation replicated from
-   *  the desktop through this service's own mutation queue and snapshot
-   *  tracking, so later saves by turns on this machine never collide with
-   *  rows written behind the service's back. The caller has already merged
-   *  the machine-owned metadata. */
   /**
    * Closes this device's providers for a chat that is being deleted elsewhere,
    * and proves they are gone.

@@ -20,9 +20,6 @@ export class ChatTitles {
     private readonly deps: Pick<ChatDependencies, "debugLogs" | "storage">
   ) {}
 
-  /** The User's switch of the chat's view (shared/mainSession.ts): shared
-   *  through her server like the pin. A chat without a main session has one
-   *  view only. */
   /**
    * Members of a sessions-view chat made before the title of their task was
    * kept with them (ChatParticipant.taskTitle) get it once, from the chat's

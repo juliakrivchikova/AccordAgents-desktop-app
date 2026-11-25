@@ -1,10 +1,6 @@
 import type { ChatMessage } from "../../../../shared/types";
 import { CHAT_DELIVERY_POLICY_OPTIONS } from "../../../../shared/chatDeliveryPolicy";
 
-/** A phone's turn this device is starting. `started`: claimed and handed to
- *  the run (a Stop is then an ordinary one). `registered`: the run is in the
- *  chat's active runs, which then say the chat is busy; until then this entry
- *  says it. */
 /** The members a User's message names, as resolved where it was written. */
 export function deliveryTargetsOf(message: ChatMessage): string[] {
   const value = (message.metadata as { deliveryTargets?: unknown } | undefined)?.deliveryTargets;

@@ -1,6 +1,6 @@
 import { readFile, stat } from "node:fs/promises";
 import {
-  containsEmbeddedSecret, containsEmbeddedSecretValue, containsMachineSpecificPath, isPortableEnvironmentReference,
+  containsEmbeddedSecret, containsEmbeddedSecretValue, containsMachineSpecificPath, isPortableEnvironmentReference, isRecord,
   isSensitiveConfigKey
 } from "./configSecrets";
 import { assertPortableSetupNotAborted, isMissingFileError } from "./portableCopy";
@@ -334,6 +334,3 @@ export async function readPortableJsonRecord(
   }
 }
 
-export function isRecord(value: unknown): value is Record<string, unknown> {
-  return Boolean(value) && typeof value === "object" && !Array.isArray(value);
-}

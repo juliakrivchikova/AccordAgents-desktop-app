@@ -7,8 +7,9 @@ import type {
 import { normalizeChatReasoningEffort } from "../../../../shared/reasoningEffort";
 import { normalizeChatAgentMode, normalizeChatAgentPermissions } from "../../../../shared/agentPermissions";
 import { preservedRemoteExecution } from "../../../../shared/chatParticipantHome";
-import { assertParticipantProvidersReady, chatParticipants, formatHandleList, inCliOwnModeInMainSessionChat } from "./identity";
-import { normalizeBehaviorRuleIds } from "./roleRuntime";
+import {
+  assertParticipantProvidersReady, chatParticipants, formatHandleList, inCliOwnModeInMainSessionChat, normalizeBehaviorRuleIds
+} from "./identity";
 import {
   fitRosterAdditions, participantManagementChangeEscalates, roleChangeManagementEscalates, roleChangeSummary,
   temporaryRolesForRoleRequest

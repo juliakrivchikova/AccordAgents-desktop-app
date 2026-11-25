@@ -126,6 +126,9 @@ export class ChatList {
     });
   }
 
+  /** The User's switch of the chat's view (shared/mainSession.ts): shared
+   *  through her server like the pin. A chat without a main session has one
+   *  view only. */
   async setChatView(request: SetChatViewRequest): Promise<Conversation | undefined> {
     if (!isChatViewMode(request.view)) {
       throw new Error("Unknown chat view.");

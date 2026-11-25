@@ -24,9 +24,6 @@ export class WarmAgents {
   private readonly conversationOperations = new Map<string, number>();
   warmShutdown?: Promise<void>;
   warmOperations = 0;
-  /** Host-wide gate: another deployment on this machine may have committed an
-   *  idle stop, and its decision has to be refused here, before a provider is
-   *  started, not discovered when the instance disappears. */
   readonly warmPreparations = new Set<{ key: string; done: Promise<void> }>();
 
   constructor(

@@ -3,9 +3,9 @@ import { APP_TOOL_PERMISSION_TOOL } from "../../shared/appMcpToolContracts";
 import { isClaudePlanApprovalRequest } from "../../shared/claudePlanApproval";
 import type { HubUserApproval } from "../../shared/hubOps";
 import type { ChatAppToolApproval, ChatParticipant, Conversation } from "../../shared/types";
-import { lowerRight, requestRight, withRequestRight } from "./askRights";
+import { withRequestRight } from "./askRights";
 import { accordNaming } from "./grants";
-import { HOME_FIELDS, permissionsOf, rank } from "./records";
+import { HOME_FIELDS, lowerRight, permissionsOf, rank, requestRight } from "./records";
 import type { Approved, Update } from "./types";
 
 // --- its own members ----------------------------------------------------------

@@ -8,8 +8,7 @@ import {
 } from "../../shared/appMcpToolContracts";
 import { claudePlanApprovalOption, claudePlanModeSettings, isClaudePlanApprovalRequest } from "../../shared/claudePlanApproval";
 import type { ChatAgentMode, ChatAgentPermissions, ChatParticipant } from "../../shared/types";
-import { lowerRight } from "./askRights";
-import { permissionsOf, rank } from "./records";
+import { lowerRight, permissionsOf, rank } from "./records";
 import type { Approved, RoleRule } from "./types";
 
 const MODE_RANK: Record<ChatAgentMode, number> = { plan: 0, default: 1, auto: 2, "full-access": 3 };

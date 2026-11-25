@@ -76,7 +76,7 @@ export type ConversationMetadata = Record<string, unknown> & {
   chatView?: ChatViewMode;
   /** When the computer moved this sessions-view chat's members with rights
    *  from the classic view into their CLI's own mode as it opened the chat
-   *  (ChatService.convertMembersForSessionsView), so that is done once and a
+   *  (ChatList.convertMembersForSessionsView), so that is done once and a
    *  later change is not undone. Shared through her server. */
   cliModesConvertedAt?: string;
   /** The same, as this computer recorded it: never shared, so a server on an

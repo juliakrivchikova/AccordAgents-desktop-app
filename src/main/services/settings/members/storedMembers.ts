@@ -136,7 +136,7 @@ export function genericSeedParticipant(kind: ChatProviderKind, participants: Cha
     kind,
     avatarId: kind === "codex-cli" ? "codex-logo" : kind === "gemini-cli" ? "gemini-logo" : "claude-logo",
     agentMode: "default",
-    // A chat with a project gives it repoRead (ChatService.seededParticipantInputs).
+    // A chat with a project gives it repoRead (seededParticipantInputs).
     permissions: newChatMemberPermissions(false),
     updatedAt: now
   };

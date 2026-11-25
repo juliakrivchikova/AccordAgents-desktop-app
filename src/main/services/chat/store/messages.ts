@@ -1,15 +1,12 @@
 import { randomUUID } from "node:crypto";
 import { mkdir, rename, writeFile } from "node:fs/promises";
 import path from "node:path";
-import type { ChatMessage, Conversation, ParticipantConfig } from "../../../../shared/types";
+import type { ChatMessage, ChatMessageReactions, Conversation, ParticipantConfig } from "../../../../shared/types";
 import { turnFinishedNoteFor } from "../../../../shared/turnFinishedNote";
 import { sanitizeWarningList, sanitizeWarningText } from "../../../../shared/warnings";
 import { chatParticipants, chatUserDataPath } from "../members/identity";
-import { normalizedRemovedChatMessageIds } from "./mergeStoredChat";
+import { normalizeChatReactionEmoji } from "../../../../shared/chatReactions";
 
-/** Copy for values adopted out of a stored snapshot into the live
- *  conversation, so in-place edits of the live object never reach the snapshot
- *  (see readStoredChatStateForRefresh). */
 /** A place's name as a member is told it: one short line of text. */
 export function placeName(value: unknown): string | undefined {
   if (typeof value !== "string") return undefined;
@@ -17,6 +14,9 @@ export function placeName(value: unknown): string | undefined {
   return line || undefined;
 }
 
+/** Copy for values adopted out of a stored snapshot into the live
+ *  conversation, so in-place edits of the live object never reach the snapshot
+ *  (see readStoredChatStateForRefresh). */
 export function cloneJsonValue<T>(value: T): T {
   return JSON.parse(JSON.stringify(value)) as T;
 }
@@ -46,16 +46,6 @@ export function chatCreateLogPayload(conversation: Conversation): Record<string,
  *  member ever ran, so deleting a chat still removes what it left behind. */
 export function storedRemoteRunIds(value: unknown): string[] {
   return value && typeof value === "object" && !Array.isArray(value) ? Object.keys(value as Record<string, unknown>) : [];
-}
-
-export function storedRemoteRunParticipantIds(value: unknown): Set<string> {
-  const participantIds = new Set<string>();
-  if (!value || typeof value !== "object" || Array.isArray(value)) return participantIds;
-  for (const handle of Object.values(value as Record<string, unknown>)) {
-    const participantId = handle && typeof handle === "object" ? (handle as { participantId?: unknown }).participantId : undefined;
-    if (typeof participantId === "string" && participantId) participantIds.add(participantId);
-  }
-  return participantIds;
 }
 
 export async function enqueueDeletedConversationArtifactCleanup(conversation: Conversation): Promise<string> {
@@ -158,3 +148,96 @@ function stableJsonValue(value: unknown): unknown {
   }
   return sorted;
 }
+
+export function normalizedRemovedChatMessageIds(value: unknown): string[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+  const ids: string[] = [];
+  for (const item of value) {
+    if (typeof item === "string" && item && !ids.includes(item)) {
+      ids.push(item);
+    }
+  }
+  return ids.slice(-CHAT_REMOVED_MESSAGE_ID_MAX);
+}
+
+export function normalizedChatMessageReactions(value: unknown): ChatMessageReactions {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return {};
+  }
+  const reactions: ChatMessageReactions = {};
+  for (const [emoji, rawReactors] of Object.entries(value)) {
+    let normalizedEmoji: string;
+    try {
+      normalizedEmoji = normalizeChatReactionEmoji(emoji);
+    } catch {
+      continue;
+    }
+    if (!Array.isArray(rawReactors)) {
+      continue;
+    }
+    const seenActors = new Set<string>();
+    const reactors: ChatMessageReactions[string] = [];
+    for (const item of rawReactors) {
+      if (!item || typeof item !== "object" || Array.isArray(item)) {
+        continue;
+      }
+      const reactor = item as Record<string, unknown>;
+      const actorId = typeof reactor.actorId === "string" ? reactor.actorId.trim() : "";
+      const actorLabel = typeof reactor.actorLabel === "string" ? reactor.actorLabel.trim() : "";
+      const actorKind = reactor.actorKind === "user"
+        ? "user"
+        : reactor.actorKind === "participant"
+          ? "participant"
+          : undefined;
+      const at = typeof reactor.at === "string" && reactor.at.trim() ? reactor.at.trim() : new Date().toISOString();
+      if (!actorId || !actorLabel || !actorKind) {
+        continue;
+      }
+      const key = `${actorKind}:${actorId}`;
+      if (seenActors.has(key)) {
+        continue;
+      }
+      seenActors.add(key);
+      reactors.push({ actorId, actorLabel, actorKind, at });
+    }
+    if (reactors.length > 0) {
+      reactions[normalizedEmoji] = reactors;
+    }
+  }
+  return reactions;
+}
+
+// Union merge for completed-message upsert: carry a placeholder's accumulated
+// reactions onto the fresh completed message (which has none of its own).
+// Existing/placeholder reactors win on a duplicate emoji + actor. Both this and
+// the stale-refresh path share normalizedChatMessageReactions for shape/dedup.
+export function mergeChatMessageReactions(existing: unknown, incoming: unknown): ChatMessageReactions | undefined {
+  const existingReactions = normalizedChatMessageReactions(existing);
+  const incomingReactions = normalizedChatMessageReactions(incoming);
+  const merged: ChatMessageReactions = {};
+  const emojis = new Set([...Object.keys(existingReactions), ...Object.keys(incomingReactions)]);
+  for (const emoji of emojis) {
+    const seenActors = new Set<string>();
+    const reactors: ChatMessageReactions[string] = [];
+    for (const reactor of [...(existingReactions[emoji] ?? []), ...(incomingReactions[emoji] ?? [])]) {
+      const key = `${reactor.actorKind}:${reactor.actorId}`;
+      if (seenActors.has(key)) {
+        continue;
+      }
+      seenActors.add(key);
+      reactors.push(reactor);
+    }
+    if (reactors.length > 0) {
+      merged[emoji] = reactors;
+    }
+  }
+  return Object.keys(merged).length > 0 ? merged : undefined;
+}
+
+export function hasStaleRunRecoveryMarker(message: ChatMessage): boolean {
+  return Boolean(message.metadata?.staleRunRecovery);
+}
+
+export const CHAT_REMOVED_MESSAGE_ID_MAX = 100;

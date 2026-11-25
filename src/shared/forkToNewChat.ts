@@ -275,7 +275,7 @@ export function forkToNewChatSupportFromHello(hello: { forkToNewChatSupported?: 
 /**
  * Why this member of a chat (as it runs now) cannot be forked to a new chat,
  * judged on this computer: the service refuses with these words and its
- * menus show them (ChatService.forkToNewChatRefusal, the renderer's
+ * menus show them (NewChatOffers.forkToNewChatRefusal, the renderer's
  * forkToNewChatReasonFor).
  */
 export function forkToNewChatReasonInChat(input: {
@@ -471,7 +471,7 @@ export function forkToNewChatReasonFromOffer(input: {
  * computer prepared for a new chat (`mainSession`: its handle, role and say
  * over members), on the member's provider, model, effort, access and place,
  * marked with where it comes from. The computer makes the same one through
- * its own validation (ChatService.createForkedConversation).
+ * its own validation (ChatForks.createForkedConversation).
  */
 export function forkedMainSessionFor(input: {
   mainSession: ChatParticipant;

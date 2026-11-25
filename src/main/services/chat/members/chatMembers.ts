@@ -18,12 +18,12 @@ import { metadataWithAutoWatchDisabled, metadataWithAutoWatchEnabled } from "../
 import { CHAT_ADMINISTRATOR_ROLE_ID } from "../constants";
 import {
   assertParticipantProvidersReady, chatParticipantHasRun, chatParticipants, chatSessions, inCliOwnModeInMainSessionChat,
-  isChatMainSession, participantConfigSyncKey, participantHomeChangeRequested, syncParticipantFromSavedConfig
+  isChatMainSession, normalizeBehaviorRuleIds, participantConfigSyncKey, participantHomeChangeRequested,
+  syncParticipantFromSavedConfig
 } from "./identity";
 import {
   appToolApprovalReferencesParticipant, cleanupRemovedParticipantMessageState, MAIN_SESSION_NOT_REMOVABLE_MESSAGE
 } from "./removalRules";
-import { normalizeBehaviorRuleIds } from "./roleRuntime";
 import { isOpenParticipantRequestStatus } from "../requests/requestRecords";
 import { createChatMessage } from "../store/messages";
 import type { ChatModules } from "../modules";

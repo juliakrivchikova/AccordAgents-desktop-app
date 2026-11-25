@@ -1,17 +1,15 @@
 import { sessionsRowDetailLine, sessionsRowShowsDetail } from "../../../../shared/sessionsActivity";
 import { furthestTurnMarks } from "../../chatServerOps";
 import type {
-  ChatAgentActivityEvent, ChatMessage, ChatMessageReactions, ChatParticipantRequestBatch, ChatParticipantRequestItem,
-  ChatPendingChoice, ChatPendingMention, Conversation
+  ChatAgentActivityEvent, ChatMessage, ChatParticipantRequestBatch, ChatParticipantRequestItem, ChatPendingChoice,
+  ChatPendingMention, Conversation
 } from "../../../../shared/types";
 import { withInterimPostsFrom } from "../../../../shared/interimPosts";
-import { normalizeChatReactionEmoji } from "../../../../shared/chatReactions";
 import { furthestSelfCompactionMark } from "../compaction/selfCompactionMarks";
 import { CHAT_CHOICE_REFUSALS_KEPT } from "../constants";
 import { isOpenParticipantRequestStatus, rollupParticipantRequestStatus } from "../requests/requestRecords";
-import { hasStaleRunRecoveryMarker } from "../runs/runOwnerRecords";
 import { repairLastMessagePointerAfterRemoval } from "./lastMessages";
-import { cloneJsonValue } from "./messages";
+import { CHAT_REMOVED_MESSAGE_ID_MAX, cloneJsonValue, hasStaleRunRecoveryMarker, normalizedRemovedChatMessageIds } from "./messages";
 import { chatAutoTitleMetadata } from "./titles";
 
 const CHAT_ACTIVITY_EVENT_MAX_COUNT = 500;
@@ -24,8 +22,6 @@ const CHAT_ACTIVITY_EVENT_MAX_COUNT = 500;
  *  their details first (withinActivityDetailsBudget); every row keeps what it
  *  shows. */
 const CHAT_ACTIVITY_DETAILS_TOTAL_MAX_CHARS = 24_000;
-
-const CHAT_REMOVED_MESSAGE_ID_MAX = 100;
 
 export function mergeStoredChatTitle(stored: Conversation, current: Conversation): string {
   const storedTitle = chatAutoTitleMetadata(stored);
@@ -325,33 +321,6 @@ function mergeStoredParticipantRequestItem(
   return currentItem.updatedAt >= storedItem.updatedAt ? currentItem : storedItem;
 }
 
-// Union merge for completed-message upsert: carry a placeholder's accumulated
-// reactions onto the fresh completed message (which has none of its own).
-// Existing/placeholder reactors win on a duplicate emoji + actor. Both this and
-// the stale-refresh path share normalizedChatMessageReactions for shape/dedup.
-export function mergeChatMessageReactions(existing: unknown, incoming: unknown): ChatMessageReactions | undefined {
-  const existingReactions = normalizedChatMessageReactions(existing);
-  const incomingReactions = normalizedChatMessageReactions(incoming);
-  const merged: ChatMessageReactions = {};
-  const emojis = new Set([...Object.keys(existingReactions), ...Object.keys(incomingReactions)]);
-  for (const emoji of emojis) {
-    const seenActors = new Set<string>();
-    const reactors: ChatMessageReactions[string] = [];
-    for (const reactor of [...(existingReactions[emoji] ?? []), ...(incomingReactions[emoji] ?? [])]) {
-      const key = `${reactor.actorKind}:${reactor.actorId}`;
-      if (seenActors.has(key)) {
-        continue;
-      }
-      seenActors.add(key);
-      reactors.push(reactor);
-    }
-    if (reactors.length > 0) {
-      merged[emoji] = reactors;
-    }
-  }
-  return Object.keys(merged).length > 0 ? merged : undefined;
-}
-
 export function capChatActivityEvents(events: ChatAgentActivityEvent[]): { events: ChatAgentActivityEvent[]; dropped: number } {
   const kept = events.length <= CHAT_ACTIVITY_EVENT_MAX_COUNT ? events : events.slice(-CHAT_ACTIVITY_EVENT_MAX_COUNT);
   return { events: withinActivityDetailsBudget(kept), dropped: events.length - kept.length };
@@ -407,19 +376,6 @@ export function mergeRemovedChatMessageIds(storedValue: unknown, currentValue: u
   return merged.slice(-CHAT_REMOVED_MESSAGE_ID_MAX);
 }
 
-export function normalizedRemovedChatMessageIds(value: unknown): string[] {
-  if (!Array.isArray(value)) {
-    return [];
-  }
-  const ids: string[] = [];
-  for (const item of value) {
-    if (typeof item === "string" && item && !ids.includes(item)) {
-      ids.push(item);
-    }
-  }
-  return ids.slice(-CHAT_REMOVED_MESSAGE_ID_MAX);
-}
-
 export function markChatMessageRemoved(conversation: Conversation, messageId: string): void {
   const existing = normalizedRemovedChatMessageIds(conversation.metadata.removedChatMessageIds)
     .filter((id) => id !== messageId);
@@ -446,49 +402,3 @@ export function applyRemovedChatMessageTombstones(conversation: Conversation): b
   return true;
 }
 
-export function normalizedChatMessageReactions(value: unknown): ChatMessageReactions {
-  if (!value || typeof value !== "object" || Array.isArray(value)) {
-    return {};
-  }
-  const reactions: ChatMessageReactions = {};
-  for (const [emoji, rawReactors] of Object.entries(value)) {
-    let normalizedEmoji: string;
-    try {
-      normalizedEmoji = normalizeChatReactionEmoji(emoji);
-    } catch {
-      continue;
-    }
-    if (!Array.isArray(rawReactors)) {
-      continue;
-    }
-    const seenActors = new Set<string>();
-    const reactors: ChatMessageReactions[string] = [];
-    for (const item of rawReactors) {
-      if (!item || typeof item !== "object" || Array.isArray(item)) {
-        continue;
-      }
-      const reactor = item as Record<string, unknown>;
-      const actorId = typeof reactor.actorId === "string" ? reactor.actorId.trim() : "";
-      const actorLabel = typeof reactor.actorLabel === "string" ? reactor.actorLabel.trim() : "";
-      const actorKind = reactor.actorKind === "user"
-        ? "user"
-        : reactor.actorKind === "participant"
-          ? "participant"
-          : undefined;
-      const at = typeof reactor.at === "string" && reactor.at.trim() ? reactor.at.trim() : new Date().toISOString();
-      if (!actorId || !actorLabel || !actorKind) {
-        continue;
-      }
-      const key = `${actorKind}:${actorId}`;
-      if (seenActors.has(key)) {
-        continue;
-      }
-      seenActors.add(key);
-      reactors.push({ actorId, actorLabel, actorKind, at });
-    }
-    if (reactors.length > 0) {
-      reactions[normalizedEmoji] = reactors;
-    }
-  }
-  return reactions;
-}

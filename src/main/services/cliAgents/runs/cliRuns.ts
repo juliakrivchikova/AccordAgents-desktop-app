@@ -20,6 +20,9 @@ export class CliRuns {
   private nativeOperations = 0;
   nativeAdmissionsFenced = false;
   nativeShutdownGeneration = 0;
+  /** Host-wide gate: another deployment on this machine may have committed an
+   *  idle stop, and its decision has to be refused here, before a provider is
+   *  started, not discovered when the instance disappears. */
   private hostAdmission?: (what: string) => Promise<{ admitted: true } | { admitted: false; reason: string }> | { admitted: true } | { admitted: false; reason: string };
 
   constructor(

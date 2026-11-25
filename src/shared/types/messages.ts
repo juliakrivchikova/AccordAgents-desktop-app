@@ -74,7 +74,7 @@ export interface ChatMessageMetadata {
   missingProjectCopy?: { machineId: string; sourcePath: string };
   /** A reply that ended for the compaction its member asked for
    *  (app_chat_request_compaction): the member goes on by itself after it, in
-   *  a turn of its own (ChatService.continueAfterSelfCompaction). Written by
+   *  a turn of its own (SelfCompactionResumes.continueAfterSelfCompaction). Written by
    *  the member's device and read by the one that waits for its answer. */
   selfCompaction?: ChatSelfCompactionMark;
   /** The message's place in the User's server's order (agreement Д1): set

@@ -5,7 +5,8 @@ import type {
   ChatAppToolApproval, ChatAppToolApprovalPolicy, ChatAppToolApprovalRequest, ChatAppToolCapability, ChatCodexApprovalRequest,
   ChatParticipant, ChatParticipantChangeRequest, ChatParticipantRemovalRequest, ChatParticipantRequestApprovalRequest,
   ChatParticipantRequestInput, ChatPermissionChangeRequest, ChatPermissionRequestToolResult, ChatRoleChangeRequest,
-  ChatRoleParticipantChangeRequest, ChatRosterChangeRequest, ChatShellPermissionRule, ChatToolPermissionRequest, Conversation
+  ChatRoleParticipantChangeRequest, ChatRosterChangeRequest, ChatSelfCompactionRequest, ChatShellPermissionRule,
+  ChatToolPermissionRequest, Conversation
 } from "../../../../shared/types";
 import { CODEX_APPROVAL_TOOL_NAME } from "../../codexApprovals";
 import { isCodexGuardianDeniedApprovalMethod, isCodexGuardianTimedOutApprovalMethod } from "../../../../shared/codexApproval";
@@ -18,9 +19,7 @@ import { chatToolPermissionScopesEqual, normalizeChatToolPermissionScope } from 
 import { isChatScriptChangeRequest, type ChatScriptChangeRequest } from "../../../../shared/scripts";
 import { isConnectorSignInRequest, type McpServerStatus } from "../../../../shared/connectorSignIn";
 import { CHAT_GITHUB_APP_PERMISSION_MAX_LENGTH, CHAT_GITHUB_APP_PERMISSION_PATTERN, CHAT_GITHUB_APP_REPOSITORY_PATTERN } from "./constants";
-import { permissionChangeRequestCovers } from "./permissionGrants";
 import { withoutFencedCode } from "../choices/mentions";
-import { isSelfCompactionRequest } from "../compaction/compactionText";
 import type { ChatAppMcpActor } from "../types";
 
 /** The run a permission approval resumes its member in. It is a turn of its
@@ -169,54 +168,8 @@ export function permissionRequestStatusResult(approval: ChatAppToolApproval): Ch
 /** A member's permission request belongs to the run that asked for it and
  *  to the run its approval resumed the member in: there the member may ask
  *  for it again, or for its status, and gets the answer it already has. */
-function isPermissionRequestOfRun(approval: ChatAppToolApproval, runId: string): boolean {
+export function isPermissionRequestOfRun(approval: ChatAppToolApproval, runId: string): boolean {
   return approval.resumeContext?.runId === runId || permissionApprovalResumeRunId(approval.id) === runId;
-}
-
-export function findReplayablePermissionApproval(
-  conversation: Conversation,
-  requester: ChatParticipant,
-  request: ChatPermissionChangeRequest,
-  actor: ChatAppMcpActor
-): ChatAppToolApproval | undefined {
-  return chatAppToolApprovals(conversation).find((approval) => {
-    if (
-      approval.toolName !== APP_PERMISSIONS_REQUEST_CHANGE_TOOL ||
-      approval.requesterParticipantId !== requester.id ||
-      !isPermissionChangeRequest(approval.request)
-    ) {
-      return false;
-    }
-    if (actor.runId) {
-      if (!isPermissionRequestOfRun(approval, actor.runId)) {
-        return false;
-      }
-    } else if (approval.status !== "pending") {
-      return false;
-    }
-    return (
-      permissionChangeRequestCovers(approval.request, request) &&
-      permissionChangeRequestCovers(request, approval.request)
-    );
-  });
-}
-
-function hasPendingPermissionApproval(
-  conversation: Conversation,
-  participant: ChatParticipant,
-  request: ChatPermissionChangeRequest
-): boolean {
-  return chatAppToolApprovals(conversation).some((approval) => {
-    if (
-      approval.status !== "pending" ||
-      approval.toolName !== APP_PERMISSIONS_REQUEST_CHANGE_TOOL ||
-      approval.requesterParticipantId !== participant.id ||
-      !isPermissionChangeRequest(approval.request)
-    ) {
-      return false;
-    }
-    return permissionChangeRequestCovers(approval.request as ChatPermissionChangeRequest, request);
-  });
 }
 
 export function hasPendingPermissionApprovalForResume(conversation: Conversation, approval: ChatAppToolApproval): boolean {
@@ -621,4 +574,14 @@ export function withoutAnsweredPlans(conversation: Conversation): void {
       return { ...approval, request: { ...approval.request, planApproval: asked } };
     })
   };
+}
+
+export function isSelfCompactionRequest(value: unknown): value is ChatSelfCompactionRequest {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return false;
+  }
+  const request = value as Partial<ChatSelfCompactionRequest>;
+  return request.type === "self_compaction" &&
+    (request.instructions === undefined || typeof request.instructions === "string") &&
+    (request.contextPercentage === undefined || typeof request.contextPercentage === "number");
 }

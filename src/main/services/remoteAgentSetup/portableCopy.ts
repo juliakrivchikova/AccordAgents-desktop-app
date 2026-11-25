@@ -1,7 +1,7 @@
 import { chmod, copyFile, lstat, mkdir, readdir, realpath, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
-import { isRecord } from "./portableConfig";
 import type { PortableAgentSetupManifestLink, PortableCopyBudget } from "./types";
+import { isRecord } from "./configSecrets";
 
 export async function copyPortableSkillRoot(
   sourceRoot: string,

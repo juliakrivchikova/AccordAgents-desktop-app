@@ -4,12 +4,12 @@ import {
   CLAUDE_TOOLS_WITHOUT_ROW, claudeToolActivity, mcpServerToolPrefix, type ClaudeToolActivityContext, type CliToolActivity
 } from "../../cliToolActivity";
 import { CLAUDE_WARM_CANCELLED_MESSAGE } from "./constants";
-import { extractClaudeStreamEventTextDelta, extractClaudeWarmAssistantText, extractClaudeWarmResultText } from "./output";
 import type { ClaudeWarmProcessHooks, ClaudeWarmProcessState } from "./types";
 import { finalTextFromMessageItems, textWithAgentMessageBoundary, trailingTextBlock } from "../codex/appServerText";
 import { emitLiveOutput, reportSessionId } from "../runs/outputText";
 import { asRecord, stringField } from "../runs/records";
 import type { ClaudeWarmReply, CliAgentOutputCallback, CliAgentReplyStart, CliAgentWarmOptions } from "../types";
+import { extractClaudeStreamEventTextDelta, extractClaudeWarmAssistantText, extractClaudeWarmResultText } from "./streamText";
 
 // Claude background tasks (Agent/Bash `run_in_background`) on the warm transport.
 // Verified on Claude Code 2.1.257 and 2.1.280: the CLI resumes the model with

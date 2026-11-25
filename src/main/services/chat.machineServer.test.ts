@@ -908,7 +908,7 @@ test("a cloud member's reply that failed here before its turn started stays wher
 
 test("a fork's line a machine writes during its member's turn reaches the server and the computer once, and is not written again when said again on a later turn", async (t) => {
   // Fork to new chat and a delegated fork say what became of the copy as a
-  // line in the chat (ChatService.postForkNotice) as well as a chat warning:
+  // line in the chat (ChatForks.postForkNotice) as well as a chat warning:
   // a warning stays on the device that raised it, here the machine.
   const notice = "@drew could not start from a copy of @main's session, so it started a clean session from the saved chat context.";
   const h = await linked(t, localChat("chat-fork-line"));

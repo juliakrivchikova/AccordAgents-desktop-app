@@ -119,7 +119,7 @@ test("buildGeminiExecInvocation: auto mode and granted write skip tool confirmat
   });
   assert.equal(write.args.includes("--dangerously-skip-permissions"), true);
   // A chat turn is the member's message as it is; where it may write is said
-  // once, in its session's instructions (ChatService.antigravityAccessLines).
+  // once, in its session's instructions (antigravityAccessLines).
   assert.equal(flagValue(auto.args, "--print"), "Create exactly /outside/explicit-target.txt with the text parity-proof.");
   assert.doesNotMatch(JSON.stringify(auto.args), /writable_roots|sandbox\.filesystem\.allowWrite/);
   assert.equal(flagValue(write.args, "--print"), "Do work");

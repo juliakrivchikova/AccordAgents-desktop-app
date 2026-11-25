@@ -8,8 +8,8 @@ import {
 } from "../../../../shared/agentPermissions";
 import { APP_PERMISSIONS_REQUEST_CHANGE_TOOL } from "../../appMcp";
 import {
-  chatAppToolApprovals, findReplayablePermissionApproval, isPermissionChangeRequest, newAppToolApproval,
-  permissionRequestIdFromRaw, permissionRequestStatusForTool, permissionRequestStatusResult, upsertAppToolApproval
+  chatAppToolApprovals, isPermissionChangeRequest, isPermissionRequestOfRun, newAppToolApproval, permissionRequestIdFromRaw,
+  permissionRequestStatusForTool, permissionRequestStatusResult, upsertAppToolApproval
 } from "./approvalRecords";
 import { CHAT_GITHUB_APP_PERMISSION_MAX_LENGTH, CHAT_GITHUB_APP_PERMISSION_PATTERN, CHAT_GITHUB_APP_REPOSITORY_PATTERN } from "./constants";
 import type { PreparedPermissionChange } from "./types";
@@ -617,4 +617,50 @@ function formatProviderNativeAllowedToolList(allowedTools: string[]): string {
 function formatGitHubAppPermissionList(repositoryFullName: string, permissions: string[]): string {
   const labels = permissions.map((permission) => `GitHub App ${JSON.stringify(permission)} on ${repositoryFullName}`);
   return formatHandleList(labels);
+}
+
+export function findReplayablePermissionApproval(
+  conversation: Conversation,
+  requester: ChatParticipant,
+  request: ChatPermissionChangeRequest,
+  actor: ChatAppMcpActor
+): ChatAppToolApproval | undefined {
+  return chatAppToolApprovals(conversation).find((approval) => {
+    if (
+      approval.toolName !== APP_PERMISSIONS_REQUEST_CHANGE_TOOL ||
+      approval.requesterParticipantId !== requester.id ||
+      !isPermissionChangeRequest(approval.request)
+    ) {
+      return false;
+    }
+    if (actor.runId) {
+      if (!isPermissionRequestOfRun(approval, actor.runId)) {
+        return false;
+      }
+    } else if (approval.status !== "pending") {
+      return false;
+    }
+    return (
+      permissionChangeRequestCovers(approval.request, request) &&
+      permissionChangeRequestCovers(request, approval.request)
+    );
+  });
+}
+
+export function hasPendingPermissionApproval(
+  conversation: Conversation,
+  participant: ChatParticipant,
+  request: ChatPermissionChangeRequest
+): boolean {
+  return chatAppToolApprovals(conversation).some((approval) => {
+    if (
+      approval.status !== "pending" ||
+      approval.toolName !== APP_PERMISSIONS_REQUEST_CHANGE_TOOL ||
+      approval.requesterParticipantId !== participant.id ||
+      !isPermissionChangeRequest(approval.request)
+    ) {
+      return false;
+    }
+    return permissionChangeRequestCovers(approval.request as ChatPermissionChangeRequest, request);
+  });
 }

@@ -17,8 +17,8 @@ import {
   isClaudePermissionModeUnsupported, withClaudePermissionMode
 } from "./launch";
 import {
-  claudeJsonResult, compactClaudeThroughProcess, extractClaudeSessionId, extractClaudeText, extractClaudeWarmResultText,
-  handleClaudeOneShotStreamChunk, handleClaudeOneShotStreamLine
+  claudeJsonResult, compactClaudeThroughProcess, extractClaudeSessionId, extractClaudeText, handleClaudeOneShotStreamChunk,
+  handleClaudeOneShotStreamLine
 } from "./output";
 import {
   CLAUDE_PERMISSION_MODE_LABELS, ClaudeControlError, type ClaudePermissionMode, isClaudeAutoModeRefusal, isClaudePermissionMode
@@ -36,6 +36,7 @@ import {
 import type { CliAgentCompactResult, CliAgentOutputCallback, CliAgentRunOptions, CliAgentWarmOptions, WarmAgentEntry } from "../types";
 import { warmAgentKey, warmAgentScopeKey, withoutWarm } from "../warm/warmKeys";
 import type { CliModules } from "../modules";
+import { extractClaudeWarmResultText } from "./streamText";
 
 /** How long the CLI gets to answer `set_permission_mode` (Shift+Tab). */
 export const CLAUDE_PERMISSION_MODE_TIMEOUT_MS = 15_000;
