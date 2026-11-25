@@ -218,13 +218,9 @@ test("clearInterruptedRuns preserves local run metadata because storage cannot o
   };
   let saved = false;
   const storage = storageWithoutDatabase();
+  storageParts(storage).sqlite.queryLines = async () => conversation.messages.map((message, sequence) =>
+    `${sequence}|${Buffer.from(JSON.stringify(message), "utf8").toString("hex").toUpperCase()}`);
   storageParts(storage).sqlite.queryJson = async (sql: string) => {
-    if (sql.includes("from conversation_messages")) {
-      return conversation.messages.map((message, sequence) => ({
-        sequence,
-        payloadHex: Buffer.from(JSON.stringify(message), "utf8").toString("hex").toUpperCase()
-      }));
-    }
     assert.match(sql, /select id from conversations/);
     assert.doesNotMatch(sql, /payload_json as payloadJson/);
     return [{ id: conversation.id }];
@@ -254,13 +250,9 @@ test("clearInterruptedRuns preserves local participant compaction metadata becau
   };
   let saved = false;
   const storage = storageWithoutDatabase();
+  storageParts(storage).sqlite.queryLines = async () => conversation.messages.map((message, sequence) =>
+    `${sequence}|${Buffer.from(JSON.stringify(message), "utf8").toString("hex").toUpperCase()}`);
   storageParts(storage).sqlite.queryJson = async (sql: string) => {
-    if (sql.includes("from conversation_messages")) {
-      return conversation.messages.map((message, sequence) => ({
-        sequence,
-        payloadHex: Buffer.from(JSON.stringify(message), "utf8").toString("hex").toUpperCase()
-      }));
-    }
     assert.match(sql, /select id from conversations/);
     assert.doesNotMatch(sql, /payload_json as payloadJson/);
     return [{ id: conversation.id }];
@@ -291,13 +283,9 @@ test("clearInterruptedRuns does not mark local pending turns interrupted at stor
   let saved = false;
   const storage = storageWithoutDatabase();
   storage.machineProgress = () => ({ overlay: async (_id: string, messages: ChatMessage[]) => messages });
+  storageParts(storage).sqlite.queryLines = async () => conversation.messages.map((message, sequence) =>
+    `${sequence}|${Buffer.from(JSON.stringify(message), "utf8").toString("hex").toUpperCase()}`);
   storageParts(storage).sqlite.queryJson = async (sql: string) => {
-    if (sql.includes("from conversation_messages")) {
-      return conversation.messages.map((message, sequence) => ({
-        sequence,
-        payloadHex: Buffer.from(JSON.stringify(message), "utf8").toString("hex").toUpperCase()
-      }));
-    }
     assert.match(sql, /select id from conversations/);
     assert.doesNotMatch(sql, /payload_json as payloadJson/);
     return [{ id: conversation.id }];
@@ -348,13 +336,9 @@ test("clearInterruptedRuns preserves active remote run handles without warning",
   let saved: Conversation | undefined;
   const storage = storageWithoutDatabase();
   storage.machineProgress = () => ({ overlay: async (_id: string, messages: ChatMessage[]) => messages });
+  storageParts(storage).sqlite.queryLines = async () => conversation.messages.map((message, sequence) =>
+    `${sequence}|${Buffer.from(JSON.stringify(message), "utf8").toString("hex").toUpperCase()}`);
   storageParts(storage).sqlite.queryJson = async (sql: string) => {
-    if (sql.includes("from conversation_messages")) {
-      return conversation.messages.map((message, sequence) => ({
-        sequence,
-        payloadHex: Buffer.from(JSON.stringify(message), "utf8").toString("hex").toUpperCase()
-      }));
-    }
     assert.match(sql, /select id from conversations/);
     assert.doesNotMatch(sql, /payload_json as payloadJson/);
     return [{ id: conversation.id }];

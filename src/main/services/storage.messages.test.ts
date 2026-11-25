@@ -585,13 +585,14 @@ function maintenanceStorage(options: {
     if (sql.includes("select id from conversations")) {
       return (options.ids ?? []).map((id) => ({ id }));
     }
-    if (sql.includes("from conversation_messages")) {
-      const id = sql.match(/conversation_id = '([^']+)'/)?.[1];
-      const payload = id ? options.payloads?.get(id) : undefined;
-      const messages = payload ? (JSON.parse(payload) as Conversation).messages : [];
-      return messages.map((message, sequence) => ({ sequence, payloadHex: hexJson(message) }));
-    }
     throw new Error(`Unexpected queryJson: ${sql}`);
+  };
+  storageParts(storage).sqlite.queryLines = async (sql: string) => {
+    queryJsonSql.push(sql);
+    const id = sql.match(/from conversation_messages\s+where conversation_id = '([^']+)'/)?.[1];
+    const payload = id ? options.payloads?.get(id) : undefined;
+    const messages = payload ? (JSON.parse(payload) as Conversation).messages : [];
+    return messages.map((message, sequence) => `${sequence}|${hexJson(message)}`);
   };
   storageParts(storage).sqlite.queryText = async (sql: string) => {
     queryTextSql.push(sql);

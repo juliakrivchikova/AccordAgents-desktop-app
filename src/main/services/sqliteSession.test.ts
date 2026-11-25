@@ -67,3 +67,29 @@ test("missing SQLite executable fails promptly instead of leaving an unresolved 
   const db = new SqliteSession(path.join(tmpdir(), "no-such-accord-sqlite-runtime"), ":memory:", 1000);
   await assert.rejects(db.run("select 1;", "json", 5000), /ENOENT/);
 });
+
+test("an answer too large for one string is refused, and the next query is answered as ever", { timeout: 20_000 }, async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), "accord-sqlite-too-large-"));
+  const db = new SqliteSession("sqlite3", path.join(dir, "state.db"), 1000, 1_000_000);
+  try {
+    const [large, next] = await Promise.allSettled([
+      db.run("select hex(zeroblob(1000000)) as history;", "json", 15000),
+      db.run("select 42;", "list", 15000)
+    ]);
+    assert.equal(large.status, "rejected");
+    assert.match(String((large as PromiseRejectedResult).reason.message), /too large to read at once/);
+    assert.deepEqual(next, { status: "fulfilled", value: "42\n" });
+  } finally { await rm(dir, { recursive: true, force: true }); }
+});
+
+test("rows read by lines hold more than one string can, each row exact", { timeout: 20_000 }, async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), "accord-sqlite-lines-"));
+  const db = new SqliteSession("sqlite3", path.join(dir, "state.db"), 1000, 1_000_000);
+  try {
+    const rows = await db.runLines("with recursive n(i) as (select 1 union all select i+1 from n where i<200) select i || '|' || hex(zeroblob(50000)) from n;", 15000);
+    assert.equal(rows.length, 200);
+    assert.ok(rows.every((row, index) => row === `${index + 1}|${"0".repeat(100_000)}`));
+    assert.deepEqual(await db.runLines("select 1 where 0;", 5000), []);
+    assert.deepEqual(await db.runLines("select 'a' union all select '' union all select 'Ж';", 5000), ["a", "", "Ж"]);
+  } finally { await rm(dir, { recursive: true, force: true }); }
+});

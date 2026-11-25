@@ -54,6 +54,11 @@ export class Sqlite {
     return text ? (JSON.parse(text) as T[]) : [];
   }
 
+  /** A read too large for one string: its rows, a line each. */
+  queryLines(sql: string): Promise<string[]> {
+    return this.databaseSession().runLines(sql, SQLITE_COMMAND_TIMEOUT_MS);
+  }
+
   async queryText(sql: string): Promise<string> {
     return (await this.databaseSession().run(sql, "list", SQLITE_COMMAND_TIMEOUT_MS)).trim();
   }

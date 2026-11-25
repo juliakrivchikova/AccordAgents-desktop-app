@@ -12,6 +12,24 @@ import { storageParts } from "./storage/test/storageParts";
 
 const SQLITE_EXECUTABLE = resolveSqliteExecutable({ appPath: process.cwd() });
 
+test("chat search reads no reply's stream or steps, which are most of a chat's bytes", async () => {
+  await withStorage(async (storage) => {
+    await storage.saveConversation(conversation("long", "Long chat", false, [
+      message("u", "user", "Needle plan", "2026-01-01T00:00:01.000Z"),
+      message("r", "participant", "Visible answer", "2026-01-01T00:00:02.000Z", {
+        processingTranscript: { content: "x".repeat(400_000), originalLength: 400_000, capturedAt: "2026-01-01T00:00:03.000Z" },
+        activityEvents: [{ id: "a", sequence: 1, kind: "command", label: "Running tests", createdAt: "2026-01-01T00:00:02.000Z" }]
+      })
+    ]));
+    const [read] = await storage.readChatSearchConversations(["long"]);
+    assert.deepEqual(read!.conversation.messages.map((item) => item.content), ["Needle plan", "Visible answer"]);
+    assert.equal(read!.conversation.messages[1]!.metadata?.processingTranscript, undefined);
+    assert.equal(read!.conversation.messages[1]!.metadata?.activityEvents, undefined);
+    assert.equal(read!.snapshot.messageCount, 2);
+    assert.equal((await storage.getConversation("long"))!.messages[1]!.metadata?.processingTranscript?.content.length, 400_000, "the chat itself keeps them");
+  });
+});
+
 test("chat search rebuilds a derived index and excludes non-chat, hidden, control, raw, and debug content", async () => {
   await withStorage(async (storage) => {
     const active = conversation("active", "Active design", false, [

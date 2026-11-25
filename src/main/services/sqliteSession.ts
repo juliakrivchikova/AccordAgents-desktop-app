@@ -1,6 +1,10 @@
+import { constants as bufferConstants } from "node:buffer";
 import type { ChildProcessWithoutNullStreams } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { CommandError, commandEnvironment, spawnCommand } from "./command";
+
+/** What a failed operation tells of its output, at most. */
+const MAX_REPORTED_OUTPUT_CHARS = 1_000_000;
 
 /** Reuse the CLI process, not its database connection. Each operation opens a
  * fresh connection and closes it before completion, preserving the old
@@ -11,15 +15,42 @@ export class SqliteSession {
   private queue: Promise<void> = Promise.resolve();
   private idle?: ReturnType<typeof setTimeout>;
 
-  constructor(private readonly executable: string, private readonly dbPath: string, private readonly busyTimeoutMs: number) {}
+  constructor(
+    private readonly executable: string,
+    private readonly dbPath: string,
+    private readonly busyTimeoutMs: number,
+    /** The longest answer one string can hold. */
+    private readonly maxAnswerChars = bufferConstants.MAX_STRING_LENGTH
+  ) {}
 
-  run(sql: string, mode: "json" | "list", timeoutMs: number): Promise<string> {
-    const result = this.queue.then(() => this.perform(sql, mode, timeoutMs));
+  async run(sql: string, mode: "json" | "list", timeoutMs: number): Promise<string> {
+    return (await this.enqueue(sql, mode, timeoutMs, this.maxAnswerChars)).join("");
+  }
+
+  /** The answer's rows, a line each (list mode): what a read too large for one
+   *  string (a whole chat) is read by. */
+  async runLines(sql: string, timeoutMs: number): Promise<string[]> {
+    const lines: string[] = [];
+    let open = "";
+    for (const chunk of await this.enqueue(sql, "list", timeoutMs)) {
+      const parts = chunk.split("\n");
+      open += parts[0]!;
+      for (const part of parts.slice(1)) {
+        lines.push(open.endsWith("\r") ? open.slice(0, -1) : open);
+        open = part;
+      }
+    }
+    if (open) lines.push(open);
+    return lines;
+  }
+
+  private enqueue(sql: string, mode: "json" | "list", timeoutMs: number, maxChars?: number): Promise<string[]> {
+    const result = this.queue.then(() => this.perform(sql, mode, timeoutMs, maxChars));
     this.queue = result.then(() => undefined, () => undefined);
     return result;
   }
 
-  private perform(sql: string, mode: "json" | "list", timeoutMs: number): Promise<string> {
+  private perform(sql: string, mode: "json" | "list", timeoutMs: number, maxChars = Infinity): Promise<string[]> {
     if (this.idle) clearTimeout(this.idle);
     this.idle = undefined;
     if (!this.child) {
@@ -32,7 +63,7 @@ export class SqliteSession {
     }
     const child = this.child;
     const marker = `accord_sqlite_${randomUUID().replaceAll("-", "")}`;
-    return new Promise<string>((resolve, reject) => {
+    return new Promise<string[]>((resolve, reject) => {
       const output: string[] = [];
       let outputLength = 0, tail = "", stderr = "";
       const endMarker = new RegExp(`(^|\\r?\\n)${marker}\\r?\\n$`);
@@ -54,8 +85,17 @@ export class SqliteSession {
         child.kill("SIGKILL");
       };
       const onData = (chunk: string): void => {
+        // Nothing here may throw: an answer that never settles leaves every
+        // read and write after it waiting until the app restarts (the User,
+        // 2026-11-25: a new chat stuck on "Opening your chat…").
+        if (failure) return;
         output.push(chunk);
         outputLength += chunk.length;
+        if (outputLength - marker.length - 4 > maxChars) {
+          output.length = 0;
+          stop(new Error("SQLite's answer is too large to read at once."));
+          return;
+        }
         // Only the suffix can contain the closing marker. Scanning the whole
         // accumulated response on each chunk made large history reads quadratic.
         tail = (tail + chunk).slice(-(marker.length + 4));
@@ -69,7 +109,7 @@ export class SqliteSession {
           this.child = undefined;
           child.stdin.end();
         }, 1000);
-        resolve(output.join("").slice(0, outputLength - matched[0].length + matched[1].length));
+        resolve(withoutTail(output, matched[0].length - matched[1].length));
       };
       const onErrorData = (chunk: string): void => { stderr = (stderr + chunk).slice(-8192); };
       const onError = (error: Error): void => { failure ??= error; };
@@ -79,7 +119,7 @@ export class SqliteSession {
         settled = true;
         cleanup();
         reject(new CommandError(failure?.message ?? `SQLite operation failed (${signal ?? code ?? "closed"}): ${stderr.trim() || "process closed before confirming completion"}`, {
-          command: this.executable, args: ["-batch", "-bail", ":memory:"], stdout: output.join(""),
+          command: this.executable, args: ["-batch", "-bail", ":memory:"], stdout: outputLength <= MAX_REPORTED_OUTPUT_CHARS ? output.join("") : "",
           stderr: stderr || failure?.message || "", exitCode: code, timedOut
         }));
       };
@@ -98,4 +138,15 @@ export class SqliteSession {
       child.stdin.write(input, error => { if (error && !settled) stop(error); });
     });
   }
+}
+
+/** The chunks without their last `count` characters. */
+function withoutTail(chunks: string[], count: number): string[] {
+  const kept = [...chunks];
+  for (let left = count; left > 0 && kept.length > 0;) {
+    const last = kept.pop()!;
+    if (last.length > left) kept.push(last.slice(0, last.length - left));
+    left -= last.length;
+  }
+  return kept;
 }

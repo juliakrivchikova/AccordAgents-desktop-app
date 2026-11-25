@@ -99,36 +99,52 @@ export class ChatSearchIndex {
 
   async readChatSearchConversation(conversationId: string): Promise<Conversation | undefined> {
     await this.storage.schema.init();
-    const rows = await this.storage.sqlite.queryJson<{ rowKind: "body" | "message"; sequence: number; payloadHex: string }>(`
-      select rowKind, sequence, payloadHex
-      from (
-        select
-          'body' as rowKind,
-          -1 as sequence,
-          hex(coalesce(nullif(body_json, ''), json_set(payload_json, '$.messages', json_array()))) as payloadHex
-        from conversations
-        where id = ${sqlString(conversationId)} and kind = 'chat'
-        union all
-        select
-          'message' as rowKind,
-          sequence,
-          hex(payload_json) as payloadHex
-        from conversation_messages
-        where conversation_id = ${sqlString(conversationId)}
-      )
-      order by sequence;
-    `);
-    const body = rows.find((row) => row.rowKind === "body");
+    const rows = await this.chatSearchSourceRows([conversationId]);
+    const body = rows.find(isBodyRow);
     if (!body) {
       return undefined;
     }
-    const conversation = parseHexJson<Conversation>(body.payloadHex, `chat search conversation ${conversationId}`);
-    conversation.metadata = clearLegacyAccordState(conversation.metadata);
-    conversation.messages = rows
-      .filter((row) => row.rowKind === "message")
-      .map((row) => parseHexJson<ChatMessage>(row.payloadHex, `chat search message ${conversationId}:${row.sequence}`));
-    sanitizeConversationWarnings(conversation);
-    return conversation;
+    return searchedConversation(conversationId, body, rows);
+  }
+
+  /** The chats' rows as search reads them: each chat's body once, then its
+   *  messages without what search does not look in (a reply's stream and its
+   *  steps are most of a chat's bytes), read by lines in one transaction. In
+   *  one string, with the chat's columns repeated on every message, 24 chats
+   *  outgrew what a string can hold (2026-11-25). */
+  private async chatSearchSourceRows(conversationIds: string[]): Promise<ChatSearchSourceRow[]> {
+    const ids = sqlStringList(conversationIds);
+    const body = "coalesce(nullif(c.body_json, ''), c.payload_json)";
+    const lines = await this.storage.sqlite.queryLines(`
+      begin;
+      select json_object(
+        'rowKind', 'body',
+        'conversationId', c.id,
+        'title', c.title,
+        'repoPath', c.repo_path,
+        'archived', case when json_valid(${body}) then json_extract(${body}, '$.metadata.archived') end,
+        'updatedAt', c.updated_at,
+        'messageCount', (select count(*) from conversation_messages m where m.conversation_id = c.id),
+        'oldestMessageAt', (select min(m.created_at) from conversation_messages m where m.conversation_id = c.id),
+        'newestMessageAt', (select max(m.created_at) from conversation_messages m where m.conversation_id = c.id),
+        'payloadValid', json_valid(${body}),
+        'payloadHex', case when json_valid(${body}) then hex(json_set(${body}, '$.messages', json_array())) else '' end
+      )
+      from conversations c
+      where c.kind = 'chat' and c.id in ${ids};
+      select json_object(
+        'rowKind', 'message',
+        'conversationId', conversation_id,
+        'sequence', sequence,
+        'payloadHex', hex(case when json_valid(payload_json)
+          then json_remove(payload_json, '$.metadata.processingTranscript', '$.metadata.activityEvents') else payload_json end)
+      )
+      from conversation_messages
+      where conversation_id in ${ids}
+      order by conversation_id, sequence;
+      commit;
+    `);
+    return lines.map((line) => JSON.parse(line) as ChatSearchSourceRow);
   }
 
   async readChatSearchConversations(conversationIds: string[]): Promise<ChatSearchConversationRead[]> {
@@ -136,79 +152,7 @@ export class ChatSearchIndex {
     if (conversationIds.length === 0) {
       return [];
     }
-    const rows = await this.storage.sqlite.queryJson<{
-      conversationId: string;
-      title: string;
-      repoPath?: string;
-      archived?: number | string | boolean | null;
-      updatedAt: string;
-      messageCount: number | string;
-      oldestMessageAt?: string | null;
-      newestMessageAt?: string | null;
-      participantsHex: string;
-      payloadValid: number | string;
-      rowKind: "body" | "message";
-      sequence: number;
-      payloadHex: string;
-    }>(`
-      with selected_conversations as (
-        select
-          c.id as conversation_id,
-          c.title,
-          c.repo_path,
-          case when json_valid(coalesce(nullif(c.body_json, ''), c.payload_json))
-            then json_extract(coalesce(nullif(c.body_json, ''), c.payload_json), '$.metadata.archived') end as archived,
-          c.updated_at,
-          case when json_valid(coalesce(nullif(c.body_json, ''), c.payload_json))
-            then hex(coalesce(json_extract(coalesce(nullif(c.body_json, ''), c.payload_json), '$.metadata.participants'), '[]')) else '' end as participants_hex,
-          case when json_valid(coalesce(nullif(c.body_json, ''), c.payload_json))
-            then hex(coalesce(nullif(c.body_json, ''), c.payload_json)) else '' end as body_hex,
-          json_valid(coalesce(nullif(c.body_json, ''), c.payload_json)) as payload_valid
-        from conversations c
-        where c.kind = 'chat' and c.id in ${sqlStringList(conversationIds)}
-      ), message_stats as (
-        select
-          m.conversation_id,
-          count(*) as message_count,
-          min(m.created_at) as oldest_message_at,
-          max(m.created_at) as newest_message_at
-        from conversation_messages m
-        where m.conversation_id in ${sqlStringList(conversationIds)}
-        group by m.conversation_id
-      ), source_rows as (
-        select
-          c.conversation_id, c.title, c.repo_path, c.archived, c.updated_at,
-          coalesce(s.message_count, 0) as message_count,
-          s.oldest_message_at, s.newest_message_at, c.participants_hex, c.payload_valid,
-          'body' as row_kind, -1 as sequence, c.body_hex as payload_hex
-        from selected_conversations c
-        left join message_stats s on s.conversation_id = c.conversation_id
-        union all
-        select
-          c.conversation_id, c.title, c.repo_path, c.archived, c.updated_at,
-          s.message_count, s.oldest_message_at, s.newest_message_at, c.participants_hex, c.payload_valid,
-          'message' as row_kind, m.sequence, hex(m.payload_json) as payload_hex
-        from selected_conversations c
-        join message_stats s on s.conversation_id = c.conversation_id
-        join conversation_messages m on m.conversation_id = c.conversation_id
-      )
-      select
-        conversation_id as conversationId,
-        title,
-        repo_path as repoPath,
-        archived,
-        updated_at as updatedAt,
-        message_count as messageCount,
-        oldest_message_at as oldestMessageAt,
-        newest_message_at as newestMessageAt,
-        participants_hex as participantsHex,
-        payload_valid as payloadValid,
-        row_kind as rowKind,
-        sequence,
-        payload_hex as payloadHex
-      from source_rows
-      order by conversation_id, sequence;
-    `);
+    const rows = await this.chatSearchSourceRows(conversationIds);
     const rowsByConversation = new Map<string, typeof rows>();
     for (const row of rows) {
       const grouped = rowsByConversation.get(row.conversationId) ?? [];
@@ -217,7 +161,7 @@ export class ChatSearchIndex {
     }
     return conversationIds.flatMap((conversationId) => {
       const conversationRows = rowsByConversation.get(conversationId);
-      const body = conversationRows?.find((row) => row.rowKind === "body");
+      const body = conversationRows?.find(isBodyRow);
       if (!body) {
         return [];
       }
@@ -225,12 +169,8 @@ export class ChatSearchIndex {
         throw new InvalidChatSearchSourceError(conversationId);
       }
       try {
-        const conversation = parseHexJson<Conversation>(body.payloadHex, `chat search conversation ${conversationId}`);
-        conversation.metadata = clearLegacyAccordState(conversation.metadata);
-        conversation.messages = (conversationRows ?? [])
-          .filter((row) => row.rowKind === "message")
-          .map((row) => parseHexJson<ChatMessage>(row.payloadHex, `chat search message ${conversationId}:${row.sequence}`));
-        sanitizeConversationWarnings(conversation);
+        const conversation = searchedConversation(conversationId, body, conversationRows ?? []);
+        const participants = conversation.metadata.participants;
         return [{
           snapshot: {
             conversationId,
@@ -241,8 +181,7 @@ export class ChatSearchIndex {
             messageCount: Number(body.messageCount) || 0,
             ...(body.oldestMessageAt ? { oldestMessageAt: body.oldestMessageAt } : {}),
             ...(body.newestMessageAt ? { newestMessageAt: body.newestMessageAt } : {}),
-            participants: parseHexJson<unknown[]>(body.participantsHex, `chat search participants ${conversationId}`)
-              .filter(isStoredChatParticipant)
+            participants: (Array.isArray(participants) ? participants : []).filter(isStoredChatParticipant)
           },
           conversation
         }];
@@ -582,4 +521,41 @@ export class ChatSearchIndex {
       matchedChatCount: Number(countRow?.matchedChatCount) || 0
     };
   }
+}
+
+interface ChatSearchBodyRow {
+  rowKind: "body";
+  conversationId: string;
+  title: string;
+  repoPath?: string | null;
+  archived?: number | string | boolean | null;
+  updatedAt: string;
+  messageCount: number | string;
+  oldestMessageAt?: string | null;
+  newestMessageAt?: string | null;
+  payloadValid: number | string;
+  payloadHex: string;
+}
+
+interface ChatSearchMessageRow {
+  rowKind: "message";
+  conversationId: string;
+  sequence: number;
+  payloadHex: string;
+}
+
+type ChatSearchSourceRow = ChatSearchBodyRow | ChatSearchMessageRow;
+
+function isBodyRow(row: ChatSearchSourceRow): row is ChatSearchBodyRow {
+  return row.rowKind === "body";
+}
+
+function searchedConversation(conversationId: string, body: ChatSearchBodyRow, rows: readonly ChatSearchSourceRow[]): Conversation {
+  const conversation = parseHexJson<Conversation>(body.payloadHex, `chat search conversation ${conversationId}`);
+  conversation.metadata = clearLegacyAccordState(conversation.metadata);
+  conversation.messages = rows.flatMap((row) => row.rowKind === "message"
+    ? [parseHexJson<ChatMessage>(row.payloadHex, `chat search message ${conversationId}:${row.sequence}`)]
+    : []);
+  sanitizeConversationWarnings(conversation);
+  return conversation;
 }
