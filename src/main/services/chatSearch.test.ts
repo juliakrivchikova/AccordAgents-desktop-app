@@ -8,6 +8,7 @@ import type { ChatMessage, ChatParticipant, ChatSearchMessageMatch, ChatSearchRe
 import { buildChatSearchMatchQuery, ChatSearchService } from "./chatSearch";
 import { resolveSqliteExecutable } from "./sqliteCli";
 import { StorageService, type ChatSearchConversationSnapshot } from "./storage";
+import { storageParts } from "./storage/test/storageParts";
 
 const SQLITE_EXECUTABLE = resolveSqliteExecutable({ appPath: process.cwd() });
 
@@ -85,7 +86,7 @@ test("chat search rebuilds a derived index and excludes non-chat, hidden, contro
     assert.equal(threadReply?.snippetText.includes("Needle"), true);
     assert.deepEqual(threadReply?.highlightRanges.map((range) => threadReply.snippetText.slice(range.start, range.end)), ["Needle"]);
 
-    await (storage as unknown as { runSql(sql: string): Promise<void> }).runSql(`
+    await (storageParts(storage).sqlite as unknown as { runSql(sql: string): Promise<void> }).runSql(`
       drop table chat_search_fts;
       drop table chat_search_state;
       delete from schema_meta where key = 'chat-search-index-version';
@@ -218,7 +219,7 @@ test("participant scope ignores unreadable foreign chats without leaking their i
     const preindexed = await new ChatSearchService(storage).search({ requester: { kind: "user" }, query: "isolatedword" });
     assert.equal(preindexed.status, "ok");
     assert.equal(preindexed.matches.length, 3);
-    await (storage as unknown as { runSql(sql: string): Promise<void> }).runSql(`
+    await (storageParts(storage).sqlite as unknown as { runSql(sql: string): Promise<void> }).runSql(`
       update conversations
       set body_json = '{invalid-json', payload_json = '{invalid-json'
       where id = 'scope-foreign';
@@ -238,7 +239,7 @@ test("participant scope ignores unreadable foreign chats without leaking their i
     assert.equal("failure" in isolated, false);
     assert.deepEqual(events, []);
 
-    await (storage as unknown as { runSql(sql: string): Promise<void> }).runSql(`
+    await (storageParts(storage).sqlite as unknown as { runSql(sql: string): Promise<void> }).runSql(`
       update conversations
       set body_json = '{invalid-json', payload_json = '{invalid-json'
       where id = 'scope-current';
@@ -392,7 +393,7 @@ test("chat search repairs a wrong derived schema and preserves literal legacy ma
     const service = new ChatSearchService(storage);
     const initial = await service.search({ requester: { kind: "user" }, query: "repairword" });
     assert.equal(initial.status, "ok");
-    await (storage as unknown as { runSql(sql: string): Promise<void> }).runSql(`
+    await (storageParts(storage).sqlite as unknown as { runSql(sql: string): Promise<void> }).runSql(`
       drop table chat_search_state;
       create table chat_search_state (conversation_id text primary key);
     `);
@@ -406,7 +407,7 @@ test("chat search repairs a wrong derived schema and preserves literal legacy ma
       ["repairword"]
     );
 
-    await (storage as unknown as { runSql(sql: string): Promise<void> }).runSql(`
+    await (storageParts(storage).sqlite as unknown as { runSql(sql: string): Promise<void> }).runSql(`
       drop table chat_search_fts;
       create table chat_search_fts (
         conversation_id text,
@@ -434,7 +435,7 @@ test("canonical corruption fails closed with a safe detail and recovers after re
     const service = new ChatSearchService(storage, {
       write: async (event, payload) => { events.push({ event, payload }); }
     });
-    await (storage as unknown as { runSql(sql: string): Promise<void> }).runSql(`
+    await (storageParts(storage).sqlite as unknown as { runSql(sql: string): Promise<void> }).runSql(`
       update conversations set body_json = '{invalid-json', payload_json = '{invalid-json' where id = 'corrupt';
     `);
     const unavailable = await service.search({ requester: { kind: "user" }, query: "corruptword" });

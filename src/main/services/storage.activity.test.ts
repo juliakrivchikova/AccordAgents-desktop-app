@@ -5,6 +5,7 @@ import path from "node:path";
 import test from "node:test";
 import { resolveSqliteExecutable } from "./sqliteCli";
 import { StorageService } from "./storage";
+import { storageDependencies, storageParts, storageWithoutDatabase } from "./storage/test/storageParts";
 import type { ChatAppToolApproval, ChatMessage, Conversation } from "../../shared/types";
 
 const SQLITE_EXECUTABLE = resolveSqliteExecutable({ appPath: process.cwd() });
@@ -14,9 +15,9 @@ function hexText(value: string): string {
 }
 
 function fakeStorage(queryJson: (sql: string) => Promise<unknown[]>): StorageService {
-  const storage = Object.create(StorageService.prototype) as any;
-  storage.init = async () => {};
-  storage.queryJson = async (sql: string) => {
+  const storage = storageWithoutDatabase();
+  storageParts(storage).schema.init = async () => {};
+  storageParts(storage).sqlite.queryJson = async (sql: string) => {
     const rows = await queryJson(sql);
     return rows.map((value) => {
       if (!value || typeof value !== "object" || Array.isArray(value)) {
@@ -83,10 +84,10 @@ test("listChatActivity finds pending messages outside the recent participant win
 
 test("listChatActivity uses the payload fallback when body_json is empty", async () => {
   const directory = await mkdtemp(path.join(tmpdir(), "accordagents-storage-activity-"));
-  const storage = Object.create(StorageService.prototype) as any;
-  storage.dbPath = path.join(directory, "accordagents.sqlite3");
-  storage.sqliteExecutable = SQLITE_EXECUTABLE;
-  storage.initialized = true;
+  const storage = storageWithoutDatabase();
+  storageDependencies(storage).dbPath = path.join(directory, "accordagents.sqlite3");
+  storageDependencies(storage).sqliteExecutable = SQLITE_EXECUTABLE;
+  storageParts(storage).schema.initialized = true;
   const chat = conversation("fallback-chat", "Fallback chat");
   chat.messages = [participantMessage("fallback-choice", {
     content: "Choose \"one\"\nline two\t\u001f🙂",
@@ -102,7 +103,7 @@ test("listChatActivity uses the payload fallback when body_json is empty", async
   })];
 
   try {
-    await storage.runSql(`
+    await storageParts(storage).sqlite.runSql(`
       create table conversations (
         id text primary key, title text not null, kind text not null, created_at text not null,
         updated_at text not null, repo_path text, body_json text, payload_json text not null
@@ -114,7 +115,7 @@ test("listChatActivity uses the payload fallback when body_json is empty", async
       );
     `);
     await storage.saveConversation(chat);
-    await storage.runSql("update conversations set body_json = '' where id = 'fallback-chat';");
+    await storageParts(storage).sqlite.runSql("update conversations set body_json = '' where id = 'fallback-chat';");
 
     const result = await storage.listChatActivity();
 
@@ -128,10 +129,10 @@ test("listChatActivity uses the payload fallback when body_json is empty", async
 
 test("listChatActivity skips a malformed conversation body and keeps remaining activity", async () => {
   const directory = await mkdtemp(path.join(tmpdir(), "accordagents-storage-activity-"));
-  const storage = Object.create(StorageService.prototype) as any;
-  storage.dbPath = path.join(directory, "accordagents.sqlite3");
-  storage.sqliteExecutable = SQLITE_EXECUTABLE;
-  storage.initialized = true;
+  const storage = storageWithoutDatabase();
+  storageDependencies(storage).dbPath = path.join(directory, "accordagents.sqlite3");
+  storageDependencies(storage).sqliteExecutable = SQLITE_EXECUTABLE;
+  storageParts(storage).schema.initialized = true;
   const goodChat = conversation("good-chat", "Good chat");
   goodChat.messages = [participantMessage("good-choice", {
     metadata: {
@@ -152,7 +153,7 @@ test("listChatActivity skips a malformed conversation body and keeps remaining a
   };
 
   try {
-    await storage.runSql(`
+    await storageParts(storage).sqlite.runSql(`
       create table conversations (
         id text primary key, title text not null, kind text not null, created_at text not null,
         updated_at text not null, repo_path text, body_json text, payload_json text not null
@@ -165,7 +166,7 @@ test("listChatActivity skips a malformed conversation body and keeps remaining a
     `);
     await storage.saveConversation(goodChat);
     await storage.saveConversation(badChat);
-    await storage.runSql("update conversations set body_json = '{oops' where id = 'bad-chat';");
+    await storageParts(storage).sqlite.runSql("update conversations set body_json = '{oops' where id = 'bad-chat';");
 
     const result = await storage.listChatActivity();
 
@@ -215,7 +216,7 @@ test("listChatActivity transports every full JSON result through hex projections
     return [];
   });
 
-  await (messageStorage as any).activityMessageRows(
+  await storageParts(messageStorage).chatActivity.activityMessageRows(
     ["chat-1"],
     40,
     ["chat-1"],
@@ -400,7 +401,7 @@ test("listChatActivity returns bounded sorted items with resolvable message targ
     }
     throw new Error(`Unexpected query: ${sql}`);
   }) as any;
-  storage.listConversationMessages = async (request: { aroundMessageId?: string }) => ({
+  storageParts(storage).conversationReads.listConversationMessages = async (request: { aroundMessageId?: string }) => ({
     messages: request.aroundMessageId === "recent-reply" ? [message] : [],
     oldestSequence: 3,
     newestSequence: 3,

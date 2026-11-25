@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { StorageService } from "./storage";
+import { storageParts } from "./storage/test/storageParts";
 import type { ChatMessage, Conversation } from "../../shared/types";
 
 /**
@@ -69,9 +70,9 @@ test("waiting cards are found through the partial index, without reading every m
   const storage = new StorageService({ dbPath: path.join(directory, "accordagents.sqlite3") });
   try {
     await storage.saveConversation(chat("waits", [asked, card("pending")]));
-    const internals = storage as unknown as { queryJson(sql: string): Promise<unknown[]>; queryText(sql: string): Promise<string> };
+    const internals = storageParts(storage).sqlite as unknown as { queryJson(sql: string): Promise<unknown[]>; queryText(sql: string): Promise<string> };
     let listSql = "";
-    const queryJson = internals.queryJson.bind(storage);
+    const queryJson = internals.queryJson.bind(internals);
     internals.queryJson = async (sql: string) => {
       if (sql.includes("as waitingChoice")) listSql = sql;
       return queryJson(sql);

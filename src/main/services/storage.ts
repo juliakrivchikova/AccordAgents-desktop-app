@@ -1,527 +1,40 @@
-import { createHash, randomUUID } from "node:crypto";
-import { mkdir } from "node:fs/promises";
 import path from "node:path";
 import { userDataPath } from "../platform";
-import { SqliteSession } from "./sqliteSession";
 import type {
-  ChatForkSeenReply,
-  ChatMessage,
-  ChatParticipant,
-  ChatParticipantRequestBatch,
-  ChatRunningMessageTarget,
-  Conversation,
-  ConversationMessagePage,
-  ConversationMessagePageInfo,
-  ConversationMessagePageRequest,
-  ConversationOpenResult,
-  ConversationSummary,
-  ListChatActivityRequest,
-  ListChatActivityResult
+  ChatForkSeenReply, ChatMessage, ChatParticipantRequestBatch, ChatRunningMessageTarget, Conversation, ConversationMessagePage,
+  ConversationMessagePageRequest, ConversationOpenResult, ConversationSummary, ListChatActivityRequest, ListChatActivityResult
 } from "../../shared/types";
 import type { ChatSearchDocument } from "../../shared/chatSearchDocuments";
-import { runningMessageForParticipant, runningMessageTarget } from "../../shared/chatRunningMessage";
-import {
-  DEFAULT_CHAT_ACTIVITY_LIMIT,
-  DEFAULT_CHAT_ACTIVITY_RECENT_CONVERSATION_LIMIT,
-  DEFAULT_CHAT_ACTIVITY_RECENT_WINDOW_DAYS,
-  buildChatActivityItems,
-  limitChatActivityItems,
-  sortChatActivityItems
-} from "../../shared/chatActivity";
-import { clearChatRunMetadata, clearParticipantCompactions, readParticipantCompactions } from "../../shared/chatRunState";
-import { sessionsTaskTitle, titleTaskByMember } from "../../shared/mainSessionView";
-import { normalizeInferredParticipantRequestThreads as normalizeInferredParticipantRequestThreadMetadata } from "../../shared/chatParticipantRequestThreads";
-import { normalizeConversationSummaryChatParticipants } from "../../shared/conversationSummary";
-import { sanitizeConversationWarnings } from "../../shared/warnings";
-import { forkSeenReplyOf, isMemberTurnEnd } from "../../shared/forkToNewChat";
-import type { ForkReplyView } from "../../shared/forkToNewChat";
 import { DeviceEventBlobStorage } from "./deviceEventBlobStorage";
 import { HubStorage } from "./hubStorage";
 import { HubOpsStore } from "./hubOpsStore";
 import { HubClientOpsStore } from "./hubOpsClient";
-import { NATIVE_COMMAND_SCHEMA_SQL, NativeCommandStore } from "./nativeCommandStore";
-import { MACHINE_POWER_SCHEMA, MachinePowerStore } from "./machinePowerStore";
+import { NativeCommandStore } from "./nativeCommandStore";
+import { MachinePowerStore } from "./machinePowerStore";
+import type {
+  ChatSearchConversationRead, ChatSearchConversationSnapshot, ChatSearchDocumentReplacement, ChatSearchIndexState,
+  StoredChatSearchQueryResult
+} from "./storage/search/types";
+import type { ChatMemberProviderRow, DeviceIdentityRecord, SavedMessageRow, StorageServiceOptions } from "./storage/types";
+import { createStorageModules, type StorageModules } from "./storage/modules";
 
-const DEFAULT_MESSAGE_PAGE_LIMIT = 80;
-const MAX_MESSAGE_PAGE_LIMIT = 200;
-const SQLITE_BUSY_TIMEOUT_MS = 30_000;
-const SQLITE_COMMAND_TIMEOUT_MS = 45_000;
-const SQLITE_MIGRATION_TIMEOUT_MS = 120_000;
-/** A message row that may be a member's reply not ended yet: its JSON (as
- *  JSON.stringify writes it) holds a pending status somewhere. A superset —
- *  a nested status matches too — that the exact check then narrows. It never
- *  parses the row, so it cannot fail on one, and it is the condition of the
- *  partial index `idx_conversation_messages_pending_reply`: a query uses that
- *  index only while it states this very expression. The index is made once
- *  by name, so a change here needs a new index name as well. */
-const pendingReplyRowHintSql = (column: string): string => `instr(${column}, '"status":"pending"') > 0`;
-const SCHEMA_META_COMPLETE = "complete";
-export const SUPPORTED_STORAGE_SCHEMA_VERSION = 2;
-/** What `prepareStorageForOlderVersion` puts the database back to. */
-export const PREVIOUS_STORAGE_SCHEMA_VERSION = 1;
-export const STORAGE_SCHEMA_VERSION_META_KEY = "storage-schema-version";
-/** Where this device's identity is kept (the key's name is the stored one). */
-const DEVICE_IDENTITY_META_KEY = "chat-event-device-identity-v1";
-const INFERRED_REQUEST_THREAD_MIGRATION_KEY = "inferred-participant-request-threads-v1";
-const CHAT_SEARCH_INDEX_META_KEY = "chat-search-index-version";
-const CHAT_SEARCH_INDEX_VERSION = 2;
-const RUN_CANCEL_REQUEST_MAX_AGE_MS = 60 * 60_000;
-const UTF8_DECODER = new TextDecoder("utf-8", { fatal: true });
+export { SUPPORTED_STORAGE_SCHEMA_VERSION, PREVIOUS_STORAGE_SCHEMA_VERSION, STORAGE_SCHEMA_VERSION_META_KEY, UnsupportedStorageSchemaVersionError } from "./storage/database/schemaVersion";
+export type { DeviceIdentityRecord, SavedMessageRow, StorageServiceOptions, ChatMemberProviderRow } from "./storage/types";
+export { InvalidChatSearchSourceError, type ChatSearchConversationSnapshot, type ChatSearchConversationRead, type ChatSearchDocumentReplacement, type ChatSearchIndexState, type StoredChatSearchTitleMatch, type StoredChatSearchMessageMatch, type StoredChatSearchQueryResult } from "./storage/search/types";
 
-function sqlString(value: string | undefined | null): string {
-  if (value === undefined || value === null) {
-    return "NULL";
-  }
-  // The sqlite3 shell reads statements line by line and a NUL ends a line:
-  // the rest of the literal would leak into the statement.
-  if (value.includes("\u0000")) {
-    throw new Error("A value with a NUL character cannot be stored.");
-  }
-  return `'${value.replace(/'/g, "''")}'`;
-}
-
-/** How many still-pending choices the phone's chat list may carry across
- *  the listed chats before the set is called incomplete. */
-const MAX_PENDING_CHOICE_ROWS = 500;
-
-function sqlStringList(values: readonly string[]): string {
-  return values.length > 0 ? `(${values.map((value) => sqlString(value)).join(", ")})` : "('')";
-}
-
-function sqlStringPairList(values: Array<[string, string]>): string {
-  return values.length > 0
-    ? `(${values.map(([left, right]) => `(${sqlString(left)}, ${sqlString(right)})`).join(", ")})`
-    : "(('', ''))";
-}
-
-function parseHexJson<T>(value: unknown, context: string): T {
-  if (typeof value !== "string" || value.length % 2 !== 0 || !/^[0-9a-f]*$/i.test(value)) {
-    throw new Error(`Invalid hexadecimal JSON returned for ${context}.`);
-  }
-  let json: string;
-  try {
-    json = UTF8_DECODER.decode(Buffer.from(value, "hex"));
-  } catch {
-    throw new Error(`Invalid UTF-8 JSON returned for ${context}.`);
-  }
-  try {
-    return JSON.parse(json) as T;
-  } catch {
-    throw new Error(`Invalid JSON returned for ${context}.`);
-  }
-}
-
-function parseHexText(value: unknown, context: string): string {
-  if (typeof value !== "string" || value.length % 2 !== 0 || !/^[0-9a-f]*$/i.test(value)) {
-    throw new Error(`Invalid hexadecimal text returned for ${context}.`);
-  }
-  try {
-    return UTF8_DECODER.decode(Buffer.from(value, "hex"));
-  } catch {
-    throw new Error(`Invalid UTF-8 text returned for ${context}.`);
-  }
-}
-
-/** The chat state the running-message rule reads (chatActiveRuns.ts):
- *  the chat's members and its run bookkeeping, nothing else of its body. */
-const RUNNING_MESSAGE_RUN_STATE_KEYS = [
-  "participants",
-  "activeRunIds",
-  "runId",
-  "activeRunOwnersByRunId",
-  "activeRunParticipantIdsByRunId",
-  "remoteRunHandles"
-] as const;
-/** Long enough for every hidden "waiting for approval" status the rule
- *  recognises (isParticipantRequestWaitingStatus), which are one sentence. */
-const RUNNING_MESSAGE_CONTENT_CHARS = 400;
-
-function decodedRunningMessageContent(value: unknown): string {
-  try {
-    return parseHexText(value, "a running message");
-  } catch {
-    return "";
-  }
-}
-
-function parseStorageSchemaVersion(value: string | undefined): number | undefined {
-  const trimmed = value?.trim();
-  if (!trimmed) {
-    return undefined;
-  }
-  if (!/^\d+$/.test(trimmed)) {
-    throw new Error("This chat database has an invalid storage schema version. Restore a backup or update AccordAgents.");
-  }
-  return Number.parseInt(trimmed, 10);
-}
-
-export class UnsupportedStorageSchemaVersionError extends Error {
-  constructor(storedVersion: number, supportedVersion: number) {
-    super(
-      `This chat database was written by a newer version of AccordAgents. Update to open it. ` +
-        `Database schema ${storedVersion}, supported schema ${supportedVersion}.`
-    );
-    this.name = "UnsupportedStorageSchemaVersionError";
-  }
-}
-
-/** This device's ed25519 identity (see deviceIdentity.ts). */
-export interface DeviceIdentityRecord {
-  originId: string;
-  keyId: string;
-  publicKeyDerBase64: string;
-  privateKeyDerBase64: string;
-  createdAt: string;
-}
-
-/** One message as it is about to be written, with the hash used to decide
- *  whether its row needs writing at all. */
-/** A message as storage writes it: its position, id, creation time, the JSON
- *  that goes into the row and the sha1 of that JSON, which is what decides
- *  whether the row changed since the last save. */
-export interface SavedMessageRow {
-  index: number;
-  id: string;
-  createdAt: string;
-  json: string;
-  hash: string;
-}
-
-/** What this process last committed for a conversation: the token it stamped on
- *  the row, and the message ids and hashes in the order it wrote them. */
-interface SavedMessageState {
-  token: string;
-  rows: Array<{ id: string; hash: string }>;
-}
-
-export class InvalidChatSearchSourceError extends Error {
-  constructor(readonly conversationId: string, cause?: unknown) {
-    super(`Saved chat ${conversationId} could not be read for search.`, { cause });
-    this.name = "InvalidChatSearchSourceError";
-  }
-}
-function clearLegacyAccordState(metadata: Conversation["metadata"]): Conversation["metadata"] {
-  const policies = Array.isArray(metadata.appToolApprovalPolicies)
-    ? metadata.appToolApprovalPolicies.filter((policy) =>
-        Boolean(
-          policy &&
-          typeof policy === "object" &&
-          !Array.isArray(policy) &&
-          (policy as { capability?: unknown }).capability !== "participants.request" &&
-          (policy as { accordLaunchId?: unknown }).accordLaunchId === undefined &&
-          (policy as { expiresAt?: unknown }).expiresAt === undefined
-        )
-      )
-    : undefined;
-  const next = { ...metadata };
-  delete next.accordLaunch;
-  delete next.accordRun;
-  if (policies) {
-    next.appToolApprovalPolicies = policies;
-  }
-  return next;
-}
-
-function hasPendingAppToolApprovals(conversation: Conversation): boolean {
-  return Array.isArray(conversation.metadata.pendingAppToolApprovals) &&
-    conversation.metadata.pendingAppToolApprovals.some((approval) =>
-      approval &&
-      typeof approval === "object" &&
-      (approval as { status?: unknown }).status === "pending"
-    );
-}
-
-function pendingApprovalTriggerTargets(conversation: Conversation): Array<[string, string]> {
-  if (!Array.isArray(conversation.metadata.pendingAppToolApprovals)) {
-    return [];
-  }
-  return conversation.metadata.pendingAppToolApprovals.flatMap((approval) => {
-    const messageId = approval?.status === "pending" ? approval.resumeContext?.triggerMessageId?.trim() : "";
-    return messageId ? [[conversation.id, messageId] as [string, string]] : [];
-  });
-}
-
-function nonTerminalRemoteRunIds(value: unknown): string[] {
-  if (!value || typeof value !== "object" || Array.isArray(value)) {
-    return [];
-  }
-  return Object.entries(value as Record<string, unknown>).flatMap(([runId, raw]) => {
-    if (!runId || !raw || typeof raw !== "object" || Array.isArray(raw)) {
-      return [];
-    }
-    const record = raw as Record<string, unknown>;
-    const status = record.status;
-    const worker = record.worker;
-    const host = worker && typeof worker === "object" && !Array.isArray(worker)
-      ? (worker as Record<string, unknown>).host
-      : undefined;
-    if (typeof host !== "string" || !host.trim()) {
-      return [];
-    }
-    return status === "completed" || status === "failed" || status === "cancelled" ? [] : [runId];
-  });
-}
-
-function withRemoteRunMetadata(metadata: Record<string, unknown>, runIds: string[]): Record<string, unknown> {
-  if (runIds.length === 0) {
-    return metadata;
-  }
-  const preferred = typeof metadata.runId === "string" && runIds.includes(metadata.runId)
-    ? metadata.runId
-    : runIds[0];
-  return {
-    ...metadata,
-    running: true,
-    runId: preferred,
-    activeRunIds: runIds
-  };
-}
-
-export interface StorageServiceOptions {
-  dbPath?: string;
-  sqliteExecutable?: string;
-}
-
-export interface ChatSearchConversationSnapshot {
-  conversationId: string;
-  title: string;
-  repoPath?: string;
-  archived: boolean;
-  updatedAt: string;
-  messageCount: number;
-  oldestMessageAt?: string;
-  newestMessageAt?: string;
-  participants: ChatParticipant[];
-  /** The chat's main session and view, for how its results name authors
-   *  (the sessions view names none). */
-  mainSessionParticipantId?: string;
-  chatView?: string;
-  sourceReadable?: boolean;
-}
-
-export interface ChatSearchConversationRead {
-  snapshot: ChatSearchConversationSnapshot;
-  conversation: Conversation;
-}
-
-export interface ChatSearchDocumentReplacement {
-  snapshot: ChatSearchConversationSnapshot;
-  documents: ChatSearchDocument[];
-  indexedAt: string;
-}
-
-export interface ChatSearchIndexState {
-  conversationId: string;
-  sourceTitle: string;
-  sourceUpdatedAt: string;
-  sourceMessageCount: number;
-  sourceNewestMessageAt?: string;
-  indexedAt: string;
-  indexSchemaVersion: number;
-}
-
-export interface StoredChatSearchTitleMatch {
-  kind: "title";
-  conversationId: string;
-  titleText: string;
-  snippet: string;
-  rank: number;
-}
-
-export interface StoredChatSearchMessageMatch {
-  kind: "message";
-  conversationId: string;
-  messageId: string;
-  threadRootId?: string;
-  role: "user" | "participant";
-  authorLabel: string;
-  createdAt: string;
-  snippet: string;
-  rank: number;
-}
-
-export interface StoredChatSearchQueryResult {
-  titleMatches: StoredChatSearchTitleMatch[];
-  messageMatches: StoredChatSearchMessageMatch[];
-  messageMatchCount: number;
-  matchedChatCount: number;
-}
-
-/**
- * The order of signed events every device kept before the User's server
- * owned the chats, and everything only it used: the events and their
- * projections, the native turn commands built on them, the per-device
- * delivery queues, the phone's turn claims, a removed machine's deletion
- * targets, the server's order, folding, readers and retention bookkeeping,
- * and a device's held places. Tables that refer to others come first.
- */
-const LEGACY_EVENT_TABLES = [
-  "native_commands",
-  "native_run_cancellations",
-  "native_run_outcomes",
-  "native_session_executors",
-  "device_event_outbox",
-  "device_event_inbox",
-  "device_event_applied_heads",
-  "device_replica_copies",
-  "device_replica_inventory",
-  "chat_event_projections",
-  "phone_turn_claims",
-  "conversation_deletion_targets",
-  "hub_client_held_events",
-  "hub_log",
-  "hub_fold_state",
-  "hub_device_cursors",
-  "hub_reader_floors",
-  "hub_device_reads",
-  "hub_pair_machines",
-  "hub_chain_marks",
-  "hub_prune_state",
-  "hub_retention_candidates",
-  "device_event_blob_gc",
-  "device_event_blob_gc_refs",
-  "chat_events"
-] as const;
-/** Bodies: a device kept the large payloads of its events here; only the
- *  User's server keeps bodies now (pictures, avatars). */
-const LEGACY_BODY_TABLES = ["device_event_blob_fragments", "device_event_blob_pins", "device_event_blobs"] as const;
-/** Where a device stood in the old order (hub_client_state keys). */
-const LEGACY_CLIENT_STATE_KEYS = ["pushed-rowid", "pulled-hub-seq", "hub-id", "given-up", "dismissed-notices"] as const;
-/** The old order's logical clock (schema_meta). */
-const LEGACY_META_KEYS = ["chat-event-clock-v1"] as const;
-/** Rows deleted per transaction while a legacy table is emptied, and the
- *  pause between two batches (other work gets the database meanwhile): an
- *  event row is a few KB with four indexes, so a batch holds the database
- *  for a fraction of a second. */
-const LEGACY_DROP_BATCH_ROWS = 500;
-const LEGACY_DROP_PAUSE_MS = 100;
-
-/** One chat member's fields the usage signals read: its provider, role and
- *  saved member, and how many behavior rules it has. Nothing here is sent;
- *  the signals reduce it to families, counts and the app's own role ids. */
-export interface ChatMemberProviderRow {
-  kind?: unknown;
-  hostId?: unknown;
-  hostVendor?: unknown;
-  roleConfigId?: unknown;
-  participantConfigId?: unknown;
-  handle?: unknown;
-  behaviorRuleCount?: number;
-}
-
+/** The app's database. The work is done by the parts in ./storage. */
 export class StorageService {
-  private sqliteSession?: SqliteSession;
-  private hubStorage?: HubStorage;
-  private hubOpsStore?: HubOpsStore;
-  private hubClientOpsStore?: HubClientOpsStore;
-  private deviceEventBlobStorage?: DeviceEventBlobStorage;
-  private savedMessageStateCache: Map<string, SavedMessageState> | undefined;
-  private readonly dbPath: string;
-  private readonly sqliteExecutable: string;
-  private initialized = false;
-  /** The one set-up under way: callers that arrive while it runs wait for
-   *  it instead of starting a second one, which on a new database would add
-   *  the same column twice and stop the app from starting. */
-  private initializing?: Promise<void>;
-  private chatSearchIndexReady = false;
+  private readonly modules: StorageModules;
 
   constructor(options: StorageServiceOptions = {}) {
-    this.dbPath = options.dbPath ?? path.join(userDataPath(), "accordagents.sqlite3");
-    this.sqliteExecutable = options.sqliteExecutable ?? "sqlite3";
+    this.modules = createStorageModules({
+      dbPath: options.dbPath ?? path.join(userDataPath(), "accordagents.sqlite3"),
+      sqliteExecutable: options.sqliteExecutable ?? "sqlite3"
+    });
   }
 
-  async init(): Promise<void> {
-    if (this.initialized) {
-      return;
-    }
-    if (!this.initializing) {
-      // A set-up that fails is tried again by the next caller.
-      this.initializing = this.runInit().finally(() => {
-        this.initializing = undefined;
-      });
-    }
-    return this.initializing;
-  }
-
-  private async runInit(): Promise<void> {
-    await mkdir(path.dirname(this.dbPath), { recursive: true });
-    await this.ensureSchemaMetaTable();
-    await this.assertSupportedSchemaVersion();
-    await this.configureSqliteRuntime();
-    await this.runSql(`
-      create table if not exists conversations (
-        id text primary key,
-        title text not null,
-        kind text not null,
-        created_at text not null,
-        updated_at text not null,
-        repo_path text,
-        body_json text,
-        payload_json text not null
-      );
-      create index if not exists idx_conversations_updated_at on conversations(updated_at);
-      create table if not exists schema_meta (
-        key text primary key,
-        value text not null
-      );
-      create table if not exists conversation_messages (
-        conversation_id text not null,
-        sequence integer not null,
-        message_id text not null,
-        created_at text not null,
-        payload_json text not null,
-        primary key (conversation_id, sequence),
-        unique (conversation_id, message_id)
-      );
-      create index if not exists idx_conversation_messages_conversation_sequence on conversation_messages(conversation_id, sequence);
-      create table if not exists run_cancel_requests (
-        run_id text primary key,
-        conversation_id text not null,
-        requested_at text not null
-      );
-      -- A chat the owner deleted. Kept after the rows are gone, because a
-      -- snapshot already in flight would otherwise write it back: the copy
-      -- has no way to tell "new" from "stale" without a record of the absence.
-      create table if not exists deleted_conversations (
-        conversation_id text primary key,
-        deleted_at text not null
-      );
-      -- Enforce absence inside the write transaction, including stale writers
-      -- in other processes and snapshots queued before deletion started.
-      create trigger if not exists deleted_conversation_insert before insert on conversations
-        when exists (select 1 from deleted_conversations where conversation_id = new.id)
-        begin select raise(abort, 'Chat was permanently deleted.'); end;
-      create trigger if not exists deleted_conversation_update before update on conversations
-        when exists (select 1 from deleted_conversations where conversation_id = new.id)
-        begin select raise(abort, 'Chat was permanently deleted.'); end;
-      create trigger if not exists deleted_message_insert before insert on conversation_messages
-        when exists (select 1 from deleted_conversations where conversation_id = new.conversation_id)
-        begin select raise(abort, 'Chat was permanently deleted.'); end;
-      create trigger if not exists deleted_message_update before update on conversation_messages
-        when exists (select 1 from deleted_conversations where conversation_id = new.conversation_id)
-        begin select raise(abort, 'Chat was permanently deleted.'); end;
-      ${NATIVE_COMMAND_SCHEMA_SQL}
-      ${MACHINE_POWER_SCHEMA}
-      -- Where each relay mailbox was read to, from before the relay was removed.
-      drop table if exists device_event_mailbox_cursors;
-    `);
-    await this.pruneStaleRunCancelRequests();
-    await this.ensureColumn("conversations", "body_json", "text");
-    await this.ensureColumn("conversations", "save_token", "text");
-    // The few message rows that may be a member's reply not ended yet, so the
-    // chat list finds them without reading every message (listConversations).
-    // Built once over the existing rows; sqlite keeps it on every write after.
-    await this.runSql(
-      `create index if not exists idx_conversation_messages_pending_reply on conversation_messages(conversation_id)
-         where ${pendingReplyRowHintSql("payload_json")};`,
-      SQLITE_MIGRATION_TIMEOUT_MS
-    );
-    await this.backfillConversationBodiesAndMessages();
-    await this.backUpBeforeSchemaUpgrade();
-    await this.setSchemaMeta(STORAGE_SCHEMA_VERSION_META_KEY, String(SUPPORTED_STORAGE_SCHEMA_VERSION));
-    this.initialized = true;
-    await this.normalizeInferredParticipantRequestThreads();
-    await this.clearInterruptedRuns();
+  init(): Promise<void> {
+    return this.modules.schema.init();
   }
 
   // Cross-instance run cancellation. Multiple app instances can share this
@@ -529,69 +42,20 @@ export class StorageService {
   // in a non-owner instance cannot abort the owner's in-memory controllers, so
   // it records a request row here and the owning instance consumes it on its
   // run-owner heartbeat.
-  async requestRunCancel(conversationId: string, runId: string): Promise<void> {
-    await this.init();
-    const normalizedRunId = runId.trim();
-    if (!normalizedRunId) {
-      return;
-    }
-    await this.runSql(`
-      insert into run_cancel_requests (run_id, conversation_id, requested_at)
-      values (${sqlString(normalizedRunId)}, ${sqlString(conversationId)}, ${sqlString(new Date().toISOString())})
-      on conflict(run_id) do update set requested_at = excluded.requested_at;
-    `);
+  requestRunCancel(conversationId: string, runId: string): Promise<void> {
+    return this.modules.runCancels.requestRunCancel(conversationId, runId);
   }
 
-  async takeRunCancelRequests(runIds: string[]): Promise<string[]> {
-    await this.init();
-    const normalized = Array.from(new Set(runIds.map((runId) => runId.trim()).filter(Boolean)));
-    if (normalized.length === 0) {
-      return [];
-    }
-    const rows = await this.queryJson<{ runId: string }>(
-      `select run_id as runId from run_cancel_requests where run_id in ${sqlStringList(normalized)};`
-    );
-    const matched = rows.map((row) => row.runId);
-    if (matched.length > 0) {
-      await this.runSql(`delete from run_cancel_requests where run_id in ${sqlStringList(matched)};`);
-    }
-    return matched;
-  }
-
-  private async pruneStaleRunCancelRequests(): Promise<void> {
-    const cutoff = new Date(Date.now() - RUN_CANCEL_REQUEST_MAX_AGE_MS).toISOString();
-    await this.runSql(`delete from run_cancel_requests where requested_at < ${sqlString(cutoff)};`);
+  takeRunCancelRequests(runIds: string[]): Promise<string[]> {
+    return this.modules.runCancels.takeRunCancelRequests(runIds);
   }
 
   /** A chat's kind, project folder and members, without its messages or
    *  the rest of its body (members' memory asks this on every request); its
    *  main session and view, for how the server words what it sends outside
    *  (an urgent alert names nobody by handle in the sessions view). */
-  async conversationAccess(id: string): Promise<{ kind: string; repoPath?: string; participants: unknown[]; mainSessionParticipantId?: string; chatView?: string } | undefined> {
-    await this.init();
-    const rows = await this.queryJson<{ kind: string; repoPath: string | null; participantsJson: string | null; mainSessionParticipantId: string | null; chatView: string | null }>(
-      `select kind, repo_path as repoPath,
-         json_extract(coalesce(nullif(body_json, ''), payload_json), '$.metadata.participants') as participantsJson,
-         json_extract(coalesce(nullif(body_json, ''), payload_json), '$.metadata.mainSessionParticipantId') as mainSessionParticipantId,
-         json_extract(coalesce(nullif(body_json, ''), payload_json), '$.metadata.chatView') as chatView
-       from conversations where id = ${sqlString(id)};`
-    );
-    const row = rows[0];
-    if (!row) return undefined;
-    let participants: unknown[] = [];
-    try {
-      const parsed = row.participantsJson ? JSON.parse(row.participantsJson) as unknown : [];
-      if (Array.isArray(parsed)) participants = parsed;
-    } catch {
-      participants = [];
-    }
-    return {
-      kind: row.kind,
-      ...(row.repoPath ? { repoPath: row.repoPath } : {}),
-      participants,
-      ...(typeof row.mainSessionParticipantId === "string" && row.mainSessionParticipantId ? { mainSessionParticipantId: row.mainSessionParticipantId } : {}),
-      ...(typeof row.chatView === "string" && row.chatView ? { chatView: row.chatView } : {})
-    };
+  conversationAccess(id: string): Promise<{ kind: string; repoPath?: string; participants: unknown[]; mainSessionParticipantId?: string; chatView?: string } | undefined> {
+    return this.modules.conversationReads.conversationAccess(id);
   }
 
   /** The chat's newest messages that give a member a task (a request item
@@ -600,172 +64,32 @@ export class StorageService {
    *  (sessionsMemberTitle, titleTaskByMember). When none of them titles it,
    *  the newest delegation that names it is read as well, so a member with
    *  many follow-ups keeps the title its delegation gave it. */
-  async memberTaskMessages(conversationId: string, participantId: string, limit = 5): Promise<ChatMessage[]> {
-    await this.init();
-    const target = `${JSON.stringify("targetParticipantId")}:${JSON.stringify(participantId)}`;
-    const read = async (extra: string, count: number): Promise<ChatMessage[]> => {
-      const rows = await this.queryJson<{ payloadJson: string }>(
-        `select payload_json as payloadJson from conversation_messages
-         where conversation_id = ${sqlString(conversationId)}
-           and instr(payload_json, '"participantRequest"') > 0
-           and instr(payload_json, ${sqlString(target)}) > 0${extra}
-         order by sequence desc limit ${Math.max(1, Math.floor(count))};`
-      );
-      return rows.flatMap((row) => {
-        try {
-          const message = JSON.parse(row.payloadJson) as ChatMessage;
-          return message && typeof message === "object" ? [message] : [];
-        } catch {
-          return [];
-        }
-      }).reverse();
-    };
-    const newest = await read("", limit);
-    // The main session's title only: an inferred request's is the app's
-    // (titleTaskByMember).
-    const titled = newest.some((message) => message.metadata?.participantRequest?.source !== "inferred" &&
-      (message.metadata?.participantRequest?.items ?? [])
-        .some((item) => item.targetParticipantId === participantId && typeof item.title === "string" && item.title.trim()));
-    if (titled) return newest;
-    const delegation = await read(` and instr(payload_json, '"delegation"') > 0`, 1);
-    return [...delegation.filter((message) => !newest.some((known) => known.id === message.id)), ...newest];
+  memberTaskMessages(conversationId: string, participantId: string, limit = 5): Promise<ChatMessage[]> {
+    return this.modules.chatActivity.memberTaskMessages(conversationId, participantId, limit);
   }
 
   /** A chat's member requests, oldest first, each only its batch (not the
    *  rest of its message): the whole history's tasks, read once to give the
    *  members made before titles were kept with them theirs. */
-  async chatRequestBatches(conversationId: string): Promise<ChatParticipantRequestBatch[]> {
-    await this.init();
-    const rows = await this.queryJson<{ requestHex: string | null }>(
-      `select hex(json_extract(payload_json, '$.metadata.participantRequest')) as requestHex from conversation_messages
-       where conversation_id = ${sqlString(conversationId)}
-         and instr(payload_json, '"participantRequest"') > 0
-       order by sequence asc;`
-    );
-    return rows.flatMap((row) => {
-      if (!row.requestHex) return [];
-      try {
-        const batch = parseHexJson<ChatParticipantRequestBatch>(row.requestHex, `request batches ${conversationId}`);
-        return batch && typeof batch === "object" && Array.isArray(batch.items) ? [batch] : [];
-      } catch {
-        return [];
-      }
-    });
+  chatRequestBatches(conversationId: string): Promise<ChatParticipantRequestBatch[]> {
+    return this.modules.conversationReads.chatRequestBatches(conversationId);
   }
 
   /** A chat's member session records (this device's own), without its
    *  messages: a main session made by Fork to new chat reads the session of
    *  the member it copies from that member's chat, which can be thousands of
    *  messages long. `undefined` when no such chat is stored. */
-  async conversationParticipantSessions(id: string): Promise<unknown[] | undefined> {
-    await this.init();
-    const rows = await this.queryJson<{ kind: string; sessionsJson: string | null }>(
-      `select kind,
-         json_extract(coalesce(nullif(body_json, ''), payload_json), '$.metadata.participantSessions') as sessionsJson
-       from conversations where id = ${sqlString(id)};`
-    );
-    const row = rows[0];
-    if (!row || row.kind !== "chat") return undefined;
-    try {
-      const parsed = row.sessionsJson ? JSON.parse(row.sessionsJson) as unknown : [];
-      return Array.isArray(parsed) ? parsed : [];
-    } catch {
-      return [];
-    }
+  conversationParticipantSessions(id: string): Promise<unknown[] | undefined> {
+    return this.modules.conversationReads.conversationParticipantSessions(id);
   }
 
   /** The titles of the chats named (those this device still has). */
-  async conversationTitles(ids: readonly string[]): Promise<Record<string, string>> {
-    if (!ids.length) return {};
-    await this.init();
-    // sqlStringList is already parenthesized: one more pair makes a row value
-    // that sqlite refuses as soon as there are two ids.
-    const rows = await this.queryJson<{ id: string; title: string }>(`select id, title from conversations where id in ${sqlStringList(ids)};`);
-    return Object.fromEntries(rows.map((row) => [row.id, row.title]));
+  conversationTitles(ids: readonly string[]): Promise<Record<string, string>> {
+    return this.modules.conversationReads.conversationTitles(ids);
   }
 
-  async listConversations(): Promise<ConversationSummary[]> {
-    await this.init();
-    const rows = await this.queryJson<{
-      id: string;
-      title: string;
-      kind: ConversationSummary["kind"];
-      createdAt: string;
-      updatedAt: string;
-      repoPath?: string;
-      running?: number | string | boolean | null;
-      archived?: number | string | boolean | null;
-      pinned?: number | string | boolean | null;
-      pinnedAt?: string | null;
-      activeRunIdsCount?: number | string | null;
-      replyPending?: number | string | null;
-      waitingChoice?: number | string | null;
-      chatParticipantsJson?: string | null;
-    }>(
-      // Besides this device's runs, whether a member's reply has not ended
-      // (`isPendingReply`): a machine member's turn asked from the phone runs
-      // with no run here at all, and the reply is the only sign of it.
-      `select
-         id,
-         title,
-         kind,
-         created_at as createdAt,
-         updated_at as updatedAt,
-         repo_path as repoPath,
-         json_extract(coalesce(nullif(body_json, ''), payload_json), '$.metadata.running') as running,
-         json_extract(coalesce(nullif(body_json, ''), payload_json), '$.metadata.archived') as archived,
-         json_extract(coalesce(nullif(body_json, ''), payload_json), '$.metadata.pinned') as pinned,
-         json_extract(coalesce(nullif(body_json, ''), payload_json), '$.metadata.pinnedAt') as pinnedAt,
-         coalesce(json_array_length(coalesce(nullif(body_json, ''), payload_json), '$.metadata.activeRunIds'), 0) as activeRunIdsCount,
-         exists (
-           select 1 from conversation_messages m
-           where m.conversation_id = conversations.id
-             and ${pendingReplyRowHintSql("m.payload_json")}
-             and json_valid(m.payload_json)
-             and json_extract(m.payload_json, '$.status') = 'pending'
-             and json_extract(m.payload_json, '$.role') = 'participant'
-         ) as replyPending,
-         exists (
-           select 1 from conversation_messages m
-           where m.conversation_id = conversations.id
-             and ${pendingReplyRowHintSql("m.payload_json")}
-             and json_valid(m.payload_json)
-             and json_extract(m.payload_json, '$.role') = 'participant'
-             and json_extract(m.payload_json, '$.metadata.pendingChoice.status') = 'pending'
-             and coalesce(json_extract(m.payload_json, '$.metadata.serverCard.state'), '') <> 'answered'
-         ) as waitingChoice,
-         json_extract(coalesce(nullif(body_json, ''), payload_json), '$.metadata.participants') as chatParticipantsJson
-       from conversations
-       order by updated_at desc;`
-    );
-    return rows.map((row) => {
-      const activeCount = typeof row.activeRunIdsCount === "string"
-        ? Number.parseInt(row.activeRunIdsCount, 10) || 0
-        : (row.activeRunIdsCount ?? 0);
-      const runningFlag = row.running === 1 || row.running === "1" || row.running === true || row.running === "true";
-      const replyPending = row.replyPending === 1 || row.replyPending === "1";
-      const isRunning = activeCount > 0 || runningFlag;
-      const isArchived = row.archived === 1 || row.archived === "1" || row.archived === true || row.archived === "true";
-      const isPinned = row.pinned === 1 || row.pinned === "1" || row.pinned === true || row.pinned === "true";
-      const waitingChoice = row.waitingChoice === 1 || row.waitingChoice === "1";
-      const chatParticipants = row.kind === "chat"
-        ? normalizeConversationSummaryChatParticipants(row.chatParticipantsJson)
-        : undefined;
-      return {
-        id: row.id,
-        title: row.title,
-        kind: row.kind,
-        createdAt: row.createdAt,
-        updatedAt: row.updatedAt,
-        repoPath: row.repoPath ?? undefined,
-        running: isRunning,
-        ...(replyPending ? { replyPending: true } : {}),
-        archived: isArchived,
-        ...(isPinned ? { pinned: true, ...(typeof row.pinnedAt === "string" && row.pinnedAt ? { pinnedAt: row.pinnedAt } : {}) } : {}),
-        ...(waitingChoice ? { waitingChoice: true } : {}),
-        ...(chatParticipants ? { chatParticipants } : {})
-      };
-    });
+  listConversations(): Promise<ConversationSummary[]> {
+    return this.modules.conversationLists.listConversations();
   }
 
   /** Each chat's members, as the runtime fields that say which provider they
@@ -774,46 +98,8 @@ export class StorageService {
    *  query over the chats' own rows, the same body the chat list reads, that
    *  returns only those fields; no message is read, and a chat whose
    *  row cannot be read is left out rather than failing the rest. */
-  async listChatMemberProviders(): Promise<Array<Array<ChatMemberProviderRow>>> {
-    await this.init();
-    const rows = await this.queryJson<{ id: string; kind?: unknown; hostId?: unknown; hostVendor?: unknown; roleConfigId?: unknown; participantConfigId?: unknown; handle?: unknown; behaviorRuleCount?: unknown; member?: number | null }>(
-      `select c.id as id,
-              json_extract(p.value, '$.kind') as kind,
-              json_extract(p.value, '$.hostId') as hostId,
-              json_extract(p.value, '$.hostVendor') as hostVendor,
-              json_extract(p.value, '$.roleConfigId') as roleConfigId,
-              json_extract(p.value, '$.participantConfigId') as participantConfigId,
-              json_extract(p.value, '$.handle') as handle,
-              coalesce(json_array_length(p.value, '$.behaviorRuleIds'), 0) as behaviorRuleCount,
-              p.key as member
-       from (
-         select id, coalesce(nullif(body_json, ''), payload_json) as body
-         from conversations
-         where kind = 'chat' and json_valid(coalesce(nullif(body_json, ''), payload_json))
-       ) c
-       left join json_each(
-         case when json_type(c.body, '$.metadata.participants') = 'array' then c.body else '{"metadata":{"participants":[]}}' end,
-         '$.metadata.participants'
-       ) p
-       order by c.id;`
-    );
-    const chats = new Map<string, Array<ChatMemberProviderRow>>();
-    for (const row of rows) {
-      const members = chats.get(row.id) ?? [];
-      if (row.member !== null && row.member !== undefined) {
-        members.push({
-          kind: row.kind ?? undefined,
-          hostId: row.hostId ?? undefined,
-          hostVendor: row.hostVendor ?? undefined,
-          roleConfigId: row.roleConfigId ?? undefined,
-          participantConfigId: row.participantConfigId ?? undefined,
-          handle: row.handle ?? undefined,
-          behaviorRuleCount: typeof row.behaviorRuleCount === "number" ? row.behaviorRuleCount : 0
-        });
-      }
-      chats.set(row.id, members);
-    }
-    return [...chats.values()];
+  listChatMemberProviders(): Promise<Array<Array<ChatMemberProviderRow>>> {
+    return this.modules.conversationLists.listChatMemberProviders();
   }
 
   /** The chats with a User message written since `since` (the weekly usage
@@ -821,35 +107,8 @@ export class StorageService {
    *  (shared/mainSession.ts chatViewFor): its main session, whether that is
    *  still a member, and its view. One query over the chat rows; a message's
    *  body is looked at only for rows written since then. */
-  async listChatViewsWithUserMessagesSince(since: string): Promise<Array<{ mainSessionParticipantId?: string; chatView?: string }>> {
-    await this.init();
-    const rows = await this.queryJson<{ mainId?: unknown; isMember?: unknown; view?: unknown }>(
-      `select json_extract(c.body, '$.metadata.mainSessionParticipantId') as mainId,
-              exists (
-                select 1 from json_each(
-                  case when json_type(c.body, '$.metadata.participants') = 'array' then c.body else '{"metadata":{"participants":[]}}' end,
-                  '$.metadata.participants'
-                ) p
-                where json_extract(p.value, '$.id') = json_extract(c.body, '$.metadata.mainSessionParticipantId')
-              ) as isMember,
-              json_extract(c.body, '$.metadata.chatView') as view
-       from (
-         select id, coalesce(nullif(body_json, ''), payload_json) as body
-         from conversations
-         where kind = 'chat' and json_valid(coalesce(nullif(body_json, ''), payload_json))
-       ) c
-       where exists (
-         select 1 from conversation_messages m
-         where m.conversation_id = c.id
-           and m.created_at >= ${sqlString(since)}
-           and json_valid(m.payload_json)
-           and json_extract(m.payload_json, '$.role') = 'user'
-       );`
-    );
-    return rows.map((row) => ({
-      ...(typeof row.mainId === "string" && row.mainId && row.isMember === 1 ? { mainSessionParticipantId: row.mainId } : {}),
-      ...(typeof row.view === "string" ? { chatView: row.view } : {})
-    }));
+  listChatViewsWithUserMessagesSince(since: string): Promise<Array<{ mainSessionParticipantId?: string; chatView?: string }>> {
+    return this.modules.conversationLists.listChatViewsWithUserMessagesSince(since);
   }
 
   /** The messages whose choice still waits for the User, in the given chats:
@@ -858,319 +117,43 @@ export class StorageService {
    *  payloads are scanned; a chat's history is never read through the CLI).
    *  Past the cap the set is incomplete and says so, because the phone treats
    *  what it is given as the whole. */
-  async listPendingChoiceMessages(conversationIds: string[]): Promise<{
+  listPendingChoiceMessages(conversationIds: string[]): Promise<{
     rows: Array<{ conversationId: string; message: ChatMessage }>;
     truncated: boolean;
   }> {
-    await this.init();
-    const ids = [...new Set(conversationIds.filter((id) => typeof id === "string" && id.trim()))];
-    if (ids.length === 0) {
-      return { rows: [], truncated: false };
-    }
-    const found = await this.queryJson<{ conversationId: string; sequence: number; payloadHex: string }>(
-      `
-        select conversation_id as conversationId, sequence, hex(payload_json) as payloadHex
-        from conversation_messages
-        where conversation_id in ${sqlStringList(ids)}
-          and json_valid(payload_json)
-          and json_extract(payload_json, '$.metadata.pendingChoice.status') = 'pending'
-        order by created_at desc
-        limit ${MAX_PENDING_CHOICE_ROWS + 1};
-      `
-    );
-    const truncated = found.length > MAX_PENDING_CHOICE_ROWS;
-    const rows: Array<{ conversationId: string; message: ChatMessage }> = [];
-    for (const row of found.slice(0, MAX_PENDING_CHOICE_ROWS)) {
-      try {
-        rows.push({
-          conversationId: row.conversationId,
-          message: parseHexJson<ChatMessage>(row.payloadHex, `pending choice message ${row.conversationId}:${row.sequence}`)
-        });
-      } catch (error) {
-        console.warn(`[StorageService] Skipping invalid pending choice message ${row.conversationId}:${row.sequence}: ${
-          error instanceof Error ? error.message : String(error)}`);
-      }
-    }
-    return { rows, truncated };
+    return this.modules.chatActivity.listPendingChoiceMessages(conversationIds);
   }
 
-  async listChatActivity(request: ListChatActivityRequest = {}): Promise<ListChatActivityResult> {
-    await this.init();
-    const limit = normalizePositiveInteger(request.limit, DEFAULT_CHAT_ACTIVITY_LIMIT);
-    const conversationLimit = normalizePositiveInteger(
-      request.recentConversationLimit,
-      DEFAULT_CHAT_ACTIVITY_RECENT_CONVERSATION_LIMIT
-    );
-    const recentWindowDays = normalizePositiveInteger(
-      request.recentWindowDays,
-      DEFAULT_CHAT_ACTIVITY_RECENT_WINDOW_DAYS
-    );
-    const rows = await this.queryJson<{
-      id: string;
-      bodyHex: string;
-    }>(
-      `select
-         id,
-         hex(coalesce(nullif(body_json, ''), json_set(payload_json, '$.messages', json_array()))) as bodyHex
-       from conversations
-       where kind = 'chat'
-         and coalesce(json_extract(coalesce(nullif(body_json, ''), payload_json), '$.metadata.archived'), 0) not in (1, '1', 'true')
-       order by updated_at desc
-       limit ${conversationLimit};`
-    );
-    if (rows.length === 0) {
-      return { items: [], generatedAt: new Date().toISOString() };
-    }
-
-    const conversationsById = new Map<string, Conversation>();
-    for (const row of rows) {
-      let conversation: Conversation;
-      try {
-        conversation = parseHexJson<Conversation>(row.bodyHex, `conversation ${row.id}`);
-      } catch (error) {
-        console.warn(
-          `[StorageService] Skipping invalid chat activity conversation ${row.id}: ${
-            error instanceof Error ? error.message : String(error)
-          }`
-        );
-        continue;
-      }
-      conversation.metadata = clearLegacyAccordState(conversation.metadata);
-      conversation.messages = [];
-      sanitizeConversationWarnings(conversation);
-      conversationsById.set(conversation.id, conversation);
-    }
-    if (conversationsById.size === 0) {
-      return { items: [], generatedAt: new Date().toISOString() };
-    }
-
-    const conversationIds = [...conversationsById.keys()];
-    const approvalConversationIds = [...conversationsById.values()]
-      .filter((conversation) => hasPendingAppToolApprovals(conversation))
-      .map((conversation) => conversation.id);
-    const approvalTriggerTargets = [...conversationsById.values()].flatMap(pendingApprovalTriggerTargets);
-    const messages = await this.activityMessageRows(
-      conversationIds,
-      conversationLimit,
-      approvalConversationIds,
-      approvalTriggerTargets
-    );
-    for (const row of messages) {
-      const conversation = conversationsById.get(row.conversationId);
-      if (!conversation) {
-        continue;
-      }
-      conversation.messages.push(row.message);
-    }
-    for (const conversation of conversationsById.values()) {
-      conversation.messages.sort((left, right) => {
-        const timeDelta = Date.parse(left.createdAt) - Date.parse(right.createdAt);
-        return timeDelta || left.id.localeCompare(right.id);
-      });
-    }
-
-    const excludedItemIds = new Set(
-      (request.excludedItemIds ?? [])
-        .filter((itemId): itemId is string => typeof itemId === "string" && itemId.trim().length > 0)
-        .slice(-1_000)
-    );
-    const preferences = {
-      clearedItemIds: excludedItemIds,
-      ...(request.clearedRecentThroughByGroup ? { clearedRecentThroughByGroup: request.clearedRecentThroughByGroup } : {}),
-      ...(request.clearedRecentThroughBefore ? { clearedRecentThroughBefore: request.clearedRecentThroughBefore } : {})
-    };
-    const knownTitles = await this.activitySessionsTitles([...conversationsById.values()]);
-    const items = [...conversationsById.values()].flatMap((conversation) =>
-      buildChatActivityItems(conversation, {
-        recentWindowDays,
-        lastViewedAt: request.lastViewedAtByConversationId?.[conversation.id],
-        preferences,
-        ...(knownTitles.has(conversation.id) ? { knownTitles: knownTitles.get(conversation.id) } : {})
-      })
-    );
-    return {
-      items: limitChatActivityItems(sortChatActivityItems(items), limit),
-      generatedAt: new Date().toISOString()
-    };
+  listChatActivity(request: ListChatActivityRequest = {}): Promise<ListChatActivityResult> {
+    return this.modules.chatActivity.listChatActivity(request);
   }
 
-  async getConversation(id: string): Promise<Conversation | undefined> {
-    await this.init();
-    return this.readWholeConversation(id);
+  getConversation(id: string): Promise<Conversation | undefined> {
+    return this.modules.conversationReads.getConversation(id);
   }
 
   /** A chat's project folder, without reading a conversation that can be
    *  thousands of messages long. `undefined` when the chat is not stored. */
-  async conversationRepoPath(id: string): Promise<{ repoPath?: string } | undefined> {
-    await this.init();
-    const [row] = await this.queryJson<{ repoPath: string | null }>(
-      `select repo_path as repoPath from conversations where id = ${sqlString(id)} limit 1;`
-    );
-    if (!row) return undefined;
-    return typeof row.repoPath === "string" && row.repoPath.trim() ? { repoPath: row.repoPath } : {};
+  conversationRepoPath(id: string): Promise<{ repoPath?: string } | undefined> {
+    return this.modules.conversationReads.conversationRepoPath(id);
   }
 
   /** Whether a chat is stored here (and holds one message), without reading
    *  a conversation that can be thousands of messages long. */
-  async conversationPresence(id: string, messageId?: string): Promise<{ kind: Conversation["kind"]; hasMessage: boolean } | undefined> {
-    await this.init();
-    const hasMessage = messageId
-      ? `exists(select 1 from conversation_messages where conversation_id = ${sqlString(id)} and message_id = ${sqlString(messageId)})`
-      : "0";
-    const [row] = await this.queryJson<{ kind: Conversation["kind"]; hasMessage: number }>(
-      `select kind, ${hasMessage} as hasMessage from conversations where id = ${sqlString(id)} limit 1;`
-    );
-    return row ? { kind: row.kind, hasMessage: Boolean(row.hasMessage) } : undefined;
+  conversationPresence(id: string, messageId?: string): Promise<{ kind: Conversation["kind"]; hasMessage: boolean } | undefined> {
+    return this.modules.conversationReads.conversationPresence(id, messageId);
   }
 
-  // The conversation is assembled from its body plus its message rows. The old
-  // full `payload_json` copy is no longer written — it duplicated everything the
-  // rows already hold, and rewriting it cost megabytes on every save — so it is
-  // only read for rows that predate this change and have no body yet.
-  private async readWholeConversation(id: string): Promise<Conversation | undefined> {
-    const bodyJson = await this.queryText(
-      `select coalesce(nullif(body_json, ''), payload_json) from conversations where id = ${sqlString(id)} limit 1;`
-    );
-    if (!bodyJson) {
-      return undefined;
-    }
-    const conversation = JSON.parse(bodyJson) as Conversation;
-    const rows = await this.readAllConversationMessages(id);
-    // No rows but the parsed copy has messages means this row still predates the
-    // split and was never backfilled — that legacy payload is then the only
-    // place the messages exist, so it wins. Anything else takes the rows.
-    const legacyPayloadIsTheOnlySource = rows.length === 0 &&
-      Array.isArray(conversation.messages) &&
-      conversation.messages.length > 0;
-    if (!legacyPayloadIsTheOnlySource) {
-      conversation.messages = rows;
-    }
-    conversation.metadata = clearLegacyAccordState(conversation.metadata);
-    sanitizeConversationWarnings(conversation);
-    return conversation;
-  }
-
-  private async readAllConversationMessages(id: string): Promise<ChatMessage[]> {
-    const rows = await this.queryJson<{ sequence: number; payloadHex: string }>(
-      `
-        select sequence, hex(payload_json) as payloadHex
-        from conversation_messages
-        where conversation_id = ${sqlString(id)}
-        order by sequence;
-      `
-    );
-    return rows.map((row) =>
-      parseHexJson<ChatMessage>(row.payloadHex, `conversation message ${id}:${row.sequence}`)
-    );
-  }
-
-  async openConversation(
+  openConversation(
     id: string,
     limit?: number,
     page?: { beforeMessageId?: string }
   ): Promise<ConversationOpenResult | undefined> {
-    await this.init();
-    const bodyJson = await this.queryText(
-      `select coalesce(nullif(body_json, ''), payload_json) from conversations where id = ${sqlString(id)} limit 1;`
-    );
-    if (!bodyJson) {
-      return undefined;
-    }
-    const conversation = JSON.parse(bodyJson) as Conversation;
-    conversation.metadata = clearLegacyAccordState(conversation.metadata);
-    sanitizeConversationWarnings(conversation);
-    const messagePage = await this.listConversationMessages({
-      conversationId: id,
-      limit,
-      ...(page?.beforeMessageId ? { beforeMessageId: page.beforeMessageId } : {})
-    });
-    return {
-      conversation: {
-        ...conversation,
-        messages: messagePage.messages
-      },
-      messagePage: messagePageInfo(messagePage)
-    };
+    return this.modules.conversationReads.openConversation(id, limit, page);
   }
 
-  async listConversationMessages(request: ConversationMessagePageRequest): Promise<ConversationMessagePage> {
-    await this.init();
-    const limit = normalizeMessagePageLimit(request.limit);
-    const aroundMessageId = typeof request.aroundMessageId === "string" ? request.aroundMessageId.trim() : "";
-    const beforeMessageId = typeof request.beforeMessageId === "string" ? request.beforeMessageId.trim() : "";
-    let sequenceClause = "";
-    if (beforeMessageId) {
-      // Strictly before a message the reader already holds. An unknown id
-      // answers with nothing rather than the latest page: the reader asked
-      // for older history, and the latest page is not that.
-      const targetRows = await this.queryJson<{ sequence: number }>(
-        `
-          select sequence
-          from conversation_messages
-          where conversation_id = ${sqlString(request.conversationId)}
-            and message_id = ${sqlString(beforeMessageId)}
-          limit 1;
-        `
-      );
-      const targetSequence = targetRows[0]?.sequence;
-      if (targetSequence === undefined) {
-        const countRows = await this.queryJson<{ totalMessages: number }>(
-          `select count(*) as totalMessages from conversation_messages where conversation_id = ${sqlString(request.conversationId)};`
-        );
-        return {
-          messages: [],
-          hasMoreBefore: false,
-          totalMessages: countRows[0]?.totalMessages ?? 0
-        };
-      }
-      sequenceClause = ` and sequence < ${Math.max(0, Math.floor(targetSequence))}`;
-    } else if (aroundMessageId) {
-      const targetRows = await this.queryJson<{ sequence: number }>(
-        `
-          select sequence
-          from conversation_messages
-          where conversation_id = ${sqlString(request.conversationId)}
-            and message_id = ${sqlString(aroundMessageId)}
-          limit 1;
-        `
-      );
-      const targetSequence = targetRows[0]?.sequence;
-      if (targetSequence === undefined) {
-        const countRows = await this.queryJson<{ totalMessages: number }>(
-          `select count(*) as totalMessages from conversation_messages where conversation_id = ${sqlString(request.conversationId)};`
-        );
-        return {
-          messages: [],
-          hasMoreBefore: false,
-          totalMessages: countRows[0]?.totalMessages ?? 0
-        };
-      }
-      sequenceClause = ` and sequence <= ${Math.max(0, Math.floor(targetSequence))}`;
-    } else if (typeof request.beforeSequence === "number") {
-      sequenceClause = ` and sequence < ${Math.max(0, Math.floor(request.beforeSequence))}`;
-    }
-    const rows = await this.queryJson<{ sequence: number; payloadHex: string }>(
-      `
-        select sequence, hex(payload_json) as payloadHex
-        from conversation_messages
-        where conversation_id = ${sqlString(request.conversationId)}${sequenceClause}
-        order by sequence desc
-        limit ${limit + 1};
-      `
-    );
-    const selectedRows = rows.slice(0, limit).reverse();
-    const countRows = await this.queryJson<{ totalMessages: number }>(
-      `select count(*) as totalMessages from conversation_messages where conversation_id = ${sqlString(request.conversationId)};`
-    );
-    return {
-      messages: selectedRows.map((row) =>
-        parseHexJson<ChatMessage>(row.payloadHex, `conversation message ${request.conversationId}:${row.sequence}`)
-      ),
-      oldestSequence: selectedRows[0]?.sequence,
-      newestSequence: selectedRows[selectedRows.length - 1]?.sequence,
-      hasMoreBefore: rows.length > limit,
-      totalMessages: countRows[0]?.totalMessages ?? selectedRows.length
-    };
+  listConversationMessages(request: ConversationMessagePageRequest): Promise<ConversationMessagePage> {
+    return this.modules.conversationReads.listConversationMessages(request);
   }
 
   /** Whether a member has a finished reply in a chat (the rule of
@@ -1178,83 +161,22 @@ export class StorageService {
    *  fork (Fork to new chat from the phone). Read newest first, stopping at
    *  the first; a member that never answered reads the chat's messages once
    *  (when the phone's menu opens, never per list). */
-  async conversationParticipantAnswered(conversationId: string, participantId: string): Promise<boolean> {
-    await this.init();
-    const rows = await this.queryJson<{ found: number }>(
-      `select 1 as found from conversation_messages
-        where conversation_id = ${sqlString(conversationId)}
-          and json_extract(payload_json, '$.role') = 'participant'
-          and json_extract(payload_json, '$.participantId') = ${sqlString(participantId)}
-          and coalesce(json_extract(payload_json, '$.status'), '') <> 'pending'
-          and coalesce(json_extract(payload_json, '$.metadata.serverPlaceholder'), 0) <> 1
-        order by sequence desc limit 1;`
-    );
-    return rows.length > 0;
+  conversationParticipantAnswered(conversationId: string, participantId: string): Promise<boolean> {
+    return this.modules.conversationReads.conversationParticipantAnswered(conversationId, participantId);
   }
 
   /** The member's newest reply that ended a turn of its CLI (the rule of
    *  isMemberTurnEnd), as Fork to new chat keeps it (forkSeenReplyOf): where
    *  the copy ends. Read newest first, stopping at the first, and only the
    *  fields the cut needs (a reply can carry a long transcript). */
-  async conversationLastTurnEnd(conversationId: string, participantId: string): Promise<ChatForkSeenReply | undefined> {
-    await this.init();
-    const rows = await this.queryJson<{ id: string; createdAt?: string; turnStartedAt?: string; workedMs?: number; sessionCut?: string }>(
-      `select message_id as id,
-              json_extract(payload_json, '$.createdAt') as createdAt,
-              json_extract(payload_json, '$.metadata.turnStartedAt') as turnStartedAt,
-              json_extract(payload_json, '$.metadata.workedMs') as workedMs,
-              json_extract(payload_json, '$.metadata.sessionCut') as sessionCut
-         from conversation_messages
-        where conversation_id = ${sqlString(conversationId)}
-          and json_extract(payload_json, '$.role') = 'participant'
-          and json_extract(payload_json, '$.participantId') = ${sqlString(participantId)}
-          and coalesce(json_extract(payload_json, '$.status'), '') <> 'pending'
-          and coalesce(json_extract(payload_json, '$.metadata.serverPlaceholder'), 0) <> 1
-          and (json_type(payload_json, '$.metadata.workedMs') in ('integer', 'real')
-            or (json_type(payload_json, '$.metadata.sessionCut.sessionId') = 'text'
-              and json_type(payload_json, '$.metadata.sessionCut.at') = 'text'))
-        order by sequence desc limit 20;`
-    );
-    // The first that ends a turn by the shared rule (the query narrows to
-    // the same, but a cut it cannot use is skipped, as on the phone's view).
-    for (const row of rows) {
-      const seen = this.lastTurnEndRow(row, participantId);
-      if (seen) return seen;
-    }
-    return undefined;
-  }
-
-  private lastTurnEndRow(row: { id: string; createdAt?: string; turnStartedAt?: string; workedMs?: number; sessionCut?: string }, participantId: string): ChatForkSeenReply | undefined {
-    if (!row || typeof row.id !== "string") return undefined;
-    let sessionCut: unknown;
-    try {
-      sessionCut = typeof row.sessionCut === "string" ? JSON.parse(row.sessionCut) : undefined;
-    } catch {
-      sessionCut = undefined;
-    }
-    const view: ForkReplyView = {
-      id: row.id,
-      role: "participant",
-      participantId,
-      ...(typeof row.createdAt === "string" ? { createdAt: row.createdAt } : {}),
-      metadata: {
-        ...(typeof row.turnStartedAt === "string" ? { turnStartedAt: row.turnStartedAt } : {}),
-        ...(typeof row.workedMs === "number" ? { workedMs: row.workedMs } : {}),
-        ...(sessionCut !== undefined ? { sessionCut } : {})
-      }
-    };
-    return isMemberTurnEnd(view, participantId) ? forkSeenReplyOf(view) : undefined;
+  conversationLastTurnEnd(conversationId: string, participantId: string): Promise<ChatForkSeenReply | undefined> {
+    return this.modules.conversationReads.conversationLastTurnEnd(conversationId, participantId);
   }
 
   /** One message of a chat by its id: a single read through the chat's
    *  message-id index, for readers that need nothing around it. */
-  async conversationMessageById(conversationId: string, messageId: string): Promise<ChatMessage | undefined> {
-    await this.init();
-    const rows = await this.queryJson<{ sequence: number; payloadHex: string }>(
-      `select sequence, hex(payload_json) as payloadHex from conversation_messages
-        where conversation_id = ${sqlString(conversationId)} and message_id = ${sqlString(messageId)} limit 1;`
-    );
-    return rows[0] ? parseHexJson<ChatMessage>(rows[0].payloadHex, `message ${conversationId}:${rows[0].sequence}`) : undefined;
+  conversationMessageById(conversationId: string, messageId: string): Promise<ChatMessage | undefined> {
+    return this.modules.conversationReads.conversationMessageById(conversationId, messageId);
   }
 
   /** The member messages still in progress that answer these turns (the
@@ -1262,38 +184,11 @@ export class StorageService {
    *  chat. Read from the earliest of those messages on, not the whole chat;
    *  few and small (a turn's message holds only its placeholder until it
    *  ends). A dead message of another turn is never one of them. */
-  async listPendingTurnMessages(
+  listPendingTurnMessages(
     conversationId: string,
     turns: Array<{ messageId: string; participantId: string }>
   ): Promise<ChatMessage[]> {
-    if (turns.length === 0) return [];
-    await this.init();
-    const asked = [...new Set(turns.map((turn) => turn.messageId))].slice(0, 200);
-    const [first] = await this.queryJson<{ sequence: number | null }>(
-      `select min(sequence) as sequence from conversation_messages
-        where conversation_id = ${sqlString(conversationId)} and message_id in (${asked.map(sqlString).join(", ")});`
-    );
-    if (typeof first?.sequence !== "number") return [];
-    const rows = await this.queryJson<{ sequence: number; payloadHex: string }>(
-      `
-        select sequence, hex(payload_json) as payloadHex
-        from conversation_messages
-        where conversation_id = ${sqlString(conversationId)}
-          and sequence >= ${Math.max(0, Math.floor(first.sequence))}
-          and payload_json like '%"status":"pending"%'
-          and json_valid(payload_json)
-          and json_extract(payload_json, '$.role') = 'participant'
-          and json_extract(payload_json, '$.status') = 'pending'
-        order by sequence;
-      `
-    );
-    const wanted = new Set(turns.map((turn) => `${turn.participantId}\u0000${turn.messageId}`));
-    return rows
-      .map((row) => parseHexJson<ChatMessage>(row.payloadHex, `pending message ${conversationId}:${row.sequence}`))
-      .filter((message) => {
-        const answers = message.metadata?.sourceMessageId || message.metadata?.parentMessageId;
-        return Boolean(message.participantId && answers) && wanted.has(`${message.participantId}\u0000${answers}`);
-      });
+    return this.modules.chatActivity.listPendingTurnMessages(conversationId, turns);
   }
 
   /** The member's turn in progress (see runningMessageForParticipant), found
@@ -1302,511 +197,51 @@ export class StorageService {
    *  of its pending member messages, the run fields plus the first characters
    *  of their text (to recognise a hidden "waiting for approval" status), so
    *  the answer stays a handful of short rows on any chat. */
-  async findRunningParticipantMessage(conversationId: string, participantId: string): Promise<ChatRunningMessageTarget | undefined> {
-    await this.init();
-    const body = `coalesce(nullif(body_json, ''), payload_json)`;
-    const runStateJson = await this.queryText(
-      `
-        select json_object(${RUNNING_MESSAGE_RUN_STATE_KEYS.map((key) =>
-          `${sqlString(key)}, json_extract(${body}, ${sqlString(`$.metadata.${key}`)})`).join(", ")})
-        from conversations
-        where id = ${sqlString(conversationId)} and json_valid(${body})
-        limit 1;
-      `
-    );
-    if (!runStateJson) {
-      return undefined;
-    }
-    const metadata = JSON.parse(runStateJson) as Conversation["metadata"];
-    const rows = await this.queryJson<{
-      id: string;
-      participantId: string | null;
-      createdAt: string | null;
-      runId: string | null;
-      queued: number;
-      chatThreadRootId: string | null;
-      hiddenFromTimeline: number | null;
-      contentHex: string | null;
-    }>(
-      `
-        select
-          message_id as id,
-          json_extract(payload_json, '$.participantId') as participantId,
-          json_extract(payload_json, '$.createdAt') as createdAt,
-          json_extract(payload_json, '$.metadata.runId') as runId,
-          json_extract(payload_json, '$.metadata.queuedBehind') is not null as queued,
-          json_extract(payload_json, '$.metadata.chatThreadRootId') as chatThreadRootId,
-          json_extract(payload_json, '$.metadata.hiddenFromTimeline') as hiddenFromTimeline,
-          hex(substr(json_extract(payload_json, '$.content'), 1, ${RUNNING_MESSAGE_CONTENT_CHARS})) as contentHex
-        from conversation_messages
-        where conversation_id = ${sqlString(conversationId)}
-          and payload_json like '%"status":"pending"%'
-          and json_valid(payload_json)
-          and json_extract(payload_json, '$.role') = 'participant'
-          and json_extract(payload_json, '$.status') = 'pending'
-        order by sequence;
-      `
-    );
-    const messages: ChatMessage[] = rows.flatMap((row) => typeof row.id === "string" && row.id ? [{
-      id: row.id,
-      role: "participant" as const,
-      status: "pending" as const,
-      ...(typeof row.participantId === "string" ? { participantId: row.participantId } : {}),
-      content: decodedRunningMessageContent(row.contentHex),
-      createdAt: typeof row.createdAt === "string" ? row.createdAt : "",
-      metadata: {
-        ...(typeof row.runId === "string" ? { runId: row.runId } : {}),
-        ...(row.queued ? { queuedBehind: { handle: "" } } : {}),
-        ...(typeof row.chatThreadRootId === "string" ? { chatThreadRootId: row.chatThreadRootId } : {}),
-        ...(row.hiddenFromTimeline ? { hiddenFromTimeline: true } : {})
-      }
-    }] : []);
-    const running = runningMessageForParticipant({ metadata, messages }, participantId);
-    return running ? runningMessageTarget(running) : undefined;
+  findRunningParticipantMessage(conversationId: string, participantId: string): Promise<ChatRunningMessageTarget | undefined> {
+    return this.modules.chatActivity.findRunningParticipantMessage(conversationId, participantId);
   }
 
-  async listChatSearchConversationSnapshots(options: { includeParticipants?: boolean } = {}): Promise<ChatSearchConversationSnapshot[]> {
-    await this.init();
-    const includeParticipants = options.includeParticipants !== false;
-    const rows = await this.queryJson<{
-      conversationId: string;
-      title: string;
-      repoPath?: string;
-      archived?: number | string | boolean | null;
-      updatedAt: string;
-      messageCount: number | string;
-      oldestMessageAt?: string | null;
-      newestMessageAt?: string | null;
-      participantsHex?: string;
-      mainSessionParticipantId?: string | null;
-      chatView?: string | null;
-      payloadValid: number | string;
-    }>(`
-      with chat_bodies as (
-        select
-          id,
-          title,
-          repo_path,
-          updated_at,
-          coalesce(nullif(body_json, ''), payload_json) as source_json
-        from conversations
-        where kind = 'chat'
-      ), message_stats as (
-        select
-          conversation_id,
-          count(*) as message_count,
-          min(created_at) as oldest_message_at,
-          max(created_at) as newest_message_at
-        from conversation_messages
-        group by conversation_id
-      )
-      select
-        c.id as conversationId,
-        c.title,
-        c.repo_path as repoPath,
-        case when json_valid(c.source_json) then json_extract(c.source_json, '$.metadata.archived') end as archived,
-        c.updated_at as updatedAt,
-        coalesce(s.message_count, 0) as messageCount,
-        s.oldest_message_at as oldestMessageAt,
-        s.newest_message_at as newestMessageAt,
-        ${includeParticipants
-          ? "case when json_valid(c.source_json) then hex(coalesce(json_extract(c.source_json, '$.metadata.participants'), '[]')) end"
-          : "NULL"} as participantsHex,
-        case when json_valid(c.source_json) then json_extract(c.source_json, '$.metadata.mainSessionParticipantId') end as mainSessionParticipantId,
-        case when json_valid(c.source_json) then json_extract(c.source_json, '$.metadata.chatView') end as chatView,
-        json_valid(c.source_json) as payloadValid
-      from chat_bodies c
-      left join message_stats s on s.conversation_id = c.id
-      order by c.updated_at desc;
-    `);
-    return rows.map((row) => {
-      const sourceReadable = sqliteBoolean(row.payloadValid);
-      try {
-        return {
-          conversationId: row.conversationId,
-          title: row.title,
-          ...(row.repoPath ? { repoPath: row.repoPath } : {}),
-          archived: sqliteBoolean(row.archived),
-          updatedAt: row.updatedAt,
-          messageCount: Number(row.messageCount) || 0,
-          ...(row.oldestMessageAt ? { oldestMessageAt: row.oldestMessageAt } : {}),
-          ...(row.newestMessageAt ? { newestMessageAt: row.newestMessageAt } : {}),
-          participants: sourceReadable && includeParticipants && row.participantsHex
-            ? parseHexJson<unknown[]>(row.participantsHex, `chat search participants ${row.conversationId}`)
-              .filter(isStoredChatParticipant)
-            : [],
-          ...(typeof row.mainSessionParticipantId === "string" && row.mainSessionParticipantId ? { mainSessionParticipantId: row.mainSessionParticipantId } : {}),
-          ...(typeof row.chatView === "string" && row.chatView ? { chatView: row.chatView } : {}),
-          sourceReadable
-        };
-      } catch (error) {
-        throw new InvalidChatSearchSourceError(row.conversationId, error);
-      }
-    });
+  listChatSearchConversationSnapshots(options: { includeParticipants?: boolean } = {}): Promise<ChatSearchConversationSnapshot[]> {
+    return this.modules.chatSearchIndex.listChatSearchConversationSnapshots(options);
   }
 
-  async readChatSearchConversation(conversationId: string): Promise<Conversation | undefined> {
-    await this.init();
-    const rows = await this.queryJson<{ rowKind: "body" | "message"; sequence: number; payloadHex: string }>(`
-      select rowKind, sequence, payloadHex
-      from (
-        select
-          'body' as rowKind,
-          -1 as sequence,
-          hex(coalesce(nullif(body_json, ''), json_set(payload_json, '$.messages', json_array()))) as payloadHex
-        from conversations
-        where id = ${sqlString(conversationId)} and kind = 'chat'
-        union all
-        select
-          'message' as rowKind,
-          sequence,
-          hex(payload_json) as payloadHex
-        from conversation_messages
-        where conversation_id = ${sqlString(conversationId)}
-      )
-      order by sequence;
-    `);
-    const body = rows.find((row) => row.rowKind === "body");
-    if (!body) {
-      return undefined;
-    }
-    const conversation = parseHexJson<Conversation>(body.payloadHex, `chat search conversation ${conversationId}`);
-    conversation.metadata = clearLegacyAccordState(conversation.metadata);
-    conversation.messages = rows
-      .filter((row) => row.rowKind === "message")
-      .map((row) => parseHexJson<ChatMessage>(row.payloadHex, `chat search message ${conversationId}:${row.sequence}`));
-    sanitizeConversationWarnings(conversation);
-    return conversation;
+  readChatSearchConversation(conversationId: string): Promise<Conversation | undefined> {
+    return this.modules.chatSearchIndex.readChatSearchConversation(conversationId);
   }
 
-  async readChatSearchConversations(conversationIds: string[]): Promise<ChatSearchConversationRead[]> {
-    await this.init();
-    if (conversationIds.length === 0) {
-      return [];
-    }
-    const rows = await this.queryJson<{
-      conversationId: string;
-      title: string;
-      repoPath?: string;
-      archived?: number | string | boolean | null;
-      updatedAt: string;
-      messageCount: number | string;
-      oldestMessageAt?: string | null;
-      newestMessageAt?: string | null;
-      participantsHex: string;
-      payloadValid: number | string;
-      rowKind: "body" | "message";
-      sequence: number;
-      payloadHex: string;
-    }>(`
-      with selected_conversations as (
-        select
-          c.id as conversation_id,
-          c.title,
-          c.repo_path,
-          case when json_valid(coalesce(nullif(c.body_json, ''), c.payload_json))
-            then json_extract(coalesce(nullif(c.body_json, ''), c.payload_json), '$.metadata.archived') end as archived,
-          c.updated_at,
-          case when json_valid(coalesce(nullif(c.body_json, ''), c.payload_json))
-            then hex(coalesce(json_extract(coalesce(nullif(c.body_json, ''), c.payload_json), '$.metadata.participants'), '[]')) else '' end as participants_hex,
-          case when json_valid(coalesce(nullif(c.body_json, ''), c.payload_json))
-            then hex(coalesce(nullif(c.body_json, ''), c.payload_json)) else '' end as body_hex,
-          json_valid(coalesce(nullif(c.body_json, ''), c.payload_json)) as payload_valid
-        from conversations c
-        where c.kind = 'chat' and c.id in ${sqlStringList(conversationIds)}
-      ), message_stats as (
-        select
-          m.conversation_id,
-          count(*) as message_count,
-          min(m.created_at) as oldest_message_at,
-          max(m.created_at) as newest_message_at
-        from conversation_messages m
-        where m.conversation_id in ${sqlStringList(conversationIds)}
-        group by m.conversation_id
-      ), source_rows as (
-        select
-          c.conversation_id, c.title, c.repo_path, c.archived, c.updated_at,
-          coalesce(s.message_count, 0) as message_count,
-          s.oldest_message_at, s.newest_message_at, c.participants_hex, c.payload_valid,
-          'body' as row_kind, -1 as sequence, c.body_hex as payload_hex
-        from selected_conversations c
-        left join message_stats s on s.conversation_id = c.conversation_id
-        union all
-        select
-          c.conversation_id, c.title, c.repo_path, c.archived, c.updated_at,
-          s.message_count, s.oldest_message_at, s.newest_message_at, c.participants_hex, c.payload_valid,
-          'message' as row_kind, m.sequence, hex(m.payload_json) as payload_hex
-        from selected_conversations c
-        join message_stats s on s.conversation_id = c.conversation_id
-        join conversation_messages m on m.conversation_id = c.conversation_id
-      )
-      select
-        conversation_id as conversationId,
-        title,
-        repo_path as repoPath,
-        archived,
-        updated_at as updatedAt,
-        message_count as messageCount,
-        oldest_message_at as oldestMessageAt,
-        newest_message_at as newestMessageAt,
-        participants_hex as participantsHex,
-        payload_valid as payloadValid,
-        row_kind as rowKind,
-        sequence,
-        payload_hex as payloadHex
-      from source_rows
-      order by conversation_id, sequence;
-    `);
-    const rowsByConversation = new Map<string, typeof rows>();
-    for (const row of rows) {
-      const grouped = rowsByConversation.get(row.conversationId) ?? [];
-      grouped.push(row);
-      rowsByConversation.set(row.conversationId, grouped);
-    }
-    return conversationIds.flatMap((conversationId) => {
-      const conversationRows = rowsByConversation.get(conversationId);
-      const body = conversationRows?.find((row) => row.rowKind === "body");
-      if (!body) {
-        return [];
-      }
-      if (!sqliteBoolean(body.payloadValid)) {
-        throw new InvalidChatSearchSourceError(conversationId);
-      }
-      try {
-        const conversation = parseHexJson<Conversation>(body.payloadHex, `chat search conversation ${conversationId}`);
-        conversation.metadata = clearLegacyAccordState(conversation.metadata);
-        conversation.messages = (conversationRows ?? [])
-          .filter((row) => row.rowKind === "message")
-          .map((row) => parseHexJson<ChatMessage>(row.payloadHex, `chat search message ${conversationId}:${row.sequence}`));
-        sanitizeConversationWarnings(conversation);
-        return [{
-          snapshot: {
-            conversationId,
-            title: body.title,
-            ...(body.repoPath ? { repoPath: body.repoPath } : {}),
-            archived: sqliteBoolean(body.archived),
-            updatedAt: body.updatedAt,
-            messageCount: Number(body.messageCount) || 0,
-            ...(body.oldestMessageAt ? { oldestMessageAt: body.oldestMessageAt } : {}),
-            ...(body.newestMessageAt ? { newestMessageAt: body.newestMessageAt } : {}),
-            participants: parseHexJson<unknown[]>(body.participantsHex, `chat search participants ${conversationId}`)
-              .filter(isStoredChatParticipant)
-          },
-          conversation
-        }];
-      } catch (error) {
-        throw new InvalidChatSearchSourceError(conversationId, error);
-      }
-    });
+  readChatSearchConversations(conversationIds: string[]): Promise<ChatSearchConversationRead[]> {
+    return this.modules.chatSearchIndex.readChatSearchConversations(conversationIds);
   }
 
-  async ensureChatSearchIndex(): Promise<void> {
-    await this.init();
-    if (this.chatSearchIndexReady) {
-      return;
-    }
-    const valid = await this.chatSearchIndexIsValid().catch(() => false);
-    if (!valid) {
-      await this.rebuildChatSearchIndex();
-      return;
-    }
-    try {
-      await this.runSql("insert into chat_search_fts(chat_search_fts) values('integrity-check');");
-      this.chatSearchIndexReady = true;
-    } catch {
-      await this.rebuildChatSearchIndex();
-    }
+  ensureChatSearchIndex(): Promise<void> {
+    return this.modules.chatSearchIndex.ensureChatSearchIndex();
   }
 
-  async rebuildChatSearchIndex(): Promise<void> {
-    await this.init();
-    this.chatSearchIndexReady = false;
-    await this.runSql(`
-      begin;
-      drop table if exists chat_search_fts;
-      drop table if exists chat_search_state;
-      create virtual table chat_search_fts using fts5(
-        conversation_id unindexed,
-        document_kind unindexed,
-        message_id unindexed,
-        thread_root_id unindexed,
-        role unindexed,
-        author_label unindexed,
-        created_at unindexed,
-        conversation_updated_at unindexed,
-        title_text,
-        body,
-        tokenize = 'unicode61 remove_diacritics 2'
-      );
-      create table chat_search_state (
-        conversation_id text primary key,
-        source_title text not null,
-        source_updated_at text not null,
-        source_message_count integer not null,
-        source_newest_message_at text,
-        indexed_at text not null,
-        index_schema_version integer not null
-      );
-      insert into schema_meta (key, value)
-      values (${sqlString(CHAT_SEARCH_INDEX_META_KEY)}, ${sqlString(String(CHAT_SEARCH_INDEX_VERSION))})
-      on conflict(key) do update set value = excluded.value;
-      commit;
-    `, SQLITE_MIGRATION_TIMEOUT_MS);
-    this.chatSearchIndexReady = true;
+  rebuildChatSearchIndex(): Promise<void> {
+    return this.modules.chatSearchIndex.rebuildChatSearchIndex();
   }
 
-  private async chatSearchIndexIsValid(): Promise<boolean> {
-    const rows = await this.queryJson<{
-      storedVersion?: string | null;
-      ftsSql?: string | null;
-      stateColumns?: string | null;
-    }>(`
-      select
-        (select value from schema_meta where key = ${sqlString(CHAT_SEARCH_INDEX_META_KEY)}) as storedVersion,
-        (select sql from sqlite_master where name = 'chat_search_fts' and type = 'table') as ftsSql,
-        (select group_concat(name, ',') from pragma_table_info('chat_search_state')) as stateColumns;
-    `);
-    const row = rows[0];
-    const ftsSql = row?.ftsSql?.toLowerCase() ?? "";
-    const stateColumns = new Set((row?.stateColumns ?? "").split(",").filter(Boolean));
-    const expectedStateColumns = [
-      "conversation_id",
-      "source_title",
-      "source_updated_at",
-      "source_message_count",
-      "source_newest_message_at",
-      "indexed_at",
-      "index_schema_version"
-    ];
-    return row?.storedVersion === String(CHAT_SEARCH_INDEX_VERSION) &&
-      ftsSql.includes("using fts5") &&
-      [
-        "conversation_id",
-        "document_kind",
-        "message_id",
-        "thread_root_id",
-        "role",
-        "author_label",
-        "created_at",
-        "conversation_updated_at",
-        "title_text",
-        "body"
-      ]
-        .every((column) => ftsSql.includes(column)) &&
-      expectedStateColumns.every((column) => stateColumns.has(column));
+  listChatSearchIndexStates(conversationIds?: string[]): Promise<ChatSearchIndexState[]> {
+    return this.modules.chatSearchIndex.listChatSearchIndexStates(conversationIds);
   }
 
-  async listChatSearchIndexStates(conversationIds?: string[]): Promise<ChatSearchIndexState[]> {
-    await this.ensureChatSearchIndex();
-    if (conversationIds?.length === 0) {
-      return [];
-    }
-    const rows = await this.queryJson<{
-      conversationId: string;
-      sourceTitle: string;
-      sourceUpdatedAt: string;
-      sourceMessageCount: number | string;
-      sourceNewestMessageAt?: string | null;
-      indexedAt: string;
-      indexSchemaVersion: number | string;
-    }>(`
-      select
-        conversation_id as conversationId,
-        source_title as sourceTitle,
-        source_updated_at as sourceUpdatedAt,
-        source_message_count as sourceMessageCount,
-        source_newest_message_at as sourceNewestMessageAt,
-        indexed_at as indexedAt,
-        index_schema_version as indexSchemaVersion
-      from chat_search_state
-      ${conversationIds ? `where conversation_id in ${sqlStringList(conversationIds)}` : ""};
-    `);
-    return rows.map((row) => ({
-      conversationId: row.conversationId,
-      sourceTitle: row.sourceTitle,
-      sourceUpdatedAt: row.sourceUpdatedAt,
-      sourceMessageCount: Number(row.sourceMessageCount) || 0,
-      ...(row.sourceNewestMessageAt ? { sourceNewestMessageAt: row.sourceNewestMessageAt } : {}),
-      indexedAt: row.indexedAt,
-      indexSchemaVersion: Number(row.indexSchemaVersion) || 0
-    }));
-  }
-
-  async replaceChatSearchDocuments(
+  replaceChatSearchDocuments(
     snapshot: ChatSearchConversationSnapshot,
     documents: ChatSearchDocument[],
     indexedAt: string
   ): Promise<void> {
-    await this.replaceChatSearchDocumentsBatch([{ snapshot, documents, indexedAt }]);
+    return this.modules.chatSearchIndex.replaceChatSearchDocuments(snapshot, documents, indexedAt);
   }
 
-  async replaceChatSearchDocumentsBatch(replacements: ChatSearchDocumentReplacement[]): Promise<void> {
-    await this.ensureChatSearchIndex();
-    if (replacements.length === 0) {
-      return;
-    }
-    const replacementSql = replacements.map(({ snapshot, documents, indexedAt }) => {
-      const insertSql = documents.map((document) => `
-        insert into chat_search_fts (
-          conversation_id, document_kind, message_id, thread_root_id, role, author_label,
-          created_at, conversation_updated_at, title_text, body
-        ) values (
-          ${sqlString(snapshot.conversationId)},
-          ${sqlString(document.kind)},
-          ${sqlString(document.kind === "message" ? document.messageId : undefined)},
-          ${sqlString(document.kind === "message" ? document.threadRootId : undefined)},
-          ${sqlString(document.kind === "message" ? document.role : undefined)},
-          ${sqlString(document.kind === "message" ? document.authorLabel : undefined)},
-          ${sqlString(document.kind === "message" ? document.createdAt : undefined)},
-          ${sqlString(snapshot.updatedAt)},
-          ${sqlString(document.kind === "title" ? document.titleText : undefined)},
-          ${sqlString(document.kind === "message" ? document.body : undefined)}
-        );
-      `).join("\n");
-      return `
-        delete from chat_search_fts where conversation_id = ${sqlString(snapshot.conversationId)};
-        ${insertSql}
-        insert into chat_search_state (
-          conversation_id, source_title, source_updated_at, source_message_count,
-          source_newest_message_at, indexed_at, index_schema_version
-        ) values (
-          ${sqlString(snapshot.conversationId)},
-          ${sqlString(snapshot.title)},
-          ${sqlString(snapshot.updatedAt)},
-          ${snapshot.messageCount},
-          ${sqlString(snapshot.newestMessageAt)},
-          ${sqlString(indexedAt)},
-          ${CHAT_SEARCH_INDEX_VERSION}
-        ) on conflict(conversation_id) do update set
-          source_title = excluded.source_title,
-          source_updated_at = excluded.source_updated_at,
-          source_message_count = excluded.source_message_count,
-          source_newest_message_at = excluded.source_newest_message_at,
-          indexed_at = excluded.indexed_at,
-          index_schema_version = excluded.index_schema_version;
-      `;
-    }).join("\n");
-    await this.runSql(`
-      begin;
-      ${replacementSql}
-      commit;
-    `, SQLITE_MIGRATION_TIMEOUT_MS);
+  replaceChatSearchDocumentsBatch(replacements: ChatSearchDocumentReplacement[]): Promise<void> {
+    return this.modules.chatSearchIndex.replaceChatSearchDocumentsBatch(replacements);
   }
 
-  async deleteChatSearchDocuments(conversationIds: string[]): Promise<void> {
-    await this.ensureChatSearchIndex();
-    if (conversationIds.length === 0) {
-      return;
-    }
-    await this.runSql(`
-      begin;
-      delete from chat_search_fts where conversation_id in ${sqlStringList(conversationIds)};
-      delete from chat_search_state where conversation_id in ${sqlStringList(conversationIds)};
-      commit;
-    `);
+  deleteChatSearchDocuments(conversationIds: string[]): Promise<void> {
+    return this.modules.chatSearchIndex.deleteChatSearchDocuments(conversationIds);
   }
 
-  async queryChatSearchIndex(request: {
+  queryChatSearchIndex(request: {
     conversationIds: string[];
     matchQuery: string;
     startMarker: string;
@@ -1814,132 +249,7 @@ export class StorageService {
     limit: number;
     offset?: number;
   }): Promise<StoredChatSearchQueryResult> {
-    await this.ensureChatSearchIndex();
-    if (request.conversationIds.length === 0) {
-      return { titleMatches: [], messageMatches: [], messageMatchCount: 0, matchedChatCount: 0 };
-    }
-    const rows = await this.queryJson<{
-      rowKind: "title" | "message" | "counts";
-      conversationId?: string | null;
-      messageId?: string | null;
-      threadRootId?: string | null;
-      role?: "user" | "participant" | null;
-      authorLabel?: string | null;
-      createdAt?: string | null;
-      titleText?: string | null;
-      snippetHex?: string | null;
-      rank?: number | string | null;
-      messageMatchCount?: number | string | null;
-      matchedChatCount?: number | string | null;
-    }>(`
-      with title_matches as (
-        select
-          'title' as rowKind,
-          conversation_id as conversationId,
-          NULL as messageId,
-          NULL as threadRootId,
-          NULL as role,
-          NULL as authorLabel,
-          NULL as createdAt,
-          title_text as titleText,
-          hex(highlight(chat_search_fts, 8, ${sqlString(request.startMarker)}, ${sqlString(request.endMarker)})) as snippetHex,
-          bm25(chat_search_fts) as rank,
-          NULL as messageMatchCount,
-          NULL as matchedChatCount,
-          conversation_updated_at as sortUpdatedAt,
-          0 as rowOrder
-        from chat_search_fts
-        where chat_search_fts match ${sqlString(request.matchQuery)}
-          and conversation_id in ${sqlStringList(request.conversationIds)}
-          and document_kind = 'title'
-      ), message_matches as (
-        select
-          'message' as rowKind,
-          conversation_id as conversationId,
-          message_id as messageId,
-          thread_root_id as threadRootId,
-          role,
-          author_label as authorLabel,
-          created_at as createdAt,
-          NULL as titleText,
-          hex(snippet(chat_search_fts, 9, ${sqlString(request.startMarker)}, ${sqlString(request.endMarker)}, ' … ', 24)) as snippetHex,
-          bm25(chat_search_fts) as rank,
-          NULL as messageMatchCount,
-          NULL as matchedChatCount,
-          conversation_updated_at as sortUpdatedAt,
-          1 as rowOrder
-        from chat_search_fts
-        where chat_search_fts match ${sqlString(request.matchQuery)}
-          and conversation_id in ${sqlStringList(request.conversationIds)}
-          and document_kind = 'message'
-        order by conversation_updated_at desc, conversation_id asc, created_at asc, message_id asc
-        limit ${request.limit}
-        offset ${Math.max(0, Math.floor(request.offset ?? 0))}
-      ), match_counts as (
-        select
-          'counts' as rowKind,
-          NULL as conversationId,
-          NULL as messageId,
-          NULL as threadRootId,
-          NULL as role,
-          NULL as authorLabel,
-          NULL as createdAt,
-          NULL as titleText,
-          NULL as snippetHex,
-          NULL as rank,
-          coalesce(sum(case when document_kind = 'message' then 1 else 0 end), 0) as messageMatchCount,
-          count(distinct conversation_id) as matchedChatCount,
-          NULL as sortUpdatedAt,
-          2 as rowOrder
-        from chat_search_fts
-        where chat_search_fts match ${sqlString(request.matchQuery)}
-          and conversation_id in ${sqlStringList(request.conversationIds)}
-      )
-      select * from (
-        select * from title_matches
-        union all
-        select * from message_matches
-        union all
-        select * from match_counts
-      )
-      order by rowOrder, sortUpdatedAt desc, conversationId asc, createdAt asc, messageId asc;
-    `);
-    const titleRows = rows.filter((row) => row.rowKind === "title");
-    const messageRows = rows.filter((row) => row.rowKind === "message");
-    const countRow = rows.find((row) => row.rowKind === "counts");
-    return {
-      titleMatches: titleRows.map((row) => ({
-        kind: "title",
-        conversationId: row.conversationId ?? "",
-        titleText: row.titleText ?? "",
-        snippet: parseHexText(row.snippetHex, `chat search title ${row.conversationId}`),
-        rank: Number(row.rank) || 0
-      })),
-      messageMatches: messageRows.map((row) => ({
-        kind: "message",
-        conversationId: row.conversationId ?? "",
-        messageId: row.messageId ?? "",
-        ...(row.threadRootId ? { threadRootId: row.threadRootId } : {}),
-        role: row.role ?? "user",
-        authorLabel: row.authorLabel ?? "",
-        createdAt: row.createdAt ?? "",
-        snippet: parseHexText(row.snippetHex, `chat search snippet ${row.conversationId}:${row.messageId}`),
-        rank: Number(row.rank) || 0
-      })),
-      messageMatchCount: Number(countRow?.messageMatchCount) || 0,
-      matchedChatCount: Number(countRow?.matchedChatCount) || 0
-    };
-  }
-
-  // Only ever a cache of what this process itself wrote. It is dropped whenever
-  // the database turns out to hold something else, so a wrong entry costs one
-  // full rewrite rather than a lost message. Created on demand because tests
-  // build this service through `Object.create`, which skips field initialisers.
-  private get savedMessageState(): Map<string, SavedMessageState> {
-    if (!this.savedMessageStateCache) {
-      this.savedMessageStateCache = new Map();
-    }
-    return this.savedMessageStateCache;
+    return this.modules.chatSearchIndex.queryChatSearchIndex(request);
   }
 
   // A save used to delete every message row of a conversation and insert them
@@ -1952,59 +262,14 @@ export class StorageService {
    *  that already serialized and hashed the messages for this exact snapshot
    *  passes them as `rows`; they are used only when they line up with the
    *  messages one to one, otherwise the messages are serialized here. */
-  async saveConversation(conversation: Conversation, options: {
+  saveConversation(conversation: Conversation, options: {
     rows?: SavedMessageRow[];
     /** Statements that must commit in the same transaction as this save, or
      *  not at all: the chat's outgoing change event. `onlyIfSql` receives the
      *  condition the incremental write is gated on. */
     alsoCommit?: { sql: string; onlyIfSql(condition: string): string };
   } = {}): Promise<string> {
-    await this.init();
-    const rows: SavedMessageRow[] = rowsMatchMessages(options.rows, conversation.messages)
-      ? options.rows
-      : conversation.messages.map((message, index) => {
-        const json = JSON.stringify(message);
-        return {
-          index,
-          id: message.id,
-          createdAt: message.createdAt,
-          json,
-          hash: createHash("sha1").update(json).digest("hex")
-        };
-      });
-    const previous = this.savedMessageState.get(conversation.id);
-    const nextToken = randomUUID();
-    // Another app instance can share this database. The token makes a partial
-    // save atomic against that: every message statement is gated on this
-    // process still owning the row it last wrote, so a foreign write in between
-    // turns the whole batch into a no-op instead of splicing our rows into
-    // theirs and producing a state neither instance ever held.
-    let claimed = false;
-    if (previous) {
-      try {
-        claimed = await this.writeConversationIncrementally(conversation, rows, previous, nextToken, options.alsoCommit);
-      } catch (error) {
-        // A failed partial write leaves this process unable to say what the row
-        // holds, so the cache is worthless and the next save must rewrite
-        // everything.
-        this.savedMessageState.delete(conversation.id);
-        throw error;
-      }
-    }
-    if (claimed) {
-      this.savedMessageState.set(conversation.id, {
-        token: nextToken,
-        rows: rows.map((row) => ({ id: row.id, hash: row.hash }))
-      });
-      return nextToken;
-    }
-    this.savedMessageState.delete(conversation.id);
-    await this.writeConversationInFull(conversation, rows, nextToken, options.alsoCommit?.sql);
-    this.savedMessageState.set(conversation.id, {
-      token: nextToken,
-      rows: rows.map((row) => ({ id: row.id, hash: row.hash }))
-    });
-    return nextToken;
+    return this.modules.conversationSaves.saveConversation(conversation, options);
   }
 
   /** True while the conversation row still carries `token`, the value a
@@ -2012,140 +277,8 @@ export class StorageService {
    *  instance or any caller in this process — stamps a new token, so a match
    *  proves nothing has written the conversation since that save and storage
    *  holds exactly the snapshot it persisted. */
-  async isConversationSaveOwned(conversationId: string, token: string): Promise<boolean> {
-    if (!token) {
-      return false;
-    }
-    await this.init();
-    const observed = await this.queryText(
-      `select save_token from conversations where id = ${sqlString(conversationId)} limit 1;`
-    );
-    return observed === token;
-  }
-
-  private async writeConversationInFull(
-    conversation: Conversation,
-    rows: SavedMessageRow[],
-    token: string,
-    alsoCommitSql = ""
-  ): Promise<void> {
-    const bodyPayload = JSON.stringify(conversationBody(conversation));
-    // `payload_json` used to hold a second, complete copy of the conversation —
-    // every message again, megabytes of it, rewritten on every save. The body
-    // and the message rows are the record now; the column stays because it is
-    // `not null` and because rows written before this change are still read
-    // through it, but it is no longer a copy of anything.
-    const payload = bodyPayload;
-    const messageRows = rows.map((row) => `
-      insert into conversation_messages (conversation_id, sequence, message_id, created_at, payload_json)
-      values (
-        ${sqlString(conversation.id)},
-        ${row.index},
-        ${sqlString(row.id)},
-        ${sqlString(row.createdAt)},
-        ${sqlString(row.json)}
-      );
-    `).join("\n");
-    await this.runSql(`
-      begin immediate;
-      insert into conversations (id, title, kind, created_at, updated_at, repo_path, payload_json)
-      values (
-        ${sqlString(conversation.id)},
-        ${sqlString(conversation.title)},
-        ${sqlString(conversation.kind)},
-        ${sqlString(conversation.createdAt)},
-        ${sqlString(conversation.updatedAt)},
-        ${sqlString(conversation.repoPath)},
-        ${sqlString(payload)}
-      )
-      on conflict(id) do update set
-        title = excluded.title,
-        kind = excluded.kind,
-        updated_at = excluded.updated_at,
-        repo_path = excluded.repo_path,
-        body_json = ${sqlString(bodyPayload)},
-        payload_json = excluded.payload_json;
-      update conversations set body_json = ${sqlString(bodyPayload)}, save_token = ${sqlString(token)}
-        where id = ${sqlString(conversation.id)};
-      delete from conversation_messages where conversation_id = ${sqlString(conversation.id)};
-      ${messageRows}
-      ${alsoCommitSql}
-      commit;
-    `);
-  }
-
-  /** Returns false when this process no longer owns the row, so the caller must
-   *  fall back to a full rewrite. */
-  private async writeConversationIncrementally(
-    conversation: Conversation,
-    rows: SavedMessageRow[],
-    previous: SavedMessageState,
-    token: string,
-    alsoCommit?: { sql: string; onlyIfSql(condition: string): string }
-  ): Promise<boolean> {
-    const bodyPayload = JSON.stringify(conversationBody(conversation));
-    const payload = bodyPayload;
-    // Messages are spliced, not only appended (`chat.ts` inserts a message into
-    // the middle of the array and removes pending ones), and a splice shifts
-    // every later row's sequence while leaving its content identical. Comparing
-    // content alone would call those rows clean and leave stale sequences
-    // behind, and re-inserting a message id that still exists at another
-    // sequence would trip `unique (conversation_id, message_id)` and fail the
-    // whole transaction. So the first position whose message id differs decides:
-    // everything from there is rewritten, everything before it is touched only
-    // when its content changed. An append makes that boundary the old length; an
-    // in-place edit makes it the end.
-    const shared = Math.min(previous.rows.length, rows.length);
-    let divergence = shared;
-    for (let index = 0; index < shared; index += 1) {
-      if (previous.rows[index].id !== rows[index].id) {
-        divergence = index;
-        break;
-      }
-    }
-    const owned = `exists (select 1 from conversations where id = ${sqlString(conversation.id)}
-      and save_token = ${sqlString(previous.token)})`;
-    const statements: string[] = [];
-    statements.push(`
-      delete from conversation_messages
-      where conversation_id = ${sqlString(conversation.id)} and sequence >= ${divergence} and ${owned};
-    `);
-    for (const row of rows) {
-      const changed = row.index >= divergence || previous.rows[row.index].hash !== row.hash;
-      if (!changed) {
-        continue;
-      }
-      statements.push(`
-        insert into conversation_messages (conversation_id, sequence, message_id, created_at, payload_json)
-        select ${sqlString(conversation.id)}, ${row.index}, ${sqlString(row.id)},
-          ${sqlString(row.createdAt)}, ${sqlString(row.json)}
-        where ${owned}
-        on conflict(conversation_id, sequence) do update set
-          message_id = excluded.message_id,
-          created_at = excluded.created_at,
-          payload_json = excluded.payload_json;
-      `);
-    }
-    await this.runSql(`
-      begin immediate;
-      update conversations set
-        title = ${sqlString(conversation.title)},
-        kind = ${sqlString(conversation.kind)},
-        updated_at = ${sqlString(conversation.updatedAt)},
-        repo_path = ${sqlString(conversation.repoPath)},
-        body_json = ${sqlString(bodyPayload)},
-        payload_json = ${sqlString(payload)}
-      where id = ${sqlString(conversation.id)} and save_token = ${sqlString(previous.token)};
-      ${statements.join("\n")}
-      ${alsoCommit ? alsoCommit.onlyIfSql(owned) : ""}
-      update conversations set save_token = ${sqlString(token)}
-        where id = ${sqlString(conversation.id)} and save_token = ${sqlString(previous.token)};
-      commit;
-    `);
-    const observed = await this.queryText(
-      `select save_token from conversations where id = ${sqlString(conversation.id)} limit 1;`
-    );
-    return observed === token;
+  isConversationSaveOwned(conversationId: string, token: string): Promise<boolean> {
+    return this.modules.conversationSaves.isConversationSaveOwned(conversationId, token);
   }
 
   /**
@@ -2161,117 +294,51 @@ export class StorageService {
     deletedAt(conversationId: string): Promise<string | undefined>;
     pendingCopies(): Promise<Array<{ conversationId: string; deletedAt: string }>>;
   } {
-    return {
-      mark: async (conversationId, deletedAt) => {
-        await this.init();
-        await this.runSql(`begin immediate; ${this.conversationDeletionSql(conversationId, deletedAt)} commit;`);
-      },
-      isDeleted: async (conversationId) => Boolean(await this.conversationTombstones().deletedAt(conversationId)),
-      deletedAt: async (conversationId) => {
-        await this.init();
-        const rows = await this.queryJson<{ deletedAt: string }>(
-          `select deleted_at as deletedAt from deleted_conversations where conversation_id = ${sqlString(conversationId)};`);
-        return rows[0]?.deletedAt;
-      },
-      pendingCopies: async () => {
-        await this.init();
-        return this.queryJson<{ conversationId: string; deletedAt: string }>(`select d.conversation_id as conversationId, d.deleted_at as deletedAt
-          from deleted_conversations d join conversations c on c.id = d.conversation_id order by d.conversation_id limit 100;`);
-      }
-    };
-  }
-
-  private conversationDeletionSql(conversationId: string, deletedAt: string): string {
-    if (!conversationId.trim() || !deletedAt.trim()) throw new Error("A deletion tombstone requires stable identities.");
-    return `insert into deleted_conversations(conversation_id, deleted_at)
-      values (${sqlString(conversationId)}, ${sqlString(deletedAt)}) on conflict(conversation_id) do nothing;`;
+    return this.modules.conversationSaves.conversationTombstones();
   }
 
   nativeCommands(): NativeCommandStore {
-    return new NativeCommandStore({ init: () => this.init(), query: <T>(sql: string) => this.queryJson<T>(sql), execute: sql => this.runSql(sql) });
+    return this.modules.relatedStores.nativeCommands();
   }
 
   machinePower(): MachinePowerStore {
-    return new MachinePowerStore({ init: () => this.init(), query: <T>(sql: string) => this.queryJson<T>(sql), execute: sql => this.runSql(sql) });
+    return this.modules.relatedStores.machinePower();
   }
 
   /** The hub's tables: on the hub, its roster, phone pairing, notices and
    *  push subscriptions; on a device that uses one, where it stands with it. */
   hub(): HubStorage {
-    this.hubStorage ??= new HubStorage({
-      init: () => this.init(),
-      query: <T>(sql: string) => this.queryJson<T>(sql),
-      execute: (sql: string) => this.runSql(sql)
-    });
-    return this.hubStorage;
+    return this.modules.relatedStores.hub();
   }
 
   /** This device's operations for the User's server, and its failed sends. */
   hubClientOps(): HubClientOpsStore {
-    this.hubClientOpsStore ??= new HubClientOpsStore({
-      init: () => this.init(),
-      query: <T>(sql: string) => this.queryJson<T>(sql),
-      execute: (sql: string) => this.runSql(sql)
-    });
-    return this.hubClientOpsStore;
+    return this.modules.relatedStores.hubClientOps();
   }
 
   /** This database through its own session, for a store whose tables live
    *  here too (the server's documents), so its changes and the server's
    *  order can commit together. */
   sqlExecutor(): { path: string; queryJson<T>(sql: string): Promise<T[]>; queryText(sql: string): Promise<string>; runSql(sql: string): Promise<void> } {
-    return {
-      path: this.dbPath,
-      queryJson: async <T>(sql: string) => {
-        await this.init();
-        return this.queryJson<T>(sql);
-      },
-      queryText: async (sql: string) => {
-        await this.init();
-        return this.queryText(sql);
-      },
-      runSql: async (sql: string) => {
-        await this.init();
-        await this.runSql(sql);
-      }
-    };
+    return this.modules.sqlite.sqlExecutor();
   }
 
   /** The server's accepted operations and turns (the User's server only). */
   hubOps(): HubOpsStore {
-    this.hubOpsStore ??= new HubOpsStore({
-      init: () => this.init(),
-      query: <T>(sql: string) => this.queryJson<T>(sql),
-      execute: (sql: string) => this.runSql(sql)
-    });
-    return this.hubOpsStore;
+    return this.modules.relatedStores.hubOps();
   }
 
   /** The User's server's bodies (pictures, avatars); no other device keeps any. */
   deviceEventBlobs(): DeviceEventBlobStorage {
-    this.deviceEventBlobStorage ??= new DeviceEventBlobStorage({
-      init: () => this.init(),
-      query: <T>(sql: string) => this.queryJson<T>(sql),
-      execute: (sql: string) => this.runSql(sql)
-    });
-    return this.deviceEventBlobStorage;
+    return this.modules.relatedStores.deviceEventBlobs();
   }
 
-  async getDeviceIdentityRecord(): Promise<DeviceIdentityRecord | undefined> {
-    await this.init();
-    const raw = await this.getSchemaMeta(DEVICE_IDENTITY_META_KEY);
-    if (!raw) {
-      return undefined;
-    }
-    const parsed = JSON.parse(raw) as DeviceIdentityRecord;
-    this.assertValidDeviceIdentityRecord(parsed);
-    return parsed;
+  getDeviceIdentityRecord(): Promise<DeviceIdentityRecord | undefined> {
+    return this.modules.deviceIdentity.getDeviceIdentityRecord();
   }
 
-  async saveDeviceIdentityRecord(record: DeviceIdentityRecord): Promise<void> {
-    await this.init();
-    this.assertValidDeviceIdentityRecord(record);
-    await this.setSchemaMeta(DEVICE_IDENTITY_META_KEY, JSON.stringify(record));
+  saveDeviceIdentityRecord(record: DeviceIdentityRecord): Promise<void> {
+    return this.modules.deviceIdentity.saveDeviceIdentityRecord(record);
   }
 
   /** Puts this database back into the shape an older build can open: the full
@@ -2281,71 +348,16 @@ export class StorageService {
    *  afterwards simply raises the version back. This is the supported way to go
    *  back to a previous version of the app; without it, raising the schema
    *  version would be a one-way door. */
-  async prepareStorageForOlderVersion(): Promise<{ conversations: number; schemaVersion: number }> {
-    await this.init();
-    const rows = await this.queryJson<{ total: number }>("select count(*) as total from conversations;");
-    await this.runSql(`
-      begin immediate;
-      update conversations
-      set payload_json = json_set(
-        coalesce(nullif(body_json, ''), payload_json),
-        '$.messages',
-        coalesce(
-          (
-            select json_group_array(json(ordered.message_json))
-            from (
-              select m.payload_json as message_json
-              from conversation_messages m
-              where m.conversation_id = conversations.id
-              order by m.sequence
-            ) as ordered
-          ),
-          json_array()
-        )
-      )
-      where json_valid(coalesce(nullif(body_json, ''), payload_json));
-      commit;
-    `, SQLITE_MIGRATION_TIMEOUT_MS);
-    await this.setSchemaMeta(STORAGE_SCHEMA_VERSION_META_KEY, String(PREVIOUS_STORAGE_SCHEMA_VERSION));
-    // Anything this process believed about the rows it wrote is meaningless to
-    // the build that opens the database next.
-    this.savedMessageStateCache = undefined;
-    return { conversations: rows[0]?.total ?? 0, schemaVersion: PREVIOUS_STORAGE_SCHEMA_VERSION };
+  prepareStorageForOlderVersion(): Promise<{ conversations: number; schemaVersion: number }> {
+    return this.modules.backups.prepareStorageForOlderVersion();
   }
 
-  async createPreMigrationBackup(label: string): Promise<string> {
-    await this.init();
-    return this.backUpDatabaseTo(label);
+  createPreMigrationBackup(label: string): Promise<string> {
+    return this.modules.backups.createPreMigrationBackup(label);
   }
 
-  private async backUpDatabaseTo(label: string): Promise<string> {
-    const safeLabel = label.trim().replace(/[^a-zA-Z0-9._-]+/g, "-").replace(/^-+|-+$/g, "");
-    if (!safeLabel) {
-      throw new Error("Pre-migration backup label is required.");
-    }
-    const backupPath = `${this.dbPath}.${safeLabel}.bak`;
-    await this.runSql(`vacuum into ${sqlString(backupPath)};`, SQLITE_MIGRATION_TIMEOUT_MS);
-    return backupPath;
-  }
-
-  async deleteConversation(id: string, options: { alsoCommitSql?: string } = {}): Promise<boolean> {
-    await this.init();
-    const exists = await this.queryText(
-      `select id from conversations where id = ${sqlString(id)} limit 1;`
-    );
-    if (!exists) {
-      return false;
-    }
-    await this.runSql(`
-      begin immediate;
-      ${this.conversationDeletionSql(id, new Date().toISOString())}
-      delete from conversation_messages where conversation_id = ${sqlString(id)};
-      delete from conversations where id = ${sqlString(id)};
-      ${options.alsoCommitSql ?? ""}
-      commit;
-    `);
-    this.savedMessageState.delete(id);
-    return true;
+  deleteConversation(id: string, options: { alsoCommitSql?: string } = {}): Promise<boolean> {
+    return this.modules.conversationSaves.deleteConversation(id, options);
   }
 
   /**
@@ -2360,234 +372,21 @@ export class StorageService {
    * and carries on at the next call; a database without these tables is
    * left alone at once.
    */
-  async dropLegacyEventTables(options: {
+  dropLegacyEventTables(options: {
     keepBodies: boolean;
     signal?: AbortSignal;
     log?: (event: string, payload: Record<string, unknown>) => void;
     batchRows?: number;
     pauseMs?: number;
   }): Promise<{ tables: string[]; rows: number; done: boolean }> {
-    await this.init();
-    const wanted = [...LEGACY_EVENT_TABLES, ...(options.keepBodies ? [] : LEGACY_BODY_TABLES)];
-    const present = new Set((await this.queryJson<{ name: string }>(
-      `select name from sqlite_master where type = 'table' and name in ${sqlStringList(wanted)};`
-    )).map((row) => row.name));
-    const batch = Math.max(1, Math.floor(options.batchRows ?? LEGACY_DROP_BATCH_ROWS));
-    const pauseMs = Math.max(0, Math.floor(options.pauseMs ?? LEGACY_DROP_PAUSE_MS));
-    const started = Date.now();
-    const dropped: string[] = [];
-    let rows = 0;
-    const stopped = (): boolean => options.signal?.aborted === true;
-    for (const table of wanted) {
-      if (!present.has(table)) continue;
-      for (;;) {
-        if (stopped()) return { tables: dropped, rows, done: false };
-        const [result] = await this.queryJson<{ deleted: number }>(
-          `delete from ${table} where rowid in (select rowid from ${table} limit ${batch}); select changes() as deleted;`
-        );
-        const deleted = Number(result?.deleted ?? 0) || 0;
-        rows += deleted;
-        if (deleted < batch) break;
-        await new Promise((resolve) => setTimeout(resolve, pauseMs));
-      }
-      await this.runSql(`drop table if exists ${table};`);
-      dropped.push(table);
-    }
-    // What this device kept about where it stood in the old order.
-    await this.runSql(`
-      delete from schema_meta where key in ${sqlStringList(LEGACY_META_KEYS)};
-      delete from hub_client_state where key in ${sqlStringList(LEGACY_CLIENT_STATE_KEYS)};
-    `).catch(() => undefined);
-    if (dropped.length > 0) {
-      options.log?.("storage.legacy-tables.dropped", { tables: dropped, rows, ms: Date.now() - started });
-    }
-    return { tables: dropped, rows, done: true };
-  }
-
-  private async ensureColumn(table: string, column: string, definition: string): Promise<void> {
-    const rows = await this.queryJson<{ name: string }>(`pragma table_info(${table});`);
-    if (rows.some((row) => row.name === column)) {
-      return;
-    }
-    await this.runSql(`alter table ${table} add column ${column} ${definition};`);
-  }
-
-  private async ensureSchemaMetaTable(): Promise<void> {
-    await this.runSql(`
-      create table if not exists schema_meta (
-        key text primary key,
-        value text not null
-      );
-    `);
-  }
-
-  private async configureSqliteRuntime(): Promise<void> {
-    const journalMode = (await this.queryText("pragma journal_mode = wal;")).toLowerCase();
-    if (journalMode && journalMode !== "wal") {
-      console.warn(`[StorageService] SQLite journal_mode=wal requested, got ${journalMode}.`);
-    }
-  }
-
-  /** Raising the schema version is what stops an older build from destroying
-   *  this database, but it also means that build can no longer open it. A copy
-   *  taken the moment before the version rises is the floor under that: whatever
-   *  goes wrong afterwards, the database as the previous version left it is
-   *  still on disk, next to the live one. Taken once — a second upgrade of an
-   *  already-upgraded database finds the version unchanged and does nothing. */
-  private async backUpBeforeSchemaUpgrade(): Promise<void> {
-    const storedVersion = parseStorageSchemaVersion(await this.getSchemaMeta(STORAGE_SCHEMA_VERSION_META_KEY));
-    if (storedVersion === undefined || storedVersion >= SUPPORTED_STORAGE_SCHEMA_VERSION) {
-      return;
-    }
-    try {
-      // Deliberately not `createPreMigrationBackup`: this runs from inside
-      // `init`, and that method starts by awaiting `init` itself, which would
-      // re-enter it before `initialized` is set and never return.
-      const backupPath = await this.backUpDatabaseTo(`schema-${storedVersion}`);
-      console.info(`[StorageService] Backed up the chat database before upgrading it to schema ${SUPPORTED_STORAGE_SCHEMA_VERSION}: ${backupPath}`);
-    } catch (error) {
-      // A missing backup must not stop the app from opening. It is a safety net,
-      // and the upgrade itself is not destructive — the old copy is what the
-      // user loses the option of, not their data.
-      console.warn(`[StorageService] Could not back up the chat database before the schema upgrade: ${error instanceof Error ? error.message : String(error)}`);
-    }
-  }
-
-  private async assertSupportedSchemaVersion(): Promise<void> {
-    const storedVersion = parseStorageSchemaVersion(await this.getSchemaMeta(STORAGE_SCHEMA_VERSION_META_KEY));
-    if (storedVersion !== undefined && storedVersion > SUPPORTED_STORAGE_SCHEMA_VERSION) {
-      throw new UnsupportedStorageSchemaVersionError(storedVersion, SUPPORTED_STORAGE_SCHEMA_VERSION);
-    }
-  }
-
-  private assertValidDeviceIdentityRecord(record: DeviceIdentityRecord): void {
-    const requiredStrings = [
-      ["originId", record.originId],
-      ["keyId", record.keyId],
-      ["publicKeyDerBase64", record.publicKeyDerBase64],
-      ["privateKeyDerBase64", record.privateKeyDerBase64],
-      ["createdAt", record.createdAt]
-    ] as const;
-    for (const [field, value] of requiredStrings) {
-      if (typeof value !== "string" || !value.trim()) {
-        throw new Error(`This device's identity requires ${field}.`);
-      }
-    }
-  }
-
-  private async backfillConversationBodiesAndMessages(): Promise<void> {
-    await this.runSql(`
-      begin;
-      update conversations
-      set body_json = json_set(payload_json, '$.messages', json_array())
-      where (body_json is null or body_json = '')
-        and json_valid(payload_json);
-
-      with valid_conversations as (
-        select c.id, c.payload_json as payload_json
-        from conversations c
-        where json_valid(c.payload_json)
-      ),
-      target_conversations as (
-        select c.id, c.payload_json as payload_json
-        from valid_conversations c
-        where json_type(c.payload_json, '$.messages') = 'array'
-          and not exists (
-            select 1
-            from conversation_messages m
-            where m.conversation_id = c.id
-          )
-      )
-      insert or ignore into conversation_messages (conversation_id, sequence, message_id, created_at, payload_json)
-      select
-        c.id,
-        cast(message.key as integer),
-        json_extract(message.value, '$.id'),
-        json_extract(message.value, '$.createdAt'),
-        message.value
-      from target_conversations c, json_each(c.payload_json, '$.messages') as message
-      where json_extract(message.value, '$.id') is not null
-        and json_extract(message.value, '$.createdAt') is not null;
-      commit;
-    `, SQLITE_MIGRATION_TIMEOUT_MS);
-  }
-
-  private async clearInterruptedRuns(): Promise<void> {
-    // Run state lives in conversation metadata, which is what `body_json` holds.
-    // The legacy full payload is only consulted for rows written before the
-    // split; searching it for current rows would match a frozen copy and act on
-    // state that is no longer true.
-    const runMarkers = ["\"running\":true", "\"activeRunIds\":[", "\"participantCompactionsByParticipantId\":"];
-    const ids = await this.queryConversationIds(
-      runMarkers.map((marker) =>
-        `coalesce(nullif(body_json, ''), payload_json) like '%${marker}%'`
-      ).join(" or ")
-    );
-    for (const id of ids) {
-      const conversation = await this.readWholeConversation(id);
-      if (!conversation) {
-        continue;
-      }
-      const activeRunIds = Array.isArray(conversation.metadata.activeRunIds) ? conversation.metadata.activeRunIds : [];
-      const wasRunning = conversation.metadata.running === true || activeRunIds.length > 0;
-      const hasParticipantCompactions = Object.keys(readParticipantCompactions(conversation.metadata)).length > 0;
-      if (!wasRunning && !hasParticipantCompactions) {
-        continue;
-      }
-      const remoteRunIds = nonTerminalRemoteRunIds(conversation.metadata.remoteRunHandles);
-      const remoteRunIdSet = new Set(remoteRunIds);
-      const metadataRunId = typeof conversation.metadata.runId === "string" ? conversation.metadata.runId : undefined;
-      const localActiveRunIds = activeRunIds.filter((runId): runId is string => typeof runId === "string" && !remoteRunIdSet.has(runId));
-      const onlyRemoteRunState = remoteRunIds.length > 0 &&
-        localActiveRunIds.length === 0 &&
-        (!metadataRunId || remoteRunIdSet.has(metadataRunId));
-      if (onlyRemoteRunState) {
-        conversation.metadata = withRemoteRunMetadata(clearChatRunMetadata(clearParticipantCompactions(conversation.metadata)), remoteRunIds);
-        conversation.updatedAt = new Date().toISOString();
-        await this.saveConversation(conversation);
-        continue;
-      }
-    }
-  }
-
-  private async normalizeInferredParticipantRequestThreads(): Promise<void> {
-    const completed = await this.getSchemaMeta(INFERRED_REQUEST_THREAD_MIGRATION_KEY);
-    if (completed === SCHEMA_META_COMPLETE) {
-      return;
-    }
-
-    // This marker sits in message metadata, not conversation metadata, so it is
-    // not in `body_json` at all — the message rows are where it has to be looked
-    // for. Rows written before the split have no body and no message rows yet,
-    // so their legacy payload is still searched.
-    const ids = await this.queryConversationIds(
-      `exists (
-        select 1 from conversation_messages m
-        where m.conversation_id = conversations.id and m.payload_json like '%"source":"inferred"%'
-      ) or (coalesce(body_json, '') = '' and payload_json like '%"source":"inferred"%')`
-    );
-    for (const id of ids) {
-      const conversation = await this.readWholeConversation(id);
-      if (!conversation) {
-        continue;
-      }
-      if (!normalizeInferredParticipantRequestThreadMetadata(conversation)) {
-        continue;
-      }
-      await this.saveConversation(conversation);
-    }
-    await this.setSchemaMeta(INFERRED_REQUEST_THREAD_MIGRATION_KEY, SCHEMA_META_COMPLETE);
+    return this.modules.startupRepairs.dropLegacyEventTables(options);
   }
 
   /** Chats holding an approved roster change that had not been applied yet
    *  (ChatAppToolApproval.memberRemovalQueuedAt or memberAdditionQueuedAt);
    *  read once at startup. */
-  async conversationIdsWithQueuedRosterChanges(): Promise<string[]> {
-    await this.init();
-    return this.queryConversationIds(
-      `coalesce(nullif(body_json, ''), payload_json) like '%"memberRemovalQueuedAt":%'` +
-      ` or coalesce(nullif(body_json, ''), payload_json) like '%"memberAdditionQueuedAt":%'`
-    );
+  conversationIdsWithQueuedRosterChanges(): Promise<string[]> {
+    return this.modules.conversationLists.conversationIdsWithQueuedRosterChanges();
   }
 
   /** Chats that may hold a card a member waits on: an approval waiting (or
@@ -2597,328 +396,13 @@ export class StorageService {
    *  the User's server match them (ChatService.resumeServerCards). Without
    *  `messages` only the chats' bodies are read (a reconnect): every message
    *  row is read only at a start. */
-  async conversationIdsWithOpenCards(options: { messages?: boolean } = {}): Promise<string[]> {
-    await this.init();
-    const messages = options.messages !== false;
-    const bodies = `
-      select id from conversations
-        where kind = 'chat'
-          and coalesce(nullif(body_json, ''), payload_json) like '%"pendingAppToolApprovals":[{%'
-          and json_valid(coalesce(nullif(body_json, ''), payload_json))
-          and exists (
-            select 1 from json_each(coalesce(nullif(body_json, ''), payload_json), '$.metadata.pendingAppToolApprovals') as approval
-            where json_extract(approval.value, '$.status') = 'pending'
-              or json_extract(approval.value, '$.memberRemovalQueuedAt') is not null
-              or json_extract(approval.value, '$.memberAdditionQueuedAt') is not null
-              or json_extract(approval.value, '$.machineDecisionPending') is not null
-          )`;
-    const rows = await this.queryJson<{ id: string }>(`${bodies}${messages ? `
-      union
-      select distinct m.conversation_id as id from conversation_messages m
-        where (m.payload_json like '%"pendingChoice":%' or m.payload_json like '%"pendingMentions":%' or m.payload_json like '%"serverCard":%')
-          and json_valid(m.payload_json)
-          and (
-            json_extract(m.payload_json, '$.metadata.pendingChoice.status') = 'pending'
-            or json_extract(m.payload_json, '$.metadata.serverCard') is not null
-            or exists (
-              select 1 from json_each(m.payload_json, '$.metadata.pendingMentions') as mention
-              where json_extract(mention.value, '$.status') = 'pending'
-            )
-          )` : ""};`);
-    return rows.flatMap((row) => typeof row.id === "string" && row.id.trim() ? [row.id] : []);
+  conversationIdsWithOpenCards(options: { messages?: boolean } = {}): Promise<string[]> {
+    return this.modules.conversationLists.conversationIdsWithOpenCards(options);
   }
 
   /** The chats holding a member's choice that still waits for the User
    *  (ChatService.resumeChoiceExpiry). */
-  async conversationIdsWithPendingChoices(): Promise<string[]> {
-    await this.init();
-    const rows = await this.queryJson<{ id: string }>(`
-      select distinct m.conversation_id as id from conversation_messages m
-        where m.payload_json like '%"pendingChoice":%'
-          and json_valid(m.payload_json)
-          and json_extract(m.payload_json, '$.metadata.pendingChoice.status') = 'pending';`);
-    return rows.flatMap((row) => typeof row.id === "string" && row.id.trim() ? [row.id] : []);
+  conversationIdsWithPendingChoices(): Promise<string[]> {
+    return this.modules.conversationLists.conversationIdsWithPendingChoices();
   }
-
-  private async queryConversationIds(whereSql: string): Promise<string[]> {
-    const rows = await this.queryJson<{ id: string }>(`select id from conversations where ${whereSql};`);
-    return rows.flatMap((row) => typeof row.id === "string" && row.id.trim() ? [row.id] : []);
-  }
-
-  /** The task titles of the members of chats shown in the sessions view, by
-   *  chat and member: Activity names a member by its task there, and the
-   *  rows it reads hold only recent messages. Each chat's newest 40 task
-   *  messages (request messages) are read, nothing else. */
-  private async activitySessionsTitles(conversations: Conversation[]): Promise<Map<string, Map<string, string>>> {
-    const sessionsChats = conversations.filter((conversation) =>
-      Boolean(conversation.metadata?.mainSessionParticipantId) && (conversation.metadata?.chatView ?? "sessions") === "sessions");
-    const result = new Map<string, Map<string, string>>();
-    if (sessionsChats.length === 0) return result;
-    // Only the request of each message is read, not its whole payload.
-    const rows = await this.queryJson<{ conversationId: string; requestHex: string | null }>(
-      `select conversationId, hex(requestJson) as requestHex from (
-         select conversation_id as conversationId, json_extract(payload_json, '$.metadata.participantRequest') as requestJson,
-           row_number() over (partition by conversation_id order by sequence desc) as rank
-         from conversation_messages
-         where conversation_id in ${sqlStringList(sessionsChats.map((conversation) => conversation.id))}
-           and instr(payload_json, '"participantRequest"') > 0
-       ) where rank <= 40 and requestJson is not null;`
-    ).catch((error: unknown) => {
-      console.warn(`[StorageService] Activity task titles could not be read: ${error instanceof Error ? error.message : String(error)}`);
-      return [];
-    });
-    const messagesByChat = new Map<string, ChatMessage[]>();
-    for (const row of rows) {
-      if (!row.requestHex) continue;
-      try {
-        const participantRequest = parseHexJson<NonNullable<NonNullable<ChatMessage["metadata"]>["participantRequest"]>>(row.requestHex, `activity task ${row.conversationId}`);
-        const list = messagesByChat.get(row.conversationId) ?? [];
-        list.push({ id: participantRequest.id, role: "participant", content: "", createdAt: participantRequest.createdAt, status: "done", metadata: { participantRequest } } as ChatMessage);
-        messagesByChat.set(row.conversationId, list);
-      } catch {
-        // A request that does not read names nobody.
-      }
-    }
-    for (const conversation of sessionsChats) {
-      const tasks = titleTaskByMember(messagesByChat.get(conversation.id) ?? []);
-      const titles = new Map<string, string>();
-      for (const [participantId, task] of tasks) titles.set(participantId, sessionsTaskTitle(task.item) || "");
-      for (const [participantId, title] of titles) if (!title) titles.delete(participantId);
-      if (titles.size > 0) result.set(conversation.id, titles);
-    }
-    return result;
-  }
-
-  private async activityMessageRows(
-    conversationIds: string[],
-    conversationLimit: number,
-    approvalConversationIds: string[] = [],
-    approvalTriggerTargets: Array<[string, string]> = []
-  ): Promise<{ conversationId: string; sequence: number; message: ChatMessage }[]> {
-    const idList = sqlStringList(conversationIds);
-    const pendingRows = await this.queryJson<{ conversationId: string; sequence: number; payloadHex: string }>(
-      `
-        select conversation_id as conversationId, sequence, hex(payload_json) as payloadHex
-        from conversation_messages
-        where conversation_id in ${idList}
-          and (
-            json_extract(payload_json, '$.metadata.pendingChoice.status') = 'pending'
-            or exists (
-              select 1
-              from json_each(payload_json, '$.metadata.pendingMentions') as mention
-              where json_extract(mention.value, '$.status') = 'pending'
-            )
-            or json_extract(payload_json, '$.metadata.participantRequest.status') = 'pending_approval'
-          )
-        order by created_at desc;
-      `
-    );
-    const pendingParticipantRows = await this.queryJson<{ conversationId: string; sequence: number; payloadHex: string }>(
-      `
-        select conversation_id as conversationId, sequence, hex(payload_json) as payloadHex
-        from conversation_messages
-        where conversation_id in ${idList}
-          and json_extract(payload_json, '$.role') = 'participant'
-          and json_extract(payload_json, '$.status') = 'pending'
-          and json_extract(payload_json, '$.metadata.runId') is not null
-        order by created_at desc
-        limit ${Math.max(DEFAULT_CHAT_ACTIVITY_LIMIT, conversationLimit * 2)};
-      `
-    );
-    const participantRows = await this.queryJson<{ conversationId: string; sequence: number; payloadHex: string }>(
-      `
-        select conversationId, sequence, hex(payloadJson) as payloadHex
-        from (
-          select
-            conversation_id as conversationId,
-            sequence,
-            payload_json as payloadJson,
-            row_number() over (
-              partition by
-                conversation_id,
-                coalesce(
-                  nullif(json_extract(payload_json, '$.participantId'), ''),
-                  lower(nullif(json_extract(payload_json, '$.participantLabel'), '')),
-                  message_id
-                )
-              order by created_at desc
-            ) as rowNumber
-          from conversation_messages
-          where conversation_id in ${idList}
-            and json_extract(payload_json, '$.role') = 'participant'
-            and json_extract(payload_json, '$.status') = 'done'
-            and coalesce(json_extract(payload_json, '$.metadata.hiddenFromTimeline'), 0) not in (1, '1', 'true')
-        )
-        where rowNumber <= 8
-        order by json_extract(payloadJson, '$.createdAt') desc
-        limit ${Math.max(DEFAULT_CHAT_ACTIVITY_LIMIT * 4, conversationLimit * 16)};
-      `
-    );
-    const approvalContextRows = approvalConversationIds.length > 0
-      ? await this.queryJson<{ conversationId: string; sequence: number; payloadHex: string }>(
-        `
-          select conversationId, sequence, hex(payloadJson) as payloadHex
-          from (
-            select
-              conversation_id as conversationId,
-              sequence,
-              payload_json as payloadJson,
-              row_number() over (partition by conversation_id order by created_at desc) as rowNumber
-            from conversation_messages
-            where conversation_id in ${sqlStringList(approvalConversationIds)}
-              and coalesce(json_extract(payload_json, '$.role'), '') != 'system'
-          )
-          where rowNumber <= 48
-          order by conversationId, sequence;
-        `
-      )
-      : [];
-    const approvalTriggerRows = approvalTriggerTargets.length > 0
-      ? await this.queryJson<{ conversationId: string; sequence: number; payloadHex: string }>(
-        `
-          select conversation_id as conversationId, sequence, hex(payload_json) as payloadHex
-          from conversation_messages
-          where (conversation_id, message_id) in ${sqlStringPairList(approvalTriggerTargets)};
-        `
-      )
-      : [];
-    const decodeRows = (
-      rows: Array<{ conversationId: string; sequence: number; payloadHex: string }>,
-      context: string
-    ) => rows.map((row) => ({
-      conversationId: row.conversationId,
-      sequence: row.sequence,
-      message: parseHexJson<ChatMessage>(
-        row.payloadHex,
-        `${context} ${row.conversationId}:${row.sequence}`
-      )
-    }));
-    const decodedPendingRows = decodeRows(pendingRows, "pending activity message");
-    const decodedPendingParticipantRows = decodeRows(pendingParticipantRows, "pending participant activity message");
-    const decodedParticipantRows = decodeRows(participantRows, "participant activity message");
-    const decodedApprovalContextRows = decodeRows(approvalContextRows, "approval context message");
-    const decodedApprovalTriggerRows = decodeRows(approvalTriggerRows, "approval trigger message");
-    const activitySourceTargets = [
-      ...decodedPendingRows,
-      ...decodedPendingParticipantRows,
-      ...decodedApprovalTriggerRows
-    ].flatMap((row) => {
-      const ids = [row.message.metadata?.sourceMessageId, row.message.metadata?.parentMessageId, row.message.metadata?.chatThreadRootId]
-        .flatMap((value) => typeof value === "string" && value.trim() ? [value.trim()] : []);
-      return [...new Set(ids)].map((messageId) => [row.conversationId, messageId] as [string, string]);
-    });
-    const activitySourceRows = activitySourceTargets.length > 0
-      ? await this.queryJson<{ conversationId: string; sequence: number; payloadHex: string }>(
-        `
-          select conversation_id as conversationId, sequence, hex(payload_json) as payloadHex
-          from conversation_messages
-          where (conversation_id, message_id) in ${sqlStringPairList(activitySourceTargets)};
-        `
-      )
-      : [];
-    const decodedSourceRows = activitySourceRows.map((row) => ({
-      conversationId: row.conversationId,
-      sequence: row.sequence,
-      message: parseHexJson<ChatMessage>(
-        row.payloadHex,
-        `activity source message ${row.conversationId}:${row.sequence}`
-      )
-    }));
-    const byKey = new Map<string, { conversationId: string; sequence: number; message: ChatMessage }>();
-    for (const row of [
-      ...decodedPendingRows,
-      ...decodedPendingParticipantRows,
-      ...decodedParticipantRows,
-      ...decodedApprovalContextRows,
-      ...decodedApprovalTriggerRows,
-      ...decodedSourceRows
-    ]) {
-      byKey.set(`${row.conversationId}:${row.sequence}`, row);
-    }
-    return [...byKey.values()];
-  }
-
-  private async getSchemaMeta(key: string): Promise<string | undefined> {
-    const value = await this.queryText(`select value from schema_meta where key = ${sqlString(key)} limit 1;`);
-    return value || undefined;
-  }
-
-  private async setSchemaMeta(key: string, value: string): Promise<void> {
-    await this.runSql(`
-      insert into schema_meta (key, value)
-      values (${sqlString(key)}, ${sqlString(value)})
-      on conflict(key) do update set value = excluded.value;
-    `);
-  }
-
-  private async queryJson<T>(sql: string): Promise<T[]> {
-    const text = (await this.databaseSession().run(sql, "json", SQLITE_COMMAND_TIMEOUT_MS)).trim();
-    return text ? (JSON.parse(text) as T[]) : [];
-  }
-
-  private async queryText(sql: string): Promise<string> {
-    return (await this.databaseSession().run(sql, "list", SQLITE_COMMAND_TIMEOUT_MS)).trim();
-  }
-
-  private async runSql(sql: string, timeoutMs = SQLITE_COMMAND_TIMEOUT_MS): Promise<void> {
-    await this.databaseSession().run(sql, "list", timeoutMs);
-  }
-
-  private databaseSession(): SqliteSession {
-    return this.sqliteSession ??= new SqliteSession(this.sqliteExecutable ?? "sqlite3", this.dbPath, SQLITE_BUSY_TIMEOUT_MS);
-  }
-}
-
-function normalizeMessagePageLimit(limit: number | undefined): number {
-  if (!Number.isFinite(limit)) {
-    return DEFAULT_MESSAGE_PAGE_LIMIT;
-  }
-  return Math.max(1, Math.min(MAX_MESSAGE_PAGE_LIMIT, Math.floor(limit as number)));
-}
-
-function sqliteBoolean(value: number | string | boolean | null | undefined): boolean {
-  return value === 1 || value === "1" || value === true || value === "true";
-}
-
-function isStoredChatParticipant(value: unknown): value is ChatParticipant {
-  return Boolean(
-    value &&
-    typeof value === "object" &&
-    !Array.isArray(value) &&
-    typeof (value as { id?: unknown }).id === "string" &&
-    typeof (value as { handle?: unknown }).handle === "string"
-  );
-}
-
-function normalizePositiveInteger(value: unknown, fallback: number): number {
-  const number = typeof value === "number" ? value : Number(value);
-  return Number.isFinite(number) && number > 0 ? Math.floor(number) : fallback;
-}
-
-function conversationBody(conversation: Conversation): Conversation {
-  return {
-    ...conversation,
-    messages: []
-  };
-}
-
-function rowsMatchMessages(rows: SavedMessageRow[] | undefined, messages: ChatMessage[]): rows is SavedMessageRow[] {
-  if (!rows || rows.length !== messages.length) {
-    return false;
-  }
-  for (let index = 0; index < rows.length; index += 1) {
-    if (rows[index].index !== index || rows[index].id !== messages[index].id) {
-      return false;
-    }
-  }
-  return true;
-}
-
-function messagePageInfo(page: ConversationMessagePage): ConversationMessagePageInfo {
-  return {
-    oldestSequence: page.oldestSequence,
-    newestSequence: page.newestSequence,
-    hasMoreBefore: page.hasMoreBefore,
-    totalMessages: page.totalMessages
-  };
 }

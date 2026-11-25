@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { StorageService } from "./storage";
+import { storageParts } from "./storage/test/storageParts";
 import { MachineApprovalExecutor, SCRIPT_CODE_APPROVED_ON_DESKTOP, cardAnswerKey } from "./machineApprovalExecutor";
 import type { ChatApprovalExecutionGuard } from "./chat";
 import type { HubCard } from "../../shared/hubOps";
@@ -138,7 +139,7 @@ async function fixture(options: { script?: boolean } = {}) {
     setCanApply: (value: boolean) => { canApply = value; },
     failAfterClaim: (value: boolean) => { failAfterClaim = value; },
     restart: () => { instance++; executor = create(); },
-    sql: (sql: string) => (storage as any).runSql(sql),
+    sql: (sql: string) => storageParts(storage).sqlite.runSql(sql),
     close: () => rm(dir, { recursive: true, force: true })
   };
 }

@@ -8,7 +8,7 @@ import { chatParts } from "./chat/test/chatParts";
 import { validateRepoFileMentions } from "./chat/choices/mentions";
 import { mergeStoredChatMessages } from "./chat/store/mergeStoredChat";
 import { mergeStoredChatMetadata } from "./chat/store/mergeStoredMetadata";
-import { StorageService } from "./storage";
+import { storageParts, storageWithoutDatabase } from "./storage/test/storageParts";
 import { defaultChatAgentPermissions, effectiveChatAgentPermissionsForProvider, normalizeChatAgentPermissions } from "../../shared/agentPermissions";
 import { normalizeInferredParticipantRequestThreads } from "../../shared/chatParticipantRequestThreads";
 import { INTERRUPTED_RUN_WARNING } from "../../shared/warnings";
@@ -1255,8 +1255,8 @@ test("clearInterruptedRuns preserves local run metadata because storage cannot o
     runId: "stale-run"
   };
   let saved = false;
-  const storage = Object.create(StorageService.prototype) as any;
-  storage.queryJson = async (sql: string) => {
+  const storage = storageWithoutDatabase();
+  storageParts(storage).sqlite.queryJson = async (sql: string) => {
     if (sql.includes("from conversation_messages")) {
       return conversation.messages.map((message, sequence) => ({
         sequence,
@@ -1268,12 +1268,12 @@ test("clearInterruptedRuns preserves local run metadata because storage cannot o
     return [{ id: conversation.id }];
   };
   // The body carries everything but the messages; those come from their rows.
-  storage.queryText = async () => JSON.stringify({ ...conversation, messages: [] });
-  storage.saveConversation = async () => {
+  storageParts(storage).sqlite.queryText = async () => JSON.stringify({ ...conversation, messages: [] });
+  storageParts(storage).conversationSaves.saveConversation = async () => {
     saved = true;
   };
 
-  await (storage as any).clearInterruptedRuns();
+  await storageParts(storage).startupRepairs.clearInterruptedRuns();
 
   assert.equal(saved, false);
 });
@@ -1291,8 +1291,8 @@ test("clearInterruptedRuns preserves local participant compaction metadata becau
     }
   };
   let saved = false;
-  const storage = Object.create(StorageService.prototype) as any;
-  storage.queryJson = async (sql: string) => {
+  const storage = storageWithoutDatabase();
+  storageParts(storage).sqlite.queryJson = async (sql: string) => {
     if (sql.includes("from conversation_messages")) {
       return conversation.messages.map((message, sequence) => ({
         sequence,
@@ -1304,12 +1304,12 @@ test("clearInterruptedRuns preserves local participant compaction metadata becau
     return [{ id: conversation.id }];
   };
   // The body carries everything but the messages; those come from their rows.
-  storage.queryText = async () => JSON.stringify({ ...conversation, messages: [] });
-  storage.saveConversation = async () => {
+  storageParts(storage).sqlite.queryText = async () => JSON.stringify({ ...conversation, messages: [] });
+  storageParts(storage).conversationSaves.saveConversation = async () => {
     saved = true;
   };
 
-  await (storage as any).clearInterruptedRuns();
+  await storageParts(storage).startupRepairs.clearInterruptedRuns();
 
   assert.equal(saved, false);
 });
@@ -1327,9 +1327,9 @@ test("clearInterruptedRuns does not mark local pending turns interrupted at stor
     runId: "stale-run"
   };
   let saved = false;
-  const storage = Object.create(StorageService.prototype) as any;
+  const storage = storageWithoutDatabase();
   storage.machineProgress = () => ({ overlay: async (_id: string, messages: ChatMessage[]) => messages });
-  storage.queryJson = async (sql: string) => {
+  storageParts(storage).sqlite.queryJson = async (sql: string) => {
     if (sql.includes("from conversation_messages")) {
       return conversation.messages.map((message, sequence) => ({
         sequence,
@@ -1341,12 +1341,12 @@ test("clearInterruptedRuns does not mark local pending turns interrupted at stor
     return [{ id: conversation.id }];
   };
   // The body carries everything but the messages; those come from their rows.
-  storage.queryText = async () => JSON.stringify({ ...conversation, messages: [] });
-  storage.saveConversation = async () => {
+  storageParts(storage).sqlite.queryText = async () => JSON.stringify({ ...conversation, messages: [] });
+  storageParts(storage).conversationSaves.saveConversation = async () => {
     saved = true;
   };
 
-  await (storage as any).clearInterruptedRuns();
+  await storageParts(storage).startupRepairs.clearInterruptedRuns();
 
   assert.equal(saved, false);
 });
@@ -1384,9 +1384,9 @@ test("clearInterruptedRuns preserves active remote run handles without warning",
     }
   };
   let saved: Conversation | undefined;
-  const storage = Object.create(StorageService.prototype) as any;
+  const storage = storageWithoutDatabase();
   storage.machineProgress = () => ({ overlay: async (_id: string, messages: ChatMessage[]) => messages });
-  storage.queryJson = async (sql: string) => {
+  storageParts(storage).sqlite.queryJson = async (sql: string) => {
     if (sql.includes("from conversation_messages")) {
       return conversation.messages.map((message, sequence) => ({
         sequence,
@@ -1398,12 +1398,12 @@ test("clearInterruptedRuns preserves active remote run handles without warning",
     return [{ id: conversation.id }];
   };
   // The body carries everything but the messages; those come from their rows.
-  storage.queryText = async () => JSON.stringify({ ...conversation, messages: [] });
-  storage.saveConversation = async (next: Conversation) => {
+  storageParts(storage).sqlite.queryText = async () => JSON.stringify({ ...conversation, messages: [] });
+  storageParts(storage).conversationSaves.saveConversation = async (next: Conversation) => {
     saved = cloneConversation(next);
   };
 
-  await (storage as any).clearInterruptedRuns();
+  await storageParts(storage).startupRepairs.clearInterruptedRuns();
 
   assert.equal(saved?.metadata.running, true);
   assert.equal(saved?.metadata.runId, "remote-run");
