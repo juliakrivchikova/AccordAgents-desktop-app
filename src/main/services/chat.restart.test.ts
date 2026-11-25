@@ -7,6 +7,7 @@ import { DEFAULT_CHAT_PROMPT_CONTEXT } from "../../shared/chatPromptContext";
 import { canRestartParticipant, memberProcessRestartable } from "../../shared/chatParticipantStatus";
 import { memberRestartLine, restartingMembers } from "../../shared/memberRestart";
 import { ChatService } from "./chat";
+import { chatParts } from "./chat/test/chatParts";
 import type { ChatServerLink } from "./chatServerOps";
 import type { HubFeedEntry, HubOp, HubOpEffect, HubTurn } from "../../shared/hubOps";
 
@@ -34,7 +35,7 @@ test("a restart says how many background tasks it stopped", async () => {
   const participant = chatParticipant();
   const conversation = chatConversation([participant], [chatSession(participant, "session-1")]);
   const { service, storage, closed } = testService(conversation);
-  (service as any).memberBackgroundTasks.set(conversation.id, new Map([[participant.id, { source: "local", labels: ["npm run dev", "tail -f log"] }]]));
+  chatParts(service).backgroundTasks.memberBackgroundTasks.set(conversation.id, new Map([[participant.id, { source: "local", labels: ["npm run dev", "tail -f log"] }]]));
 
   await assert.rejects(service.restartParticipant({ conversationId: conversation.id, participantId: participant.id }),
     /@admin has background tasks running\. Restart it again to stop them\./, "never stopped without the User's word");
@@ -84,7 +85,7 @@ test("a member removed while its restart waited gets no line", async () => {
   const participant = chatParticipant();
   const conversation = chatConversation([participant], [chatSession(participant, "session-1")]);
   const { service, storage, closed } = testService(conversation);
-  const held = (service as any).reserveParticipantTurn(conversation.id, participant.id, "shared");
+  const held = chatParts(service).turnQueue.reserveParticipantTurn(conversation.id, participant.id, "shared");
 
   const restarting = service.restartParticipant({ conversationId: conversation.id, participantId: participant.id });
   await delay(20);
@@ -99,7 +100,7 @@ test("one restart of a member at a time", async () => {
   const participant = chatParticipant();
   const conversation = chatConversation([participant], [chatSession(participant, "session-1")]);
   const { service, closed } = testService(conversation);
-  const held = (service as any).reserveParticipantTurn(conversation.id, participant.id, "shared");
+  const held = chatParts(service).turnQueue.reserveParticipantTurn(conversation.id, participant.id, "shared");
 
   const first = service.restartParticipant({ conversationId: conversation.id, participantId: participant.id });
   await assert.rejects(service.restartParticipant({ conversationId: conversation.id, participantId: participant.id }), /@admin is already restarting/);
@@ -113,7 +114,7 @@ test("a member that is answering is not restarted", async () => {
   const conversation = chatConversation([participant], [chatSession(participant, "session-1")]);
   answering(conversation, participant, "turn-run");
   const { service, storage, closed } = testService(conversation);
-  (service as any).rememberActiveChatRun(conversation.id, "turn-run");
+  chatParts(service).activeRuns.rememberActiveChatRun(conversation.id, "turn-run");
 
   await assert.rejects(service.restartParticipant({ conversationId: conversation.id, participantId: participant.id }), /@admin is busy/);
   assert.deepEqual(closed, []);
@@ -124,7 +125,7 @@ test("a turn that took the member's queue just before is not cut off: the restar
   const participant = chatParticipant();
   const conversation = chatConversation([participant], [chatSession(participant, "session-1")]);
   const { service, closed } = testService(conversation);
-  const held = (service as any).reserveParticipantTurn(conversation.id, participant.id, "shared");
+  const held = chatParts(service).turnQueue.reserveParticipantTurn(conversation.id, participant.id, "shared");
 
   const restarting = service.restartParticipant({ conversationId: conversation.id, participantId: participant.id });
   await delay(30);
@@ -272,7 +273,7 @@ test("a machine whose member is answering ends the restart turn as an error and 
   conversation.messages.push(acceptedMessage());
   answering(conversation, participant, "other-run");
   const { service, closed } = testService(conversation);
-  (service as any).rememberActiveChatRun(conversation.id, "other-run");
+  chatParts(service).activeRuns.rememberActiveChatRun(conversation.id, "other-run");
   service.setHostMachineId("box");
   const link = fakeServerLink("machine-device");
   service.setServerLink(link);
@@ -306,7 +307,7 @@ test("a machine does not run a restart asked too long ago, nor stop background t
   await waitFor(() => outcomes().length === 1);
   assert.deepEqual(outcomes(), ["error"]);
 
-  (service as any).memberBackgroundTasks.set(conversation.id, new Map([[participant.id, { source: "local", labels: ["npm run dev"] }]]));
+  chatParts(service).backgroundTasks.memberBackgroundTasks.set(conversation.id, new Map([[participant.id, { source: "local", labels: ["npm run dev"] }]]));
   await service.startServerTurn({ runId: "turn-tasks", conversationId: conversation.id, messageId: "anchor", participantId: participant.id, state: "requested",
     request: { kind: "restart", askedAt: new Date().toISOString() } });
   await waitFor(() => outcomes().length === 2);

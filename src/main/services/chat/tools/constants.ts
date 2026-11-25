@@ -1,0 +1,1 @@
+export const CHAT_CONTEXT_READ_MAX_LIMIT = 200;

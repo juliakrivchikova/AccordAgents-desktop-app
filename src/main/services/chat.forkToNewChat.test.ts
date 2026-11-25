@@ -4,6 +4,8 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { ChatService } from "./chat";
+import { chatDependencies, chatParts } from "./chat/test/chatParts";
+import { forkCopyFailed } from "./chat/sessions/forkNotes";
 import { StorageService } from "./storage";
 import { normalizeChatAgentPermissions } from "../../shared/agentPermissions";
 import { selectedChatAccessOption } from "../../shared/chatAccessModes";
@@ -228,7 +230,7 @@ function testService(options: {
   const debugLogs = { async write() {} };
   const make = () => {
     const made = new ChatService(storage as never, settings as never, cliRunner as never, debugLogs as never);
-    (made as any).ensureHistoryFiles = async () => tempRoot;
+    chatParts(made).chatHistory.ensureHistoryFiles = async () => tempRoot;
     return made;
   };
   const service = make();
@@ -281,10 +283,10 @@ async function runOnMachine(service: ChatService, storage: { store: Map<string, 
   const message: ChatMessage = { id: `user-${runId}`, role: "user", content, createdAt: new Date().toISOString(), status: "done" };
   stored.messages.push(message);
   storage.store.set(id, stored);
-  const chat = await (service as any).requireChat(id) as Conversation;
+  const chat = await chatParts(service).store.requireChat(id) as Conversation;
   const participant = participantsOf(chat).find((item) => item.id === mainId)!;
   const warnings: string[] = [];
-  await (service as any).runParticipantBatch(chat, [participant], message, runId, undefined, undefined, warnings, { targetRunIds: new Map([[participant.id, runId]]) });
+  await chatParts(service).participantBatch.runParticipantBatch(chat, [participant], message, runId, undefined, undefined, warnings, { targetRunIds: new Map([[participant.id, runId]]) });
   return warnings;
 }
 
@@ -313,8 +315,8 @@ function forkedOnMachine(source: Conversation, sourceMember: ChatParticipant): C
 /** The fork notices a service says (postForkNotice), as it says them. */
 function spyForkNotices(service: ChatService): string[] {
   const said: string[] = [];
-  const post = (service as any).postForkNotice.bind(service);
-  (service as any).postForkNotice = (conversation: Conversation, participant: ChatParticipant, kind: string, text: string) => {
+  const post = chatParts(service).forks.postForkNotice.bind(chatParts(service).forks);
+  chatParts(service).forks.postForkNotice = (conversation: Conversation, participant: ChatParticipant, kind: string, text: string) => {
     said.push(text);
     return post(conversation, participant, kind, text);
   };
@@ -322,8 +324,8 @@ function spyForkNotices(service: ChatService): string[] {
 }
 
 function asMachine(service: ChatService): ChatService {
-  (service as any).machineRuntime = true;
-  (service as any).hostMachineId = "m-1";
+  chatParts(service).host.machineRuntime = true;
+  chatParts(service).host.hostMachineId = "m-1";
   return service;
 }
 
@@ -734,8 +736,8 @@ test("two messages sent at once: when the other one made the member's session me
       return { participant, ok: true, content: "Into the same session.", durationMs: 1, sessionId: runOptions.sessionId };
     }
   });
-  const sessionFor = (service as any).sessionForParticipant.bind(service);
-  (service as any).sessionForParticipant = async (...args: unknown[]) => {
+  const sessionFor = chatParts(service).memberSessions.sessionForParticipant.bind(chatParts(service).memberSessions);
+  chatParts(service).memberSessions.sessionForParticipant = async (...args: unknown[]) => {
     const state = await sessionFor(...args);
     turnSession = state.session;
     return state;
@@ -767,9 +769,9 @@ test("a failure that is not the copy's (a turn that failed, a Stop) never starts
   const stopped = new AbortController();
   stopped.abort();
   const failedCopy = { participant: runs[0]!.participant, ok: false, content: "", error: "no rollout found for thread id src-cli-session", forkCopyFailed: true };
-  assert.equal((service as any).forkCopyFailed(failedCopy, stopped.signal), false);
-  assert.equal((service as any).forkCopyFailed(failedCopy, undefined), true);
-  assert.equal((service as any).forkCopyFailed({ ...failedCopy, error: "some other failure", forkCopyFailed: undefined }, undefined), false);
+  assert.equal(forkCopyFailed(failedCopy, stopped.signal), false);
+  assert.equal(forkCopyFailed(failedCopy, undefined), true);
+  assert.equal(forkCopyFailed({ ...failedCopy, error: "some other failure", forkCopyFailed: undefined }, undefined), false);
 });
 
 test("Claude Code starting the copy clean (its source gone) still tells it it is the new chat's main session, with its role", async () => {
@@ -918,9 +920,9 @@ test("the machine that runs the forked main session copies the member's session 
     }
   } as Conversation;
   const { service } = testService({ conversations: [source, forked] });
-  (service as any).machineRuntime = true;
-  (service as any).hostMachineId = "m-1";
-  const state = await (service as any).sessionForParticipant(forked, participantsOf(forked)[0]);
+  chatParts(service).host.machineRuntime = true;
+  chatParts(service).host.hostMachineId = "m-1";
+  const state = await chatParts(service).memberSessions.sessionForParticipant(forked, participantsOf(forked)[0]);
   assert.deepEqual(state.session.forkFrom, { participantId: boxed.id, sessionId: "src-cli-session", kind: "claude-code", conversationId: source.id,
     cut: { at: "assistant-uuid-1" } }, "up to the reply the User saw, at the point the machine recorded");
   assert.equal(state.forkOriginUnavailable, undefined);
@@ -977,7 +979,7 @@ test("the phone makes the same main session the computer makes, from what the co
     });
     const { service } = testService({ conversations: [source], agents: READY_AGENTS, machines: [{ id: "m-1", name: "Box" }] });
     service.setMachineForkToNewChatSupport(() => "supported");
-    const settings = (service as any).settings;
+    const settings = chatDependencies(service).settings;
     const plain = settings.getPublicSettings;
     for (const read of ["getPublicSettings", "ensureGenericChatParticipantSeeds", "ensureAssistantProviderDefault"]) {
       settings[read] = async () => ({ ...(await plain()), cliProviderHosts: [host] });
@@ -1038,13 +1040,13 @@ test("a member moved here whose session still waits on the server is taken befor
   const source = oldChat([ASSISTANT, moved], { participantSessions: [] });
   const { service, storage, runs } = testService({ conversations: [source] });
   const taken: string[] = [];
-  (service as any).takeSessionHandoff = async (conversation: Conversation, member: ChatParticipant) => {
+  chatParts(service).memberMoves.takeSessionHandoff = async (conversation: Conversation, member: ChatParticipant) => {
     taken.push(`${conversation.id}:${member.id}`);
     const stored = storage.store.get(conversation.id)!;
     stored.metadata.participantSessions = [sessionRecord(moved, "moved-session")];
     storage.store.set(conversation.id, stored);
   };
-  (service as any).storage.conversationAccess = async (id: string) => {
+  chatDependencies(service).storage.conversationAccess = async (id: string) => {
     const found = storage.store.get(id);
     return found ? { kind: found.kind, participants: clone(found.metadata.participants) } : undefined;
   };
@@ -1335,11 +1337,11 @@ test("a member's CLI session started anew says so as a warning, unless a fork's 
   const session = { ...sessionRecord(REVIEWER, "old-session") };
   const restarted = { participant: { id: REVIEWER.id, kind: "claude-code", label: "@reviewer" }, ok: true, content: "Done.", sessionId: "new-session", sessionRestarted: true };
   const warnings: string[] = [];
-  (service as any).applyCliRunMetadata(session, restarted, REVIEWER, warnings);
-  (service as any).applyCliRunMetadata(session, restarted, REVIEWER, warnings);
+  chatParts(service).pendingReplies.applyCliRunMetadata(session, restarted, REVIEWER, warnings);
+  chatParts(service).pendingReplies.applyCliRunMetadata(session, restarted, REVIEWER, warnings);
   assert.deepEqual(warnings, ["@reviewer: previous CLI session was unavailable, so a new session was started from saved chat context."], "once");
   assert.equal(session.sessionId, "new-session");
   const forked: string[] = [];
-  (service as any).applyCliRunMetadata({ ...sessionRecord(REVIEWER, "") }, restarted, REVIEWER, forked, true);
+  chatParts(service).pendingReplies.applyCliRunMetadata({ ...sessionRecord(REVIEWER, "") }, restarted, REVIEWER, forked, true);
   assert.deepEqual(forked, []);
 });

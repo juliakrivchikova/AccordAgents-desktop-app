@@ -1,6 +1,8 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { ChatService } from "./chat";
+import { chatParts } from "./chat/test/chatParts";
+import { mergeStoredChatMetadata } from "./chat/store/mergeStoredMetadata";
 import { normalizeAutoChatTitle, sanitizeAutoChatTitleSuggestion } from "../../shared/chatTitles";
 import type {
   AgentContextUsage,
@@ -230,7 +232,7 @@ test("sendMessage persists first-turn title eligibility and passes matching targ
   });
   const { service, storage } = testService([conversation]);
   let captured: { triggerMessageId?: string; targetRunId?: string } | undefined;
-  (service as unknown as {
+  (chatParts(service).participantBatch as unknown as {
     runParticipantBatch(
       conversation: Conversation,
       targets: ChatParticipant[],
@@ -286,7 +288,7 @@ test("stored first-agent title survives a later stale run mutation", async () =>
 
   await service.setChatTitleFromTool(autoTitleActor(participant), { title: "Agent Chosen Title" });
 
-  await (service as unknown as {
+  await (chatParts(service).store as unknown as {
     withChatMutation(conversation: Conversation, fn: () => Promise<void>): Promise<void>;
     saveConversation(conversation: Conversation): Promise<void>;
   }).withChatMutation(staleRunConversation, async () => {
@@ -300,7 +302,7 @@ test("stored first-agent title survives a later stale run mutation", async () =>
       status: "done"
     });
     staleRunConversation.updatedAt = "2026-05-19T12:01:00.000Z";
-    await (service as unknown as {
+    await (chatParts(service).store as unknown as {
       saveConversation(conversation: Conversation): Promise<void>;
     }).saveConversation(staleRunConversation);
   });
@@ -331,24 +333,20 @@ test("terminal title cleanup keeps eligibility while another target run is regis
     }
   });
   const { service } = testService([conversation]);
-  const internals = service as unknown as {
-    registerTargetRun(runId: string, controller: AbortController, meta: { conversationId: string; participantId: string; participantHandle: string }): void;
-    unregisterTargetRun(runId: string, controller?: AbortController): void;
-    metadataAfterAutoTitleRunTerminal(conversationId: string, metadata: Record<string, unknown>, terminalRunId: string): Record<string, unknown>;
-  };
+  const { activeRuns, titles } = chatParts(service);
   const controller = new AbortController();
 
-  internals.registerTargetRun("run-live", controller, {
+  activeRuns.registerTargetRun("run-live", controller, {
     conversationId: conversation.id,
     participantId: liveParticipant.id,
     participantHandle: liveParticipant.handle
   });
 
-  const preserved = internals.metadataAfterAutoTitleRunTerminal(conversation.id, conversation.metadata, "run-skipped");
+  const preserved = titles.metadataAfterAutoTitleRunTerminal(conversation.id, conversation.metadata, "run-skipped");
   assert.ok(preserved.autoTitleEligibility);
 
-  internals.unregisterTargetRun("run-live", controller);
-  const cleared = internals.metadataAfterAutoTitleRunTerminal(conversation.id, preserved, "run-live");
+  activeRuns.unregisterTargetRun("run-live", controller);
+  const cleared = titles.metadataAfterAutoTitleRunTerminal(conversation.id, preserved, "run-live");
   assert.equal(cleared.autoTitleEligibility, undefined);
 });
 
@@ -446,7 +444,7 @@ test("replicated archive waits for closure and an archived machine chat cannot s
   await applying;
   await unarchive;
   assert.notEqual((await storage.getConversation(conversation.id))?.metadata.archived, true, "a later unarchive must wait for replicated closure and then win");
-  const batch = service as unknown as { runParticipantBatch(conversation: Conversation): Promise<void> };
+  const batch = chatParts(service).participantBatch as unknown as { runParticipantBatch(conversation: Conversation): Promise<void> };
   await assert.rejects(batch.runParticipantBatch({ ...conversation, metadata: { ...conversation.metadata, archived: true } }), /Unarchive/);
 });
 
@@ -585,16 +583,16 @@ test("permanent deletion cannot be resurrected by an already queued stale mutati
   let entered!: () => void;
   const blocker = new Promise<void>((resolve) => { release = resolve; });
   const mutationEntered = new Promise<void>((resolve) => { entered = resolve; });
-  const staleMutation = (service as any).withChatMutation(stale, async () => {
+  const staleMutation = chatParts(service).store.withChatMutation(stale, async () => {
     entered();
     await blocker;
     stale.title = "resurrected";
-    await (service as any).saveConversation(stale);
+    await chatParts(service).store.saveConversation(stale);
   }) as Promise<void>;
   await mutationEntered;
 
   const deletion = service.deleteConversation({ conversationId: conversation.id });
-  for (let attempt = 0; attempt < 100 && !(service as any).deletedConversationIds.has(conversation.id); attempt += 1) {
+  for (let attempt = 0; attempt < 100 && !chatParts(service).deletion.deletedConversationIds.has(conversation.id); attempt += 1) {
     await new Promise((resolve) => setTimeout(resolve, 1));
   }
   release();
@@ -928,7 +926,7 @@ test("hydrateContextUsage preserves newer stored messages when syncing participa
 
 test("participant-session metadata merge preserves newer handles and respects newer intentional clears", () => {
   const { service } = testService([]);
-  const merge = (service as any).mergeStoredChatMetadata.bind(service) as (
+  const merge = mergeStoredChatMetadata as (
     stored: Record<string, unknown>,
     current: Record<string, unknown>
   ) => Record<string, unknown>;
@@ -1046,11 +1044,11 @@ function testService(conversationList: Conversation[], options: {
     undefined,
     (conversation) => snapshots.push(cloneConversation(conversation))
   );
-  (service as unknown as { ensureHistoryFiles(conversation: Conversation): Promise<string> }).ensureHistoryFiles = async (conversation) => {
+  (chatParts(service).chatHistory as unknown as { ensureHistoryFiles(conversation: Conversation): Promise<string> }).ensureHistoryFiles = async (conversation) => {
     historyWrites.push(conversation.title);
     return "/mock/history";
   };
-  (service as unknown as { cleanupDeletedConversationArtifacts(conversation: Conversation): Promise<void> })
+  (chatParts(service).deletion as unknown as { cleanupDeletedConversationArtifacts(conversation: Conversation): Promise<void> })
     .cleanupDeletedConversationArtifacts = async () => undefined;
   return { service, storage, snapshots, historyWrites };
 }
@@ -1167,7 +1165,7 @@ async function holdChatRunLock(service: ChatService, conversationId: string): Pr
   let release!: () => void;
   let runFinished!: () => void;
   const started = new Promise<void>((resolve) => {
-    void (service as unknown as {
+    void (chatParts(service).activeRuns as unknown as {
       withChatRunLock<T>(conversationId: string, run: () => Promise<T>): Promise<T>;
     }).withChatRunLock(conversationId, async () => {
       resolve();

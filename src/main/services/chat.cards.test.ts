@@ -15,6 +15,7 @@ import type { ChatAppToolApproval, ChatMessage, ChatParticipant, Conversation } 
 import { HubOps } from "../../hub/hubOps";
 import { HubServer } from "../../hub/hubServer";
 import { ChatService } from "./chat";
+import { chatDependencies, chatParts } from "./chat/test/chatParts";
 import { MachineChoiceExecutor, MachineMentionExecutor } from "./chatActionNativeClaims";
 import { DeviceIdentityService, createDeviceIdentity } from "./deviceIdentity";
 import { ChatSearchService } from "./chatSearch";
@@ -64,8 +65,8 @@ function chatService(storage: StorageService, turns: Turn[], device: Turn["devic
   const cliRunner = { async detectAgents() { return []; }, async contextUsageForSession() { return undefined; }, async closeConversationSessions() { return undefined; },
     async closeWarmAgents() { return undefined; } };
   const chat = new ChatService(storage as never, settings as never, cliRunner as never, { async write(event: string, payload: Record<string, unknown>) { trace(device, event, payload); } } as never);
-  (chat as unknown as { ensureHistoryFiles: () => Promise<string> }).ensureHistoryFiles = async () => tmpdir();
-  (chat as unknown as { runParticipantTurn: (...args: unknown[]) => Promise<ChatMessage[]> }).runParticipantTurn = async (conversation, participant, trigger, runId, signal, _progress, options) => {
+  (chatParts(chat).chatHistory as unknown as { ensureHistoryFiles: () => Promise<string> }).ensureHistoryFiles = async () => tmpdir();
+  (chatParts(chat).participantTurn as unknown as { runParticipantTurn: (...args: unknown[]) => Promise<ChatMessage[]> }).runParticipantTurn = async (conversation, participant, trigger, runId, signal, _progress, options) => {
     const turn: Turn = { device, participantId: (participant as ChatParticipant).id, triggerId: (trigger as ChatMessage).id, runId: runId as string, signal: signal as AbortSignal | undefined };
     turns.push(turn);
     const existing = (options as { existingPendingMessage?: ChatMessage }).existingPendingMessage;
@@ -75,7 +76,7 @@ function chatService(storage: StorageService, turns: Turn[], device: Turn["devic
       metadata: { runId: runId as string, ...(control.showPending ? { sourceMessageId: (trigger as ChatMessage).id, parentMessageId: (trigger as ChatMessage).id } : {}) }
     } as ChatMessage;
     if (!existing && control.showPending) {
-      const chatInternals = chat as unknown as { withChatMutation(c: Conversation, mutate: () => Promise<void>): Promise<void>; queueSnapshot(c: Conversation): void };
+      const chatInternals = chatParts(chat).store as unknown as { withChatMutation(c: Conversation, mutate: () => Promise<void>): Promise<void>; queueSnapshot(c: Conversation): void };
       await chatInternals.withChatMutation(conversation as Conversation, async () => {
         (conversation as Conversation).messages.push({ ...reply, metadata: { ...reply.metadata } });
         chatInternals.queueSnapshot(conversation as Conversation);
@@ -85,7 +86,7 @@ function chatService(storage: StorageService, turns: Turn[], device: Turn["devic
     if ((signal as AbortSignal | undefined)?.aborted) {
       if (!existing && control.showPending) {
         // As a stopped turn closes its bubble.
-        const chatInternals = chat as unknown as { withChatMutation(c: Conversation, mutate: () => Promise<void>): Promise<void>; queueSnapshot(c: Conversation): void };
+        const chatInternals = chatParts(chat).store as unknown as { withChatMutation(c: Conversation, mutate: () => Promise<void>): Promise<void>; queueSnapshot(c: Conversation): void };
         await chatInternals.withChatMutation(conversation as Conversation, async () => {
           const shown = (conversation as Conversation).messages.find((message) => message.id === reply.id);
           if (shown) Object.assign(shown, { status: "error", content: `@${(participant as ChatParticipant).handle} stopped by user.` });
@@ -230,7 +231,7 @@ function grantApproval(id: string, requester: ChatParticipant, conversationId: s
  *  process (requestToolPermissionFromTool), as while its member runs: an
  *  answer to a card no call waits on is not applied, it expires. */
 const callWaitsOn = (service: ChatService, approvalId: string) =>
-  (service as unknown as { noteToolPermissionWaiter(id: string, change: 1): void }).noteToolPermissionWaiter(approvalId, 1);
+  (chatParts(service).toolPermissions as unknown as { noteToolPermissionWaiter(id: string, change: 1): void }).noteToolPermissionWaiter(approvalId, 1);
 
 function scriptApproval(id: string, conversationId: string): ChatAppToolApproval {
   return {
@@ -246,7 +247,7 @@ function scriptApproval(id: string, conversationId: string): ChatAppToolApproval
   } as unknown as ChatAppToolApproval;
 }
 
-const save = (service: ChatService, conversation: Conversation) => (service as unknown as { saveConversation(c: Conversation): Promise<void> }).saveConversation(conversation);
+const save = (service: ChatService, conversation: Conversation) => (chatParts(service).store as unknown as { saveConversation(c: Conversation): Promise<void> }).saveConversation(conversation);
 const approvalOf = async (storage: StorageService, conversationId: string, approvalId: string) =>
   ((await storage.getConversation(conversationId))?.metadata.pendingAppToolApprovals as ChatAppToolApproval[] | undefined)?.find((item) => item.id === approvalId);
 const allowedLines = async (storage: StorageService, conversationId: string) =>
@@ -503,7 +504,7 @@ test("a machine member whose Manage members setting allows it removes a member w
   await until(() => h.machineStorage.getConversation("cards-allow"), (item) => Boolean(item));
   // The asking member's turn is running on the machine, as when it calls the tool.
   const machineCopy = (await h.machineStorage.getConversation("cards-allow"))!;
-  const machineRuns = h.machineChat as unknown as { beginChatRun(c: Conversation, runId: string): Promise<void>; endChatRun(c: Conversation, runId: string): Promise<void> };
+  const machineRuns = chatParts(h.machineChat).activeRuns as unknown as { beginChatRun(c: Conversation, runId: string): Promise<void>; endChatRun(c: Conversation, runId: string): Promise<void> };
   await machineRuns.beginChatRun(machineCopy, "drew-run");
   const result = await h.machineChat.requestParticipantChangeFromTool(
     { conversationId: "cards-allow", participantId: allowing.id, roleConfigId: allowing.roleConfigId, roleConfigVersion: 1, capabilities: ["participants.manage"] } as never,
@@ -656,7 +657,7 @@ test("a task a machine's member creates without a card asks nobody, and every de
     async applyApproved() { applied += 1; return "Added the scheduled task \"Watcher\"."; },
     async rejectPending() { return undefined; }
   } as never);
-  const settings = (h.machineChat as unknown as { settings: { getPublicSettings(): Promise<Record<string, unknown>> } }).settings;
+  const settings = (chatDependencies(h.machineChat) as unknown as { settings: { getPublicSettings(): Promise<Record<string, unknown>> } }).settings;
   const read = settings.getPublicSettings.bind(settings);
   settings.getPublicSettings = async () => ({ ...await read(), newChatDefaults: { compactWithoutAsking: true, scheduleWithoutAsking: true } });
   await h.startMachine();
@@ -858,7 +859,7 @@ test("an answer the User gave on the phone while the machine was stopped wins ov
   await link.start();
   await applying;
   await restarted.resumeChoiceExpiry(["cards-expiry-answered"]);
-  await (restarted as unknown as { sweepChoiceExpiry(id: string): Promise<void> }).sweepChoiceExpiry("cards-expiry-answered");
+  await (chatParts(restarted).choiceExpiry as unknown as { sweepChoiceExpiry(id: string): Promise<void> }).sweepChoiceExpiry("cards-expiry-answered");
   const meanwhile = (await h.machineStorage.getConversation("cards-expiry-answered"))?.messages.find((message) => message.id === "due-choice")?.metadata?.pendingChoice;
   assert.deepEqual([meanwhile?.status, meanwhile?.expiredAt], ["pending", undefined], "left to her answer");
   release();
@@ -888,24 +889,20 @@ test("an answer from the phone that crosses the expiry is applied: the server re
   await save(h.machineChat, machineCopy);
   const cardId = choiceCardId("crossed-choice");
   await until(() => h.card(cardId), (item) => item?.state === "pending");
-  const machine = h.machineChat as unknown as {
-    serverCards: { reconciled: boolean };
-    serverLink: { openCards(conversationId?: string): Promise<unknown> };
-    noteServerCardEntries(entries: unknown[]): void;
-    sweepChoiceExpiry(id: string): Promise<void>;
-  };
-  await until(async () => machine.serverCards.reconciled, (done) => done);
+  const { serverCards, serverLink, choiceExpiry } = chatParts(h.machineChat);
+  const link = serverLink.current as { openCards(conversationId?: string): Promise<unknown> };
+  await until(async () => serverCards.book.reconciled as boolean, (done) => done);
   // The machine read the open cards just before her answer reached the server,
   // and the feed has not brought it here yet.
-  const stale = await machine.serverLink.openCards("cards-crossed");
-  const openCards = machine.serverLink.openCards;
-  const noteEntries = machine.noteServerCardEntries;
-  machine.serverLink.openCards = async () => stale;
-  machine.noteServerCardEntries = () => undefined;
+  const stale = await link.openCards("cards-crossed");
+  const openCards = link.openCards;
+  const noteEntries = serverCards.noteServerCardEntries;
+  link.openCards = async () => stale;
+  serverCards.noteServerCardEntries = () => undefined;
   assert.equal((await h.phoneAnswers("cards-crossed", cardId, { selectedOptionId: "yes" })).result.status, "accepted");
-  await machine.sweepChoiceExpiry("cards-crossed");
-  machine.serverLink.openCards = openCards;
-  machine.noteServerCardEntries = noteEntries;
+  await choiceExpiry.sweepChoiceExpiry("cards-crossed");
+  link.openCards = openCards;
+  serverCards.noteServerCardEntries = noteEntries;
   // Closed here for a moment; the server keeps her answer and refuses the close.
   const settled = await until(() => h.card(cardId), (item) => item?.state === "settled");
   assert.equal((settled!.outcome as { result?: string }).result, "applied", "her answer is applied");

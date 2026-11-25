@@ -10,6 +10,8 @@ import type { ChatMessage, ChatParticipant, Conversation } from "../../shared/ty
 import { HubOps } from "../../hub/hubOps";
 import { HubServer } from "../../hub/hubServer";
 import { ChatService, REPLIES_REPAIRED_KEY } from "./chat";
+import { endAbortedServerTurn } from "./chat/runs/runOwnerRecords";
+import { chatParts } from "./chat/test/chatParts";
 import { DeviceIdentityService, createDeviceIdentity } from "./deviceIdentity";
 import { ChatSearchService } from "./chatSearch";
 import { signHubRequest, type HubSigningIdentity } from "./hubAuth";
@@ -91,7 +93,7 @@ async function setup(t: test.TestContext) {
   const links: ServerChatLink[] = [];
   const boot = (): { chat: ChatService; link: ServerChatLink } => {
     const chat = new ChatService(storage as never, settings as never, cliRunner as never, { async write() { return undefined; } } as never);
-    (chat as unknown as { runParticipantTurn: typeof playTurn }).runParticipantTurn = playTurn;
+    (chatParts(chat).participantTurn as unknown as { runParticipantTurn: typeof playTurn }).runParticipantTurn = playTurn;
     const link = new ServerChatLink({
       storage, chat,
       identity: () => events.getOrCreateDeviceIdentity(),
@@ -150,7 +152,7 @@ function localChat(id: string, messages: ChatMessage[] = []): Conversation {
   } as Conversation;
 }
 
-const save = (chat: ChatService, conversation: Conversation) => (chat as unknown as { saveConversation(c: Conversation): Promise<void> }).saveConversation(conversation);
+const save = (chat: ChatService, conversation: Conversation) => (chatParts(chat).store as unknown as { saveConversation(c: Conversation): Promise<void> }).saveConversation(conversation);
 
 test("the computer moves its chats to the server once, then a message it sends is accepted before its member starts and the reply is the server's", async (t) => {
   const h = await setup(t);
@@ -258,7 +260,7 @@ test("a claim stopped before it ran is never left taken: taken back if unsent, f
       opAnswered: async () => answer,
       enqueue: async (ops: HubOp[]) => { sent.push(...ops); }
     };
-    await (chat as unknown as { endAbortedServerTurn(link: unknown, turn: unknown, claimOpId?: string): Promise<void> }).endAbortedServerTurn(link, turn, "op-claim");
+    await endAbortedServerTurn(link as never, turn as never, "op-claim");
     return sent.map((op) => op.kind === "turn.finish" ? `finish:${op.outcome}` : op.kind);
   };
   assert.deepEqual(await run({ status: "withdrawn", attempted: false }), ["turn.stop"], "never sent: the turn is only stopped");
@@ -458,7 +460,7 @@ test("quitting the computer leaves a member on a machine running there", async (
   chat.metadata = { ...chat.metadata, participants: [desk, onMachine] } as Conversation["metadata"];
   await save(h.chat, chat);
   // The computer follows that member's turn as a run of its own.
-  (h.chat as unknown as { chatRunMeta: Map<string, unknown> }).chatRunMeta.set("run-on-machine", { conversationId: "chat-m", participantId: onMachine.id, participantHandle: "cloudy" });
+  (chatParts(h.chat).activeRuns as unknown as { chatRunMeta: Map<string, unknown> }).chatRunMeta.set("run-on-machine", { conversationId: "chat-m", participantId: onMachine.id, participantHandle: "cloudy" });
   h.chat.beginQuit();
   assert.equal(await h.chat.endTurnsForQuit(), 0);
   assert.equal((await h.storage.getConversation("chat-m"))?.messages.find((message) => message.id === "m-reply")?.status, "pending");
@@ -477,7 +479,7 @@ test("quitting ends the requests whose tasks it ended, as the next start would",
   const chat = localChat("chat-t", [request, reply]);
   chat.metadata = { ...chat.metadata, participants: [main, desk] } as Conversation["metadata"];
   await save(h.chat, chat);
-  (h.chat as unknown as { chatRunMeta: Map<string, unknown> }).chatRunMeta.set("run-task", { conversationId: "chat-t", participantId: desk.id, participantHandle: "taylor" });
+  (chatParts(h.chat).activeRuns as unknown as { chatRunMeta: Map<string, unknown> }).chatRunMeta.set("run-task", { conversationId: "chat-t", participantId: desk.id, participantHandle: "taylor" });
   h.chat.beginQuit();
   assert.equal(await h.chat.endTurnsForQuit(), 1);
   const stored = (await h.storage.getConversation("chat-t"))!;
@@ -497,7 +499,7 @@ test("quitting closes the cards of the turns it ends, so no phone keeps them ope
       action: "command", command: "git push origin main", options: [{ id: "accept", label: "Allow once", outcome: "approve" }, { id: "decline", label: "Deny", outcome: "deny" }] },
     summary: "Run git push", createdAt: at, updatedAt: at, resumeContext: { runId: "run-card", triggerMessageId: "chat-cards-start" } }] } as unknown as Conversation["metadata"];
   await save(h.chat, chat);
-  (h.chat as unknown as { chatRunMeta: Map<string, unknown> }).chatRunMeta.set("run-card", { conversationId: "chat-cards", participantId: desk.id, participantHandle: "taylor" });
+  (chatParts(h.chat).activeRuns as unknown as { chatRunMeta: Map<string, unknown> }).chatRunMeta.set("run-card", { conversationId: "chat-cards", participantId: desk.id, participantHandle: "taylor" });
   h.chat.beginQuit();
   assert.equal(await h.chat.endTurnsForQuit(), 1);
   const approval = ((await h.storage.getConversation("chat-cards"))!.metadata.pendingAppToolApprovals as Array<{ id: string; status: string }>).find((item) => item.id === "approval-1");

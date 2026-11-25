@@ -3,6 +3,9 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { ChatService } from "./chat";
+import { chatDependencies, chatParts } from "./chat/test/chatParts";
+import { mainSessionHandleForMember, participantForRun } from "./chat/members/identity";
+import { appToolCapabilitiesForRun, handleWritingLines } from "./chat/turns/promptSections";
 import { accordLaunchCardForMessage } from "../../shared/accordLaunchCard";
 import { chatParticipantRequestReplyRootMap } from "../../shared/chatParticipantRequestThreads";
 import { defaultChatAgentPermissions, normalizeChatAgentPermissions } from "../../shared/agentPermissions";
@@ -213,7 +216,7 @@ function testService(options: {
   const debugEvents: Array<{ event: string; payload: Record<string, unknown> }> = [];
   const debugLogs = { async write(event: string, payload: Record<string, unknown>) { debugEvents.push({ event, payload }); } };
   const service = new ChatService(storage as never, settings as never, cliRunner as never, debugLogs as never, undefined, undefined, options.userSkills as never);
-  (service as any).ensureHistoryFiles = async () => tempRoot;
+  chatParts(service).chatHistory.ensureHistoryFiles = async () => tempRoot;
   return { service, storage, runs, debugEvents };
 }
 
@@ -256,15 +259,15 @@ test("delegate and start-Accord tools reach only the chat's own main session, wh
   const conversation = mainSessionChat([main, impostor]);
   const { service } = testService({ conversation });
   const internals = service as any;
-  const forMain = internals.appToolCapabilitiesForRun(conversation, main, sessionRecord(main, "s"), normalizeChatAgentPermissions(main.permissions));
-  const forImpostor = internals.appToolCapabilitiesForRun(conversation, impostor, sessionRecord(impostor, "s"), normalizeChatAgentPermissions(impostor.permissions));
+  const forMain = appToolCapabilitiesForRun(conversation, main, sessionRecord(main, "s"), normalizeChatAgentPermissions(main.permissions));
+  const forImpostor = appToolCapabilitiesForRun(conversation, impostor, sessionRecord(impostor, "s"), normalizeChatAgentPermissions(impostor.permissions));
   assert.ok(forMain.includes("participants.delegate"));
   assert.ok(forMain.includes("accord.start"));
   assert.equal(forImpostor.includes("participants.delegate"), false);
   assert.equal(forImpostor.includes("accord.start"), false);
   // A chat without a main session gives them to nobody.
   const plain = { ...conversation, metadata: { participants: [main, impostor] } } as Conversation;
-  assert.equal(internals.appToolCapabilitiesForRun(plain, main, sessionRecord(main, "s"), normalizeChatAgentPermissions(main.permissions)).includes("participants.delegate"), false);
+  assert.equal(appToolCapabilitiesForRun(plain, main, sessionRecord(main, "s"), normalizeChatAgentPermissions(main.permissions)).includes("participants.delegate"), false);
 });
 
 // --- delegation ----------------------------------------------------------------
@@ -367,7 +370,7 @@ test("a fork is refused across providers, for Antigravity, without a session, an
   // A session on another machine is not this device's to copy.
   const elsewhere = mainSession("claude-code", { homeMachineId: "machine-1" });
   const { service } = testService({ conversation: mainSessionChat([elsewhere]) });
-  assert.match(String((service as any).forkUnavailableReason(elsewhere, sessionRecord(elsewhere, "s"), "claude-code", undefined)), /another machine/);
+  assert.match(String(chatParts(service).forks.forkUnavailableReason(elsewhere, sessionRecord(elsewhere, "s"), "claude-code", undefined)), /another machine/);
 });
 
 test("a fork starts from a copy of the main session's CLI session and then keeps its own", async () => {
@@ -565,12 +568,12 @@ test("a fork never takes the source's session id as its own", () => {
   const { service } = testService({ conversation: mainSessionChat([main]) });
   const session = { ...sessionRecord(member("c", "c"), ""), forkFrom: { participantId: main.id, sessionId: "main-cli-session", kind: "claude-code" as const } };
   const conversation = mainSessionChat([main]);
-  (service as any).persistParticipantSessionId(conversation, session, "main-cli-session");
+  chatParts(service).memberSessions.persistParticipantSessionId(conversation, session, "main-cli-session");
   assert.equal(session.sessionId, "");
   assert.ok(session.forkFrom);
-  (service as any).applyCliRunMetadata(session, { participant: {}, ok: true, content: "", sessionId: "main-cli-session" }, member("c", "c"), []);
+  chatParts(service).pendingReplies.applyCliRunMetadata(session, { participant: {}, ok: true, content: "", sessionId: "main-cli-session" }, member("c", "c"), []);
   assert.equal(session.sessionId, "");
-  (service as any).applyCliRunMetadata(session, { participant: {}, ok: true, content: "", sessionId: "child-session" }, member("c", "c"), []);
+  chatParts(service).pendingReplies.applyCliRunMetadata(session, { participant: {}, ok: true, content: "", sessionId: "child-session" }, member("c", "c"), []);
   assert.equal(session.sessionId, "child-session");
   assert.equal(session.forkFrom, undefined);
 });
@@ -581,11 +584,11 @@ test("a fork never takes the source's session id as its own", () => {
 function liveTurn(service: unknown, turnSegmentId: string): { end: () => void } {
   const internals = service as any;
   const key = `conversation-1\u0000${turnSegmentId}`;
-  internals.liveTurnSegments.add(key);
+  chatParts(internals).delegation.liveTurnSegments.add(key);
   return {
     end: () => {
-      internals.liveTurnSegments.delete(key);
-      internals.resumeDelegationsOfEndedTurn(key);
+      chatParts(internals).delegation.liveTurnSegments.delete(key);
+      chatParts(internals).requesterResumes.resumeDelegationsOfEndedTurn(key);
     }
   };
 }
@@ -806,7 +809,7 @@ function restartedChat(statuses: Array<"answered" | "running">, at = new Date(Da
 test("after a restart a task that was still running ends, and the main session gets the answers its turn's other tasks gave, once", async () => {
   const { service, storage, runs } = testService({ conversation: restartedChat(["answered", "running", "answered"]) });
   // The first read after the restart finds no run for the second task.
-  await (service as any).requireChat("conversation-1");
+  await chatParts(service).store.requireChat("conversation-1");
   await waitFor(() => delegationBatches(storage.current).every((batch) => Boolean(batch.autoResumeMessageId)));
   await new Promise((resolve) => setTimeout(resolve, 50));
   const resumes = resumesOf(runs, "main-id");
@@ -818,7 +821,7 @@ test("after a restart a task that was still running ends, and the main session g
 
 test("after a restart that ended every task of a turn, the main session is not woken by those tasks (a request it made with the request tool does wake it)", async () => {
   const { service, storage, runs, debugEvents } = testService({ conversation: restartedChat(["running", "running"]) });
-  await (service as any).requireChat("conversation-1");
+  await chatParts(service).store.requireChat("conversation-1");
   await waitFor(() => delegationBatches(storage.current).every((batch) => batch.items[0]?.status === "interrupted"));
   await waitFor(() => debugEvents.some((event) => event.payload.reason === "all-items-interrupted-before-completion"));
   await new Promise((resolve) => setTimeout(resolve, 50));
@@ -838,7 +841,7 @@ test("after a restart while the main session's turn ran, its tasks that had all 
   assert.match(resumes[0]!.prompt, /Answer 0\./);
   assert.match(resumes[0]!.prompt, /Answer 1\./);
   // Later reads do not resume it again.
-  await (service as any).requireChat("conversation-1");
+  await chatParts(service).store.requireChat("conversation-1");
   await service.hydrateContextUsage(clone(storage.current));
   await new Promise((resolve) => setTimeout(resolve, 50));
   assert.equal(resumesOf(runs, "main-id").length, 1);
@@ -853,7 +856,7 @@ test("a combined resume a restart cut short after it began is not made again: it
   conversation.messages.push({ id: "cut-trigger", role: "system", content: "Auto-resumed @main after member request.\nAll 2 tasks you gave in one turn have ended:",
     createdAt: new Date(Date.now() - 4 * 60_000).toISOString(), status: "done", metadata: { sourceMessageId: "request-0", parentMessageId: "request-0", threadId: "user-message" } } as ChatMessage);
   const { service, storage, runs, debugEvents } = testService({ conversation });
-  await (service as any).requireChat("conversation-1");
+  await chatParts(service).store.requireChat("conversation-1");
   await new Promise((resolve) => setTimeout(resolve, 100));
   assert.equal(resumesOf(runs, "main-id").length, 0, "the resume turn is not replayed");
   assert.deepEqual(delegationBatches(storage.current).map((batch) => batch.status), ["answered", "answered"], "settled: no longer resuming");
@@ -867,7 +870,7 @@ test("a combined resume a restart lost before its resume line was written is mad
     if (message.metadata?.participantRequest) message.metadata.participantRequest.status = "resuming_requester";
   }
   const { service, storage, runs } = testService({ conversation });
-  await (service as any).requireChat("conversation-1");
+  await chatParts(service).store.requireChat("conversation-1");
   await waitFor(() => delegationBatches(storage.current).every((batch) => Boolean(batch.autoResumeMessageId)));
   await new Promise((resolve) => setTimeout(resolve, 50));
   const resumes = resumesOf(runs, "main-id");
@@ -879,7 +882,7 @@ test("a combined resume a restart lost before its resume line was written is mad
 
 test("tasks that ended more than a day before the restart do not wake the main session; they are settled quietly", async () => {
   const { service, storage, runs, debugEvents } = testService({ conversation: restartedChat(["answered", "answered"], new Date(Date.now() - 25 * 60 * 60_000).toISOString()) });
-  await (service as any).requireChat("conversation-1");
+  await chatParts(service).store.requireChat("conversation-1");
   await service.hydrateContextUsage(clone(storage.current));
   await new Promise((resolve) => setTimeout(resolve, 100));
   assert.equal(resumesOf(runs, "main-id").length, 0);
@@ -889,7 +892,7 @@ test("tasks that ended more than a day before the restart do not wake the main s
 
 test("a task a restart ended a day after its turn does not wake the main session with the others' answers", async () => {
   const { service, runs, debugEvents } = testService({ conversation: restartedChat(["answered", "running"], new Date(Date.now() - 25 * 60 * 60_000).toISOString()) });
-  await (service as any).requireChat("conversation-1");
+  await chatParts(service).store.requireChat("conversation-1");
   await new Promise((resolve) => setTimeout(resolve, 100));
   assert.equal(resumesOf(runs, "main-id").length, 0);
   assert.ok(debugEvents.some((event) => event.event === "chat.participant-request.auto-resume.settled" && event.payload.reason === "too-old"));
@@ -899,7 +902,7 @@ test("after the User wrote again, a restart does not wake the main session with 
   const conversation = restartedChat(["answered", "answered"]);
   conversation.messages.push({ id: "user-later", role: "user", content: "Never mind, do something else.", createdAt: new Date(Date.now() - 60_000).toISOString(), status: "done" } as ChatMessage);
   const { service, runs, debugEvents } = testService({ conversation });
-  await (service as any).requireChat("conversation-1");
+  await chatParts(service).store.requireChat("conversation-1");
   await new Promise((resolve) => setTimeout(resolve, 100));
   assert.equal(resumesOf(runs, "main-id").length, 0);
   assert.ok(debugEvents.some((event) => event.event === "chat.participant-request.auto-resume.settled" && event.payload.reason === "moved-on"));
@@ -911,7 +914,7 @@ test("after a later turn of the main session, a restart does not wake it with th
   conversation.messages.push({ id: "main-later", role: "participant", participantId: "main-id", participantLabel: "@main", content: "Already merged both answers.",
     createdAt: new Date(Date.now() - 60_000).toISOString(), status: "done", metadata: { turnSegmentId: "turn-later" } } as ChatMessage);
   const { service, runs, debugEvents } = testService({ conversation });
-  await (service as any).requireChat("conversation-1");
+  await chatParts(service).store.requireChat("conversation-1");
   await new Promise((resolve) => setTimeout(resolve, 100));
   assert.equal(resumesOf(runs, "main-id").length, 0);
   assert.ok(debugEvents.some((event) => event.event === "chat.participant-request.auto-resume.settled" && event.payload.reason === "moved-on"));
@@ -923,7 +926,7 @@ test("the turn that gave the tasks writing after they ended still lets a restart
   conversation.messages.push({ id: "main-post", role: "participant", participantId: "main-id", participantLabel: "@main", content: "Both answered; merging.",
     createdAt: new Date(Date.now() - 60_000).toISOString(), status: "done", metadata: { turnSegmentId: "turn-old" } } as ChatMessage);
   const { service, storage, runs } = testService({ conversation });
-  await (service as any).requireChat("conversation-1");
+  await chatParts(service).store.requireChat("conversation-1");
   await waitFor(() => delegationBatches(storage.current).every((batch) => Boolean(batch.autoResumeMessageId)));
   assert.equal(resumesOf(runs, "main-id").length, 1);
 });
@@ -938,9 +941,9 @@ test("a restart looks at a chat's ended tasks once, not on every read of the cha
   const { service, storage } = testService({ conversation });
   const internals = service as any;
   let looks = 0;
-  const original = internals.delegationGroupResumeWasMade.bind(service);
-  internals.delegationGroupResumeWasMade = (...args: unknown[]) => { looks += 1; return original(...args); };
-  for (let index = 0; index < 3; index += 1) await internals.requireChat("conversation-1");
+  const original = chatParts(internals).requestRecovery.delegationGroupResumeWasMade.bind(chatParts(internals).requestRecovery);
+  chatParts(internals).requestRecovery.delegationGroupResumeWasMade = (...args: unknown[]) => { looks += 1; return original(...args); };
+  for (let index = 0; index < 3; index += 1) await chatParts(internals).store.requireChat("conversation-1");
   await service.hydrateContextUsage(clone(storage.current));
   assert.equal(looks, 1);
 });
@@ -953,7 +956,7 @@ test("a combined resume that was made and failed is not made again by a restart"
   conversation.messages.push({ id: "failed-trigger", role: "system", content: "Auto-resumed @main after member request.",
     createdAt: NOW, status: "done", metadata: { sourceMessageId: "request-0", parentMessageId: "request-0", threadId: "user-message" } } as ChatMessage);
   const { service, runs, debugEvents } = testService({ conversation });
-  await (service as any).requireChat("conversation-1");
+  await chatParts(service).store.requireChat("conversation-1");
   await new Promise((resolve) => setTimeout(resolve, 100));
   assert.equal(resumesOf(runs, "main-id").length, 0);
   assert.equal(debugEvents.some((event) => event.event === "chat.participant-request.auto-resume.recovered"), false);
@@ -1047,7 +1050,7 @@ test("the main session adding a member broader than itself through the member to
 test("every member added to a chat with a main session runs in its CLI's own mode: on her approval card, by a member without a card, or by her from the roster", async () => {
   const main = mainSession();
   const { service, storage } = testService({ conversation: mainSessionChat([main]) });
-  (service as any).cliRunner.detectAgents = async () => [
+  chatDependencies(service).cliRunner.detectAgents = async () => [
     { kind: "codex-cli", label: "Codex CLI", installed: true },
     { kind: "claude-code", label: "Claude Code", installed: true }
   ];
@@ -1085,7 +1088,7 @@ test("every member added to a chat with a main session runs in its CLI's own mod
 test("a member added to a chat without a main session keeps the rights it was given", async () => {
   const conversation = { ...mainSessionChat([member("worker-id", "worker")]), metadata: { participants: [member("worker-id", "worker")] } } as Conversation;
   const { service, storage } = testService({ conversation });
-  (service as any).cliRunner.detectAgents = async () => [{ kind: "codex-cli", label: "Codex CLI", installed: true }];
+  chatDependencies(service).cliRunner.detectAgents = async () => [{ kind: "codex-cli", label: "Codex CLI", installed: true }];
   await service.addParticipant({
     conversationId: conversation.id,
     participant: { handle: "classic", roleConfigId: GENERIC_ROLE.id, kind: "codex-cli", agentMode: "default", permissions: permissions({ workspaceWrite: true }) } as any
@@ -1150,18 +1153,18 @@ test("members of a main-session chat ask the main session, not User, and do not 
   const conversation = mainSessionChat([main, worker]);
   const { service } = testService({ conversation });
   const internals = service as any;
-  assert.equal(internals.mainSessionHandleForMember(conversation, worker), "main");
-  assert.equal(internals.mainSessionHandleForMember(conversation, main), undefined);
+  assert.equal(mainSessionHandleForMember(conversation, worker), "main");
+  assert.equal(mainSessionHandleForMember(conversation, main), undefined);
 
   const access = { agentMode: "default", permissions: defaultChatAgentPermissions() };
-  const workerInstructions = internals.sessionInstructions(conversation, worker, sessionRecord(worker, "s", GENERIC_ROLE), access, "/tmp/accordagents-history") as string;
+  const workerInstructions = chatParts(internals).memberSessions.sessionInstructions(conversation, worker, sessionRecord(worker, "s", GENERIC_ROLE), access, "/tmp/accordagents-history") as string;
   assert.match(workerInstructions, /ask @main with `app_chat_request_participants` instead of asking User/);
   assert.match(workerInstructions, /Do not write a `User choice:` block unless @main asked you to put a question to User\./);
   assert.match(workerInstructions, /Do not start an Accord; when one is needed, ask @main\./);
   assert.match(workerInstructions, /"target": "main"/);
   assert.doesNotMatch(workerInstructions, /Ask User directly/);
 
-  const mainInstructions = internals.sessionInstructions(conversation, main, sessionRecord(main, "s"), access, "/tmp/accordagents-history") as string;
+  const mainInstructions = chatParts(internals).memberSessions.sessionInstructions(conversation, main, sessionRecord(main, "s"), access, "/tmp/accordagents-history") as string;
   assert.match(mainInstructions, /Ask User directly when goals/);
   assert.match(mainInstructions, /- When User must pick one option/);
   assert.doesNotMatch(mainInstructions, /ask @main/);
@@ -1227,14 +1230,14 @@ test("in a main-session chat shown the classic way another member's '@x /accord'
   const other = member("other-id", "other");
   const conversation = mainSessionChat([main, worker, other], { chatView: "classic" });
   const { service } = testService({ conversation });
-  (service as any).startDeferredParticipantRequestRunners = () => undefined;
+  chatParts(service).participantRequests.startDeferredParticipantRequestRunners = () => undefined;
 
   const fromWorker: ChatMessage = {
     id: "worker-reply", role: "participant", participantId: worker.id, participantLabel: "@worker",
     content: "@other /accord on the rollout plan.", createdAt: NOW, status: "done", metadata: { threadId: "user-message", runId: "worker-run" }
   };
   conversation.messages.push(fromWorker);
-  await (service as any).createImplicitParticipantRequestApproval(conversation, worker, [fromWorker]);
+  await chatParts(service).inferredRequests.createImplicitParticipantRequestApproval(conversation, worker, [fromWorker]);
   assert.equal(conversation.messages.some((message) => message.metadata?.participantRequest), false, "no request, no Accord");
   assert.equal(normalizeChatAgentPermissions(participantsOf(conversation).find((item) => item.id === other.id)!.permissions).requestParticipants, "ask");
   assert.ok((conversation.metadata.warnings as string[]).some((warning) => warning.includes("only this chat's own session starts one")));
@@ -1244,7 +1247,7 @@ test("in a main-session chat shown the classic way another member's '@x /accord'
     content: "@other /accord on the rollout plan.", createdAt: NOW, status: "done", metadata: { threadId: "user-message", runId: "main-run" }
   };
   conversation.messages.push(fromMain);
-  await (service as any).createImplicitParticipantRequestApproval(conversation, main, [fromMain]);
+  await chatParts(service).inferredRequests.createImplicitParticipantRequestApproval(conversation, main, [fromMain]);
   assert.ok(conversation.messages.some((message) => message.metadata?.participantRequest?.requesterParticipantId === main.id));
   assert.equal(normalizeChatAgentPermissions(participantsOf(conversation).find((item) => item.id === other.id)!.permissions).requestParticipants, "allow");
 });
@@ -1262,7 +1265,7 @@ test("in the sessions view an @handle in a member's reply or post starts nobody;
   for (const chatView of [undefined, "sessions"] as const) {
     const conversation = mainSessionChat([main, worker, other], chatView ? { chatView } : {});
     const { service } = testService({ conversation });
-    (service as any).startDeferredParticipantRequestRunners = () => undefined;
+    chatParts(service).participantRequests.startDeferredParticipantRequestRunners = () => undefined;
     const messages = [
       reply("main-reply", main, "@worker please check the logs."),
       reply("worker-reply", worker, "Done. @other can you confirm the numbers?"),
@@ -1273,25 +1276,25 @@ test("in the sessions view an @handle in a member's reply or post starts nobody;
     for (const message of messages) {
       conversation.messages.push(message);
       const from = message.participantId === main.id ? main : worker;
-      const started = await (service as any).createImplicitParticipantRequestApproval(conversation, from, [message]);
+      const started = await chatParts(service).inferredRequests.createImplicitParticipantRequestApproval(conversation, from, [message]);
       assert.deepEqual(started, [], `${chatView ?? "default view"}: ${message.id} starts nobody`);
     }
     assert.equal(requests(conversation).length, 0, "no task row, no turn");
     assert.deepEqual(conversation.metadata.warnings ?? [], [], "no warning either, the Accord one included");
     assert.equal(normalizeChatAgentPermissions(participantsOf(conversation).find((item) => item.id === other.id)!.permissions).requestParticipants, "ask",
       "no Accord leave either");
-    assert.match((service as any).handleWritingLines(conversation).join("\n"), /starts nobody/);
+    assert.match(handleWritingLines(conversation).join("\n"), /starts nobody/);
   }
 
   const classic = mainSessionChat([main, worker, other], { chatView: "classic" });
   const { service } = testService({ conversation: classic });
-  (service as any).startDeferredParticipantRequestRunners = () => undefined;
+  chatParts(service).participantRequests.startDeferredParticipantRequestRunners = () => undefined;
   const fromMain = reply("main-reply", main, "@worker please check the logs.");
   classic.messages.push(fromMain);
-  await (service as any).createImplicitParticipantRequestApproval(classic, main, [fromMain]);
+  await chatParts(service).inferredRequests.createImplicitParticipantRequestApproval(classic, main, [fromMain]);
   assert.equal(requests(classic).length, 1, "the classic view still reads it as a request");
   assert.equal(requests(classic)[0]!.metadata?.participantRequest?.source, "inferred");
-  assert.match((service as any).handleWritingLines(classic).join("\n"), /is a request for that participant to run/);
+  assert.match(handleWritingLines(classic).join("\n"), /is a request for that participant to run/);
 });
 
 test("the main session's inferred '@x /accord' gives its facilitator no more leave than its own (the classic view)", async () => {
@@ -1299,13 +1302,13 @@ test("the main session's inferred '@x /accord' gives its facilitator no more lea
   const other = member("other-id", "other", { permissions: permissions({ requestParticipants: "deny" }) });
   const conversation = mainSessionChat([main, other], { chatView: "classic" });
   const { service } = testService({ conversation });
-  (service as any).startDeferredParticipantRequestRunners = () => undefined;
+  chatParts(service).participantRequests.startDeferredParticipantRequestRunners = () => undefined;
   const fromMain: ChatMessage = {
     id: "main-reply", role: "participant", participantId: main.id, participantLabel: "@main",
     content: "@other /accord on the rollout plan.", createdAt: NOW, status: "done", metadata: { threadId: "user-message", runId: "main-run" }
   };
   conversation.messages.push(fromMain);
-  await (service as any).createImplicitParticipantRequestApproval(conversation, main, [fromMain]);
+  await chatParts(service).inferredRequests.createImplicitParticipantRequestApproval(conversation, main, [fromMain]);
   assert.equal(normalizeChatAgentPermissions(participantsOf(conversation).find((item) => item.id === other.id)!.permissions).requestParticipants, "ask");
 });
 
@@ -1387,9 +1390,9 @@ test("the main session's task gives its member who added it, and that member run
     ? { ...participant, permissions: permissions({ requestParticipants: "ask" }) }
     : participant);
   const chatNow = { ...storage.current, metadata: { ...storage.current.metadata, participants: [...asking, own] } };
-  assert.equal(normalizeChatAgentPermissions(internals.participantForRun(chatNow, stored).permissions).requestParticipants, "ask");
-  assert.equal(internals.participantForRun(chatNow, stored).agentMode, "plan");
-  assert.equal(internals.participantForRun(chatNow, own), own);
+  assert.equal(normalizeChatAgentPermissions(participantForRun(chatNow, stored).permissions).requestParticipants, "ask");
+  assert.equal(participantForRun(chatNow, stored).agentMode, "plan");
+  assert.equal(participantForRun(chatNow, own), own);
 });
 
 test("an Antigravity member in agy's own Accept edits or Auto, under a main session set from the classic controls, never runs with every confirmation skipped", () => {
@@ -1400,7 +1403,7 @@ test("an Antigravity member in agy's own Accept edits or Auto, under a main sess
     const own = applyChatAccessOptionById("gemini-cli", id, permissions({ workspaceWrite: true }));
     const agy = member(`agy-${id}`, `agy${id.length}`, { kind: "gemini-cli", delegatedByParticipantId: main.id, agentMode: own.agentMode, permissions: own.permissions });
     const chat = mainSessionChat([main, agy]);
-    const run = (service as any).participantForRun(chat, agy) as ChatParticipant;
+    const run = participantForRun(chat, agy) as ChatParticipant;
     const invocation = buildGeminiExecInvocation({
       participant: { ...agy, label: agy.handle } as never, prompt: "Go.", repoPath: "/work/app", kind: "chat",
       options: { agentMode: run.agentMode, permissions: run.permissions }
@@ -1438,7 +1441,7 @@ test("the main session's tasks and members' questions to it are not held to the 
     } as ChatMessage);
   }
   const { service } = testService({ conversation });
-  (service as any).startDeferredParticipantRequestRunners = () => undefined;
+  chatParts(service).participantRequests.startDeferredParticipantRequestRunners = () => undefined;
   const delegated = await service.delegateTaskFromTool(mainActor(), { task: "Write the tests." });
   assert.equal(delegated.ok, true, JSON.stringify(delegated));
   const question = await service.requestParticipantsFromTool(childActor(undefined, { triggerMessageId: "child-turn", chainRootId: "user-message" }), {
@@ -1456,7 +1459,7 @@ test("a member the main session made proposes a scheduled task on the normal car
   const main = mainSession();
   const conversation = mainSessionChat([main], { participantSessions: [sessionRecord(main, "s")] });
   const { service, storage } = testService({ conversation });
-  (service as any).startDeferredParticipantRequestRunners = () => undefined;
+  chatParts(service).participantRequests.startDeferredParticipantRequestRunners = () => undefined;
   const delegated = await service.delegateTaskFromTool(mainActor(), { task: "Watch the build every minute." });
   assert.equal(delegated.ok, true, JSON.stringify(delegated));
   const childId = String(delegated.participantId);
@@ -1489,13 +1492,13 @@ test("scheduled tasks without a card: a member the main session makes has it onl
   const main = { ...mainSession(), permissions: { ...mainSession().permissions!, scheduleWithoutAsking: true as const } };
   const conversation = mainSessionChat([main], { participantSessions: [sessionRecord(main, "s")] });
   const { service, storage } = testService({ conversation });
-  (service as any).startDeferredParticipantRequestRunners = () => undefined;
+  chatParts(service).participantRequests.startDeferredParticipantRequestRunners = () => undefined;
   const delegated = await service.delegateTaskFromTool(mainActor(), { task: "Watch the build every minute." });
   const stored = (): ChatParticipant[] => storage.current.metadata.participants as ChatParticipant[];
   const child = () => stored().find((participant) => participant.id === delegated.participantId)!;
-  (service as any).settings.getPublicSettings = ((read) => async () => ({ ...await read(), newChatDefaults: { compactWithoutAsking: true, scheduleWithoutAsking: true } }))(
-    (service as any).settings.getPublicSettings.bind((service as any).settings));
-  const creates = () => (service as any).createsScheduledTasksWithoutCard(storage.current, child()) as Promise<boolean>;
+  chatDependencies(service).settings.getPublicSettings = ((read) => async () => ({ ...await read(), newChatDefaults: { compactWithoutAsking: true, scheduleWithoutAsking: true } }))(
+    chatDependencies(service).settings.getPublicSettings.bind(chatDependencies(service).settings));
+  const creates = () => chatParts(service).scheduledTasks.createsScheduledTasksWithoutCard(storage.current, child()) as Promise<boolean>;
   assert.equal(await creates(), true, "as it has the main session's other rights");
   storage.current.metadata.participants = stored().map((participant) => participant.id === main.id
     ? { ...participant, permissions: { ...participant.permissions!, scheduleWithoutAsking: undefined } } : participant);
@@ -1503,7 +1506,7 @@ test("scheduled tasks without a card: a member the main session makes has it onl
 
   const plain = mainSession();
   const without = testService({ conversation: mainSessionChat([plain], { participantSessions: [sessionRecord(plain, "s")] }) });
-  (without.service as any).startDeferredParticipantRequestRunners = () => undefined;
+  chatParts(without.service).participantRequests.startDeferredParticipantRequestRunners = () => undefined;
   const raised = await without.service.delegateTaskFromTool(mainActor(), { task: "Watch it.", permissions: { scheduleWithoutAsking: true } });
   const raisedChild = (without.storage.current.metadata.participants as ChatParticipant[]).find((participant) => participant.id === raised.participantId)!;
   assert.equal(raisedChild.permissions?.scheduleWithoutAsking, undefined);
@@ -1596,7 +1599,7 @@ function quitRequestChat(
 const requestBatch = (conversation: Conversation) => conversation.messages.find((message) => message.id === "request-1")!.metadata!.participantRequest!;
 /** Recovery looked at the chat and left this request alone (no line is said for it). */
 const leftAlone = (service: unknown, key = REQUEST_KEY) =>
-  (service as any).delegationRecoveryLookedChats.has("conversation-1") && !(service as any).delegationGroupsRecovered.has(key);
+  chatParts(service).requestRecovery.delegationRecoveryLookedChats.has("conversation-1") && !chatParts(service).requestRecovery.delegationGroupsRecovered.has(key);
 
 test("a request a real quit cut short resumes its requester once at the next start, with the interruption", async () => {
   const main = mainSession("codex-cli", { model: undefined });
@@ -1620,7 +1623,7 @@ test("a request a real quit cut short resumes its requester once at the next sta
   assert.equal(resumesOf(first.runs, "main-id").length, 0);
 
   const next = testService({ conversation: first.storage.current });
-  await (next.service as any).requireChat("conversation-1");
+  await chatParts(next.service).store.requireChat("conversation-1");
   await waitFor(() => Boolean(next.storage.current.messages.find((message: ChatMessage) => message.metadata?.participantRequest)!.metadata!.participantRequest!.autoResumeMessageId));
   await new Promise((resolve) => setTimeout(resolve, 50));
   const resumes = resumesOf(next.runs, "main-id");
@@ -1629,7 +1632,7 @@ test("a request a real quit cut short resumes its requester once at the next sta
 
   // A start after that: nothing more.
   const again = testService({ conversation: next.storage.current });
-  await (again.service as any).requireChat("conversation-1");
+  await chatParts(again.service).store.requireChat("conversation-1");
   await new Promise((resolve) => setTimeout(resolve, 50));
   assert.equal(resumesOf(again.runs, "main-id").length, 0);
 });
@@ -1646,7 +1649,7 @@ test("a request answered after the quit began (its resume skipped) resumes its r
   await waitFor(() => first.debugEvents.some((event) => event.payload.reason === "quitting"));
 
   const next = testService({ conversation: first.storage.current });
-  await (next.service as any).requireChat("conversation-1");
+  await chatParts(next.service).store.requireChat("conversation-1");
   await waitFor(() => resumesOf(next.runs, "main-id").length > 0);
   await new Promise((resolve) => setTimeout(resolve, 50));
   const resumes = resumesOf(next.runs, "main-id");
@@ -1656,7 +1659,7 @@ test("a request answered after the quit began (its resume skipped) resumes its r
 
 test("a request still running at the start ends interrupted and resumes its requester once", async () => {
   const { service, storage, runs } = testService({ conversation: quitRequestChat("running") });
-  await (service as any).requireChat("conversation-1");
+  await chatParts(service).store.requireChat("conversation-1");
   await waitFor(() => Boolean(requestBatch(storage.current).autoResumeMessageId));
   await new Promise((resolve) => setTimeout(resolve, 50));
   assert.equal(requestBatch(storage.current).items[0]!.status, "interrupted");
@@ -1669,16 +1672,16 @@ test("a cut-short request is not resumed after the User wrote again, when older 
   const made = quitRequestChat("interrupted", { resumeLine: true });
   for (const [conversation, reason] of [[moved, "moved-on"], [made, "resume-already-made"]] as const) {
     const { service, runs, debugEvents } = testService({ conversation });
-    await (service as any).requireChat("conversation-1");
+    await chatParts(service).store.requireChat("conversation-1");
     await waitFor(() => debugEvents.some((event) => event.event === "chat.participant-request.auto-resume.settled" && event.payload.reason === reason));
     await new Promise((resolve) => setTimeout(resolve, 50));
     assert.equal(resumesOf(runs, "main-id").length, 0, reason);
   }
   // Older than a day: settled without a line, every start.
   const old = testService({ conversation: quitRequestChat("interrupted", { at: new Date(Date.now() - 25 * 60 * 60_000).toISOString() }) });
-  const verdict = (old.service as any).delegationGroupRecoveryVerdict(old.storage.current, undefined, [old.storage.current.messages.find((message: ChatMessage) => message.id === "request-1")]);
+  const verdict = chatParts(old.service).requestRecovery.delegationGroupRecoveryVerdict(old.storage.current, undefined, [old.storage.current.messages.find((message: ChatMessage) => message.id === "request-1")]);
   assert.equal(verdict, "too-old");
-  await (old.service as any).requireChat("conversation-1");
+  await chatParts(old.service).store.requireChat("conversation-1");
   await new Promise((resolve) => setTimeout(resolve, 50));
   assert.equal(resumesOf(old.runs, "main-id").length, 0);
   assert.equal(old.debugEvents.filter((event) => event.event === "chat.participant-request.auto-resume.settled").length, 0);
@@ -1686,14 +1689,14 @@ test("a cut-short request is not resumed after the User wrote again, when older 
 
 test("a resume a quit cut short after it began is not made again; one lost before its line was written is made, once", async () => {
   const cut = testService({ conversation: quitRequestChat("answered", { resumeLine: true, batch: { status: "resuming_requester" } }) });
-  await (cut.service as any).requireChat("conversation-1");
+  await chatParts(cut.service).store.requireChat("conversation-1");
   await waitFor(() => cut.debugEvents.some((event) => event.payload.reason === "resume-already-made" && event.payload.cutShort === true));
   await new Promise((resolve) => setTimeout(resolve, 50));
   assert.equal(resumesOf(cut.runs, "main-id").length, 0);
   assert.equal(requestBatch(cut.storage.current).status, "answered", "it stops holding later looks");
 
   const lost = testService({ conversation: quitRequestChat("answered", { batch: { status: "resuming_requester" } }) });
-  await (lost.service as any).requireChat("conversation-1");
+  await chatParts(lost.service).store.requireChat("conversation-1");
   await waitFor(() => Boolean(requestBatch(lost.storage.current).autoResumeMessageId));
   await new Promise((resolve) => setTimeout(resolve, 50));
   assert.equal(resumesOf(lost.runs, "main-id").length, 1);
@@ -1705,7 +1708,7 @@ test("the turn that asked writing later is not going on (its posts carry its tur
   sameTurn.messages.push({ id: "post", role: "participant", participantId: "main-id", participantLabel: "@main", content: "Still waiting.", createdAt: new Date().toISOString(), status: "done",
     metadata: { runId: "run-1", turnSegmentId: "turn-1" } } as ChatMessage);
   let service = testService({ conversation: sameTurn });
-  await (service.service as any).requireChat("conversation-1");
+  await chatParts(service.service).store.requireChat("conversation-1");
   await waitFor(() => Boolean(requestBatch(service.storage.current).autoResumeMessageId));
   assert.equal(resumesOf(service.runs, "main-id").length, 1);
 
@@ -1713,7 +1716,7 @@ test("the turn that asked writing later is not going on (its posts carry its tur
   otherTurn.messages.push({ id: "other", role: "participant", participantId: "main-id", participantLabel: "@main", content: "Something else.", createdAt: new Date().toISOString(), status: "done",
     metadata: { runId: "run-2", turnSegmentId: "turn-2", sourceMessageId: "user-message" } } as ChatMessage);
   service = testService({ conversation: otherTurn });
-  await (service.service as any).requireChat("conversation-1");
+  await chatParts(service.service).store.requireChat("conversation-1");
   await waitFor(() => service.debugEvents.some((event) => event.payload.reason === "moved-on"));
   await new Promise((resolve) => setTimeout(resolve, 50));
   assert.equal(resumesOf(service.runs, "main-id").length, 0);
@@ -1724,7 +1727,7 @@ test("the turn that asked writing later is not going on (its posts carry its tur
   stored.messages.push({ id: "post", role: "participant", participantId: "main-id", participantLabel: "@main", content: "Still waiting.", createdAt: new Date().toISOString(), status: "done",
     metadata: { runId: "run-1", turnSegmentId: "turn-1" } } as ChatMessage);
   service = testService({ conversation: stored });
-  await (service.service as any).requireChat("conversation-1");
+  await chatParts(service.service).store.requireChat("conversation-1");
   await waitFor(() => Boolean(requestBatch(service.storage.current).autoResumeMessageId));
   assert.equal(resumesOf(service.runs, "main-id").length, 1);
   // With neither, any later message of the requester is going on.
@@ -1732,7 +1735,7 @@ test("the turn that asked writing later is not going on (its posts carry its tur
   older.messages.push({ id: "post", role: "participant", participantId: "main-id", participantLabel: "@main", content: "Still waiting.", createdAt: new Date().toISOString(), status: "done",
     metadata: { runId: "run-1", turnSegmentId: "turn-1" } } as ChatMessage);
   service = testService({ conversation: older });
-  await (service.service as any).requireChat("conversation-1");
+  await chatParts(service.service).store.requireChat("conversation-1");
   await waitFor(() => service.debugEvents.some((event) => event.payload.reason === "moved-on"));
   assert.equal(resumesOf(service.runs, "main-id").length, 0);
 });
@@ -1746,7 +1749,7 @@ test("a request whose member waits on the User's permission card is left to the 
     resumeContext: { runId: "helper-run", triggerMessageId: "request-1", participantRequestBatchId: "batch-1" }
   }];
   const { service, storage, runs } = testService({ conversation: waiting });
-  await (service as any).requireChat("conversation-1");
+  await chatParts(service).store.requireChat("conversation-1");
   await service.participantRequestStatusForTool(mainActor(), {});
   await new Promise((resolve) => setTimeout(resolve, 80));
   assert.ok(leftAlone(service), "not weighed while the card waits");
@@ -1757,7 +1760,7 @@ test("a request whose member waits on the User's permission card is left to the 
 test("after the chat's first look, a request whose run is found gone resumes its requester once", async () => {
   const conversation = quitRequestChat("answered");
   const { service, storage, runs } = testService({ conversation: { ...conversation, messages: conversation.messages.filter((message) => message.id !== "request-1" && message.id !== "helper-reply") } });
-  await (service as any).requireChat("conversation-1");
+  await chatParts(service).store.requireChat("conversation-1");
   // A request of this process whose run is gone (nothing holds it) is found
   // by the requester's status check.
   const running = quitRequestChat("running").messages.filter((message) => message.id === "request-1" || message.id === "helper-reply");
@@ -1772,7 +1775,7 @@ test("after the chat's first look, a request whose run is found gone resumes its
 test("only requests a requester waits on are weighed: not an inline one, not an inferred one", async () => {
   for (const options of [{ resumeRequester: false }, { source: "inferred" as const }]) {
     const { service, runs } = testService({ conversation: quitRequestChat("answered", options) });
-    await (service as any).requireChat("conversation-1");
+    await chatParts(service).store.requireChat("conversation-1");
     await new Promise((resolve) => setTimeout(resolve, 50));
     assert.ok(leftAlone(service), JSON.stringify(options));
     assert.equal(resumesOf(runs, "main-id").length, 0, JSON.stringify(options));
@@ -1782,14 +1785,14 @@ test("only requests a requester waits on are weighed: not an inline one, not an 
 test("a requester on a cloud machine is resumed by its machine, never by the desktop", async () => {
   const onMachine = { homeMachineId: "machine-1" };
   const desktop = testService({ conversation: quitRequestChat("interrupted", { requester: onMachine }) });
-  await (desktop.service as any).requireChat("conversation-1");
+  await chatParts(desktop.service).store.requireChat("conversation-1");
   await new Promise((resolve) => setTimeout(resolve, 50));
   assert.ok(leftAlone(desktop.service), "the desktop leaves it to the machine");
   assert.equal(resumesOf(desktop.runs, "main-id").length, 0);
 
   const machine = testService({ conversation: quitRequestChat("interrupted", { requester: onMachine }) });
   machine.service.setHostMachineId("machine-1");
-  await (machine.service as any).requireChat("conversation-1");
+  await chatParts(machine.service).store.requireChat("conversation-1");
   await waitFor(() => Boolean(requestBatch(machine.storage.current).autoResumeMessageId));
   assert.equal(resumesOf(machine.runs, "main-id").length, 1);
 });

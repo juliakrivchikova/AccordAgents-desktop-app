@@ -12,6 +12,8 @@ import type { DeviceEventBlobReference } from "../../shared/deviceEventBlobs";
 import type { HubFeedEntry, HubOp, HubOpEffect, HubTurn } from "../../shared/hubOps";
 import { memberMovedNote, type ChatSessionHandoff } from "../../shared/memberSessionMove";
 import { ChatService } from "./chat";
+import { chatParts } from "./chat/test/chatParts";
+import { normalizedPromptContextPointers } from "./chat/turns/promptContextRecords";
 import type { ChatServerLink } from "./chatServerOps";
 import { blobReferenceOf, HubHttpError } from "./hubClient";
 import {
@@ -117,13 +119,13 @@ test("not moved: a member that answers or has background tasks, a machine on an 
   busy.metadata = { ...busy.metadata, running: true, runId: "run", activeRunIds: ["run"] };
   const first = testService(busy);
   first.service.setMachineSessionMove(() => ({ support: "supported", name: "Box", machineId: "box" }));
-  (first.service as any).rememberActiveChatRun(busy.id, "run");
+  chatParts(first.service).activeRuns.rememberActiveChatRun(busy.id, "run");
   await assert.rejects(move(first.service), /@admin is busy\. Move it when it is done\./);
 
   const idle = () => withReply(chatConversation([participant], [chatSession(participant, "sess-1")]), participant);
   const tasks = testService(idle());
   tasks.service.setMachineSessionMove(() => ({ support: "supported", name: "Box", machineId: "box" }));
-  (tasks.service as any).memberBackgroundTasks.set("chat-move", new Map([[participant.id, { source: "local", labels: ["npm run dev"] }]]));
+  chatParts(tasks.service).backgroundTasks.memberBackgroundTasks.set("chat-move", new Map([[participant.id, { source: "local", labels: ["npm run dev"] }]]));
   await assert.rejects(move(tasks.service), /@admin has background tasks running\. Move it when they are done\./, "a move never stops them unasked");
 
   const old = testService(idle());
@@ -165,8 +167,8 @@ test("a machine takes the session its member was handed before the member first 
   service.setHubBlobReader(async (reference) => { reads += 1; assert.equal(reference.blobHash, handoff.blob.blobHash); return packed; });
 
   const [first, second] = await Promise.all([
-    (service as any).sessionForParticipant(clone(storage.current), participant),
-    (service as any).sessionForParticipant(clone(storage.current), participant)
+    chatParts(service).memberSessions.sessionForParticipant(clone(storage.current), participant),
+    chatParts(service).memberSessions.sessionForParticipant(clone(storage.current), participant)
   ]);
   assert.equal(first.session.sessionId, "sess-1", "its next turn resumes that session");
   assert.equal(second.session.sessionId, "sess-1", "a turn that waited for the take reads it too");
@@ -182,7 +184,7 @@ test("a machine takes the session its member was handed before the member first 
   assert.deepEqual(said.metadata.memberSessionTaken, { participantId: participant.id, blobHash: handoff.blob.blobHash, taken: true });
   assert.deepEqual(closed.map((item) => item.reason), ["member-moved"]);
 
-  await (service as any).sessionForParticipant(clone(storage.current), participant);
+  await chatParts(service).memberSessions.sessionForParticipant(clone(storage.current), participant);
   assert.equal(reads, 1, "taken once");
 });
 
@@ -194,12 +196,12 @@ test("a handed session gone from the server: the member starts a new session and
   runner.claudeProjectsDirectory = async () => tempDir();
 
   service.setHubBlobReader(async () => { throw new Error("fetch failed"); });
-  await assert.rejects((service as any).sessionForParticipant(clone(storage.current), participant),
+  await assert.rejects(chatParts(service).memberSessions.sessionForParticipant(clone(storage.current), participant),
     /Could not take over @admin's session here: fetch failed\. It is tried again with its next message\./);
   assert.equal((storage.current.metadata.participantSessions as ChatParticipantSession[]).length, 0);
 
   service.setHubBlobReader(async () => { throw new HubHttpError(404, "The hub does not hold that fragment."); });
-  const state = await (service as any).sessionForParticipant(clone(storage.current), participant);
+  const state = await chatParts(service).memberSessions.sessionForParticipant(clone(storage.current), participant);
   assert.equal(state.session.sessionId, "", "a new session");
   assert.ok(storage.current.messages.some((message: any) => message.content === "@admin's session could not be moved here (it is no longer on your server). It starts a new session."));
   assert.equal((storage.current.metadata.participantSessions as ChatParticipantSession[])[0].importedHandoff, handoff.blob.blobHash, "never tried again");
@@ -214,7 +216,7 @@ test("a Codex member's handoff is never taken: only a Claude member moves with i
   onMachine.service.setHostMachineId("box");
   let reads = 0;
   onMachine.service.setHubBlobReader(async () => { reads += 1; return packed; });
-  await (onMachine.service as any).sessionForParticipant(clone(onMachine.storage.current), codex);
+  await chatParts(onMachine.service).memberSessions.sessionForParticipant(clone(onMachine.storage.current), codex);
   assert.equal(reads, 0);
 });
 
@@ -227,8 +229,8 @@ test("how far the chat reached the session moves with it", async () => {
   service.setHostMachineId("box");
   runner.claudeProjectsDirectory = async () => tempDir();
   service.setHubBlobReader(async () => packed);
-  await (service as any).sessionForParticipant(clone(storage.current), participant);
-  const kept = (service as any).normalizedPromptContextPointers(storage.current.metadata.promptContextPointers)[participant.id];
+  await chatParts(service).memberSessions.sessionForParticipant(clone(storage.current), participant);
+  const kept = normalizedPromptContextPointers(storage.current.metadata.promptContextPointers)[participant.id];
   assert.deepEqual(kept?.timeline?.messageId, "m-7", "its next turn there sends only what is new to it");
 });
 
@@ -240,12 +242,12 @@ test("a member that is moving is not restarted, and a machine lets its held turn
   service.setHostMachineId("box");
   const link = fakeServerLink("machine-device");
   service.setServerLink(link);
-  const release = (service as any).openMemberMoveGate(conversation.id, participant.id);
+  const release = chatParts(service).memberMoves.openMemberMoveGate(conversation.id, participant.id);
   await assert.rejects(service.restartParticipant({ conversationId: conversation.id, participantId: participant.id }), /@admin is moving/);
   await service.applyServerEntries([fromServer("desktop-device", { kind: "message.create",
     message: { id: "gave-up", role: "system", content: "@admin stays where it was.", createdAt: NOW, status: "done",
       metadata: { hiddenFromTimeline: true, serverSeq: 950, serverWriter: "desktop-device", memberMoveCancelled: { participantId: participant.id, runId: "turn-x" } } } as any })]);
-  assert.equal((service as any).memberMoveGate(conversation.id, participant.id), undefined);
+  assert.equal(chatParts(service).memberMoves.memberMoveGate(conversation.id, participant.id), undefined);
   release();
 });
 
@@ -286,7 +288,7 @@ test("a machine hands its member's session over on a session.export turn, and ke
   await service.applyServerEntries([fromServer("desktop-device", { kind: "conversation.update", conversationId: conversation.id,
     metadata: { participants: [{ ...participant, homeMachineId: undefined }] }, updatedAt: new Date().toISOString() } as any)]);
   await waitFor(() => (storage.current.metadata.participantSessions as ChatParticipantSession[]).length === 0);
-  assert.equal((service as any).memberMoveGate(conversation.id, participant.id), undefined, "nothing of it waits here any more");
+  assert.equal(chatParts(service).memberMoves.memberMoveGate(conversation.id, participant.id), undefined, "nothing of it waits here any more");
 });
 
 test("a machine whose member is answering or has background tasks says so, and holds nothing", async () => {
@@ -297,14 +299,14 @@ test("a machine whose member is answering or has background tasks says so, and h
   service.setHostMachineId("box");
   const link = fakeServerLink("machine-device");
   service.setServerLink(link);
-  (service as any).memberBackgroundTasks.set(conversation.id, new Map([[participant.id, { source: "local", labels: ["npm run dev"] }]]));
+  chatParts(service).backgroundTasks.memberBackgroundTasks.set(conversation.id, new Map([[participant.id, { source: "local", labels: ["npm run dev"] }]]));
 
   await service.startServerTurn({ runId: "turn-export", conversationId: conversation.id, messageId: "anchor", participantId: participant.id, state: "requested",
     request: { kind: "session.export", askedAt: new Date().toISOString() } });
   await waitFor(() => link.ops.some((op) => op.kind === "turn.finish"));
   assert.equal((link.ops.find((op) => op.kind === "turn.finish") as Extract<HubOp, { kind: "turn.finish" }>).outcome, "error");
   assert.equal(storage.current.messages.at(-1).metadata.memberSessionExport.reason, "background");
-  assert.equal((service as any).memberMoveGate(conversation.id, participant.id), undefined);
+  assert.equal(chatParts(service).memberMoves.memberMoveGate(conversation.id, participant.id), undefined);
 });
 
 test("the computer moves a member back from its machine: its turns wait for the move, the session is taken here, and the server lets go of it", async () => {
@@ -326,7 +328,7 @@ test("the computer moves a member back from its machine: its turns wait for the 
   await assert.rejects(service.updateParticipantRuntime({ conversationId: conversation.id, participantId: participant.id, homeMachineId: "other", cloudRun: undefined }),
     /@admin is already moving\./);
   // A message to it now: routed once it moved, by where it runs then.
-  const routed = (service as any).openServerTurn(clone(storage.current), participant, acceptedMessage("anchor"), "run-during-move");
+  const routed = chatParts(service).serverTurns.openServerTurn(clone(storage.current), participant, acceptedMessage("anchor"), "run-during-move");
   let routedTo: string | undefined;
   void routed.then((open: { kind: string }) => { routedTo = open.kind; });
   const request = link.ops.find((op) => op.kind === "turn.request") as Extract<HubOp, { kind: "turn.request" }>;
@@ -529,9 +531,9 @@ test("the member is told once, on its first turn after the move, where it runs n
   runner.claudeProjectsDirectory = async () => tempDir();
   service.setHubBlobReader(async () => packed);
 
-  const state = await (service as any).sessionForParticipant(clone(storage.current), participant);
+  const state = await chatParts(service).memberSessions.sessionForParticipant(clone(storage.current), participant);
   assert.deepEqual({ from: state.session.movedHere?.from, to: state.session.movedHere?.to }, { from: "the User's computer", to: "cloud machine Box" });
-  const build = (session: ChatParticipantSession, note?: string) => (service as any).buildPromptParts(clone(storage.current), participant, session, acceptedMessage(), "/tmp/chat", false,
+  const build = (session: ChatParticipantSession, note?: string) => chatParts(service).turnPrompt.buildPromptParts(clone(storage.current), participant, session, acceptedMessage(), "/tmp/chat", false,
     { includeRoleInstructions: false, agentMode: "default", permissions: participant.permissions, moveNoteBlock: note }).prompt as string;
   const note = memberMovedNote(state.session.movedHere, "/home/ubuntu/ws/mirrors/proj/repo", "linux");
   assert.match(note, /moved from the User's computer to cloud machine Box/);

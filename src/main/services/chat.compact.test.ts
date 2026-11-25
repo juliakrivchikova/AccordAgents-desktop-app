@@ -9,6 +9,10 @@ import { defaultChatAgentPermissions, normalizeChatAgentPermissions } from "../.
 import { DEFAULT_CHAT_PROMPT_CONTEXT } from "../../shared/chatPromptContext";
 import { readParticipantCompactions } from "../../shared/chatRunState";
 import { ChatService } from "./chat";
+import { chatDependencies, chatParts } from "./chat/test/chatParts";
+import { selfCompactionResumeText } from "./chat/compaction/compactionText";
+import { memoryIndexKey } from "./chat/members/roleRuntime";
+import { compactionAccessLines } from "./chat/turns/promptSections";
 import type { ChatServerLink } from "./chatServerOps";
 import type { HubFeedEntry, HubOp, HubOpEffect, HubTurn } from "../../shared/hubOps";
 
@@ -51,7 +55,7 @@ test("chat:send routes exact @participant /compact to participant compaction", a
         };
       }
     });
-    (service as any).ensureHistoryFiles = async () => tempRoot;
+    chatParts(service).chatHistory.ensureHistoryFiles = async () => tempRoot;
 
     const result = await service.sendMessage({
       conversationId: conversation.id,
@@ -99,7 +103,7 @@ test("chat:send routes @participant /compact instructions to participant compact
         };
       }
     });
-    (service as any).ensureHistoryFiles = async () => tempRoot;
+    chatParts(service).chatHistory.ensureHistoryFiles = async () => tempRoot;
 
     await service.sendMessage({
       conversationId: conversation.id,
@@ -134,10 +138,10 @@ test("/compact on a member with an added provider carries the provider env, and 
         return undefined;
       }
     });
-    (service as any).ensureHistoryFiles = async () => tempRoot;
+    chatParts(service).chatHistory.ensureHistoryFiles = async () => tempRoot;
     let apiKey: string | undefined = "zai-secret";
-    (service as any).settings.getManualAgentEnvironment = async () => ({ env: {}, version: "env-v1" });
-    (service as any).settings.getCliProviderHostSecret = async (id: string) => (id === host.id ? { host, apiKey } : undefined);
+    chatDependencies(service).settings.getManualAgentEnvironment = async () => ({ env: {}, version: "env-v1" });
+    chatDependencies(service).settings.getCliProviderHostSecret = async (id: string) => (id === host.id ? { host, apiKey } : undefined);
 
     await service.sendMessage({ conversationId: conversation.id, runId: "compact-glm", content: "@admin /compact" });
     assert.equal(compactOptions.length, 1);
@@ -178,9 +182,9 @@ test("/compact on an Antigravity member on a Gemini API key stays on that key", 
       },
       contextUsageForSession: async () => undefined
     });
-    (service as any).ensureHistoryFiles = async () => tempRoot;
-    (service as any).settings.getManualAgentEnvironment = async () => ({ env: {}, version: "env-v1" });
-    (service as any).settings.getCliProviderHostSecret = async (id: string) => (id === host.id ? { host, apiKey: "gemini-secret" } : undefined);
+    chatParts(service).chatHistory.ensureHistoryFiles = async () => tempRoot;
+    chatDependencies(service).settings.getManualAgentEnvironment = async () => ({ env: {}, version: "env-v1" });
+    chatDependencies(service).settings.getCliProviderHostSecret = async (id: string) => (id === host.id ? { host, apiKey: "gemini-secret" } : undefined);
 
     await service.sendMessage({ conversationId: conversation.id, runId: "compact-gemini-key", content: "@admin /compact" });
     assert.equal(compactRuns.length, 1);
@@ -226,7 +230,7 @@ test("compactParticipant refreshes stored context usage from the session after c
         };
       }
     });
-    (service as any).ensureHistoryFiles = async () => tempRoot;
+    chatParts(service).chatHistory.ensureHistoryFiles = async () => tempRoot;
 
     await service.compactParticipant({
       conversationId: conversation.id,
@@ -238,7 +242,7 @@ test("compactParticipant refreshes stored context usage from the session after c
     assert.equal(storage.current.metadata.agentContextUsageByParticipant?.[participant.id]?.percentage, 12);
     assert.deepEqual(readParticipantCompactions(storage.current.metadata), {});
     // The list of memory notes was in the compacted context: the next turn shows it again.
-    assert.ok((service as any).memoryIndexDue.has((service as any).memoryIndexKey(conversation.id, participant.id)));
+    assert.ok(chatParts(service).memberSessions.memoryIndexDue.has(memoryIndexKey(conversation.id, participant.id)));
     // The CLI rebuilt its instructions from its launch's text: the next turn
     // says its access again.
     const session = (storage.current.metadata.participantSessions as ChatParticipantSession[]).find((item) => item.participantId === participant.id);
@@ -265,7 +269,7 @@ test("compactParticipant schedules prompt-fallback role redelivery after Gemini 
         sessionId: "gemini-after"
       })
     });
-    (service as any).ensureHistoryFiles = async () => tempRoot;
+    chatParts(service).chatHistory.ensureHistoryFiles = async () => tempRoot;
 
     await service.compactParticipant({
       conversationId: conversation.id,
@@ -276,7 +280,7 @@ test("compactParticipant schedules prompt-fallback role redelivery after Gemini 
     const storedSession = storage.current.metadata.participantSessions[0] as ChatParticipantSession;
     assert.equal(storedSession.sessionId, "gemini-after");
     assert.equal(storedSession.runtimeConfigVersion, undefined);
-    const next = await (service as any).sessionForParticipant(storage.current, participant);
+    const next = await chatParts(service).memberSessions.sessionForParticipant(storage.current, participant);
     assert.equal(next.instructionsRefreshed, true);
     assert.equal(typeof next.session.runtimeConfigVersion, "number");
     assert.ok(next.session.runtimeConfigVersion > 0);
@@ -318,8 +322,8 @@ test("compactParticipant preserves sibling active runs while compacting an idle 
         };
       }
     });
-    (service as any).ensureHistoryFiles = async () => tempRoot;
-    (service as any).rememberActiveChatRun(conversation.id, "other-run");
+    chatParts(service).chatHistory.ensureHistoryFiles = async () => tempRoot;
+    chatParts(service).activeRuns.rememberActiveChatRun(conversation.id, "other-run");
 
     await service.compactParticipant({
       conversationId: conversation.id,
@@ -354,8 +358,8 @@ test("compactParticipant waits for an existing same-participant turn reservation
         };
       }
     });
-    (service as any).ensureHistoryFiles = async () => tempRoot;
-    const reservation = (service as any).reserveParticipantTurn(conversation.id, participant.id);
+    chatParts(service).chatHistory.ensureHistoryFiles = async () => tempRoot;
+    const reservation = chatParts(service).turnQueue.reserveParticipantTurn(conversation.id, participant.id);
 
     const compact = service.compactParticipant({
       conversationId: conversation.id,
@@ -402,7 +406,7 @@ test("compactParticipant serializes double compact requests for the same partici
         };
       }
     });
-    (service as any).ensureHistoryFiles = async () => tempRoot;
+    chatParts(service).chatHistory.ensureHistoryFiles = async () => tempRoot;
 
     const first = service.compactParticipant({
       conversationId: conversation.id,
@@ -461,7 +465,7 @@ test("compactParticipant clears running state when compact fails", async () => {
         };
       }
     });
-    (service as any).ensureHistoryFiles = async () => tempRoot;
+    chatParts(service).chatHistory.ensureHistoryFiles = async () => tempRoot;
 
     const result = await service.compactParticipant({
       conversationId: conversation.id,
@@ -474,7 +478,7 @@ test("compactParticipant clears running state when compact fails", async () => {
     assert.equal(storage.current.messages.at(-1)?.metadata?.compaction?.outcome, "failed");
     assert.equal(debugEvents.filter(({ event }) => event === "chat.compaction.finished").at(-1)?.payload.outcome, "failed");
     // Nothing was compacted: the member still has its list of memory notes.
-    assert.equal((service as any).memoryIndexDue.size, 0);
+    assert.equal(chatParts(service).memberSessions.memoryIndexDue.size, 0);
     assert.equal(storage.current.metadata.running, false);
     assert.equal(storage.current.metadata.runId, undefined);
     assert.equal(storage.current.metadata.activeRunIds, undefined);
@@ -499,7 +503,7 @@ test("compactParticipant clears running and compaction state when compact throws
         throw new Error("compact transport failed");
       }
     });
-    (service as any).ensureHistoryFiles = async () => tempRoot;
+    chatParts(service).chatHistory.ensureHistoryFiles = async () => tempRoot;
 
     await assert.rejects(
       service.compactParticipant({
@@ -549,7 +553,7 @@ test("compactParticipant does not overwrite newer context usage after compact fa
         updatedAt: "2026-01-01T00:01:00.000Z"
       })
     });
-    (service as any).ensureHistoryFiles = async () => tempRoot;
+    chatParts(service).chatHistory.ensureHistoryFiles = async () => tempRoot;
 
     await service.compactParticipant({
       conversationId: conversation.id,
@@ -686,8 +690,8 @@ test("requestSelfCompactionFromTool queues behind the current participant turn a
         return { participant: runParticipant, ok: true, sessionId: "session-1" };
       }
     });
-    (service as any).ensureHistoryFiles = async () => tempRoot;
-    const activeTurn = (service as any).reserveParticipantTurn(conversation.id, participant.id);
+    chatParts(service).chatHistory.ensureHistoryFiles = async () => tempRoot;
+    const activeTurn = chatParts(service).turnQueue.reserveParticipantTurn(conversation.id, participant.id);
 
     const result = await service.requestSelfCompactionFromTool(selfCompactionActor(participant), {
       instructions: "Preserve the implementation decisions."
@@ -743,7 +747,7 @@ test("queued self-compaction can be cancelled through the chat run controller", 
         return { participant: runParticipant, ok: true, sessionId: "session-1" };
       }
     });
-    (service as any).ensureHistoryFiles = async () => tempRoot;
+    chatParts(service).chatHistory.ensureHistoryFiles = async () => tempRoot;
 
     const result = await service.requestSelfCompactionFromTool(selfCompactionActor(participant), {});
     assert.equal(result.status, "queued");
@@ -773,7 +777,7 @@ test("approving self-compaction for chat updates the roster override and queues 
         return { participant: runParticipant, ok: true, sessionId: "session-1" };
       }
     });
-    (service as any).ensureHistoryFiles = async () => tempRoot;
+    chatParts(service).chatHistory.ensureHistoryFiles = async () => tempRoot;
     const request = await service.requestSelfCompactionFromTool(selfCompactionActor(participant), {});
 
     await service.respondToAppToolApproval({
@@ -1024,7 +1028,7 @@ test("the machine takes a compaction turn asked of its member, runs it under the
           contextUsage: { usedTokens: 50, contextWindowTokens: 1000, percentage: 5, source: "codex-cli", updatedAt: "2026-03-01T00:00:00.000Z" } };
       }
     });
-    (service as any).ensureHistoryFiles = async () => tempRoot;
+    chatParts(service).chatHistory.ensureHistoryFiles = async () => tempRoot;
     service.setHostMachineId("box");
     const link = fakeServerLink("machine-device");
     service.setServerLink(link);
@@ -1070,7 +1074,7 @@ test("a /compact with no handle written to a member, asked of it on the server (
         return { participant: runParticipant, ok: true, content: "Seen.", durationMs: 1 };
       }
     });
-    (service as any).ensureHistoryFiles = async () => tempRoot;
+    chatParts(service).chatHistory.ensureHistoryFiles = async () => tempRoot;
     service.setHostMachineId("box");
     const link = fakeServerLink("machine-device");
     service.setServerLink(link);
@@ -1101,7 +1105,7 @@ test("a member on a machine asking to compact itself asks it on the server, and 
       conversation,
       compactSession: async (runParticipant) => { compactCalls += 1; return { participant: runParticipant, ok: true, sessionId: "session-on-box" }; }
     });
-    (service as any).ensureHistoryFiles = async () => tempRoot;
+    chatParts(service).chatHistory.ensureHistoryFiles = async () => tempRoot;
     service.setHostMachineId("box");
     const link = fakeServerLink("machine-device");
     service.setServerLink(link);
@@ -1165,7 +1169,7 @@ test("Stop by run id reaches a compaction the machine runs for another device, w
         return { participant: runParticipant, ok: false, error: "Compaction was cancelled." };
       }
     });
-    (service as any).ensureHistoryFiles = async () => tempRoot;
+    chatParts(service).chatHistory.ensureHistoryFiles = async () => tempRoot;
     service.setHostMachineId("box");
     const link = fakeServerLink("machine-device");
     service.setServerLink(link);
@@ -1223,7 +1227,7 @@ function selfCompactingChat(options: {
       return { participant: runParticipant, ok: true, content, durationMs: 1, sessionId: `session-${runParticipant.id}` };
     }
   });
-  (made.service as any).ensureHistoryFiles = async () => tmpdir();
+  chatParts(made.service).chatHistory.ensureHistoryFiles = async () => tmpdir();
   const replies = (): any[] => made.storage.current.messages.filter((message: any) => message.role === "participant" && message.status === "done");
   const approvals = (): any[] => made.storage.current.metadata.pendingAppToolApprovals ?? [];
   return { ...made, participant, conversation, prompts, order, debugEvents, replies, approvals };
@@ -1440,7 +1444,7 @@ test("on a machine a member's own compaction carries what to go on from, and the
       return { participant: runParticipant, ok: true, content: "Went on.", durationMs: 1, sessionId: "session-on-box" };
     }
   });
-  (service as any).ensureHistoryFiles = async () => tmpdir();
+  chatParts(service).chatHistory.ensureHistoryFiles = async () => tmpdir();
   service.setHostMachineId("box");
   const link = fakeServerLink("machine-device");
   service.setServerLink(link);
@@ -1475,7 +1479,7 @@ test("a member's answer is waited for through its own compaction on another devi
     if (here === "machine") service.setHostMachineId("box");
     service.setServerLink(fakeServerLink(`${here}-device`));
     const asked = storage.current.messages.find((message: any) => message.id === "asked-reply");
-    const waiting = (service as any).selfCompactedAnswer(conversation.id, participant.id, asked, undefined) as Promise<any>;
+    const waiting = chatParts(service).selfCompaction.selfCompactedAnswer(conversation.id, participant.id, asked, undefined) as Promise<any>;
     await delay(20);
     const went = (content: string, status: string): any => ({ id: "went-on", role: "participant", participantId: participant.id, content, createdAt: NOW, status,
       metadata: { runId: "turn-compaction-resume-asked", serverSeq: 950, serverWriter: "other-device" } });
@@ -1500,7 +1504,7 @@ test("an answer that never comes after a compaction says why: stopped, cut short
     made.service.setServerLink(link);
     const controller = new AbortController();
     const asked = made.storage.current.messages.find((message: any) => message.id === "asked-reply");
-    const waiting = (made.service as any).selfCompactedAnswer(conversation.id, participant.id, asked, controller.signal) as Promise<any>;
+    const waiting = chatParts(made.service).selfCompaction.selfCompactedAnswer(conversation.id, participant.id, asked, controller.signal) as Promise<any>;
     return { ...made, link, controller, waiting, conversation };
   };
   for (const reason of ["stopped", "interrupted", "failed", "not-continued"]) {
@@ -1567,7 +1571,7 @@ test("a restart that cut a member's compaction short is said on its reply once; 
     conversation.messages.push({ ...askingReply(participant.id, mark), metadata: { runId: "turn-asked", selfCompaction: mark } });
     conversation.metadata.pendingAppToolApprovals = approvals as never;
     const { service, storage } = testService({ conversation, compactSession: async () => ({}) });
-    await (service as any).requireChat(conversation.id);
+    await chatParts(service).store.requireChat(conversation.id);
     return storage.current.messages.find((message: any) => message.id === "asked-reply").metadata.selfCompaction;
   };
   assert.deepEqual(await marks({ state: "waiting" }), { state: "ended", reason: "interrupted" });
@@ -1589,8 +1593,8 @@ test("a turn that could not start after the compaction, or was stopped before an
       participant: ALLOWED,
       turn: async ({ actor, service }) => {
         await service.requestSelfCompactionFromTool(actor, {});
-        const run = (service as any).runParticipantTurnSerialized.bind(service);
-        (service as any).runParticipantTurnSerialized = async (...args: any[]) => {
+        const run = chatParts(service).turnQueue.runParticipantTurnSerialized.bind(chatParts(service).turnQueue);
+        chatParts(service).turnQueue.runParticipantTurnSerialized = async (...args: any[]) => {
           if (!String(args[3]).startsWith("turn-compaction-resume-")) return run(...args);
           args[6].turnReservation.release();
           return start();
@@ -1604,7 +1608,7 @@ test("a turn that could not start after the compaction, or was stopped before an
     const asking = chat.storage.current.messages.find((message: any) => message.metadata?.selfCompaction);
     const { error: _error, ...mark } = asking.metadata.selfCompaction;
     assert.deepEqual(mark, expected, label);
-    const answer = await (chat.service as any).selfCompactedAnswer(chat.conversation.id, "codex-admin", asking, undefined);
+    const answer = await chatParts(chat.service).selfCompaction.selfCompactedAnswer(chat.conversation.id, "codex-admin", asking, undefined);
     assert.equal(answer.kind, "ended", label);
     await waitFor(() => chat.storage.current.metadata.running === false, 5_000);
   }
@@ -1621,13 +1625,13 @@ test("a stopped request stops its member's compaction, its card and the turn it 
   await card.service.sendMessage({ conversationId: card.conversation.id, runId: "user-run", content: "@admin go" });
   await waitFor(() => card.replies().length === 1 && card.storage.current.metadata.running === false, 5_000);
   const controller = new AbortController();
-  const waiting = (card.service as any).selfCompactedAnswer(card.conversation.id, "codex-admin", card.replies()[0], controller.signal) as Promise<any>;
+  const waiting = chatParts(card.service).selfCompaction.selfCompactedAnswer(card.conversation.id, "codex-admin", card.replies()[0], controller.signal) as Promise<any>;
   await delay(20);
   controller.abort();
   assert.deepEqual(await waiting, { kind: "ended", reason: "stopped" });
   assert.equal(card.approvals()[0].status, "cancelled");
   // A resume already on its way behind another turn is not begun.
-  await (card.service as any).continueAfterSelfCompaction(card.conversation.id, "codex-admin", { runId: card.replies()[0].metadata.runId }, { kind: "completed" }, undefined);
+  await chatParts(card.service).selfCompactionResumes.continueAfterSelfCompaction(card.conversation.id, "codex-admin", { runId: card.replies()[0].metadata.runId }, { kind: "completed" }, undefined);
   assert.equal(card.prompts.length, 1);
 });
 
@@ -1661,7 +1665,7 @@ test("a Stop from before the member asked to compact, told again by the server, 
   service.setServerLink(fakeServerLink("desktop-device"));
   const stopped = (at: string): HubTurn => ({ runId: `turn-${at}`, conversationId: conversation.id, messageId: "anchor", participantId: participant.id, state: "stopped", finishedAt: at, outcome: "stopped" });
   const since = "2026-11-25T12:00:00.000Z";
-  const check = async (): Promise<boolean> => (service as any).memberStoppedSince(await (service as any).requireChat(conversation.id), participant.id, { runId: "asked", since });
+  const check = async (): Promise<boolean> => chatParts(service).selfCompactionResumes.memberStoppedSince(await chatParts(service).store.requireChat(conversation.id), participant.id, { runId: "asked", since });
   await service.applyServerEntries([fromServer("phone", { kind: "turn.stop", turn: stopped("2026-11-25T11:00:00.000Z") })]);
   assert.equal(await check(), false);
   await service.applyServerEntries([fromServer("phone", { kind: "turn.stop", turn: stopped("2026-11-25T12:00:01.000Z") })]);
@@ -1676,10 +1680,10 @@ test("a request held through a permission approval's resume is not swept as inte
     id: "batch", requesterParticipantId: "asker", requesterHandle: "asker", source: "mcp", resumeRequester: true, status: "running", depth: 1, createdAt: NOW, updatedAt: NOW,
     items: [{ targetParticipantId: target.id, targetHandle: "admin", prompt: "Do it", status: "running", createdAt: NOW, updatedAt: NOW }] } } } as any);
   const { service } = testService({ conversation, compactSession: async () => ({}) });
-  const sweep = (): boolean => (service as any).markOrphanedParticipantRequestsInterrupted(clone(conversation));
-  (service as any).heldParticipantRequests.add("request");
+  const sweep = (): boolean => chatParts(service).requestRecovery.markOrphanedParticipantRequestsInterrupted(clone(conversation));
+  chatParts(service).permissionRequests.heldParticipantRequests.add("request");
   assert.equal(sweep(), false);
-  (service as any).heldParticipantRequests.delete("request");
+  chatParts(service).permissionRequests.heldParticipantRequests.delete("request");
   assert.equal(sweep(), true);
 });
 
@@ -1690,26 +1694,26 @@ test("a machine that restarted after a compaction ended, before its member went 
   const { service, storage } = testService({ conversation, compactSession: async () => ({}) });
   service.setHostMachineId("box");
   (service as any).setMachineRuntime?.(true);
-  (service as any).machineRuntime = true;
+  chatParts(service).host.machineRuntime = true;
   const mark = (): any => storage.current.messages.find((message: any) => message.id === "asked-reply").metadata.selfCompaction;
-  await (service as any).requireChat(conversation.id);
+  await chatParts(service).store.requireChat(conversation.id);
   assert.deepEqual(mark(), { state: "waiting" }, "not known yet what waits there");
   service.setServerLink(fakeServerLink("machine-device"));
   await service.resumeServerTurns();
-  await (service as any).requireChat(conversation.id);
+  await chatParts(service).store.requireChat(conversation.id);
   assert.deepEqual(mark(), { state: "ended", reason: "interrupted" });
 });
 
 test("the turn a member goes on in is never taken for its requester's resume after a restart", () => {
   const { service } = testService({ conversation: chatConversation([], []), compactSession: async () => ({}) });
-  const text = (service as any).selfCompactionResumeText(chatParticipant(), { kind: "completed" }, undefined) as string;
+  const text = selfCompactionResumeText(chatParticipant(), { kind: "completed" }, undefined) as string;
   assert.doesNotMatch(text, /^Auto-resumed @/);
 });
 
 test("a member's access says when to compact: on its own when it may, on a card when it asks, nothing when it may not", () => {
   const { service } = testService({ conversation: chatConversation([], []), compactSession: async () => ({}) });
   const lines = (right: "allow" | "ask" | "deny"): string =>
-    (service as any).compactionAccessLines(normalizeChatAgentPermissions({ ...defaultChatAgentPermissions(), requestCompaction: right })).join("\n");
+    compactionAccessLines(normalizeChatAgentPermissions({ ...defaultChatAgentPermissions(), requestCompaction: right })).join("\n");
   assert.match(lines("allow"), /User is not asked\..*the app calls you again/s);
   assert.match(lines("allow"), /before you start a new task or the next stage of a big task/);
   assert.match(lines("ask"), /asks User on a card/);
@@ -1750,7 +1754,7 @@ test("a compaction that finds no live process starts the member's process exactl
         return { participant: runParticipant, ok: true, content: "Done.", durationMs: 1, sessionId: "session-1" };
       }
     });
-    (service as any).ensureHistoryFiles = async () => tempRoot;
+    chatParts(service).chatHistory.ensureHistoryFiles = async () => tempRoot;
 
     // After a restart: no live process, no app tool connection yet.
     await service.sendMessage({ conversationId: conversation.id, runId: "compact-run", content: "@admin /compact" });
@@ -1841,7 +1845,7 @@ test("a compaction gives Codex its app tools as a Codex turn does, gives Gemini 
         return { participant: runParticipant, ok: true, sessionId: compactOptions.sessionId as string };
       }
     });
-    (service as any).ensureHistoryFiles = async () => tempRoot;
+    chatParts(service).chatHistory.ensureHistoryFiles = async () => tempRoot;
     for (const handle of ["cx", "gm", "cf"]) {
       await service.sendMessage({ conversationId: conversation.id, runId: `compact-${handle}`, content: `@${handle} /compact` });
     }
@@ -1866,7 +1870,7 @@ test("a compaction failure line ends with one period whatever the reason ends wi
       conversation,
       compactSession: async (runParticipant) => ({ participant: runParticipant, ok: false, error: errors.shift() })
     });
-    (service as any).ensureHistoryFiles = async () => tempRoot;
+    chatParts(service).chatHistory.ensureHistoryFiles = async () => tempRoot;
     const lines: string[] = [];
     for (let index = 0; index < 4; index += 1) {
       await service.sendMessage({ conversationId: conversation.id, runId: `compact-${index}`, content: "@admin /compact" });
@@ -2023,13 +2027,13 @@ test("a member compacting while another member's compaction finishes stays compa
         return { participant: runParticipant, ok: true, sessionId: `${runParticipant.id}-session` };
       }
     });
-    (service as any).ensureHistoryFiles = async () => tempRoot;
+    chatParts(service).chatHistory.ensureHistoryFiles = async () => tempRoot;
 
     const firstCompaction = service.compactParticipant({ conversationId: conversation.id, participantId: first.id, runId: "first-compaction" });
     const secondCompaction = service.compactParticipant({ conversationId: conversation.id, participantId: second.id, runId: "second-compaction" });
     await firstCompaction;
     await waitFor(() => typeof finishSecond === "function");
-    await (service as any).waitForQueuedSave(conversation.id);
+    await chatParts(service).store.waitForQueuedSave(conversation.id);
 
     assert.ok(storage.current.metadata.participantCompactionsByParticipantId?.second, "the second member still shows as compacting");
     await assert.rejects(

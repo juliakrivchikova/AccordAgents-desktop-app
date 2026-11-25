@@ -16,6 +16,7 @@ import {
   AppMcpService
 } from "./appMcp";
 import { ChatService } from "./chat";
+import { chatParts } from "./chat/test/chatParts";
 
 const SNAPSHOT_AT = "2026-07-31T09:00:00.000Z";
 
@@ -762,7 +763,7 @@ test("activity snapshot stays roster-consistent while request-status explicitly 
     })
   }));
   const harness = chatServiceHarness([conversation]);
-  (harness.service as any).activeRunIds.add("unrelated-live-run");
+  chatParts(harness.service).activeRuns.activeRunIds.add("unrelated-live-run");
   const actor = {
     conversationId: conversation.id,
     participantId: requester.id,
@@ -790,10 +791,10 @@ test("participant activity guidance is local-only and absent from detached remot
   const conversation = chatConversation([local, remote]);
   const access = { agentMode: "default", permissions: local.permissions };
   const remoteSession = { ...session, participantId: remote.id, participantKind: remote.kind };
-  const localInstructions = (harness.service as any).sessionInstructions(conversation, local, session, access, "/tmp/ws") as string;
-  const remoteInstructions = (harness.service as any).sessionInstructions(conversation, remote, remoteSession, access, "/tmp/ws") as string;
+  const localInstructions = chatParts(harness.service).memberSessions.sessionInstructions(conversation, local, session, access, "/tmp/ws") as string;
+  const remoteInstructions = chatParts(harness.service).memberSessions.sessionInstructions(conversation, remote, remoteSession, access, "/tmp/ws") as string;
   // The same instructions go in-band when the CLI cannot take them natively.
-  const remoteFallback = (harness.service as any).buildPromptParts(conversation, remote, remoteSession, { id: "m", role: "user", content: "Hi.", createdAt: "2026-05-01T00:00:00.000Z", status: "done" }, "/tmp/ws", false, { includeRoleInstructions: true, ...access }).prompt as string;
+  const remoteFallback = chatParts(harness.service).turnPrompt.buildPromptParts(conversation, remote, remoteSession, { id: "m", role: "user", content: "Hi.", createdAt: "2026-05-01T00:00:00.000Z", status: "done" }, "/tmp/ws", false, { includeRoleInstructions: true, ...access }).prompt as string;
 
   assert.match(localInstructions, /app_chat_get_participant_activity/);
   assert.doesNotMatch(remoteInstructions, /app_chat_get_participant_activity/);

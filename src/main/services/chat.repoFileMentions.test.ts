@@ -4,6 +4,10 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { ChatService } from "./chat";
+import { chatParts } from "./chat/test/chatParts";
+import { validateRepoFileMentions } from "./chat/choices/mentions";
+import { mergeStoredChatMessages } from "./chat/store/mergeStoredChat";
+import { mergeStoredChatMetadata } from "./chat/store/mergeStoredMetadata";
 import { StorageService } from "./storage";
 import { defaultChatAgentPermissions, effectiveChatAgentPermissionsForProvider, normalizeChatAgentPermissions } from "../../shared/agentPermissions";
 import { normalizeInferredParticipantRequestThreads } from "../../shared/chatParticipantRequestThreads";
@@ -48,7 +52,7 @@ test("validateRepoFileMentions keeps safe repo-relative files and rejects unsafe
     const conversation = chatConversation([chatParticipant()], repoPath);
     const warnings: string[] = [];
 
-    const mentions = await service.validateRepoFileMentions(conversation, [
+    const mentions = await validateRepoFileMentions(conversation, [
       { path: "src/chat.ts" },
       { path: "../outside.txt" },
       { path: "/tmp/outside.txt" },
@@ -78,7 +82,7 @@ test("validateRepoFileMentions extracts manually typed repo file tokens", async 
     const conversation = chatConversation([chatParticipant()], repoPath);
     const warnings: string[] = [];
 
-    const mentions = await service.validateRepoFileMentions(
+    const mentions = await validateRepoFileMentions(
       conversation,
       [{ path: "src/chat.ts" }],
       warnings,
@@ -116,12 +120,12 @@ test("buildPrompt adds repo file guidance based on repoRead permission", () => {
   const service = testService({ canRequestPermissions: true }).service as any;
   const session = chatSession(participant);
 
-  const blockedPrompt = service.buildPrompt(conversation, participant, session, triggerMessage, "/workspace", false, {
+  const blockedPrompt = chatParts(service).turnPrompt.buildPrompt(conversation, participant, session, triggerMessage, "/workspace", false, {
     includeRoleInstructions: false,
     agentMode: "default",
     permissions: normalizeChatAgentPermissions({ ...defaultChatAgentPermissions(), repoRead: false })
   });
-  const allowedPrompt = service.buildPrompt(conversation, participant, session, triggerMessage, "/workspace", false, {
+  const allowedPrompt = chatParts(service).turnPrompt.buildPrompt(conversation, participant, session, triggerMessage, "/workspace", false, {
     includeRoleInstructions: false,
     agentMode: "default",
     permissions: normalizeChatAgentPermissions(defaultChatAgentPermissions())
@@ -156,7 +160,7 @@ test("buildPromptParts: a resumed session's message is User's text alone; its in
     conversation: Conversation,
     permissions: ReturnType<typeof normalizeChatAgentPermissions>,
     includeRoleInstructions: boolean
-  ) => service.buildPromptParts(conversation, participant, session, triggerMessage, "/workspace", false, {
+  ) => chatParts(service).turnPrompt.buildPromptParts(conversation, participant, session, triggerMessage, "/workspace", false, {
     includeRoleInstructions,
     agentMode: "default",
     permissions
@@ -194,13 +198,13 @@ test("the session's instructions say once who acts on a message naming several m
   conversation.messages.push(triggerMessage);
   const service = testService({ canRequestPermissions: true }).service as any;
   const access = { agentMode: "default", permissions: normalizeChatAgentPermissions(defaultChatAgentPermissions()) };
-  const prompt = service.buildPrompt(conversation, drew, chatSession(drew), triggerMessage, "/workspace", false, {
+  const prompt = chatParts(service).turnPrompt.buildPrompt(conversation, drew, chatSession(drew), triggerMessage, "/workspace", false, {
     includeRoleInstructions: false,
     ...access
   }) as string;
   assert.equal(prompt, "@drew @taylor what do you both think?", "the message as typed, nothing around it");
 
-  const instructions = service.sessionInstructions(conversation, drew, chatSession(drew), access, "/workspace") as string;
+  const instructions = chatParts(service).memberSessions.sessionInstructions(conversation, drew, chatSession(drew), access, "/workspace") as string;
   assert.match(instructions, /When one message mentions several members, act on it only if you are its direct addressee or it is a request addressed to you; otherwise reply only "Noted"\./);
   assert.match(instructions, /Writing another participant's handle:/);
   assert.match(instructions, /is a request for that participant to run, not a reference to them/);
@@ -221,7 +225,7 @@ test("a message's files and selected skills follow its text, one short line each
   };
   conversation.messages.push(triggerMessage);
   const service = testService({ canRequestPermissions: true }).service as any;
-  const prompt = service.buildPrompt(conversation, drew, chatSession(drew), triggerMessage, "/workspace", false, {
+  const prompt = chatParts(service).turnPrompt.buildPrompt(conversation, drew, chatSession(drew), triggerMessage, "/workspace", false, {
     includeRoleInstructions: false,
     agentMode: "default",
     permissions: normalizeChatAgentPermissions(defaultChatAgentPermissions())
@@ -238,8 +242,8 @@ test("sendMessage clears running and emits terminal error when participant run f
   const conversation = chatConversation([participant], "/repo");
   const { service, storage } = testService({ conversations: [conversation] });
   const progress: Array<{ phase: string; message: string }> = [];
-  (service as any).ensureHistoryFiles = async () => tmpdir();
-  (service as any).runParticipantTurnSerialized = async () => {
+  chatParts(service).chatHistory.ensureHistoryFiles = async () => tmpdir();
+  chatParts(service).turnQueue.runParticipantTurnSerialized = async () => {
     throw new Error("participant exploded");
   };
 
@@ -266,7 +270,7 @@ test("sendMessage persists image-only messages as metadata plus app-owned files"
   const conversation = chatConversation([participant], "/repo");
   const { service, storage } = testService({ conversations: [conversation] });
   const serviceAny = service as any;
-  serviceAny.attachmentPath = (_conversationId: string, storageKey: string) => path.join(tempRoot, storageKey);
+  chatParts(serviceAny).attachments.attachmentPath = (_conversationId: string, storageKey: string) => path.join(tempRoot, storageKey);
 
   try {
     const result = await service.sendMessage({
@@ -355,7 +359,7 @@ test("MCP attachment export writes byte-identical files with run-scoped effectiv
   };
   const { service } = testService({ conversations: [conversation] });
   const serviceAny = service as any;
-  serviceAny.attachmentPath = (_conversationId: string, storageKey: string) => path.join(storageRoot, storageKey);
+  chatParts(serviceAny).attachments.attachmentPath = (_conversationId: string, storageKey: string) => path.join(storageRoot, storageKey);
   await mkdir(path.join(repoPath, "exports"), { recursive: true });
   await mkdir(path.dirname(path.join(storageRoot, attachment.storageKey)), { recursive: true });
   const bytes = Buffer.from(ONE_BY_ONE_PNG_BASE64, "base64");
@@ -464,7 +468,7 @@ test("MCP attachment export rejects unsafe destination paths", async () => {
   };
   const { service } = testService({ conversations: [conversation] });
   const serviceAny = service as any;
-  serviceAny.attachmentPath = (_conversationId: string, storageKey: string) => path.join(storageRoot, storageKey);
+  chatParts(serviceAny).attachments.attachmentPath = (_conversationId: string, storageKey: string) => path.join(storageRoot, storageKey);
   await mkdir(path.join(repoPath, "exports"), { recursive: true });
   await mkdir(outsidePath, { recursive: true });
   await mkdir(path.dirname(path.join(storageRoot, attachment.storageKey)), { recursive: true });
@@ -525,7 +529,7 @@ test("MCP attachment export reports missing app-owned bytes", async () => {
   };
   const { service } = testService({ conversations: [conversation] });
   const serviceAny = service as any;
-  serviceAny.attachmentPath = (_conversationId: string, storageKey: string) => path.join(storageRoot, storageKey);
+  chatParts(serviceAny).attachments.attachmentPath = (_conversationId: string, storageKey: string) => path.join(storageRoot, storageKey);
   await mkdir(path.join(repoPath, "exports"), { recursive: true });
   const actor = {
     conversationId: conversation.id,
@@ -563,7 +567,7 @@ test("respondToMentions returns after ingest and emits terminal error when parti
   conversation.messages.push(sourceMessage);
   const { service, storage } = testService({ conversations: [conversation] });
   const progress: Array<{ phase: string; message: string }> = [];
-  (service as any).runParticipantBatch = async () => {
+  chatParts(service).participantBatch.runParticipantBatch = async () => {
     throw new Error("mention exploded");
   };
 
@@ -607,7 +611,7 @@ test("respondToChoice returns after ingest and emits terminal error when request
   conversation.messages.push(sourceMessage);
   const { service, storage } = testService({ conversations: [conversation] });
   const progress: Array<{ phase: string; message: string }> = [];
-  (service as any).runParticipantTurnSerialized = async () => {
+  chatParts(service).turnQueue.runParticipantTurnSerialized = async () => {
     throw new Error("choice exploded");
   };
 
@@ -647,8 +651,8 @@ test("a durable choice answer is taken with the own-answer option and kept on th
   conversation.messages.push(sourceMessage);
   const { service, storage } = testService({ conversations: [conversation] });
   const serviceAny = service as any;
-  serviceAny.ensureHistoryFiles = async () => "/tmp/accordagents-test-history";
-  serviceAny.runParticipantTurnSerialized = async () => [participantMessage(requester, "choice-reply", "Choice handled.")];
+  chatParts(serviceAny).chatHistory.ensureHistoryFiles = async () => "/tmp/accordagents-test-history";
+  chatParts(serviceAny).turnQueue.runParticipantTurnSerialized = async () => [participantMessage(requester, "choice-reply", "Choice handled.")];
   // An answer from the User's server, as its card's device applies it: named
   // by the card's answer, refused under the operation it came in.
   const guard = (operationId: string) => ({ decisionEventId: `card-answer:choice:${sourceMessage.id}:${operationId}`, operationId, beforeApply: async () => undefined });
@@ -669,9 +673,9 @@ test("a durable choice answer is taken with the own-answer option and kept on th
   ], "each refused answer is kept once, by the operation it was sent under");
   await assert.rejects(answer({ selectedOptionId: "nope-again" }), /Selected option was not found\./);
   assert.equal((await refusals())?.length, 2, "an answer that was not a durable decision names no operation to keep");
-  await serviceAny.withChatMutation(stale, async () => {
+  await chatParts(serviceAny).store.withChatMutation(stale, async () => {
     stale.updatedAt = new Date().toISOString();
-    await serviceAny.saveConversation(stale);
+    await chatParts(serviceAny).store.saveConversation(stale);
   });
   assert.equal((await refusals())?.length, 2, "a flow holding an older copy of the waiting choice keeps the refusals recorded since");
 
@@ -704,8 +708,8 @@ test("respondToChoice releases chat run queue while requester turn continues", a
   const runCanFinish = new Promise<void>((resolve) => {
     releaseRun = resolve;
   });
-  serviceAny.ensureHistoryFiles = async () => "/tmp/accordagents-test-history";
-  serviceAny.runParticipantTurnSerialized = async (
+  chatParts(serviceAny).chatHistory.ensureHistoryFiles = async () => "/tmp/accordagents-test-history";
+  chatParts(serviceAny).turnQueue.runParticipantTurnSerialized = async (
     _conversation: Conversation,
     _requester: ChatParticipant,
     triggerMessage: ChatMessage
@@ -728,7 +732,7 @@ test("respondToChoice releases chat run queue while requester turn continues", a
   );
   await waitFor(() => runStarted);
 
-  assert.equal(serviceAny.runQueues.has(conversation.id), false);
+  assert.equal(chatParts(serviceAny).activeRuns.runQueues.has(conversation.id), false);
   const savedDuringRun = await storage.getConversation(conversation.id);
   assert.equal(savedDuringRun?.metadata.running, true);
   const savedSelectionMessage = savedDuringRun?.messages.find((message) =>
@@ -777,7 +781,7 @@ test("respondToChoice can cancel without returning control to requester", async 
   const { service, storage } = testService({ conversations: [conversation] });
   const serviceAny = service as any;
   let requesterRan = false;
-  serviceAny.runParticipantTurnSerialized = async () => {
+  chatParts(serviceAny).turnQueue.runParticipantTurnSerialized = async () => {
     requesterRan = true;
     return [participantMessage(requester, "choice-reply", "Choice handled.")];
   };
@@ -822,8 +826,8 @@ test("respondToChoice waits for persisted ingest and rejects duplicate choice an
   const runCanFinish = new Promise<void>((resolve) => {
     releaseRun = resolve;
   });
-  serviceAny.ensureHistoryFiles = async () => "/tmp/accordagents-test-history";
-  serviceAny.runParticipantTurnSerialized = async () => {
+  chatParts(serviceAny).chatHistory.ensureHistoryFiles = async () => "/tmp/accordagents-test-history";
+  chatParts(serviceAny).turnQueue.runParticipantTurnSerialized = async () => {
     await runCanFinish;
     return [participantMessage(requester, "choice-reply", "Choice handled.")];
   };
@@ -903,7 +907,7 @@ test("respondToMentions waits for persisted ingest and rejects duplicate approva
   const batchCanFinish = new Promise<void>((resolve) => {
     releaseBatch = resolve;
   });
-  serviceAny.runParticipantBatch = async () => {
+  chatParts(serviceAny).participantBatch.runParticipantBatch = async () => {
     await batchCanFinish;
   };
 
@@ -985,7 +989,7 @@ test("respondToMentions keeps parent run cancellable after fast return", async (
   const batchCanFinish = new Promise<void>((resolve) => {
     releaseBatch = resolve;
   });
-  serviceAny.runParticipantBatch = async (
+  chatParts(serviceAny).participantBatch.runParticipantBatch = async (
     _conversation: Conversation,
     _participants: ChatParticipant[],
     _triggerMessage: ChatMessage,
@@ -1013,7 +1017,7 @@ test("respondToMentions keeps parent run cancellable after fast return", async (
   await waitFor(async () => {
     const saved = await storage.getConversation(conversation.id);
     return saved?.metadata.running === false &&
-      !serviceAny.chatRunControllers.has("mention-parent-run");
+      !chatParts(serviceAny).activeRuns.chatRunControllers.has("mention-parent-run");
   });
 });
 
@@ -1109,7 +1113,7 @@ test("hydrateContextUsage interrupts orphaned running participant requests when 
   conversation.messages.push(requestMessage, targetPending);
   const { service, storage } = testService({ conversations: [conversation] });
   const serviceAny = service as any;
-  serviceAny.participantRequestRunners.set(requestMessage.id, new Promise(() => undefined));
+  chatParts(serviceAny).participantRequests.participantRequestRunners.set(requestMessage.id, new Promise(() => undefined));
 
   const hydrated = await service.hydrateContextUsage(cloneConversation(conversation));
   const saved = await storage.getConversation(conversation.id);
@@ -1155,21 +1159,21 @@ test("stale recovery does not clear running while background runner is active", 
   const { service, storage } = testService({ conversations: [conversation] });
   const serviceAny = service as any;
 
-  await serviceAny.beginChatRun(conversation, "origin-run");
-  serviceAny.incrementBackgroundRunner(conversation.id);
-  await serviceAny.endChatRun(conversation, "origin-run");
+  await chatParts(serviceAny).activeRuns.beginChatRun(conversation, "origin-run");
+  chatParts(serviceAny).activeRuns.incrementBackgroundRunner(conversation.id);
+  await chatParts(serviceAny).activeRuns.endChatRun(conversation, "origin-run");
 
   let saved = await storage.getConversation(conversation.id);
   assert.equal(saved?.metadata.running, true);
   assert.equal(saved?.metadata.runId, undefined);
 
   const recoveredCandidate = cloneConversation(saved as Conversation);
-  assert.equal(serviceAny.recoverStaleChatRun(recoveredCandidate), false);
+  assert.equal(chatParts(serviceAny).runOwners.recoverStaleChatRun(recoveredCandidate), false);
   assert.equal(recoveredCandidate.metadata.running, true);
   assert.equal(recoveredCandidate.metadata.runId, undefined);
 
-  serviceAny.decrementBackgroundRunner(conversation.id);
-  await serviceAny.tryClearRunningIfIdle(conversation.id);
+  chatParts(serviceAny).activeRuns.decrementBackgroundRunner(conversation.id);
+  await chatParts(serviceAny).activeRuns.tryClearRunningIfIdle(conversation.id);
 
   saved = await storage.getConversation(conversation.id);
   assert.equal(saved?.metadata.running, false);
@@ -1182,11 +1186,11 @@ test("tryClearRunningIfIdle waits for the chat run queue before clearing running
   const { service, storage } = testService({ conversations: [conversation] });
   const serviceAny = service as any;
   let releaseRunQueue!: () => void;
-  serviceAny.runQueues.set(conversation.id, new Promise<void>((resolve) => {
+  chatParts(serviceAny).activeRuns.runQueues.set(conversation.id, new Promise<void>((resolve) => {
     releaseRunQueue = resolve;
   }));
 
-  const clearing = serviceAny.tryClearRunningIfIdle(conversation.id);
+  const clearing = chatParts(serviceAny).activeRuns.tryClearRunningIfIdle(conversation.id);
   await Promise.resolve();
 
   let saved = await storage.getConversation(conversation.id);
@@ -1206,13 +1210,13 @@ test("endChatRun does not clear a newer run id", async () => {
   conversation.metadata = { ...conversation.metadata, running: true, runId: "newer-run" };
   const { service } = testService({ conversations: [conversation] });
   const serviceAny = service as any;
-  serviceAny.activeRunIds.add("older-run");
+  chatParts(serviceAny).activeRuns.activeRunIds.add("older-run");
 
-  await serviceAny.endChatRun(conversation, "older-run");
+  await chatParts(serviceAny).activeRuns.endChatRun(conversation, "older-run");
 
   assert.equal(conversation.metadata.running, true);
   assert.equal(conversation.metadata.runId, "newer-run");
-  assert.equal(serviceAny.activeRunIds.has("older-run"), false);
+  assert.equal(chatParts(serviceAny).activeRuns.activeRunIds.has("older-run"), false);
 });
 
 test("autoResumeParticipantRequest completes and clears running state", async () => {
@@ -1222,12 +1226,12 @@ test("autoResumeParticipantRequest completes and clears running state", async ()
   conversation.messages.push(requestMessage);
   const { service, storage } = testService({ conversations: [conversation] });
   const serviceAny = service as any;
-  serviceAny.ensureHistoryFiles = async () => "/tmp/accordagents-test-history";
-  serviceAny.runParticipantTurnSerialized = async () => [
+  chatParts(serviceAny).chatHistory.ensureHistoryFiles = async () => "/tmp/accordagents-test-history";
+  chatParts(serviceAny).turnQueue.runParticipantTurnSerialized = async () => [
     participantMessage(requester, "resume-reply", "Final required fixes are listed.")
   ];
 
-  await serviceAny.autoResumeParticipantRequest(conversation.id, requestMessage.id);
+  await chatParts(serviceAny).requesterResumes.autoResumeParticipantRequest(conversation.id, requestMessage.id);
   await waitFor(async () => {
     const saved = await storage.getConversation(conversation.id);
     const savedRequest = saved?.messages.find((message) => message.id === requestMessage.id);
@@ -1416,7 +1420,7 @@ test("requestParticipantsFromTool does not wait on top-level run queue", async (
   const { service } = testService({ conversations: [conversation] });
   const serviceAny = service as any;
   let releaseRunQueue!: () => void;
-  serviceAny.runQueues.set(conversation.id, new Promise<void>((resolve) => {
+  chatParts(serviceAny).activeRuns.runQueues.set(conversation.id, new Promise<void>((resolve) => {
     releaseRunQueue = resolve;
   }));
 
@@ -1440,7 +1444,7 @@ test("requestParticipantsFromTool does not wait on top-level run queue", async (
     assert.equal(result.status, "pending_approval");
   } finally {
     releaseRunQueue();
-    serviceAny.runQueues.delete(conversation.id);
+    chatParts(serviceAny).activeRuns.runQueues.delete(conversation.id);
   }
 });
 
@@ -1455,9 +1459,9 @@ test("requestParticipantsFromTool reports running without approvalRequired while
   const targetCanFinish = new Promise<void>((resolve) => {
     releaseTarget = resolve;
   });
-  serviceAny.ensureHistoryFiles = async () => "/tmp/accordagents-test-history";
-  serviceAny.refreshStoredChatState = async () => undefined;
-  serviceAny.runParticipantTurnSerialized = async () => {
+  chatParts(serviceAny).chatHistory.ensureHistoryFiles = async () => "/tmp/accordagents-test-history";
+  chatParts(serviceAny).store.refreshStoredChatState = async () => undefined;
+  chatParts(serviceAny).turnQueue.runParticipantTurnSerialized = async () => {
     await targetCanFinish;
     return [participantMessage(target, "target-reply", "Reviewed.")];
   };
@@ -1500,10 +1504,10 @@ test("requestParticipantsFromTool forwards requester progress to target runs", a
   const requesterProgress = (progress: { agentProgress?: { partialContent?: string } }): void => {
     progressEvents.push(progress);
   };
-  serviceAny.ensureHistoryFiles = async () => "/tmp/accordagents-test-history";
-  serviceAny.refreshStoredChatState = async () => undefined;
-  serviceAny.runProgressCallbacks.set("active-run", requesterProgress);
-  serviceAny.runParticipantTurnSerialized = async (
+  chatParts(serviceAny).chatHistory.ensureHistoryFiles = async () => "/tmp/accordagents-test-history";
+  chatParts(serviceAny).store.refreshStoredChatState = async () => undefined;
+  chatParts(serviceAny).activeRuns.runProgressCallbacks.set("active-run", requesterProgress);
+  chatParts(serviceAny).turnQueue.runParticipantTurnSerialized = async (
     _conversation: Conversation,
     participant: ChatParticipant,
     _trigger: ChatMessage,
@@ -1543,9 +1547,9 @@ test("requestParticipantsFromTool uses service progress for background target ru
     onProgress: (progress: { agentProgress?: { partialContent?: string } }) => progressEvents.push(progress)
   });
   const serviceAny = service as any;
-  serviceAny.ensureHistoryFiles = async () => "/tmp/accordagents-test-history";
-  serviceAny.refreshStoredChatState = async () => undefined;
-  serviceAny.runParticipantTurnSerialized = async (
+  chatParts(serviceAny).chatHistory.ensureHistoryFiles = async () => "/tmp/accordagents-test-history";
+  chatParts(serviceAny).store.refreshStoredChatState = async () => undefined;
+  chatParts(serviceAny).turnQueue.runParticipantTurnSerialized = async (
     _conversation: Conversation,
     participant: ChatParticipant,
     _trigger: ChatMessage,
@@ -1706,7 +1710,7 @@ test("superseded participant turn preserves older pending choices while closing 
   conversation.messages.push(choiceMessage, requestMessage);
   const { service } = testService({ conversations: [conversation] });
 
-  (service as any).resolveSupersededParticipantInteractions(conversation, requester.id);
+  chatParts(service).approvalDecisions.resolveSupersededParticipantInteractions(conversation, requester.id);
 
   assert.equal(choiceMessage.metadata?.pendingChoice?.status, "pending");
   assert.equal(choiceMessage.metadata?.pendingChoice?.cancelledAt, undefined);
@@ -1740,8 +1744,8 @@ test("respondToChoice succeeds after an intervening same-participant turn", asyn
   const serviceAny = service as any;
   let routedParticipantId = "";
   let choiceTriggerMessage: ChatMessage | undefined;
-  serviceAny.ensureHistoryFiles = async () => "/tmp/accordagents-test-history";
-  serviceAny.runParticipantTurnSerialized = async (
+  chatParts(serviceAny).chatHistory.ensureHistoryFiles = async () => "/tmp/accordagents-test-history";
+  chatParts(serviceAny).turnQueue.runParticipantTurnSerialized = async (
     _conversation: Conversation,
     participant: ChatParticipant,
     triggerMessage: ChatMessage
@@ -1751,7 +1755,7 @@ test("respondToChoice succeeds after an intervening same-participant turn", asyn
     return [participantMessage(requester, "choice-reply", "Push approval handled.")];
   };
 
-  serviceAny.resolveSupersededParticipantInteractions(conversation, requester.id, laterMessage.id);
+  chatParts(serviceAny).approvalDecisions.resolveSupersededParticipantInteractions(conversation, requester.id, laterMessage.id);
   assert.equal(choiceMessage.metadata?.pendingChoice?.status, "pending");
 
   await service.respondToChoice({
@@ -1808,8 +1812,8 @@ test("stopping a later same-participant run leaves older pending choice answerab
   const { service, storage } = testService({ conversations: [conversation] });
   const serviceAny = service as any;
 
-  serviceAny.resolveSupersededParticipantInteractions(conversation, requester.id, laterMessage.id);
-  await serviceAny.discardStoppedTargetRun(conversation, "later-run", requester, laterMessage.id);
+  chatParts(serviceAny).approvalDecisions.resolveSupersededParticipantInteractions(conversation, requester.id, laterMessage.id);
+  await chatParts(serviceAny).participantBatch.discardStoppedTargetRun(conversation, "later-run", requester, laterMessage.id);
 
   const saved = await storage.getConversation(conversation.id);
   const savedChoice = saved?.messages.find((message) => message.id === choiceMessage.id)?.metadata?.pendingChoice;
@@ -1819,8 +1823,8 @@ test("stopping a later same-participant run leaves older pending choice answerab
 });
 
 test("resolveSupersededParticipantInteractions does not reference pendingChoice", async () => {
-  const source = await readFile(path.join(process.cwd(), "src/main/services/chat.ts"), "utf8");
-  const method = source.match(/private resolveSupersededParticipantInteractions\([\s\S]*?\n  private markPendingAppToolApprovalsForRunTerminal/);
+  const source = await readFile(path.join(process.cwd(), "src/main/services/chat/approvals/approvalDecisions.ts"), "utf8");
+  const method = source.match(/\n  resolveSupersededParticipantInteractions\([\s\S]*?\n  (?:private )?markPendingAppToolApprovalsForRunTerminal/);
   assert.ok(method);
   assert.equal(method?.[0].includes("pendingChoice"), false);
 });
@@ -1879,8 +1883,8 @@ test("stale chat metadata merge cannot resurrect terminal pending states", () =>
   const { service } = testService();
   const serviceAny = service as any;
 
-  const mergedMessages = serviceAny.mergeStoredChatMessages([storedMessage], [currentMessage]) as ChatMessage[];
-  const mergedMetadata = serviceAny.mergeStoredChatMetadata(
+  const mergedMessages = mergeStoredChatMessages([storedMessage], [currentMessage]) as ChatMessage[];
+  const mergedMetadata = mergeStoredChatMetadata(
     { pendingAppToolApprovals: [storedApproval] },
     { pendingAppToolApprovals: [currentApproval] }
   );
@@ -1905,7 +1909,7 @@ test("run-scoped approval cleanup denies approval and interrupts linked request 
   };
   const { service } = testService({ conversations: [conversation] });
 
-  const changed = (service as any).markPendingAppToolApprovalsForRunTerminal(
+  const changed = chatParts(service).approvalDecisions.markPendingAppToolApprovalsForRunTerminal(
     conversation,
     "approval-run",
     "Run stopped."
@@ -1982,9 +1986,9 @@ test("requestParticipantsFromTool roots running recipient replies under the requ
   const { service, storage } = testService({ conversations: [conversation] });
   const serviceAny = service as any;
   let capturedTrigger: ChatMessage | undefined;
-  serviceAny.ensureHistoryFiles = async () => "/tmp/accordagents-test-history";
-  serviceAny.refreshStoredChatState = async () => undefined;
-  serviceAny.runParticipantTurnSerialized = async (
+  chatParts(serviceAny).chatHistory.ensureHistoryFiles = async () => "/tmp/accordagents-test-history";
+  chatParts(serviceAny).store.refreshStoredChatState = async () => undefined;
+  chatParts(serviceAny).turnQueue.runParticipantTurnSerialized = async (
     _conversation: Conversation,
     participant: ChatParticipant,
     trigger: ChatMessage
@@ -2041,7 +2045,7 @@ test("an inferred task is titled by the reply's sentence that asks the member, i
     "I fixed `chat.ts`. Thanks...@taylor can you run `npm test` on `src/app.ts`?\n```\n@taylor ignored in code\n```");
   const { service } = testService({ conversations: [conversation] });
 
-  await (service as any).appendParticipantTurnMessages(conversation, requester, [source]);
+  await chatParts(service).pendingReplies.appendParticipantTurnMessages(conversation, requester, [source]);
 
   const batch = conversation.messages.find((message) => message.metadata?.participantRequest)?.metadata?.participantRequest;
   const titles = Object.fromEntries((batch?.items ?? []).map((item) => [item.targetHandle, item.title]));
@@ -2062,7 +2066,7 @@ test("inferred participant request carrier is hidden and rooted to the source vi
   };
   const { service } = testService({ conversations: [conversation] });
 
-  await (service as any).appendParticipantTurnMessages(conversation, requester, [source]);
+  await chatParts(service).pendingReplies.appendParticipantTurnMessages(conversation, requester, [source]);
 
   const requestMessage = conversation.messages.find((message) => message.metadata?.participantRequest);
   const batch = requestMessage?.metadata?.participantRequest;
@@ -2087,7 +2091,7 @@ test("inferred member requests follow the requester's permission as saved, not t
   // The turn started while it was still allowed; the User switched it to Ask meanwhile.
   const turnCopy = { ...savedRequester, permissions: { ...normalizeChatAgentPermissions(savedRequester.permissions), requestParticipants: "allow" as const } };
 
-  await (service as any).appendParticipantTurnMessages(conversation, turnCopy, [
+  await chatParts(service).pendingReplies.appendParticipantTurnMessages(conversation, turnCopy, [
     participantMessage(savedRequester, "source-message", "@codex please verify this.")
   ]);
 
@@ -2103,7 +2107,7 @@ test("inferred participant requests trigger mentioned participants and rely on a
   const conversation = chatConversation([manager, codex, claude], "/repo");
   const { service, storage } = testService({ conversations: [conversation] });
 
-  await (service as any).appendParticipantTurnMessages(conversation, manager, [
+  await chatParts(service).pendingReplies.appendParticipantTurnMessages(conversation, manager, [
     participantMessage(
       manager,
       "source-message",
@@ -2127,7 +2131,7 @@ test("normal participant finalization infers participant requests from assigned 
   const conversation = chatConversation([manager, drew, taylor], "/repo");
   const { service, storage } = testService({ conversations: [conversation] });
 
-  await (service as any).finalizePendingParticipantMessage(
+  await chatParts(service).pendingReplies.finalizePendingParticipantMessage(
     conversation,
     manager,
     participantMessage(
@@ -2152,7 +2156,7 @@ test("inferred participant request triggers when action appears later in the mes
   const conversation = chatConversation([manager, drew], "/repo");
   const { service, storage } = testService({ conversations: [conversation] });
 
-  await (service as any).finalizePendingParticipantMessage(
+  await chatParts(service).pendingReplies.finalizePendingParticipantMessage(
     conversation,
     manager,
     participantMessage(
@@ -2179,7 +2183,7 @@ test("inferred accord assignment grants request participants to the facilitator"
   const conversation = chatConversation([manager, drew, taylor], "/repo");
   const { service, storage } = testService({ conversations: [conversation] });
 
-  await (service as any).finalizePendingParticipantMessage(
+  await chatParts(service).pendingReplies.finalizePendingParticipantMessage(
     conversation,
     manager,
     participantMessage(
@@ -2210,9 +2214,9 @@ test("stored refresh preserves inferred accord participant-request auto-allow", 
   const current = cloneConversation(stored);
   const { service } = testService({ conversations: [stored] });
   // The inferred accord grants it on the flow's copy (allowParticipantRequestsForInferredAccordIfSelected).
-  (service as any).setParticipantRequestPermission(current, drew.id, "allow");
+  chatParts(service).requestGrants.setParticipantRequestPermission(current, drew.id, "allow");
 
-  await (service as any).refreshStoredChatState(current);
+  await chatParts(service).store.refreshStoredChatState(current);
 
   const refreshedDrew = (current.metadata.participants as ChatParticipant[]).find((participant) => participant.id === drew.id);
   assert.equal(normalizeChatAgentPermissions(refreshedDrew?.permissions).requestParticipants, "allow");
@@ -2231,7 +2235,7 @@ test("stored refresh keeps a request-members permission the User revoked over an
   );
   const { service } = testService({ conversations: [stored] });
 
-  await (service as any).refreshStoredChatState(current);
+  await chatParts(service).store.refreshStoredChatState(current);
 
   const refreshedDrew = (current.metadata.participants as ChatParticipant[]).find((participant) => participant.id === drew.id);
   assert.equal(normalizeChatAgentPermissions(refreshedDrew?.permissions).requestParticipants, "ask");
@@ -2255,7 +2259,7 @@ test("legacy accord launch metadata does not suppress inferred participant reque
   };
   const { service } = testService({ conversations: [conversation] });
 
-  await (service as any).appendParticipantTurnMessages(conversation, requester, [
+  await chatParts(service).pendingReplies.appendParticipantTurnMessages(conversation, requester, [
     participantMessage(requester, "source-message", "@taylor please verify this accord concern.")
   ]);
 
@@ -2276,7 +2280,7 @@ test("legacy manual accord metadata does not suppress inferred participant reque
   };
   const { service } = testService({ conversations: [conversation] });
 
-  await (service as any).appendParticipantTurnMessages(conversation, requester, [
+  await chatParts(service).pendingReplies.appendParticipantTurnMessages(conversation, requester, [
     participantMessage(requester, "source-message", "@taylor please verify this accord concern.")
   ]);
 
@@ -2336,9 +2340,9 @@ test("runParticipantRequest roots inferred recipient replies under the source vi
   const { service, storage } = testService({ conversations: [conversation] });
   const serviceAny = service as any;
   let capturedTrigger: ChatMessage | undefined;
-  serviceAny.ensureHistoryFiles = async () => "/tmp/accordagents-test-history";
-  serviceAny.refreshStoredChatState = async () => undefined;
-  serviceAny.runParticipantTurnSerialized = async (
+  chatParts(serviceAny).chatHistory.ensureHistoryFiles = async () => "/tmp/accordagents-test-history";
+  chatParts(serviceAny).store.refreshStoredChatState = async () => undefined;
+  chatParts(serviceAny).turnQueue.runParticipantTurnSerialized = async (
     _conversation: Conversation,
     participant: ChatParticipant,
     trigger: ChatMessage
@@ -2355,7 +2359,7 @@ test("runParticipantRequest roots inferred recipient replies under the source vi
     }];
   };
 
-  await serviceAny.startParticipantRequestRunner(conversation.id, "request-message", 1);
+  await chatParts(serviceAny).participantRequests.startParticipantRequestRunner(conversation.id, "request-message", 1);
 
   const saved = await storage.getConversation(conversation.id);
   const targetReply = saved?.messages.find((message) => message.id === "target-reply");
