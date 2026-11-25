@@ -62,6 +62,7 @@ import { CHAT_ASSISTANT_ROLE_ID, authorForMessage, chatParticipantReference } fr
 import { IconButton, StatusBadge } from "../primitives";
 import type { ChatParticipantRosterStatus } from "./chat-participant-menu";
 import { WorkedRow } from "./chat-worked-row";
+import { ChatWaitingMessageActions } from "./chat-waiting-message";
 import { ChatDelegationRows, ChatWorkedFold } from "./chat-delegation-fold";
 import { ChatSessionsFinishedActivity, ChatSessionsRunningReply, sessionsReplyHasActivity } from "./chat-sessions-activity";
 import { mainSessionMemberOf, withoutLeadingMention } from "../../../shared/mainSession";
@@ -113,6 +114,10 @@ export const ChatMessageItem = memo(function ChatMessageItem(props: {
   /** The sessions view: the main session's tasks of this turn, shown in its
    *  "Worked for …" fold (under the reply while it is being written). */
   sessionsWork?: readonly SessionsTaskEntry[];
+  /** The sessions view: the User's message its member has not taken yet (the
+   *  run it waits as), and the reply being written meanwhile. */
+  waitingRunId?: string;
+  waitingBehindRunId?: string;
   onOpenTask?: (entry: SessionsTaskEntry) => void;
   replyCount?: number;
   replyPreviewMessages?: Conversation["messages"];
@@ -384,24 +389,9 @@ export const ChatMessageItem = memo(function ChatMessageItem(props: {
           <Avatar className="message-avatar" spec={avatar} />
         )}
         <div className="message-body">
-          {/* A reply of the sessions view keeps the clean look: the running
-              turn is stopped from the composer (its button, or Stop beside
-              Send), a queued one is taken back from a small × on hover, as on
-              the phone. */}
-          {sessions && isStreaming && queuedBehind && message.metadata?.runId && props.onStopRun && (
-            <div className="message-actions is-sessions-stop">
-              <IconButton
-                className="message-action-stop"
-                size="xs"
-                icon={XIcon}
-                label="Cancel queued reply"
-                tooltip="Cancel queued reply"
-                data-testid="chat-sessions-reply-stop"
-                onClick={() => props.onStopRun?.(message.metadata!.runId!)}
-              />
-            </div>
-          )}
-          {!(sessions && isStreaming) && <div className="message-actions">
+          {/* A running reply of the sessions view keeps the clean look: it is
+              stopped from the composer (its button, or Stop beside Send). */}
+          {!(sessions && isStreaming) && <div className={props.waitingRunId ? "message-actions is-waiting" : "message-actions"}>
             {sessions && !isStreaming && <ChatMessageHoverWhen createdAt={message.createdAt} />}
             {isStreaming && message.metadata?.runId && props.onStopRun && (
               <IconButton
@@ -436,6 +426,9 @@ export const ChatMessageItem = memo(function ChatMessageItem(props: {
               />
             )}
             {reactAndReplyActions}
+            {props.waitingRunId && props.onStopRun && (
+              <ChatWaitingMessageActions runId={props.waitingRunId} behindRunId={props.waitingBehindRunId} onStopRun={props.onStopRun} />
+            )}
           </div>}
           <ChatMessageMeta
             message={message}

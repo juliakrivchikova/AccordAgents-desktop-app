@@ -465,16 +465,20 @@ switch is disabled.
     the call), while a refusal keeps its reason. Claude's ExitPlanMode and
     EnterPlanMode get no row: the CLI draws nothing at the call, and the
     plan card is ExitPlanMode's dialog.
-    A message the User sends while a Claude member works is "Queued" (no
-    clock) until its CLI hands it to the running step at the next tool
-    result; from then its reply is the turn's one "Working for", counted
+    A message the User sends while a Claude member works waits until its
+    CLI hands it to the running step at the next tool result; from then its
+    reply is the turn's one "Working for", counted
     from the start of the step it joined, as the CLI's one spinner is. The member's words and its posts
     stay its words, in order between the rows; its turn's tasks follow as
     their rows. No status label, no "Thinking" word, no grouped boxes, no
     Stop or copy on a running reply (the composer stops it, also with
-    text typed; a member's session head stops the member); a queued one is
-    taken back from a small × on hover (always on a touch screen, the
-    phone's at least 32px) and shows "Queued", no clock. A long turn
+    text typed; a member's session head stops the member). A reply that
+    has not started has no row (the User, 2026-11-25: as Claude does, no
+    "Queued"); the message it answers has "Send now", which interrupts the
+    reply being written so the member takes what waits, and a × that takes
+    the message back (`waitingMessages.ts`, desktop and phone). In the
+    composer Enter sends and waits, Cmd or Ctrl with Enter sends now, and
+    Enter with nothing typed sends what already waits. A long turn
     draws its newest 50 steps under a muted "N earlier steps" (a finished
     fold opens them); a reply that waited in the queue counts its
     "Working for" from its own turn's start (`turnStartedAt`). A run on a
@@ -536,8 +540,7 @@ switch is disabled.
     main session's answer to a member's question is in that member's
     session from its first token (placed by the request it answers);
   - a finished message shows no member state; its time is with its controls
-    on hover. A reply still being written has its "Working for …" (above),
-    one still queued keeps "Queued";
+    on hover. A reply still being written has its "Working for …" (above);
   - a task's state is not taken from the member's earlier stopped or failed
     turn while the task waits (queued, a machine preparing);
   - no turn-finished note ("<X> finished answering"), the main session's

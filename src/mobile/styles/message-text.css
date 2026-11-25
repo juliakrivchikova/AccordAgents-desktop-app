@@ -69,20 +69,32 @@
   color: var(--mut);
 }
 
-/* A queued reply of the sessions view is taken back from its own row: a
-   small ×, a finger's target around it. */
-.message-stop.is-queued-cancel {
-  width: 32px;
-  height: 32px;
-  padding: 0;
-  border-color: transparent;
+/* Under a message its member has not taken yet: send it now or take it back,
+   a finger's target each. */
+.message-waiting {
+  display: flex;
+  flex-basis: 100%;
+  justify-content: flex-end;
+  margin-top: 2px;
+}
+
+.message-waiting-action {
+  min-width: 36px;
+  height: 36px;
+  padding: 0 8px;
+  border: 0;
   background: transparent;
   color: var(--mut);
-  font: 400 18px/1 var(--sans);
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
+  font: 500 13px/1 var(--sans);
   touch-action: manipulation;
+}
+
+.message-waiting-action.is-take-back {
+  font: 400 18px/1 var(--sans);
+}
+
+.message-waiting-action:disabled {
+  opacity: 0.5;
 }
 
 .message-content {

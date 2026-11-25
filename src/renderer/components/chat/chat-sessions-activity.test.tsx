@@ -235,15 +235,28 @@ test("the classic view's running reply is as it was: its status line and its sto
   act(() => renderer!.unmount());
 });
 
-test("a queued reply of the sessions view can be cancelled from its own row", () => {
-  const sessions = sessionsOf(sessionsConversation());
+test("a message its member has not taken yet is sent now or taken back from the message itself; its reply has no row", () => {
+  const base = sessionsConversation();
+  const running = chatMessage("main-running", "participant", 12, { participantId: MAIN.id, status: "pending", content: "", metadata: { runId: "run-running", sourceMessageId: "u-first" } } as Partial<ChatMessage>);
+  const waiting = chatMessage("u-waiting", "user", 13, { content: "And the docs?" });
+  const queued = chatMessage("main-queued", "participant", 13, { participantId: MAIN.id, status: "pending", content: "", metadata: { runId: "run-queued", sourceMessageId: "u-waiting", queuedBehind: { handle: "main" } } } as Partial<ChatMessage>);
+  const sessions = sessionsOf({ ...base, messages: [...base.messages, running, waiting, queued] });
+  const shown = sessions.mainMessages.map((message) => message.id);
+  assert.ok(shown.includes("main-running") && shown.includes("u-waiting"));
+  assert.ok(!shown.includes("main-queued"), "no Queued row");
   const stopped: string[] = [];
-  const queued = chatMessage("main-queued", "participant", 13, { participantId: MAIN.id, status: "pending", content: "", metadata: { runId: "run-queued", queuedBehind: { handle: "drew" } } } as Partial<ChatMessage>);
-  const root = renderSessionsRow(queued, sessions, { onStopRun: (runId: string) => { stopped.push(runId); } } as Partial<Parameters<typeof ChatMessageItem>[0]>);
-  const cancel = root.find((node) => typeof node.type === "string" && node.props?.["data-testid"] === "chat-sessions-reply-stop");
-  assert.equal(cancel.props["aria-label"], "Cancel queued reply");
-  act(() => cancel.props.onClick({ defaultPrevented: false, preventDefault: noop, stopPropagation: noop }));
-  assert.deepEqual(stopped, ["run-queued"]);
+  const row = (message: ChatMessage) => renderSessionsRow(message, sessions, { onStopRun: (runId: string) => { stopped.push(runId); } } as Partial<Parameters<typeof ChatMessageItem>[0]>);
+  const press = (root: ReactTestInstance, testId: string): void => {
+    const button = root.find((node) => node.type === "button" && node.props?.["data-testid"] === testId);
+    act(() => button.props.onClick({ defaultPrevented: false, preventDefault: noop, stopPropagation: noop }));
+  };
+  const root = row(waiting);
+  assert.doesNotMatch(textOf(root), /Queued/);
+  press(root, "chat-waiting-send-now");
+  assert.deepEqual(stopped, ["run-running"], "the step being worked on makes way, the message stays in line");
+  press(row(waiting), "chat-waiting-take-back");
+  assert.deepEqual(stopped, ["run-running", "run-queued"]);
+  assert.equal(row(running).findAll((node) => node.props?.["data-testid"] === "chat-waiting-message").length, 0);
 });
 
 /** A long turn: `count` steps, each a command. */

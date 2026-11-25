@@ -1,4 +1,5 @@
 import { render } from "../chat/render.js";
+import { isWaitingReplyRow, waitingMessagesOf } from "../chat/waitingMessage.js";
 import { selectedConversationId } from "../chats/openChat.js";
 import { memberLocationLabel } from "../members/membersSheet.js";
 import { enqueueTurnStop, sendNow, stopRequestedRunIds, turnOfRun } from "../outbox/sending.js";
@@ -16,8 +17,10 @@ import {
 export function sessionsMainRows(state) {
   const shared = sessionsRules();
   const rows = [];
+  const waiting = waitingMessagesOf(state.messages);
   state.rows.forEach(function (row, position) {
     const message = state.messages[position];
+    if (isWaitingReplyRow(message)) return;
     const base = { ...row, presentation: "sessions", replyCount: undefined };
     if (state.openCardIds.has(message.id)) {
       const member = state.members.find(function (candidate) { return candidate.id === row.participantId; });
@@ -30,7 +33,10 @@ export function sessionsMainRows(state) {
       rows.push({ ...base, delegations: { standalone: true, entries: sessionsDelegationsOf(state, message) } });
       return;
     }
-    if (row.author === "you") base.content = shared.withoutLeadingMention(String(row.content || ""), state.mainHandle);
+    if (row.author === "you") {
+      base.content = shared.withoutLeadingMention(String(row.content || ""), state.mainHandle);
+      base.waiting = waiting.get(message.id);
+    }
     const tasks = state.placement.tasksByReplyId.get(message.id);
     // A part of a turn her next message joined, with nothing in it, is not
     // drawn (as in the CLI's transcript).
@@ -84,10 +90,12 @@ export function sessionsMemberSessionRows(state, member) {
     }
   }];
   let shown = 0;
+  const waiting = waitingMessagesOf(state.messages);
   state.rows.forEach(function (drawn, position) {
     const message = state.messages[position];
     if (!ids.has(message.id)) return;
     shown += 1;
+    if (isWaitingReplyRow(message)) return;
     const batch = message.metadata.participantRequest;
     const given = batch && batch.requesterParticipantId !== participantId
       ? batch.items.find(function (item) { return item.targetParticipantId === participantId; })
@@ -96,6 +104,7 @@ export function sessionsMemberSessionRows(state, member) {
     // desktop: the main session is named by nothing.
     const asksMain = batch && batch.requesterParticipantId === participantId && typeof shared.withoutLeadingMention === "function";
     const base = { ...drawn, presentation: "sessions", replyCount: undefined,
+      ...(drawn.author === "you" ? { waiting: waiting.get(message.id) } : {}),
       ...(asksMain ? { content: shared.withoutLeadingMention(String(drawn.content || ""), state.mainHandle) } : {}) };
     if (given) {
       const key = drawn.rowKey || drawn.id;

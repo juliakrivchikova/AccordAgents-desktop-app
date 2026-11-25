@@ -249,6 +249,7 @@ function sessionsMessageOf(row) {
       // A reply waiting behind its member's turn, and when a reply's own
       // turn began: which reply runs, and from when (sessionsMemberActivity).
       ...(row.queued ? { turnQueued: true } : {}),
+      ...(row.runId ? { runId: row.runId } : {}),
       ...(typeof row.startedAt === "string" && row.startedAt ? { turnStartedAt: row.startedAt } : {})
     }
   };

@@ -175,7 +175,7 @@ async function waitForOp(hub, matches, timeoutMs = 15_000) {
   throw new Error("the phone did not send the operation");
 }
 
-test("a queued reply on the phone says Queued and is taken back from its own ×; a running one works for the time its own run took; a member's session stops that member", { timeout: 240_000 }, async (t) => {
+test("a message its member has not taken yet is sent now or taken back from the message itself on the phone; a running reply works for the time its own run took; a member's session stops that member", { timeout: 240_000 }, async (t) => {
   const DREW = member("drew", { id: "p-drew", kind: "codex-cli" });
   const hub = await startMobileHub();
   const site = await serveMobileShell({ port: 8396, hubOrigins: [hub.base] });
@@ -209,23 +209,28 @@ test("a queued reply on the phone says Queued and is taken back from its own ×;
   app = await attachApp({ port: 9546 });
   await pairPage(app, { hub, siteOrigin: site.origin, query: "qa=1" });
   await openChat(app, "conv-queued");
-  await app.waitFor(`Boolean(${row("r1")}?.querySelector(".sessions-working")) && Boolean(${row("q1")})`, "the running reply and the queued one");
+  await app.waitFor(`Boolean(${row("r1")}?.querySelector(".sessions-working")) && Boolean(${row("u2")}?.querySelector(".message-waiting"))`, "the running reply and the waiting message");
 
   // --- its Working for counts from when its own run began, not when it was made
   const seconds = await app.evaluate(`Number((${row("r1")}.querySelector(".sessions-working-head").textContent.match(/(\\d+)s$/) || [])[1])`);
   assert.ok(Number.isFinite(seconds) && seconds < 60, `Working for ${seconds}s: from its run's start, not the two minutes since it was made`);
 
-  // --- queued: "Queued", no Working for, a small × to take it back ----------
-  const queued = await app.evaluate(`(() => { const node = ${row("q1")}; const cancel = node.querySelector(".message-stop");
-    const box = cancel ? cancel.getBoundingClientRect() : { width: 0, height: 0 };
-    return { status: node.querySelector(".message-status").textContent, said: (node.innerText.match(/Queued/g) || []).length, working: node.querySelectorAll(".sessions-working").length,
-      cancel: cancel ? [cancel.textContent, cancel.getAttribute("aria-label"), cancel.classList.contains("is-queued-cancel")] : null,
-      target: box.width >= 32 && box.height >= 32, shown: Boolean(cancel) && getComputedStyle(node.querySelector(".message-meta")).display !== "none" }; })()`);
-  assert.deepEqual(queued, { status: "Queued", said: 1, working: 0, cancel: ["×", "Cancel this queued reply", true], target: true, shown: true });
+  // --- waiting: no row for the reply, the message itself says what can be done
+  const waiting = await app.evaluate(`(() => { const node = ${row("u2")}; const bubble = node.querySelector(".message-bubble").getBoundingClientRect();
+    return { reply: Boolean(${row("q1")}), queued: (document.getElementById("message-list").innerText.match(/Queued/g) || []).length,
+      buttons: [...node.querySelectorAll(".message-waiting button")].map((button) => { const box = button.getBoundingClientRect();
+        return [button.textContent, button.getAttribute("aria-label"), button.disabled, box.width >= 36 && box.height >= 36, box.top >= bubble.bottom, Math.round(box.right) <= Math.round(bubble.right)]; }) }; })()`);
+  assert.deepEqual(waiting, { reply: false, queued: 0, buttons: [
+    ["Send now", "Send this message now", false, true, true, true],
+    ["×", "Take this message back", false, true, true, true]
+  ] });
+  assert.equal(await app.evaluate(`${row("u1")}.querySelectorAll(".message-waiting").length`), 0, "a message being answered waits for nothing");
   assert.equal(await app.evaluate(`${row("r1")}.querySelectorAll(".message-stop").length`), 0, "the running reply still has no Stop of its own (the composer stops it)");
-  await app.evaluate(`${row("q1")}.querySelector(".message-stop").click()`);
-  const cancelled = await waitForOp(hub, (op) => op.kind === "turn.stop" && op.messageId === "u2");
-  assert.equal(cancelled.participantId, MAIN.id, "the queued turn, named by the message it answers");
+  await app.evaluate(`${row("u2")}.querySelector(".message-waiting .is-send-now").click()`);
+  const interrupted = await waitForOp(hub, (op) => op.kind === "turn.stop" && op.messageId === "u1");
+  assert.equal(interrupted.participantId, MAIN.id, "the turn being answered makes way");
+  await app.waitFor(`[...${row("u2")}.querySelectorAll(".message-waiting button")].every((button) => button.disabled)`, "pressed once");
+  assert.equal(hub.opsRequests.some((request) => (request.ops || []).some((op) => op.kind === "turn.stop" && op.messageId === "u2")), false, "the message stays in line");
 
   // --- a member's session: its composer stops that member, typed or not -----
   await app.evaluate(`document.getElementById("chat-members-button").click()`);

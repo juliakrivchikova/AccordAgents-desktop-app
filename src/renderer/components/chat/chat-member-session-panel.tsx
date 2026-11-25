@@ -6,7 +6,8 @@ import type { AppSettings, ChatImageInput, ChatMessage, ChatParticipant, ChatSki
 import { MarkdownText } from "../content/markdown-text";
 import { TimelineLoadMoreRow } from "../conversation/timeline-primitives";
 import { IconButton } from "../primitives";
-import { ChatComposer } from "./chat-composer";
+import type { WaitingMessage } from "../../../shared/waitingMessages";
+import { ChatComposer, type ChatComposerSendNow } from "./chat-composer";
 import { ChatProviderMark, renderComposerMemberMark } from "./chat-member-mark";
 import { useSessionsViewNames } from "./chat-sessions-links";
 import { sessionsMentionText } from "../../../shared/sessionsViewText";
@@ -71,6 +72,9 @@ export function ChatMemberSessionPanel(props: {
   onDraftChange: (value: string) => void;
   onSend: (request: ChatMemberSendRequest) => Promise<boolean>;
   onStopRuns?: (runIds: readonly string[]) => void;
+  /** The User's messages to it that it has not taken yet, by message id. */
+  waiting: ReadonlyMap<string, WaitingMessage>;
+  sendNow?: ChatComposerSendNow;
   onBack: () => void;
   onClose: () => void;
 }): JSX.Element {
@@ -170,6 +174,8 @@ export function ChatMemberSessionPanel(props: {
               {...itemProps}
               presentation="sessions"
               authorMark={mainSession ? mainSessionMark(mainSession) : undefined}
+              waitingRunId={props.waiting.get(message.id)?.runId}
+              waitingBehindRunId={props.waiting.get(message.id)?.behind?.runId}
               onOpenThread={undefined}
             />
           );
@@ -190,6 +196,7 @@ export function ChatMemberSessionPanel(props: {
           onSend={send}
           isRunning={props.busy}
           placeholder={`Message ${props.title}...`}
+          sendNow={props.sendNow}
           footerChip={props.chip}
           testId="chat-member-composer"
           renderParticipantAvatar={renderComposerMemberMark}

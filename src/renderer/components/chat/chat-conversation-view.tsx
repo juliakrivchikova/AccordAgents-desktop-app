@@ -61,6 +61,7 @@ import { ChatViewHeaderContext } from "./chat-view-switch";
 import type { ChatPanelMessageContext } from "./chat-sessions-right-panel";
 import { ChatSessionsLinksContext, ChatSessionsNamesContext, useStableMap, useStableSessionsViewNames } from "./chat-sessions-links";
 import { mainComposerTargetIds, sessionsComposerProps } from "./chat-sessions-composer";
+import { composerSendNow } from "./chat-waiting-message";
 import { ChatViewRightPanels } from "./chat-view-right-panels";
 import { ComposerRepoLead, useRepoInfo } from "./composer-context";
 import { FOLDER_BUSY_REASON } from "../../../shared/newChat";
@@ -504,6 +505,7 @@ export function ChatConversationView(props: ChatConversationViewProps): JSX.Elem
               contextLead={sessions ? <ComposerRepoLead repoPath={props.conversation.repoPath} repo={repo} onRepoChange={setRepo}
                 lockedReason={props.isRunning ? FOLDER_BUSY_REASON : undefined} /> : undefined}
               testId="chat-main-composer"
+              sendNow={sessions && composerSendNow(props.conversation.messages, sessions.mainSessionId, props.onStopRun)}
               takesFocusRequests
               renderParticipantAvatar={renderComposerMemberMark}
               participantRoleLabel={(participant) => chatRoleLabel(props.settings.chatRoleConfigs, participant)}

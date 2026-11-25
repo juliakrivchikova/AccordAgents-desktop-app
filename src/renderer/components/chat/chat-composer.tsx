@@ -48,6 +48,14 @@ export interface ChatComposerPicks {
   onFileMentionsChange: React.Dispatch<React.SetStateAction<RepoFileMention[]>>;
 }
 
+/** What the composer can do with a message while its member works, as its
+ *  CLI's prompt can: send it and wait (Enter), or send it now (Cmd or Ctrl
+ *  with Enter; Enter with nothing typed sends what already waits). */
+export interface ChatComposerSendNow {
+  waiting: boolean;
+  onSendNow: () => void;
+}
+
 export interface ChatComposerProps {
   participants: ChatParticipant[];
   savedPrompts: ChatSavedPromptConfig[];
@@ -92,6 +100,8 @@ export interface ChatComposerProps {
   /** The sessions view: Stop for the main session's run, in the send
    *  button's place while there is nothing to send. */
   stop?: ChatComposerStop;
+  /** The sessions view: while its member writes a reply. */
+  sendNow?: ChatComposerSendNow;
   /** The chat's main composer: it takes the keyboard when its chat asked
    *  for it before it was opened (composer-focus-request.ts). */
   takesFocusRequests?: boolean;
@@ -173,9 +183,16 @@ export function ChatComposer(props: ChatComposerProps): JSX.Element {
     highlightRef.current.scrollLeft = event.currentTarget.scrollLeft;
   }
 
-  async function sendDraft(): Promise<void> {
+  async function submit(now: boolean): Promise<void> {
+    // The reply written when the key was pressed is the one that makes way.
+    const sendNow = props.sendNow;
+    const sent = await sendDraft();
+    if (sendNow && ((sent && now) || (draftEmpty && sendNow.waiting))) sendNow.onSendNow();
+  }
+
+  async function sendDraft(): Promise<boolean> {
     if (!canSend) {
-      return;
+      return false;
     }
     const fileMentionsToSend = mentions.selectedFileMentions;
     const skillMentionsToSend = mentions.selectedSkillMentions;
@@ -195,9 +212,10 @@ export function ChatComposer(props: ChatComposerProps): JSX.Element {
       mentions.setSelectedSkillMentions(skillMentionsToSend);
       mentions.setSelectedPluginMentions(pluginMentionsToRestore);
       images.setPendingImages(pendingImagesToSend);
-      return;
+      return false;
     }
     revokePendingImageUrls(pendingImagesToSend);
+    return true;
   }
 
   return (
@@ -334,7 +352,7 @@ export function ChatComposer(props: ChatComposerProps): JSX.Element {
             }
             if (event.key === "Enter" && !event.shiftKey) {
               event.preventDefault();
-              void sendDraft();
+              void submit(event.metaKey || event.ctrlKey);
             }
           }}
           onBlur={() => window.setTimeout(() => {

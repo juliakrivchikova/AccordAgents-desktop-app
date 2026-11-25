@@ -23,7 +23,9 @@ import { ChatMemberSessionPanel, type ChatMemberSendRequest } from "./chat-membe
 import { chatRoleLabel, participantProviderLabel } from "./chat-mention-directory";
 import type { ChatMessageItem } from "./chat-message-item";
 import type { ChatParticipantRosterStatus } from "./chat-roster-status";
+import { isWaitingReply } from "../../../shared/waitingMessages";
 import { isChatMessageHiddenInChat } from "./chat-thread-data";
+import { composerSendNow } from "./chat-waiting-message";
 import type { ChatRightPanelState } from "./use-chat-right-panel";
 import type { ChatSessionsView } from "./use-chat-sessions-view";
 import { useMachineList } from "./use-cli-start-defaults";
@@ -121,7 +123,7 @@ export function ChatSessionsRightPanel(props: {
   const former = memberId && !participant ? sessions.formerRows.find((row) => row.member.id === memberId) : undefined;
   const messages = useMemo(
     () => memberId
-      ? memberSessionMessages(conversation.messages, memberId, sessions.index).filter((message) => !isChatMessageHiddenInChat(conversation, message))
+      ? memberSessionMessages(conversation.messages, memberId, sessions.index).filter((message) => !isChatMessageHiddenInChat(conversation, message) && !isWaitingReply(message))
       : [],
     [conversation.messages, memberId, sessions.index]
   );
@@ -218,6 +220,8 @@ export function ChatSessionsRightPanel(props: {
       onDraftChange={(value) => rightPanel.setMemberDraft(memberId, value)}
       onSend={props.onSendToMember}
       onStopRuns={props.onStopRuns}
+      waiting={sessions.waiting}
+      sendNow={composerSendNow(conversation.messages, memberId, messageContext.onStopRun)}
       onBack={rightPanel.openMembers}
       onClose={rightPanel.close}
     />

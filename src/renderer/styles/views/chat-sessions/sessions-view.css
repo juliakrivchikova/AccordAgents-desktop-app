@@ -83,7 +83,7 @@
    as in Claude and Codex (copy, react, then the time), left under a reply
    and right under the User's bubble. The row sits in the gap to the next
    message, so showing it moves nothing. */
-.chat-view.is-sessions-view .chat-message .message-actions:not(.is-sessions-stop) {
+.chat-view.is-sessions-view .chat-message .message-actions {
   top: 100%;
   right: auto;
   left: -6px;
@@ -97,7 +97,7 @@
   transition: opacity var(--ui-duration-fast) var(--ui-ease-out);
 }
 
-.chat-view.is-sessions-view .chat-message.user .message-actions:not(.is-sessions-stop) {
+.chat-view.is-sessions-view .chat-message.user .message-actions {
   right: -6px;
   left: auto;
 }
@@ -107,6 +107,24 @@
   padding: 0 6px;
   color: var(--ui-text-3);
   font-size: 11px;
+}
+
+/* A message its member has not taken yet: what can be done with it stays in
+   that row, the other controls join it on hover. */
+.chat-view.is-sessions-view .message.chat-message.is-sessions .message-actions.is-waiting {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+.chat-view.is-sessions-view .message.chat-message.is-sessions:not(:hover) .message-actions.is-waiting > :not(.chat-waiting-message) {
+  display: none;
+}
+
+.chat-waiting-message {
+  display: flex;
+  order: 2;
+  align-items: center;
+  color: var(--ui-text-2);
 }
 
 /* Provider marks at row size */

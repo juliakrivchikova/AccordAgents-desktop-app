@@ -15,8 +15,8 @@ import { ChatMessageWhen } from "./chat-streaming";
  * Only an author the view must tell apart stays: a member's open card by its
  * task (`authorLabel`), the main session in a member's session by its
  * provider's logo alone (`authorMark`; it is named by nothing). A reply still being written has no status line
- * either: its "Working for …" says it (ChatSessionsRunningReply); one still
- * queued keeps "Queued".
+ * either: its "Working for …" says it (ChatSessionsRunningReply); one that
+ * has not started has no row (shared/waitingMessages.ts).
  */
 export function ChatMessageMeta(props: {
   message: ChatMessage;
@@ -32,15 +32,15 @@ export function ChatMessageMeta(props: {
   inThread?: boolean;
 }): JSX.Element | null {
   const { message, participant, sessions } = props;
-  if (sessions && (!props.isStreaming || !props.queued)) {
+  if (sessions) {
     return props.authorLabel || props.authorMark
       ? <div className="message-meta">{props.authorMark}{props.authorLabel && <strong>{props.authorLabel}</strong>}</div>
       : null;
   }
   return (
     <div className="message-meta">
-      {!sessions ? <strong>{props.author}</strong> : <>{props.authorMark}{props.authorLabel && <strong>{props.authorLabel}</strong>}</>}
-      {!sessions && participant && message.role === "participant" && (
+      <strong>{props.author}</strong>
+      {participant && message.role === "participant" && (
         <span className="message-provider">{participantProviderLabel(participant.kind, participant.hostLabel)}</span>
       )}
       {message.role === "participant" && (

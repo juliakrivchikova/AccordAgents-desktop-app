@@ -129,3 +129,37 @@ test("a request for the chat already on screen is taken at once, by its main com
     elsewhere.remove();
   }
 });
+
+test("while its member works, Enter sends and waits, Cmd+Enter sends now, and Enter with nothing typed sends what waits", async () => {
+  const composer = mount();
+  const did: string[] = [];
+  const sendNow = { waiting: true, onSendNow: () => { did.push("now"); } };
+  const key = async (init: KeyboardEventInit): Promise<void> => {
+    await act(async () => { composer.field().dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true, ...init })); });
+  };
+  const render = (extra: Partial<ChatComposerProps>): Promise<void> => composer.render(composerProps({ onSend: () => { did.push("sent"); return true; }, ...extra }));
+  try {
+    await render({ draft: "And the docs?", sendNow });
+    await key({});
+    assert.deepEqual(did.splice(0), ["sent"], "it waits for the member to take it");
+    await key({ metaKey: true });
+    assert.deepEqual(did.splice(0), ["sent", "now"], "what is being written makes way once the message is sent");
+    await key({ ctrlKey: true });
+    assert.deepEqual(did.splice(0), ["sent", "now"]);
+    await render({ draft: "", sendNow });
+    await key({});
+    assert.deepEqual(did.splice(0), ["now"]);
+    await render({ draft: "", sendNow: { ...sendNow, waiting: false } });
+    await key({});
+    await key({ metaKey: true });
+    assert.deepEqual(did.splice(0), [], "nothing typed and nothing waiting: nothing is interrupted");
+    await render({ draft: "Hello" });
+    await key({ metaKey: true });
+    assert.deepEqual(did.splice(0), ["sent"], "the member is free: it just sends");
+    await render({ draft: "Hello", sendNow, onSend: () => false });
+    await key({ metaKey: true });
+    assert.deepEqual(did.splice(0), [], "a message that was not sent interrupts nothing");
+  } finally {
+    await composer.unmount();
+  }
+});

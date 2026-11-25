@@ -9,6 +9,7 @@ import { finishedNoteCardElement, finishedNoteOfEntry } from "./finishedNoteCard
 import { render } from "./render.js";
 import { applyStreamableState } from "./streamView.js";
 import { urgentAlertCardElement, urgentAlertOfEntry } from "./urgentAlerts.js";
+import { syncWaitingActions, waitingSignature } from "./waitingMessage.js";
 import { loadChats } from "../chats/chatStore.js";
 import { selectedConversationId } from "../chats/openChat.js";
 import { attachmentsNodeFor, renderAttachmentsInto } from "../media/attachments.js";
@@ -48,7 +49,7 @@ export function messageRowSignature(entry) {
     activity: sessionsView && activitySignature(entry)
       ? activitySignature(entry) + (openWorkedFolds.has(entry.rowKey || entry.id) ? ":open" : "") : undefined,
     liveStatus: sessionsView && entry.liveStatus ? true : undefined,
-    queued: sessionsView && entry.queued ? true : undefined,
+    waiting: sessionsView ? waitingSignature(entry) : undefined,
     startedAt: sessionsView ? entry.startedAt : undefined,
     sessions: sessionsView ? sessionsSpecialSignature(entry) : undefined,
     avatar: entry.author === "agent" && entry.identified !== false && !sessionsView ? avatarSignature(rowAvatar(entry)) : undefined,
@@ -176,9 +177,8 @@ export function formatClockTime(iso) {
 }
 
 export function messageStatusLabel(entry) {
-  // A running reply of the sessions view says "Working for …" instead;
-  // one still waiting behind the member's turn before it, "Queued".
-  if (isSessionsRunningEntry(entry)) return entry.queued ? "Queued" : "";
+  // A running reply of the sessions view says "Working for …" instead.
+  if (isSessionsRunningEntry(entry)) return "";
   // A refused message of the User's says why; one not sent yet is faded
   // and shows its time like any other.
   if (entry.author === "you" && entry.mark) return entry.mark;
@@ -347,21 +347,10 @@ export function isCancellableMobileRow(entry) {
 function syncMessageStopButton(meta, entry) {
   let button = meta.querySelector(".message-stop");
   // The sessions view's composer (and a member session's head) stops a
-  // running reply: the reply itself has no Stop, as in T3 Code. A reply
-  // still queued is taken back from its own row (a small ×), as on the
-  // desktop.
-  // A queued member's turn is still "@x is running…" text: its run is what
-  // is taken back, as the sessions view stops any member's turn.
-  const queuedInSessions = isSessionsRunningEntry(entry) && entry.queued === true && Boolean(entry.runId) &&
-    (entry.cancellable !== false || entry.memberTurn === true);
-  const visible = queuedInSessions || (isCancellableMobileRow(entry) && !isSessionsRunningEntry(entry));
-  if (!visible) {
+  // running reply: the reply itself has no Stop, as in T3 Code.
+  if (!isCancellableMobileRow(entry) || isSessionsRunningEntry(entry)) {
     button?.remove();
     return;
-  }
-  if (button && button.classList.contains("is-queued-cancel") !== queuedInSessions) {
-    button.remove();
-    button = null;
   }
   if (!button) {
     button = document.createElement("button");
@@ -375,22 +364,15 @@ function syncMessageStopButton(meta, entry) {
         return;
       }
       button.disabled = true;
-      if (!button.classList.contains("is-queued-cancel")) button.textContent = "Stopping…";
+      button.textContent = "Stopping…";
       void stopRunFromPhone(targetRunId, undefined, { messageId: button.dataset.turnMessageId, participantId: button.dataset.participantId });
     });
-    if (queuedInSessions) button.classList.add("is-queued-cancel");
     meta.append(button);
   }
   button.dataset.runId = entry.runId;
   button.dataset.turnMessageId = entry.sourceMessageId || "";
   button.dataset.participantId = entry.participantId || "";
   button.disabled = entry.stopRequested === true;
-  if (queuedInSessions) {
-    button.textContent = "\u00d7";
-    button.setAttribute("aria-label", "Cancel this queued reply");
-    button.title = "Cancel";
-    return;
-  }
   button.textContent = entry.stopRequested ? "Stopping…" : "Stop";
   button.setAttribute("aria-label", "Stop response from " + rowHandleText(entry));
 }
@@ -516,6 +498,7 @@ function createMessageRow(entry) {
     bubble.append(content, meta);
     renderAttachmentsInto(attachmentsNodeFor(bubble), entry);
     item.append(bubble);
+    syncWaitingActions(item, entry);
   }
   appendThreadChip(item, entry);
   return item;
@@ -677,6 +660,7 @@ export function updateMessageRow(item, entry) {
   status.textContent = messageStatusLabel(entry);
   renderMessageContentIfChanged(content, entryShownContent(entry), entry.author);
   renderAttachmentsInto(attachmentsNodeFor(content.parentElement || item), entry);
+  syncWaitingActions(item, entry);
   syncThreadChip(item, entry);
   return true;
 }
