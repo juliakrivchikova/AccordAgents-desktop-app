@@ -202,15 +202,14 @@ export function createCoreServices(desktopApp: DesktopApp): void {
   });
 }
 
-function onQuitSignal(desktopApp: DesktopApp, signal: NodeJS.Signals): void {
-  for (const each of QUIT_SIGNALS) process.removeListener(each, (signal) => onQuitSignal(desktopApp, signal));
-  desktopApp.debugLogService.writeNow("app-quit.signal", { signal });
-  desktopApp.quitConfirmation.allow();
-  app.quit();
-}
-
 function installQuitSignalHandlers(desktopApp: DesktopApp): void {
-  for (const signal of QUIT_SIGNALS) process.on(signal, (signal) => onQuitSignal(desktopApp, signal));
+  const onQuitSignal = (signal: NodeJS.Signals): void => {
+    for (const each of QUIT_SIGNALS) process.removeListener(each, onQuitSignal);
+    desktopApp.debugLogService.writeNow("app-quit.signal", { signal });
+    desktopApp.quitConfirmation.allow();
+    app.quit();
+  };
+  for (const signal of QUIT_SIGNALS) process.on(signal, onQuitSignal);
 }
 
 /**
