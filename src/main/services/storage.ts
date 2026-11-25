@@ -1318,7 +1318,10 @@ export class StorageService {
         union all
         select
           c.conversation_id, c.title, c.repo_path, c.archived, c.updated_at,
-          s.message_count, s.oldest_message_at, s.newest_message_at, c.participants_hex, c.payload_valid,
+          s.message_count, s.oldest_message_at, s.newest_message_at,
+          -- Only the chat's own row carries its members: repeated on every
+          -- message they outgrow the messages themselves.
+          '' as participants_hex, c.payload_valid,
           'message' as row_kind, m.sequence, hex(m.payload_json) as payload_hex
         from selected_conversations c
         join message_stats s on s.conversation_id = c.conversation_id
@@ -2592,16 +2595,15 @@ export class StorageService {
   }
 
   private async queryJson<T>(sql: string): Promise<T[]> {
-    const text = (await this.databaseSession().run(sql, "json", SQLITE_COMMAND_TIMEOUT_MS)).trim();
-    return text ? (JSON.parse(text) as T[]) : [];
+    return this.databaseSession().rows<T>(sql, SQLITE_COMMAND_TIMEOUT_MS);
   }
 
   private async queryText(sql: string): Promise<string> {
-    return (await this.databaseSession().run(sql, "list", SQLITE_COMMAND_TIMEOUT_MS)).trim();
+    return (await this.databaseSession().run(sql, SQLITE_COMMAND_TIMEOUT_MS)).trim();
   }
 
   private async runSql(sql: string, timeoutMs = SQLITE_COMMAND_TIMEOUT_MS): Promise<void> {
-    await this.databaseSession().run(sql, "list", timeoutMs);
+    await this.databaseSession().run(sql, timeoutMs);
   }
 
   private databaseSession(): SqliteSession {

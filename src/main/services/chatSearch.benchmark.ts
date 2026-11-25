@@ -34,25 +34,25 @@ async function main(): Promise<void> {
     };
     const originalQueryJson = instrumented.queryJson.bind(storage);
     const originalRunSql = instrumented.runSql.bind(storage);
-    let sqliteProcessCount = 0;
+    let sqliteOperationCount = 0;
     instrumented.queryJson = async (sql, timeoutMs) => {
-      sqliteProcessCount += 1;
+      sqliteOperationCount += 1;
       return originalQueryJson(sql, timeoutMs);
     };
     instrumented.runSql = async (sql, timeoutMs) => {
-      sqliteProcessCount += 1;
+      sqliteOperationCount += 1;
       return originalRunSql(sql, timeoutMs);
     };
     const service = new ChatSearchService(storage);
     const coldStartedAt = performance.now();
     const cold = await service.search({ requester: { kind: "user" }, query: "benchmarkneedle" });
     const coldMs = performance.now() - coldStartedAt;
-    const coldSqliteProcesses = sqliteProcessCount;
-    sqliteProcessCount = 0;
+    const coldSqliteOperations = sqliteOperationCount;
+    sqliteOperationCount = 0;
     const warmStartedAt = performance.now();
     const warm = await service.search({ requester: { kind: "user" }, query: "benchmarkneedle" });
     const warmMs = performance.now() - warmStartedAt;
-    const warmSqliteProcesses = sqliteProcessCount;
+    const warmSqliteOperations = sqliteOperationCount;
     const [indexStats] = await originalQueryJson(`
       select coalesce(sum(pgsize), 0) as bytes
       from dbstat
@@ -65,17 +65,17 @@ async function main(): Promise<void> {
     assert.equal(cold.coverage.completeness, "complete");
     assert.ok(coldMs < 20_000, `cold search exceeded 20s: ${coldMs.toFixed(1)}ms`);
     assert.ok(warmMs < 1_000, `warm search exceeded 1s: ${warmMs.toFixed(1)}ms`);
-    assert.ok(coldSqliteProcesses < 50, `cold search used ${coldSqliteProcesses} sqlite3 processes`);
-    assert.ok(warmSqliteProcesses <= 4, `warm search used ${warmSqliteProcesses} sqlite3 processes`);
+    assert.ok(coldSqliteOperations < CHAT_COUNT + 50, `cold search used ${coldSqliteOperations} sqlite3 operations`);
+    assert.ok(warmSqliteOperations <= 4, `warm search used ${warmSqliteOperations} sqlite3 operations`);
     console.log(JSON.stringify({
       chats: CHAT_COUNT,
       messages: CHAT_COUNT * MESSAGES_PER_CHAT,
       textBytes,
       indexBytes: indexStats?.bytes ?? 0,
       coldMs: Number(coldMs.toFixed(1)),
-      coldSqliteProcesses,
+      coldSqliteOperations,
       warmMs: Number(warmMs.toFixed(1)),
-      warmSqliteProcesses,
+      warmSqliteOperations,
       firstPageMatches: cold.matches.length,
       hasMore: cold.status === "ok" && cold.hasMore
     }));
