@@ -486,8 +486,8 @@ switch is disabled.
     the message back (`waitingMessages.ts`, desktop and phone). In the
     composer Enter sends and waits, Cmd or Ctrl with Enter sends now, and
     Enter with nothing typed sends what already waits. A long turn
-    draws its newest 50 steps under a muted "N earlier steps" (a finished
-    fold opens them); a reply that waited in the queue counts its
+    draws its newest 50 steps (a folded line is one) under a muted "N
+    earlier steps" (a finished fold opens them); a reply that waited in the queue counts its
     "Working for" from its own turn's start (`turnStartedAt`). A run on a
     machine shows where it stands ("Preparing the workspace") as its
     current step until its first own step. The phone gets a reply's newest 12 steps, each one
