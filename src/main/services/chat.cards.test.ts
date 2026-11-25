@@ -644,6 +644,35 @@ test("an answer refused after a restart still says why to the device that gave i
   assert.equal(h.scripts.applied, 0);
 });
 
+test("a task a machine's member creates without a card asks nobody, and every device shows it", async (t) => {
+  const maker: ChatParticipant = { ...remote, permissions: { ...normalizeChatAgentPermissions(remote.permissions), scheduleWithoutAsking: true } };
+  const h = await linkedDesktop(t, chat("cards-made", { participants: [desk, maker] } as never));
+  let applied = 0;
+  const { request } = scriptApproval("x", "cards-made");
+  h.machineChat.setScriptHost({
+    async proposeChange() { return { kind: "approval", request, summary: "Add the scheduled task", missingSecretNames: [] }; },
+    async attachApproval() { return undefined; },
+    async assertApprovable() { return undefined; },
+    async applyApproved() { applied += 1; return "Added the scheduled task \"Watcher\"."; },
+    async rejectPending() { return undefined; }
+  } as never);
+  const settings = (h.machineChat as unknown as { settings: { getPublicSettings(): Promise<Record<string, unknown>> } }).settings;
+  const read = settings.getPublicSettings.bind(settings);
+  settings.getPublicSettings = async () => ({ ...await read(), newChatDefaults: { compactWithoutAsking: true, scheduleWithoutAsking: true } });
+  await h.startMachine();
+  await until(() => h.machineStorage.getConversation("cards-made"), (item) => Boolean(item));
+  const result = await h.machineChat.scriptToolFromApp({ conversationId: "cards-made", participantId: maker.id, roleConfigId: maker.roleConfigId, roleConfigVersion: 1, capabilities: [] } as never,
+    APP_SCRIPTS_REQUEST_CHANGE_TOOL, { op: "create" });
+  assert.equal(result.status, "created");
+  const approvalId = String(result.approvalId);
+  const settled = await until(() => h.card(approvalId), (item) => item?.state === "settled");
+  assert.deepEqual([settled!.answer?.auto, settled!.answeredBy], [true, h.machineIdentity.originId], "its machine answered it, nobody was asked");
+  const shown = await until(() => approvalOf(h.desktopStorage, "cards-made", approvalId), (item) => item?.status === "auto-applied" && !item.machineDecisionPending);
+  assert.equal(shown!.taskCreatedAt, undefined);
+  assert.equal(controlCardFromHubCard(settled!), undefined);
+  assert.equal(applied, 1, "installed once");
+});
+
 test("mentions approved one member at a time: each answer is applied once and the card is asked again for the rest", async (t) => {
   const third: ChatParticipant = { id: "33333333-3333-4333-8333-333333333333", handle: "morgan", roleConfigId: "software-engineer", kind: "claude-code",
     permissions: normalizeChatAgentPermissions(defaultChatAgentPermissions()) };

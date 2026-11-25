@@ -1,4 +1,4 @@
-import { readActiveRunOwnerIds, readActiveRunParticipants } from "./chatRunState";
+import { readActiveRunOwnerIds, readActiveRunParticipants, readParticipantCompactions } from "./chatRunState";
 import type { ChatMessage, Conversation } from "./types";
 
 export interface ActiveChatRunSummary {
@@ -119,6 +119,11 @@ export function activeRunSummaryForConversation(conversation: ConversationRunSta
 
   for (const [runId, participantId] of activeRemoteRunParticipants(conversation.metadata, liveRunIds)) {
     setParticipant(runId, participantId);
+  }
+
+  // A member's compaction is its run: its Stop reaches it.
+  for (const [participantId, state] of Object.entries(readParticipantCompactions(conversation.metadata))) {
+    setParticipant(state.runId, participantId);
   }
 
   for (const message of conversation.messages) {

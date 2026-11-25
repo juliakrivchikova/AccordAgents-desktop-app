@@ -345,7 +345,7 @@ export function memberAsItRunsNow(participant: ChatParticipant, mainSession: Cha
 /**
  * The new chat's main session's mode and rights: the member's access as it
  * runs now (what it may read, edit, run and reach, and whether it compacts
- * its context without asking) in its CLI's own mode, the one it was running
+ * its context or creates scheduled tasks without asking) in its CLI's own mode, the one it was running
  * in (inCliOwnMode: the sessions view has only the CLIs' own modes, never
  * "Custom"; the User, 2026-11-22), with the main session's own say over
  * members (`base`: what its role gives a new main session). Never more than
@@ -365,13 +365,14 @@ export function forkedMainSessionAccess(
  *  mode (its rights as they are, with the main session's say over members). */
 export function forkedMainSessionPermissions(base: ChatAgentPermissions, memberPermissions: ChatAgentPermissions | undefined): ChatAgentPermissions {
   const own = normalizeChatAgentPermissions(memberPermissions);
-  const { providerNative: _baseNative, cliApprovals: _baseApprovals, codexPlanMode: _basePlan, ...rest } = normalizeChatAgentPermissions(base);
+  const { providerNative: _baseNative, cliApprovals: _baseApprovals, codexPlanMode: _basePlan, scheduleWithoutAsking: _baseSchedule, ...rest } = normalizeChatAgentPermissions(base);
   return {
     ...rest,
     repoRead: own.repoRead,
     workspaceWrite: own.workspaceWrite,
     webAccess: own.webAccess,
     requestCompaction: own.requestCompaction,
+    ...(own.scheduleWithoutAsking ? { scheduleWithoutAsking: true as const } : {}),
     shell: { enabled: own.shell.enabled, rules: own.shell.rules.map((rule) => ({ ...rule })) },
     ...(own.providerNative ? { providerNative: own.providerNative } : {}),
     ...(own.cliApprovals ? { cliApprovals: true as const } : {}),

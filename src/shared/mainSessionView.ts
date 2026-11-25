@@ -9,7 +9,7 @@ import type { ChatParticipantRosterStatus } from "./chatParticipantStatus";
 import { sessionsViewLane, type SessionsViewIndex } from "./mainSession";
 import { isChatMessageHiddenFromTimeline } from "./chatTimelineVisibility";
 import { remoteRunStreamingStartedAt } from "./remoteRunStreaming";
-import { APP_CONNECTOR_SIGN_IN_TOOL, APP_PARTICIPANTS_REQUEST_CHANGE_TOOL, APP_TOOL_PERMISSION_TOOL } from "./appMcpToolContracts";
+import { APP_CHAT_REQUEST_COMPACTION_TOOL, APP_CONNECTOR_SIGN_IN_TOOL, APP_PARTICIPANTS_REQUEST_CHANGE_TOOL, APP_TOOL_PERMISSION_TOOL } from "./appMcpToolContracts";
 import type { ChatAppToolApproval, ChatMessage, ChatParticipant, ChatParticipantRequestBatch, ChatParticipantRequestItem } from "./types";
 
 /** The ordinary member's role: the sessions view names no role for it. */
@@ -604,7 +604,9 @@ export function sessionsMembersWaitingSince(
 /** Whether a member's request stops its turn until the User answers
  *  (BLOCKING_APPROVAL_TOOLS, or a request that names the run it holds). */
 export function approvalHoldsTurn(approval: Partial<Pick<ChatAppToolApproval, "toolName" | "resumeContext">>): boolean {
-  return BLOCKING_APPROVAL_TOOLS.has(approval.toolName ?? "") || typeof approval.resumeContext?.runId === "string";
+  // A compaction card names the turn the member goes on from, which has ended.
+  return BLOCKING_APPROVAL_TOOLS.has(approval.toolName ?? "") ||
+    (approval.toolName !== APP_CHAT_REQUEST_COMPACTION_TOOL && typeof approval.resumeContext?.runId === "string");
 }
 
 export interface SessionsMemberRow {

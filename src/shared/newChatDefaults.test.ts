@@ -6,8 +6,10 @@ import {
   newChatCompactionPermission,
   newChatDefaultsForProvider,
   newChatMainSessionStart,
-  normalizeNewChatDefaults
+  normalizeNewChatDefaults,
+  withNewChatRights
 } from "./newChatDefaults";
+import { defaultChatAgentPermissions } from "./agentPermissions";
 import { newChatLeadStart, newChatMainSessionFor } from "./newChat";
 import type { ChatParticipant } from "./types";
 
@@ -38,6 +40,20 @@ test("a change keeps what it does not touch; model, effort and mode for another 
   // A kind alone never relabels another CLI's choices.
   assert.deepEqual(applyNewChatDefaultsUpdate(claude, { kind: "codex-cli", compactWithoutAsking: false }), { ...claude, compactWithoutAsking: false });
   assert.deepEqual(newChatDefaultsForProvider({ ...claude, homeMachineId: "m-1", compactWithoutAsking: false }), { homeMachineId: "m-1", compactWithoutAsking: false });
+});
+
+test("scheduled tasks without asking: off unless turned on, kept through other changes, and only as Settings says", () => {
+  assert.equal(normalizeNewChatDefaults({ scheduleWithoutAsking: "yes" }).scheduleWithoutAsking, undefined);
+  const on = applyNewChatDefaultsUpdate(undefined, { scheduleWithoutAsking: true });
+  assert.deepEqual(on, { compactWithoutAsking: true, scheduleWithoutAsking: true });
+  assert.equal(applyNewChatDefaultsUpdate(on, { kind: "claude-code", model: "opus" }).scheduleWithoutAsking, true);
+  assert.equal(newChatDefaultsForProvider(on).scheduleWithoutAsking, true, "another provider keeps it");
+  assert.equal(applyNewChatDefaultsUpdate(on, { scheduleWithoutAsking: false }).scheduleWithoutAsking, undefined);
+  const start = newChatMainSessionStart(on, { kind: "claude-code", hostId: "zai" });
+  assert.equal(start.scheduleWithoutAsking, true);
+  assert.equal(withNewChatRights(defaultChatAgentPermissions(), start).scheduleWithoutAsking, true);
+  assert.equal(withNewChatRights({ ...defaultChatAgentPermissions(), scheduleWithoutAsking: true }, newChatMainSessionStart(undefined, { kind: "claude-code" })).scheduleWithoutAsking,
+    undefined, "a row that brings it does not give it");
 });
 
 test("a new chat's main session starts with the choices for its own CLI, on a machine still set up, with its compaction right", () => {

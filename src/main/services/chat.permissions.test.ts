@@ -12319,6 +12319,73 @@ test("a script approval stays pending until its keys exist, approves once, and a
   assert.equal(storage.current.metadata.pendingAppToolApprovals.find((item: any) => item.id === second.approvalId).status, "denied");
 });
 
+test("a member the User lets create scheduled tasks without a card creates one at once; keys, other changes, Plan and other members still ask", async () => {
+  const may = { ...defaultChatAgentPermissions(), scheduleWithoutAsking: true as const };
+  const requestFor = (conversationId: string, op: string, secretNames: string[]) => ({
+    kind: "script-change", op, scriptId: "script-0000-test", revisionId: "rev-00000001", contentHash: "h",
+    name: "Watcher", description: "d", hostId: "desktop", hostLabel: "This Mac", runtime: "node", entry: "w.mjs",
+    schedule: { kind: "interval", everySeconds: 60 }, scheduleText: "Every minute", timeoutSeconds: 300,
+    secretNames, permissions: { chatIds: [conversationId], participantIds: [], maxWakeupsPerHour: 6 },
+    chatLabels: {}, participantLabels: {}, fileCount: 1, totalBytes: 10
+  });
+  const propose = async (patch: Partial<ChatParticipant>, op = "create", keys: string[] = [], failing?: "apply" | "save", switchedOn = true) => {
+    const claude = { ...chatParticipant("claude-code"), ...patch };
+    const conversation = chatConversation([claude]);
+    const { service, storage } = testService({ conversation, settings: { chatRoleConfigs: [ADMIN_ROLE, ROLE], newChatDefaults: { compactWithoutAsking: true, ...(switchedOn ? { scheduleWithoutAsking: true as const } : {}) } } });
+    const calls: string[] = [];
+    service.setScriptHost({
+      proposeChange: async () => ({ kind: "approval", request: requestFor(conversation.id, op, keys) as any, summary: "Add the scheduled task", missingSecretNames: keys }),
+      attachApproval: async () => { calls.push("attach"); },
+      assertApprovable: async () => undefined,
+      applyApproved: async () => {
+        calls.push("apply");
+        if (failing === "apply") throw new Error("The disk is full.");
+        return "Added the scheduled task \"Watcher\": every minute, first run now.";
+      },
+      rejectPending: async () => { calls.push("reject"); },
+      listForAgent: async () => [],
+      runs: async () => []
+    });
+    if (failing === "save") (service as any).newAppToolApproval = () => { throw new Error("Could not save."); };
+    const actor = { conversationId: conversation.id, participantId: claude.id, roleConfigId: claude.roleConfigId, roleConfigVersion: 1, capabilities: [] };
+    const run = service.scriptToolFromApp(actor as any, "app_scripts_request_change", { op });
+    return { run, calls, approvals: () => (storage.current.metadata.pendingAppToolApprovals ?? []) as any[], storage };
+  };
+
+  const created = await propose({ permissions: may });
+  const result = await created.run;
+  assert.equal(result.status, "created");
+  assert.deepEqual(created.calls, ["apply"]);
+  assert.equal(created.approvals().length, 1);
+  assert.equal(created.approvals()[0].status, "auto-applied", "the chat shows the task it made");
+  assert.equal(created.approvals()[0].taskCreatedAt, undefined, "on this computer no card stands on the server for it");
+
+  for (const [label, patch, op, keys] of [
+    ["no such right", {}, "create", []],
+    ["needs a key", { permissions: may }, "create", ["SLACK_BOT_TOKEN"]],
+    ["a change of a task", { permissions: may }, "update", []],
+    ["deleting one", { permissions: may }, "delete", []],
+    ["Plan", { permissions: may, agentMode: "plan" }, "create", []],
+    ["Codex's Plan", { permissions: { ...may, cliApprovals: true as const, codexPlanMode: true as const } }, "create", []]
+  ] as Array<[string, Partial<ChatParticipant>, string, string[]]>) {
+    const asked = await propose(patch, op, keys);
+    assert.equal((await asked.run).status, "pending_user_approval", label);
+    assert.deepEqual(asked.calls, ["attach"], label);
+  }
+
+  const off = await propose({ permissions: may }, "create", [], undefined, false);
+  assert.equal((await off.run).status, "pending_user_approval", "her switch is off now: a chat made while it was on asks too");
+
+  // Never a task that runs with nothing in the chat about it.
+  const unsaved = await propose({ permissions: may }, "create", [], "save");
+  await assert.rejects(unsaved.run, /Could not save/);
+  assert.deepEqual(unsaved.calls, ["apply", "reject"]);
+  const failed = await propose({ permissions: may }, "create", [], "apply");
+  await assert.rejects(failed.run, /The disk is full/);
+  assert.deepEqual(failed.calls, ["apply", "reject"]);
+  assert.equal(failed.approvals().length, 0);
+});
+
 function pendingParticipantMessage(
   participant: ChatParticipant,
   id: string,

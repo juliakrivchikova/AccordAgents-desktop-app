@@ -699,14 +699,15 @@ test("requestSelfCompactionFromTool queues behind the current participant turn a
 
     activeTurn.release();
     await waitFor(() => compactCalls === 1);
-    await waitFor(() => storage.current.messages.at(-1)?.content === "Compacted @admin context with focus instructions.");
-    assert.deepEqual(storage.current.messages.at(-1)?.metadata?.compaction, {
+    const line = (): any => storage.current.messages.find((message: any) => message.content === "Compacted @admin context with focus instructions.");
+    await waitFor(() => Boolean(line()));
+    assert.deepEqual(line().metadata?.compaction, {
       triggeredBy: "agent",
       participantId: participant.id,
       outcome: "completed",
       instructionsProvided: true
     });
-    assert.deepEqual(debugEvents.map(({ event, payload }) => ({ event, triggeredBy: payload.triggeredBy, outcome: payload.outcome })), [
+    assert.deepEqual(debugEvents.filter(({ event }) => event.startsWith("chat.compaction.")).map(({ event, payload }) => ({ event, triggeredBy: payload.triggeredBy, outcome: payload.outcome })), [
       { event: "chat.compaction.requested", triggeredBy: "agent", outcome: undefined },
       { event: "chat.compaction.finished", triggeredBy: "agent", outcome: "completed" }
     ]);
@@ -1110,7 +1111,9 @@ test("a member on a machine asking to compact itself asks it on the server, and 
     await waitFor(() => link.ops.some((op) => op.kind === "turn.request"));
     const request = link.ops.find((op) => op.kind === "turn.request") as Extract<HubOp, { kind: "turn.request" }>;
     assert.equal(request.participantId, participant.id);
-    assert.deepEqual(request.request, { kind: "compaction", triggeredBy: "agent", instructions: "Keep the API notes." });
+    const { resume, ...asked2 } = request.request as Record<string, any>;
+    assert.deepEqual(asked2, { kind: "compaction", triggeredBy: "agent", instructions: "Keep the API notes." });
+    assert.equal(resume.runId, "active-turn", "what to go on from travels with it");
     await delay(25);
     assert.equal(compactCalls, 0, "it runs when the server says so, so every device sees it and can stop it");
     // The server's word comes back: this machine takes it.
@@ -1179,6 +1182,538 @@ test("Stop by run id reaches a compaction the machine runs for another device, w
   } finally {
     await rm(tempRoot, { recursive: true, force: true });
   }
+});
+
+// --- going on after a member's own compaction (the User, 2026-11-25) ---------
+
+/** A chat whose one member's turns the test plays: what each prompt was, and
+ *  the app tools each turn acts with (the grant its CLI got). */
+function selfCompactingChat(options: {
+  participant?: Partial<ChatParticipant>;
+  others?: ChatParticipant[];
+  turn: (context: { prompt: string; participantId: string; actor: any; service: ChatService; call: number }) => Promise<string>;
+  compactSession?: (signal: AbortSignal | undefined) => Promise<Record<string, unknown>>;
+}) {
+  const participant = chatParticipant(options.participant);
+  const members = [participant, ...(options.others ?? [])];
+  const conversation = chatConversation(members, members.map((member) => chatSession(member, `session-${member.id}`)));
+  const grants = new Map<string, any>();
+  const note = (grant: any): { url: string; token: string } => {
+    grants.set(grant.participantId, grant);
+    return { url: "http://127.0.0.1:1/mcp", token: `token-${grant.participantId}` };
+  };
+  const prompts: Array<{ participantId: string; prompt: string }> = [];
+  const order: string[] = [];
+  const debugEvents: Array<{ event: string; payload: Record<string, unknown> }> = [];
+  const made = testService({
+    conversation,
+    debugEvents,
+    appMcp: { issueToken: note, updateToken: (_token: string, grant: any) => note(grant), clientStatus: () => undefined },
+    compactSession: async (runParticipant, _repoPath, _diffMode, _kind, signal) => {
+      order.push(`compact ${runParticipant.id}`);
+      return options.compactSession ? await options.compactSession(signal) : { participant: runParticipant, ok: true, sessionId: `session-${runParticipant.id}` };
+    },
+    run: async (runParticipant, prompt) => {
+      prompts.push({ participantId: runParticipant.id, prompt });
+      order.push(`turn ${runParticipant.id}`);
+      const content = await options.turn({
+        prompt, participantId: runParticipant.id, actor: { ...grants.get(runParticipant.id), capabilities: ["compaction.request", "participants.request"] },
+        service: made.service, call: prompts.filter((item) => item.participantId === runParticipant.id).length
+      });
+      return { participant: runParticipant, ok: true, content, durationMs: 1, sessionId: `session-${runParticipant.id}` };
+    }
+  });
+  (made.service as any).ensureHistoryFiles = async () => tmpdir();
+  const replies = (): any[] => made.storage.current.messages.filter((message: any) => message.role === "participant" && message.status === "done");
+  const approvals = (): any[] => made.storage.current.metadata.pendingAppToolApprovals ?? [];
+  return { ...made, participant, conversation, prompts, order, debugEvents, replies, approvals };
+}
+
+const ALLOWED = { permissions: normalizeChatAgentPermissions({ ...defaultChatAgentPermissions(), requestCompaction: "allow" }) };
+
+test("a member that compacts its own context goes on by itself: compacted, then called once with what comes next, on the same session", async () => {
+  const chat = selfCompactingChat({
+    participant: ALLOWED,
+    turn: async ({ actor, service, call }) => {
+      if (call > 1) return "Stage two is done.";
+      const asked = await service.requestSelfCompactionFromTool(actor, { instructions: "Stage two: the settings screen." });
+      assert.equal(asked.status, "queued");
+      assert.match(String(asked.next), /the app calls you again to go on/);
+      return "Stage one is done, stage two next.";
+    }
+  });
+  await chat.service.sendMessage({ conversationId: chat.conversation.id, runId: "user-run", content: "@admin do both stages" });
+  await waitFor(() => chat.replies().length === 2, 5_000);
+  assert.deepEqual(chat.order, ["turn codex-admin", "compact codex-admin", "turn codex-admin"]);
+  const [, second] = chat.prompts;
+  assert.match(second.prompt, /<<<EVENT [0-9a-f]{8}>>>\n@admin goes on after the compaction it asked for\.\nYour context was compacted\. Go on with the next step of your work now\./);
+  assert.match(second.prompt, /What you asked the summary to keep: Stage two: the settings screen\./);
+  assert.deepEqual(chat.replies().map((message) => message.content), ["Stage one is done, stage two next.", "Stage two is done."]);
+  await waitFor(() => chat.storage.current.metadata.running === false, 5_000);
+  await delay(50);
+  assert.equal(chat.prompts.length, 2, "called once");
+  // In the thread of the message it works on.
+  const [first, last] = chat.replies();
+  assert.equal(last.metadata.threadId, first.metadata.threadId);
+});
+
+test("a compaction that fails is said, and the member goes on without it; a Stop of the compaction leaves it to the User", async () => {
+  const failing = selfCompactingChat({
+    participant: ALLOWED,
+    compactSession: async () => ({ ok: false, error: "No messages to compact." }),
+    turn: async ({ actor, service, call }) => {
+      if (call === 1) await service.requestSelfCompactionFromTool(actor, {});
+      return `Reply ${call}.`;
+    }
+  });
+  await failing.service.sendMessage({ conversationId: failing.conversation.id, runId: "user-run", content: "@admin go" });
+  await waitFor(() => failing.replies().length === 2, 5_000);
+  assert.match(failing.prompts[1].prompt, /Your context could not be compacted \(No messages to compact\.\): it is as it was\./);
+
+  const stopped = selfCompactingChat({
+    participant: ALLOWED,
+    compactSession: async (signal) => {
+      await new Promise((resolve) => signal?.addEventListener("abort", resolve, { once: true }));
+      return { ok: false, error: "Compaction was cancelled." };
+    },
+    turn: async ({ actor, service }) => {
+      await service.requestSelfCompactionFromTool(actor, {});
+      return "Stage one is done.";
+    }
+  });
+  await stopped.service.sendMessage({ conversationId: stopped.conversation.id, runId: "user-run", content: "@admin go" });
+  await waitFor(() => stopped.order.includes("compact codex-admin"), 5_000);
+  const compaction = readParticipantCompactions(stopped.storage.current.metadata)["codex-admin"];
+  assert.equal(stopped.service.cancelRun(compaction!.runId), true);
+  await waitFor(() => stopped.storage.current.metadata.running === false, 5_000);
+  await delay(50);
+  assert.equal(stopped.prompts.length, 1, "not called again after a Stop");
+});
+
+test("the User's answer to a compaction card calls the member again: compacted, or as it is after Not now; a Stop of its turn withdraws the card", async () => {
+  for (const approve of [true, false]) {
+    const chat = selfCompactingChat({
+      turn: async ({ actor, service, call }) => {
+        if (call === 1) {
+          const asked = await service.requestSelfCompactionFromTool(actor, { instructions: "The open findings." });
+          assert.equal(asked.status, "pending_user_approval");
+          assert.match(String(asked.next), /Once User answers the card the app calls you again/);
+        }
+        return `Reply ${call}.`;
+      }
+    });
+    await chat.service.sendMessage({ conversationId: chat.conversation.id, runId: "user-run", content: "@admin go" });
+    await waitFor(() => chat.replies().length === 1 && chat.storage.current.metadata.running === false, 5_000);
+    assert.equal(chat.prompts.length, 1, "it waits for her answer");
+    await chat.service.respondToAppToolApproval({ conversationId: chat.conversation.id, approvalId: chat.approvals()[0].id, approve });
+    await waitFor(() => chat.replies().length === 2, 5_000);
+    assert.deepEqual(chat.order, approve ? ["turn codex-admin", "compact codex-admin", "turn codex-admin"] : ["turn codex-admin", "turn codex-admin"]);
+    assert.match(chat.prompts[1].prompt, approve ? /Your context was compacted\./ : /User chose not to compact your context now: it is as it was\./);
+  }
+
+  // It went on at her word already: Not now only closes the card.
+  const wentOn = selfCompactingChat({
+    turn: async ({ actor, service, call }) => {
+      if (call === 1) await service.requestSelfCompactionFromTool(actor, {});
+      return `Reply ${call}.`;
+    }
+  });
+  await wentOn.service.sendMessage({ conversationId: wentOn.conversation.id, runId: "user-run", content: "@admin go" });
+  await waitFor(() => wentOn.replies().length === 1 && wentOn.storage.current.metadata.running === false, 5_000);
+  await wentOn.service.sendMessage({ conversationId: wentOn.conversation.id, runId: "second-run", content: "@admin go on without it" });
+  await waitFor(() => wentOn.replies().length === 2 && wentOn.storage.current.metadata.running === false, 5_000);
+  await wentOn.service.respondToAppToolApproval({ conversationId: wentOn.conversation.id, approvalId: wentOn.approvals()[0].id, approve: false });
+  await waitFor(() => wentOn.debugEvents.some(({ event, payload }) => event === "chat.self-compaction.not-resumed" && payload.reason === "not-continued"), 5_000);
+  assert.equal(wentOn.prompts.length, 2);
+
+  // Stopped: the card goes with the work it was for.
+  let release!: () => void;
+  const stopped = selfCompactingChat({
+    turn: async ({ actor, service }) => {
+      await service.requestSelfCompactionFromTool(actor, {});
+      await new Promise<void>((resolve) => { release = resolve; });
+      return "Late.";
+    }
+  });
+  await stopped.service.sendMessage({ conversationId: stopped.conversation.id, runId: "user-run", content: "@admin go" });
+  await waitFor(() => stopped.approvals().length === 1 && typeof release === "function", 5_000);
+  const runId = stopped.storage.current.messages.find((message: any) => message.role === "participant").metadata.runId;
+  assert.equal(stopped.service.cancelRun(runId), true);
+  release();
+  await waitFor(() => stopped.approvals()[0].status === "cancelled", 5_000);
+  assert.equal(stopped.prompts.length, 1);
+});
+
+test("a turn stopped after it queued its own compaction is not gone on with", async () => {
+  let release!: () => void;
+  const chat = selfCompactingChat({
+    participant: ALLOWED,
+    turn: async ({ actor, service }) => {
+      await service.requestSelfCompactionFromTool(actor, {});
+      await new Promise<void>((resolve) => { release = resolve; });
+      return "Late.";
+    }
+  });
+  await chat.service.sendMessage({ conversationId: chat.conversation.id, runId: "user-run", content: "@admin go" });
+  await waitFor(() => typeof release === "function", 5_000);
+  const runId = chat.storage.current.messages.find((message: any) => message.role === "participant").metadata.runId;
+  assert.equal(chat.service.cancelRun(runId), true);
+  release();
+  await waitFor(() => chat.debugEvents.some(({ event, payload }) => event === "chat.self-compaction.not-resumed" && payload.reason === "stopped"), 5_000);
+  assert.equal(chat.prompts.length, 1);
+});
+
+test("a member that compacts in the middle of another member's request answers with the reply it goes on to", async () => {
+  const asker = chatParticipant({ id: "asker", handle: "asker", permissions: normalizeChatAgentPermissions({ ...defaultChatAgentPermissions(), requestParticipants: "allow" }) });
+  const chat = selfCompactingChat({
+    participant: ALLOWED,
+    others: [asker],
+    turn: async ({ actor, service, participantId, call }) => {
+      if (participantId === "asker") {
+        if (call > 1) return "Thanks.";
+        const asked = await service.requestParticipantsFromTool(actor, { requests: [{ target: "admin", prompt: "Do both stages" }] });
+        assert.equal(asked.status, "running");
+        return "Asked admin.";
+      }
+      if (call === 1) {
+        await service.requestSelfCompactionFromTool(actor, {});
+        return "Stage one is done, stage two next.";
+      }
+      // Its requester still waits for it.
+      const batch = chat.storage.current.messages.find((message: any) => message.metadata?.participantRequest)!.metadata.participantRequest;
+      assert.equal(batch.items[0].status, "running");
+      assert.equal(chat.prompts.filter((item) => item.participantId === "asker").length, 1);
+      return "Both stages are done.";
+    }
+  });
+  await chat.service.sendMessage({ conversationId: chat.conversation.id, runId: "user-run", content: "@asker get both stages done" });
+  await waitFor(() => chat.prompts.filter((item) => item.participantId === "asker").length === 2, 8_000);
+  const item = chat.storage.current.messages.find((message: any) => message.metadata?.participantRequest)!.metadata.participantRequest.items[0];
+  const replyOf = (content: string): any => chat.replies().find((message) => message.content === content);
+  assert.equal(item.status, "answered");
+  assert.equal(item.replyMessageId, replyOf("Both stages are done.").id);
+  assert.deepEqual(item.earlierReplyMessageIds, [replyOf("Stage one is done, stage two next.").id]);
+  const back = chat.prompts.filter((entry) => entry.participantId === "asker")[1].prompt;
+  assert.match(back, /Stage one is done, stage two next\./);
+  assert.match(back, /Both stages are done\./);
+  await waitFor(() => chat.storage.current.metadata.running === false, 5_000);
+});
+
+test("a request whose member's own compaction the User stopped ends as stopped, never as answered with the half it wrote", async () => {
+  const asker = chatParticipant({ id: "asker", handle: "asker", permissions: normalizeChatAgentPermissions({ ...defaultChatAgentPermissions(), requestParticipants: "allow" }) });
+  const chat = selfCompactingChat({
+    participant: ALLOWED,
+    others: [asker],
+    compactSession: async (signal) => {
+      await new Promise((resolve) => signal?.addEventListener("abort", resolve, { once: true }));
+      return { ok: false, error: "Compaction was cancelled." };
+    },
+    turn: async ({ actor, service, participantId, call }) => {
+      if (participantId === "asker") {
+        if (call === 1) await service.requestParticipantsFromTool(actor, { requests: [{ target: "admin", prompt: "Do both stages" }] });
+        return call === 1 ? "Asked admin." : "Noted.";
+      }
+      await service.requestSelfCompactionFromTool(actor, {});
+      return "Stage one is done, stage two next.";
+    }
+  });
+  await chat.service.sendMessage({ conversationId: chat.conversation.id, runId: "user-run", content: "@asker get both stages done" });
+  await waitFor(() => chat.order.includes("compact codex-admin"), 5_000);
+  assert.equal(chat.service.cancelRun(readParticipantCompactions(chat.storage.current.metadata)["codex-admin"]!.runId), true);
+  const item = (): any => chat.storage.current.messages.find((message: any) => message.metadata?.participantRequest)!.metadata.participantRequest.items[0];
+  await waitFor(() => item().status === "interrupted", 5_000);
+  assert.equal(item().error, "Stopped by User.");
+  await waitFor(() => chat.storage.current.metadata.running === false, 5_000);
+  assert.equal(chat.prompts.filter((entry) => entry.participantId === "codex-admin").length, 1);
+});
+
+test("on a machine a member's own compaction carries what to go on from, and the machine goes on there once it compacted", async () => {
+  const participant = chatParticipant({ homeMachineId: "box", ...ALLOWED });
+  const conversation = chatConversation([participant], [chatSession(participant, "session-on-box")]);
+  conversation.messages.push(acceptedMessage());
+  const prompts: string[] = [];
+  const { service, storage } = testService({
+    conversation,
+    compactSession: async (runParticipant) => ({ participant: runParticipant, ok: true, sessionId: "session-on-box" }),
+    run: async (runParticipant, prompt) => {
+      prompts.push(prompt);
+      return { participant: runParticipant, ok: true, content: "Went on.", durationMs: 1, sessionId: "session-on-box" };
+    }
+  });
+  (service as any).ensureHistoryFiles = async () => tmpdir();
+  service.setHostMachineId("box");
+  const link = fakeServerLink("machine-device");
+  service.setServerLink(link);
+  // Taken after a restart of the machine: nothing in memory, all in the turn.
+  void service.startServerTurn({ runId: "turn-self", conversationId: conversation.id, messageId: "anchor", participantId: participant.id, state: "requested",
+    requestedBy: "machine-device", request: { kind: "compaction", triggeredBy: "agent", instructions: "Stage two.", resume: { runId: "turn-asked", triggerMessageId: "anchor" } } });
+  await waitFor(() => prompts.length === 1, 5_000);
+  assert.match(prompts[0], /Your context was compacted\./);
+  assert.match(prompts[0], /Stage two\./);
+  await waitFor(() => storage.current.messages.some((message: any) => message.content === "Went on."), 5_000);
+  const claims = link.ops.filter((op) => op.kind === "turn.claim").map((op) => (op as Extract<HubOp, { kind: "turn.claim" }>).runId);
+  assert.deepEqual(claims, ["turn-self", "turn-compaction-resume-asked"], "a turn of its own on the server, named by the run that asked");
+  // The same turn offered again (the feed repeats it) goes on once.
+  await delay(30);
+  assert.equal(prompts.length, 1);
+});
+
+/** A reply as another device's member wrote it, ended for its own compaction. */
+function askingReply(participantId: string, mark: Record<string, unknown>): any {
+  return { id: "asked-reply", role: "participant", participantId, content: "Stage one is done, stage two next.", createdAt: NOW, status: "done",
+    metadata: { runId: "turn-asked", selfCompaction: mark, serverSeq: 940, serverWriter: "other-device" } };
+}
+
+test("a member's answer is waited for through its own compaction on another device, by what that device wrote on its reply", async () => {
+  // Wherever the requester runs: the computer for a cloud member, a machine
+  // for a member of the computer's (its compaction is no turn on the server).
+  for (const here of ["desktop", "machine"]) {
+    const participant = chatParticipant(here === "desktop" ? { homeMachineId: "box" } : {});
+    const conversation = chatConversation([participant], []);
+    conversation.messages.push(acceptedMessage(), askingReply(participant.id, { state: "waiting" }));
+    const { service, storage } = testService({ conversation, compactSession: async () => { throw new Error("not here"); } });
+    if (here === "machine") service.setHostMachineId("box");
+    service.setServerLink(fakeServerLink(`${here}-device`));
+    const asked = storage.current.messages.find((message: any) => message.id === "asked-reply");
+    const waiting = (service as any).selfCompactedAnswer(conversation.id, participant.id, asked, undefined) as Promise<any>;
+    await delay(20);
+    const went = (content: string, status: string): any => ({ id: "went-on", role: "participant", participantId: participant.id, content, createdAt: NOW, status,
+      metadata: { runId: "turn-compaction-resume-asked", serverSeq: 950, serverWriter: "other-device" } });
+    const post: any = { ...went("On it.", "done"), id: "post", metadata: { ...went("", "done").metadata, appMessageSource: "app_chat_send_message", serverSeq: 951 } };
+    await service.applyServerEntries([fromServer("other-device", { kind: "message.update", message: askingReply(participant.id, { state: "resumed" }) })]);
+    await service.applyServerEntries([fromServer("other-device", { kind: "message.create", message: went("", "pending") })]);
+    await service.applyServerEntries([fromServer("other-device", { kind: "message.create", message: post })]);
+    await delay(20);
+    await service.applyServerEntries([fromServer("other-device", { kind: "message.update", message: went("Both stages are done.", "done") })]);
+    const answer = await waiting;
+    assert.deepEqual([answer.kind, answer.reply.content], ["went-on", "Both stages are done."], `${here}: its reply, not a post it sent on the way`);
+  }
+});
+
+test("an answer that never comes after a compaction says why: stopped, cut short, could not start, nothing to go on with", async () => {
+  const participant = chatParticipant({ homeMachineId: "box" });
+  const start = (mark: Record<string, unknown>) => {
+    const conversation = chatConversation([participant], []);
+    conversation.messages.push(acceptedMessage(), askingReply(participant.id, mark));
+    const made = testService({ conversation, compactSession: async () => { throw new Error("not here"); } });
+    const link = fakeServerLink("desktop-device");
+    made.service.setServerLink(link);
+    const controller = new AbortController();
+    const asked = made.storage.current.messages.find((message: any) => message.id === "asked-reply");
+    const waiting = (made.service as any).selfCompactedAnswer(conversation.id, participant.id, asked, controller.signal) as Promise<any>;
+    return { ...made, link, controller, waiting, conversation };
+  };
+  for (const reason of ["stopped", "interrupted", "failed", "not-continued"]) {
+    const { service, waiting } = start({ state: "waiting" });
+    await delay(10);
+    await service.applyServerEntries([fromServer("machine-device", { kind: "message.update", message: askingReply(participant.id, { state: "ended", reason }) })]);
+    assert.deepEqual(await waiting, { kind: "ended", reason });
+  }
+  // The machine lost the compaction: its turn says so.
+  const lost = start({ state: "waiting" });
+  await delay(10);
+  const compaction: HubTurn = { runId: "turn-c", conversationId: lost.conversation.id, messageId: "anchor", participantId: participant.id, state: "finished", outcome: "interrupted",
+    executorDeviceId: "machine-device", request: { kind: "compaction", triggeredBy: "agent", resume: { runId: "turn-asked" } } };
+  await lost.service.applyServerEntries([fromServer("machine-device", { kind: "turn.finish", turn: compaction })]);
+  assert.deepEqual(await lost.waiting, { kind: "ended", reason: "interrupted" });
+  // Her Stop of the request: the compaction and the turn after it stop there too.
+  const stopped = start({ state: "waiting" });
+  await stopped.service.applyServerEntries([fromServer("machine-device", { kind: "turn.request", turn: { ...compaction, state: "claimed", outcome: undefined } })]);
+  await delay(10);
+  stopped.controller.abort();
+  assert.deepEqual(await stopped.waiting, { kind: "ended", reason: "stopped" });
+  await waitFor(() => stopped.link.ops.some((op) => op.kind === "turn.stop" && op.runId === "turn-c"));
+  // The server gave the turn after it before this device's Stop got there:
+  // stopped as it stands once it is told of it.
+  await stopped.service.applyServerEntries([fromServer("machine-device", { kind: "turn.claim", turn: {
+    runId: "turn-compaction-resume-asked", conversationId: stopped.conversation.id, messageId: "event-1", participantId: participant.id, state: "claimed", executorDeviceId: "machine-device" } })]);
+  await waitFor(() => stopped.link.ops.some((op) => op.kind === "turn.stop" && op.runId === "turn-compaction-resume-asked" && op.messageId === "event-1"));
+});
+
+test("a Stop of what the User sent while a member compacted leaves the work to her", async () => {
+  let release!: () => void;
+  const chat = selfCompactingChat({
+    participant: ALLOWED,
+    compactSession: async () => {
+      await new Promise<void>((resolve) => { release = resolve; });
+      return { ok: true };
+    },
+    turn: async ({ actor, service, call }) => {
+      if (call === 1) {
+        await service.requestSelfCompactionFromTool(actor, {});
+        return "Stage one is done.";
+      }
+      await new Promise<void>((resolve) => { release = resolve; });
+      return "Late.";
+    }
+  });
+  await chat.service.sendMessage({ conversationId: chat.conversation.id, runId: "user-run", content: "@admin go" });
+  await waitFor(() => chat.order.includes("compact codex-admin"), 5_000);
+  await chat.service.sendMessage({ conversationId: chat.conversation.id, runId: "second-run", content: "@admin wait, look at this" });
+  release();
+  await waitFor(() => chat.prompts.length === 2, 5_000);
+  const second = chat.storage.current.messages.findLast((message: any) => message.role === "participant" && message.status === "pending");
+  assert.equal(chat.service.cancelRun(second.metadata.runId), true);
+  release();
+  await waitFor(() => chat.debugEvents.some(({ event, payload }) => event === "chat.self-compaction.not-resumed" && payload.reason === "stopped"), 5_000);
+  await waitFor(() => chat.storage.current.metadata.running === false, 5_000);
+  assert.equal(chat.prompts.length, 2);
+});
+
+test("a restart that cut a member's compaction short is said on its reply once; a card still open goes on waiting", async () => {
+  const participant = chatParticipant();
+  const marks = async (mark: Record<string, unknown>, approvals: unknown[] = []): Promise<any> => {
+    const conversation = chatConversation([participant], [chatSession(participant, "session-1")]);
+    conversation.messages.push({ ...askingReply(participant.id, mark), metadata: { runId: "turn-asked", selfCompaction: mark } });
+    conversation.metadata.pendingAppToolApprovals = approvals as never;
+    const { service, storage } = testService({ conversation, compactSession: async () => ({}) });
+    await (service as any).requireChat(conversation.id);
+    return storage.current.messages.find((message: any) => message.id === "asked-reply").metadata.selfCompaction;
+  };
+  assert.deepEqual(await marks({ state: "waiting" }), { state: "ended", reason: "interrupted" });
+  assert.deepEqual(await marks({ state: "card" }), { state: "ended", reason: "interrupted" });
+  assert.deepEqual(await marks({ state: "resumed" }), { state: "resumed", reason: "interrupted" }, "its turn never began");
+  assert.deepEqual(await marks({ state: "ended", reason: "stopped" }), { state: "ended", reason: "stopped" });
+  const card = { id: "card", conversationId: "chat-compact", requesterParticipantId: participant.id, requesterHandle: "admin", requesterRoleConfigId: ROLE.id,
+    toolName: "app_chat_request_compaction", capability: "compaction.request", status: "pending", request: { type: "self_compaction" }, summary: "Compact",
+    createdAt: NOW, updatedAt: NOW, resumeContext: { runId: "turn-asked", triggerMessageId: "anchor" } };
+  assert.deepEqual(await marks({ state: "card" }, [card]), { state: "card" });
+});
+
+test("a turn that could not start after the compaction, or was stopped before anyone took it, ends the wait for it", async () => {
+  for (const [label, start, expected] of [
+    ["refused", async () => { throw new Error("The server did not give @admin this turn: no."); }, { state: "resumed", reason: "failed" }],
+    ["stopped before it was taken", async () => [], { state: "resumed", reason: "stopped" }]
+  ] as Array<[string, () => Promise<any[]>, Record<string, unknown>]>) {
+    const chat = selfCompactingChat({
+      participant: ALLOWED,
+      turn: async ({ actor, service }) => {
+        await service.requestSelfCompactionFromTool(actor, {});
+        const run = (service as any).runParticipantTurnSerialized.bind(service);
+        (service as any).runParticipantTurnSerialized = async (...args: any[]) => {
+          if (!String(args[3]).startsWith("turn-compaction-resume-")) return run(...args);
+          args[6].turnReservation.release();
+          return start();
+        };
+        return "Stage one is done.";
+      }
+    });
+    await chat.service.sendMessage({ conversationId: chat.conversation.id, runId: "user-run", content: "@admin go" });
+    await waitFor(() => chat.debugEvents.some(({ event }) => event === "chat.self-compaction.not-resumed"), 5_000);
+    await waitFor(() => chat.storage.current.messages.some((message: any) => message.metadata?.selfCompaction?.reason), 5_000);
+    const asking = chat.storage.current.messages.find((message: any) => message.metadata?.selfCompaction);
+    const { error: _error, ...mark } = asking.metadata.selfCompaction;
+    assert.deepEqual(mark, expected, label);
+    const answer = await (chat.service as any).selfCompactedAnswer(chat.conversation.id, "codex-admin", asking, undefined);
+    assert.equal(answer.kind, "ended", label);
+    await waitFor(() => chat.storage.current.metadata.running === false, 5_000);
+  }
+});
+
+test("a stopped request stops its member's compaction, its card and the turn it would go on in, never begun after", async () => {
+  // Waiting on the User's card.
+  const card = selfCompactingChat({
+    turn: async ({ actor, service }) => {
+      await service.requestSelfCompactionFromTool(actor, {});
+      return "Stage one is done.";
+    }
+  });
+  await card.service.sendMessage({ conversationId: card.conversation.id, runId: "user-run", content: "@admin go" });
+  await waitFor(() => card.replies().length === 1 && card.storage.current.metadata.running === false, 5_000);
+  const controller = new AbortController();
+  const waiting = (card.service as any).selfCompactedAnswer(card.conversation.id, "codex-admin", card.replies()[0], controller.signal) as Promise<any>;
+  await delay(20);
+  controller.abort();
+  assert.deepEqual(await waiting, { kind: "ended", reason: "stopped" });
+  assert.equal(card.approvals()[0].status, "cancelled");
+  // A resume already on its way behind another turn is not begun.
+  await (card.service as any).continueAfterSelfCompaction(card.conversation.id, "codex-admin", { runId: card.replies()[0].metadata.runId }, { kind: "completed" }, undefined);
+  assert.equal(card.prompts.length, 1);
+});
+
+test("a card approved after the User stopped something else of the member's still brings it back", async () => {
+  let release: (() => void) | undefined;
+  const chat = selfCompactingChat({
+    turn: async ({ actor, service, call }) => {
+      if (call === 1) await service.requestSelfCompactionFromTool(actor, {});
+      if (call === 2) await new Promise<void>((resolve) => { release = resolve; });
+      return `Reply ${call}.`;
+    }
+  });
+  await chat.service.sendMessage({ conversationId: chat.conversation.id, runId: "user-run", content: "@admin go" });
+  await waitFor(() => chat.replies().length === 1 && chat.storage.current.metadata.running === false, 5_000);
+  await chat.service.sendMessage({ conversationId: chat.conversation.id, runId: "second-run", content: "@admin look at this" });
+  await waitFor(() => Boolean(release), 5_000);
+  const second = chat.storage.current.messages.findLast((message: any) => message.role === "participant" && message.status === "pending");
+  chat.service.cancelRun(second.metadata.runId);
+  release!();
+  await waitFor(() => chat.storage.current.metadata.running === false, 5_000);
+  await delay(5);
+  await chat.service.respondToAppToolApproval({ conversationId: chat.conversation.id, approvalId: chat.approvals()[0].id, approve: true });
+  await waitFor(() => chat.prompts.length === 3, 5_000);
+  assert.match(chat.prompts[2].prompt, /Your context was compacted\./);
+});
+
+test("a Stop from before the member asked to compact, told again by the server, is not a Stop since", async () => {
+  const participant = chatParticipant();
+  const conversation = chatConversation([participant], [chatSession(participant, "session-1")]);
+  const { service } = testService({ conversation, compactSession: async () => ({}) });
+  service.setServerLink(fakeServerLink("desktop-device"));
+  const stopped = (at: string): HubTurn => ({ runId: `turn-${at}`, conversationId: conversation.id, messageId: "anchor", participantId: participant.id, state: "stopped", finishedAt: at, outcome: "stopped" });
+  const since = "2026-11-25T12:00:00.000Z";
+  const check = async (): Promise<boolean> => (service as any).memberStoppedSince(await (service as any).requireChat(conversation.id), participant.id, { runId: "asked", since });
+  await service.applyServerEntries([fromServer("phone", { kind: "turn.stop", turn: stopped("2026-11-25T11:00:00.000Z") })]);
+  assert.equal(await check(), false);
+  await service.applyServerEntries([fromServer("phone", { kind: "turn.stop", turn: stopped("2026-11-25T12:00:01.000Z") })]);
+  assert.equal(await check(), true);
+});
+
+test("a request held through a permission approval's resume is not swept as interrupted", async () => {
+  const asker = chatParticipant({ id: "asker", handle: "asker" });
+  const target = chatParticipant();
+  const conversation = chatConversation([asker, target], []);
+  conversation.messages.push({ id: "request", role: "participant", participantId: "asker", content: "@admin do it", createdAt: NOW, status: "done", metadata: { participantRequest: {
+    id: "batch", requesterParticipantId: "asker", requesterHandle: "asker", source: "mcp", resumeRequester: true, status: "running", depth: 1, createdAt: NOW, updatedAt: NOW,
+    items: [{ targetParticipantId: target.id, targetHandle: "admin", prompt: "Do it", status: "running", createdAt: NOW, updatedAt: NOW }] } } } as any);
+  const { service } = testService({ conversation, compactSession: async () => ({}) });
+  const sweep = (): boolean => (service as any).markOrphanedParticipantRequestsInterrupted(clone(conversation));
+  (service as any).heldParticipantRequests.add("request");
+  assert.equal(sweep(), false);
+  (service as any).heldParticipantRequests.delete("request");
+  assert.equal(sweep(), true);
+});
+
+test("a machine that restarted after a compaction ended, before its member went on, says so once it knows what waits on the server", async () => {
+  const participant = chatParticipant({ homeMachineId: "box" });
+  const conversation = chatConversation([participant], [chatSession(participant, "session-on-box")]);
+  conversation.messages.push(acceptedMessage(), { ...askingReply(participant.id, { state: "waiting" }), metadata: { runId: "turn-asked", selfCompaction: { state: "waiting" } } });
+  const { service, storage } = testService({ conversation, compactSession: async () => ({}) });
+  service.setHostMachineId("box");
+  (service as any).setMachineRuntime?.(true);
+  (service as any).machineRuntime = true;
+  const mark = (): any => storage.current.messages.find((message: any) => message.id === "asked-reply").metadata.selfCompaction;
+  await (service as any).requireChat(conversation.id);
+  assert.deepEqual(mark(), { state: "waiting" }, "not known yet what waits there");
+  service.setServerLink(fakeServerLink("machine-device"));
+  await service.resumeServerTurns();
+  await (service as any).requireChat(conversation.id);
+  assert.deepEqual(mark(), { state: "ended", reason: "interrupted" });
+});
+
+test("the turn a member goes on in is never taken for its requester's resume after a restart", () => {
+  const { service } = testService({ conversation: chatConversation([], []), compactSession: async () => ({}) });
+  const text = (service as any).selfCompactionResumeText(chatParticipant(), { kind: "completed" }, undefined) as string;
+  assert.doesNotMatch(text, /^Auto-resumed @/);
+});
+
+test("a member's access says when to compact: on its own when it may, on a card when it asks, nothing when it may not", () => {
+  const { service } = testService({ conversation: chatConversation([], []), compactSession: async () => ({}) });
+  const lines = (right: "allow" | "ask" | "deny"): string =>
+    (service as any).compactionAccessLines(normalizeChatAgentPermissions({ ...defaultChatAgentPermissions(), requestCompaction: right })).join("\n");
+  assert.match(lines("allow"), /User is not asked\..*the app calls you again/s);
+  assert.match(lines("allow"), /before you start a new task or the next stage of a big task/);
+  assert.match(lines("ask"), /asks User on a card/);
+  assert.equal(lines("deny"), "");
 });
 
 test("a compaction that finds no live process starts the member's process exactly as its next turn would, and that turn continues in it", async () => {

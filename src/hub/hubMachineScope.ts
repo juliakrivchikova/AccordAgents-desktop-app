@@ -47,6 +47,7 @@
 import {
   chatAgentModeForKind,
   chatAgentModeWithin,
+  chatAgentPermissionsFromAgent,
   chatAgentPermissionsWithin,
   chatParticipantRequestPermissionExceeds,
   chatParticipantRequestPermissionRank,
@@ -367,6 +368,8 @@ function rightsBeyond(wanted: ChatAgentPermissions, had: ChatAgentPermissions): 
   // Running in its CLI's own mode, asking the User for what it is not
   // granted, is a right of its own (the app's chatAgentPermissionsWithin).
   if (wanted.cliApprovals && !had.cliApprovals) return true;
+  // Creating scheduled tasks without a card: hers to give, never raised.
+  if (wanted.scheduleWithoutAsking && !had.scheduleWithoutAsking) return true;
   const hadRules = new Set(had.shell.rules.map(shellRuleKey));
   if (wanted.shell.rules.some((rule) => rule.action !== "deny" && !hadRules.has(shellRuleKey(rule)))) return true;
   const wantedRules = new Set(wanted.shell.rules.map(shellRuleKey));
@@ -394,7 +397,8 @@ function rightsWithin(wanted: ChatAgentPermissions, ceiling: ChatAgentPermission
     requestCompaction: lowerRight(compaction, compactionCeiling),
     shell: { enabled: wanted.shell.enabled && ceiling.shell.enabled, rules },
     providerNative: tools.length ? { "claude-code": { allowedTools: tools } } : undefined,
-    cliApprovals: wanted.cliApprovals && ceiling.cliApprovals ? true : undefined
+    cliApprovals: wanted.cliApprovals && ceiling.cliApprovals ? true : undefined,
+    scheduleWithoutAsking: wanted.scheduleWithoutAsking && ceiling.scheduleWithoutAsking ? true : undefined
   };
 }
 
@@ -493,6 +497,7 @@ function keepGrantedRights(next: ChatParticipant, current: ChatParticipant, appr
   const permissions: Record<string, unknown> = { ...permissionsOf(next), ...within };
   if (!within.providerNative) delete permissions.providerNative;
   if (!within.cliApprovals) delete permissions.cliApprovals;
+  if (!within.scheduleWithoutAsking) delete permissions.scheduleWithoutAsking;
   return { ...kept, permissions: permissions as unknown as ChatParticipant["permissions"] };
 }
 
@@ -552,7 +557,7 @@ function managesWithoutCard(member: ChatParticipant, rules: HubMemberRules | und
 
 /** The rights a member starts with when added without its own: its role's. */
 function startingPermissions(rule: RoleRule | undefined, permissions: unknown): ChatAgentPermissions {
-  const normalized = normalizeChatAgentPermissions(permissions);
+  const normalized = chatAgentPermissionsFromAgent(permissions);
   if (permissions !== undefined) return normalized;
   return {
     ...normalized,
@@ -722,12 +727,14 @@ function additionAllowed(member: ChatParticipant, changes: MemberChanges): ChatP
   const escalates = manageRight(role, member.permissions).exceedsRoleDefault ||
     (preset !== undefined && chatParticipantRequestPermissionExceeds(manageRight(role, member.permissions).effective, manageRight(role, preset.permissions).effective));
   if (!escalates) {
-    // Codex's Full Access only by the User's choice: without a main session
-    // whose own mode it is (the app hands a main session's mode to the
-    // members it makes), a member in it is added only on her card.
+    // Codex's Full Access and scheduled tasks without a card only by the
+    // User's choice: without a main session whose own they are (the app
+    // hands a main session's mode and rights to the members it makes), a
+    // member in Full Access is added only on her card, and one with that
+    // right not at all (no card gives it).
     const adders = changes.machineMembers.filter((requester) => managesWithoutCard(requester, rules, changes.policies, mainSession) &&
       (!mainSession
-        ? normalizeChatAgentMode(member.agentMode) !== "full-access"
+        ? normalizeChatAgentMode(member.agentMode) !== "full-access" && !normalizeChatAgentPermissions(member.permissions).scheduleWithoutAsking
         : withinMember(member, requester, rules) && withinMember(member, mainSession, rules)));
     // The member the machine names as the one that added it, when it is one.
     const named = adders.find((requester) => requester.id === member.delegatedByParticipantId);

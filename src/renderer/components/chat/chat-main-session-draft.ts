@@ -2,7 +2,7 @@ import { MAIN_SESSION_HANDLE, MAIN_SESSION_ROLE_ID } from "../../../shared/mainS
 import type { ChatParticipantConfig, ChatProviderKind } from "../../../shared/types";
 import { newChatMemberPermissions } from "../../../shared/agentPermissions";
 import { applyChatAccessOption, codexModesUnavailableReason, startChatAccessOption } from "../../../shared/chatAccessModes";
-import { newChatMainSessionStart, type NewChatMainSessionStart } from "../../../shared/newChatDefaults";
+import { newChatMainSessionStart, withNewChatRights, type NewChatMainSessionStart } from "../../../shared/newChatDefaults";
 import type { CloudRunSelection } from "../../../shared/cloudRunPreparation";
 import type { MachineListResult } from "../../../shared/machineLink";
 import { machineOf } from "./use-cli-start-defaults";
@@ -32,15 +32,16 @@ export function newChatMainSessionParticipantConfig(
   startAccess?: string,
   /** How Settings → General → New chats starts it on this provider
    *  (newChatDesktopStart): its model, effort, mode (over the one her
-   *  config starts the CLI in), where it runs and compaction right. */
+   *  config starts the CLI in), where it runs, compaction right and
+   *  whether it creates scheduled tasks without a card. */
   start?: NewChatDesktopStart
 ): ChatParticipantConfig {
-  const permissions = {
+  const ordinary = {
     ...newChatMemberPermissions(hasProject),
     requestParticipants: "allow" as const,
-    manageRolesParticipants: "allow" as const,
-    ...(start ? { requestCompaction: start.requestCompaction } : {})
+    manageRolesParticipants: "allow" as const
   };
+  const permissions = start ? withNewChatRights(ordinary, start) : ordinary;
   const access = sessionsView
     ? applyChatAccessOption(startChatAccessOption(kind, start?.access ?? startAccess), permissions)
     : { agentMode: "default" as const, permissions };

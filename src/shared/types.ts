@@ -678,6 +678,8 @@ export interface NewChatDefaults {
   /** Compaction without a card (the agent's own request to compact its
    *  context). Off: it asks first. */
   compactWithoutAsking: boolean;
+  /** Creating scheduled tasks without a card. Off (none): it asks first. */
+  scheduleWithoutAsking?: true;
 }
 
 /** A change from Settings: a value, `null` to go back to the CLI's own, or
@@ -690,6 +692,7 @@ export interface NewChatDefaultsUpdate {
   access?: string | null;
   homeMachineId?: string | null;
   compactWithoutAsking?: boolean;
+  scheduleWithoutAsking?: boolean;
 }
 
 /** How a chat with a main session is shown (shared/mainSession.ts): "classic"
@@ -970,6 +973,14 @@ export interface ChatAgentPermissions {
   requestParticipants: ChatParticipantRequestPermission;
   requestCompaction?: ChatParticipantRequestPermission;
   manageRolesParticipants?: ChatParticipantRequestPermission;
+  /**
+   * Creates scheduled tasks (`app_scripts_request_change` with op create)
+   * without a card: the app installs and switches on what it proposes. Only
+   * the User gives it (Settings → General → New chats), never a member's or
+   * a machine's word. Absent: every task waits for her on a card. A task
+   * that needs keys, and any change of a task, always does.
+   */
+  scheduleWithoutAsking?: true;
   shell: {
     enabled: boolean;
     rules: ChatShellPermissionRule[];
@@ -1483,6 +1494,9 @@ export interface ChatParticipantRequestItem {
   reason?: string;
   status: ChatParticipantRequestStatus;
   replyMessageId?: string;
+  /** What it wrote before, when it compacted its context in between and went
+   *  on (replyMessageId is the last of them). */
+  earlierReplyMessageIds?: string[];
   createdAt: string;
   updatedAt: string;
   error?: string;
@@ -1728,6 +1742,11 @@ export interface ChatAppToolApproval {
   /** An approved (or auto-applied) addition requested by a member on a
    *  machine, waiting for the desktop, which owns the member list, to apply it. */
   memberAdditionQueuedAt?: string;
+  /** A scheduled task a machine's member created without a card
+   *  (ChatAgentPermissions.scheduleWithoutAsking): its card stands on the
+   *  User's server, answered by that machine itself, until it is settled
+   *  right after, so every device shows the task in the chat. */
+  taskCreatedAt?: string;
   /** Desktop only: when the desktop applied (or could not apply) a machine
    *  member's roster change, so an older copy of the card from the machine
    *  does not bring the waiting state back. */
@@ -1827,6 +1846,17 @@ export interface ChatTurnFinishedNoteMetadata {
   participantLabel: string;
 }
 
+/** Where the work a reply stopped for its member's own compaction stands:
+ *  waiting for the User's card, compacting (or behind another turn), gone on,
+ *  or ended there, with why. It only moves down this list. */
+export interface ChatSelfCompactionMark {
+  state: "card" | "waiting" | "ended" | "resumed";
+  /** ended: a Stop; cut short (a quit, a restart); its next turn could not
+   *  start (`error`); or there was nothing to go on with any more. */
+  reason?: "stopped" | "interrupted" | "failed" | "not-continued";
+  error?: string;
+}
+
 export interface ChatMessageMetadata {
   /** The launch of an Accord the chat's main session started
    *  (app_chat_start_accord, docs/main-session.md): written as its message,
@@ -1839,6 +1869,11 @@ export interface ChatMessageMetadata {
    *  project is gone: the computer that made the copy forgets it, so the
    *  next message copies it again. */
   missingProjectCopy?: { machineId: string; sourcePath: string };
+  /** A reply that ended for the compaction its member asked for
+   *  (app_chat_request_compaction): the member goes on by itself after it, in
+   *  a turn of its own (ChatService.continueAfterSelfCompaction). Written by
+   *  the member's device and read by the one that waits for its answer. */
+  selfCompaction?: ChatSelfCompactionMark;
   /** The message's place in the User's server's order (agreement Д1): set
    *  by the server when it accepted the message, the same on every device. */
   serverSeq?: number;

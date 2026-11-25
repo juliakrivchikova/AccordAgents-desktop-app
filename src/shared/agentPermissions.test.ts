@@ -2,9 +2,11 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
   chatAgentModeWithin,
+  chatAgentPermissionsFromAgent,
   chatAgentPermissionsWithin,
   clampChatAgentMode,
   clampChatAgentPermissions,
+  defaultChatAgentPermissions,
   effectiveChatAgentPermissionsForProvider,
   normalizeChatAgentPermissions
 } from "./agentPermissions";
@@ -124,6 +126,23 @@ test("modes clamp plan < default < auto", () => {
   assert.equal(clampChatAgentMode(undefined, "auto"), "default");
   assert.equal(chatAgentModeWithin("auto", "default"), false);
   assert.equal(chatAgentModeWithin("plan", "default"), true);
+});
+
+test("scheduled tasks without a card: both must have it, Plan never, and a member's word never gives it", () => {
+  const may = { ...defaultChatAgentPermissions(), scheduleWithoutAsking: true as const };
+  const mayNot = defaultChatAgentPermissions();
+  assert.equal(clampChatAgentPermissions(may, may).scheduleWithoutAsking, true);
+  assert.equal(clampChatAgentPermissions(may, mayNot).scheduleWithoutAsking, undefined);
+  assert.equal(chatAgentPermissionsWithin(may, mayNot), false);
+  assert.equal(chatAgentPermissionsWithin(mayNot, may), true);
+  assert.equal(effectiveChatAgentPermissionsForProvider("claude-code", "plan", may).scheduleWithoutAsking, undefined);
+  assert.equal(effectiveChatAgentPermissionsForProvider("claude-code", "auto", may).scheduleWithoutAsking, true);
+  for (const mode of ["default", "auto", "full-access"] as const) {
+    assert.equal(effectiveChatAgentPermissionsForProvider("codex-cli", mode, { ...may, cliApprovals: true, codexPlanMode: true }).scheduleWithoutAsking, undefined,
+      "nor Codex's own Plan, nor a member made from it");
+  }
+  assert.equal(normalizeChatAgentPermissions({ scheduleWithoutAsking: "yes" }).scheduleWithoutAsking, undefined);
+  assert.equal(chatAgentPermissionsFromAgent(may).scheduleWithoutAsking, undefined);
 });
 
 test("within: a broader right, rule or tool is caught", () => {
