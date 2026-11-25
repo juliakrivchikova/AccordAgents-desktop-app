@@ -21,7 +21,3 @@
 .chat-plan-approval-card .chat-plan-approval-intro {
   color: var(--app-text-secondary);
 }
-
-.chat-plan-approval-card .chat-plan-approval-feedback {
-  font-size: 13px;
-}

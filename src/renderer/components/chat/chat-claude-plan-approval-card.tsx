@@ -2,7 +2,6 @@ import { useState, type KeyboardEvent } from "react";
 import { ArrowDownIcon, ArrowUpIcon, ArrowElbowDownLeftIcon, ClipboardTextIcon } from "@phosphor-icons/react";
 
 import { Button } from "@/components/ui/button";
-import { Textarea } from "@/components/ui/textarea";
 import type {
   ChatAppToolApproval,
   ChatAppToolApprovalRequest,
@@ -23,6 +22,7 @@ import { chatParticipantDisplayName, chatParticipantReference } from "../convers
 import { MarkdownText } from "../content/markdown-text";
 import { avatarForChatParticipant } from "./chat-avatars";
 import { chatApprovalKeyboardAction, participantProviderLabel } from "./chat-conversation-data";
+import { ChatCardField } from "./chat-card-field";
 import { ChatMemberMark } from "./chat-member-mark";
 import { formatChatTime } from "./chat-format";
 import { useSessionsViewLabel, useSessionsViewText } from "./chat-sessions-links";
@@ -160,28 +160,24 @@ export function ChatClaudePlanApprovalCard(props: {
             ))}
           </div>
           {selected?.placeholder && (
-            <Textarea
-              className="chat-plan-approval-feedback"
+            <ChatCardField
               value={feedback}
-              onChange={(event) => setFeedback(event.target.value)}
-              onKeyDown={(event) => {
-                if (event.key === "Enter" && !event.shiftKey && !event.nativeEvent.isComposing) {
-                  event.preventDefault();
-                  submit();
-                }
-              }}
+              onChange={setFeedback}
+              label={selected.label}
               placeholder={selected.placeholder}
-              aria-label={selected.label}
-              rows={2}
-              disabled={props.submitting}
+              submitting={props.submitting}
+              canSend={!props.submitting}
+              onSend={submit}
             />
           )}
-          <div className="chat-approval-footer">
-            <Button variant="default" size="sm" className="chat-approval-submit" disabled={props.submitting} onClick={submit}>
-              <span>Submit</span>
-              <ArrowElbowDownLeftIcon size={14} aria-hidden />
-            </Button>
-          </div>
+          {!selected?.placeholder && (
+            <div className="chat-approval-footer">
+              <Button variant="default" size="sm" className="chat-approval-submit" disabled={props.submitting} onClick={submit}>
+                <span>Submit</span>
+                <ArrowElbowDownLeftIcon size={14} aria-hidden />
+              </Button>
+            </div>
+          )}
         </div>
       </div>
     </section>

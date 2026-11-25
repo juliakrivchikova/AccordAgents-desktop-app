@@ -58,3 +58,32 @@ test("a choice that still asks is the whole card, with its options and buttons",
   assert.equal(asking.byClass("chat-choice-option").length, 3, "two options and her own answer");
   assert.ok(asking.root.findAll((node) => node.type === "button" && textOf(node) === "Cancel").length === 1);
 });
+
+test("her own answer and a note are written in one field with the composer's round button, and Enter sends them", () => {
+  const sent: unknown[] = [];
+  let renderer: ReturnType<typeof create> | undefined;
+  act(() => {
+    renderer = create(<ChatChoiceCard choice={ASKED} requesterLabel="@taylor" submitting={false} onConfirm={(response) => { sent.push(response); }} />);
+  });
+  const root = renderer!.root;
+  const field = () => root.find((node) => node.type === "textarea");
+  const round = () => root.find((node) => node.type === "button" && node.props.className === "composer-send-button");
+  const type = (value: string): void => act(() => field().props.onChange({ target: { value } }));
+  const enter = (init: Record<string, unknown> = {}): void => act(() => field().props.onKeyDown({ key: "Enter", shiftKey: false, nativeEvent: { isComposing: false }, preventDefault: () => undefined, ...init }));
+  type("And old cards too.");
+  act(() => round().props.onClick());
+  assert.deepEqual(sent.splice(0), [{ selectedOptionId: "o1", note: "And old cards too." }]);
+
+  act(() => root.findAll((node) => node.type === "input").at(-1)!.props.onChange());
+  assert.equal(field().props["aria-label"], "Your answer");
+  assert.equal(round().props.disabled, true, "nothing written yet");
+  enter();
+  assert.deepEqual(sent.splice(0), []);
+  type("Only the phone");
+  enter({ shiftKey: true });
+  assert.deepEqual(sent.splice(0), [], "Shift+Enter is a new line");
+  enter();
+  assert.deepEqual(sent.splice(0), [{ selectedOptionId: "__custom__", customAnswer: "Only the phone" }]);
+  act(() => root.find((node) => node.type === "button" && textOf(node) === "Cancel").props.onClick());
+  assert.deepEqual(sent.splice(0), [{ cancel: true }]);
+});

@@ -28,7 +28,7 @@ function render(approval: ChatAppToolApproval) {
   });
   const root = renderer.root;
   const option = (id: string) => root.find((node) => node.type === "button" && node.props["data-plan-option-id"] === id);
-  const submit = () => act(() => { root.find((node) => node.type === "button" && String(node.props.className).includes("chat-approval-submit")).props.onClick(); });
+  const submit = () => act(() => { root.find((node) => node.type === "button" && /chat-approval-submit|composer-send-button/.test(String(node.props.className))).props.onClick(); });
   return { root, answers, option, submit, text: () => textOf(root), unmount: () => renderer.unmount() };
 }
 

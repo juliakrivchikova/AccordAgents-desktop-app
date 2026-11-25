@@ -73,7 +73,7 @@ export function ChatMemberSessionPanel(props: {
   onSend: (request: ChatMemberSendRequest) => Promise<boolean>;
   onStopRuns?: (runIds: readonly string[]) => void;
   /** The User's messages to it that it has not taken yet, by message id. */
-  waiting: ReadonlyMap<string, WaitingMessage>;
+  waiting?: ReadonlyMap<string, WaitingMessage>;
   sendNow?: ChatComposerSendNow;
   onBack: () => void;
   onClose: () => void;
@@ -174,8 +174,8 @@ export function ChatMemberSessionPanel(props: {
               {...itemProps}
               presentation="sessions"
               authorMark={mainSession ? mainSessionMark(mainSession) : undefined}
-              waitingRunId={props.waiting.get(message.id)?.runId}
-              waitingBehindRunId={props.waiting.get(message.id)?.behind?.runId}
+              waitingRunId={props.waiting?.get(message.id)?.runId}
+              waitingBehindRunId={props.waiting?.get(message.id)?.behind?.runId}
               onOpenThread={undefined}
             />
           );

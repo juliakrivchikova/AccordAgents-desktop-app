@@ -60,20 +60,6 @@
   overflow-wrap: anywhere;
 }
 
-.chat-choice-kicker,
-.chat-choice-actions span {
-  color: var(--ui-text-3);
-  font-size: 12px;
-  line-height: 1.3;
-}
-
-.chat-choice-kicker {
-  color: var(--ui-text-3);
-  font-size: 12px;
-  font-weight: 500;
-  letter-spacing: 0;
-}
-
 .chat-choice-option-title small {
   display: inline-flex;
   align-items: center;
@@ -194,84 +180,41 @@
   padding-top: 0;
 }
 
-.chat-choice-text-panel {
+/* A card's own answer, written as in the composer: one rounded field with the
+   round button in it, and no ring while typing. */
+.chat-card-field {
   display: grid;
-  gap: 6px;
-  padding: 8px 10px;
-  border: 1px solid var(--ui-border-subtle);
-  border-radius: var(--ui-radius-8);
-  background: var(--ui-bg-subtle);
-}
-
-.chat-choice-text-panel > span {
-  display: flex;
-  align-items: baseline;
-  flex-wrap: wrap;
-  gap: 6px;
-  color: var(--app-text-strong);
-  font-size: 13px;
-  line-height: 1.3;
-}
-
-.chat-choice-text-panel small {
-  color: var(--ui-text-3);
-  font-size: 12px;
-  font-weight: 500;
-}
-
-.chat-choice-text-panel blockquote {
-  margin: 0;
-  color: var(--app-text-strong);
-  font-size: 13px;
-  line-height: 1.4;
-  overflow-wrap: anywhere;
-}
-
-.chat-choice-text-panel textarea {
-  width: 100%;
-  min-width: 0;
-  resize: vertical;
+  gap: 4px;
+  padding: 8px 8px 8px 12px;
   border: 1px solid var(--ui-border);
-  border-radius: var(--ui-radius-8);
-  padding: 8px 10px;
+  border-radius: var(--ui-radius-12);
   background: var(--ui-bg);
+}
+
+.chat-card-field textarea {
+  min-height: 20px;
+  max-height: 240px;
+  padding: 2px 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
   color: var(--ui-text);
-  font: inherit;
   font-size: 13px;
-  line-height: 1.35;
-  outline: none;
+  line-height: 20px;
+  resize: none;
+  box-shadow: none;
 }
 
-.chat-choice-text-panel textarea:disabled {
-  opacity: 1;
-  cursor: default;
+.chat-card-field textarea:focus-visible {
+  box-shadow: none;
 }
 
-.chat-choice-text-panel textarea:focus {
-  border-color: var(--ui-primary);
-  box-shadow: 0 0 0 3px var(--ui-focus);
-}
-
+.chat-card-field-actions,
 .chat-choice-actions {
   display: flex;
   align-items: center;
   justify-content: flex-end;
-  gap: 8px;
-  flex-wrap: wrap;
-}
-
-.chat-choice-hint {
-  margin-right: auto;
-}
-
-.chat-choice-actions strong {
-  color: var(--app-text-strong);
-}
-
-.chat-choice-action-buttons {
-  display: inline-flex;
-  align-items: center;
-  gap: 8px;
+  gap: 4px;
 }
 
 .chat-choice-cancel {

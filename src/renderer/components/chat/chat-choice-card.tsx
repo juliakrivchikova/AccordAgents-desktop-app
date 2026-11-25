@@ -1,10 +1,9 @@
 import { useEffect, useState } from "react";
 import { ListChecksIcon, PencilLineIcon } from "@phosphor-icons/react";
 
-import { Button } from "@/components/ui/button";
-import { Textarea } from "@/components/ui/textarea";
 import type { ChatPendingChoice } from "../../../shared/types";
 import { choiceOutcome } from "../../../shared/usedCards";
+import { ChatCardField } from "./chat-card-field";
 import { CHAT_CUSTOM_CHOICE_OPTION_ID } from "./chat-conversation-data";
 import { formatChatTime } from "./chat-format";
 import { useSessionsViewLabel, useSessionsViewText } from "./chat-sessions-links";
@@ -79,6 +78,12 @@ export function ChatChoiceCard(props: {
     }
   }
 
+  const cancelButton = (
+    <button type="button" className="chat-choice-cancel" disabled={submitting} onClick={cancelChoice}>
+      Cancel
+    </button>
+  );
+
   return (
     <section className="chat-choice-card" aria-label={choice.title}>
       <div className="chat-choice-head">
@@ -129,50 +134,22 @@ export function ChatChoiceCard(props: {
           </span>
         </label>
       </div>
-      {isCustomSelected && (
-        <label className="chat-choice-text-panel">
-          <span>
-            <strong>Your answer</strong>
-            <small>{appText(`required · sent verbatim to ${requesterMention}`)}</small>
-          </span>
-          <Textarea
-            value={customAnswer}
-            onChange={(event) => setCustomAnswer(event.target.value)}
-            placeholder={'e.g. "Use session cookies for web, but issue short-lived JWTs to native clients"'}
-            rows={3}
-            disabled={submitting}
-          />
-        </label>
+      {isCustomSelected || selectedOption ? (
+        <ChatCardField
+          key={isCustomSelected ? "answer" : "note"}
+          value={isCustomSelected ? customAnswer : note}
+          onChange={isCustomSelected ? setCustomAnswer : setNote}
+          label={isCustomSelected ? "Your answer" : "Add a note"}
+          placeholder={isCustomSelected ? "Your answer" : "Add a note (optional)"}
+          submitting={submitting}
+          canSend={canConfirm}
+          onSend={confirmChoice}
+        >
+          {cancelButton}
+        </ChatCardField>
+      ) : (
+        <div className="chat-choice-actions">{cancelButton}</div>
       )}
-      {!isCustomSelected && selectedOption && (
-        <label className="chat-choice-text-panel">
-          <span>
-            <strong>Add a note</strong>
-            <small>{appText(`optional · ${requesterMention} will see it alongside your pick`)}</small>
-          </span>
-          <Textarea
-            value={note}
-            onChange={(event) => setNote(event.target.value)}
-            placeholder={appText(`Constraints, caveats, or follow-up questions for ${requesterMention}...`)}
-            rows={2}
-            disabled={submitting}
-          />
-        </label>
-      )}
-      <div className="chat-choice-actions">
-        {isCustomSelected && !customAnswer.trim() && (
-          <span className="chat-choice-hint">Type your answer to enable send.</span>
-        )}
-        <div className="chat-choice-action-buttons">
-          <button type="button" className="chat-choice-cancel" disabled={submitting} onClick={cancelChoice}>
-            Cancel
-          </button>
-          <Button size="sm" className="chat-choice-submit" disabled={!canConfirm} onClick={confirmChoice}>
-            <span>Submit</span>
-            <kbd aria-hidden="true">↵</kbd>
-          </Button>
-        </div>
-      </div>
     </section>
   );
 }

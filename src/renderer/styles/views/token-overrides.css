@@ -614,14 +614,8 @@ img.chat-draft-plugin-token-icon {
 }
 
 .chat-choice-title-block h3,
-.chat-choice-option-title strong,
-.chat-choice-actions strong,
-.chat-choice-text-panel > span {
+.chat-choice-option-title strong {
   color: var(--app-text-strong);
-}
-
-.chat-choice-kicker {
-  color: var(--ui-link);
 }
 
 .chat-choice-option-title small {
@@ -630,9 +624,7 @@ img.chat-draft-plugin-token-icon {
 }
 
 .chat-choice-question,
-.chat-choice-option-description,
-.chat-choice-text-panel small,
-.chat-choice-text-panel blockquote {
+.chat-choice-option-description {
   color: var(--app-muted);
 }
 
@@ -644,22 +636,6 @@ img.chat-draft-plugin-token-icon {
 .chat-choice-custom-icon {
   background: transparent;
   color: var(--app-muted);
-}
-
-.chat-choice-text-panel {
-  border-color: var(--app-border);
-  background: var(--app-surface-subtle);
-}
-
-.chat-choice-text-panel textarea {
-  border-color: var(--app-border);
-  background: var(--app-surface);
-  color: var(--app-text);
-}
-
-.chat-choice-text-panel textarea:focus {
-  border-color: var(--app-focus-border);
-  box-shadow: none;
 }
 
 .status-badge,
@@ -760,21 +736,6 @@ img.chat-draft-plugin-token-icon {
 /* Mention popover section labels align with the option rows. */
 .mention-menu .chat-popover-section-title {
   padding: 4px 10px 2px;
-}
-
-/* Solid dark choice-card submit button — design handoff (.aa-perm-submit). */
-
-/* The primary button's own focus mark: a thin light edge inside it. */
-
-/* Disabled is the shared calm light button, not the dark one faded grey. */
-
-/* Keep the submit a dark button with white text in dark mode too, instead of
-   letting --app-primary / --app-surface flip it to a light button. */
-
-.chat-choice-submit kbd {
-  font-family: var(--font-code);
-  font-size: 11px;
-  line-height: 1;
 }
 
 /* Chat thread roots should not look selected when the side thread is open. */
