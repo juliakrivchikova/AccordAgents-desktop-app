@@ -4,6 +4,10 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { SettingsService } from "./settings";
+import { behaviorRuleIdFromLabel } from "./settings/roles/storedRules";
+import { settingsDependencies, settingsParts, settingsWithoutFile } from "./settings/test/settingsParts";
+import { normalizeBetaUpdates } from "./settings/preferences/storedPreferences";
+import { mergeDefaults, normalizeChatProviderKind } from "./settings/stored/storedDefaults";
 import type { AgentHealth, AppSettings } from "../../shared/types";
 import {
   CHAT_BEHAVIOR_RULE_INSTRUCTIONS_MAX_CHARS,
@@ -11,7 +15,8 @@ import {
 } from "../../shared/chatBehaviorRules";
 import {
   CLI_AGENT_RUN_TIMEOUT_DEFAULT_MS,
-  CLI_AGENT_RUN_TIMEOUT_MIN_MS
+  CLI_AGENT_RUN_TIMEOUT_MIN_MS,
+  normalizeCliAgentRunTimeoutMs
 } from "../../shared/cliAgentRunSettings";
 import {
   CHAT_PARTICIPANT_REQUEST_MAX_DEPTH_DEFAULT,
@@ -19,11 +24,14 @@ import {
   CHAT_PARTICIPANT_REQUEST_MAX_DEPTH_MIN,
   CHAT_PARTICIPANT_REQUEST_PROMPT_MAX_CHARS_DEFAULT,
   CHAT_PARTICIPANT_REQUEST_PROMPT_MAX_CHARS_MAX,
-  CHAT_PARTICIPANT_REQUEST_PROMPT_MAX_CHARS_MIN
+  CHAT_PARTICIPANT_REQUEST_PROMPT_MAX_CHARS_MIN,
+  normalizeChatParticipantRequestMaxDepth,
+  normalizeChatParticipantRequestPromptMaxChars
 } from "../../shared/chatParticipantRequests";
 import {
   CHAT_PROMPT_CONTEXT_LIMIT_MAX,
-  DEFAULT_CHAT_PROMPT_CONTEXT
+  DEFAULT_CHAT_PROMPT_CONTEXT,
+  normalizeChatPromptContextSettings
 } from "../../shared/chatPromptContext";
 
 const CODEX_AGENT: AgentHealth = {
@@ -51,7 +59,7 @@ const MISSING_CLAUDE_AGENT: AgentHealth = {
 };
 
 function settingsServiceWithStoredSettings(initial: Partial<AppSettings> = {}) {
-  const service = Object.create(SettingsService.prototype) as any;
+  const service = settingsWithoutFile();
   let stored = {
     settingsVersion: 1,
     roundLimitDefault: 1,
@@ -70,26 +78,26 @@ function settingsServiceWithStoredSettings(initial: Partial<AppSettings> = {}) {
   };
   let writeCount = 0;
 
-  service.readStored = async () => stored;
-  service.writeStored = async (next: typeof stored) => {
+  settingsParts(service).settingsStore.readStored = async () => stored;
+  settingsParts(service).settingsStore.writeStored = async (next: typeof stored) => {
     writeCount += 1;
     stored = next;
   };
-  service.getPublicSettings = async () => ({
+  settingsParts(service).publicSettings.getPublicSettings = async () => ({
     roundLimitDefault: stored.roundLimitDefault,
-    betaUpdates: service.normalizeBetaUpdates(stored.betaUpdates),
-    cliAgentRunTimeoutMs: service.normalizeCliAgentRunTimeoutMs(stored.cliAgentRunTimeoutMs),
-    chatParticipantRequestMaxDepth: service.normalizeChatParticipantRequestMaxDepth(stored.chatParticipantRequestMaxDepth),
-    chatParticipantRequestPromptMaxChars: service.normalizeChatParticipantRequestPromptMaxChars(stored.chatParticipantRequestPromptMaxChars),
-    chatPromptContext: service.normalizeChatPromptContextSettings(stored.chatPromptContext),
+    betaUpdates: normalizeBetaUpdates(stored.betaUpdates),
+    cliAgentRunTimeoutMs: normalizeCliAgentRunTimeoutMs(stored.cliAgentRunTimeoutMs),
+    chatParticipantRequestMaxDepth: normalizeChatParticipantRequestMaxDepth(stored.chatParticipantRequestMaxDepth),
+    chatParticipantRequestPromptMaxChars: normalizeChatParticipantRequestPromptMaxChars(stored.chatParticipantRequestPromptMaxChars),
+    chatPromptContext: normalizeChatPromptContextSettings(stored.chatPromptContext),
     providers: stored.providers,
     chatRoleConfigs: stored.chatRoleConfigs,
     chatBehaviorRules: stored.chatBehaviorRules,
     chatSavedPrompts: stored.chatSavedPrompts,
     chatParticipantConfigs: stored.chatParticipantConfigs,
     chatParticipantSeedState: stored.chatParticipantSeedState,
-    assistantProviderKind: service.normalizeChatProviderKind(stored.assistantProviderKind),
-    lastSuccessfulChatProviderKind: service.normalizeChatProviderKind(stored.lastSuccessfulChatProviderKind)
+    assistantProviderKind: normalizeChatProviderKind(stored.assistantProviderKind),
+    lastSuccessfulChatProviderKind: normalizeChatProviderKind(stored.lastSuccessfulChatProviderKind)
   });
 
   return {
@@ -102,9 +110,9 @@ function settingsServiceWithStoredSettings(initial: Partial<AppSettings> = {}) {
 test("readStored purges legacy hosted providers and encrypted API keys from settings file", async () => {
   const dir = await mkdtemp(path.join(tmpdir(), "accordagents-settings-"));
   const settingsPath = path.join(dir, "settings.json");
-  const service = Object.create(SettingsService.prototype) as any;
-  service.settingsPath = settingsPath;
-  service.storedWriteQueue = Promise.resolve();
+  const service = settingsWithoutFile();
+  settingsDependencies(service).settingsPath = settingsPath;
+  settingsParts(service).settingsStore.storedWriteQueue = Promise.resolve();
 
   await writeFile(
     settingsPath,
@@ -123,7 +131,7 @@ test("readStored purges legacy hosted providers and encrypted API keys from sett
     "utf8"
   );
 
-  const stored = await service.readStored();
+  const stored = await settingsParts(service).settingsStore.readStored();
   const persisted = JSON.parse(await readFile(settingsPath, "utf8")) as { providers: Array<Record<string, unknown>> };
 
   assert.deepEqual(stored.providers.map((provider: { kind: string }) => provider.kind), ["codex-cli", "claude-code", "gemini-cli"]);
@@ -135,10 +143,8 @@ test("readStored purges legacy hosted providers and encrypted API keys from sett
 });
 
 test("behavior rule IDs include entropy so deleted rules cannot be reattached by label reuse", () => {
-  const service = Object.create(SettingsService.prototype) as Record<string, (label: string) => string>;
-
-  const first = service.behaviorRuleIdFromLabel("Be concise");
-  const second = service.behaviorRuleIdFromLabel("Be concise");
+  const first = behaviorRuleIdFromLabel("Be concise");
+  const second = behaviorRuleIdFromLabel("Be concise");
 
   assert.match(first, /^be-concise-[0-9a-f-]{36}$/);
   assert.match(second, /^be-concise-[0-9a-f-]{36}$/);
@@ -146,9 +152,9 @@ test("behavior rule IDs include entropy so deleted rules cannot be reattached by
 });
 
 test("saveChatBehaviorRuleConfig rejects oversized behavior rules", async () => {
-  const service = Object.create(SettingsService.prototype) as any;
+  const service = settingsWithoutFile();
   let wroteSettings = false;
-  service.readStored = async () => ({
+  settingsParts(service).settingsStore.readStored = async () => ({
     settingsVersion: 1,
     roundLimitDefault: 1,
     betaUpdates: false,
@@ -161,10 +167,10 @@ test("saveChatBehaviorRuleConfig rejects oversized behavior rules", async () => 
     chatSavedPrompts: [],
     chatParticipantConfigs: []
   });
-  service.writeStored = async () => {
+  settingsParts(service).settingsStore.writeStored = async () => {
     wroteSettings = true;
   };
-  service.getPublicSettings = async () => ({
+  settingsParts(service).publicSettings.getPublicSettings = async () => ({
     roundLimitDefault: 1,
     betaUpdates: false,
     cliAgentRunTimeoutMs: CLI_AGENT_RUN_TIMEOUT_DEFAULT_MS,
@@ -237,20 +243,20 @@ test("beta updates default to false and only boolean true enables beta", async (
 test("beta updates persist through settings reload", async () => {
   const dir = await mkdtemp(path.join(tmpdir(), "accordagents-settings-beta-"));
   const settingsPath = path.join(dir, "settings.json");
-  const service = Object.create(SettingsService.prototype) as any;
-  service.settingsPath = settingsPath;
-  service.storedWriteQueue = Promise.resolve();
+  const service = settingsWithoutFile();
+  settingsDependencies(service).settingsPath = settingsPath;
+  settingsParts(service).settingsStore.storedWriteQueue = Promise.resolve();
 
-  await service.writeStored(service.mergeDefaults({
+  await settingsParts(service).settingsStore.writeStored(mergeDefaults({
     settingsVersion: 1,
     roundLimitDefault: 1,
     providers: [],
     betaUpdates: true
   }));
 
-  const reloaded = Object.create(SettingsService.prototype) as any;
-  reloaded.settingsPath = settingsPath;
-  reloaded.storedWriteQueue = Promise.resolve();
+  const reloaded = settingsWithoutFile();
+  settingsDependencies(reloaded).settingsPath = settingsPath;
+  settingsParts(reloaded).settingsStore.storedWriteQueue = Promise.resolve();
 
   assert.equal(await reloaded.getBetaUpdatesEnabled(), true);
   assert.equal((await reloaded.getPublicSettings()).betaUpdates, true);

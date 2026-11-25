@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { SettingsService } from "./settings";
+import { settingsDependencies } from "./settings/test/settingsParts";
 import { createHeadlessPlatform, setHostPlatform } from "../platform";
 import { MAIN_SESSION_ROLE_ID } from "../../shared/mainSession";
 import type { ChatRoleConfig } from "../../shared/types";
@@ -11,7 +12,7 @@ import type { ChatRoleConfig } from "../../shared/types";
 async function withSettings(run: (make: () => SettingsService, file: string) => Promise<void>): Promise<void> {
   const dir = await mkdtemp(path.join(tmpdir(), "accord-main-session-settings-"));
   const file = path.join(dir, "settings.json");
-  const make = () => { const service = new SettingsService(); (service as unknown as { settingsPath: string }).settingsPath = file; return service; };
+  const make = () => { const service = new SettingsService(); (settingsDependencies(service) as unknown as { settingsPath: string }).settingsPath = file; return service; };
   setHostPlatform(createHeadlessPlatform({ userDataDir: dir, appVersion: "test" }));
   try {
     await run(make, file);

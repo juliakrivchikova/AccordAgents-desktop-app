@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { SettingsService } from "./settings";
+import { settingsDependencies, settingsParts, settingsWithoutFile } from "./settings/test/settingsParts";
 import { commandEnvironment, parseWindowsVariables } from "./command";
 import {
   agentEnvironmentValuePreview,
@@ -12,7 +13,7 @@ import { codexAppServerConfig } from "./cliAgents/codex/appServerParams";
 import { agentRunEnv } from "./cliAgents/runs/runEnvironment";
 
 function serviceWithStoredSettings(initial: Record<string, unknown> = {}) {
-  const service = Object.create(SettingsService.prototype) as any;
+  const service = settingsWithoutFile();
   let stored: Record<string, unknown> = {
     settingsVersion: 1,
     roundLimitDefault: 1,
@@ -24,8 +25,8 @@ function serviceWithStoredSettings(initial: Record<string, unknown> = {}) {
     agentEnvironment: { variables: [] },
     ...initial
   };
-  service.readStored = async () => stored;
-  service.writeStored = async (next: Record<string, unknown>) => {
+  settingsParts(service).settingsStore.readStored = async () => stored;
+  settingsParts(service).settingsStore.writeStored = async (next: Record<string, unknown>) => {
     stored = next;
   };
   return {
@@ -150,7 +151,7 @@ test("cloud machines get every variable except an automatic path on this compute
 test("a custom variable switched off before the switch was removed stays off until a value is saved", async () => {
   const { service } = serviceWithStoredSettings();
   await service.saveAgentEnvironmentVariable({ key: "AA_OLD_OFF", value: "old_value_0000000001" });
-  const stored = await service.readStored();
+  const stored = await settingsParts(service).settingsStore.readStored();
   stored.agentEnvironment.variables[0].enabled = false;
   assert.equal((await service.getManualAgentEnvironment()).env.AA_OLD_OFF, undefined);
   assert.equal((await listed(service)).AA_OLD_OFF.enabled, false);
@@ -293,8 +294,8 @@ test("deleting asks the settings to remember the name only when this computer se
 test("an unreadable automatic value is kept, not rewritten, while the secret store is away", async () => {
   const { service, stored } = serviceWithStoredSettings();
   await service.reconcileAutomaticAgentEnvironment({ GH_TOKEN: "gho_value_aaaaaaaaaaaa" });
-  service.decodeAgentEnvironmentValue = () => undefined;
-  service.safeStorageEncryptionAvailable = () => false;
+  settingsParts(service).secrets.decodeAgentEnvironmentValue = () => undefined;
+  settingsParts(service).secrets.safeStorageEncryptionAvailable = () => false;
   const before = JSON.stringify(stored());
   assert.equal(await service.reconcileAutomaticAgentEnvironment({ GH_TOKEN: "gho_value_aaaaaaaaaaaa" }), false);
   assert.equal(JSON.stringify(stored()), before);
@@ -305,7 +306,7 @@ test("automatic variables and deleted names survive a restart of the app", async
   const path = await import("node:path");
   const { tmpdir } = await import("node:os");
   const dir = await mkdtemp(path.join(tmpdir(), "accord-env-restart-"));
-  const make = () => { const settings = new SettingsService(); (settings as any).settingsPath = path.join(dir, "settings.json"); return settings; };
+  const make = () => { const settings = new SettingsService(); settingsDependencies(settings).settingsPath = path.join(dir, "settings.json"); return settings; };
   try {
     await make().reconcileAutomaticAgentEnvironment({ GH_TOKEN: "gho_value_aaaaaaaaaaaa", X_KEY: "x_value_bbbbbbbbbbbbbbb" });
     await make().deleteAgentEnvironmentVariable("X_KEY");

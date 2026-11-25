@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { SettingsService } from "./settings";
+import { settingsDependencies, settingsParts } from "./settings/test/settingsParts";
 import { MachineLinkService } from "./machineLink";
 import { createHeadlessPlatform, setHostPlatform } from "../platform";
 import { assertRecoverableMachineEnrollment, recoverableMachineEnrollment } from "../../shared/machineEnrollmentRecovery";
@@ -20,7 +21,7 @@ function recoveryPairing(room: string): MobilePairingPackage {
 test("restoring an enrollment commits the sealed route before reconnect, survives restart and refuses stale or foreign recovery", async () => {
   const dir = await mkdtemp(path.join(tmpdir(), "accord-enrollment-recovery-"));
   setHostPlatform(createHeadlessPlatform({ userDataDir: dir }));
-  const make = () => { const s = new SettingsService(); (s as any).settingsPath = path.join(dir, "settings.json"); return s; };
+  const make = () => { const s = new SettingsService(); settingsDependencies(s).settingsPath = path.join(dir, "settings.json"); return s; };
   const requested = recoveryPairing("recreated"), installed = recoveryPairing("installed");
   const clients: EventEmitter[] = [];
   const connections: string[] = [];
@@ -65,13 +66,13 @@ test("a failed enrollment save retains the old in-memory and on-disk route for r
   const platform = createHeadlessPlatform({ userDataDir: dir });
   setHostPlatform(platform);
   const settings = new SettingsService();
-  (settings as any).settingsPath = path.join(dir, "settings.json");
+  settingsDependencies(settings).settingsPath = path.join(dir, "settings.json");
   const old = recoveryPairing("new"), installed = recoveryPairing("existing");
   const record = { id: "one", name: "Cloud run", deviceId: "", pairingKey: old.rendezvousId, createdAt: old.createdAt };
   try {
     await settings.saveMachine(record, old);
     let release!: () => void;
-    (settings as any).storedWriteQueue = new Promise<void>(resolve => { release = resolve; });
+    settingsParts(settings).settingsStore.storedWriteQueue = new Promise<void>(resolve => { release = resolve; });
     const first = settings.restoreMachineEnrollment(record.id, old, installed);
     let duplicateFinished = false;
     const duplicate = settings.restoreMachineEnrollment(record.id, old, installed).then(() => { duplicateFinished = true; });
@@ -81,12 +82,12 @@ test("a failed enrollment save retains the old in-memory and on-disk route for r
     await settings.saveMachine(record, old);
     const before = await readFile(path.join(dir, "settings.json"), "utf8");
     const previousInstalled = await settings.getMachinePairing(installed.rendezvousId);
-    (settings as any).settingsPath = path.join(dir, "settings.json", "not-a-directory");
+    settingsDependencies(settings).settingsPath = path.join(dir, "settings.json", "not-a-directory");
     await assert.rejects(settings.restoreMachineEnrollment(record.id, old, installed));
     assert.equal((await settings.listMachines())[0].pairingKey, old.rendezvousId);
     assert.deepEqual(await settings.getMachinePairing(installed.rendezvousId), previousInstalled);
     assert.equal(await readFile(path.join(dir, "settings.json"), "utf8"), before);
-    (settings as any).settingsPath = path.join(dir, "settings.json");
+    settingsDependencies(settings).settingsPath = path.join(dir, "settings.json");
     await settings.restoreMachineEnrollment(record.id, old, installed);
     assert.equal((await settings.listMachines())[0].pairingKey, installed.rendezvousId);
     await settings.saveMachine({ ...record, id: "two" }, old);
@@ -106,17 +107,17 @@ test("a never-connected replacement restores the original immutable home id and 
   const dir = await mkdtemp(path.join(tmpdir(), "accord-recovery-home-"));
   setHostPlatform(createHeadlessPlatform({ userDataDir: dir }));
   const settings = new SettingsService();
-  (settings as any).settingsPath = path.join(dir, "settings.json");
+  settingsDependencies(settings).settingsPath = path.join(dir, "settings.json");
   const requested = recoveryPairing("new"), installed = recoveryPairing("original-room");
   const record = { id: "temporary", name: "Cloud run", deviceId: "", pairingKey: "new", createdAt: requested.createdAt };
   try {
     await settings.saveMachine(record, requested);
     await settings.saveMachineInstall({ machineId: record.id, target: { host: "example" }, installRoot: "/install", userDataDir: "/data", serviceName: "machine", serviceScope: "user" });
-    (settings as any).settingsPath = path.join(dir, "settings.json", "invalid");
+    settingsDependencies(settings).settingsPath = path.join(dir, "settings.json", "invalid");
     await assert.rejects(settings.restoreMachineEnrollment(record.id, requested, installed, "original-home"));
     assert.equal((await settings.listMachines())[0].id, record.id);
     assert.equal((await settings.listMachineInstalls())[0].machineId, record.id);
-    (settings as any).settingsPath = path.join(dir, "settings.json");
+    settingsDependencies(settings).settingsPath = path.join(dir, "settings.json");
     const restored = await settings.restoreMachineEnrollment(record.id, requested, installed, "original-home");
     assert.equal(restored.id, "original-home");
     assert.deepEqual((await settings.listMachines()).map(m => m.id), ["original-home"]);

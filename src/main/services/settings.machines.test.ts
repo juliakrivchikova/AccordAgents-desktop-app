@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { SettingsService } from "./settings";
+import { settingsDependencies } from "./settings/test/settingsParts";
 import { createHeadlessPlatform, setHostPlatform } from "../platform";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
@@ -12,7 +13,7 @@ test("a machine power key stays sealed and local through settings export/import 
   const dir = await mkdtemp(path.join(tmpdir(), "accord-power-settings-"));
   const config = { version: 1 as const, instanceId: "i-0123456789abcdef0",
     credentials: { accessKeyId: "AKIAFAKEMACHINEPOWER1", secretAccessKey: "synthetic-power-secret", region: "us-east-1" } };
-  const make = () => { const service = new SettingsService(); (service as any).settingsPath = path.join(dir, "settings.json"); return service; };
+  const make = () => { const service = new SettingsService(); settingsDependencies(service).settingsPath = path.join(dir, "settings.json"); return service; };
   setHostPlatform(createHeadlessPlatform({ userDataDir: dir, appVersion: "test" }));
   try {
     await make().saveMachinePower(config);
@@ -45,7 +46,7 @@ test("a handover that did not work puts the previous machine power key back, and
   const dir = await mkdtemp(path.join(tmpdir(), "accord-power-revert-"));
   const key = (id: string) => ({ version: 1 as const, instanceId: "i-0123456789abcdef0",
     credentials: { accessKeyId: id, secretAccessKey: `secret-${id}`, region: "us-east-1" } });
-  const make = () => { const service = new SettingsService(); (service as any).settingsPath = path.join(dir, "settings.json"); return service; };
+  const make = () => { const service = new SettingsService(); settingsDependencies(service).settingsPath = path.join(dir, "settings.json"); return service; };
   setHostPlatform(createHeadlessPlatform({ userDataDir: dir, appVersion: "test" }));
   try {
     await make().revertMachinePower();
@@ -80,7 +81,7 @@ test("a machine record from before the server owned the chats sheds the old disp
   const file = path.join(dir, "settings.json");
   const instance = (): SettingsService => {
     const service = new SettingsService();
-    (service as any).settingsPath = file;
+    settingsDependencies(service).settingsPath = file;
     return service;
   };
   try {
@@ -158,7 +159,7 @@ test("a machine settings snapshot applies its environment in one durable write a
   const file = path.join(dir, "settings.json");
   setHostPlatform(createHeadlessPlatform({ userDataDir: dir, appVersion: "test" }));
   const service = new SettingsService();
-  (service as any).settingsPath = file;
+  settingsDependencies(service).settingsPath = file;
   try {
     await service.saveAgentEnvironmentVariable({ key: "OLD_TOKEN", value: "old-value" });
     const snapshot = { version: 1 as const, exportedAt: new Date().toISOString(), settingsJson: JSON.stringify({ cliAgentRunTimeoutMs: 90_000 }),
@@ -170,10 +171,10 @@ test("a machine settings snapshot applies its environment in one durable write a
     assert.equal(stored.includes("OLD_TOKEN"), false);
     await assert.rejects(service.importMachineSettingsSnapshot({ ...snapshot, agentEnvironment: [{ key: "HOME", value: "refused" }] }));
     assert.equal(await readFile(file, "utf8"), stored);
-    (service as any).settingsPath = path.join(file, "cannot-write.json");
+    settingsDependencies(service).settingsPath = path.join(file, "cannot-write.json");
     await assert.rejects(service.importMachineSettingsSnapshot({ ...snapshot, agentEnvironment: [{ key: "REPLACEMENT", value: "not-stored" }] }));
     assert.deepEqual((await service.getManualAgentEnvironment()).env, { TEST_TOKEN: "synthetic-sensitive-value" }, "a failed write restores the committed in-memory snapshot");
-    (service as any).settingsPath = file;
+    settingsDependencies(service).settingsPath = file;
     assert.equal(await readFile(file, "utf8"), stored);
   } finally { setHostPlatform(undefined); await rm(dir, { recursive: true, force: true }); }
 });
@@ -184,7 +185,7 @@ test("machine export refuses an unreadable enabled secret instead of deleting it
   const platform = createHeadlessPlatform({ userDataDir: dir, appVersion: "test" });
   setHostPlatform(platform);
   const service = new SettingsService();
-  (service as any).settingsPath = file;
+  settingsDependencies(service).settingsPath = file;
   try {
     await service.saveAgentEnvironmentVariable({ key: "TEST_TOKEN", value: "synthetic-secret" });
     const committed = await readFile(file, "utf8");
@@ -202,7 +203,7 @@ test("a machine's install record never travels to a machine and dies with the ma
   setHostPlatform(createHeadlessPlatform({ userDataDir: dir }));
   const instance = (): SettingsService => {
     const service = new SettingsService();
-    (service as any).settingsPath = file;
+    settingsDependencies(service).settingsPath = file;
     return service;
   };
   try {
@@ -254,7 +255,7 @@ test("controller trust stays local when settings are exported or imported", asyn
   const dir = await mkdtemp(path.join(tmpdir(), "accord-trust-settings-"));
   setHostPlatform(createHeadlessPlatform({ userDataDir: dir, appVersion: "test" }));
   const service = new SettingsService();
-  (service as any).settingsPath = path.join(dir, "settings.json");
+  settingsDependencies(service).settingsPath = path.join(dir, "settings.json");
   try {
     const identity = createDeviceIdentity(new Date().toISOString());
     const record = { deviceId: identity.originId, publicKeyDerBase64: identity.publicKeyDerBase64,
@@ -273,7 +274,7 @@ test("the devices the owner trusts, and the ones removed, survive a restart", as
   setHostPlatform(createHeadlessPlatform({ userDataDir: dir, appVersion: "test" }));
   const settingsPath = path.join(dir, "settings.json");
   const service = new SettingsService();
-  (service as any).settingsPath = settingsPath;
+  settingsDependencies(service).settingsPath = settingsPath;
   try {
     const phone = createDeviceIdentity(new Date().toISOString());
     const removedPhone = createDeviceIdentity(new Date().toISOString());
@@ -296,7 +297,7 @@ test("the devices the owner trusts, and the ones removed, survive a restart", as
     // after a restart, machines were handed an empty roster, and the owner's
     // removals were forgotten just as completely.
     const restarted = new SettingsService();
-    (restarted as any).settingsPath = settingsPath;
+    settingsDependencies(restarted).settingsPath = settingsPath;
     assert.deepEqual((await restarted.listTrustedDevices()).map(device => device.deviceId), [phone.originId]);
     // A phone removed before the restart does not come back with a
     // certificate this desktop has no invite for.
@@ -313,7 +314,7 @@ test("a phone paired again replaces its own entry, and its old code can no longe
   const dir = await mkdtemp(path.join(tmpdir(), "accord-phone-repair-"));
   setHostPlatform(createHeadlessPlatform({ userDataDir: dir, appVersion: "test" }));
   const service = new SettingsService();
-  (service as any).settingsPath = path.join(dir, "settings.json");
+  settingsDependencies(service).settingsPath = path.join(dir, "settings.json");
   try {
     const phone = createDeviceIdentity(new Date().toISOString());
     const now = new Date().toISOString();
@@ -339,7 +340,7 @@ test("what the shared relay set up is taken off once: its machines are named for
   const dir = await mkdtemp(path.join(tmpdir(), "accord-relay-removal-"));
   setHostPlatform(createHeadlessPlatform({ userDataDir: dir, appVersion: "test" }));
   const settingsPath = path.join(dir, "settings.json");
-  const make = (): SettingsService => { const service = new SettingsService(); (service as any).settingsPath = settingsPath; return service; };
+  const make = (): SettingsService => { const service = new SettingsService(); settingsDependencies(service).settingsPath = settingsPath; return service; };
   const pairing = (room: string, hubUrl?: string) => ({ version: 1 as const, purpose: "machine-host" as const,
     issuer: { originId: "desktop", keyId: "key", publicKeyDerBase64: "public-key" }, rendezvousId: room, stableRoutingId: `route-${room}`,
     relaySealKeyBase64: Buffer.alloc(32, 7).toString("base64url"), ...(hubUrl ? { hubUrl } : {}), fingerprint: "F",
@@ -394,7 +395,7 @@ test("a relay removal recorded by a version that showed its notice still counts 
   const dir = await mkdtemp(path.join(tmpdir(), "accord-relay-removal-legacy-"));
   setHostPlatform(createHeadlessPlatform({ userDataDir: dir, appVersion: "test" }));
   const settingsPath = path.join(dir, "settings.json");
-  const make = (): SettingsService => { const service = new SettingsService(); (service as any).settingsPath = settingsPath; return service; };
+  const make = (): SettingsService => { const service = new SettingsService(); settingsDependencies(service).settingsPath = settingsPath; return service; };
   try {
     // As 1.11.3-beta.5 wrote it once the User dismissed both lines.
     await writeFile(settingsPath, `${JSON.stringify({
@@ -412,7 +413,7 @@ test("a relay removal recorded by a version that showed its notice still counts 
 test("the automatic-stop switch survives a restart and reaches the machine with the settings snapshot", async () => {
   const desktopDir = await mkdtemp(path.join(tmpdir(), "accord-auto-stop-desktop-"));
   const machineDir = await mkdtemp(path.join(tmpdir(), "accord-auto-stop-machine-"));
-  const make = (dir: string) => { const service = new SettingsService(); (service as any).settingsPath = path.join(dir, "settings.json"); return service; };
+  const make = (dir: string) => { const service = new SettingsService(); settingsDependencies(service).settingsPath = path.join(dir, "settings.json"); return service; };
   setHostPlatform(createHeadlessPlatform({ userDataDir: desktopDir, appVersion: "test" }));
   try {
     assert.equal(await make(desktopDir).getMachineAutoStopEnabled(), true, "a key set up before the switch existed keeps working");
@@ -433,7 +434,7 @@ test("the automatic-stop switch survives a restart and reaches the machine with 
 
 test("an unreadable settings file never reads as automatic stop left on, and is not overwritten by the switch", async () => {
   const dir = await mkdtemp(path.join(tmpdir(), "accord-auto-stop-unreadable-"));
-  const make = () => { const service = new SettingsService(); (service as any).settingsPath = path.join(dir, "settings.json"); return service; };
+  const make = () => { const service = new SettingsService(); settingsDependencies(service).settingsPath = path.join(dir, "settings.json"); return service; };
   setHostPlatform(createHeadlessPlatform({ userDataDir: dir, appVersion: "test" }));
   try {
     await writeFile(path.join(dir, "settings.json"), "{ not json");
@@ -448,7 +449,7 @@ test("the question about unused machines keeps its rhythm across a restart, and 
   const file = path.join(dir, "settings.json");
   const instance = (): SettingsService => {
     const service = new SettingsService();
-    (service as any).settingsPath = file;
+    settingsDependencies(service).settingsPath = file;
     return service;
   };
   try {
@@ -473,7 +474,7 @@ test("the hub this desktop uses and a machine's key from setup survive a fresh S
   const file = path.join(dir, "settings.json");
   const instance = (): SettingsService => {
     const service = new SettingsService();
-    (service as any).settingsPath = file;
+    settingsDependencies(service).settingsPath = file;
     return service;
   };
   try {
@@ -494,7 +495,7 @@ test("the hub this desktop uses and a machine's key from setup survive a fresh S
 
 test("forgetting an AWS instance is one write that holds only for the saved instance, and its note stays local", async () => {
   const dir = await mkdtemp(path.join(tmpdir(), "accord-aws-gone-notice-"));
-  const make = () => { const service = new SettingsService(); (service as any).settingsPath = path.join(dir, "settings.json"); return service; };
+  const make = () => { const service = new SettingsService(); settingsDependencies(service).settingsPath = path.join(dir, "settings.json"); return service; };
   setHostPlatform(createHeadlessPlatform({ userDataDir: dir, appVersion: "test" }));
   const credentials = { accessKeyId: "AKIAFAKEWORKERKEY001", secretAccessKey: "synthetic", region: "us-east-1" };
   const handle = (instanceId: string) => ({ instanceId, securityGroupId: "sg-1", keyName: "accordagents-worker-x", region: "us-east-1",
@@ -529,7 +530,7 @@ test("forgetting an AWS instance is one write that holds only for the saved inst
 
 test("machines leaving with a gone instance are recorded durably, cleared one by one, and never travel to a machine", async () => {
   const dir = await mkdtemp(path.join(tmpdir(), "accord-leaving-machines-"));
-  const make = () => { const service = new SettingsService(); (service as any).settingsPath = path.join(dir, "settings.json"); return service; };
+  const make = () => { const service = new SettingsService(); settingsDependencies(service).settingsPath = path.join(dir, "settings.json"); return service; };
   setHostPlatform(createHeadlessPlatform({ userDataDir: dir, appVersion: "test" }));
   try {
     const at = "2026-10-22T10:00:00.000Z";
@@ -551,7 +552,7 @@ test("machines leaving with a gone instance are recorded durably, cleared one by
 test("a leaving-machines write that fails leaves the settings in memory as the disk has them; the limit reports what it drops", async () => {
   const dir = await mkdtemp(path.join(tmpdir(), "accord-leaving-write-"));
   const settingsDir = path.join(dir, "data");
-  const make = () => { const service = new SettingsService(); (service as any).settingsPath = path.join(settingsDir, "settings.json"); return service; };
+  const make = () => { const service = new SettingsService(); settingsDependencies(service).settingsPath = path.join(settingsDir, "settings.json"); return service; };
   setHostPlatform(createHeadlessPlatform({ userDataDir: dir, appVersion: "test" }));
   const { chmod, mkdir } = await import("node:fs/promises");
   try {
@@ -579,7 +580,7 @@ test("a leaving-machines write that fails leaves the settings in memory as the d
 
 test("a machine already waiting for removal is never turned into one the app may not remove", async () => {
   const dir = await mkdtemp(path.join(tmpdir(), "accord-leaving-downgrade-"));
-  const make = () => { const service = new SettingsService(); (service as any).settingsPath = path.join(dir, "settings.json"); return service; };
+  const make = () => { const service = new SettingsService(); settingsDependencies(service).settingsPath = path.join(dir, "settings.json"); return service; };
   setHostPlatform(createHeadlessPlatform({ userDataDir: dir, appVersion: "test" }));
   try {
     const at = "2026-10-22T10:00:00.000Z";
@@ -595,7 +596,7 @@ test("a machine already waiting for removal is never turned into one the app may
 
 test("an unconfirmed leaving machine keeps where to look again and a well-formed account only", async () => {
   const dir = await mkdtemp(path.join(tmpdir(), "accord-leaving-recheck-"));
-  const make = () => { const service = new SettingsService(); (service as any).settingsPath = path.join(dir, "settings.json"); return service; };
+  const make = () => { const service = new SettingsService(); settingsDependencies(service).settingsPath = path.join(dir, "settings.json"); return service; };
   setHostPlatform(createHeadlessPlatform({ userDataDir: dir, appVersion: "test" }));
   try {
     const at = "2026-10-22T10:00:00.000Z";
@@ -612,7 +613,7 @@ test("the relay machines that could not be removed are kept with their reason ac
   const dir = await mkdtemp(path.join(tmpdir(), "accord-relay-removal-failed-"));
   setHostPlatform(createHeadlessPlatform({ userDataDir: dir, appVersion: "test" }));
   const settingsPath = path.join(dir, "settings.json");
-  const make = (): SettingsService => { const service = new SettingsService(); (service as any).settingsPath = settingsPath; return service; };
+  const make = (): SettingsService => { const service = new SettingsService(); settingsDependencies(service).settingsPath = settingsPath; return service; };
   try {
     // What went is recorded at once; the failing machine is left out of it.
     await make().beginRelayRemoval({ machines: [{ id: "m1", name: "One" }, { id: "m2", name: "Two" }], startKeyHanded: false });

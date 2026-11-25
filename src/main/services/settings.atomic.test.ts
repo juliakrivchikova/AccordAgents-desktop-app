@@ -4,14 +4,16 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { SettingsService } from "./settings";
+import { settingsDependencies, settingsParts, settingsWithoutFile } from "./settings/test/settingsParts";
+import { normalizeAwsWorkerOperation } from "./settings/aws/storedAws";
 
 test("concurrent AWS progress and settings updates persist one merged state", async () => {
   const dir = await mkdtemp(path.join(tmpdir(), "accord-settings-atomic-"));
   try {
-    const service = Object.create(SettingsService.prototype) as any;
-    service.settingsPath = path.join(dir, "settings.json");
-    service.storedWriteQueue = Promise.resolve();
-    service.storedState = {
+    const service = settingsWithoutFile();
+    settingsDependencies(service).settingsPath = path.join(dir, "settings.json");
+    settingsParts(service).settingsStore.storedWriteQueue = Promise.resolve();
+    settingsParts(service).settingsStore.storedState = {
       settingsVersion: 1,
       roundLimitDefault: 1,
       providers: [],
@@ -37,7 +39,7 @@ test("concurrent AWS progress and settings updates persist one merged state", as
       }),
       service.saveCloudRunsSettings({ awsRootVolumeSizeGb: 32 })
     ]);
-    const stored = JSON.parse(await readFile(service.settingsPath, "utf8"));
+    const stored = JSON.parse(await readFile(settingsDependencies(service).settingsPath, "utf8"));
     assert.equal(stored.awsWorkerOperation.operationId, "op-atomic");
     assert.equal(stored.cloudRuns.awsRootVolumeSizeGb, 32);
   } finally {
@@ -46,11 +48,11 @@ test("concurrent AWS progress and settings updates persist one merged state", as
 });
 
 test("stored setup steps that are not steps are dropped, so the AWS page can read the rest", () => {
-  const service = Object.create(SettingsService.prototype) as any;
-  const operation = service.normalizeAwsWorkerOperation({
+  const service = settingsWithoutFile();
+  const operation = normalizeAwsWorkerOperation({
     operationId: "op", phase: "error", message: "m", updatedAt: "t",
     setupSteps: [{ id: "instance", state: "done" }, { id: "bogus", state: "done" }, null, { id: "tools", state: "weird" }, { id: "program", state: "failed", detail: 3 }]
   });
-  assert.deepEqual(operation.setupSteps, [{ id: "instance", state: "done" }]);
-  assert.equal(service.normalizeAwsWorkerOperation({ operationId: "op", phase: "error", message: "m", updatedAt: "t", setupSteps: "x" }).setupSteps, undefined);
+  assert.deepEqual(operation!.setupSteps, [{ id: "instance", state: "done" }]);
+  assert.equal(normalizeAwsWorkerOperation({ operationId: "op", phase: "error", message: "m", updatedAt: "t", setupSteps: "x" })!.setupSteps, undefined);
 });
