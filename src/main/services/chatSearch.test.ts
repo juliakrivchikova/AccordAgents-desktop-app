@@ -411,6 +411,33 @@ test("chat search retries a source race against the exact read snapshot", async 
   });
 });
 
+test("chat search keeps what it read when another chat changes or goes meanwhile", async () => {
+  await withStorage(async (storage) => {
+    const chats = ["kept", "changed", "deleted"].map((id, index) => {
+      const chat = conversation(id, `Chat ${id}`, false, [message(`${id}-first`, "user", `meanwhileword ${id}`, "2026-06-01T00:00:00.000Z")]);
+      chat.updatedAt = `2026-06-01T00:0${9 - index}:00.000Z`;
+      return chat;
+    });
+    for (const chat of chats) await storage.saveConversation(chat);
+    const reads: string[] = [];
+    const originalRead = storage.readChatSearchConversations.bind(storage);
+    storage.readChatSearchConversations = async (conversationIds) => {
+      const result = await originalRead(conversationIds);
+      reads.push(...conversationIds);
+      if (reads.length === 1) {
+        chats[1].messages.push(message("changed-second", "participant", "meanwhileword again", "2026-06-01T00:00:01.000Z"));
+        await storage.saveConversation(chats[1]);
+        await storage.deleteConversation("deleted");
+      }
+      return result;
+    };
+    const result = await new ChatSearchService(storage).search({ requester: { kind: "user" }, query: "meanwhileword" });
+    assert.equal(result.status, "ok");
+    assert.deepEqual(messageMatches(result).map((match) => match.messageId).sort(), ["changed-first", "changed-second", "kept-first"]);
+    assert.deepEqual(reads, ["kept", "changed", "deleted", "changed"]);
+  });
+});
+
 test("chat search fails closed when the source changes through both bounded attempts", async () => {
   await withStorage(async (storage) => {
     const chat = conversation("unstable", "Unstable", false, [

@@ -68,13 +68,11 @@ test("missing SQLite executable fails promptly instead of leaving an unresolved 
   await assert.rejects(db.rows("select 1;", 5000), /ENOENT/);
 });
 
-// V8's longest string is 2^29 - 24 characters (about 512 MB).
-const LONGER_THAN_A_STRING = 560 * 1024 * 1024;
-
 test("rows longer together than the longest string are all read", async () => {
   const db = new SqliteSession("sqlite3", ":memory:", 1000);
   const rowLength = 16 * 1024 * 1024;
-  const count = LONGER_THAN_A_STRING / rowLength;
+  // V8's longest string is 2^29 - 24 characters (about 512 MB).
+  const count = 35;
   const rows = await db.rows<{ n: number; payload: string }>(`with recursive counter(n) as (select 1 union all select n + 1 from counter where n < ${count})
     select n, hex(zeroblob(${rowLength / 2})) as payload from counter;`, 60_000);
   assert.deepEqual(rows.map((row) => row.n), Array.from({ length: count }, (_, index) => index + 1));
@@ -82,13 +80,13 @@ test("rows longer together than the longest string are all read", async () => {
 });
 
 test("a response that cannot be read fails its own operation and leaves the next ones working", async () => {
-  const db = new SqliteSession("sqlite3", ":memory:", 1000);
-  const [tooLong, next] = await Promise.allSettled([
-    db.run(`select hex(zeroblob(${LONGER_THAN_A_STRING / 4})) from (select 1 union all select 2);`, 60_000),
-    db.rows("select 'still works' as result;", 5000)
-  ]);
-  assert.equal(tooLong.status, "rejected");
-  assert.match(String((tooLong as PromiseRejectedResult).reason), /finished, but its response \(\d+ characters\) could not be read: Invalid string length/);
+  const db = new SqliteSession("sqlite3", ":memory:", 1000, 1024 * 1024);
+  const tooLong = `with recursive counter(n) as (select 1 union all select n + 1 from counter where n < 64) select hex(zeroblob(32768)) as payload from counter;`;
+  const [rows, text, next] = await Promise.allSettled([db.rows(tooLong, 5000), db.run(tooLong, 5000), db.rows("select 'still works' as result;", 5000)]);
+  for (const refused of [rows, text]) {
+    assert.equal(refused.status, "rejected");
+    assert.match(String((refused as PromiseRejectedResult).reason), /finished, but its response \(\d+ characters\) could not be read: It is too long\./);
+  }
   assert.deepEqual(next, { status: "fulfilled", value: [{ result: "still works" }] });
   const pid = (db as any).child.pid;
   await assert.rejects(db.rows("select 1 as a; select 2 as b;", 5000), /could not be read: Unexpected "\[" after the result set/);
