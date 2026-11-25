@@ -8,6 +8,8 @@ import {
   isLocalPathValue
 } from "../../shared/agentEnvironment";
 import { automaticAgentEnvironmentSource } from "./agentEnvironment";
+import { codexAppServerConfig } from "./cliAgents/codex/appServerParams";
+import { agentRunEnv } from "./cliAgents/runs/runEnvironment";
 
 function serviceWithStoredSettings(initial: Record<string, unknown> = {}) {
   const service = Object.create(SettingsService.prototype) as any;
@@ -209,18 +211,16 @@ test("saved variables do not change the global command environment", async () =>
 });
 
 test("a member's process does not inherit a deleted name from this computer", async () => {
-  const { CliAgentRunner } = await import("./cliAgents");
   const key = "AA_DELETED_FROM_COMPUTER";
   const original = process.env[key];
   process.env[key] = "computer-value";
   try {
-    const runEnv = (CliAgentRunner.prototype as any).agentRunEnv.call(
-      { appMcpEnv: () => undefined },
+    const runEnv = agentRunEnv(
       { agentEnv: { AA_KEPT: "kept", [key]: undefined, PATH: undefined } }
     );
-    assert.equal(runEnv.AA_KEPT, "kept");
-    assert.equal(Object.hasOwn(runEnv, key), true);
-    assert.equal(Object.hasOwn(runEnv, "PATH"), false);
+    assert.equal(runEnv!.AA_KEPT, "kept");
+    assert.equal(Object.hasOwn(runEnv as never, key), true);
+    assert.equal(Object.hasOwn(runEnv as never, "PATH"), false);
     const childEnv = commandEnvironment(runEnv);
     assert.equal(childEnv[key], undefined);
     assert.ok(childEnv.PATH);
@@ -231,11 +231,9 @@ test("a member's process does not inherit a deleted name from this computer", as
 });
 
 test("Codex gets the Settings values through its own shell policy, with the thread", async () => {
-  const { CliAgentRunner } = await import("./cliAgents");
-  const runner = Object.create(CliAgentRunner.prototype);
-  const config = runner.codexAppServerConfig(
-    { kind: "codex-cli" },
-    { webAccess: false, workspaceWrite: false },
+  const config = codexAppServerConfig(
+    { kind: "codex-cli" } as never,
+    { webAccess: false, workspaceWrite: false } as never,
     { settingsEnv: { QA_CHANGED: "users_value", QA_REMOVED: undefined, "NOT VALID": "x" } }
   );
   assert.equal(config["shell_environment_policy.set.QA_CHANGED"], "users_value");

@@ -3,7 +3,7 @@ import type { ChatModules } from "../modules";
 
 // The parts of a chat service as its tests set them up and watch them: their
 // private members too, so a test names the part that does the work.
-type Open<T> = { [Key in keyof T]-?: any };
+type Open<T> = { -readonly [Key in keyof T]-?: any };
 
 export function chatParts(service: unknown): Open<ChatModules> {
   return (service as { modules: Open<ChatModules> }).modules;

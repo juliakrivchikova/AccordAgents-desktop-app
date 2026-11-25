@@ -26,6 +26,17 @@ import {
   withCliStartModel,
   runClaudeModelProbeWithExpect
 } from "./cliAgents";
+import { cliDependencies, cliParts } from "./cliAgents/test/cliParts";
+import { claudeAllowedToolsArgs, claudeAutoAllowedAppMcpTools, claudeLaunchArgs, claudeMcpArgs, claudePermissionPromptArgs, claudeReasoningEffort, claudeToolConfig, claudeToolsArgs, redactedClaudeArgs, shouldPassClaudeAllowedTools } from "./cliAgents/claude/launch";
+import { claudePermissionDenials } from "./cliAgents/claude/output";
+import { newClaudeWarmReply } from "./cliAgents/claude/replies";
+import { handleCodexAppServerCompactNotification } from "./cliAgents/codex/appServerEvents";
+import { codexAppServerThreadResumeParams, codexAppServerThreadStartParams, codexModelReasoningEfforts, codexPrompt, codexReasoningEffort } from "./cliAgents/codex/appServerParams";
+import { agentMessageBoundarySeparator } from "./cliAgents/codex/appServerText";
+import { claudeModelProbeExpectScript } from "./cliAgents/models/modelLists";
+import { commandErrorText } from "./cliAgents/runs/outputText";
+import { agentRunEnv, withAppMcpClientStatus } from "./cliAgents/runs/runEnvironment";
+import { warmAgentKey } from "./cliAgents/warm/warmKeys";
 import { CommandError, ensureLoginShellEnvPrimed } from "./command";
 import type { CodexServerRequestDelivery } from "./codexApprovals";
 import { buildCodexExecInvocation, CODEX_APP_SERVER_MCP_TOKEN_ENV } from "./codexExec";
@@ -49,7 +60,7 @@ for (const kind of ["claude-code", "codex-cli"] as const) {
     const runner = makeRunner();
     const participant = { id: `${kind}-missing-log`, kind, label: kind };
     const reads: string[] = [];
-    const lookups = runner as unknown as Record<"findClaudeSessionLogPath" | "findCodexSessionLogPath", (sessionId: string) => Promise<string | undefined>>;
+    const lookups = cliParts(runner).sessionLogs as Record<"findClaudeSessionLogPath" | "findCodexSessionLogPath", (sessionId: string) => Promise<string | undefined>>;
     lookups[kind === "claude-code" ? "findClaudeSessionLogPath" : "findCodexSessionLogPath"] = async (sessionId) => {
       reads.push(sessionId);
       return undefined;
@@ -69,7 +80,7 @@ test("a session log's context: subagent lines skipped, the CLI's own window kept
   const dir = await mkdtemp(path.join(tmpdir(), "accordagents-claude-known-"));
   try {
     const runner = makeRunner();
-    const internals = runner as unknown as { findClaudeSessionLogPath(sessionId: string): Promise<string | undefined> };
+    const internals = cliParts(runner).sessionLogs as unknown as { findClaudeSessionLogPath(sessionId: string): Promise<string | undefined> };
     const call = (model: string, input: number, extra: Record<string, unknown> = {}): string =>
       JSON.stringify({ type: "assistant", ...extra, message: { model, usage: { input_tokens: 2, cache_creation_input_tokens: 0, cache_read_input_tokens: input - 2, output_tokens: 9 } } });
     const file = path.join(dir, "session.jsonl");
@@ -101,7 +112,7 @@ test("a Codex rollout's context is its latest token count with usage, read from 
   const dir = await mkdtemp(path.join(tmpdir(), "accordagents-codex-rollout-"));
   try {
     const runner = makeRunner();
-    const internals = runner as unknown as { findCodexSessionLogPath(sessionId: string): Promise<string | undefined> };
+    const internals = cliParts(runner).sessionLogs as unknown as { findCodexSessionLogPath(sessionId: string): Promise<string | undefined> };
     const count = (total: number, window: number): string => JSON.stringify({ type: "event_msg", payload: { type: "token_count",
       info: { total_token_usage: { total_tokens: 9_999_999 }, last_token_usage: { total_tokens: total }, model_context_window: window } } });
     const file = path.join(dir, "rollout-x-s.jsonl");
@@ -129,7 +140,7 @@ test("Claude context usage read from the end of the log matches reading the whol
     const usage = (input: number): string => JSON.stringify({ type: "assistant", message: { model: "claude-opus-5-5", usage: { input_tokens: input, cache_read_input_tokens: 0, cache_creation_input_tokens: 0, output_tokens: 10 } } });
     const boundary = JSON.stringify({ type: "system", subtype: "compact_boundary" });
     const filler = JSON.stringify({ type: "user", message: { content: "п".repeat(300_000) } });
-    const internals = runner as unknown as {
+    const internals = cliParts(runner).sessionLogs as unknown as {
       findClaudeSessionLogPath(sessionId: string): Promise<string | undefined>;
     };
     // The whole-log reading this replaced: the last usage after the last compaction boundary.
@@ -190,7 +201,7 @@ test("idle accounts for native operations before a warm session exists and relea
   let fail!: (error: Error) => void;
   const pending = new Promise<Awaited<ReturnType<CliAgentRunner["run"]>>>((resolve, reject) => { finish = resolve; fail = reject; });
   let calls = 0;
-  const native = runner as unknown as { runCodex(): ReturnType<CliAgentRunner["run"]>; compactCodexSession(): ReturnType<CliAgentRunner["compactSession"]> };
+  const native = cliParts(runner).codexRuns as unknown as { runCodex(): ReturnType<CliAgentRunner["run"]>; compactCodexSession(): ReturnType<CliAgentRunner["compactSession"]> };
   native.runCodex = () => { calls++; return pending; };
   const running = runner.run(participant, "native goal", undefined, undefined, "chat");
   assert.equal(runner.hasActiveNativeWork(), true);
@@ -276,7 +287,7 @@ function makeClaudeWarmHarness(runner: any, options: { lifecycle?: boolean } = {
     const resolved: any[] = [];
     const rejected: Error[] = [];
     commands += 1;
-    const reply = runner.newClaudeWarmReply({
+    const reply = newClaudeWarmReply({
       commandUuid: `cmd-${commands}`,
       written: true,
       onOutput: (event: any) => outputs.push(event),
@@ -287,7 +298,7 @@ function makeClaudeWarmHarness(runner: any, options: { lifecycle?: boolean } = {
     state.replies.push(reply);
     return { reply, outputs, resolved, rejected };
   };
-  const send = (event: Record<string, unknown>): void => runner.handleClaudeWarmLine(
+  const send = (event: Record<string, unknown>): void => cliParts(runner).claudeProcess.handleClaudeWarmLine(
     JSON.stringify(event),
     participant,
     undefined,
@@ -298,11 +309,7 @@ function makeClaudeWarmHarness(runner: any, options: { lifecycle?: boolean } = {
 }
 
 test("agentRunEnv filters blocked manual keys and preserves app MCP token precedence", () => {
-  const runner = makeRunner() as unknown as {
-    agentRunEnv(options: Record<string, unknown>): NodeJS.ProcessEnv | undefined;
-  };
-
-  const env = runner.agentRunEnv({
+  const env = agentRunEnv({
     agentEnv: {
       AA_MANUAL_AGENT_ENV_TEST: "manual",
       PATH: "/manual/bin",
@@ -312,7 +319,7 @@ test("agentRunEnv filters blocked manual keys and preserves app MCP token preced
     appMcp: {
       token: "per-run-token"
     }
-  });
+  } as never);
 
   assert.equal(env?.AA_MANUAL_AGENT_ENV_TEST, "manual");
   assert.equal(env?.PATH, undefined);
@@ -321,14 +328,6 @@ test("agentRunEnv filters blocked manual keys and preserves app MCP token preced
 });
 
 test("warmAgentKey changes when the manual agent environment version changes", () => {
-  const runner = makeRunner() as unknown as {
-    warmAgentKey(
-      participant: Record<string, unknown>,
-      repoPath: string | undefined,
-      kind: string,
-      options: Record<string, unknown>
-    ): string;
-  };
   const participant = {
     id: "participant-1",
     kind: "codex",
@@ -344,18 +343,18 @@ test("warmAgentKey changes when the manual agent environment version changes", (
     }
   };
 
-  const firstKey = runner.warmAgentKey(participant, "/tmp/repo", "chat", {
+  const firstKey = warmAgentKey(participant as never, "/tmp/repo", "chat", {
     ...baseOptions,
     agentEnvKey: "agent-env-v1"
-  });
-  const secondKey = runner.warmAgentKey(participant, "/tmp/repo", "chat", {
+  } as never);
+  const secondKey = warmAgentKey(participant as never, "/tmp/repo", "chat", {
     ...baseOptions,
     agentEnvKey: "agent-env-v2"
-  });
-  const repeatedFirstKey = runner.warmAgentKey(participant, "/tmp/repo", "chat", {
+  } as never);
+  const repeatedFirstKey = warmAgentKey(participant as never, "/tmp/repo", "chat", {
     ...baseOptions,
     agentEnvKey: "agent-env-v1"
-  });
+  } as never);
 
   assert.notEqual(firstKey, secondKey);
   assert.equal(firstKey, repeatedFirstKey);
@@ -366,8 +365,8 @@ test("warmAgentKey changes when the manual agent environment version changes", (
 test("a Claude member started with Claude in Chrome gets --chrome and its own process key", () => {
   const runner = makeRunner() as any;
   const options = chatOptions({ agentMode: "default", workspaceWrite: false });
-  const config = runner.claudeToolConfig("chat", "/selected/repo", [], options);
-  const launch = (claudeChrome?: boolean) => runner.claudeLaunchArgs(
+  const config = claudeToolConfig("chat", "/selected/repo", [], options);
+  const launch = (claudeChrome?: boolean) => claudeLaunchArgs(
     { id: "claude-1", kind: "claude-code", label: "@claude" }, "chat", { ...options, claudeChrome }, config, [], "warm", "session-1"
   ) as string[];
   assert.equal(launch(true).includes("--chrome"), true);
@@ -375,9 +374,9 @@ test("a Claude member started with Claude in Chrome gets --chrome and its own pr
   assert.equal(launch(undefined).includes("--chrome"), false);
   const participant = { id: "claude-1", kind: "claude-code" };
   const warm = { conversationId: "c1", participantId: "claude-1", contextKey: "k" };
-  assert.notEqual(runner.warmAgentKey(participant, "/r", "chat", { warm, claudeChrome: true }), runner.warmAgentKey(participant, "/r", "chat", { warm }),
+  assert.notEqual(warmAgentKey(participant as never, "/r", "chat", { warm, claudeChrome: true } as never), warmAgentKey(participant as never, "/r", "chat", { warm } as never),
     "switching it starts the next turn in a new process");
-  assert.equal(runner.warmAgentKey(participant, "/r", "chat", { warm, claudeChrome: false }), runner.warmAgentKey(participant, "/r", "chat", { warm }),
+  assert.equal(warmAgentKey(participant as never, "/r", "chat", { warm, claudeChrome: false } as never), warmAgentKey(participant as never, "/r", "chat", { warm } as never),
     "off keeps the key processes already had");
 });
 
@@ -388,11 +387,11 @@ test("a Chrome switch waits for a busy member process instead of the member wait
     const runner = makeRunner() as any;
     const warm = { conversationId: "c1", participantId: "p1", contextKey: "", idleTimeoutMs: 1 };
     const options = { agentEnv: { CLAUDE_CONFIG_DIR: dir }, warm };
-    const runningKey = runner.warmAgentKey({ id: "p1", kind: "claude-code" }, "/r", "chat", { warm });
+    const runningKey = warmAgentKey({ id: "p1", kind: "claude-code" } as never, "/r", "chat", { warm });
     let idle = false;
-    runner.warmAgents.set(runningKey, { key: runningKey, scopeKey: "c1:p1", closed: false, isIdle: () => idle });
+    cliParts(runner).warmAgents.entries.set(runningKey, { key: runningKey, scopeKey: "c1:p1", closed: false, isIdle: () => idle });
     const member = { id: "p1", kind: "claude-code" };
-    const chrome = async (runOptions: Record<string, unknown>, kind = "chat") => (await runner.withClaudeChrome(member, "/r", kind, runOptions)).claudeChrome;
+    const chrome = async (runOptions: Record<string, unknown>, kind = "chat") => (await cliParts(runner).claudeSettings.withClaudeChrome(member, "/r", kind, runOptions)).claudeChrome;
     assert.equal(await chrome(options), false, "busy (a background task): it keeps what it started with");
     assert.equal(await chrome({ ...options, nativeGoal: { objective: "x" } }), true, "a goal runs in its own process: the setting as it is now");
     assert.equal(await chrome({ ...options, warm: { ...warm, contextKey: "changed" } }), true, "other settings changed too: the process is replaced anyway");
@@ -409,25 +408,25 @@ test("a Chrome switch waits for a busy member process instead of the member wait
 test("a changed agent environment closes only member processes that hold no work", async () => {
   const runner = makeRunner() as any;
   const closed: string[] = [];
-  runner.closeWarmAgent = async (entry: { key: string; closed: boolean }, reason: string) => {
+  cliParts(runner).warmAgentClose.closeWarmAgent = async (entry: { key: string; closed: boolean }, reason: string) => {
     entry.closed = true;
     closed.push(`${entry.key}:${reason}`);
   };
   const entry = (key: string, extra: Record<string, unknown> = {}) => ({ key, scopeKey: key, closed: false, queue: Promise.resolve(), ...extra });
-  runner.warmAgents.set("idle-claude", entry("idle-claude", { isIdle: () => true }));
-  runner.warmAgents.set("answering-claude", entry("answering-claude", { isIdle: () => false }));
-  runner.warmAgents.set("background-claude", entry("background-claude", { isIdle: () => false, hasLiveBackgroundWork: () => true }));
-  runner.warmAgents.set("idle-codex", entry("idle-codex"));
+  cliParts(runner).warmAgents.entries.set("idle-claude", entry("idle-claude", { isIdle: () => true }));
+  cliParts(runner).warmAgents.entries.set("answering-claude", entry("answering-claude", { isIdle: () => false }));
+  cliParts(runner).warmAgents.entries.set("background-claude", entry("background-claude", { isIdle: () => false, hasLiveBackgroundWork: () => true }));
+  cliParts(runner).warmAgents.entries.set("idle-codex", entry("idle-codex"));
   const codex: Record<string, unknown> = entry("running-codex");
-  runner.warmAgents.set("running-codex", codex);
+  cliParts(runner).warmAgents.entries.set("running-codex", codex);
   let finish!: () => void;
-  const turn = runner.enqueueWarmRun(codex, () => new Promise<void>((resolve) => { finish = resolve; }));
+  const turn = cliParts(runner).warmAgents.enqueueWarmRun(codex, () => new Promise<void>((resolve) => { finish = resolve; }));
 
   await runner.retireIdleWarmAgents("environment-changed");
   assert.deepEqual(closed.sort(), ["idle-claude:environment-changed", "idle-codex:environment-changed"]);
-  assert.deepEqual([...runner.warmAgents.keys()].sort(), ["answering-claude", "background-claude", "running-codex"],
+  assert.deepEqual([...cliParts(runner).warmAgents.entries.keys()].sort(), ["answering-claude", "background-claude", "running-codex"],
     "a reply in progress, background tasks and a running turn keep their process");
-  assert.equal(runner.warmShutdown, undefined, "new turns are not refused meanwhile");
+  assert.equal(cliParts(runner).warmAgents.warmShutdown, undefined, "new turns are not refused meanwhile");
 
   finish();
   await turn;
@@ -440,14 +439,14 @@ test("an environment change waits for a busy member process instead of the membe
   const runner = makeRunner() as any;
   const member = { id: "p1", kind: "claude-code" };
   const warm = { conversationId: "c1", participantId: "p1", contextKey: "", idleTimeoutMs: 1 };
-  const runningKey = runner.warmAgentKey(member, "/r", "chat", { warm, agentEnvKey: "v1" });
+  const runningKey = warmAgentKey(member as never, "/r", "chat", { warm, agentEnvKey: "v1" });
   let idle = false;
-  runner.warmAgents.set(runningKey, { key: runningKey, scopeKey: "c1:p1", closed: false, isIdle: () => idle });
+  cliParts(runner).warmAgents.entries.set(runningKey, { key: runningKey, scopeKey: "c1:p1", closed: false, isIdle: () => idle });
   const envKey = (runOptions: Record<string, unknown>, kind = "chat") =>
-    runner.withBusyMemberEnvironment(member, "/r", kind, runOptions).agentEnvKey;
+    cliParts(runner).warmAgents.withBusyMemberEnvironment(member, "/r", kind, runOptions).agentEnvKey;
   const options = { warm, agentEnvKey: "v2" };
   assert.equal(envKey(options), "v1", "busy (a background task): its messages go into the session already running");
-  assert.equal(runner.warmAgentKey(member, "/r", "chat", { ...options, agentEnvKey: envKey(options) }), runningKey);
+  assert.equal(warmAgentKey(member as never, "/r", "chat", { ...options, agentEnvKey: envKey(options) }), runningKey);
   assert.equal(envKey({ ...options, nativeGoal: { objective: "x" } }), "v2", "a goal runs in its own process: the values as they are now");
   assert.equal(envKey({ ...options, warm: { ...warm, contextKey: "changed" } }), "v2", "other settings changed too: the process is replaced anyway");
   assert.equal(envKey({ ...options, warm: { ...warm, participantId: "p2" } }), "v2", "another member's busy process changes nothing");
@@ -460,11 +459,11 @@ test("a shutdown while a Claude turn reads its Chrome setting stops the turn", a
     const runner = makeRunner() as any;
     let release!: () => void;
     const reading = new Promise<void>((resolve) => { release = resolve; });
-    runner.withClaudeChrome = async (_participant: unknown, _repoPath: unknown, _kind: unknown, options: Record<string, unknown>) => {
+    cliParts(runner).claudeSettings.withClaudeChrome = async (_participant: unknown, _repoPath: unknown, _kind: unknown, options: Record<string, unknown>) => {
       await reading;
       return { ...options, claudeChrome: false };
     };
-    runner.runClaude = runner.compactClaudeSession = async () => { throw new Error("must not start"); };
+    cliParts(runner).claudeRuns.runClaude = cliParts(runner).claudeRuns.compactClaudeSession = async () => { throw new Error("must not start"); };
     const participant = { id: "p1", label: "Claude", kind: "claude-code" };
     const warm = { conversationId: "c1", participantId: "p1", contextKey: "k", idleTimeoutMs: 1000 };
     const pending = compact
@@ -592,7 +591,7 @@ test("parseClaudeModelPickerOutput ignores numbered settings warning actions", (
 });
 
 test("macOS Claude model discovery uses a full-height, system-expect-compatible PTY", () => {
-  const script = (makeRunner() as any).claudeModelProbeExpectScript() as string;
+  const script = claudeModelProbeExpectScript() as string;
 
   assert.match(script, /set stty_init "rows 40 columns 120"/);
   assert.match(script, /spawn \$env\(ACCORD_AGENTS_CLAUDE_EXECUTABLE\) --safe-mode --no-chrome/);
@@ -893,34 +892,34 @@ test("Claude model list fails plainly when the CLI exits, refuses, stays silent,
 test("Claude model catalog reads the /model picker only when the CLI answered without models", async () => {
   const runner = makeRunner() as any;
   let pickerReads = 0;
-  runner.requestClaudeInitializeAnswer = async () => ({ models: CLAUDE_INITIALIZE_MODELS });
-  runner.runClaudeModelProbe = async () => {
+  cliParts(runner).modelCatalogs.requestClaudeInitializeAnswer = async () => ({ models: CLAUDE_INITIALIZE_MODELS });
+  cliParts(runner).modelCatalogs.runClaudeModelProbe = async () => {
     pickerReads += 1;
     return "Select model 1. Default (recommended) ✔ Opus 4.8 2. Fable Fable 5 Enter to set · Esc to cancel";
   };
-  const listed = await runner.listClaudeModelCatalog("2026-11-20T00:00:00.000Z");
+  const listed = await cliParts(runner).modelCatalogs.listClaudeModelCatalog("2026-11-20T00:00:00.000Z");
   assert.deepEqual(listed.models.map((model: { id: string }) => model.id), ["opus", "fable", "sonnet", "haiku", "claude-opus-4-8", "claude-haiku-4-5-20251001"]);
   assert.equal(listed.authoritative, true);
   assert.equal(pickerReads, 0);
 
-  runner.requestClaudeInitializeAnswer = async () => { throw new Error("initialize unsupported"); };
-  const fromPicker = await runner.listClaudeModelCatalog("2026-11-20T00:00:00.000Z");
+  cliParts(runner).modelCatalogs.requestClaudeInitializeAnswer = async () => { throw new Error("initialize unsupported"); };
+  const fromPicker = await cliParts(runner).modelCatalogs.listClaudeModelCatalog("2026-11-20T00:00:00.000Z");
   assert.deepEqual(fromPicker.models.map((model: { id: string }) => model.id), ["fable"]);
   assert.equal(pickerReads, 1);
 
-  runner.requestClaudeInitializeAnswer = async () => ({ models: [] });
-  await runner.listClaudeModelCatalog("2026-11-20T00:00:00.000Z");
+  cliParts(runner).modelCatalogs.requestClaudeInitializeAnswer = async () => ({ models: [] });
+  await cliParts(runner).modelCatalogs.listClaudeModelCatalog("2026-11-20T00:00:00.000Z");
   assert.equal(pickerReads, 2);
 
   // A CLI that did not answer in time is not asked again through its picker.
-  runner.requestClaudeInitializeAnswer = async () => { throw new ClaudeModelListTimeoutError(""); };
-  await assert.rejects(runner.listClaudeModelCatalog("2026-11-20T00:00:00.000Z"), ClaudeModelListTimeoutError);
+  cliParts(runner).modelCatalogs.requestClaudeInitializeAnswer = async () => { throw new ClaudeModelListTimeoutError(""); };
+  await assert.rejects(cliParts(runner).modelCatalogs.listClaudeModelCatalog("2026-11-20T00:00:00.000Z"), ClaudeModelListTimeoutError);
   assert.equal(pickerReads, 2);
 
   // Both reads empty: the error names the initialize failure, not only the picker.
-  runner.requestClaudeInitializeAnswer = async () => { throw new Error("Claude Code exited with code 1 before listing its models: boom"); };
-  runner.runClaudeModelProbe = async () => "nothing here";
-  await assert.rejects(runner.listClaudeModelCatalog("2026-11-20T00:00:00.000Z"), /did not list any models\. Claude Code exited with code 1 before listing its models: boom/);
+  cliParts(runner).modelCatalogs.requestClaudeInitializeAnswer = async () => { throw new Error("Claude Code exited with code 1 before listing its models: boom"); };
+  cliParts(runner).modelCatalogs.runClaudeModelProbe = async () => "nothing here";
+  await assert.rejects(cliParts(runner).modelCatalogs.listClaudeModelCatalog("2026-11-20T00:00:00.000Z"), /did not list any models\. Claude Code exited with code 1 before listing its models: boom/);
 });
 
 test("A signed-out Claude Code model list is shown but read again next time", async (t) => {
@@ -931,7 +930,7 @@ test("A signed-out Claude Code model list is shown but read again next time", as
   const runner = makeRunner() as any;
   let reads = 0;
   let account: Record<string, unknown> = { tokenSource: "none", apiProvider: "firstParty" };
-  runner.requestClaudeInitializeAnswer = async () => {
+  cliParts(runner).modelCatalogs.requestClaudeInitializeAnswer = async () => {
     reads += 1;
     return { account, models: [{ value: "default", resolvedModel: "opus" }, { value: "opus", resolvedModel: "opus", displayName: "Opus" }] };
   };
@@ -1102,7 +1101,7 @@ done
       },
       cwd: fixtureDir,
       expectCommand: "/usr/bin/expect",
-      expectScript: (makeRunner() as any).claudeModelProbeExpectScript(
+      expectScript: claudeModelProbeExpectScript(
         "-c $env(ACCORD_AGENTS_CLAUDE_STUB_PROGRAM)"
       ) as string,
       timeoutMs: 5_000
@@ -1162,7 +1161,7 @@ done
       },
       cwd: fixtureDir,
       expectCommand: "/usr/bin/expect",
-      expectScript: (makeRunner() as any).claudeModelProbeExpectScript(
+      expectScript: claudeModelProbeExpectScript(
         "-c $env(ACCORD_AGENTS_CLAUDE_STUB_PROGRAM)"
       ) as string,
       timeoutMs: 5_000
@@ -1399,7 +1398,7 @@ test("Windows Claude catalogs never add configured or hard-coded fallback models
     return;
   }
   const runner = makeRunner() as any;
-  runner.listClaudeModelCatalog = async (fetchedAt: string) => ({
+  cliParts(runner).modelCatalogs.listClaudeModelCatalog = async (fetchedAt: string) => ({
     kind: "claude-code",
     models: [{ id: "account-offered", label: "Account offered", source: "cli" }],
     authoritative: true,
@@ -1410,8 +1409,8 @@ test("Windows Claude catalogs never add configured or hard-coded fallback models
   const cachedCatalog = await runner.listModelCatalog("claude-code", "configured-but-not-offered");
   assert.deepEqual(cachedCatalog.models.map((model: { id: string }) => model.id), ["account-offered"]);
 
-  runner.modelCatalogs.clear();
-  runner.listClaudeModelCatalog = async () => { throw new Error("picker unavailable"); };
+  cliParts(runner).modelCatalogs.modelCatalogs.clear();
+  cliParts(runner).modelCatalogs.listClaudeModelCatalog = async () => { throw new Error("picker unavailable"); };
   const failed = await runner.listModelCatalog("claude-code", "configured-but-not-offered");
   assert.deepEqual(failed.models, []);
   assert.equal(failed.authoritative, false);
@@ -1425,21 +1424,21 @@ test("codex app-server stream keeps token deltas joined inside one agent message
   });
   const participant = { id: "p1", label: "Agent" };
 
-  runner.handleCodexAppServerNotification(
+  cliParts(runner).codexAppServerNotifications.handleCodexAppServerNotification(
     { method: "item/started", params: { item: { type: "agentMessage" } } },
     participant,
     pending,
     () => pending,
     (error: Error) => { throw error; }
   );
-  runner.handleCodexAppServerNotification(
+  cliParts(runner).codexAppServerNotifications.handleCodexAppServerNotification(
     { method: "item/agentMessage/delta", params: { delta: "hel" } },
     participant,
     pending,
     () => pending,
     (error: Error) => { throw error; }
   );
-  runner.handleCodexAppServerNotification(
+  cliParts(runner).codexAppServerNotifications.handleCodexAppServerNotification(
     { method: "item/agentMessage/delta", params: { delta: "lo" } },
     participant,
     pending,
@@ -1455,7 +1454,7 @@ test("codex app-server records provider acceptance from turn and item evidence",
   const participant = { id: "p1", label: "Agent" };
   const fail = (error: Error): never => { throw error; };
   const started = makeCodexPendingTurn();
-  runner.handleCodexAppServerNotification(
+  cliParts(runner).codexAppServerNotifications.handleCodexAppServerNotification(
     { method: "turn/started", params: { threadId: "thread-1", turn: { id: "turn-1" } } },
     participant,
     started,
@@ -1465,7 +1464,7 @@ test("codex app-server records provider acceptance from turn and item evidence",
   assert.equal(started.acceptedByProvider, true);
 
   const itemEvidence = makeCodexPendingTurn();
-  runner.handleCodexAppServerNotification(
+  cliParts(runner).codexAppServerNotifications.handleCodexAppServerNotification(
     { method: "item/started", params: { threadId: "thread-1", turnId: "turn-2", item: { id: "item-1", type: "commandExecution" } } },
     participant,
     itemEvidence,
@@ -1487,21 +1486,21 @@ test("codex app-server stream excludes paragraph-separated preamble from final c
   const fail = (error: Error): never => { throw error; };
 
   for (const text of ["first.", "second."]) {
-    runner.handleCodexAppServerNotification(
+    cliParts(runner).codexAppServerNotifications.handleCodexAppServerNotification(
       { method: "item/started", params: { item: { type: "agentMessage" } } },
       participant,
       pending,
       () => pending,
       fail
     );
-    runner.handleCodexAppServerNotification(
+    cliParts(runner).codexAppServerNotifications.handleCodexAppServerNotification(
       { method: "item/agentMessage/delta", params: { delta: text } },
       participant,
       pending,
       () => pending,
       fail
     );
-    runner.handleCodexAppServerNotification(
+    cliParts(runner).codexAppServerNotifications.handleCodexAppServerNotification(
       { method: "item/completed", params: { item: { type: "agentMessage", text } } },
       participant,
       pending,
@@ -1509,7 +1508,7 @@ test("codex app-server stream excludes paragraph-separated preamble from final c
       fail
     );
   }
-  runner.handleCodexAppServerNotification(
+  cliParts(runner).codexAppServerNotifications.handleCodexAppServerNotification(
     { method: "turn/completed", params: { turn: { status: "completed" } } },
     participant,
     pending,
@@ -1531,7 +1530,7 @@ test("codex app-server stream rejoins mid-sentence agent messages around tool us
   });
   const participant = { id: "p1", label: "Agent" };
   const fail = (error: Error): never => { throw error; };
-  const send = (record: Record<string, unknown>): void => runner.handleCodexAppServerNotification(
+  const send = (record: Record<string, unknown>): void => cliParts(runner).codexAppServerNotifications.handleCodexAppServerNotification(
     record,
     participant,
     pending,
@@ -1563,7 +1562,7 @@ test("codex app-server stream emits completed native subagent activity", () => {
   const participant = { id: "p1", label: "Agent" };
   const fail = (error: Error): never => { throw error; };
 
-  runner.handleCodexAppServerNotification(
+  cliParts(runner).codexAppServerNotifications.handleCodexAppServerNotification(
     { method: "item/completed", params: { item: { type: "subAgentActivity", id: "call-1" } } },
     participant,
     pending,
@@ -1592,7 +1591,7 @@ test("codex app-server stream ignores child thread completion while parent turn 
   });
   const participant = { id: "p1", label: "Agent" };
   const fail = (error: Error): never => { throw error; };
-  const send = (record: Record<string, unknown>): void => runner.handleCodexAppServerNotification(
+  const send = (record: Record<string, unknown>): void => cliParts(runner).codexAppServerNotifications.handleCodexAppServerNotification(
     record,
     participant,
     pending,
@@ -1629,7 +1628,7 @@ test("codex app-server stream accepts goal continuation root turn ids in the sam
   });
   const participant = { id: "p1", label: "Agent" };
   const fail = (error: Error): never => { throw error; };
-  const send = (record: Record<string, unknown>): void => runner.handleCodexAppServerNotification(
+  const send = (record: Record<string, unknown>): void => cliParts(runner).codexAppServerNotifications.handleCodexAppServerNotification(
     record,
     participant,
     pending,
@@ -1667,7 +1666,7 @@ test("codex app-server surfaces non-success native goal terminal states", () => 
     nativeGoal: { status: "active", turnCompleted: false },
     resolve: (result: unknown) => resolved.push(result)
   });
-  const send = (record: Record<string, unknown>): void => runner.handleCodexAppServerNotification(
+  const send = (record: Record<string, unknown>): void => cliParts(runner).codexAppServerNotifications.handleCodexAppServerNotification(
     record,
     { id: "p1", label: "Agent" },
     pending,
@@ -1699,7 +1698,7 @@ test("codex app-server stream keeps raw tool output out of agent text and comple
   });
   const participant = { id: "p1", label: "Agent" };
   const fail = (error: Error): never => { throw error; };
-  const send = (record: Record<string, unknown>): void => runner.handleCodexAppServerNotification(
+  const send = (record: Record<string, unknown>): void => cliParts(runner).codexAppServerNotifications.handleCodexAppServerNotification(
     record,
     participant,
     pending,
@@ -1906,7 +1905,7 @@ test("codex app-server completed activity output keeps only a marked 20-line 2,0
     (_, index) => `line-${index.toString().padStart(2, "0")}:${"x".repeat(150)}`
   ).join("\r\n");
 
-  runner.handleCodexAppServerNotification(
+  cliParts(runner).codexAppServerNotifications.handleCodexAppServerNotification(
     {
       method: "item/completed",
       params: {
@@ -1949,7 +1948,7 @@ test("codex app-server bounds MCP and dynamic tool invocation summaries without 
   });
   const participant = { id: "p1", label: "Agent" };
   const fail = (error: Error): never => { throw error; };
-  const send = (record: Record<string, unknown>): void => runner.handleCodexAppServerNotification(
+  const send = (record: Record<string, unknown>): void => cliParts(runner).codexAppServerNotifications.handleCodexAppServerNotification(
     record,
     participant,
     pending,
@@ -2027,7 +2026,7 @@ test("codex app-server keeps a stable fallback identity for no-id subagent compl
   const pending = makeCodexPendingTurn({
     onOutput: (event: typeof outputs[number]) => outputs.push(event)
   });
-  const send = (kind: string): void => runner.handleCodexAppServerNotification(
+  const send = (kind: string): void => cliParts(runner).codexAppServerNotifications.handleCodexAppServerNotification(
     {
       method: "item/completed",
       params: {
@@ -2065,14 +2064,14 @@ test("codex app-server stream ignores same-thread completion for a different tra
     return pending;
   };
 
-  runner.handleCodexAppServerNotification(
+  cliParts(runner).codexAppServerNotifications.handleCodexAppServerNotification(
     { method: "turn/completed", params: { threadId: "thread-1", turn: { id: "other-turn", status: "completed" } } },
     participant,
     pending,
     cleanup,
     fail
   );
-  runner.handleCodexAppServerNotification(
+  cliParts(runner).codexAppServerNotifications.handleCodexAppServerNotification(
     { method: "turn/completed", params: { threadId: "thread-1", turn: { id: "root-turn", status: "completed" } } },
     participant,
     pending,
@@ -2098,7 +2097,7 @@ test("codex app-server stream keeps command output out of agent text when a turn
     reject: (error: Error) => rejected.push(error)
   });
   const participant = { id: "p1", label: "Agent" };
-  const send = (record: Record<string, unknown>): void => runner.handleCodexAppServerNotification(
+  const send = (record: Record<string, unknown>): void => cliParts(runner).codexAppServerNotifications.handleCodexAppServerNotification(
     record,
     participant,
     pending,
@@ -2147,21 +2146,21 @@ test("codex app-server stream keeps parenthetical citation boundaries as paragra
   const participant = { id: "p1", label: "Agent" };
   const fail = (error: Error): never => { throw error; };
   const sendAgentMessage = (text: string): void => {
-    runner.handleCodexAppServerNotification(
+    cliParts(runner).codexAppServerNotifications.handleCodexAppServerNotification(
       { method: "item/started", params: { item: { type: "agentMessage" } } },
       participant,
       pending,
       () => pending,
       fail
     );
-    runner.handleCodexAppServerNotification(
+    cliParts(runner).codexAppServerNotifications.handleCodexAppServerNotification(
       { method: "item/agentMessage/delta", params: { delta: text } },
       participant,
       pending,
       () => pending,
       fail
     );
-    runner.handleCodexAppServerNotification(
+    cliParts(runner).codexAppServerNotifications.handleCodexAppServerNotification(
       { method: "item/completed", params: { item: { type: "agentMessage", text } } },
       participant,
       pending,
@@ -2172,7 +2171,7 @@ test("codex app-server stream keeps parenthetical citation boundaries as paragra
 
   sendAgentMessage("Current EUR/RUB is about 1 EUR = 89.88 RUB. (exchange-rates.org)");
   sendAgentMessage("For comparison, the Bank of Russia official rate is 87.4027 RUB per EUR. (cbr.ru)");
-  runner.handleCodexAppServerNotification(
+  cliParts(runner).codexAppServerNotifications.handleCodexAppServerNotification(
     { method: "turn/completed", params: { turn: { status: "completed" } } },
     participant,
     pending,
@@ -2202,21 +2201,21 @@ test("codex app-server keeps internal multi-paragraph final item complete", () =
   ].join("\n\n");
 
   for (const text of ["I’ll check the exchange sources first.", final]) {
-    runner.handleCodexAppServerNotification(
+    cliParts(runner).codexAppServerNotifications.handleCodexAppServerNotification(
       { method: "item/started", params: { item: { type: "agentMessage" } } },
       participant,
       pending,
       () => pending,
       fail
     );
-    runner.handleCodexAppServerNotification(
+    cliParts(runner).codexAppServerNotifications.handleCodexAppServerNotification(
       { method: "item/agentMessage/delta", params: { delta: text } },
       participant,
       pending,
       () => pending,
       fail
     );
-    runner.handleCodexAppServerNotification(
+    cliParts(runner).codexAppServerNotifications.handleCodexAppServerNotification(
       { method: "item/completed", params: { item: { type: "agentMessage", text } } },
       participant,
       pending,
@@ -2224,7 +2223,7 @@ test("codex app-server keeps internal multi-paragraph final item complete", () =
       fail
     );
   }
-  runner.handleCodexAppServerNotification(
+  cliParts(runner).codexAppServerNotifications.handleCodexAppServerNotification(
     { method: "turn/completed", params: { turn: { status: "completed" } } },
     participant,
     pending,
@@ -2259,7 +2258,7 @@ test("codex app-server keeps a fenced commentary block separate from a multi-par
     "The final answer keeps both paragraphs."
   ].join("\n");
   const sendAgentItem = (id: string, phase: string, text: string): void => {
-    runner.handleCodexAppServerNotification(
+    cliParts(runner).codexAppServerNotifications.handleCodexAppServerNotification(
       { method: "item/started", params: { item: { id, type: "agentMessage", phase } } },
       participant,
       pending,
@@ -2268,7 +2267,7 @@ test("codex app-server keeps a fenced commentary block separate from a multi-par
     );
     const splitAt = Math.floor(text.length / 2);
     for (const delta of [text.slice(0, splitAt), text.slice(splitAt)]) {
-      runner.handleCodexAppServerNotification(
+      cliParts(runner).codexAppServerNotifications.handleCodexAppServerNotification(
         { method: "item/agentMessage/delta", params: { itemId: id, delta } },
         participant,
         pending,
@@ -2276,7 +2275,7 @@ test("codex app-server keeps a fenced commentary block separate from a multi-par
         fail
       );
     }
-    runner.handleCodexAppServerNotification(
+    cliParts(runner).codexAppServerNotifications.handleCodexAppServerNotification(
       { method: "item/completed", params: { item: { id, type: "agentMessage", phase, text } } },
       participant,
       pending,
@@ -2287,7 +2286,7 @@ test("codex app-server keeps a fenced commentary block separate from a multi-par
 
   sendAgentItem("commentary-1", "commentary", commentary);
   sendAgentItem("final-1", "final_answer", final);
-  runner.handleCodexAppServerNotification(
+  cliParts(runner).codexAppServerNotifications.handleCodexAppServerNotification(
     { method: "turn/completed", params: { turn: { status: "completed" } } },
     participant,
     pending,
@@ -2310,7 +2309,7 @@ test("codex app-server normalizes agent CRLF split across deltas and flushes a f
   const participant = { id: "p1", label: "Agent" };
   const fail = (error: Error): never => { throw error; };
 
-  runner.handleCodexAppServerNotification(
+  cliParts(runner).codexAppServerNotifications.handleCodexAppServerNotification(
     { method: "item/started", params: { item: { id: "message-1", type: "agentMessage" } } },
     participant,
     pending,
@@ -2318,7 +2317,7 @@ test("codex app-server normalizes agent CRLF split across deltas and flushes a f
     fail
   );
   for (const delta of ["First line\r", "\nSecond line\r"]) {
-    runner.handleCodexAppServerNotification(
+    cliParts(runner).codexAppServerNotifications.handleCodexAppServerNotification(
       { method: "item/agentMessage/delta", params: { itemId: "message-1", delta } },
       participant,
       pending,
@@ -2326,7 +2325,7 @@ test("codex app-server normalizes agent CRLF split across deltas and flushes a f
       fail
     );
   }
-  runner.handleCodexAppServerNotification(
+  cliParts(runner).codexAppServerNotifications.handleCodexAppServerNotification(
     {
       method: "item/completed",
       params: {
@@ -2342,7 +2341,7 @@ test("codex app-server normalizes agent CRLF split across deltas and flushes a f
     () => pending,
     fail
   );
-  runner.handleCodexAppServerNotification(
+  cliParts(runner).codexAppServerNotifications.handleCodexAppServerNotification(
     { method: "turn/completed", params: { turn: { status: "completed" } } },
     participant,
     pending,
@@ -2363,21 +2362,21 @@ test("codex app-server falls back to trailing paragraph when completions are mis
   const participant = { id: "p1", label: "Agent" };
   const fail = (error: Error): never => { throw error; };
 
-  runner.handleCodexAppServerNotification(
+  cliParts(runner).codexAppServerNotifications.handleCodexAppServerNotification(
     { method: "item/started", params: { item: { type: "agentMessage" } } },
     participant,
     pending,
     () => pending,
     fail
   );
-  runner.handleCodexAppServerNotification(
+  cliParts(runner).codexAppServerNotifications.handleCodexAppServerNotification(
     { method: "item/agentMessage/delta", params: { delta: "I’ll check the sources first.\n\nFinal answer." } },
     participant,
     pending,
     () => pending,
     fail
   );
-  runner.handleCodexAppServerNotification(
+  cliParts(runner).codexAppServerNotifications.handleCodexAppServerNotification(
     { method: "turn/completed", params: { turn: { status: "completed" } } },
     participant,
     pending,
@@ -2393,9 +2392,9 @@ test("agent message fence boundaries remain opt-in for Codex", () => {
   const previous = "Here is the helper:\n```ts\nconst value = 1;\n```";
   const next = "Done — tests pass.";
 
-  assert.equal(runner.agentMessageBoundarySeparator(previous, next), " ");
+  assert.equal(agentMessageBoundarySeparator(previous, next), " ");
   assert.equal(
-    runner.agentMessageBoundarySeparator(previous, next, { fencedBlockEndsBlock: true }),
+    agentMessageBoundarySeparator(previous, next, { fencedBlockEndsBlock: true }),
     "\n\n"
   );
 });
@@ -2566,7 +2565,7 @@ test("claude launch diagnostics redact MCP tokens, inline settings, and role ins
     "/repo/history"
   ];
 
-  const redacted = runner.redactedClaudeArgs(args) as string[];
+  const redacted = redactedClaudeArgs(args) as string[];
   assert.equal(redacted.join(" ").includes("secret-token"), false);
   assert.equal(redacted.join(" ").includes("secret-path"), false);
   assert.equal(redacted.join(" ").includes("private instructions"), false);
@@ -2577,7 +2576,7 @@ test("claude launch diagnostics redact MCP tokens, inline settings, and role ins
 test("claude denial diagnostics retain only categorical layer evidence", () => {
   const runner = makeRunner() as any;
   const secretCanary = "CANARY_SECRET /private/target $(cat ~/.ssh/id_ed25519)";
-  const denials = runner.claudePermissionDenials(JSON.stringify({
+  const denials = claudePermissionDenials(JSON.stringify({
     permission_denials: [
       { tool_name: "Write", reason: secretCanary, input: { file_path: "/secret/file" } },
       { tool_name: "Bash", stage: "sandbox", decision_code: "sandbox_denied", message: secretCanary },
@@ -2618,13 +2617,13 @@ test("claude denial diagnostics do not warn for a successful Auto classifier dec
   const raw = {
     permission_denials: [{ tool_name: "Write", reason: "private target path" }]
   };
-  const success = runner.withClaudePermissionDenialWarning({
+  const success = cliParts(runner).claudeSettings.withClaudePermissionDenialWarning({
     participant,
     ok: true,
     content: "Handled safely.",
     durationMs: 1
   }, raw, participant, "one-shot");
-  const failure = runner.withClaudePermissionDenialWarning({
+  const failure = cliParts(runner).claudeSettings.withClaudePermissionDenialWarning({
     participant,
     ok: false,
     content: "Failed.",
@@ -2640,7 +2639,7 @@ test("claude denial diagnostics do not warn for a successful Auto classifier dec
 
 test("claudeToolConfig maps default + workspaceWrite=true to acceptEdits", () => {
   const runner = makeRunner() as any;
-  const config = runner.claudeToolConfig("chat", "/repo", [], chatOptions({
+  const config = claudeToolConfig("chat", "/repo", [], chatOptions({
     agentMode: "default",
     workspaceWrite: true
   }));
@@ -2653,7 +2652,7 @@ test("claudeToolConfig maps default + workspaceWrite=true to acceptEdits", () =>
 
 test("claudeToolConfig maps default + workspaceWrite=false to default and disallows editors", () => {
   const runner = makeRunner() as any;
-  const config = runner.claudeToolConfig("chat", "/repo", [], chatOptions({
+  const config = claudeToolConfig("chat", "/repo", [], chatOptions({
     agentMode: "default",
     workspaceWrite: false
   }));
@@ -2668,7 +2667,7 @@ test("claudeToolConfig maps default + workspaceWrite=false to default and disall
 
 test("claudeToolConfig auto-allows web tools when webAccess is true", () => {
   const runner = makeRunner() as any;
-  const config = runner.claudeToolConfig("chat", "/repo", [], chatOptions({
+  const config = claudeToolConfig("chat", "/repo", [], chatOptions({
     agentMode: "default",
     workspaceWrite: false,
     webAccess: true
@@ -2683,7 +2682,7 @@ test("claudeToolConfig auto-allows web tools when webAccess is true", () => {
 
 test("claudeToolConfig disallows web tools when webAccess is false", () => {
   const runner = makeRunner() as any;
-  const config = runner.claudeToolConfig("chat", "/repo", [], chatOptions({
+  const config = claudeToolConfig("chat", "/repo", [], chatOptions({
     agentMode: "default",
     workspaceWrite: false,
     webAccess: false
@@ -2698,7 +2697,7 @@ test("claudeToolConfig disallows web tools when webAccess is false", () => {
 
 test("claudeToolConfig auto mode uses native auto permission mode with Bash available", () => {
   const runner = makeRunner() as any;
-  const config = runner.claudeToolConfig("chat", "/repo", [], chatOptions({
+  const config = claudeToolConfig("chat", "/repo", [], chatOptions({
     agentMode: "auto",
     workspaceWrite: false,
     webAccess: false
@@ -2719,7 +2718,7 @@ test("claudeToolConfig auto mode uses native auto permission mode with Bash avai
 
 test("claudeToolConfig auto mode ignores all stored shell rules", () => {
   const runner = makeRunner() as any;
-  const config = runner.claudeToolConfig("chat", "/repo", [], chatOptions({
+  const config = claudeToolConfig("chat", "/repo", [], chatOptions({
     agentMode: "auto",
     workspaceWrite: false,
     webAccess: false,
@@ -2742,11 +2741,11 @@ test("claudeToolConfig auto mode ignores all stored shell rules", () => {
 
 test("claudeToolConfig leaves plan agent mode untouched regardless of workspaceWrite", () => {
   const runner = makeRunner() as any;
-  const planNoWrite = runner.claudeToolConfig("chat", "/repo", [], chatOptions({
+  const planNoWrite = claudeToolConfig("chat", "/repo", [], chatOptions({
     agentMode: "plan",
     workspaceWrite: false
   }));
-  const planWithWrite = runner.claudeToolConfig("chat", "/repo", [], chatOptions({
+  const planWithWrite = claudeToolConfig("chat", "/repo", [], chatOptions({
     agentMode: "plan",
     workspaceWrite: true
   }));
@@ -2758,11 +2757,11 @@ test("claudeToolConfig leaves plan agent mode untouched regardless of workspaceW
 
 test("claudeToolConfig enables native Skill tool without selected skills", () => {
   const runner = makeRunner() as any;
-  const chatConfig = runner.claudeToolConfig("chat", "/repo", [], chatOptions({
+  const chatConfig = claudeToolConfig("chat", "/repo", [], chatOptions({
     agentMode: "default",
     workspaceWrite: false
   }));
-  const reviewConfig = runner.claudeToolConfig("code-review", "/repo", [], chatOptions({
+  const reviewConfig = claudeToolConfig("code-review", "/repo", [], chatOptions({
     agentMode: "default",
     workspaceWrite: false
   }));
@@ -2776,11 +2775,11 @@ test("claudeToolConfig enables native Skill tool without selected skills", () =>
 test("claudeToolConfig enables subagent spawning (Agent/Task) across kinds", () => {
   const runner = makeRunner() as any;
   const configs = [
-    runner.claudeToolConfig("chat", "/repo", [], chatOptions({ agentMode: "default", workspaceWrite: false })),
-    runner.claudeToolConfig("chat", "/repo", [], chatOptions({ agentMode: "auto", workspaceWrite: false })),
-    runner.claudeToolConfig("general", "/repo", [], chatOptions({ agentMode: "default", workspaceWrite: false })),
-    runner.claudeToolConfig("code-review", "/repo", [], chatOptions({ agentMode: "default", workspaceWrite: false })),
-    runner.claudeToolConfig("implementation-plan", "/repo", [], chatOptions({ agentMode: "default", workspaceWrite: false }))
+    claudeToolConfig("chat", "/repo", [], chatOptions({ agentMode: "default", workspaceWrite: false })),
+    claudeToolConfig("chat", "/repo", [], chatOptions({ agentMode: "auto", workspaceWrite: false })),
+    claudeToolConfig("general", "/repo", [], chatOptions({ agentMode: "default", workspaceWrite: false })),
+    claudeToolConfig("code-review", "/repo", [], chatOptions({ agentMode: "default", workspaceWrite: false })),
+    claudeToolConfig("implementation-plan", "/repo", [], chatOptions({ agentMode: "default", workspaceWrite: false }))
   ];
 
   for (const config of configs) {
@@ -2800,9 +2799,9 @@ test("claude chat MCP config is additive and does not pass strict or closed tool
     canRequestPermissions: true,
     appToolNames: ["app_permissions_request_change", "app_tool_permission"]
   });
-  const config = runner.claudeToolConfig("chat", "/repo", [], options);
-  const mcpArgs = runner.claudeMcpArgs("chat", options);
-  const toolsArgs = runner.claudeToolsArgs("chat", config, options);
+  const config = claudeToolConfig("chat", "/repo", [], options);
+  const mcpArgs = claudeMcpArgs("chat", options);
+  const toolsArgs = claudeToolsArgs("chat", config, options);
 
   assert.deepEqual(mcpArgs.slice(0, 1), ["--mcp-config"]);
   assert.equal(mcpArgs.includes("--strict-mcp-config"), false);
@@ -2815,7 +2814,7 @@ test("claude chat MCP config is additive and does not pass strict or closed tool
   // only: the User's own MCP servers keep Claude Code's defaults.
   assert.equal(parsed.mcpServers.accord_agents.timeout, APP_TOOL_PERMISSION_WAIT_MS + 5 * 60_000);
   assert.equal(CLAUDE_APP_MCP_TOOL_TIMEOUT_MS > APP_TOOL_PERMISSION_WAIT_MS, true, "the app answers first");
-  assert.equal(Object.keys(runner.agentRunEnv(options) ?? {}).includes("MCP_TOOL_TIMEOUT"), false);
+  assert.equal(Object.keys(agentRunEnv(options) ?? {}).includes("MCP_TOOL_TIMEOUT"), false);
 });
 
 test("claude default chat delegates unmatched tool approvals to app_tool_permission", () => {
@@ -2827,7 +2826,7 @@ test("claude default chat delegates unmatched tool approvals to app_tool_permiss
     appToolNames: ["app_permissions_request_change", "app_tool_permission"]
   });
 
-  assert.deepEqual(runner.claudePermissionPromptArgs("chat", options), [
+  assert.deepEqual(claudePermissionPromptArgs("chat", options), [
     "--permission-prompt-tool",
     "mcp__accord_agents__app_tool_permission"
   ]);
@@ -2869,8 +2868,8 @@ test("claude auto chat preauthorizes the eligible exposed app MCP inventory only
       "app_tool_permission"
     ]
   });
-  const config = runner.claudeToolConfig("chat", "/repo", [], options);
-  const args = runner.claudeAllowedToolsArgs("chat", options, config);
+  const config = claudeToolConfig("chat", "/repo", [], options);
+  const args = claudeAllowedToolsArgs("chat", options, config);
   const allowedTools = claudeAllowedToolsFromArgs(args);
 
   assert.equal(config.allowedTools.length > 0, true);
@@ -2888,7 +2887,7 @@ test("claude auto chat preauthorizes the eligible exposed app MCP inventory only
   ]) {
     assert.equal(allowedTools.includes(tool), false, `${tool} should not be auto-allowed`);
   }
-  assert.deepEqual(runner.claudePermissionPromptArgs("chat", options), [
+  assert.deepEqual(claudePermissionPromptArgs("chat", options), [
     "--permission-prompt-tool",
     "mcp__accord_agents__app_tool_permission"
   ]);
@@ -2907,8 +2906,8 @@ test("claude Plan and non-chat runs do not receive the chat permission prompt br
     appToolNames: ["app_tool_permission"]
   });
 
-  assert.deepEqual(runner.claudePermissionPromptArgs("chat", plan), []);
-  assert.deepEqual(runner.claudePermissionPromptArgs("single", auto), []);
+  assert.deepEqual(claudePermissionPromptArgs("chat", plan), []);
+  assert.deepEqual(claudePermissionPromptArgs("single" as never, auto), []);
 });
 
 test("claude auto app MCP preauthorization is deny-by-default and intersects exposed tools", () => {
@@ -2920,8 +2919,8 @@ test("claude auto app MCP preauthorization is deny-by-default and intersects exp
     appToolNames: ["app_artifact_create", "app_chat_export_attachment", "app_tool_permission"],
     autoPreauthorizedToolNames: ["app_artifact_create", "app_unexposed", "app_chat_export_attachment", "app_tool_permission"]
   });
-  const config = runner.claudeToolConfig("chat", "/repo", [], options);
-  const allowedTools = claudeAllowedToolsFromArgs(runner.claudeAllowedToolsArgs("chat", options, config));
+  const config = claudeToolConfig("chat", "/repo", [], options);
+  const allowedTools = claudeAllowedToolsFromArgs(claudeAllowedToolsArgs("chat", options, config));
 
   assert.deepEqual(allowedTools, [
     "mcp__accord_agents__app_artifact_create",
@@ -2933,10 +2932,10 @@ test("claude auto app MCP preauthorization is deny-by-default and intersects exp
     ...options,
     appMcp: { ...options.appMcp, autoPreauthorizedToolNames: undefined }
   };
-  assert.deepEqual(runner.claudeAllowedToolsArgs(
+  assert.deepEqual(claudeAllowedToolsArgs(
     "chat",
-    noClassification,
-    runner.claudeToolConfig("chat", "/repo", [], noClassification)
+    noClassification as never,
+    claudeToolConfig("chat", "/repo", [], noClassification as never)
   ), []);
 });
 
@@ -2972,9 +2971,9 @@ test("claude production launch-argv matrix preserves Auto authority across sessi
   ];
 
   for (const scenario of scenarios) {
-    const config = runner.claudeToolConfig("chat", "/selected/repo", ["/chat-history"], scenario.options);
-    const args = runner.claudeLaunchArgs(
-      participant,
+    const config = claudeToolConfig("chat", "/selected/repo", ["/chat-history"], scenario.options);
+    const args = claudeLaunchArgs(
+      participant as never,
       "chat",
       scenario.options,
       config,
@@ -3024,8 +3023,8 @@ test("claude outside-directory parity fixture adds no app path denial or writabl
     canRequestPermissions: true,
     appToolNames: ["app_artifact_create"]
   });
-  const config = runner.claudeToolConfig("chat", "/selected/repo", ["/chat-history"], options);
-  const args = runner.claudeLaunchArgs(
+  const config = claudeToolConfig("chat", "/selected/repo", ["/chat-history"], options);
+  const args = claudeLaunchArgs(
     { id: "claude-1", kind: "claude-code", label: "@claude" },
     "chat",
     options,
@@ -3054,11 +3053,11 @@ test("claude native goal uses one streaming print invocation", () => {
     }),
     nativeGoal: { name: "goal", objective: "finish the task" }
   };
-  const config = runner.claudeToolConfig("chat", "/repo", [], options);
-  const args = runner.claudeLaunchArgs(
+  const config = claudeToolConfig("chat", "/repo", [], options as never);
+  const args = claudeLaunchArgs(
     { id: "claude-1", kind: "claude-code", label: "@claude" },
     "chat",
-    options,
+    options as never,
     config,
     [],
     "one-shot-stream",
@@ -3074,7 +3073,7 @@ test("claude native goal uses one streaming print invocation", () => {
 test("native goal idle detector warns once per idle episode and rearms on activity", async () => {
   const runner = makeRunner() as any;
   const outputs: unknown[] = [];
-  const monitor = runner.createNativeGoalIdleMonitor(
+  const monitor = cliParts(runner).warmAgents.createNativeGoalIdleMonitor(
     { id: "p1", kind: "claude-code", label: "Claude" },
     (event: unknown) => outputs.push(event),
     15
@@ -3095,10 +3094,10 @@ test("claude auto chat without app MCP still omits allowedTools", () => {
     workspaceWrite: false,
     webAccess: true
   });
-  const config = runner.claudeToolConfig("chat", "/repo", [], options);
+  const config = claudeToolConfig("chat", "/repo", [], options);
 
   assert.equal(config.allowedTools.length > 0, true);
-  assert.deepEqual(runner.claudeAllowedToolsArgs("chat", options, config), []);
+  assert.deepEqual(claudeAllowedToolsArgs("chat", options, config), []);
 });
 
 test("claude default and plan chats keep full app MCP allowedTools", () => {
@@ -3115,8 +3114,8 @@ test("claude default and plan chats keep full app MCP allowedTools", () => {
         "app_permissions_request_change"
       ]
     });
-    const config = runner.claudeToolConfig("chat", "/repo", [], options);
-    const allowedTools = claudeAllowedToolsFromArgs(runner.claudeAllowedToolsArgs("chat", options, config));
+    const config = claudeToolConfig("chat", "/repo", [], options);
+    const allowedTools = claudeAllowedToolsFromArgs(claudeAllowedToolsArgs("chat", options, config));
 
     for (const tool of [
       "mcp__accord_agents__app_chat_list_attachments",
@@ -3141,7 +3140,7 @@ test("claude default chat still hard-denies off-toggle capabilities via disallow
     canRequestPermissions: true,
     appToolNames: ["app_permissions_request_change", "app_tool_permission"]
   });
-  const config = runner.claudeToolConfig("chat", "/repo", [], options);
+  const config = claudeToolConfig("chat", "/repo", [], options);
   const disallowed = new Set(config.disallowedTools as string[]);
 
   for (const tool of ["Edit", "Write", "NotebookEdit", "WebSearch", "WebFetch", "Bash"]) {
@@ -3158,11 +3157,11 @@ test("claude non-chat keeps strict app MCP config and explicit tools", () => {
     canRequestPermissions: true,
     appToolNames: ["app_permissions_request_change", "app_tool_permission"]
   });
-  const config = runner.claudeToolConfig("code-review", "/repo", [], options);
+  const config = claudeToolConfig("code-review", "/repo", [], options);
 
-  assert.ok(runner.claudeMcpArgs("code-review", options).includes("--strict-mcp-config"));
-  assert.deepEqual(runner.claudePermissionPromptArgs("code-review", options), []);
-  assert.deepEqual(runner.claudeToolsArgs("code-review", config, options).slice(0, 1), ["--tools"]);
+  assert.ok(claudeMcpArgs("code-review", options).includes("--strict-mcp-config"));
+  assert.deepEqual(claudePermissionPromptArgs("code-review", options), []);
+  assert.deepEqual(claudeToolsArgs("code-review", config, options).slice(0, 1), ["--tools"]);
 });
 
 test("codex app-server auto mode applies workspace-write web preset and native auto reviewer", () => {
@@ -3173,8 +3172,8 @@ test("codex app-server auto mode applies workspace-write web preset and native a
     model: undefined,
     reasoningEffort: "xhigh"
   };
-  const params = runner.codexAppServerThreadStartParams(
-    participant,
+  const params = codexAppServerThreadStartParams(
+    participant as never,
     "/repo",
     "chat",
     chatOptions({
@@ -3187,8 +3186,8 @@ test("codex app-server auto mode applies workspace-write web preset and native a
   assert.equal(params.approvalPolicy, "on-request");
   assert.equal(params.approvalsReviewer, "auto_review");
   assert.equal(params.sandbox, "workspace-write");
-  assert.equal(params.config.web_search, "live");
-  assert.equal(params.config.model_reasoning_effort, "xhigh");
+  assert.equal((params.config as any).web_search, "live");
+  assert.equal((params.config as any).model_reasoning_effort, "xhigh");
 });
 
 test("Codex model catalog handles server requests and rejects external-token refresh contract drift", async () => {
@@ -3305,18 +3304,18 @@ readline.createInterface({ input: process.stdin }).on("line", (line) => {
 
 test("Claude Code's catalog names the model, effort and mode her settings start it in", async () => {
   const runner = makeRunner() as any;
-  runner.requestClaudeInitializeAnswer = async () => ({
+  cliParts(runner).modelCatalogs.requestClaudeInitializeAnswer = async () => ({
     models: CLAUDE_INITIALIZE_MODELS,
     current_permission_mode: "acceptEdits",
     appliedSettings: { applied: { model: "claude-sonnet-5-5", effort: "xhigh" } }
   });
-  const catalog = await runner.listClaudeModelCatalog("2026-11-22T00:00:00.000Z");
+  const catalog = await cliParts(runner).modelCatalogs.listClaudeModelCatalog("2026-11-22T00:00:00.000Z");
   assert.deepEqual(catalog.models.filter((model: { recommended?: boolean }) => model.recommended).map((model: { id: string }) => model.id), ["sonnet"]);
   assert.deepEqual(catalog.startDefaults, { access: "acceptEdits", model: "sonnet", modelLabel: "Sonnet 5.5", reasoningEffort: "xhigh" });
   // Bypass Permissions is not a mode the composer offers: Manual, which
   // asks before anything her settings do not allow.
-  runner.requestClaudeInitializeAnswer = async () => ({ models: CLAUDE_INITIALIZE_MODELS, current_permission_mode: "bypassPermissions" });
-  const bypass = await runner.listClaudeModelCatalog("2026-11-22T00:00:00.000Z");
+  cliParts(runner).modelCatalogs.requestClaudeInitializeAnswer = async () => ({ models: CLAUDE_INITIALIZE_MODELS, current_permission_mode: "bypassPermissions" });
+  const bypass = await cliParts(runner).modelCatalogs.listClaudeModelCatalog("2026-11-22T00:00:00.000Z");
   assert.equal(bypass.startDefaults?.access, "manual");
 });
 
@@ -3395,7 +3394,7 @@ rl.on("line", (line) => {
   const runner = new CliAgentRunner(undefined, undefined, codexPath) as any;
   const overrides = ['model_provider="accordagents_host"', 'model_providers.accordagents_host.env_key="CODEX_PROVIDER_HOST_API_KEY"'];
   try {
-    const result = await runner.runCodexAppServerWarmOrOneShot(
+    const result = await cliParts(runner).codexRuns.runCodexAppServerWarmOrOneShot(
       { id: "participant-fixture", kind: "codex-cli", label: "Codex", codexConfigOverrides: overrides },
       "Report your launch.",
       fixtureDir,
@@ -3419,9 +3418,9 @@ rl.on("line", (line) => {
     }
     assert.equal(report.argv.some((arg) => arg.includes("zai-secret")), false, "key never in argv");
     assert.equal(report.keyPresent, true, "key reaches the process env");
-    assert.equal(runner.warmAgents.size, 1);
+    assert.equal(cliParts(runner).warmAgents.entries.size, 1);
     await runner.closeWarmAgents("conversation-fixture", "participant-fixture", "provider-binding-changed");
-    assert.equal(runner.warmAgents.size, 0);
+    assert.equal(cliParts(runner).warmAgents.entries.size, 0);
   } finally {
     await runner.shutdownWarmAgents();
     await rm(fixtureDir, { recursive: true, force: true });
@@ -3475,7 +3474,7 @@ rl.on("line", (line) => {
   const runner = new CliAgentRunner(undefined, undefined, codexPath) as any;
   let delivered = false;
   try {
-    const result = await runner.runCodexAppServerWarmOrOneShot(
+    const result = await cliParts(runner).codexRuns.runCodexAppServerWarmOrOneShot(
       { id: "participant-fixture", kind: "codex-cli", label: "Codex" },
       "Run the protected command.",
       fixtureDir,
@@ -3579,7 +3578,7 @@ readline.createInterface({ input: process.stdin }).on("line", (line) => {
   const runner = new CliAgentRunner(undefined, undefined, codexPath) as any;
   const seen: string[] = [];
   try {
-    const result = await runner.runCodexAppServerWarmOrOneShot(
+    const result = await cliParts(runner).codexRuns.runCodexAppServerWarmOrOneShot(
       { id: "participant-methods", kind: "codex-cli", label: "Codex" },
       "Exercise direct approvals.",
       fixtureDir,
@@ -3679,7 +3678,7 @@ readline.createInterface({ input: process.stdin }).on("line", (line) => {
   });
   void delivery.catch(() => undefined);
   try {
-    const result = await runner.runCodexAppServerWarmOrOneShot(
+    const result = await cliParts(runner).codexRuns.runCodexAppServerWarmOrOneShot(
       { id: "participant-guardian", kind: "codex-cli", label: "Codex" },
       "Retry the protected command.",
       fixtureDir,
@@ -3778,7 +3777,7 @@ readline.createInterface({ input: process.stdin }).on("line", (line) => {
   });
   void delivery.catch(() => undefined);
   try {
-    const resultPromise: Promise<ParticipantRunResult> = runner.runCodexAppServerWarmOrOneShot(
+    const resultPromise: Promise<ParticipantRunResult> = cliParts(runner).codexRuns.runCodexAppServerWarmOrOneShot(
       { id: "participant-guardian-live", kind: "codex-cli", label: "Codex" },
       "Push the scratch branch.",
       fixtureDir,
@@ -3877,7 +3876,7 @@ readline.createInterface({ input: process.stdin }).on("line", (line) => {
   });
   void delivery.catch(() => undefined);
   try {
-    const resultPromise: Promise<ParticipantRunResult> = runner.runCodexAppServerWarmOrOneShot(
+    const resultPromise: Promise<ParticipantRunResult> = cliParts(runner).codexRuns.runCodexAppServerWarmOrOneShot(
       { id: "participant-guardian-coalesced", kind: "codex-cli", label: "Codex" },
       "Push the scratch branch.",
       fixtureDir,
@@ -3971,7 +3970,7 @@ readline.createInterface({ input: process.stdin }).on("line", (line) => {
   let approvalAborted = false;
   let guardianSignal: AbortSignal | undefined;
   try {
-    const first = await runner.runCodexAppServerWarmOrOneShot(
+    const first = await cliParts(runner).codexRuns.runCodexAppServerWarmOrOneShot(
       participant,
       "Attempt the protected command.",
       fixtureDir,
@@ -3997,7 +3996,7 @@ readline.createInterface({ input: process.stdin }).on("line", (line) => {
     assert.match(first.content, /First turn completed/);
     assert.equal(guardianSignal?.aborted, false);
 
-    const second = await runner.runCodexAppServerWarmOrOneShot(
+    const second = await cliParts(runner).codexRuns.runCodexAppServerWarmOrOneShot(
       participant,
       "Start a fresh turn.",
       fixtureDir,
@@ -4059,7 +4058,7 @@ readline.createInterface({ input: process.stdin }).on("line", (line) => {
   };
   let approvalAborted = false;
   try {
-    const first = await runner.runCodexAppServerWarmOrOneShot(
+    const first = await cliParts(runner).codexRuns.runCodexAppServerWarmOrOneShot(
       participant,
       "Attempt the protected command.",
       fixtureDir,
@@ -4135,7 +4134,7 @@ readline.createInterface({ input: process.stdin }).on("line", (line) => {
   let helperPid: number | undefined;
   const seen = new Promise<void>((resolve) => { requestSeen = resolve; });
   try {
-    const run = runner.runCodexAppServerWarmOrOneShot(
+    const run = cliParts(runner).codexRuns.runCodexAppServerWarmOrOneShot(
       { id: "participant-dead-pipe", kind: "codex-cli", label: "Codex" },
       "Apply the protected change.",
       fixtureDir,
@@ -4221,7 +4220,7 @@ readline.createInterface({ input: process.stdin }).on("line", (line) => {
   const seen = new Promise<void>((resolve) => { ready = resolve; });
   let helperPid: number | undefined;
   try {
-    const run = runner.runCodexAppServerWarmOrOneShot(
+    const run = cliParts(runner).codexRuns.runCodexAppServerWarmOrOneShot(
       { id: "codex-detached", kind: "codex-cli", label: "Codex" }, "Wait.", fixtureDir,
       undefined, "chat", controller.signal, {
         agentMode: "auto",
@@ -4291,7 +4290,7 @@ input.on("line", (line) => {
     await rm(fixtureDir, { recursive: true, force: true });
   });
 
-  const result = await runner.runCodexAppServerWarmOrOneShot(
+  const result = await cliParts(runner).codexRuns.runCodexAppServerWarmOrOneShot(
     { id: "participant-warm-tree", kind: "codex-cli", label: "Codex" },
     "Reply with done.",
     fixtureDir,
@@ -4350,7 +4349,7 @@ readline.createInterface({ input: process.stdin }).on("line", (line) => {
   // Shell readiness can take up to its own eight-second timeout; it is a
   // fixture prerequisite, not part of this four-second provider-start check.
   await ensureLoginShellEnvPrimed();
-  const runs = participants.map((participant) => runner.runCodexAppServerWarmOrOneShot(
+  const runs = participants.map((participant) => cliParts(runner).codexRuns.runCodexAppServerWarmOrOneShot(
     participant,
     "Keep responding until the app closes.",
     fixtureDir,
@@ -4383,7 +4382,7 @@ readline.createInterface({ input: process.stdin }).on("line", (line) => {
   if (startedPids.length !== participants.length) {
     const native = new NativeProcessRegistry(path.join(fixtureDir, "native-processes.sqlite3"));
     const diagnostic = { earlyResults, diagnostics, providers: await readFile(pidFile, "utf8").catch(() => "none"),
-      preparing: [...runner.warmPreparations].map((value: { key: string }) => value.key), creating: [...runner.warmAgentCreations.keys()], warm: [...runner.warmAgents.keys()],
+      preparing: [...cliParts(runner).warmAgents.warmPreparations].map((value: { key: string }) => value.key), creating: [...cliParts(runner).warmAgents.warmAgentCreations.keys()], warm: [...cliParts(runner).warmAgents.entries.keys()],
       receipts: await native.openLeases().catch(error => String(error)) };
     console.error("native-close-startup-diagnostic", JSON.stringify(diagnostic));
   }
@@ -4400,7 +4399,7 @@ readline.createInterface({ input: process.stdin }).on("line", (line) => {
   assert.equal(runner.hasActiveNativeWork(), false);
   const releaseIdle = runner.fenceIdleNativeAdmissions();
   assert.equal(typeof releaseIdle, "function");
-  const refused = await runner.runCodexAppServerWarmOrOneShot(participants[0], "Must stay queued.", fixtureDir, undefined,
+  const refused = await cliParts(runner).codexRuns.runCodexAppServerWarmOrOneShot(participants[0], "Must stay queued.", fixtureDir, undefined,
     "chat", undefined, { agentMode: "default", warm: { conversationId: "idle-fenced", participantId: participants[0].id, contextKey: "idle-fenced", idleTimeoutMs: 60_000 } });
   assert.equal(refused.ok, false);
   assert.equal((await readFile(pidFile, "utf8")).trim().split(/\r?\n/).length, participants.length, "a fenced command never spawns a replacement provider");
@@ -4507,8 +4506,8 @@ input.on("line", (line) => {
   await chmod(claudePath, 0o755);
 
   const runner = makeRunner() as any;
-  runner.nativeProcessDbPath = path.join(fixtureDir, "native-processes.sqlite3");
-  runner.providerExecutableForRun = async () => claudePath;
+  cliDependencies(runner).nativeProcessDbPath = path.join(fixtureDir, "native-processes.sqlite3");
+  cliParts(runner).cliRuns.providerExecutableForRun = async () => claudePath;
   const participant = { id: "claude-background", kind: "claude-code", label: "Claude" };
   const selfResumed: any[] = [];
   let markSelfResumed!: () => void;
@@ -4654,8 +4653,8 @@ input.on("line", (line) => {
   await chmod(claudePath, 0o755);
 
   const runner = makeRunner() as any;
-  runner.nativeProcessDbPath = path.join(fixtureDir, "native-processes.sqlite3");
-  runner.providerExecutableForRun = async () => claudePath;
+  cliDependencies(runner).nativeProcessDbPath = path.join(fixtureDir, "native-processes.sqlite3");
+  cliParts(runner).cliRuns.providerExecutableForRun = async () => claudePath;
   const participant = { id: "claude-mode", kind: "claude-code", label: "@claude" };
   const warm = { conversationId: "conversation-mode", participantId: participant.id, contextKey: "context-mode", idleTimeoutMs: 60_000 };
   const own = (agentMode: "default" | "plan" | "auto", workspaceWrite: boolean) => ({
@@ -4776,8 +4775,8 @@ input.on("line", (line) => {
   await chmod(claudePath, 0o755);
 
   const runner = makeRunner() as any;
-  runner.nativeProcessDbPath = path.join(fixtureDir, "native-processes.sqlite3");
-  runner.providerExecutableForRun = async () => claudePath;
+  cliDependencies(runner).nativeProcessDbPath = path.join(fixtureDir, "native-processes.sqlite3");
+  cliParts(runner).cliRuns.providerExecutableForRun = async () => claudePath;
   const participant = { id: "claude-plan", kind: "claude-code", label: "@claude" };
   const moved: string[] = [];
   const warm = {
@@ -5019,8 +5018,8 @@ test("Claude's context after a turn of tool calls and a subagent is its last mai
   const fixtureDir = await mkdtemp(path.join(tmpdir(), "accord-claude-context-turn-"));
   const { claudePath } = await writeClaudeCompactionFixture(fixtureDir);
   const runner = makeRunner() as any;
-  runner.nativeProcessDbPath = path.join(fixtureDir, "native-processes.sqlite3");
-  runner.providerExecutableForRun = async () => claudePath;
+  cliDependencies(runner).nativeProcessDbPath = path.join(fixtureDir, "native-processes.sqlite3");
+  cliParts(runner).cliRuns.providerExecutableForRun = async () => claudePath;
   const participant = { id: "claude-context", kind: "claude-code", label: "Claude", model: "sonnet" };
   const warm = { conversationId: "conversation-context", participantId: participant.id, contextKey: "context-turn", idleTimeoutMs: 60_000 };
   try {
@@ -5042,8 +5041,8 @@ test("each compaction the member's live Claude Code process runs is told once, w
   const fixtureDir = await mkdtemp(path.join(tmpdir(), "accord-claude-auto-compact-"));
   const { claudePath } = await writeClaudeCompactionFixture(fixtureDir);
   const runner = makeRunner() as any;
-  runner.nativeProcessDbPath = path.join(fixtureDir, "native-processes.sqlite3");
-  runner.providerExecutableForRun = async () => claudePath;
+  cliDependencies(runner).nativeProcessDbPath = path.join(fixtureDir, "native-processes.sqlite3");
+  cliParts(runner).cliRuns.providerExecutableForRun = async () => claudePath;
   const participant = { id: "claude-auto-compact", kind: "claude-code", label: "Claude", model: "sonnet" };
   const warm = { conversationId: "conversation-auto-compact", participantId: participant.id, contextKey: "context-auto-compact", idleTimeoutMs: 60_000 };
   const take = () => runner.takeMemberClaudeCompactions(warm.conversationId, participant.id);
@@ -5073,8 +5072,8 @@ test("Claude /compact runs in the member's live process, so its next reply conti
   const fixtureDir = await mkdtemp(path.join(tmpdir(), "accord-claude-compact-live-"));
   const { claudePath, log } = await writeClaudeCompactionFixture(fixtureDir);
   const runner = makeRunner() as any;
-  runner.nativeProcessDbPath = path.join(fixtureDir, "native-processes.sqlite3");
-  runner.providerExecutableForRun = async () => claudePath;
+  cliDependencies(runner).nativeProcessDbPath = path.join(fixtureDir, "native-processes.sqlite3");
+  cliParts(runner).cliRuns.providerExecutableForRun = async () => claudePath;
   const participant = { id: "claude-compact", kind: "claude-code", label: "Claude", model: "claude-opus-5-5[1m]" };
   const warm = { conversationId: "conversation-compact", participantId: participant.id, contextKey: "context-compact", idleTimeoutMs: 60_000 };
   try {
@@ -5109,8 +5108,8 @@ test("Claude /compact runs while the member's background work keeps running, as 
   const fixtureDir = await mkdtemp(path.join(tmpdir(), "accord-claude-compact-busy-"));
   const { claudePath, log, finishBackground } = await writeClaudeCompactionFixture(fixtureDir);
   const runner = makeRunner() as any;
-  runner.nativeProcessDbPath = path.join(fixtureDir, "native-processes.sqlite3");
-  runner.providerExecutableForRun = async () => claudePath;
+  cliDependencies(runner).nativeProcessDbPath = path.join(fixtureDir, "native-processes.sqlite3");
+  cliParts(runner).cliRuns.providerExecutableForRun = async () => claudePath;
   const participant = { id: "claude-compact-busy", kind: "claude-code", label: "Claude", model: "claude-opus-5-5[1m]" };
   const backgroundReports: string[][] = [];
   let selfResumed: Promise<any> | undefined;
@@ -5120,7 +5119,7 @@ test("Claude /compact runs while the member's background work keeps running, as 
   try {
     const started = await runner.run(participant, "Start background.", fixtureDir, undefined, "chat", undefined, { agentMode: "default", warm, sessionId: "fixture-session" });
     assert.equal(started.ok, true);
-    const live = Array.from(runner.warmAgents.values())[0] as any;
+    const live = Array.from(cliParts(runner).warmAgents.entries.values())[0] as any;
     assert.equal(live.hasLiveBackgroundWork(), true);
     const compact = await runner.compactSession(participant, fixtureDir, undefined, "chat", undefined, { agentMode: "default", warm, sessionId: "fixture-session" });
     assert.equal(compact.ok, true, JSON.stringify(compact));
@@ -5148,8 +5147,8 @@ test("Claude /compact: background work that finishes during the compaction is an
   const fixtureDir = await mkdtemp(path.join(tmpdir(), "accord-claude-compact-meanwhile-"));
   const { claudePath, log, finishBackground } = await writeClaudeCompactionFixture(fixtureDir);
   const runner = makeRunner() as any;
-  runner.nativeProcessDbPath = path.join(fixtureDir, "native-processes.sqlite3");
-  runner.providerExecutableForRun = async () => claudePath;
+  cliDependencies(runner).nativeProcessDbPath = path.join(fixtureDir, "native-processes.sqlite3");
+  cliParts(runner).cliRuns.providerExecutableForRun = async () => claudePath;
   const participant = { id: "claude-compact-meanwhile", kind: "claude-code", label: "Claude", model: "claude-opus-5-5[1m]" };
   const backgroundReports: string[][] = [];
   let selfResumed: Promise<any> | undefined;
@@ -5184,8 +5183,8 @@ test("Claude /compact: the answer to background work that ends during it gets th
   const fixtureDir = await mkdtemp(path.join(tmpdir(), "accord-claude-compact-meanwhile-step-"));
   const { claudePath, log, finishBackground } = await writeClaudeCompactionFixture(fixtureDir);
   const runner = makeRunner() as any;
-  runner.nativeProcessDbPath = path.join(fixtureDir, "native-processes.sqlite3");
-  runner.providerExecutableForRun = async () => claudePath;
+  cliDependencies(runner).nativeProcessDbPath = path.join(fixtureDir, "native-processes.sqlite3");
+  cliParts(runner).cliRuns.providerExecutableForRun = async () => claudePath;
   const participant = { id: "claude-compact-meanwhile-step", kind: "claude-code", label: "Claude", model: "claude-opus-5-5[1m]" };
   let resumed: { origin: unknown; outputs: string[]; done: Promise<any> } | undefined;
   const warm = { conversationId: "conversation-compact-meanwhile-step", participantId: participant.id, contextKey: "context-meanwhile-step", idleTimeoutMs: 60_000,
@@ -5218,8 +5217,8 @@ test("Claude /compact runs in a process started with other settings while it car
   const fixtureDir = await mkdtemp(path.join(tmpdir(), "accord-claude-compact-other-settings-"));
   const { claudePath, log, finishBackground } = await writeClaudeCompactionFixture(fixtureDir);
   const runner = makeRunner() as any;
-  runner.nativeProcessDbPath = path.join(fixtureDir, "native-processes.sqlite3");
-  runner.providerExecutableForRun = async () => claudePath;
+  cliDependencies(runner).nativeProcessDbPath = path.join(fixtureDir, "native-processes.sqlite3");
+  cliParts(runner).cliRuns.providerExecutableForRun = async () => claudePath;
   const participant = { id: "claude-compact-other-settings", kind: "claude-code", label: "Claude", model: "claude-opus-5-5[1m]" };
   const warm = { conversationId: "conversation-compact-other-settings", participantId: participant.id, contextKey: "context-once", idleTimeoutMs: 60_000,
     onSelfResumedTurn: (turn: any) => { void turn.attach({}); } };
@@ -5232,7 +5231,7 @@ test("Claude /compact runs in a process started with other settings while it car
     const entries = await readFixtureLog(log);
     assert.equal(entries.filter((entry) => entry.started).length, 1, "no process was started or replaced");
     assert.equal(entries.some((entry) => entry.background === "finished"), false, "compacted without waiting for the background work");
-    assert.equal((Array.from(runner.warmAgents.values())[0] as any).hasLiveBackgroundWork(), true, "which keeps running");
+    assert.equal((Array.from(cliParts(runner).warmAgents.entries.values())[0] as any).hasLiveBackgroundWork(), true, "which keeps running");
     await finishBackground();
   } finally {
     await runner.shutdownWarmAgents();
@@ -5245,8 +5244,8 @@ test("Claude /compact waits for a reply in progress before it is sent", { timeou
   const fixtureDir = await mkdtemp(path.join(tmpdir(), "accord-claude-compact-reply-"));
   const { claudePath, log } = await writeClaudeCompactionFixture(fixtureDir);
   const runner = makeRunner() as any;
-  runner.nativeProcessDbPath = path.join(fixtureDir, "native-processes.sqlite3");
-  runner.providerExecutableForRun = async () => claudePath;
+  cliDependencies(runner).nativeProcessDbPath = path.join(fixtureDir, "native-processes.sqlite3");
+  cliParts(runner).cliRuns.providerExecutableForRun = async () => claudePath;
   const participant = { id: "claude-compact-reply", kind: "claude-code", label: "Claude", model: "claude-opus-5-5[1m]" };
   const warm = { conversationId: "conversation-compact-reply", participantId: participant.id, contextKey: "context-reply", idleTimeoutMs: 60_000 };
   try {
@@ -5271,14 +5270,14 @@ test("Claude /compact queued behind a reply is sent when that reply ends, while 
   const fixtureDir = await mkdtemp(path.join(tmpdir(), "accord-claude-compact-queued-"));
   const { claudePath, log, finishBackground } = await writeClaudeCompactionFixture(fixtureDir);
   const runner = makeRunner() as any;
-  runner.nativeProcessDbPath = path.join(fixtureDir, "native-processes.sqlite3");
-  runner.providerExecutableForRun = async () => claudePath;
+  cliDependencies(runner).nativeProcessDbPath = path.join(fixtureDir, "native-processes.sqlite3");
+  cliParts(runner).cliRuns.providerExecutableForRun = async () => claudePath;
   const participant = { id: "claude-compact-queued", kind: "claude-code", label: "Claude", model: "claude-opus-5-5[1m]" };
   const warm = { conversationId: "conversation-compact-queued", participantId: participant.id, contextKey: "context-queued", idleTimeoutMs: 60_000,
     onSelfResumedTurn: (turn: any) => { void turn.attach({}); } };
   try {
     await runner.run(participant, "Start background.", fixtureDir, undefined, "chat", undefined, { agentMode: "default", warm, sessionId: "fixture-session" });
-    const live = Array.from(runner.warmAgents.values())[0] as any;
+    const live = Array.from(cliParts(runner).warmAgents.entries.values())[0] as any;
     const replying = runner.run(participant, "Reply slowly.", fixtureDir, undefined, "chat", undefined, { agentMode: "default", warm, sessionId: "fixture-session" });
     await waitForCondition(async () => (await readFixtureLog(log)).some((entry) => entry.message === "Reply slowly."));
     const compact = await runner.compactSession(participant, fixtureDir, undefined, "chat", undefined, { agentMode: "default", warm, sessionId: "fixture-session" });
@@ -5301,8 +5300,8 @@ test("Claude /compact: Stop while it waits for a reply in progress cancels it be
   const fixtureDir = await mkdtemp(path.join(tmpdir(), "accord-claude-compact-stop-waiting-"));
   const { claudePath, log } = await writeClaudeCompactionFixture(fixtureDir);
   const runner = makeRunner() as any;
-  runner.nativeProcessDbPath = path.join(fixtureDir, "native-processes.sqlite3");
-  runner.providerExecutableForRun = async () => claudePath;
+  cliDependencies(runner).nativeProcessDbPath = path.join(fixtureDir, "native-processes.sqlite3");
+  cliParts(runner).cliRuns.providerExecutableForRun = async () => claudePath;
   const participant = { id: "claude-compact-stop-waiting", kind: "claude-code", label: "Claude", model: "claude-opus-5-5[1m]" };
   const warm = { conversationId: "conversation-compact-stop-waiting", participantId: participant.id, contextKey: "context-stop-waiting", idleTimeoutMs: 60_000 };
   try {
@@ -5316,7 +5315,7 @@ test("Claude /compact: Stop while it waits for a reply in progress cancels it be
     assert.equal(stopped.ok, false);
     assert.equal(stopped.error, "Compaction was cancelled.");
     assert.equal((await replying).content, "Slow reply.", "the reply in progress is not touched");
-    const live = Array.from(runner.warmAgents.values())[0] as any;
+    const live = Array.from(cliParts(runner).warmAgents.entries.values())[0] as any;
     assert.ok(live.idleTimer, "the member's idle timer is re-armed");
     const next = await runner.run(participant, "Still there?", fixtureDir, undefined, "chat", undefined, { agentMode: "default", warm, sessionId: "fixture-session" });
     assert.equal(next.ok, true);
@@ -5334,8 +5333,8 @@ test("Claude /compact: Stop interrupts it in the live process, which keeps servi
   const fixtureDir = await mkdtemp(path.join(tmpdir(), "accord-claude-compact-stop-"));
   const { claudePath, log } = await writeClaudeCompactionFixture(fixtureDir);
   const runner = makeRunner() as any;
-  runner.nativeProcessDbPath = path.join(fixtureDir, "native-processes.sqlite3");
-  runner.providerExecutableForRun = async () => claudePath;
+  cliDependencies(runner).nativeProcessDbPath = path.join(fixtureDir, "native-processes.sqlite3");
+  cliParts(runner).cliRuns.providerExecutableForRun = async () => claudePath;
   const participant = { id: "claude-compact-stop", kind: "claude-code", label: "Claude", model: "claude-opus-5-5[1m]" };
   const warm = { conversationId: "conversation-compact-stop", participantId: participant.id, contextKey: "context-stop", idleTimeoutMs: 60_000 };
   try {
@@ -5366,16 +5365,16 @@ test("Claude /compact the CLI declines is reported with the CLI's own words, not
   const fixtureDir = await mkdtemp(path.join(tmpdir(), "accord-claude-compact-refused-"));
   const { claudePath } = await writeClaudeCompactionFixture(fixtureDir);
   const runner = makeRunner() as any;
-  runner.nativeProcessDbPath = path.join(fixtureDir, "native-processes.sqlite3");
-  runner.providerExecutableForRun = async () => claudePath;
+  cliDependencies(runner).nativeProcessDbPath = path.join(fixtureDir, "native-processes.sqlite3");
+  cliParts(runner).cliRuns.providerExecutableForRun = async () => claudePath;
   const participant = { id: "claude-compact-refused", kind: "claude-code", label: "Claude", model: "claude-opus-5-5[1m]" };
   const warm = { conversationId: "conversation-compact-refused", participantId: participant.id, contextKey: "context-refused", idleTimeoutMs: 60_000 };
   try {
     // A live process of a brand-new session (nothing said yet in it).
-    runner.warmAgents.clear();
-    const entry = await runner.createClaudeWarmAgent(runner.warmAgentKey(participant, fixtureDir, "chat", { agentMode: "default", warm }),
+    cliParts(runner).warmAgents.entries.clear();
+    const entry = await cliParts(runner).claudeProcess.createClaudeWarmAgent(warmAgentKey(participant as never, fixtureDir, "chat", { agentMode: "default", warm }),
       `${warm.conversationId}:${warm.participantId}`, participant, fixtureDir, "chat", { agentMode: "default", warm, persistSession: true }, claudePath);
-    runner.warmAgents.set(entry.key, entry);
+    cliParts(runner).warmAgents.entries.set(entry.key, entry);
     const refused = await runner.compactSession(participant, fixtureDir, undefined, "chat", undefined, { agentMode: "default", warm, sessionId: "fixture-session" });
     assert.equal(refused.ok, false);
     assert.equal(refused.error, "No messages to compact");
@@ -5390,8 +5389,8 @@ test("Claude /compact with no live process starts the member's live process as i
   const fixtureDir = await mkdtemp(path.join(tmpdir(), "accord-claude-compact-own-"));
   const { claudePath, log } = await writeClaudeCompactionFixture(fixtureDir);
   const runner = makeRunner() as any;
-  runner.nativeProcessDbPath = path.join(fixtureDir, "native-processes.sqlite3");
-  runner.providerExecutableForRun = async () => claudePath;
+  cliDependencies(runner).nativeProcessDbPath = path.join(fixtureDir, "native-processes.sqlite3");
+  cliParts(runner).cliRuns.providerExecutableForRun = async () => claudePath;
   const participant = { id: "claude-compact-own", kind: "claude-code", label: "Claude", model: "claude-opus-5-5[1m]" };
   const warm = { conversationId: "conversation-compact-own", participantId: participant.id, contextKey: "context-a", idleTimeoutMs: 60_000 };
   const appMcp = { url: "http://127.0.0.1:9/mcp", token: "member-token", toolNames: ["app_chat_send_message"] };
@@ -5410,7 +5409,7 @@ test("Claude /compact with no live process starts the member's live process as i
     assert.ok(started.includes("--resume") && started.includes("fixture-session"), "resumed on the member's session");
     assert.ok(started.includes("--mcp-config"), "with the member's app tools, as its turns start it");
     assert.equal(entries.find((entry) => entry.message?.startsWith("/compact"))?.pid, starts[1].pid);
-    assert.equal(runner.warmAgents.size, 1, "kept as the member's live process");
+    assert.equal(cliParts(runner).warmAgents.entries.size, 1, "kept as the member's live process");
     await assertFixtureProcessStops(starts[0].pid);
 
     const next = await runner.run(participant, "Continue.", fixtureDir, undefined, "chat", undefined, member);
@@ -5463,7 +5462,7 @@ input.on("line", (line) => {
 `, "utf8");
   await chmod(claudePath, 0o755);
   const runner = makeRunner() as any;
-  runner.providerExecutableForRun = async () => claudePath;
+  cliParts(runner).cliRuns.providerExecutableForRun = async () => claudePath;
   const participant = { id: "claude-idle", kind: "claude-code", label: "Claude" };
   let attachResult: Promise<any> | undefined;
   const warm = {
@@ -5480,14 +5479,14 @@ input.on("line", (line) => {
     providerPid = Number.parseInt((await readFile(providerPidFile, "utf8")).trim(), 10);
     await new Promise((resolve) => setTimeout(resolve, 500));
     assert.equal(testProcessExists(providerPid), true, "the idle timer fired while background work was live and left the process alone");
-    assert.equal(runner.warmAgents.size, 1);
+    assert.equal(cliParts(runner).warmAgents.entries.size, 1);
     for (let attempt = 0; attempt < 100 && !attachResult; attempt += 1) {
       await new Promise((resolve) => setTimeout(resolve, 20));
     }
     assert.ok(attachResult, "the CLI's own reply was offered");
     assert.equal((await attachResult).content, "Done.");
     await assertFixtureProcessStops(providerPid);
-    assert.equal(runner.warmAgents.size, 0, "once idle, the process is retired by the re-armed timer");
+    assert.equal(cliParts(runner).warmAgents.entries.size, 0, "once idle, the process is retired by the re-armed timer");
   } finally {
     await runner.shutdownWarmAgents();
     await rm(fixtureDir, { recursive: true, force: true });
@@ -5523,7 +5522,7 @@ readline.createInterface({ input: process.stdin }).on("line", (line) => {
 `, "utf8");
   await chmod(claudePath, 0o755);
   const runner = makeRunner() as any;
-  runner.providerExecutableForRun = async () => claudePath;
+  cliParts(runner).cliRuns.providerExecutableForRun = async () => claudePath;
   const participant = { id: "claude-old", kind: "claude-code", label: "Claude" };
   const warm = { conversationId: "conversation-old", participantId: participant.id, contextKey: "context-old", idleTimeoutMs: 60_000 };
   try {
@@ -5602,10 +5601,10 @@ readline.createInterface({ input: process.stdin }).on("line", () => {
   await chmod(claudePath, 0o755);
 
   const runner = makeRunner() as any;
-  runner.nativeProcessDbPath = path.join(fixtureDir, "native-processes.sqlite3");
-  runner.providerExecutableForRun = async () => claudePath;
+  cliDependencies(runner).nativeProcessDbPath = path.join(fixtureDir, "native-processes.sqlite3");
+  cliParts(runner).cliRuns.providerExecutableForRun = async () => claudePath;
   let oneShotFallbacks = 0;
-  runner.runClaudeOneShot = async (): Promise<never> => {
+  cliParts(runner).claudeRuns.runClaudeOneShot = async (): Promise<never> => {
     oneShotFallbacks += 1;
     throw new Error("prompt replayed through one-shot fallback");
   };
@@ -5696,9 +5695,9 @@ input.on("line", () => {
   await chmod(claudePath, 0o755);
 
   const runner = makeRunner() as any;
-  runner.nativeProcessDbPath = path.join(fixtureDir, "native-processes.sqlite3");
-  runner.providerExecutableForRun = async () => claudePath;
-  runner.claudeBackgroundCloseGraceMs = 20;
+  cliDependencies(runner).nativeProcessDbPath = path.join(fixtureDir, "native-processes.sqlite3");
+  cliParts(runner).cliRuns.providerExecutableForRun = async () => claudePath;
+  cliParts(runner).warmAgentClose.claudeBackgroundCloseGraceMs = 20;
   const participant = { id: "claude-escalation", kind: "claude-code", label: "Claude" };
   const controller = new AbortController();
   let markHeld!: () => void;
@@ -5777,9 +5776,9 @@ input.on("line", () => {
   await chmod(claudePath, 0o755);
 
   const runner = makeRunner() as any;
-  runner.nativeProcessDbPath = path.join(fixtureDir, "native-processes.sqlite3");
-  runner.providerExecutableForRun = async () => claudePath;
-  runner.claudeBackgroundCloseGraceMs = 200;
+  cliDependencies(runner).nativeProcessDbPath = path.join(fixtureDir, "native-processes.sqlite3");
+  cliParts(runner).cliRuns.providerExecutableForRun = async () => claudePath;
+  cliParts(runner).warmAgentClose.claudeBackgroundCloseGraceMs = 200;
   const participant = { id: "claude-eof-exit", kind: "claude-code", label: "Claude" };
   const controller = new AbortController();
   let markHeld!: () => void;
@@ -5844,9 +5843,9 @@ readline.createInterface({ input: process.stdin }).on("line", () => {
   await chmod(claudePath, 0o755);
 
   const runner = makeRunner() as any;
-  runner.providerExecutableForRun = async () => claudePath;
+  cliParts(runner).cliRuns.providerExecutableForRun = async () => claudePath;
   let captureCount = 0;
-  runner.readClaudeBackgroundProcessTable = async () => {
+  cliParts(runner).warmAgentClose.readClaudeBackgroundProcessTable = async () => {
     captureCount += 1;
     const { readPosixProcessTableAsync } = await import("./processTermination");
     return readPosixProcessTableAsync();
@@ -5925,8 +5924,8 @@ input.on("line", () => {
   await chmod(claudePath, 0o755);
 
   const runner = makeRunner() as any;
-  runner.providerExecutableForRun = async () => claudePath;
-  runner.claudeBackgroundCloseGraceMs = 5_000;
+  cliParts(runner).cliRuns.providerExecutableForRun = async () => claudePath;
+  cliParts(runner).warmAgentClose.claudeBackgroundCloseGraceMs = 5_000;
   const participant = { id: "claude-update-during-close", kind: "claude-code", label: "Claude" };
   const controller = new AbortController();
   let markHeld!: () => void;
@@ -5965,8 +5964,8 @@ input.on("line", () => {
       }
     }
     assert.equal(stdinClosed, true, "ordinary close entered its graceful stdin-EOF wait");
-    assert.equal(runner.warmAgents.size, 0, "the closing provider already left the active map");
-    assert.equal(runner.closingWarmAgents.size, 1, "the closing provider remains visible to update shutdown");
+    assert.equal(cliParts(runner).warmAgents.entries.size, 0, "the closing provider already left the active map");
+    assert.equal(cliParts(runner).warmAgentClose.closingWarmAgents.size, 1, "the closing provider remains visible to update shutdown");
 
     runner.terminateWarmAgentsImmediately("update installation");
     await closing;
@@ -5989,7 +5988,7 @@ test("Claude background-process sampling is shared, non-overlapping, and lives u
   let reads = 0;
   let resolveFirstRead!: (value: Map<number, never>) => void;
   const firstRead = new Promise<Map<number, never>>((resolve) => { resolveFirstRead = resolve; });
-  runner.readClaudeBackgroundProcessTable = () => {
+  cliParts(runner).warmAgentClose.readClaudeBackgroundProcessTable = () => {
     reads += 1;
     return reads === 1 ? firstRead : Promise.resolve(new Map<number, never>());
   };
@@ -6009,7 +6008,7 @@ test("Claude background-process sampling is shared, non-overlapping, and lives u
       markSoloDelivery();
     }
   };
-  runner.warmAgents.set("first", {
+  cliParts(runner).warmAgents.entries.set("first", {
     closed: false,
     hasLiveBackgroundWork: () => firstLive,
     refreshCapturedBackgroundProcesses: (table: unknown) => {
@@ -6017,7 +6016,7 @@ test("Claude background-process sampling is shared, non-overlapping, and lives u
       noteDelivery();
     }
   });
-  runner.warmAgents.set("second", {
+  cliParts(runner).warmAgents.entries.set("second", {
     closed: false,
     hasLiveBackgroundWork: () => secondLive,
     refreshCapturedBackgroundProcesses: (table: unknown) => {
@@ -6027,7 +6026,7 @@ test("Claude background-process sampling is shared, non-overlapping, and lives u
   });
 
   try {
-    runner.ensureClaudeBackgroundProcessCapture();
+    cliParts(runner).warmAgentClose.ensureClaudeBackgroundProcessCapture();
     await new Promise((resolve) => setTimeout(resolve, 250));
     assert.equal(reads, 1, "timer ticks do not overlap an in-flight process-table read");
 
@@ -6045,14 +6044,14 @@ test("Claude background-process sampling is shared, non-overlapping, and lives u
     assert.notEqual(secondTables[1], rows, "the second tick used its own table snapshot");
 
     secondLive = false;
-    runner.maybeStopClaudeBackgroundProcessCapture();
+    cliParts(runner).warmAgentClose.maybeStopClaudeBackgroundProcessCapture();
     await new Promise((resolve) => setTimeout(resolve, 250));
     assert.equal(reads, 2, "the shared sampler stopped after the last agent retired");
   } finally {
     firstLive = false;
     secondLive = false;
-    runner.stopClaudeBackgroundProcessCapture();
-    runner.warmAgents.clear();
+    cliParts(runner).warmAgentClose.stopClaudeBackgroundProcessCapture();
+    cliParts(runner).warmAgents.entries.clear();
   }
 });
 
@@ -6063,7 +6062,7 @@ test("immediate shutdown ignores a recycled warm-agent root PID and its unrelate
   }
   const runner = makeRunner() as any;
   const oldIdentity = { pid: 42, startedAt: "Fri Sep  5 12:00:00 2026" };
-  runner.readPosixProcessTableForTermination = () => new Map([
+  cliParts(runner).warmAgentClose.readPosixProcessTableForTermination = () => new Map([
     [42, { pid: 42, ppid: 1, pgid: 42, startedAt: "Fri Sep  5 12:01:00 2026" }],
     [43, { pid: 43, ppid: 42, pgid: 42, startedAt: "Fri Sep  5 12:01:01 2026" }]
   ]);
@@ -6074,7 +6073,7 @@ test("immediate shutdown ignores a recycled warm-agent root PID and its unrelate
     processSignals.push({ pid, signal });
     return true;
   }) as typeof process.kill;
-  runner.warmAgents.set("stale", {
+  cliParts(runner).warmAgents.entries.set("stale", {
     closed: false,
     providerKind: "claude-code",
     process: {
@@ -6096,7 +6095,7 @@ test("immediate shutdown ignores a recycled warm-agent root PID and its unrelate
     assert.deepEqual(childSignals, []);
   } finally {
     process.kill = originalKill;
-    runner.warmAgents.clear();
+    cliParts(runner).warmAgents.entries.clear();
   }
 });
 
@@ -6132,7 +6131,7 @@ readline.createInterface({ input: process.stdin }).on("line", (line) => {
   let aborted = false;
   const output: string[] = [];
   try {
-    const result = await runner.runCodexAppServerWarmOrOneShot(
+    const result = await cliParts(runner).codexRuns.runCodexAppServerWarmOrOneShot(
       { id: "participant-retire", kind: "codex-cli", label: "Codex" },
       "Run the protected command.",
       fixtureDir,
@@ -6168,7 +6167,7 @@ readline.createInterface({ input: process.stdin }).on("line", (line) => {
 test("codex app-server never replays a prompt after the provider accepted the turn", async () => {
   const runner = makeRunner() as any;
   let oneShotRuns = 0;
-  runner.createCodexAppServerWarmAgent = () => ({
+  cliParts(runner).codexAppServer.createCodexAppServerWarmAgent = () => ({
     key: "warm-key",
     scopeKey: "conversation-1:participant-1",
     providerKind: "codex-cli",
@@ -6179,13 +6178,13 @@ test("codex app-server never replays a prompt after the provider accepted the tu
       throw new CodexAppServerRunError(new Error("app-server disconnected"), true);
     }
   });
-  runner.closeWarmAgent = async () => undefined;
-  runner.runCodexOneShot = async () => {
+  cliParts(runner).warmAgentClose.closeWarmAgent = async () => undefined;
+  cliParts(runner).codexRuns.runCodexOneShot = async () => {
     oneShotRuns += 1;
     return { ok: true, content: "REPLAYED" };
   };
 
-  const result = await runner.runCodexAppServerWarmOrOneShot(
+  const result = await cliParts(runner).codexRuns.runCodexAppServerWarmOrOneShot(
     { id: "participant-1", kind: "codex-cli", label: "Codex" },
     "ONE_SHOT_PROMPT",
     "/tmp/repo",
@@ -6215,19 +6214,19 @@ test("shutdown waits for a session still being constructed and duplicate constru
   let started!: () => void;
   const constructing = new Promise<void>(resolve => { started = resolve; });
   const closed: string[] = [];
-  runner.closeWarmAgent = async (entry: any) => { closed.push(entry.key); entry.closed = true; };
-  const first = runner.createTrackedWarmAgent("starting", () => { constructions += 1; started(); return ready; });
-  const duplicate = runner.createTrackedWarmAgent("starting", () => { constructions += 1; return ready; });
+  cliParts(runner).warmAgentClose.closeWarmAgent = async (entry: any) => { closed.push(entry.key); entry.closed = true; };
+  const first = cliParts(runner).warmAgents.createTrackedWarmAgent("starting", () => { constructions += 1; started(); return ready; });
+  const duplicate = cliParts(runner).warmAgents.createTrackedWarmAgent("starting", () => { constructions += 1; return ready; });
   assert.equal(first, duplicate);
   await constructing;
   const shuttingDown = runner.shutdownWarmAgents();
-  await assert.rejects(runner.createTrackedWarmAgent("new", async () => ({})), /shutting down/);
+  await assert.rejects(cliParts(runner).warmAgents.createTrackedWarmAgent("new", async () => ({})), /shutting down/);
   create({ key: "starting", closed: false });
   await assert.rejects(first, /before this command started/);
   await shuttingDown;
   assert.deepEqual(closed, ["starting"]);
   assert.equal(constructions, 1);
-  assert.equal(runner.warmAgents.size, 0);
+  assert.equal(cliParts(runner).warmAgents.entries.size, 0);
 });
 
 test("conversation shutdown keeps other chats running and retries failed native closure", async () => {
@@ -6235,24 +6234,24 @@ test("conversation shutdown keeps other chats running and retries failed native 
   const entry = (conversationId: string) => ({ key: JSON.stringify({ conversationId, participantId: "member" }), scopeKey: `${conversationId}:member`, closed: false });
   const archived = entry("chat");
   const other = entry("chat:other");
-  runner.warmAgents.set(archived.key, archived);
-  runner.warmAgents.set(other.key, other);
-  runner.clearWarmIdleTimer = () => {};
-  runner.maybeStopClaudeBackgroundProcessCapture = () => {};
+  cliParts(runner).warmAgents.entries.set(archived.key, archived);
+  cliParts(runner).warmAgents.entries.set(other.key, other);
+  cliParts(runner).warmAgents.clearWarmIdleTimer = () => {};
+  cliParts(runner).warmAgentClose.maybeStopClaudeBackgroundProcessCapture = () => {};
   let attempts = 0;
-  runner.closeWarmAgentProcess = async (value: unknown) => {
+  cliParts(runner).warmAgentClose.closeWarmAgentProcess = async (value: unknown) => {
     assert.equal(value, archived);
     if (++attempts === 1) throw new Error("closure receipt could not be stored");
   };
   await assert.rejects(runner.closeConversationSessions("chat"), /receipt could not be stored/);
   assert.equal(runner.hasActiveNativeWork(), true, "a closed flag is not a proof that descendants are gone");
-  await assert.rejects(runner.createTrackedWarmAgent(archived.key, async () => archived), /sessions are closing/);
-  assert.equal(runner.warmAgents.get(other.key), other);
+  await assert.rejects(cliParts(runner).warmAgents.createTrackedWarmAgent(archived.key, async () => archived), /sessions are closing/);
+  assert.equal(cliParts(runner).warmAgents.entries.get(other.key), other);
   assert.equal(other.closed, false);
   await runner.closeConversationSessions("chat");
   assert.equal(attempts, 2);
   assert.equal(runner.hasActiveNativeWork(), false);
-  assert.equal(runner.warmAgents.get(other.key), other);
+  assert.equal(cliParts(runner).warmAgents.entries.get(other.key), other);
 });
 
 test("conversation shutdown fences concurrent construction and preserves another chat's startup", async () => {
@@ -6261,26 +6260,26 @@ test("conversation shutdown fences concurrent construction and preserves another
   let finish!: (entry: unknown) => void;
   let started!: () => void;
   const constructing = new Promise<void>(resolve => { started = resolve; });
-  const creating = runner.createTrackedWarmAgent(key, () => new Promise(resolve => { finish = resolve; started(); }));
+  const creating = cliParts(runner).warmAgents.createTrackedWarmAgent(key, () => new Promise(resolve => { finish = resolve; started(); }));
   await constructing;
   const closed: string[] = [];
-  runner.closeWarmAgent = async (entry: { key: string }) => { closed.push(entry.key); };
+  cliParts(runner).warmAgentClose.closeWarmAgent = async (entry: { key: string }) => { closed.push(entry.key); };
   const closing = runner.closeConversationSessions("closing");
   assert.equal(runner.closeConversationSessions("closing"), closing);
-  await assert.rejects(runner.createTrackedWarmAgent(key, async () => ({})), /sessions are closing/);
+  await assert.rejects(cliParts(runner).warmAgents.createTrackedWarmAgent(key, async () => ({})), /sessions are closing/);
   const unrelated = JSON.stringify({ conversationId: "another", participantId: "member" });
-  await runner.createTrackedWarmAgent(unrelated, async () => ({ key: unrelated }));
+  await cliParts(runner).warmAgents.createTrackedWarmAgent(unrelated, async () => ({ key: unrelated }));
   finish({ key });
   await assert.rejects(creating, /before this command started/);
   await closing;
   assert.deepEqual(closed, [key]);
-  assert.ok(runner.warmAgents.has(unrelated));
+  assert.ok(cliParts(runner).warmAgents.entries.has(unrelated));
 });
 
 test("codex app-server initialization failure never replays a command through one-shot execution", async () => {
   const runner = makeRunner() as any;
   let oneShotRuns = 0;
-  runner.createCodexAppServerWarmAgent = () => ({
+  cliParts(runner).codexAppServer.createCodexAppServerWarmAgent = () => ({
     key: "warm-key",
     scopeKey: "conversation-1:participant-1",
     providerKind: "codex-cli",
@@ -6291,13 +6290,13 @@ test("codex app-server initialization failure never replays a command through on
       throw new CodexAppServerRunError(new Error("initialize failed"), false);
     }
   });
-  runner.closeWarmAgent = async () => undefined;
-  runner.runCodexOneShot = async () => {
+  cliParts(runner).warmAgentClose.closeWarmAgent = async () => undefined;
+  cliParts(runner).codexRuns.runCodexOneShot = async () => {
     oneShotRuns += 1;
     return { ok: true, content: "FALLBACK" };
   };
 
-  const result = await runner.runCodexAppServerWarmOrOneShot(
+  const result = await cliParts(runner).codexRuns.runCodexAppServerWarmOrOneShot(
     { id: "participant-1", kind: "codex-cli", label: "Codex" },
     "PROMPT",
     "/tmp/repo",
@@ -6322,19 +6321,19 @@ test("codex app-server initialization failure never replays a command through on
 test("reasoning effort mapping is provider-specific", () => {
   const runner = makeRunner() as any;
 
-  assert.equal(runner.codexReasoningEffort("minimal"), "minimal");
-  assert.equal(runner.codexReasoningEffort("max"), "max");
-  assert.equal(runner.codexReasoningEffort("ultra"), "ultra");
-  assert.equal(runner.codexReasoningEffort("invalid"), undefined);
-  assert.equal(runner.claudeReasoningEffort("xhigh"), "xhigh");
-  assert.equal(runner.claudeReasoningEffort("max"), "max");
-  assert.equal(runner.claudeReasoningEffort("ultra"), undefined);
-  assert.equal(runner.claudeReasoningEffort("minimal"), undefined);
+  assert.equal(codexReasoningEffort("minimal"), "minimal");
+  assert.equal(codexReasoningEffort("max"), "max");
+  assert.equal(codexReasoningEffort("ultra"), "ultra");
+  assert.equal(codexReasoningEffort("invalid" as never), undefined);
+  assert.equal(claudeReasoningEffort("xhigh"), "xhigh");
+  assert.equal(claudeReasoningEffort("max"), "max");
+  assert.equal(claudeReasoningEffort("ultra"), undefined);
+  assert.equal(claudeReasoningEffort("minimal"), undefined);
 });
 
 test("Codex catalog preserves max and ultra and their default recommendation", () => {
   const runner = makeRunner() as any;
-  const options = runner.codexModelReasoningEfforts({
+  const options = codexModelReasoningEfforts({
     defaultReasoningEffort: "max",
     supportedReasoningEfforts: ["low", "medium", "high", "xhigh", "max", "ultra", "invalid", "ultra"].map(
       (reasoningEffort) => ({ reasoningEffort, description: `Use ${reasoningEffort}` })
@@ -6345,7 +6344,7 @@ test("Codex catalog preserves max and ultra and their default recommendation", (
     { id: "max", label: "Max", description: "Use max", recommended: true },
     { id: "ultra", label: "Ultra", description: "Use ultra", recommended: false }
   ]);
-  assert.deepEqual(runner.codexModelReasoningEfforts(undefined), []);
+  assert.deepEqual(codexModelReasoningEfforts(undefined), []);
 });
 
 test("Codex max and ultra reach fresh and resumed local and remote invocations", () => {
@@ -6353,10 +6352,10 @@ test("Codex max and ultra reach fresh and resumed local and remote invocations",
   for (const reasoningEffort of ["max", "ultra"] as const) {
     const participant = { id: "participant", kind: "codex-cli" as const, label: "Codex", model: "gpt-6-astra", reasoningEffort };
     const options = chatOptions({ agentMode: "auto", workspaceWrite: true });
-    const start = runner.codexAppServerThreadStartParams(participant, "/repo", "chat", options);
-    const resume = runner.codexAppServerThreadResumeParams("session-1", participant, "/repo", "chat", options);
-    assert.equal(start.config.model_reasoning_effort, reasoningEffort);
-    assert.equal(resume.config.model_reasoning_effort, reasoningEffort);
+    const start = codexAppServerThreadStartParams(participant, "/repo", "chat", options);
+    const resume = codexAppServerThreadResumeParams("session-1", participant, "/repo", "chat", options);
+    assert.equal((start.config as any).model_reasoning_effort, reasoningEffort);
+    assert.equal((resume.config as any).model_reasoning_effort, reasoningEffort);
     for (const sessionId of [undefined, "session-1"]) {
       const invocation = buildCodexExecInvocation({
         participant,
@@ -6378,9 +6377,9 @@ test("codex app-server resume re-asserts the auto preset so a mode switch applie
     label: "@codex",
     model: undefined
   };
-  const params = runner.codexAppServerThreadResumeParams(
+  const params = codexAppServerThreadResumeParams(
     "session-1",
-    participant,
+    participant as never,
     "/repo",
     "chat",
     chatOptions({
@@ -6396,17 +6395,18 @@ test("codex app-server resume re-asserts the auto preset so a mode switch applie
   assert.equal(params.approvalPolicy, "on-request");
   assert.equal(params.approvalsReviewer, "auto_review");
   assert.equal(params.sandbox, "workspace-write");
-  assert.equal(params.config.web_search, "live");
+  assert.equal((params.config as any).web_search, "live");
 });
 
 test("withAppMcpClientStatus warns and flags unestablished app MCP generations", () => {
   const runner = makeRunner() as any;
   const participant = {
-    kind: "codex-cli",
+    id: "codex",
+    kind: "codex-cli" as const,
     label: "@codex",
     model: undefined
   };
-  const result = runner.withAppMcpClientStatus({
+  const result = withAppMcpClientStatus({
     participant,
     ok: true,
     content: "done"
@@ -6427,7 +6427,7 @@ test("withAppMcpClientStatus warns and flags unestablished app MCP generations",
   });
 
   assert.equal(result.appMcpClientFailed, true);
-  assert.equal(result.warnings.some((warning: string) => warning.includes("app tools did not finish MCP setup")), true);
+  assert.equal(result.warnings!.some((warning: string) => warning.includes("app tools did not finish MCP setup")), true);
 });
 
 test("withAppMcpClientStatus does not warn for healthy warm reuse after setup", () => {
@@ -6454,11 +6454,11 @@ test("withAppMcpClientStatus does not warn for healthy warm reuse after setup", 
   };
 
   for (let turn = 0; turn < 3; turn += 1) {
-    const result = runner.withAppMcpClientStatus({
+    const result = withAppMcpClientStatus({
       participant,
       ok: true,
       content: `turn ${turn}`
-    }, participant, options);
+    } as never, participant as never, options);
 
     assert.equal(result.appMcpClientFailed, undefined);
     assert.equal(result.warnings, undefined);
@@ -6472,9 +6472,9 @@ test("codex app-server compact instructions become a scoped compact_prompt overr
     label: "@codex",
     model: undefined
   };
-  const params = runner.codexAppServerThreadResumeParams(
+  const params = codexAppServerThreadResumeParams(
     "session-1",
-    participant,
+    participant as never,
     "/repo",
     "chat",
     {
@@ -6488,8 +6488,8 @@ test("codex app-server compact instructions become a scoped compact_prompt overr
   );
 
   assert.equal(params.threadId, "session-1");
-  assert.match(params.config.compact_prompt, /Compact the conversation context/);
-  assert.match(params.config.compact_prompt, /keep focus on parser and CLI protocol details/);
+  assert.match((params.config as any).compact_prompt, /Compact the conversation context/);
+  assert.match((params.config as any).compact_prompt, /keep focus on parser and CLI protocol details/);
 });
 
 test("codex app-server compact ignores the unbounded native-goal turn timeout", () => {
@@ -6505,9 +6505,9 @@ test("codex app-server does not override compact_prompt unless compact instructi
     label: "@codex",
     model: undefined
   };
-  const params = runner.codexAppServerThreadResumeParams(
+  const params = codexAppServerThreadResumeParams(
     "session-1",
-    participant,
+    participant as never,
     "/repo",
     "chat",
     chatOptions({
@@ -6517,7 +6517,7 @@ test("codex app-server does not override compact_prompt unless compact instructi
     })
   );
 
-  assert.equal("compact_prompt" in params.config, false);
+  assert.equal("compact_prompt" in (params.config as any), false);
 });
 
 test("codex app-server compact prompt can be explicitly cleared after an instructed compact", () => {
@@ -6527,9 +6527,9 @@ test("codex app-server compact prompt can be explicitly cleared after an instruc
     label: "@codex",
     model: undefined
   };
-  const params = runner.codexAppServerThreadResumeParams(
+  const params = codexAppServerThreadResumeParams(
     "session-1",
-    participant,
+    participant as never,
     "/repo",
     "chat",
     {
@@ -6542,7 +6542,7 @@ test("codex app-server compact prompt can be explicitly cleared after an instruc
     }
   );
 
-  assert.equal(params.config.compact_prompt, null);
+  assert.equal((params.config as any).compact_prompt, null);
 });
 
 test("codex app-server compact returns token usage captured during compact", () => {
@@ -6574,20 +6574,20 @@ test("codex app-server compact returns token usage captured during compact", () 
     throw error;
   };
 
-  assert.equal(runner.handleCodexAppServerCompactNotification({
+  assert.equal(handleCodexAppServerCompactNotification({
     method: "thread/tokenUsage/updated",
     params: {
       threadId: "session-1",
       tokenUsage: { total: { totalTokens: 900_000 }, last: { totalTokens: 120_000 }, modelContextWindow: 1_000_000 }
     }
-  }, participant, pending, cleanupPending, rejectPending), true);
+  }, participant as never, pending, cleanupPending, rejectPending), true);
 
-  assert.equal(runner.handleCodexAppServerCompactNotification({
+  assert.equal(handleCodexAppServerCompactNotification({
     method: "thread/compacted",
     params: {
       threadId: "session-1"
     }
-  }, participant, pending, cleanupPending, rejectPending), true);
+  }, participant as never, pending, cleanupPending, rejectPending), true);
 
   assert.equal(resolved.ok, true);
   assert.equal(resolved.sessionId, "session-1");
@@ -6627,22 +6627,22 @@ test("codex app-server compact resolves CLI-style context_compacted events", () 
   };
 
   // Codex reports the compacted history's estimate as a token count first.
-  assert.equal(runner.handleCodexAppServerCompactNotification({
+  assert.equal(handleCodexAppServerCompactNotification({
     type: "event",
     msg: {
       type: "token_count",
       thread_id: "session-1",
       info: { last_token_usage: { total_tokens: 80_000 }, model_context_window: 258_400 }
     }
-  }, participant, pending, cleanupPending, rejectPending), true);
-  assert.equal(runner.handleCodexAppServerCompactNotification({
+  }, participant as never, pending, cleanupPending, rejectPending), true);
+  assert.equal(handleCodexAppServerCompactNotification({
     type: "event",
     msg: {
       type: "context_compacted",
       thread_id: "session-1",
       usage: { input_tokens: 999_999 }
     }
-  }, participant, pending, cleanupPending, rejectPending), true);
+  }, participant as never, pending, cleanupPending, rejectPending), true);
 
   assert.equal(resolved.ok, true);
   assert.equal(resolved.sessionId, "session-1");
@@ -6680,16 +6680,16 @@ test("codex app-server compact resolves compact completion event variants", () =
     throw error;
   };
 
-  assert.equal(runner.handleCodexAppServerCompactNotification({
+  assert.equal(handleCodexAppServerCompactNotification({
     method: "thread/tokenUsage/updated",
     params: { threadId: "session-1", tokenUsage: { last: { totalTokens: 70_000 }, modelContextWindow: 1_000_000 } }
-  }, participant, pending, cleanupPending, rejectPending), true);
-  assert.equal(runner.handleCodexAppServerCompactNotification({
+  }, participant as never, pending, cleanupPending, rejectPending), true);
+  assert.equal(handleCodexAppServerCompactNotification({
     method: "thread/compact/completed",
     params: {
       threadId: "session-1"
     }
-  }, participant, pending, cleanupPending, rejectPending), true);
+  }, participant as never, pending, cleanupPending, rejectPending), true);
 
   assert.equal(resolved.ok, true);
   assert.equal(resolved.sessionId, "session-1");
@@ -6742,12 +6742,12 @@ test("codex app-server compact resolves on the compaction turn lifecycle (no thr
   const participant = { kind: "codex-cli", label: "@codex", model: "gpt-5.5" };
   const ctx = makeCompactPending("session-1");
 
-  assert.equal(runner.handleCodexAppServerCompactNotification({
+  assert.equal(handleCodexAppServerCompactNotification({
     method: "turn/started",
     params: { threadId: "session-1", turn: { id: "compact-turn" } }
-  }, participant, ctx.pending, ctx.cleanupPending, ctx.rejectPending), true);
+  }, participant as never, ctx.pending, ctx.cleanupPending, ctx.rejectPending), true);
 
-  assert.equal(runner.handleCodexAppServerCompactNotification({
+  assert.equal(handleCodexAppServerCompactNotification({
     method: "thread/tokenUsage/updated",
     params: {
       threadId: "session-1",
@@ -6758,12 +6758,12 @@ test("codex app-server compact resolves on the compaction turn lifecycle (no thr
         modelContextWindow: 258400
       }
     }
-  }, participant, ctx.pending, ctx.cleanupPending, ctx.rejectPending), true);
+  }, participant as never, ctx.pending, ctx.cleanupPending, ctx.rejectPending), true);
 
-  assert.equal(runner.handleCodexAppServerCompactNotification({
+  assert.equal(handleCodexAppServerCompactNotification({
     method: "turn/completed",
     params: { threadId: "session-1", turn: { id: "compact-turn", status: "completed" } }
-  }, participant, ctx.pending, ctx.cleanupPending, ctx.rejectPending), true);
+  }, participant as never, ctx.pending, ctx.cleanupPending, ctx.rejectPending), true);
 
   const resolved = ctx.getResolved();
   assert.equal(resolved.ok, true);
@@ -6781,10 +6781,10 @@ test("codex app-server compact ignores a stray turn/completed before the compact
 
   // A completion that arrives before we ever saw the compaction turn start must
   // be ignored so we do not resolve on a prior turn and report stale usage.
-  assert.equal(runner.handleCodexAppServerCompactNotification({
+  assert.equal(handleCodexAppServerCompactNotification({
     method: "turn/completed",
     params: { threadId: "session-1", turn: { id: "earlier-turn", status: "completed" } }
-  }, participant, ctx.pending, ctx.cleanupPending, ctx.rejectPending), true);
+  }, participant as never, ctx.pending, ctx.cleanupPending, ctx.rejectPending), true);
   assert.equal(ctx.getResolved(), undefined);
   assert.equal(ctx.pending !== undefined, true);
 });
@@ -6794,15 +6794,15 @@ test("codex app-server compact rejects when the compaction turn fails", () => {
   const participant = { kind: "codex-cli", label: "@codex", model: "gpt-5.5" };
   const ctx = makeCompactPending("session-1");
 
-  runner.handleCodexAppServerCompactNotification({
+  handleCodexAppServerCompactNotification({
     method: "turn/started",
     params: { threadId: "session-1", turn: { id: "compact-turn" } }
-  }, participant, ctx.pending, ctx.cleanupPending, ctx.rejectPending);
+  }, participant as never, ctx.pending, ctx.cleanupPending, ctx.rejectPending);
 
-  assert.equal(runner.handleCodexAppServerCompactNotification({
+  assert.equal(handleCodexAppServerCompactNotification({
     method: "turn/completed",
     params: { threadId: "session-1", turn: { id: "compact-turn", status: "failed", error: { message: "model overloaded" } } }
-  }, participant, ctx.pending, ctx.cleanupPending, ctx.rejectPending), true);
+  }, participant as never, ctx.pending, ctx.cleanupPending, ctx.rejectPending), true);
 
   assert.equal(ctx.getResolved(), undefined);
   assert.match(String(ctx.getRejected()?.message), /model overloaded/);
@@ -6838,12 +6838,12 @@ const COMPACT_WARM = { conversationId: "c1", participantId: "p1", contextKey: "k
 
 function startsFakeMemberProcess(runner: any, entry: any): { created?: { key: string; scopeKey: string; options: any } } {
   const record: { created?: { key: string; scopeKey: string; options: any } } = {};
-  runner.providerExecutableForRun = async () => "claude";
-  runner.createClaudeWarmAgent = async (key: string, scopeKey: string, _participant: unknown, _repoPath: unknown, _kind: unknown, options: any) => {
+  cliParts(runner).cliRuns.providerExecutableForRun = async () => "claude";
+  cliParts(runner).claudeProcess.createClaudeWarmAgent = async (key: string, scopeKey: string, _participant: unknown, _repoPath: unknown, _kind: unknown, options: any) => {
     record.created = { key, scopeKey, options };
     entry.key = key;
     entry.scopeKey = scopeKey;
-    runner.warmAgents.set(key, entry);
+    cliParts(runner).warmAgents.entries.set(key, entry);
     return entry;
   };
   return record;
@@ -6856,7 +6856,7 @@ test("claude compact with no live process starts the member's process as its tur
   const { entry, calls } = fakeCompactionProcess({ contextUsage: usage });
   const record = startsFakeMemberProcess(runner, entry);
   const closed: string[] = [];
-  runner.closeWarmAgent = async (_entry: unknown, reason: string) => { closed.push(reason); };
+  cliParts(runner).warmAgentClose.closeWarmAgent = async (_entry: unknown, reason: string) => { closed.push(reason); };
   const participant = { kind: "claude-code", label: "@claude" };
   const options = {
     sessionId: "session-1",
@@ -6865,18 +6865,18 @@ test("claude compact with no live process starts the member's process as its tur
     warm: COMPACT_WARM
   };
 
-  const result = await runner.compactClaudeSession(participant, "/repo", "chat", undefined, options);
+  const result = await cliParts(runner).claudeRuns.compactClaudeSession(participant, "/repo", "chat", undefined, options);
 
   assert.equal(result.ok, true);
   assert.deepEqual(calls, [{ prompt: "/compact", timeoutMs: 2 * 60 * 60_000, allowEmptyContent: true, observers: ["onSelfResumedTurn", "onBackgroundTasksChanged"] }]);
-  assert.equal(record.created!.key, runner.warmAgentKey(participant, "/repo", "chat", options), "under the key the member's next turn looks up");
+  assert.equal(record.created!.key, warmAgentKey(participant as never, "/repo", "chat", options), "under the key the member's next turn looks up");
   assert.equal(record.created!.scopeKey, "c1:p1");
   assert.equal(record.created!.options.sessionId, "session-1", "resumed on the member's session");
   assert.equal(record.created!.options.role, options.role);
   assert.equal(record.created!.options.appMcp, options.appMcp);
   assert.equal(record.created!.options.warm, options.warm);
   assert.deepEqual(closed, [], "not closed afterwards");
-  assert.equal(runner.warmAgents.get(record.created!.key), entry, "kept as the member's live process");
+  assert.equal(cliParts(runner).warmAgents.entries.get(record.created!.key), entry, "kept as the member's live process");
   assert.ok(entry.idleTimer, "with the member's idle timer re-armed");
   clearTimeout(entry.idleTimer);
   assert.equal(result.contextUsage.usedTokens, 1995);
@@ -6887,7 +6887,7 @@ test("claude compact instructions are sent as part of the native compact command
   const { entry, calls } = fakeCompactionProcess({ postTokens: 9000 });
   startsFakeMemberProcess(runner, entry);
 
-  const result = await runner.compactClaudeSession(
+  const result = await cliParts(runner).claudeRuns.compactClaudeSession(
     { kind: "claude-code", label: "@claude", model: "claude-opus-5-5[1m]" },
     "/repo",
     "chat",
@@ -6910,43 +6910,43 @@ test("claude compact reports the CLI's failure as the compaction's and keeps the
   const { entry } = fakeCompactionProcess({ ok: false });
   startsFakeMemberProcess(runner, entry);
   const closed: string[] = [];
-  runner.closeWarmAgent = async (_entry: unknown, reason: string) => { closed.push(reason); };
+  cliParts(runner).warmAgentClose.closeWarmAgent = async (_entry: unknown, reason: string) => { closed.push(reason); };
   const options = { sessionId: "session-1", warm: COMPACT_WARM };
-  const result = await runner.compactClaudeSession({ kind: "claude-code", label: "@claude" }, "/repo", "chat", undefined, options);
+  const result = await cliParts(runner).claudeRuns.compactClaudeSession({ kind: "claude-code", label: "@claude" }, "/repo", "chat", undefined, options);
   assert.equal(result.ok, false);
   assert.equal(result.error, "compaction failed");
-  assert.equal(runner.warmAgents.get(entry.key), entry, "still the member's process");
+  assert.equal(cliParts(runner).warmAgents.entries.get(entry.key), entry, "still the member's process");
   assert.ok(entry.idleTimer, "with its idle timer");
   entry.run = async () => { entry.unusable = true; throw new Error("claude warm process exited with code 1"); };
-  const crashed = await runner.compactClaudeSession({ kind: "claude-code", label: "@claude" }, "/repo", "chat", undefined, options);
+  const crashed = await cliParts(runner).claudeRuns.compactClaudeSession({ kind: "claude-code", label: "@claude" }, "/repo", "chat", undefined, options);
   assert.equal(crashed.ok, false);
   assert.match(crashed.error, /exited with code 1/);
   assert.deepEqual(closed, ["unusable"]);
-  assert.equal(runner.warmAgents.has(entry.key), false);
+  assert.equal(cliParts(runner).warmAgents.entries.has(entry.key), false);
   clearTimeout(entry.idleTimer);
 });
 
 test("claude compact that waited for a process with other settings does not start one once native sessions shut down", async () => {
   const runner = makeRunner() as any;
   let created = false;
-  runner.createClaudeWarmAgent = async () => { created = true; throw new Error("must not start"); };
+  cliParts(runner).claudeProcess.createClaudeWarmAgent = async () => { created = true; throw new Error("must not start"); };
   const busy: any = {
     key: "other-settings", scopeKey: "c1:p1", providerKind: "claude-code", closed: false, queue: Promise.resolve(), process: { exitCode: null },
     isIdle: () => false,
-    whenIdle: async () => { runner.warmShutdown = true; }
+    whenIdle: async () => { cliParts(runner).warmAgents.warmShutdown = true; }
   };
-  runner.warmAgents.set(busy.key, busy);
-  const result = await runner.compactClaudeSession({ kind: "claude-code", label: "@claude" }, "/repo", "chat", undefined, { sessionId: "session-1", warm: COMPACT_WARM });
+  cliParts(runner).warmAgents.entries.set(busy.key, busy);
+  const result = await cliParts(runner).claudeRuns.compactClaudeSession({ kind: "claude-code", label: "@claude" }, "/repo", "chat", undefined, { sessionId: "session-1", warm: COMPACT_WARM });
   assert.equal(result.ok, false);
   assert.match(result.error, /shutting down/);
   assert.equal(created, false);
-  runner.warmShutdown = false;
+  cliParts(runner).warmAgents.warmShutdown = false;
 });
 
 test("claude compact without a member session has nothing to compact", async () => {
   const runner = makeRunner() as any;
-  runner.createClaudeWarmAgent = async () => assert.fail("no process is started without a member session");
-  const result = await runner.compactClaudeSession({ kind: "claude-code", label: "@claude" }, "/repo", "chat", undefined, { sessionId: "session-1" });
+  cliParts(runner).claudeProcess.createClaudeWarmAgent = async () => assert.fail("no process is started without a member session");
+  const result = await cliParts(runner).claudeRuns.compactClaudeSession({ kind: "claude-code", label: "@claude" }, "/repo", "chat", undefined, { sessionId: "session-1" });
   assert.equal(result.ok, false);
   assert.equal(result.error, "@claude has no chat session to compact.");
 });
@@ -6954,10 +6954,10 @@ test("claude compact without a member session has nothing to compact", async () 
 test("a Codex chat turn is the member's message as it is: no per-turn envelope, whatever the mode", () => {
   const runner = makeRunner() as any;
   for (const agentMode of ["default", "plan", "auto"] as const) {
-    const prompt = runner.codexPrompt("Fix the flaky test.", "/repo", undefined, "chat", chatOptions({ agentMode, workspaceWrite: false, canRequestPermissions: true }));
+    const prompt = codexPrompt("Fix the flaky test.", "/repo", undefined, "chat", chatOptions({ agentMode, workspaceWrite: false, canRequestPermissions: true }));
     assert.equal(prompt, "Fix the flaky test.");
   }
-  assert.equal(runner.codexPrompt("Hi.", undefined, undefined, "chat", chatOptions({ agentMode: "default", workspaceWrite: false, canRequestPermissions: false })), "Hi.");
+  assert.equal(codexPrompt("Hi.", undefined, undefined, "chat", chatOptions({ agentMode: "default", workspaceWrite: false, canRequestPermissions: false })), "Hi.");
 });
 
 test("commandErrorText surfaces structured result errors", () => {
@@ -6975,7 +6975,7 @@ test("commandErrorText surfaces structured result errors", () => {
     timedOut: false
   });
 
-  const message = runner.commandErrorText(error);
+  const message = commandErrorText(error);
 
   assert.match(message, /You've hit your session limit/);
   assert.doesNotMatch(message, /Last events: result\./);
@@ -6996,7 +6996,7 @@ test("failed keeps raw CLI diagnostics out of visible chat content", () => {
     timedOut: true
   });
 
-  const result = runner.failed({ label: "@sam-codex-qa-lead" } as any, error);
+  const result = cliParts(runner).cliRuns.failed({ label: "@sam-codex-qa-lead" } as any, error);
 
   assert.equal(result.content, "@sam-codex-qa-lead could not finish because the Slack MCP server needs authorization.");
   assert.match(result.error, /AuthRequired/);
@@ -7006,7 +7006,7 @@ test("failed keeps raw CLI diagnostics out of visible chat content", () => {
 test("failed formats CLI timeout content in human-readable time", () => {
   const runner = makeRunner() as any;
 
-  const result = runner.failed(
+  const result = cliParts(runner).cliRuns.failed(
     { label: "@sam-codex-qa-lead" } as any,
     new Error("codex app-server timed out after 86400000ms")
   );
@@ -7205,7 +7205,7 @@ test("claude warm: Stop interrupts only the running step and keeps the process a
   send({ type: "command_lifecycle", command_uuid: "cmd-1", state: "started" });
   send({ type: "system", subtype: "init" });
   send({ type: "system", subtype: "task_started", task_id: "t1", description: "agent", is_backgrounded: true });
-  runner.stopClaudeWarmReply(state, reply, hooks, participant);
+  cliParts(runner).claudeReplyFlow.stopClaudeWarmReply(state, reply, hooks, participant);
   const interrupt = written.find((message) => message.type === "control_request");
   assert.deepEqual((interrupt as any)?.request, { subtype: "interrupt" });
   send({ type: "control_response", response: { subtype: "success", request_id: (interrupt as any).request_id, response: { still_queued: [] } } });
@@ -7227,7 +7227,7 @@ test("claude warm: Stop on a message still queued in the CLI removes it from the
   send({ type: "command_lifecycle", command_uuid: "cmd-1", state: "started" });
   send({ type: "system", subtype: "init" });
   send({ type: "command_lifecycle", command_uuid: "cmd-2", state: "queued" });
-  runner.stopClaudeWarmReply(state, queued.reply, hooks, participant);
+  cliParts(runner).claudeReplyFlow.stopClaudeWarmReply(state, queued.reply, hooks, participant);
   const cancel = written.find((message) => (message as any).request?.subtype === "cancel_async_message") as any;
   assert.equal(cancel?.request.message_uuid, "cmd-2");
   assert.equal(written.some((message) => (message as any).request?.subtype === "interrupt"), false, "the running step is left alone");
@@ -7242,7 +7242,7 @@ test("claude warm: a queued message the CLI took before the removal arrived is i
   const harness = makeClaudeWarmHarness(runner, { lifecycle: true });
   const { send, state, written, hooks, participant } = harness;
   const queued = harness.addReply();
-  runner.stopClaudeWarmReply(state, queued.reply, hooks, participant);
+  cliParts(runner).claudeReplyFlow.stopClaudeWarmReply(state, queued.reply, hooks, participant);
   const cancel = written.find((message) => (message as any).request?.subtype === "cancel_async_message") as any;
   send({ type: "control_response", response: { subtype: "success", request_id: cancel.request_id, response: { cancelled: false } } });
   assert.equal(queued.rejected.length, 0);
@@ -7256,13 +7256,13 @@ test("claude warm: a queued message the CLI took before the removal arrived is i
 
 test("claude warm: a Stop the CLI never acknowledges settles the reply and retires the process", async () => {
   const runner = makeRunner() as any;
-  runner.claudeWarmStopAckTimeoutMs = 20;
+  cliParts(runner).claudeReplyFlow.claudeWarmStopAckTimeoutMs = 20;
   const harness = makeClaudeWarmHarness(runner, { lifecycle: true });
   const { send, state, hooks, participant } = harness;
   const { reply, rejected } = harness.addReply();
   send({ type: "command_lifecycle", command_uuid: "cmd-1", state: "started" });
   send({ type: "system", subtype: "init" });
-  runner.stopClaudeWarmReply(state, reply, hooks, participant);
+  cliParts(runner).claudeReplyFlow.stopClaudeWarmReply(state, reply, hooks, participant);
   await new Promise((resolve) => setTimeout(resolve, 60));
   assert.equal(rejected[0]?.message, "claude warm process was cancelled");
   assert.equal(harness.flags.unusable, true);
@@ -7283,7 +7283,7 @@ test("claude warm: a reply that finishes as Stop lands keeps its content", () =>
   const { reply, resolved } = harness.addReply();
   send({ type: "command_lifecycle", command_uuid: "cmd-1", state: "started" });
   send({ type: "system", subtype: "init" });
-  runner.stopClaudeWarmReply(state, reply, hooks, participant);
+  cliParts(runner).claudeReplyFlow.stopClaudeWarmReply(state, reply, hooks, participant);
   send({ type: "result", subtype: "success", result: "Already done." });
   assert.equal(resolved[0]?.content, "Already done.");
 });
@@ -7333,7 +7333,7 @@ test("claude warm: a Stop that reaches the CLI after the next message started st
   const second = harness.addReply();
   send({ type: "command_lifecycle", command_uuid: "cmd-1", state: "started" });
   send({ type: "system", subtype: "init" });
-  runner.stopClaudeWarmReply(state, first.reply, hooks, participant);
+  cliParts(runner).claudeReplyFlow.stopClaudeWarmReply(state, first.reply, hooks, participant);
   // The step had already finished: its result was on its way.
   send({ type: "result", subtype: "success", result: "One." });
   assert.equal(first.resolved[0]?.content, "One.");
@@ -7355,7 +7355,7 @@ test("claude warm: an interrupt the CLI took while nothing ran is not blamed for
   const first = harness.addReply();
   send({ type: "command_lifecycle", command_uuid: "cmd-1", state: "started" });
   send({ type: "system", subtype: "init" });
-  runner.stopClaudeWarmReply(state, first.reply, hooks, participant);
+  cliParts(runner).claudeReplyFlow.stopClaudeWarmReply(state, first.reply, hooks, participant);
   send({ type: "result", subtype: "success", result: "One." });
   const interrupt = written.find((message) => (message as any).request?.subtype === "interrupt") as any;
   send({ type: "control_response", response: { subtype: "success", request_id: interrupt.request_id, response: { still_queued: [] } } });
@@ -7375,7 +7375,7 @@ test("claude warm: a reply stopped as the next message joins its step ends stopp
   const second = harness.addReply();
   send({ type: "command_lifecycle", command_uuid: "cmd-1", state: "started" });
   send({ type: "system", subtype: "init" });
-  runner.stopClaudeWarmReply(state, first.reply, hooks, participant);
+  cliParts(runner).claudeReplyFlow.stopClaudeWarmReply(state, first.reply, hooks, participant);
   send({ type: "command_lifecycle", command_uuid: "cmd-2", state: "started" });
   assert.equal(first.rejected[0]?.message, "claude warm process was cancelled");
   assert.equal(first.resolved.length, 0);
@@ -7384,14 +7384,14 @@ test("claude warm: a reply stopped as the next message joins its step ends stopp
 
 test("claude warm: once the CLI refuses to drop a queued message, Stop waits for it to start without a deadline", async () => {
   const runner = makeRunner() as any;
-  runner.claudeWarmStopAckTimeoutMs = 20;
+  cliParts(runner).claudeReplyFlow.claudeWarmStopAckTimeoutMs = 20;
   const harness = makeClaudeWarmHarness(runner, { lifecycle: true });
   const { send, state, hooks, participant, written } = harness;
   harness.addReply();
   const queued = harness.addReply();
   send({ type: "command_lifecycle", command_uuid: "cmd-1", state: "started" });
   send({ type: "system", subtype: "init" });
-  runner.stopClaudeWarmReply(state, queued.reply, hooks, participant);
+  cliParts(runner).claudeReplyFlow.stopClaudeWarmReply(state, queued.reply, hooks, participant);
   const cancel = written.find((message) => (message as any).request?.subtype === "cancel_async_message") as any;
   send({ type: "control_response", response: { subtype: "success", request_id: cancel.request_id, response: { cancelled: false } } });
   await new Promise((resolve) => setTimeout(resolve, 60));
@@ -7414,9 +7414,9 @@ test("claude warm: a task finishing while idle keeps the process busy until the 
 test("claude warm: Stop while a message waits for the member's busy process to apply changed settings leaves that process alone", async () => {
   const runner = makeRunner() as any;
   const closed: unknown[] = [];
-  runner.closeWarmAgent = async (entry: unknown) => { closed.push(entry); };
+  cliParts(runner).warmAgentClose.closeWarmAgent = async (entry: unknown) => { closed.push(entry); };
   let providerStarted = false;
-  runner.providerExecutableForRun = async () => { providerStarted = true; return "/nonexistent/claude"; };
+  cliParts(runner).cliRuns.providerExecutableForRun = async () => { providerStarted = true; return "/nonexistent/claude"; };
   const busy = {
     key: "old-settings",
     scopeKey: "conversation-settings:claude-settings",
@@ -7427,11 +7427,11 @@ test("claude warm: Stop while a message waits for the member's busy process to a
       signal?.addEventListener("abort", () => reject(new Error("aborted")), { once: true });
     })
   };
-  runner.warmAgents.set(busy.key, busy);
+  cliParts(runner).warmAgents.entries.set(busy.key, busy);
   const outputs: Array<{ text: string; activityStatus?: string }> = [];
   const controller = new AbortController();
   const participant = { id: "claude-settings", kind: "claude-code", label: "Claude" };
-  const running = runner.runClaudeWarmOrOneShot(participant, "Hello", undefined, "chat", controller.signal, {
+  const running = cliParts(runner).claudeRuns.runClaudeWarmOrOneShot(participant, "Hello", undefined, "chat", controller.signal, {
     warm: { conversationId: "conversation-settings", participantId: participant.id, contextKey: "new-settings", idleTimeoutMs: 60_000 },
     onOutput: (event: { text: string; activityStatus?: string }) => outputs.push(event)
   });
@@ -7442,8 +7442,8 @@ test("claude warm: Stop while a message waits for the member's busy process to a
   assert.equal(result.ok, false);
   assert.deepEqual(closed, [], "the busy process and its background work survive the Stop");
   assert.equal(providerStarted, false);
-  assert.ok(runner.warmAgents.has("old-settings"));
-  runner.warmAgents.clear();
+  assert.ok(cliParts(runner).warmAgents.entries.has("old-settings"));
+  cliParts(runner).warmAgents.entries.clear();
 });
 
 test("claude warm: a reply is told when the CLI hands its message to a step", () => {
@@ -7476,14 +7476,14 @@ test("claude warm: a message the CLI drops without a Stop fails only that reply"
 test("claude warm: invalid output fails the running reply and retires the process; idle, it is only logged", () => {
   const runner = makeRunner() as any;
   const idle = makeClaudeWarmHarness(runner, { lifecycle: true });
-  runner.handleClaudeWarmLine("not json", idle.participant, undefined, idle.state, idle.hooks);
+  cliParts(runner).claudeProcess.handleClaudeWarmLine("not json", idle.participant, undefined, idle.state, idle.hooks);
   assert.equal(idle.flags.unusable, false);
 
   const busy = makeClaudeWarmHarness(runner, { lifecycle: true });
   const { rejected } = busy.addReply();
   busy.send({ type: "command_lifecycle", command_uuid: "cmd-1", state: "started" });
   busy.send({ type: "system", subtype: "init" });
-  runner.handleClaudeWarmLine("not json", busy.participant, undefined, busy.state, busy.hooks);
+  cliParts(runner).claudeProcess.handleClaudeWarmLine("not json", busy.participant, undefined, busy.state, busy.hooks);
   assert.match(rejected[0]?.message ?? "", /invalid JSON/);
   assert.equal(busy.flags.unusable, true);
 });
@@ -7533,7 +7533,7 @@ test("host admission waits count as busy and a Stop during the wait never starts
   let admit!: (value: { admitted: true }) => void;
   runner.setHostAdmission(() => new Promise(resolve => { admit = resolve; }));
   let executions = 0;
-  (runner as unknown as { runCodex(): Promise<unknown> }).runCodex = async () => { executions++; throw new Error("must not execute"); };
+  (cliParts(runner).codexRuns as unknown as { runCodex(): Promise<unknown> }).runCodex = async () => { executions++; throw new Error("must not execute"); };
   const abort = new AbortController();
   const running = runner.run(participant, "held", undefined, undefined, "chat", abort.signal);
   assert.equal(runner.hasActiveNativeWork(), true);
@@ -7556,17 +7556,18 @@ test("shutdown waits for pre-spawn preparation and refuses its late provider cre
     const runner = makeRunner() as any;
     let release!: () => void;
     const preparing = new Promise<void>(resolve => { release = resolve; });
-    runner.closeStaleWarmAgents = () => preparing;
-    runner.codexExecutableForRun = async () => process.execPath;
-    runner.providerExecutableForRun = async () => process.execPath;
+    cliParts(runner).warmAgents.closeStaleWarmAgents = () => preparing;
+    cliParts(runner).cliRuns.codexExecutableForRun = async () => process.execPath;
+    cliParts(runner).cliRuns.providerExecutableForRun = async () => process.execPath;
     let constructed = 0;
-    runner.constructCodexAppServerWarmAgent = async () => { constructed++; throw new Error("must not spawn"); };
-    runner.constructClaudeWarmAgent = async () => { constructed++; throw new Error("must not spawn"); };
-    const method = kind === "codex-cli" ? "runCodexAppServerWarmOrOneShot" : "runClaudeWarmOrOneShot";
+    cliParts(runner).codexAppServer.constructCodexAppServerWarmAgent = async () => { constructed++; throw new Error("must not spawn"); };
+    cliParts(runner).claudeProcess.constructClaudeWarmAgent = async () => { constructed++; throw new Error("must not spawn"); };
     const args = [{ id: "held", label: "Held", kind }, "message", undefined,
       ...(kind === "codex-cli" ? [undefined] : []), "chat", undefined,
       { warm: { conversationId: "preparing", participantId: "held", contextKey: "test", idleTimeoutMs: 1000 } }];
-    const running = runner[method](...args);
+    const running = kind === "codex-cli"
+      ? cliParts(runner).codexRuns.runCodexAppServerWarmOrOneShot(...args)
+      : cliParts(runner).claudeRuns.runClaudeWarmOrOneShot(...args);
     assert.equal(runner.hasActiveNativeWork(), true);
     let closed = false;
     const closing = runner.shutdownWarmAgents().then(() => { closed = true; });
@@ -7587,7 +7588,7 @@ test("a host admission completing after shutdown cannot start its earlier comman
     let admit!: (value: { admitted: true }) => void;
     runner.setHostAdmission(() => new Promise(resolve => { admit = resolve; }));
     let executions = 0;
-    runner.runCodex = runner.compactCodexSession = async () => { executions++; throw new Error("must not execute"); };
+    cliParts(runner).codexRuns.runCodex = cliParts(runner).codexRuns.compactCodexSession = async () => { executions++; throw new Error("must not execute"); };
     const method = compact ? "compactSession" : "run";
     const participant = { id: "late", label: "Codex", kind: "codex-cli" };
     const pending = compact
@@ -7612,20 +7613,20 @@ function ownModeOptions(agentMode: "default" | "plan" | "auto" | "full-access", 
 test("Claude Code Default (sessions view): edits, commands and web stay available and each is asked through the app's approval card, as the CLI asks", () => {
   const runner = makeRunner() as any;
   const options = ownModeOptions("default", false, { enabled: false, rules: [{ action: "deny", match: "prefix", pattern: "rm -rf" }] });
-  const config = runner.claudeToolConfig("chat", "/repo", [], options);
+  const config = claudeToolConfig("chat", "/repo", [], options);
   assert.equal(config.permissionMode, "default");
   for (const tool of ["Edit", "Write", "NotebookEdit", "Bash", "WebSearch", "WebFetch"]) {
     assert.equal(config.disallowedTools.includes(tool), false, `${tool} is not taken away`);
     assert.equal(config.allowedTools.includes(tool), false, `${tool} is not pre-approved: the CLI asks`);
   }
   assert.ok(config.disallowedTools.includes("Bash(rm -rf:*)"), "a deny rule stays a hard stop");
-  assert.deepEqual(runner.claudePermissionPromptArgs("chat", options), ["--permission-prompt-tool", "mcp__accord_agents__app_tool_permission"],
+  assert.deepEqual(claudePermissionPromptArgs("chat", options), ["--permission-prompt-tool", "mcp__accord_agents__app_tool_permission"],
     "every ask goes to the app's approval card");
 });
 
 test("Claude Code Accept edits (sessions view): edits without asking, commands and web asked", () => {
   const runner = makeRunner() as any;
-  const config = runner.claudeToolConfig("chat", "/repo", [], ownModeOptions("default", true));
+  const config = claudeToolConfig("chat", "/repo", [], ownModeOptions("default", true));
   assert.equal(config.permissionMode, "acceptEdits");
   assert.equal(config.disallowedTools.includes("Bash"), false);
   assert.equal(config.disallowedTools.includes("WebFetch"), false);
@@ -7641,11 +7642,11 @@ test("Claude Code Accept edits (sessions view): edits without asking, commands a
 // edits and its Auto classifier decides, as in its terminal.
 test("Claude Code Plan mode and Auto mode are the CLI's own: the same tools as Manual, only --permission-mode differs; the classic controls still take away what is not granted", () => {
   const runner = makeRunner() as any;
-  const plan = runner.claudeToolConfig("chat", "/repo", [], ownModeOptions("plan", false));
+  const plan = claudeToolConfig("chat", "/repo", [], ownModeOptions("plan", false));
   assert.equal(plan.permissionMode, "plan");
   assert.ok(!plan.disallowedTools.includes("Edit") && !plan.disallowedTools.includes("Bash"), "Plan mode is Claude Code's own: it takes nothing away");
-  assert.equal(runner.claudeToolConfig("chat", "/repo", [], ownModeOptions("auto", false)).permissionMode, "auto");
-  const classic = runner.claudeToolConfig("chat", "/repo", [], chatOptions({ agentMode: "default", workspaceWrite: false }));
+  assert.equal(claudeToolConfig("chat", "/repo", [], ownModeOptions("auto", false)).permissionMode, "auto");
+  const classic = claudeToolConfig("chat", "/repo", [], chatOptions({ agentMode: "default", workspaceWrite: false }));
   assert.ok(["Edit", "Bash", "WebFetch"].every((tool) => classic.disallowedTools.includes(tool)), "classic: unchanged");
 });
 
@@ -7673,8 +7674,8 @@ test("Claude Code's own modes launch one and the same process: Manual, Accept ed
     };
   };
   const launch = (options: ReturnType<typeof ownMode>) => {
-    const toolConfig = runner.claudeToolConfig("chat", "/repo", ["/workspace"], options);
-    const args: string[] = runner.claudeLaunchArgs(participant, "chat", options, toolConfig, ["/workspace"], "warm", "session-1");
+    const toolConfig = claudeToolConfig("chat", "/repo", ["/workspace"], options);
+    const args: string[] = claudeLaunchArgs(participant as never, "chat", options, toolConfig, ["/workspace"], "warm", "session-1");
     const at = args.indexOf("--permission-mode");
     return { mode: args[at + 1], rest: [...args.slice(0, at), ...args.slice(at + 2)] };
   };
@@ -7715,47 +7716,47 @@ test("Claude Code's own modes launch one and the same process: Manual, Accept ed
 
   // Classic members (no cliApprovals): exactly as before.
   const classic = (agentMode: "default" | "plan" | "auto", workspaceWrite: boolean) => chatOptions({ agentMode, workspaceWrite, shell, canRequestPermissions: true, appToolNames, autoPreauthorizedToolNames: ["app_chat_send_message"] });
-  const classicPlan = runner.claudeToolConfig("chat", "/repo", [], classic("plan", false));
+  const classicPlan = claudeToolConfig("chat", "/repo", [], classic("plan", false));
   assert.ok(["Edit", "Write", "NotebookEdit", "Bash"].every((tool) => classicPlan.disallowedTools.includes(tool)), "classic Plan: edits and Bash taken away");
-  assert.deepEqual(runner.claudePermissionPromptArgs("chat", classic("plan", false)), [], "classic Plan: no permission prompt tool");
-  const classicManual = runner.claudeToolConfig("chat", "/repo", [], classic("default", false));
+  assert.deepEqual(claudePermissionPromptArgs("chat", classic("plan", false)), [], "classic Plan: no permission prompt tool");
+  const classicManual = claudeToolConfig("chat", "/repo", [], classic("default", false));
   assert.ok(["Bash(git status:*)", "mcp__accord_agents__app_chat_export_attachment"].every((tool) => classicManual.allowedTools.includes(tool)), "classic Manual: unchanged");
   const classicAuto = classic("auto", false);
-  const classicAutoConfig = runner.claudeToolConfig("chat", "/repo", [], classicAuto);
+  const classicAutoConfig = claudeToolConfig("chat", "/repo", [], classicAuto);
   assert.ok(classicAutoConfig.allowedTools.includes("WebFetch"), "classic Auto: web pre-approved");
   assert.equal(classicAutoConfig.askTools.length, 0, "classic Auto: the shell rules are the classifier's");
-  assert.deepEqual(claudeAllowedToolsFromArgs(runner.claudeAllowedToolsArgs("chat", classicAuto, classicAutoConfig)), ["mcp__accord_agents__app_chat_send_message"],
+  assert.deepEqual(claudeAllowedToolsFromArgs(claudeAllowedToolsArgs("chat", classicAuto, classicAutoConfig)), ["mcp__accord_agents__app_chat_send_message"],
     "classic Auto: only pre-authorized app tools in --allowedTools");
 });
 
 test("Codex Ask for approval and Read Only (sessions view) ask the User through approval cards (on-request, reviewer the User); Approve for me lets Codex review; Full Access never asks; the classic controls never ask", () => {
   const runner = makeRunner() as any;
   const participant = { kind: "codex-cli", label: "@codex", model: undefined };
-  const readOnly = runner.codexAppServerThreadStartParams(participant, "/repo", "chat", ownModeOptions("default", false));
+  const readOnly = codexAppServerThreadStartParams(participant as never, "/repo", "chat", ownModeOptions("default", false));
   assert.equal(readOnly.sandbox, "read-only");
   assert.equal(readOnly.approvalPolicy, "on-request", "Codex's Read Only preset: approval to edit or go online");
   assert.equal(readOnly.approvalsReviewer, "user", "the User answers, even when her Codex config routes asks to auto-review");
-  const workspace = runner.codexAppServerThreadResumeParams("thread-1", participant, "/repo", "chat", ownModeOptions("default", true));
+  const workspace = codexAppServerThreadResumeParams("thread-1", participant as never, "/repo", "chat", ownModeOptions("default", true));
   assert.equal(workspace.sandbox, "workspace-write");
   assert.equal(workspace.approvalPolicy, "on-request", "Codex's Ask for approval preset, on resume too");
   assert.equal(workspace.approvalsReviewer, "user");
-  const auto = runner.codexAppServerThreadStartParams(participant, "/repo", "chat", ownModeOptions("auto", false));
+  const auto = codexAppServerThreadStartParams(participant as never, "/repo", "chat", ownModeOptions("auto", false));
   assert.equal(auto.approvalPolicy, "on-request");
   assert.equal(auto.approvalsReviewer, "auto_review", "Approve for me");
   assert.equal(auto.sandbox, "workspace-write");
-  const full = runner.codexAppServerThreadStartParams(participant, "/repo", "chat", ownModeOptions("full-access", false));
+  const full = codexAppServerThreadStartParams(participant as never, "/repo", "chat", ownModeOptions("full-access", false));
   assert.equal(full.sandbox, "danger-full-access", "Codex's Full Access preset");
   assert.equal(full.approvalPolicy, "never");
   assert.equal(full.approvalsReviewer, null);
-  assert.equal(runner.codexAppServerThreadResumeParams("thread-1", participant, "/repo", "chat", ownModeOptions("full-access", false)).sandbox, "danger-full-access", "on resume too");
+  assert.equal(codexAppServerThreadResumeParams("thread-1", participant as never, "/repo", "chat", ownModeOptions("full-access", false)).sandbox, "danger-full-access", "on resume too");
   // A member saved in Plan before Plan was its own toggle: Read Only, asking.
-  const legacyPlan = runner.codexAppServerThreadStartParams(participant, "/repo", "chat", ownModeOptions("plan", true));
+  const legacyPlan = codexAppServerThreadStartParams(participant as never, "/repo", "chat", ownModeOptions("plan", true));
   assert.equal(legacyPlan.sandbox, "read-only");
   assert.equal(legacyPlan.approvalPolicy, "on-request");
-  const classic = runner.codexAppServerThreadStartParams(participant, "/repo", "chat", chatOptions({ agentMode: "default", workspaceWrite: true }));
+  const classic = codexAppServerThreadStartParams(participant as never, "/repo", "chat", chatOptions({ agentMode: "default", workspaceWrite: true }));
   assert.equal(classic.approvalPolicy, "never", "classic: unchanged");
   assert.equal(classic.approvalsReviewer, null, "classic: unchanged");
-  const classicPlan = runner.codexAppServerThreadStartParams(participant, "/repo", "chat", chatOptions({ agentMode: "plan", workspaceWrite: true }));
+  const classicPlan = codexAppServerThreadStartParams(participant as never, "/repo", "chat", chatOptions({ agentMode: "plan", workspaceWrite: true }));
   assert.deepEqual([classicPlan.sandbox, classicPlan.approvalPolicy], ["read-only", "never"], "the classic Plan: unchanged");
 });
 
@@ -7763,50 +7764,50 @@ test("Codex's Plan mode is its collaboration mode, said on every turn (a thread 
   const runner = makeRunner() as any;
   const participant = { kind: "codex-cli", label: "@codex", model: undefined, reasoningEffort: "high" };
   const planned = { ...ownModeOptions("default", true), permissions: { ...ownModeOptions("default", true).permissions, codexPlanMode: true as const } };
-  assert.deepEqual(runner.codexCollaborationMode(participant, "chat", planned, "gpt-6-luna"),
+  assert.deepEqual(cliParts(runner).codexRuns.codexCollaborationMode(participant, "chat", planned, "gpt-6-luna"),
     { mode: "plan", settings: { model: "gpt-6-luna", reasoning_effort: null, developer_instructions: null } }, "Codex's own effort for Plan mode");
-  assert.equal(runner.codexAppServerThreadStartParams(participant, "/repo", "chat", planned).sandbox, "workspace-write", "the preset stays under Plan mode");
-  assert.deepEqual(runner.codexCollaborationMode(participant, "chat", ownModeOptions("default", true), "gpt-6-luna"),
+  assert.equal(codexAppServerThreadStartParams(participant as never, "/repo", "chat", planned).sandbox, "workspace-write", "the preset stays under Plan mode");
+  assert.deepEqual(cliParts(runner).codexRuns.codexCollaborationMode(participant, "chat", ownModeOptions("default", true), "gpt-6-luna"),
     { mode: "default", settings: { model: "gpt-6-luna", reasoning_effort: "high", developer_instructions: null } }, "off: Default, turning a thread's Plan off");
   // No effort of its own: the thread's, which Codex took from her
   // config.toml (thread/start's reasoningEffort): her terminal's "low", never
   // reset by a null to the model's own.
   const noEffort = { ...participant, reasoningEffort: undefined };
-  assert.equal(runner.codexCollaborationMode(noEffort, "chat", ownModeOptions("default", true), "gpt-5.6-luna", "low").settings.reasoning_effort, "low");
-  assert.equal(runner.codexCollaborationMode(noEffort, "chat", planned, "gpt-5.6-luna", "low").settings.reasoning_effort, null, "Plan mode: Codex's own effort for it");
-  assert.equal(runner.codexCollaborationMode(participant, "chat", ownModeOptions("default", true), "gpt-5.6-luna", "low").settings.reasoning_effort, "high", "the member's own wins");
+  assert.equal(cliParts(runner).codexRuns.codexCollaborationMode(noEffort, "chat", ownModeOptions("default", true), "gpt-5.6-luna", "low").settings.reasoning_effort, "low");
+  assert.equal(cliParts(runner).codexRuns.codexCollaborationMode(noEffort, "chat", planned, "gpt-5.6-luna", "low").settings.reasoning_effort, null, "Plan mode: Codex's own effort for it");
+  assert.equal(cliParts(runner).codexRuns.codexCollaborationMode(participant, "chat", ownModeOptions("default", true), "gpt-5.6-luna", "low").settings.reasoning_effort, "high", "the member's own wins");
   // Her config's effort, as Codex said it with its list, also when the
   // thread came back from a turn in Plan mode without one.
-  runner.modelCatalogs.set("codex-cli", { catalog: { kind: "codex-cli", models: [], authoritative: true, fetchedAt: "t", startDefaults: { reasoningEffort: "low" } }, expiresAt: Date.now() + 60_000 });
-  assert.equal(runner.codexCollaborationMode(noEffort, "chat", ownModeOptions("default", true), "gpt-5.6-luna", undefined).settings.reasoning_effort, "low");
+  cliParts(runner).modelCatalogs.modelCatalogs.set("codex-cli", { catalog: { kind: "codex-cli", models: [], authoritative: true, fetchedAt: "t", startDefaults: { reasoningEffort: "low" } }, expiresAt: Date.now() + 60_000 });
+  assert.equal(cliParts(runner).codexRuns.codexCollaborationMode(noEffort, "chat", ownModeOptions("default", true), "gpt-5.6-luna", undefined).settings.reasoning_effort, "low");
   // A model of the member's own, or an added provider: the thread's effort
   // (Codex's own choice for it), never her config's.
-  assert.equal(runner.codexCollaborationMode({ ...noEffort, model: "gpt-6-luna" }, "chat", ownModeOptions("default", true), "gpt-6-luna", "medium").settings.reasoning_effort, "medium");
-  assert.equal(runner.codexCollaborationMode({ ...noEffort, codexConfigOverrides: ['model_provider="accordagents_host"'] }, "chat", ownModeOptions("default", true), "glm-5.3", undefined).settings.reasoning_effort, null);
-  runner.modelCatalogs.delete("codex-cli");
-  assert.equal(runner.codexCollaborationMode({ ...participant, model: "gpt-5.6-terra" }, "chat", planned, "gpt-6-luna").settings.model, "gpt-5.6-terra", "the member's own model");
-  assert.equal(runner.codexCollaborationMode(participant, "chat", planned, undefined), undefined, "no model known: nothing said");
-  assert.equal(runner.codexCollaborationMode(participant, "chat", ownModeOptions("plan", true), "m").mode, "plan", "a member saved in Plan from before");
-  assert.equal(runner.codexCollaborationMode(participant, "chat", chatOptions({ agentMode: "default", workspaceWrite: true }), "m").mode, "default", "classic: Default");
-  assert.equal(runner.codexCollaborationMode(participant, "code-review", planned, "m"), undefined, "chat turns only");
+  assert.equal(cliParts(runner).codexRuns.codexCollaborationMode({ ...noEffort, model: "gpt-6-luna" }, "chat", ownModeOptions("default", true), "gpt-6-luna", "medium").settings.reasoning_effort, "medium");
+  assert.equal(cliParts(runner).codexRuns.codexCollaborationMode({ ...noEffort, codexConfigOverrides: ['model_provider="accordagents_host"'] }, "chat", ownModeOptions("default", true), "glm-5.3", undefined).settings.reasoning_effort, null);
+  cliParts(runner).modelCatalogs.modelCatalogs.delete("codex-cli");
+  assert.equal(cliParts(runner).codexRuns.codexCollaborationMode({ ...participant, model: "gpt-5.6-terra" }, "chat", planned, "gpt-6-luna").settings.model, "gpt-5.6-terra", "the member's own model");
+  assert.equal(cliParts(runner).codexRuns.codexCollaborationMode(participant, "chat", planned, undefined), undefined, "no model known: nothing said");
+  assert.equal(cliParts(runner).codexRuns.codexCollaborationMode(participant, "chat", ownModeOptions("plan", true), "m").mode, "plan", "a member saved in Plan from before");
+  assert.equal(cliParts(runner).codexRuns.codexCollaborationMode(participant, "chat", chatOptions({ agentMode: "default", workspaceWrite: true }), "m").mode, "default", "classic: Default");
+  assert.equal(cliParts(runner).codexRuns.codexCollaborationMode(participant, "code-review", planned, "m"), undefined, "chat turns only");
 });
 
 test("Codex's Full Access is not a Claude Code or Antigravity mode: a Claude member given it launches exactly as in Auto", () => {
   const runner = makeRunner() as any;
   const full = ownModeOptions("full-access", false);
   const auto = ownModeOptions("auto", false);
-  assert.equal(runner.claudeToolConfig("chat", "/repo", [], full).permissionMode, "auto");
-  assert.deepEqual(runner.claudePermissionPromptArgs("chat", full), runner.claudePermissionPromptArgs("chat", auto), "its asks still reach the app's cards");
-  assert.equal(runner.shouldPassClaudeAllowedTools("chat", full), runner.shouldPassClaudeAllowedTools("chat", auto));
-  const config = runner.claudeToolConfig("chat", "/repo", [], full);
-  assert.deepEqual(runner.claudeAutoAllowedAppMcpTools("chat", full, config), runner.claudeAutoAllowedAppMcpTools("chat", auto, runner.claudeToolConfig("chat", "/repo", [], auto)),
+  assert.equal(claudeToolConfig("chat", "/repo", [], full).permissionMode, "auto");
+  assert.deepEqual(claudePermissionPromptArgs("chat", full), claudePermissionPromptArgs("chat", auto), "its asks still reach the app's cards");
+  assert.equal(shouldPassClaudeAllowedTools("chat", full), shouldPassClaudeAllowedTools("chat", auto));
+  const config = claudeToolConfig("chat", "/repo", [], full);
+  assert.deepEqual(claudeAutoAllowedAppMcpTools("chat", full, config), claudeAutoAllowedAppMcpTools("chat", auto, claudeToolConfig("chat", "/repo", [], auto)),
     "its app tools are pre-approved as in Auto");
 });
 
 test("Codex's Full Access runs only as the User's menu sets it (the CLI's own mode); anywhere else no wider than Auto", () => {
   const runner = makeRunner() as any;
   const participant = { kind: "codex-cli", label: "@codex", model: undefined };
-  const classic = runner.codexAppServerThreadStartParams(participant, "/repo", "chat", chatOptions({ agentMode: "full-access", workspaceWrite: false }));
+  const classic = codexAppServerThreadStartParams(participant as never, "/repo", "chat", chatOptions({ agentMode: "full-access", workspaceWrite: false }));
   assert.notEqual(classic.sandbox, "danger-full-access", "never outside the sandbox without her menu's choice");
   assert.equal(classic.sandbox, "workspace-write");
   const exec = buildCodexExecInvocation({ participant: participant as any, prompt: "p", outputPath: "/tmp/o", repoPath: "/tmp/r", kind: "chat", options: { agentMode: "full-access", permissions: { ...defaultChatAgentPermissions(), cliApprovals: true } } });

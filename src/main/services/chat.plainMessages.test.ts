@@ -10,6 +10,9 @@ import { mergeStoredChatMetadata } from "./chat/store/mergeStoredMetadata";
 import { commitPromptContextPointerAdvance, forgetPromptContextPointers, mergePromptContextPointers, promptContextBlock } from "./chat/turns/promptContextRecords";
 import { triggerPromptText } from "./chat/turns/promptSections";
 import { CliAgentRunner } from "./cliAgents";
+import { claudeWarmUserMessage } from "./cliAgents/claude/launch";
+import { codexAppServerTurnInput } from "./cliAgents/codex/appServerParams";
+import { promptWithImageFallback } from "./cliAgents/runs/runEnvironment";
 import { userDataPath } from "../platform";
 import { normalizeChatAgentPermissions } from "../../shared/agentPermissions";
 import { DEFAULT_CHAT_PROMPT_CONTEXT } from "../../shared/chatPromptContext";
@@ -449,23 +452,23 @@ test("pictures of the message go to the CLI as images; a transport without image
 test("Claude Code gets pictures as image blocks of the user message; Codex as localImage input; a text-only transport as names", () => {
   const runner = new CliAgentRunner() as any;
   const image = { mimeType: "image/png", dataBase64: PNG_1X1, path: "/data/img.png" };
-  assert.deepEqual(runner.claudeWarmUserMessage("Look.", "uuid-1", [image]), {
+  assert.deepEqual(claudeWarmUserMessage("Look.", "uuid-1", [image]), {
     type: "user",
     uuid: "uuid-1",
     message: { role: "user", content: [{ type: "text", text: "Look." }, { type: "image", source: { type: "base64", media_type: "image/png", data: PNG_1X1 } }] },
     parent_tool_use_id: null
   });
-  assert.deepEqual(runner.claudeWarmUserMessage("", undefined, [image]).message.content, [{ type: "image", source: { type: "base64", media_type: "image/png", data: PNG_1X1 } }], "pictures alone");
-  assert.deepEqual(runner.claudeWarmUserMessage("Hi.").message.content, [{ type: "text", text: "Hi." }]);
+  assert.deepEqual((claudeWarmUserMessage("", undefined, [image]).message as any).content, [{ type: "image", source: { type: "base64", media_type: "image/png", data: PNG_1X1 } }], "pictures alone");
+  assert.deepEqual((claudeWarmUserMessage("Hi.").message as any).content, [{ type: "text", text: "Hi." }]);
 
-  assert.deepEqual(runner.codexAppServerTurnInput("Look.", [image]), [{ type: "text", text: "Look.", text_elements: [] }, { type: "localImage", path: "/data/img.png" }]);
-  assert.deepEqual(runner.codexAppServerTurnInput("", [image]), [{ type: "localImage", path: "/data/img.png" }]);
-  assert.deepEqual(runner.codexAppServerTurnInput("Hi."), [{ type: "text", text: "Hi.", text_elements: [] }]);
+  assert.deepEqual(codexAppServerTurnInput("Look.", [image]), [{ type: "text", text: "Look.", text_elements: [] }, { type: "localImage", path: "/data/img.png" }]);
+  assert.deepEqual(codexAppServerTurnInput("", [image]), [{ type: "localImage", path: "/data/img.png" }]);
+  assert.deepEqual(codexAppServerTurnInput("Hi."), [{ type: "text", text: "Hi.", text_elements: [] }]);
 
   const images = { items: [image], fallbackText: "Attached pictures:\n- img.png (image/png, 1x1, attachment ID i)" };
-  assert.equal(runner.promptWithImageFallback("Look.", images), `Look.\n\n${images.fallbackText}`);
-  assert.equal(runner.promptWithImageFallback("", images), images.fallbackText);
-  assert.equal(runner.promptWithImageFallback("Look.", undefined), "Look.");
+  assert.equal(promptWithImageFallback("Look.", images), `Look.\n\n${images.fallbackText}`);
+  assert.equal(promptWithImageFallback("", images), images.fallbackText);
+  assert.equal(promptWithImageFallback("Look.", undefined), "Look.");
 });
 
 test("an Antigravity member (no instruction mechanism of its own) gets its instructions with its first message, then her words alone", async () => {

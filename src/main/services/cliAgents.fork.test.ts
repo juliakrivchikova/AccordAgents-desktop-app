@@ -5,6 +5,10 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { CliAgentRunner, isForkSourceMissingError } from "./cliAgents";
+import { cliDependencies, cliParts } from "./cliAgents/test/cliParts";
+import { claudeLaunchArgs, claudeToolConfig, redactedClaudeArgs } from "./cliAgents/claude/launch";
+import { applyClaudeWarmReplyEvent, newClaudeWarmReply } from "./cliAgents/claude/replies";
+import { codexAppServerThreadForkParams, codexAppServerThreadResumeParams } from "./cliAgents/codex/appServerParams";
 import { defaultChatAgentPermissions } from "../../shared/agentPermissions";
 
 // A member made as a fork of the main session's CLI session
@@ -18,11 +22,11 @@ const role = { name: "accordagents-child", description: "Child", instructions: "
 function claudeArgs(options: Record<string, unknown>, newSessionId?: string): string[] {
   const runner = new CliAgentRunner() as any;
   const fullOptions = { agentMode: "default", permissions: defaultChatAgentPermissions(), role, persistSession: true, ...options };
-  const config = runner.claudeToolConfig("chat", "/repo", [], fullOptions);
-  return runner.claudeLaunchArgs(
+  const config = claudeToolConfig("chat", "/repo", [], fullOptions as never);
+  return claudeLaunchArgs(
     { id: "child", kind: "claude-code", label: "@child" },
     "chat",
-    fullOptions,
+    fullOptions as never,
     config,
     [],
     "warm",
@@ -51,7 +55,7 @@ test("claude: a resumed session gets its instructions on every launch, so a rela
   assert.equal(args[args.indexOf("--append-system-prompt") + 1], "You are @child.");
   assert.equal(args.includes("--agent"), false);
   // Launch logs never carry the instructions.
-  const redacted = (new CliAgentRunner() as any).redactedClaudeArgs(args) as string[];
+  const redacted = redactedClaudeArgs(args) as string[];
   assert.equal(redacted[redacted.indexOf("--append-system-prompt") + 1], "<redacted>");
 });
 
@@ -89,13 +93,13 @@ async function claudeProjectsWithTranscript(sessionId: string, extraLines: strin
 async function claudeForkTurns(projects: string, forkCut: Record<string, unknown>, answers: Array<Record<string, unknown>> = []) {
   const said: string[] = [];
   const runner = new CliAgentRunner() as any;
-  runner.claudeProjectsDirectory = async () => projects;
+  cliParts(runner).claudeSettings.claudeProjectsDirectory = async () => projects;
   const turns: any[] = [];
-  runner.runClaudeTurn = async (participant: unknown, _prompt: string, _repo: unknown, _kind: unknown, _signal: unknown, options: any) => {
+  cliParts(runner).claudeRuns.runClaudeTurn = async (participant: unknown, _prompt: string, _repo: unknown, _kind: unknown, _signal: unknown, options: any) => {
     turns.push(options);
     return { participant, ok: true, content: "ok", sessionId: "child-session", ...(answers[turns.length - 1] ?? {}) };
   };
-  const result = await runner.runClaude({ id: "main", kind: "claude-code", label: "@main" }, "Go on.", "/repo", "chat", undefined,
+  const result = await cliParts(runner).claudeRuns.runClaude({ id: "main", kind: "claude-code", label: "@main" }, "Go on.", "/repo", "chat", undefined,
     { persistSession: true, forkFromSessionId: "parent-session", forkCut, onForkCutMissed: (reason: string) => said.push(`${turns.length}:${reason}`) });
   return { result, turns, said };
 }
@@ -280,8 +284,8 @@ test("claude: a fork whose live process exits before it takes the message report
   const claudePath = await fakeClaudeFork(dir);
   const run = async (source: string) => {
     const runner = new CliAgentRunner() as any;
-    runner.nativeProcessDbPath = path.join(dir, `native-${source}.sqlite3`);
-    runner.providerExecutableForRun = async () => claudePath;
+    cliDependencies(runner).nativeProcessDbPath = path.join(dir, `native-${source}.sqlite3`);
+    cliParts(runner).cliRuns.providerExecutableForRun = async () => claudePath;
     try {
       return await runner.run({ id: "child", kind: "claude-code", label: "@child" }, "Your task.", dir, undefined, "chat", undefined, {
         persistSession: true,
@@ -314,8 +318,8 @@ test("claude: a fork whose live process exits before it takes the message report
     // Two messages sent at once share the process: the first made the copy;
     // the second, lost when the process died, is no failed copy.
     const shared = new CliAgentRunner() as any;
-    shared.nativeProcessDbPath = path.join(dir, "native-shared.sqlite3");
-    shared.providerExecutableForRun = async () => claudePath;
+    cliDependencies(shared).nativeProcessDbPath = path.join(dir, "native-shared.sqlite3");
+    cliParts(shared).cliRuns.providerExecutableForRun = async () => claudePath;
     try {
       const options = { persistSession: true, forkFromSessionId: "dies-on-second", agentMode: "default", permissions: defaultChatAgentPermissions(),
         warm: { conversationId: "chat", participantId: "child-shared", contextKey: "child-context", idleTimeoutMs: 60_000 } };
@@ -336,17 +340,17 @@ test("claude: a fork whose live process exits before it takes the message report
 test("claude: a reply records the uuid of its last assistant message, not a subagent's", () => {
   const runner = new CliAgentRunner() as any;
   let resolved: any;
-  const reply = runner.newClaudeWarmReply({ resolve: (result: unknown) => { resolved = result; }, reject: () => undefined, allowEmptyContent: true });
+  const reply = newClaudeWarmReply({ resolve: (result: unknown) => { resolved = result; }, reject: () => undefined, allowEmptyContent: true });
   reply.started = true;
   // Its usage is known, so the reply ends at once (no session log read).
   reply.usedTokens = 1_000;
   reply.contextWindowTokens = 200_000;
   reply.sessionId = "s-1";
   const state = { replies: [reply], active: reply, cancelRequests: new Map() };
-  runner.applyClaudeWarmReplyEvent(reply, { type: "assistant", uuid: "a-1", parent_tool_use_id: null, message: { content: [{ type: "tool_use", id: "t" }] } });
-  runner.applyClaudeWarmReplyEvent(reply, { type: "assistant", uuid: "sub-1", parent_tool_use_id: "t", message: { content: [{ type: "text", text: "sub" }] } });
-  runner.applyClaudeWarmReplyEvent(reply, { type: "assistant", uuid: "a-2", message: { content: [{ type: "text", text: "Done." }] } });
-  runner.finishClaudeWarmReply(state, reply, "Done.", { type: "result", session_id: "s-1", result: "Done." }, { id: "m", kind: "claude-code", label: "@m" });
+  (applyClaudeWarmReplyEvent as any)(reply, { type: "assistant", uuid: "a-1", parent_tool_use_id: null, message: { content: [{ type: "tool_use", id: "t" }] } });
+  (applyClaudeWarmReplyEvent as any)(reply, { type: "assistant", uuid: "sub-1", parent_tool_use_id: "t", message: { content: [{ type: "text", text: "sub" }] } });
+  (applyClaudeWarmReplyEvent as any)(reply, { type: "assistant", uuid: "a-2", message: { content: [{ type: "text", text: "Done." }] } });
+  cliParts(runner).claudeReplyFlow.finishClaudeWarmReply(state, reply, "Done.", { type: "result", session_id: "s-1", result: "Done." }, { id: "m", kind: "claude-code", label: "@m" });
   assert.equal(resolved.sessionCut, "a-2");
   assert.equal(resolved.sessionId, "s-1");
 });
@@ -369,8 +373,8 @@ test("codex: fork params carry the member's own settings, as a resume does", () 
     persistSession: true
   };
   const participant = { id: "child", kind: "codex-cli", label: "@child", model: "gpt-5", reasoningEffort: "high" };
-  const fork = runner.codexAppServerThreadForkParams("parent-thread", participant, "/repo", "chat", options);
-  const resume = runner.codexAppServerThreadResumeParams("parent-thread", participant, "/repo", "chat", options);
+  const fork = codexAppServerThreadForkParams("parent-thread", participant as never, "/repo", "chat", options as never);
+  const resume = codexAppServerThreadResumeParams("parent-thread", participant as never, "/repo", "chat", options as never);
   assert.equal(fork.threadId, "parent-thread");
   assert.equal(fork.ephemeral, false);
   for (const key of ["model", "cwd", "approvalPolicy", "approvalsReviewer", "sandbox", "config", "developerInstructions"]) {
@@ -454,7 +458,7 @@ async function runForkedCodexTurn(
   const runner = new CliAgentRunner(undefined, undefined, codexPath) as any;
   const sessionIds: string[] = [];
   try {
-    const result = await runner.runCodexAppServerWarmOrOneShot(
+    const result = await cliParts(runner).codexRuns.runCodexAppServerWarmOrOneShot(
       { id: "child", kind: "codex-cli", label: "@child" },
       "Your task.",
       fixtureDir,

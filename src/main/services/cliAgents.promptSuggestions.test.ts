@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { CliAgentRunner } from "./cliAgents";
+import { cliDependencies, cliParts } from "./cliAgents/test/cliParts";
 
 /** A Claude Code stand-in on the warm stream-json transport: `--help` lists
  *  `--prompt-suggestions` only when `withFlag`, and with the flag it sends a
@@ -55,9 +56,8 @@ input.on("line", (line) => {
 
 function warmRunner(claudePath: string, dir: string): CliAgentRunner {
   const runner = new CliAgentRunner();
-  const internals = runner as unknown as Record<string, unknown>;
-  internals.nativeProcessDbPath = path.join(dir, "native-processes.sqlite3");
-  internals.providerExecutableForRun = async () => claudePath;
+    cliDependencies(runner).nativeProcessDbPath = path.join(dir, "native-processes.sqlite3");
+  cliParts(runner).cliRuns.providerExecutableForRun = async () => claudePath;
   return runner;
 }
 
