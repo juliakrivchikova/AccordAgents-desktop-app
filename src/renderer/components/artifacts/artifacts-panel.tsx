@@ -13,6 +13,8 @@ import { IconButton } from "../primitives";
 import { ArtifactDetailView, formatArtifactRelativeTimestamp, type ArtifactCompareState } from "./artifact-detail";
 import { ArtifactActionsMenu } from "./artifact-actions-menu";
 import { ArtifactVersionSubmenu, artifactSubtitleParts } from "./artifact-version-selector";
+import { useArtifactFocus } from "./use-artifact-focus";
+import type { ArtifactFocusRequest } from "./use-artifacts";
 import { AccessArtifactForm, CreateArtifactForm } from "./artifact-forms";
 import type { ArtifactAccessValues } from "./artifact-forms";
 import { useArtifactsPanelResize } from "./use-artifacts-panel-resize";
@@ -29,6 +31,9 @@ export function ArtifactsPanel(props: {
   members: string[];
   artifacts: ArtifactSummary[];
   selectedId?: string;
+  /** The last open of the selected document, and taking it once. */
+  focus?: ArtifactFocusRequest;
+  takeFocus?: (seq: number) => boolean;
   onSelect: (artifactId: string | undefined) => void;
   onClose: () => void;
 }): JSX.Element {
@@ -191,6 +196,22 @@ export function ArtifactsPanel(props: {
     setRenaming(false);
     setAccessOpen(false);
   }, [detail?.summary.archivedAt]);
+  const focusWait = useArtifactFocus({
+    focus: props.focus,
+    takeFocus: props.takeFocus ?? (() => true),
+    selectedId: props.selectedId,
+    editing: mode !== "view",
+    headVersion: selectedSummary?.headVersion,
+    detail,
+    drafts,
+    draftsFor,
+    draftError,
+    showVersion: pinVersion,
+    showDraft,
+    reload: (version) => {
+      if (props.selectedId) void loadDetail(props.selectedId, version);
+    }
+  });
   async function run<T>(action: () => Promise<{ ok: true; value: T } | { ok: false; error: ArtifactError }>): Promise<T | undefined> {
     setBusy(true);
     clearTransient();
@@ -324,20 +345,26 @@ export function ArtifactsPanel(props: {
       void loadDetail(detail.summary.id, viewVersion);
     }
   }
-  function showVersion(version: number): void {
-    if (!detail) {
-      return;
-    }
-    const target = version === detail.summary.headVersion ? undefined : version;
+  // One version on screen (none: the head), with no draft or comparison over it.
+  function pinVersion(target: number | undefined): void {
     setSelectedDraftId(undefined);
     setViewVersion(target);
     setShowDiff(false);
     setCompare(undefined);
     compareGeneration.current += 1;
     setDiffBusy(false);
+  }
+  function showVersion(version: number): void {
+    if (!detail) {
+      return;
+    }
+    const target = version === detail.summary.headVersion ? undefined : version;
+    focusWait.cancel();
+    pinVersion(target);
     void loadDetail(detail.summary.id, target);
   }
   function showDraft(draftId: string): void {
+    focusWait.cancel();
     setSelectedDraftId(draftId);
     // Drop any older-version pin, so the refresh effect stops re-reading that version
     // underneath the draft and dismissing the draft returns the reader to the head.
@@ -351,6 +378,7 @@ export function ArtifactsPanel(props: {
     if (!detail || detail.lifecycle !== "published") {
       return;
     }
+    focusWait.cancel();
     const generation = ++compareGeneration.current;
     setShowDiff(nextShowDiff);
     setCompare(undefined);

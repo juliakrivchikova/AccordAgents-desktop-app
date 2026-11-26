@@ -32,8 +32,9 @@ function launch(subject: string, members = "drew, gera", wording: "members" | "p
   ].join("\n");
 }
 
+// What is on screen: words for screen readers only are left out.
 const textOf = (node: ReactTestInstance | string): string =>
-  typeof node === "string" ? node : node.children.map(textOf).join("");
+  typeof node === "string" ? node : node.props?.className === "sr-only" ? "" : node.children.map(textOf).join("");
 
 test("the launch prompt reads as an Accord card, in both wordings it has had", () => {
   assert.deepEqual(parseAccordLaunchCard(launch("Pick the launch shape.")), {

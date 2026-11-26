@@ -11,11 +11,13 @@ import { ACCORD_NEEDS_AGENT_LINE } from "../../../shared/accordCandidates";
 import { parseAccordLaunchCard } from "../../../shared/accordLaunchCard";
 import { accordProgressFromNotes, type DockedAccord } from "../../../shared/accordProgress";
 import type { AppSettings, ChatParticipant, Conversation } from "../../../shared/types";
-import { ArtifactsContext } from "../artifacts/artifacts-context";
+import { ArtifactsContext, type ArtifactFocus } from "../artifacts/artifacts-context";
 import { resetAccordDockStoreForTests } from "./accord-dock-store";
 import { ChatAccordDockSlot } from "./chat-accord-dock";
 import { ChatMembersPanel } from "./chat-members-panel";
 import { ChatSessionsPresentationContext } from "./chat-member-mark";
+import { resetMemberModelCatalogs } from "./chat-member-model-name";
+import { ChatSessionsLinksContext, type ChatSessionsLinks } from "./chat-sessions-links";
 import { ChatSessionsRightPanel, type ChatPanelMessageContext } from "./chat-sessions-right-panel";
 import { DREW, MAIN, PARTICIPANTS } from "./chat-sessions-fixtures.test";
 import type { ChatRightPanel, ChatRightPanelState } from "./use-chat-right-panel";
@@ -24,8 +26,9 @@ import type { ChatSessionsView } from "./use-chat-sessions-view";
 
 const NOW = "2026-11-20T10:00:00.000Z";
 const noop = (): void => undefined;
+// What is on screen: words for screen readers only are left out.
 const textOf = (node: ReactTestInstance | string): string =>
-  typeof node === "string" ? node : node.children.map(textOf).join("");
+  typeof node === "string" ? node : node.props?.className === "sr-only" ? "" : node.children.map(textOf).join("");
 const hasClass = (name: string) => (node: ReactTestInstance): boolean =>
   typeof node.type === "string" && typeof node.props.className === "string" && node.props.className.split(/\s+/).includes(name);
 const byTestId = (id: string) => (node: ReactTestInstance): boolean => typeof node.type === "string" && node.props["data-testid"] === id;
@@ -46,12 +49,18 @@ function accord(): DockedAccord {
   return { launchId: "launch-1", card, progress };
 }
 
-function renderIn(sessions: boolean, element: ReactElement): { root: ReactTestInstance; update: (next: ReactElement) => void; unmount: () => void } {
+function renderIn(
+  sessions: boolean,
+  element: ReactElement,
+  extra: { links?: ChatSessionsLinks; openArtifact?: (artifactId: string, focus?: ArtifactFocus) => void } = {}
+): { root: ReactTestInstance; update: (next: ReactElement) => void; unmount: () => void } {
   let renderer: ReturnType<typeof create> | undefined;
   const wrap = (inner: ReactElement): ReactElement => (
     <TooltipProvider>
-      <ArtifactsContext.Provider value={{ byId: new Map(), openArtifact: noop }}>
-        <ChatSessionsPresentationContext.Provider value={sessions}>{inner}</ChatSessionsPresentationContext.Provider>
+      <ArtifactsContext.Provider value={{ byId: new Map(), openArtifact: extra.openArtifact ?? noop }}>
+        <ChatSessionsLinksContext.Provider value={extra.links}>
+          <ChatSessionsPresentationContext.Provider value={sessions}>{inner}</ChatSessionsPresentationContext.Provider>
+        </ChatSessionsLinksContext.Provider>
       </ArtifactsContext.Provider>
     </TooltipProvider>
   );
@@ -208,4 +217,51 @@ test("opened from the Accord button with too few for an Accord, the side panel s
   const met = open(false);
   assert.equal(met.root.findAll(byTestId("chat-subagents-note")).length, 0, "once Accord has enough, the line is gone");
   met.unmount();
+test("in the sessions view the card names members by model and effort; a submitted draft and the published version open in the document", async (t) => {
+  resetAccordDockStoreForTests();
+  resetMemberModelCatalogs();
+  const page = window as unknown as { consensus?: unknown };
+  const bridge = page.consensus;
+  const catalog = (kind: string, models: unknown[]) => ({ kind, models, authoritative: true, fetchedAt: NOW });
+  page.consensus = {
+    listMachines: async () => ({ machines: [], status: [] }),
+    listProviderModels: async (kind: string) => kind === "claude-code"
+      ? catalog(kind, [{ id: "claude-opus-5-5", label: "Opus 5.5" }])
+      : catalog(kind, [{ id: "gpt-5.5", label: "GPT-5.5 (gpt-5.5)", supportedReasoningEfforts: [{ id: "high", label: "High" }] }])
+  };
+  t.after(() => {
+    page.consensus = bridge;
+    resetMemberModelCatalogs();
+    resetAccordDockStoreForTests();
+  });
+  const participants = [{ ...MAIN, model: "claude-opus-5-5", reasoningEffort: "xhigh" }, { ...DREW, model: "gpt-5.5", reasoningEffort: "high" }] as typeof PARTICIPANTS;
+  const links: ChatSessionsLinks = {
+    mainSessionId: MAIN.id,
+    mainHandle: "main",
+    byHandle: new Map([["drew", { id: DREW.id, title: "Fix the login page", kind: DREW.kind }]]),
+    openMember: noop
+  };
+  const opened: Array<[string, ArtifactFocus | undefined]> = [];
+  const latest = accord();
+  const card = renderIn(true, rightPanelElement({ kind: "accord", launchId: "launch-1" }, [], latest, { participants }), {
+    links, openArtifact: (artifactId, focus) => opened.push([artifactId, focus])
+  });
+  // The model lists come a moment later.
+  await act(async () => { await new Promise((resolve) => setTimeout(resolve, 0)); });
+  const chips = card.root.findAll(hasClass("chat-accord-progress-member"));
+  assert.deepEqual(chips.map(textOf), ["Opus 5.5 Extra High", "GPT-5.5 High", "Opus 5.5 Extra High", "GPT-5.5 High"]);
+  assert.equal(textOf(card.root.find(hasClass("chat-accord-dock-meta"))), "Accord · with GPT-5.5 High", "the head names the members the same way, the main session by nothing");
+
+  // Drafts open; signatures do not.
+  assert.deepEqual(chips.map((chip) => chip.type), ["button", "button", "span", "span"]);
+  act(() => chips[1]!.props.onClick());
+  act(() => card.root.find((node) => node.type === "button" && hasClass("chat-accord-progress-label")(node)).props.onClick());
+  assert.deepEqual(opened, [["art-1", { draftAuthor: "drew" }], ["art-1", { version: 1 }]]);
+  card.unmount();
+
+  // A former member is named by its task's title.
+  const former = renderIn(true, rightPanelElement({ kind: "accord", launchId: "launch-1" }, [], latest, { participants: [participants[0]!] }), { links });
+  await act(async () => { await new Promise((resolve) => setTimeout(resolve, 0)); });
+  assert.deepEqual(former.root.findAll(hasClass("chat-accord-progress-member")).map(textOf).slice(0, 2), ["Opus 5.5 Extra High", "Fix the login page"]);
+  former.unmount();
 });

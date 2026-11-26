@@ -1,6 +1,6 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { ArtifactSummary } from "../../../shared/types";
-import type { ArtifactsContextValue } from "./artifacts-context";
+import type { ArtifactFocus, ArtifactsContextValue } from "./artifacts-context";
 
 /** A local file the panel shows (a link from a local member's message). */
 export interface PanelFileTarget {
@@ -22,6 +22,15 @@ export interface PanelAttachmentTarget {
   returnThreadRootId?: string;
 }
 
+/** An open of a document, new for every click (`seq`): the place it asks
+ *  for, if any. An open without one leaves the document as it is and stops
+ *  an earlier open's wait for a draft. */
+export interface ArtifactFocusRequest {
+  artifactId: string;
+  seq: number;
+  place?: ArtifactFocus;
+}
+
 /** What the side panel shows instead of artifacts. One thing at a time. */
 export type PanelFileLikeTarget = PanelFileTarget | PanelAttachmentTarget;
 
@@ -30,11 +39,16 @@ export interface ArtifactsState {
   context: ArtifactsContextValue;
   panelOpen: boolean;
   selectedId?: string;
+  /** The last open of the selected document. */
+  focus?: ArtifactFocusRequest;
+  /** True the first time the panel takes an open, so a panel drawn again
+   *  later (back from Settings) does not land there again. */
+  takeFocus: (seq: number) => boolean;
   /** Set while the panel shows a file or an attachment instead of artifacts. */
   fileTarget?: PanelFileLikeTarget;
   openPanel: () => void;
   closePanel: () => void;
-  openArtifact: (artifactId: string) => void;
+  openArtifact: (artifactId: string, focus?: ArtifactFocus) => void;
   openFile: (target: Omit<PanelFileTarget, "kind">) => void;
   openAttachment: (target: Omit<PanelAttachmentTarget, "kind">) => void;
   selectArtifact: (artifactId: string | undefined) => void;
@@ -46,6 +60,11 @@ export function useArtifacts(conversationId: string | undefined): ArtifactsState
   const [panelOpen, setPanelOpen] = useState(false);
   const [selectedId, setSelectedId] = useState<string | undefined>(undefined);
   const [fileTarget, setFileTarget] = useState<PanelFileLikeTarget | undefined>(undefined);
+  // Only the open that asked for it carries a place: any other way to the
+  // panel (Open, the Artifacts button, the list) shows the document as it is.
+  const [focus, setFocus] = useState<ArtifactFocusRequest | undefined>(undefined);
+  const focusSeq = useRef(0);
+  const focusTaken = useRef(0);
 
   const refresh = useCallback(async () => {
     if (!conversationId) {
@@ -67,6 +86,7 @@ export function useArtifacts(conversationId: string | undefined): ArtifactsState
     setPanelOpen(false);
     setSelectedId(undefined);
     setFileTarget(undefined);
+    setFocus(undefined);
     void refresh();
   }, [conversationId, refresh]);
 
@@ -78,9 +98,10 @@ export function useArtifacts(conversationId: string | undefined): ArtifactsState
     });
   }, [conversationId, refresh]);
 
-  const openArtifact = useCallback((artifactId: string) => {
+  const openArtifact = useCallback((artifactId: string, target?: ArtifactFocus) => {
     setFileTarget(undefined);
     setSelectedId(artifactId);
+    setFocus({ artifactId, seq: ++focusSeq.current, ...(target ? { place: target } : {}) });
     setPanelOpen(true);
   }, []);
 
@@ -97,12 +118,14 @@ export function useArtifacts(conversationId: string | undefined): ArtifactsState
   const openPanel = useCallback(() => {
     // The top bar's Artifacts button shows artifacts, whatever was open before.
     setFileTarget(undefined);
+    setFocus(undefined);
     setPanelOpen(true);
   }, []);
 
   const closePanel = useCallback(() => {
     setPanelOpen(false);
     setFileTarget(undefined);
+    setFocus(undefined);
   }, []);
 
   const byId = useMemo(() => new Map(artifacts.map((artifact) => [artifact.id, artifact])), [artifacts]);
@@ -113,13 +136,22 @@ export function useArtifacts(conversationId: string | undefined): ArtifactsState
     context,
     panelOpen,
     selectedId,
+    focus,
+    takeFocus: useCallback((seq: number) => {
+      if (seq <= focusTaken.current) return false;
+      focusTaken.current = seq;
+      return true;
+    }, []),
     fileTarget,
     openPanel,
     closePanel,
     openArtifact,
     openFile,
     openAttachment,
-    selectArtifact: useCallback((artifactId: string | undefined) => setSelectedId(artifactId), []),
+    selectArtifact: useCallback((artifactId: string | undefined) => {
+      setFocus(undefined);
+      setSelectedId(artifactId);
+    }, []),
     refresh
   };
 }
