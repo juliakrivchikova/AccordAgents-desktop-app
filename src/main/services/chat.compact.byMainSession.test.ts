@@ -9,10 +9,10 @@ import type { ChatParticipant, Conversation } from "../../shared/types";
 import { defaultChatAgentPermissions, normalizeChatAgentPermissions } from "../../shared/agentPermissions";
 import { APP_CHAT_COMPACT_PARTICIPANT_TOOL } from "../../shared/appMcpToolContracts";
 import { buildChatParticipantActivitySnapshot } from "../../shared/chatParticipantActivity";
-import type { HubOp } from "../../shared/hubOps";
+import type { HubOp, HubTurn } from "../../shared/hubOps";
 import { machineMayCompact } from "../../hub/hubMachineScope";
 import { chatParts } from "./chat/test/chatParts";
-import { acceptedMessage, chatConversation, chatParticipant, chatSession, fakeServerLink, testService, waitFor } from "./chat/test/compactionFixtures";
+import { acceptedMessage, chatConversation, chatParticipant, chatSession, fakeServerLink, fromServer, testService, waitFor } from "./chat/test/compactionFixtures";
 import { appMcpToolNamesFor, appToolCapabilitiesForRolePolicy, compactionAccessLines } from "./chat/turns/promptSections";
 
 const TWO_HOURS_AGO = new Date(Date.now() - 2 * 60 * 60_000).toISOString();
@@ -51,7 +51,8 @@ test("only the main session gets the tool, and only while it compacts without as
   }
   const mainLines = compactionAccessLines(permissions("allow"), true).join("\n");
   assert.match(mainLines, /app_chat_compact_participant/);
-  assert.match(mainLines, /more than an hour ago/);
+  assert.match(mainLines, /minutesSinceLastTurn` is over 60/);
+  assert.match(mainLines, /participants: \["<its handle>"\]/);
   assert.match(mainLines, /100,000/);
   assert.doesNotMatch(compactionAccessLines(permissions("allow"), false).join("\n"), /app_chat_compact_participant/, "a member is not told");
   assert.doesNotMatch(compactionAccessLines(permissions("ask"), true).join("\n"), /app_chat_compact_participant/, "Compact without asking off: not told");
@@ -61,16 +62,33 @@ test("the activity tool says when each member last worked and how full its conte
   const { worker, conversation } = chat();
   conversation.messages[0] = { ...conversation.messages[0], metadata: { runId: "old-run", activityEvents: [{ id: "e", kind: "tool", label: "Read", createdAt: "2026-01-01T00:05:00.000Z" }] } } as never;
   conversation.messages[0].createdAt = "2026-01-01T00:00:00.000Z";
-  const entry = buildChatParticipantActivitySnapshot(conversation).participants.find((item) => item.participantId === worker.id)!;
+  (conversation.metadata.agentContextUsageByParticipant as any)[worker.id].updatedAt = "2026-01-01T00:06:00.000Z";
+  const at = (snapshotAt: string) => buildChatParticipantActivitySnapshot(conversation, snapshotAt).participants.find((item) => item.participantId === worker.id)!;
+  const entry = at("2026-01-01T01:35:30.000Z");
   assert.equal(entry.lastTurnEndedAt, "2026-01-01T00:05:00.000Z", "its reply's last step");
-  assert.deepEqual(entry.context, { usedTokens: 180_000, contextWindowTokens: 200_000, percentage: 90, measuredAt: TWO_HOURS_AGO });
+  assert.equal(entry.minutesSinceLastTurn, 90);
+  assert.deepEqual(entry.context, { usedTokens: 180_000, contextWindowTokens: 200_000, percentage: 90, measuredAt: "2026-01-01T00:06:00.000Z" });
   conversation.messages.push({ id: "line", role: "system", content: "Compacted @worker context.", createdAt: "2026-01-01T01:00:00.000Z", status: "done",
     metadata: { compaction: { triggeredBy: "user", participantId: worker.id, outcome: "completed", instructionsProvided: false } } } as never);
-  assert.equal(buildChatParticipantActivitySnapshot(conversation).participants.find((item) => item.participantId === worker.id)!.lastTurnEndedAt,
-    "2026-01-01T01:00:00.000Z", "a later compaction of it");
+  assert.equal(at("2026-01-01T01:35:30.000Z").lastTurnEndedAt, "2026-01-01T01:00:00.000Z", "a later compaction of it");
+  assert.equal(at("2026-01-01T01:35:30.000Z").minutesSinceLastTurn, 35);
+  assert.equal(at("2026-01-01T01:35:30.000Z").context, null, "a figure read before its compaction is not its context now");
+  conversation.messages.push({ id: "waiting", role: "participant", participantId: worker.id, content: "", createdAt: "2026-01-01T01:20:00.000Z", status: "done",
+    metadata: { hiddenFromTimeline: true } } as never);
+  assert.equal(at("2026-01-01T01:35:30.000Z").lastTurnEndedAt, "2026-01-01T01:20:00.000Z", "a hidden reply is its work too");
   const main = buildChatParticipantActivitySnapshot(conversation).participants.find((item) => item.participantId === "main-id")!;
   assert.equal(main.lastTurnEndedAt, null);
   assert.equal(main.context, null);
+});
+
+test("the activity tool gives only the members it is asked about, the chat's counts still the whole chat's", async () => {
+  const { main, worker, conversation } = chat();
+  const { service } = testService({ conversation, compactSession: async () => ({}) });
+  const one = await service.describeChatParticipantActivityForTool(actorOf(main), { participants: ["@Worker"] });
+  assert.deepEqual(one.participants.map((entry) => entry.participantId), [worker.id]);
+  assert.equal(Object.values(one.statusCounts).reduce((sum, count) => sum + count, 0), 2);
+  const all = await service.describeChatParticipantActivityForTool(actorOf(main), {});
+  assert.equal(all.participants.length, 2);
 });
 
 test("the main session compacts an idle member on this computer: its CLI gets the instructions, the line names who asked and what it kept", async () => {
@@ -156,35 +174,88 @@ test("refused for a member that is busy: one already being compacted", async () 
   assert.equal(compactions, 1);
 });
 
-test("a main session on a machine asks the User's server to compact a member that runs elsewhere, naming itself", async () => {
-  const { main, worker, conversation } = chat({ main: { homeMachineId: "box" } });
-  conversation.messages.push(acceptedMessage());
-  const { service } = testService({ conversation, compactSession: async () => { throw new Error("Not compacted on the machine."); } });
-  service.setHostMachineId("box");
-  const link = fakeServerLink("machine-device");
-  service.setServerLink(link);
-  const answer = await service.compactParticipantFromTool(actorOf(main), { target: "worker", instructions: "Keep the task." });
-  assert.equal(answer.ok, true, JSON.stringify(answer));
-  assert.equal(answer.status, "started");
-  const asked = link.ops.filter((op) => op.kind === "turn.request") as Array<Extract<HubOp, { kind: "turn.request" }>>;
-  assert.equal(asked.length, 1);
-  assert.equal(asked[0].participantId, worker.id);
-  assert.deepEqual(asked[0].request, { kind: "compaction", triggeredBy: "agent", instructions: "Keep the task.", requestedByParticipantId: main.id });
+test("two calls at once compact a member once", async () => {
+  const { main, conversation } = chat();
+  let compactions = 0;
+  const { service } = testService({
+    conversation,
+    compactSession: async (runParticipant) => { compactions += 1; await delay(50); return { participant: runParticipant, ok: true, sessionId: "session-worker" }; }
+  });
+  chatParts(service).chatHistory.ensureHistoryFiles = async () => tmpdir();
+  const answers = await Promise.all([1, 2].map(() => service.compactParticipantFromTool(actorOf(main), { target: "worker", instructions: "Keep it." })));
+  assert.deepEqual(answers.map((answer) => answer.status).sort(), ["busy", "started"]);
+  await waitFor(() => compactions === 1, 3000);
+  await delay(80);
+  assert.equal(compactions, 1);
+});
+
+test("a main session on a machine asks the User's server to compact a member that runs elsewhere, answers once that device took it, and follows it to its end", async () => {
+  for (const ending of ["line", "no line"] as const) {
+    const { main, worker, conversation } = chat({ main: { homeMachineId: "box" } });
+    conversation.messages.push(acceptedMessage());
+    const { service, storage } = testService({ conversation, compactSession: async () => { throw new Error("Not compacted on the machine."); } });
+    service.setHostMachineId("box");
+    const link = fakeServerLink("machine-device");
+    service.setServerLink(link);
+    let answer: Record<string, unknown> | undefined;
+    void service.compactParticipantFromTool(actorOf(main), { target: "worker", instructions: "Keep the task." }).then((value) => { answer = value; });
+    await waitFor(() => link.ops.some((op) => op.kind === "turn.request"));
+    const asked = link.ops.filter((op) => op.kind === "turn.request") as Array<Extract<HubOp, { kind: "turn.request" }>>;
+    assert.equal(asked.length, 1);
+    assert.equal(asked[0].participantId, worker.id);
+    assert.deepEqual(asked[0].request, { kind: "compaction", triggeredBy: "agent", instructions: "Keep the task.", requestedByParticipantId: main.id });
+    await delay(30);
+    assert.equal(answer, undefined, "not before the device the member runs on took it");
+    const again = await service.compactParticipantFromTool(actorOf(main), { target: "worker", instructions: "Keep the task." });
+    assert.equal(again.status, "busy", "asked again meanwhile");
+    const turn: HubTurn = { runId: asked[0].runId, conversationId: conversation.id, messageId: "anchor", participantId: worker.id, state: "claimed", executorDeviceId: "desktop-device" };
+    await service.applyServerEntries([fromServer("desktop-device", { kind: "turn.claim", turn })]);
+    await waitFor(() => answer !== undefined);
+    assert.equal(answer!.status, "started", JSON.stringify(answer));
+    if (ending === "line") {
+      await service.applyServerEntries([fromServer("desktop-device", { kind: "message.create", message: { id: `line-${turn.runId}`, role: "system", content: "@main compacted @worker context. Focus: Keep the task.",
+        createdAt: new Date().toISOString(), status: "done", metadata: { runId: turn.runId, serverSeq: 900, compaction: { triggeredBy: "agent", participantId: worker.id, outcome: "completed", instructionsProvided: true, requestedByParticipantId: main.id } } } as never })]);
+    }
+    await service.applyServerEntries([fromServer("desktop-device", { kind: "turn.finish", turn: { ...turn, state: "finished", outcome: ending === "line" ? "done" : "error" } })]);
+    await delay(50);
+    const lines = storage.current.messages.filter((message: any) => message.role === "system").map((message: any) => message.content);
+    assert.deepEqual(lines, ending === "line"
+      ? ["@main compacted @worker context. Focus: Keep the task."]
+      : ["Could not compact @worker context: the device it runs on ended the compaction without saying how it went."], ending);
+    assert.equal((chatParts(service).memberCompaction as any).compacting.size, 0, "free again once it ended");
+  }
 });
 
 test("the member's device runs a compaction the main session asked on the server, and its line names the main session", async () => {
   const { main, worker, conversation } = chat({ main: { homeMachineId: "box" } });
   conversation.messages.push(acceptedMessage());
+  let release!: () => void;
+  const held = new Promise<void>((resolve) => { release = resolve; });
   const { service, storage } = testService({
     conversation,
-    compactSession: async (runParticipant) => ({ participant: runParticipant, ok: true, sessionId: "session-worker" })
+    compactSession: async (runParticipant) => { await held; return { participant: runParticipant, ok: true, sessionId: "session-worker" }; }
   });
   chatParts(service).chatHistory.ensureHistoryFiles = async () => tmpdir();
   const link = fakeServerLink("desktop-device");
   service.setServerLink(link);
-  await service.startServerTurn({ runId: "turn-main-asked", conversationId: conversation.id, messageId: "anchor", participantId: worker.id, state: "requested",
+  // Its own reads after it was taken are slow (a large chat).
+  const store = chatParts(service).store;
+  const read = store.readStoredChatStateForRefresh.bind(store);
+  store.readStoredChatStateForRefresh = (async (...args: Parameters<typeof read>) => { await delay(150); return read(...args); }) as typeof read;
+  void service.startServerTurn({ runId: "turn-main-asked", conversationId: conversation.id, messageId: "anchor", participantId: worker.id, state: "requested",
     requestedBy: "machine-device", request: { kind: "compaction", triggeredBy: "agent", instructions: "Keep the task.", requestedByParticipantId: main.id } });
+  // Once it is taken (the main session hears "started" then), the work it
+  // gives the member next waits for it.
+  await waitFor(() => link.ops.some((op) => op.kind === "turn.claim"), 3000);
+  const next = chatParts(service).turnQueue.reserveParticipantTurn(conversation.id, worker.id, "shared");
+  let nextRan = false;
+  void next.wait().then(() => { nextRan = true; });
+  await delay(30);
+  assert.equal(nextRan, false, "a turn asked after it was taken runs after it");
+  release();
   await waitFor(() => link.ops.some((op) => op.kind === "turn.finish"), 3000);
+  await waitFor(() => nextRan, 3000);
+  next.release();
   const line = storage.current.messages.at(-1);
   assert.equal(line.content, "@main compacted @worker context. Focus: Keep the task.");
   assert.equal(line.metadata.compaction.requestedByParticipantId, main.id);

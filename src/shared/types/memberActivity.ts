@@ -88,6 +88,9 @@ export interface ChatParticipantActivityEntry {
    *  or a compaction of it), as near as the chat knows it: a CLI's prompt
    *  cache lives about an hour after that. Null when it never worked here. */
   lastTurnEndedAt: string | null;
+  /** Whole minutes from lastTurnEndedAt to the snapshot. */
+  minutesSinceLastTurn: number | null;
+  /** Null when unknown, or read before the member's last compaction. */
   context: ChatParticipantActivityContext | null;
 }
 

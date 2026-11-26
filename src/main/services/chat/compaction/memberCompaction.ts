@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { setTimeout as delay } from "node:timers/promises";
 import { newOpId } from "../../chatServerOps";
 import type { ChatParticipant, Conversation } from "../../../../shared/types";
 import { normalizeChatAgentPermissions, normalizeChatParticipantRequestPermission } from "../../../../shared/agentPermissions";
@@ -8,7 +9,10 @@ import { isMainSessionParticipant } from "../../../../shared/mainSession";
 import { participantForMentionHandle } from "../choices/mentions";
 import { chatParticipants, participantForRun } from "../members/identity";
 import { createChatMessage } from "../store/messages";
-import { compactionAnchor, compactionFailureLine, compactMessageMetadata, normalizeCompactInstructions } from "./compactionText";
+import { isMachineCompactionLine } from "../../../../shared/machineLink";
+import {
+  compactionAnchor, compactionFailureLine, compactMessageMetadata, machineCompactionFailureLine, normalizeCompactInstructions
+} from "./compactionText";
 import type { SelfCompactionEnd } from "./selfCompactionMarks";
 import type { ChatAppMcpActor } from "../types";
 import type { ChatModules } from "../modules";
@@ -32,8 +36,13 @@ const IDLE_STATUSES = new Set(["idle", "stopped", "error"]);
  * member's turns, so the work the main session gives it next runs after it.
  */
 export class MemberCompaction {
+  /** Members a compaction was asked for here and has not ended yet, by
+   *  chat and member: asked again meanwhile (a retry, two calls at once), the
+   *  tool says so instead of compacting twice. */
+  private readonly compacting = new Set<string>();
+
   constructor(
-    private readonly chat: Pick<ChatModules, "backgroundTasks" | "compaction" | "host" | "participantBatch" | "serverLink" | "store">,
+    private readonly chat: Pick<ChatModules, "backgroundTasks" | "compaction" | "host" | "participantBatch" | "serverLink" | "serverTurns" | "store">,
     private readonly deps: Pick<ChatDependencies, "debugLogs" | "onReviewProgress">
   ) {}
 
@@ -68,16 +77,26 @@ export class MemberCompaction {
     if (!activity?.lastTurnEndedAt) {
       return refused("no_active_session", `@${target.handle} has not worked in this chat yet: there is nothing to compact.`);
     }
+    // Checked and taken with nothing awaited in between.
+    const key = `${conversation.id}\u0000${target.id}`;
+    if (this.compacting.has(key)) return refused("busy", `@${target.handle} is being compacted already.`);
+    this.compacting.add(key);
     void this.deps.debugLogs.write("chat.member-compaction.requested", {
       conversationId: conversation.id, participantId: caller.id, targetParticipantId: target.id, machineRuntime: this.chat.host.machineRuntime
     });
-    return this.chat.host.machineRuntime
-      ? this.compactThroughServer(conversation, caller, target, request.instructions)
-      : this.compactHere(conversation, caller, target, request.instructions);
+    const done = () => { this.compacting.delete(key); };
+    try {
+      return this.chat.host.machineRuntime
+        ? await this.compactThroughServer(conversation, caller, target, request.instructions, done)
+        : await this.compactHere(conversation, caller, target, request.instructions, done);
+    } catch (error) {
+      done();
+      throw error;
+    }
   }
 
   /** The computer: as the User's Compact, with its status line and Stop. */
-  private async compactHere(conversation: Conversation, caller: ChatParticipant, target: ChatParticipant, instructions: string): Promise<Record<string, unknown>> {
+  private async compactHere(conversation: Conversation, caller: ChatParticipant, target: ChatParticipant, instructions: string, done: () => void): Promise<Record<string, unknown>> {
     const runId = randomUUID();
     const run = this.chat.participantBatch.registerBackgroundRunController(runId, undefined);
     let wasQueued = false;
@@ -100,11 +119,13 @@ export class MemberCompaction {
     void ended.then(async (result) => {
       const stopped = run.signal.aborted;
       run.cleanup();
-      // A compaction that failed once it held the member's turns writes no
-      // line of its own (the User's Compact shows the error where she
-      // pressed it), so here the chat says it; one refused before that is
-      // the tool's answer.
-      if (result.kind === "threw" && wasQueued && !stopped) await this.recordFailure(conversation.id, target, caller, runId, instructions, result.error);
+      done();
+      // A compaction that failed once it held the member's turns, before it
+      // ended (`end`, after which its own line is written), writes no line
+      // of its own (the User's Compact shows the error where she pressed
+      // it), so here the chat says it; one refused before that is the
+      // tool's answer.
+      if (result.kind === "threw" && wasQueued && !end && !stopped) await this.recordFailure(conversation.id, target, caller, runId, instructions, result.error);
     });
     const first = await Promise.race([queued, ended]);
     if (first !== "queued") {
@@ -116,39 +137,89 @@ export class MemberCompaction {
     return started(target, runId);
   }
 
-  /** A machine: a turn of the member on the User's server, taken by the
-   *  device it runs on (this one included), as a member's own compaction on
-   *  a machine is (SelfCompaction.requestServerSelfCompaction). */
-  private async compactThroughServer(conversation: Conversation, caller: ChatParticipant, target: ChatParticipant, instructions: string): Promise<Record<string, unknown>> {
+  /**
+   * A machine: a turn of the member on the User's server, taken by the device
+   * it runs on (this one included), as a member's own compaction on a machine
+   * is (SelfCompaction.requestServerSelfCompaction). The tool answers once
+   * that device took it (its turns are held from then, ServerTurns), and the
+   * compaction is followed to its end: one that never ran there, or that the
+   * server refused after the tool answered, leaves the line a compaction
+   * here would (compactParticipantOnMachine).
+   */
+  private async compactThroughServer(
+    conversation: Conversation, caller: ChatParticipant, target: ChatParticipant, instructions: string, done: () => void
+  ): Promise<Record<string, unknown>> {
     const link = this.chat.serverLink.current;
-    if (!link) return refused("failed", "This machine is not linked to your server.");
+    if (!link) {
+      done();
+      return refused("failed", "This machine is not linked to your server.");
+    }
     const anchor = compactionAnchor(conversation, {});
-    if (!anchor) return refused("failed", "Nothing in this chat has reached your server yet.");
+    if (!anchor) {
+      done();
+      return refused("failed", "Nothing in this chat has reached your server yet.");
+    }
     const runId = `turn-${randomUUID()}`;
     const opId = newOpId();
     await link.enqueue([{
       opId, kind: "turn.request", conversationId: conversation.id, runId, messageId: anchor.id, participantId: target.id,
       request: { kind: "compaction", triggeredBy: "agent", instructions, requestedByParticipantId: caller.id }
     }]);
-    const answer = await link.opAnswered(opId, AbortSignal.timeout(SERVER_ANSWER_WAIT_MS)).catch(() => undefined);
-    if (!answer) {
-      return {
-        ok: true,
-        status: "queued",
-        runId,
-        target: `@${target.handle}`,
-        next: `Your server has not taken it yet; @${target.handle} is compacted once it does, before a request you give it afterwards. Do not wait or poll for it.`
-      };
-    }
-    if (answer.status === "rejected") return refused("rejected", answer.reason);
-    return started(target, runId);
+    let toolAnswered = false;
+    let tell: (answer: Record<string, unknown>) => void = () => undefined;
+    const answer = new Promise<Record<string, unknown>>((resolve) => {
+      tell = (value) => { if (!toolAnswered) { toolAnswered = true; resolve(value); } };
+    });
+    // What the tool no longer says is said in the chat.
+    const failed = async (reason: string, line: string): Promise<void> => {
+      if (!toolAnswered) return tell(refused("failed", reason));
+      await this.writeLine(conversation.id, target, caller, runId, instructions, line);
+    };
+    void (async () => {
+      const accepted = await link.opAnswered(opId).catch((error: unknown) => ({ status: "rejected" as const, reason: error instanceof Error ? error.message : String(error) }));
+      if (accepted.status === "rejected") {
+        if (!toolAnswered) return tell(refused("rejected", accepted.reason));
+        return this.writeLine(conversation.id, target, caller, runId, instructions, compactionFailureLine(target.handle, accepted.reason));
+      }
+      const placed = await this.chat.serverTurns.waitForServerTurn(runId, (turn) => turn.state !== "requested");
+      tell(started(target, runId));
+      const ended = placed.state === "finished" || placed.state === "stopped"
+        ? placed
+        : await this.chat.serverTurns.waitForServerTurn(runId, (turn) => turn.state === "finished" || turn.state === "stopped");
+      // The line of the device that ran it came through the server before
+      // the turn's end did.
+      const latest = await this.chat.store.requireChat(conversation.id).catch(() => undefined);
+      if (!latest || latest.messages.some((message) => isMachineCompactionLine(message, runId, target.id))) return;
+      const stoppedBeforeStart = ended.state === "stopped" && !ended.executorDeviceId;
+      await failed(stoppedBeforeStart ? "It was stopped before it started." : "The device it runs on ended it without saying how it went.",
+        machineCompactionFailureLine(target.handle, stoppedBeforeStart ? "interrupted" : "failed",
+          stoppedBeforeStart ? undefined : "the device it runs on ended the compaction without saying how it went"));
+    })().catch(async (error: unknown) => {
+      const reason = error instanceof Error ? error.message : String(error);
+      void this.deps.debugLogs.write("chat.member-compaction.follow-error", { conversationId: conversation.id, runId, message: reason });
+      await failed(reason, compactionFailureLine(target.handle, reason)).catch(() => undefined);
+    }).finally(done);
+    const waited = await Promise.race([answer, delay(SERVER_ANSWER_WAIT_MS, undefined, { ref: false }).then(() => undefined)]);
+    if (waited) return waited;
+    tell({});
+    return {
+      ok: true,
+      status: "queued",
+      runId,
+      target: `@${target.handle}`,
+      next: `The device @${target.handle} runs on has not taken it yet; it is compacted once that device does, and the chat shows a line then. Do not wait or poll for it.`
+    };
   }
 
-  private async recordFailure(conversationId: string, target: ChatParticipant, caller: ChatParticipant, runId: string, instructions: string, error: string): Promise<void> {
+  private recordFailure(conversationId: string, target: ChatParticipant, caller: ChatParticipant, runId: string, instructions: string, error: string): Promise<void> {
+    return this.writeLine(conversationId, target, caller, runId, instructions, compactionFailureLine(target.handle, error));
+  }
+
+  private async writeLine(conversationId: string, target: ChatParticipant, caller: ChatParticipant, runId: string, instructions: string, line: string): Promise<void> {
     const latest = await this.chat.store.requireChat(conversationId).catch(() => undefined);
     if (!latest) return;
     await this.chat.store.withChatMutation(latest, async () => {
-      latest.messages.push(createChatMessage("system", compactionFailureLine(target.handle, error), undefined,
+      latest.messages.push(createChatMessage("system", line, undefined,
         compactMessageMetadata({ runId, triggeredBy: "agent", instructions, requestedByParticipantId: caller.id }, target.id, "failed")));
       latest.updatedAt = new Date().toISOString();
       await this.chat.store.saveConversation(latest);

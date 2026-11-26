@@ -140,7 +140,7 @@ export class ToolCalls {
       if (!this.mcp.toolHandlers.chatParticipantActivityHandler) {
         throw new Error("Chat member activity is not available.");
       }
-      return toolTextResult(await this.mcp.toolHandlers.chatParticipantActivityHandler(actor));
+      return toolTextResult(await this.mcp.toolHandlers.chatParticipantActivityHandler(actor, record.arguments));
     }
     if (record.name === APP_CHAT_READ_MESSAGES_TOOL) {
       if (!this.mcp.toolHandlers.chatMessagesHandler) {

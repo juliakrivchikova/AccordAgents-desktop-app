@@ -24,7 +24,7 @@ export type AppChatContextHandler = (actor: AppMcpActor) => Promise<unknown>;
 
 export type AppChatParticipantsHandler = (actor: AppMcpActor) => Promise<unknown>;
 
-export type AppChatParticipantActivityHandler = (actor: AppMcpActor) => Promise<unknown>;
+export type AppChatParticipantActivityHandler = (actor: AppMcpActor, request?: unknown) => Promise<unknown>;
 
 export type AppChatMessagesHandler = (actor: AppMcpActor, request: unknown) => Promise<unknown>;
 

@@ -151,11 +151,27 @@ test("a machine compacts a member elsewhere only for the chat's main session tha
     "accepted", "its main session compacts the computer's member");
   assert.equal((await allowed({ kind: "compaction", triggeredBy: "agent" })).body.results[0].status, "rejected", "not without naming the main session");
   assert.equal((await allowed({ kind: "turn", requestedByParticipantId: "p-main" })).body.results[0].status, "rejected", "and only to compact it");
+  assert.equal((await allowed({ kind: "compaction", triggeredBy: "agent", requestedByParticipantId: "p-main", resume: { runId: "turn-x" } })).body.results[0].status,
+    "rejected", "never with a member's own going on after it, which would run the member");
+  assert.equal((await allowed({ kind: "compaction", requestedByParticipantId: "p-desk" })).body.results[0].status, "rejected", "naming another member as the one asking");
   const asks = await write("ask");
   assert.equal((await asks({ kind: "compaction", requestedByParticipantId: "p-main" })).body.results[0].status, "rejected", "Compact without asking off");
   const elsewhere = await write("allow", "machine-2");
   assert.equal((await elsewhere({ kind: "compaction", requestedByParticipantId: "p-main" })).body.results[0].status, "rejected",
     "a machine the main session does not run on");
+  // Its own member: compacted as before, but naming the main session only
+  // when that holds.
+  const ownChat = id("chat");
+  const ownMain = { id: "p-main", handle: "main", label: "Main", roleConfigId: "main-session", homeMachineId: "machine-2", permissions: { requestCompaction: "allow" } };
+  const ownBox = { id: "p-box", handle: "box", label: "Box", homeMachineId: "machine-1" };
+  await h.write(h.owner, { opId: id("op"), kind: "conversation.create", conversationId: ownChat,
+    conversation: { title: "Own", kind: "chat", createdAt: new Date().toISOString(), metadata: { participants: [ownMain, ownBox], mainSessionParticipantId: "p-main" } } } as HubOp);
+  await h.write(h.owner, { opId: id("op"), kind: "message.create", conversationId: ownChat, message: userMessage("u-own", "words") });
+  const askOwn = (request: Record<string, unknown>) => h.write(h.machine, { opId: id("op"), kind: "turn.request", conversationId: ownChat,
+    runId: `turn-${id("x")}`, messageId: "u-own", participantId: "p-box", request } as HubOp);
+  assert.equal((await askOwn({ kind: "compaction", requestedByParticipantId: "p-main" })).body.results[0].status, "rejected",
+    "its own member, named as compacted by a main session that runs elsewhere");
+  assert.equal((await askOwn({ kind: "compaction", triggeredBy: "agent" })).body.results[0].status, "accepted", "its own member's own compaction");
 });
 
 test("the User's rules for members come only from her computer, and a machine adds members by them", async (t) => {

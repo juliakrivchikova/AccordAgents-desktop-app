@@ -402,7 +402,9 @@ test("app MCP advertises attachment and reaction tools to chat participants", ()
   assert.ok(participantActivityTool);
   assert.equal(participantActivityTool.annotations?.readOnlyHint, true);
   assert.equal(participantActivityTool.annotations?.destructiveHint, false);
-  assert.deepEqual(participantActivityTool.inputSchema?.properties, {});
+  assert.deepEqual(participantActivityTool.inputSchema?.properties, {
+    participants: { type: "array", items: { type: "string" }, description: "Optional: only these members (handles, with or without @)." }
+  });
   assert.ok(reactionTool.inputSchema?.properties?.messageId);
   assert.ok(reactionTool.inputSchema?.properties?.emoji);
   assert.ok(exportTool);

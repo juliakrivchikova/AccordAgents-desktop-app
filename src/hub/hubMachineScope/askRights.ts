@@ -70,17 +70,20 @@ export function askNeedsApproval(conversation: Conversation, message: ChatMessag
 }
 
 /**
- * Whether a machine may compact a member that runs elsewhere: only for the
- * chat's main session when it runs on that machine and compacts without
- * asking (its `requestCompaction` as the server holds it), and names itself
- * as the one asking, never itself (app_chat_compact_participant; the User,
- * 2026-11-26). The computer compacts any member, as it always could.
+ * Whether a machine may name the chat's main session as the one compacting a
+ * member (app_chat_compact_participant; the User, 2026-11-26), wherever that
+ * member runs: only when the main session runs on that machine and compacts
+ * without asking (its `requestCompaction` as the server holds it), never for
+ * itself, and never with a member's own going on after it (`resume` starts a
+ * turn of the member, which a compaction is not). The computer compacts any
+ * member, as it always could.
  */
 export function machineMayCompact(conversation: Conversation, machineId: string | undefined, targetId: string, request: Record<string, unknown> | undefined): boolean {
   const members = participantsOf(conversation.metadata?.participants);
   const mainId = mainSessionParticipantId(conversation.metadata);
   const main = mainId ? members.find((member) => member.id === mainId) : undefined;
   if (!main || !runsOnMachine(main, machineId) || request?.requestedByParticipantId !== main.id || targetId === main.id) return false;
+  if (request.resume !== undefined) return false;
   if (!members.some((member) => member.id === targetId)) return false;
   return normalizeChatParticipantRequestPermission(permissionsOf(main).requestCompaction as ChatParticipantRequestPermission | undefined) === "allow";
 }

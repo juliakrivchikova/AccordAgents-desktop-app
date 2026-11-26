@@ -687,7 +687,9 @@ test("app MCP dispatches participant activity as capability-free read-only JSON"
   assert.deepEqual(tool?.inputSchema, {
     type: "object",
     additionalProperties: false,
-    properties: {}
+    properties: {
+      participants: { type: "array", items: { type: "string" }, description: "Optional: only these members (handles, with or without @)." }
+    }
   });
   assert.deepEqual(tool?.annotations, {
     readOnlyHint: true,

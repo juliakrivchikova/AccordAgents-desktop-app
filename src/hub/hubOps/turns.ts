@@ -104,11 +104,15 @@ export class Turns {
         const members = Array.isArray(conversation.metadata?.participants) ? conversation.metadata.participants as Array<{ id?: unknown; homeMachineId?: string }> : [];
         const member = (id: unknown) => members.find((item) => item?.id === id);
         const elsewhere = !runsOnMachine(member(op.participantId), device.machineId);
-        // But the chat's main session on this machine compacts a member that
-        // runs elsewhere, as the computer may, while it compacts without asking.
-        const mainCompacts = elsewhere && op.request?.kind === "compaction" &&
-          machineMayCompact(conversation, device.machineId, op.participantId, op.request);
-        if (elsewhere && !mainCompacts) {
+        // The chat's main session on this machine compacts any member, one
+        // that runs elsewhere too, as the computer may, while it compacts
+        // without asking; a compaction that names it otherwise is refused,
+        // so the line never says it compacted a member when it did not.
+        const namesMain = op.request?.kind === "compaction" && op.request.requestedByParticipantId !== undefined;
+        if (namesMain && !machineMayCompact(conversation, device.machineId, op.participantId, op.request)) {
+          return reject(opId, "Only the chat's main session on this machine compacts other members, and only while it compacts without asking.");
+        }
+        if (elsewhere && !namesMain) {
           const message = conversation.messages.find((item) => item.id === op.messageId);
           const ownMembers = message?.role === "participant" && runsOnMachine(member(message.participantId), device.machineId);
           if (!ownMembers || op.request?.kind === "compaction" || isMemberRestartTurnRequest(op.request)) {

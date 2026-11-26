@@ -531,8 +531,8 @@ export class ChatService {
     return this.modules.chatReadTools.describeChatParticipantsForTool(actor);
   }
 
-  describeChatParticipantActivityForTool(actor: ChatAppMcpActor): Promise<ChatParticipantActivitySnapshot> {
-    return this.modules.chatReadTools.describeChatParticipantActivityForTool(actor);
+  describeChatParticipantActivityForTool(actor: ChatAppMcpActor, rawRequest?: unknown): Promise<ChatParticipantActivitySnapshot> {
+    return this.modules.chatReadTools.describeChatParticipantActivityForTool(actor, rawRequest);
   }
 
   readChatMessagesForTool(actor: ChatAppMcpActor, rawRequest: unknown): Promise<Record<string, unknown>> {

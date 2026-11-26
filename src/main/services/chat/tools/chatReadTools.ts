@@ -152,7 +152,7 @@ export class ChatReadTools {
     };
   }
 
-  async describeChatParticipantActivityForTool(actor: ChatAppMcpActor): Promise<ChatParticipantActivitySnapshot> {
+  async describeChatParticipantActivityForTool(actor: ChatAppMcpActor, rawRequest?: unknown): Promise<ChatParticipantActivitySnapshot> {
     await this.chat.store.waitForQueuedSave(actor.conversationId);
     const conversation = await this.chat.store.requireChat(actor.conversationId);
     const requester = chatParticipants(conversation)
@@ -160,7 +160,11 @@ export class ChatReadTools {
     if (!requester) {
       throw new Error("The requesting member is no longer in this chat.");
     }
-    return buildChatParticipantActivitySnapshot(conversation, undefined, new Map(Object.entries(this.chat.backgroundTasks.backgroundTasksForConversation(conversation.id))));
+    const snapshot = buildChatParticipantActivitySnapshot(conversation, undefined, new Map(Object.entries(this.chat.backgroundTasks.backgroundTasksForConversation(conversation.id))));
+    // Only the members asked about (the main session looks at one before it
+    // gives it more work): the chat's counts stay the whole chat's.
+    const named = activityHandles(rawRequest);
+    return named ? { ...snapshot, participants: snapshot.participants.filter((entry) => named.has(entry.handle.toLowerCase())) } : snapshot;
   }
 
   async readChatMessagesForTool(actor: ChatAppMcpActor, rawRequest: unknown): Promise<Record<string, unknown>> {
@@ -300,4 +304,13 @@ export class ChatReadTools {
       dataBase64
     };
   }
+}
+
+/** The handles an activity request names (`participants`), lowercased
+ *  without @; undefined for every member. */
+function activityHandles(value: unknown): Set<string> | undefined {
+  const list = value && typeof value === "object" && !Array.isArray(value) ? (value as { participants?: unknown }).participants : undefined;
+  if (!Array.isArray(list)) return undefined;
+  const handles = list.filter((item): item is string => typeof item === "string").map((item) => item.trim().replace(/^@/, "").toLowerCase()).filter(Boolean);
+  return handles.length > 0 ? new Set(handles) : undefined;
 }

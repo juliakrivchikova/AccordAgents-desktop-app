@@ -56,7 +56,7 @@ export class ServerTurns {
     private readonly chat: Pick<
       ChatModules,
       | "activeRuns" | "appQuit" | "compaction" | "host" | "memberMoves" | "memberRestart" | "members" | "participantBatch"
-      | "runCancel" | "selfCompaction" | "selfCompactionResumes" | "serverChat" | "serverLink" | "store" | "titles"
+      | "runCancel" | "selfCompaction" | "selfCompactionResumes" | "serverChat" | "serverLink" | "store" | "titles" | "turnQueue"
     >,
     private readonly deps: Pick<ChatDependencies, "debugLogs" | "onReviewProgress" | "settings" | "storage">
   ) {}
@@ -235,9 +235,24 @@ export class ServerTurns {
         : undefined;
       const request = turn.request ?? {};
       if (request.kind === "compaction" || (compact && compact.handle.toLowerCase() === participant.handle.toLowerCase())) {
+        // The main session's compaction of a member holds the member's turns
+        // from before it is taken: the work it gives that member a moment
+        // later runs after it (app_chat_compact_participant).
+        const heldEarly = request.kind === "compaction" && typeof request.requestedByParticipantId === "string"
+          ? this.chat.turnQueue.reserveParticipantTurn(chat.id, participant.id) : undefined;
         // Taken on the server first, like any turn (Д5); a Stop from any
         // device reaches it by its run id.
-        if (await this.claimServerTurnHere(turn, controller.signal) !== "claimed") return true;
+        let claimed: Awaited<ReturnType<ServerTurns["claimServerTurnHere"]>>;
+        try {
+          claimed = await this.claimServerTurnHere(turn, controller.signal);
+        } catch (error) {
+          heldEarly?.release();
+          throw error;
+        }
+        if (claimed !== "claimed") {
+          heldEarly?.release();
+          return true;
+        }
         const run = this.chat.participantBatch.registerBackgroundRunController(runId, controller.signal);
         let outcome: "done" | "error" | "stopped" = "error";
         let usage: AgentContextUsage | undefined;
@@ -258,7 +273,7 @@ export class ServerTurns {
             ...(request.kind === "compaction"
               ? { threadId: text(request.threadId), parentMessageId: text(request.parentMessageId), chatThreadRootId: text(request.chatThreadRootId) }
               : { threadId: message.metadata?.threadId ?? message.id, parentMessageId: message.id, chatThreadRootId: message.metadata?.chatThreadRootId })
-          }, run.signal, this.deps.onReviewProgress, (ended) => { end = ended; });
+          }, run.signal, this.deps.onReviewProgress, (ended) => { end = ended; }, undefined, heldEarly);
           usage = agentContextUsageByParticipant(compacted.conversation)[participant.id];
           outcome = run.signal.aborted ? "stopped" : "done";
         } catch (error) {
