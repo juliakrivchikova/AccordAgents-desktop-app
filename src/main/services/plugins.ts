@@ -19,7 +19,8 @@ import type {
 import { UserSkillsService } from "./userSkills";
 
 const DEFAULT_LIMIT = 50;
-const MAX_LIMIT = 100;
+// The composer's slash menu asks for the whole list and filters it itself.
+const MAX_LIMIT = 500;
 const CODEX_CACHE_MAX_DEPTH = 5;
 const PROVIDERS: ChatProviderKind[] = ["codex-cli", "claude-code"];
 const ICON_EXTENSIONS = new Set([".png", ".jpg", ".jpeg", ".webp", ".svg"]);

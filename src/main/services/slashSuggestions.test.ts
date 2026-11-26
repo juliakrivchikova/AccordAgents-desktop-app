@@ -1,35 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { matchingChatSavedPrompts } from "../../shared/chatSavedPrompts";
-import { rankSlashSuggestions } from "../../shared/slashSuggestions";
 import type { ChatSavedPromptConfig } from "../../shared/types";
-
-test("rankSlashSuggestions promotes primary plugin matches above skill description matches", () => {
-  const groups = {
-    commands: [],
-    prompts: [],
-    skills: [
-      { name: "design-html", description: "Design and build production HTML" },
-      { name: "document-release", description: "Build release documentation" }
-    ],
-    plugins: [
-      { name: "build-macos-apps", displayName: "Build macOS Apps", description: "Build native apps" },
-      { name: "build-web-apps", displayName: "Build Web Apps", description: "Build frontend apps" }
-    ]
-  };
-
-  const ranked = rankSlashSuggestions(groups, "build", (selection) => ({
-    primary: [selection.item.name, "displayName" in selection.item ? selection.item.displayName : ""],
-    secondary: [selection.item.description]
-  }));
-
-  assert.deepEqual(ranked.map((selection) => selection.item.name), [
-    "build-macos-apps",
-    "build-web-apps",
-    "design-html",
-    "document-release"
-  ]);
-});
 
 test("matchingChatSavedPrompts ranks exact and prefix trigger matches before broad trigger or label matches", () => {
   const prompts: ChatSavedPromptConfig[] = [

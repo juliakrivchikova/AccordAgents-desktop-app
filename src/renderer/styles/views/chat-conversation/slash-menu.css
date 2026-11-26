@@ -1,0 +1,300 @@
+/* The "/" menu over the composer: variant A of docs/design/slash-menu, the
+   User's choice (2026-11-26). A kit overlay (radius 12, elevated surface,
+   large shadow), one column the composer's width, grouped by kind. */
+.slash-menu {
+  /* Set inline from the composer card it sits over (chat-slash-menu.tsx). */
+  --slash-menu-lift: 0px;
+  --slash-menu-inset-left: 0px;
+  --slash-menu-inset-right: 0px;
+  --slash-menu-room: 520px;
+  position: absolute;
+  left: calc(0px - var(--slash-menu-inset-left));
+  right: calc(0px - var(--slash-menu-inset-right));
+  bottom: calc(100% + var(--slash-menu-lift) + 6px);
+  z-index: var(--z-menu);
+  display: flex;
+  flex-direction: column;
+  max-height: min(520px, calc(var(--slash-menu-room) - 8px));
+  overflow: hidden;
+  /* Thread and member panels give the composer 300-430 px. */
+  container-type: inline-size;
+  border-radius: var(--ui-radius-12);
+  background: var(--ui-bg-elevated);
+  box-shadow: var(--ui-shadow-lg);
+  color: var(--ui-text);
+  font-size: 13px;
+  line-height: 20px;
+}
+
+.slash-menu-list {
+  flex: 0 1 auto;
+  min-height: 0;
+  max-height: 470px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding: 0 4px 4px;
+}
+
+.slash-menu-group {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  display: flex;
+  align-items: flex-end;
+  gap: 6px;
+  height: 24px;
+  margin: 0 -4px;
+  padding: 0 12px 4px;
+  background: var(--ui-bg-elevated);
+  color: var(--ui-text-3);
+  font-size: 11px;
+  font-weight: 500;
+  line-height: 16px;
+}
+
+.slash-menu-group-count {
+  font-weight: 400;
+  font-variant-numeric: tabular-nums;
+}
+
+.slash-menu-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  height: 28px;
+  padding: 0 8px;
+  border: 0;
+  border-radius: var(--ui-radius-8);
+  background: transparent;
+  color: var(--ui-text);
+  font: inherit;
+  text-align: left;
+  white-space: nowrap;
+  cursor: pointer;
+  /* Arrowing into a row never leaves it under the sticky group title. */
+  scroll-margin-top: 24px;
+  scroll-margin-bottom: 4px;
+}
+
+.slash-menu-row.is-active {
+  background: var(--ui-row-active);
+}
+
+.slash-menu-row.is-unavailable {
+  cursor: default;
+}
+
+.slash-menu-row.is-unavailable.is-active {
+  background: var(--ui-row-hover);
+}
+
+.slash-menu-icon {
+  display: inline-grid;
+  flex: none;
+  place-items: center;
+  width: 16px;
+  height: 16px;
+  color: var(--ui-text-3);
+}
+
+.slash-menu-icon img {
+  width: 14px;
+  height: 14px;
+  border-radius: var(--ui-radius-4);
+  object-fit: contain;
+}
+
+.slash-menu-row.is-active:not(.is-unavailable) .slash-menu-icon {
+  color: var(--ui-select-fg);
+}
+
+.slash-menu-name {
+  flex: none;
+  max-width: 55%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  color: var(--ui-text);
+}
+
+.slash-menu-slash,
+.slash-menu-namespace {
+  color: var(--ui-text-3);
+}
+
+.slash-menu-name b,
+.slash-menu-desc b {
+  font-weight: 600;
+}
+
+.slash-menu-desc b {
+  color: var(--ui-text-2);
+}
+
+.slash-menu-row.is-active:not(.is-unavailable) .slash-menu-name,
+.slash-menu-row.is-active:not(.is-unavailable) .slash-menu-slash,
+.slash-menu-row.is-active:not(.is-unavailable) .slash-menu-namespace {
+  color: var(--ui-select-fg);
+}
+
+.slash-menu-desc {
+  flex: 1 1 0;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  color: var(--ui-text-3);
+  font-size: 12px;
+}
+
+.slash-menu-row.is-fold .slash-menu-name {
+  color: var(--ui-text-2);
+}
+
+.slash-menu-row.is-unavailable .slash-menu-name,
+.slash-menu-row.is-unavailable .slash-menu-slash,
+.slash-menu-row.is-unavailable .slash-menu-namespace {
+  color: var(--ui-text-3);
+}
+
+.slash-menu-row.is-unavailable .slash-menu-desc {
+  color: var(--ui-text-disabled);
+}
+
+.slash-menu-row.is-unavailable .slash-menu-marks {
+  opacity: 0.45;
+}
+
+/* Claude Code, Codex, Antigravity: fixed columns, so a column of marks
+   reads as where an item works. */
+.slash-menu-marks {
+  display: grid;
+  flex: none;
+  grid-template-columns: repeat(3, 12px);
+  gap: 4px;
+}
+
+.slash-menu-marks .chat-provider-icon.is-bare,
+.slash-menu-for .chat-provider-icon.is-bare {
+  width: 12px;
+  height: 12px;
+}
+
+/* Quiet status: a small dot and colored text. */
+.slash-menu-status {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  gap: 5px;
+  min-width: 0;
+  color: var(--ui-warning);
+  font-size: 12px;
+}
+
+.slash-menu-status i {
+  flex: none;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--ui-warning-dot);
+}
+
+.slash-menu-status span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.slash-menu-footer {
+  display: flex;
+  flex: none;
+  align-items: center;
+  gap: 12px;
+  height: 32px;
+  padding: 0 12px;
+  border-top: 1px solid var(--ui-border-subtle);
+  color: var(--ui-text-3);
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+.slash-menu-footer-lead {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.slash-menu-footer-lead .slash-menu-status {
+  display: flex;
+  max-width: 100%;
+}
+
+.slash-menu-for {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  vertical-align: middle;
+}
+
+.slash-menu-for {
+  max-width: 100%;
+}
+
+.slash-menu-for b {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  color: var(--ui-text-2);
+  font-weight: 500;
+}
+
+.slash-menu-keys {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  gap: 12px;
+}
+
+.slash-menu-keys > span {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+}
+
+@container (max-width: 420px) {
+  .slash-menu-keys {
+    display: none;
+  }
+}
+
+.slash-menu-keys kbd {
+  display: inline-block;
+  min-width: 18px;
+  padding: 0 4px;
+  border: 1px solid var(--ui-border);
+  border-radius: var(--ui-radius-4);
+  color: var(--ui-text-3);
+  font-family: inherit;
+  font-size: 11px;
+  line-height: 16px;
+  text-align: center;
+}
+
+.slash-menu-empty {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 14px 12px;
+}
+
+.slash-menu-empty > svg {
+  flex: none;
+  margin-top: 2px;
+  color: var(--ui-text-3);
+}
+
+.slash-menu-empty-detail {
+  color: var(--ui-text-3);
+  font-size: 12px;
+  line-height: 18px;
+}

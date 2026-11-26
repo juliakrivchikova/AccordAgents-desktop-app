@@ -32,6 +32,7 @@
 @import "./views/chat-conversation/dictation.css" layer(components);
 @import "./views/chat-conversation/composer-shell.css" layer(components);
 @import "./views/chat-conversation/composer-menus.css" layer(components);
+@import "./views/chat-conversation/slash-menu.css" layer(components);
 @import "./views/chat-conversation/images.css" layer(components);
 @import "./views/chat-conversation/artifact-notes.css" layer(components);
 @import "./views/chat-conversation/accord-cards.css" layer(components);

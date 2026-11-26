@@ -13,12 +13,6 @@ import type {
   UserSkillTargetSummary
 } from "../../../shared/types";
 import {
-  matchingChatSavedPrompts
-} from "../../../shared/chatSavedPrompts";
-import {
-  rankSlashSuggestions
-} from "../../../shared/slashSuggestions";
-import {
   chatParticipantDisplayName,
   chatParticipantMentionHandle
 } from "../conversation/conversation-display";
@@ -27,7 +21,6 @@ import {
   activeFileQuery,
   activeMentionQuery,
   activeSkillQuery,
-  type ChatSlashSuggestion,
   compactCommandOption,
   goalCommandOption,
   draftHasArtifactMention,
@@ -44,10 +37,19 @@ import {
   replaceActivePluginMention,
   replaceActiveSkillMention,
   replaceActiveSlashToken,
-  type DraftPluginMention,
-  skillPickerTargetLabel
+  type DraftPluginMention
 } from "./chat-composer-draft-utils";
 import { isSlashInvocablePlugin } from "./chat-plugin-options";
+import { chatSlashItems, chatSlashTarget } from "./chat-slash-items";
+import type { ChatSlashMenuProps } from "./chat-slash-menu";
+import { buildSlashMenu, resolveSlashActive, slashMoreKey, slashNavKey, stepSlashActive, withSlashKind, type SlashKind } from "./slash-menu-model";
+
+const NO_SLASH_KINDS: ReadonlySet<SlashKind> = new Set();
+// A failed search still answers, so the menu opens with prompts and no target.
+const NO_SLASH_TARGET: UserSkillTargetSummary = { participantIds: [], providerKinds: [], hasClearTargets: false };
+// The whole list for the target, filtered here: initials ("/ocgr") and the
+// group counts need every skill (main's cap, userSkills.ts MAX_LIMIT).
+const SLASH_SEARCH_LIMIT = 500;
 
 export type ChatComposerSearchSource =
   | {
@@ -89,7 +91,8 @@ export function useChatComposerMentions(props: {
   insertSavedPrompt: (prompt: ChatSavedPromptConfig) => void;
   insertSkillMention: (skill: UserSkillSummary) => void;
   insertPluginMention: (plugin: PluginCatalogItem) => void;
-  insertSlashOptionAtIndex: (index: number) => void;
+  activateSlashNavAtIndex: (index: number) => void;
+  moveSlashActive: (step: number) => void;
   mentionIndex: number;
   mentionOptions: ChatParticipant[];
   pendingCaretRef: React.MutableRefObject<{ value: string; position: number } | undefined>;
@@ -105,22 +108,19 @@ export function useChatComposerMentions(props: {
   setSelectedFileMentions: React.Dispatch<React.SetStateAction<RepoFileMention[]>>;
   setSelectedPluginMentions: React.Dispatch<React.SetStateAction<DraftPluginMention[]>>;
   setSelectedSkillMentions: React.Dispatch<React.SetStateAction<ChatSkillMention[]>>;
-  setSkillIndex: React.Dispatch<React.SetStateAction<number>>;
   setSkillQuery: React.Dispatch<React.SetStateAction<string | undefined>>;
   showSkillHighlights: boolean;
-  skillIndex: number;
   skillQuery: string | undefined;
-  skillTargetLabel?: string;
+  slashActiveIndex: number;
+  /** The open "/" menu; undefined while it is closed. */
+  slashMenu?: ChatSlashMenuProps;
+  slashNavCount: number;
+  /** A "/query" is being typed and the search has not answered yet. */
+  slashSearching: boolean;
   updateDraft: (value: string) => void;
   visibleArtifactOptions: ArtifactSummary[];
-  visibleCommandOptions: NonNullable<ReturnType<typeof compactCommandOption>>[];
   visibleFileOptions: RepoFileSearchResult[];
   visibleHashOptionCount: number;
-  visiblePromptOptions: ChatSavedPromptConfig[];
-  visibleSkillOptions: UserSkillSummary[];
-  visiblePluginOptions: PluginCatalogItem[];
-  visibleSlashOptions: ChatSlashSuggestion[];
-  visibleSlashOptionCount: number;
 } {
   const [mentionQuery, setMentionQuery] = useState<string | undefined>();
   const [mentionIndex, setMentionIndex] = useState(0);
@@ -128,10 +128,13 @@ export function useChatComposerMentions(props: {
   const [fileIndex, setFileIndex] = useState(0);
   const [fileOptions, setFileOptions] = useState<RepoFileSearchResult[]>([]);
   const [skillQuery, setSkillQuery] = useState<string | undefined>();
-  const [skillIndex, setSkillIndex] = useState(0);
+  // The highlighted slash row by key; undefined puts it on the first insertable row.
+  const [slashActiveKey, setSlashActiveKey] = useState<string>();
+  const [slashExpanded, setSlashExpanded] = useState(NO_SLASH_KINDS);
   const [skillOptions, setSkillOptions] = useState<UserSkillSummary[]>([]);
   const [pluginOptions, setPluginOptions] = useState<PluginCatalogItem[]>([]);
   const [skillTarget, setSkillTarget] = useState<UserSkillTargetSummary | undefined>();
+  const [slashResultKey, setSlashResultKey] = useState<string>();
   const [internalSelectedSkillMentions, setInternalSelectedSkillMentions] = useState<ChatSkillMention[]>([]);
   const [internalSelectedPluginMentions, setInternalSelectedPluginMentions] = useState<DraftPluginMention[]>([]);
   const [internalSelectedFileMentions, setInternalSelectedFileMentions] = useState<RepoFileMention[]>([]);
@@ -171,41 +174,41 @@ export function useChatComposerMentions(props: {
   const visibleFileOptions = fileQuery === undefined ? [] : fileOptions;
   const visibleArtifactOptions = fileQuery === undefined ? [] : matchArtifactMentions(artifactPool, fileQuery);
   const visibleHashOptionCount = visibleArtifactOptions.length + visibleFileOptions.length;
-  const visiblePromptOptions = skillQuery === undefined
+  // What the search depends on: the draft without the "/query" being typed.
+  // Main reads only the @mentions in it (the target), so typing the query
+  // filters locally and only a new target searches again.
+  const slashSearchContent = skillQuery === undefined ? undefined : props.draft.replace(/\/[A-Za-z0-9_-]*$/, "");
+  // By value: New chat rebuilds its search source on every keystroke.
+  const slashSearchSource = JSON.stringify(props.searchSource);
+  const slashSearchKey = slashSearchContent === undefined ? undefined : `${slashSearchSource}\n${slashSearchContent}`;
+  // Results answer the search they were made for: after the member before the
+  // "/query" changes, the last member's rows are gone until the new answer.
+  const slashFresh = slashSearchKey !== undefined && slashResultKey === slashSearchKey;
+  const slashTarget = slashFresh ? skillTarget : undefined;
+  const visiblePluginOptions = slashFresh ? pluginOptions.filter((plugin) => isSlashInvocablePlugin(plugin, slashTarget)) : [];
+  const commandOptions = [
+    goalCommandOption(slashTarget),
+    props.searchSource.type === "conversation" ? compactCommandOption(slashTarget) : undefined
+  ].filter((option): option is NonNullable<typeof option> => Boolean(option));
+  const slashItems = skillQuery === undefined
     ? []
-    : matchingChatSavedPrompts(props.savedPrompts, skillQuery, { includeBody: false });
-  const visibleSkillOptions = skillQuery === undefined ? [] : skillOptions;
-  const visiblePluginOptions = skillQuery === undefined ? [] : pluginOptions.filter((plugin) => isSlashInvocablePlugin(plugin, skillTarget));
-  const skillTargetLabel = skillTarget ? skillPickerTargetLabel(skillTarget, props.participants) : undefined;
-  const compactOption = props.searchSource.type === "conversation" ? compactCommandOption(skillQuery, skillTarget) : undefined;
-  const goalOption = goalCommandOption(skillQuery, skillTarget);
-  const visibleCommandOptions = [compactOption, goalOption].filter(
-    (option): option is NonNullable<typeof option> => Boolean(option)
-  );
-  const visibleSlashOptions = rankSlashSuggestions({
-    commands: visibleCommandOptions,
-    prompts: visiblePromptOptions,
-    skills: visibleSkillOptions,
-    plugins: visiblePluginOptions
-  }, skillQuery ?? "", (selection) => {
-    if (selection.kind === "command") {
-      return { primary: [selection.item.id, selection.item.label], secondary: [selection.item.description] };
-    }
-    if (selection.kind === "prompt") {
-      return { primary: [selection.item.trigger, selection.item.label] };
-    }
-    if (selection.kind === "skill") {
-      return {
-        primary: [selection.item.frontmatterName, selection.item.displayName],
-        secondary: [selection.item.description ?? ""]
-      };
-    }
-    return {
-      primary: [selection.item.name, selection.item.displayName],
-      secondary: [selection.item.description ?? "", selection.item.category ?? ""]
-    };
-  });
-  const visibleSlashOptionCount = visibleSlashOptions.length;
+    : chatSlashItems({ commands: commandOptions, prompts: props.savedPrompts, skills: slashFresh ? skillOptions : [], plugins: visiblePluginOptions });
+  const slashModel = buildSlashMenu(slashItems, skillQuery ?? "", slashExpanded);
+  const slashActiveIndex = resolveSlashActive(slashModel.nav, slashActiveKey);
+  // Saved prompts show at once (Enter on "/st" keeps inserting one); "No
+  // matches" and the target wait for the search to answer.
+  const slashMenu: ChatSlashMenuProps | undefined = skillQuery !== undefined && (slashModel.nav.length > 0 || slashTarget !== undefined)
+    ? {
+        menu: slashModel,
+        activeIndex: slashActiveIndex,
+        items: slashItems,
+        query: skillQuery,
+        searching: slashTarget === undefined,
+        target: chatSlashTarget(slashTarget, props.participants),
+        onActivate: activateSlashNavAtIndex,
+        onHover: (index) => setSlashActiveAt(slashModel, index)
+      }
+    : undefined;
   const showSkillHighlights = draftHasMention(props.draft) ||
     draftHasArtifactMention(props.draft) ||
     selectedSkillMentions.some((mention) => draftHasSkillMention(props.draft, mention.frontmatterName)) ||
@@ -276,55 +279,38 @@ export function useChatComposerMentions(props: {
   }, [fileQuery, fileSearchAvailable, props.searchSource]);
 
   useEffect(() => {
-    if (skillQuery === undefined || !skillSearchAvailable) {
+    if (slashSearchContent === undefined || !skillSearchAvailable) {
       setSkillOptions([]);
       setPluginOptions([]);
+      setSkillTarget(undefined);
       return;
     }
     const requestId = skillSearchRequestRef.current + 1;
     skillSearchRequestRef.current = requestId;
     const timeout = window.setTimeout(() => {
-      const request = props.searchSource.type === "conversation"
-        ? {
-            conversationId: props.searchSource.conversationId ?? "",
-            query: skillQuery,
-            content: props.draft,
-            limit: 50
-          }
-        : {
-            repoPath: props.searchSource.repoPath,
-            participants: props.searchSource.participants,
-            assistantProviderKind: props.searchSource.assistantProviderKind,
-            query: skillQuery,
-            content: props.draft,
-            limit: 50
-          };
-      void window.consensus.searchUserSkills(request).then((result) => {
-        if (skillSearchRequestRef.current === requestId) {
-          setSkillOptions(result.skills);
-          setSkillTarget(result.target);
-          setSkillIndex(0);
+      const search = { query: "", content: slashSearchContent, limit: SLASH_SEARCH_LIMIT };
+      const source = props.searchSource;
+      const request = source.type === "conversation"
+        ? { ...search, conversationId: source.conversationId ?? "" }
+        : { ...search, repoPath: source.repoPath, participants: source.participants, assistantProviderKind: source.assistantProviderKind };
+      // Both lists land together: the target opens the menu, which must not
+      // say "No matches" while the plugins are still on their way.
+      void Promise.allSettled([window.consensus.searchUserSkills(request), window.consensus.listPlugins(request)]).then(([skills, plugins]) => {
+        if (skillSearchRequestRef.current !== requestId) {
+          return;
         }
-      }).catch(() => {
-        if (skillSearchRequestRef.current === requestId) {
-          setSkillOptions([]);
-          setPluginOptions([]);
-          setSkillTarget(undefined);
-        }
-      });
-      void window.consensus.listPlugins(request).then((result) => {
-        if (skillSearchRequestRef.current === requestId) {
-          setPluginOptions(result.plugins);
-          setSkillIndex(0);
-        }
-      }).catch(() => {
-        if (skillSearchRequestRef.current === requestId) {
-          setPluginOptions([]);
-        }
+        setSkillOptions(skills.status === "fulfilled" ? skills.value.skills : []);
+        setSkillTarget(skills.status === "fulfilled" ? skills.value.target : NO_SLASH_TARGET);
+        setPluginOptions(plugins.status === "fulfilled" ? plugins.value.plugins : []);
+        setSlashResultKey(slashSearchKey);
       });
     }, 200);
-    return () => window.clearTimeout(timeout);
-  }, [skillQuery, skillSearchAvailable, props.draft, props.searchSource]);
+    return () => {
+      window.clearTimeout(timeout);
+      // A reply still on its way after Esc or a new target is stale.
+      skillSearchRequestRef.current += 1;
+    };
+  }, [slashSearchKey, skillSearchAvailable]);
 
   function updateDraft(value: string): void {
     const normalized = normalizeArtifactDraft(value, selectedPluginMentions);
@@ -337,7 +323,8 @@ export function useChatComposerMentions(props: {
     setSkillQuery(nextSkillQuery);
     setMentionIndex(0);
     setFileIndex(0);
-    setSkillIndex(0);
+    setSlashActiveKey(undefined);
+    setSlashExpanded(NO_SLASH_KINDS);
   }
 
   function updateDraftWithCaret(value: string, position = value.length): void {
@@ -396,7 +383,7 @@ export function useChatComposerMentions(props: {
     setSkillOptions([]);
     setPluginOptions([]);
     setSkillTarget(undefined);
-    setSkillIndex(0);
+    setSlashActiveKey(undefined);
   }
 
   function insertSavedPrompt(prompt: ChatSavedPromptConfig): void {
@@ -405,7 +392,7 @@ export function useChatComposerMentions(props: {
     setSkillOptions([]);
     setPluginOptions([]);
     setSkillTarget(undefined);
-    setSkillIndex(0);
+    setSlashActiveKey(undefined);
   }
 
   function insertCommand(command: "compact" | "goal"): void {
@@ -414,7 +401,7 @@ export function useChatComposerMentions(props: {
     setSkillOptions([]);
     setPluginOptions([]);
     setSkillTarget(undefined);
-    setSkillIndex(0);
+    setSlashActiveKey(undefined);
   }
 
   function insertPluginMention(plugin: PluginCatalogItem): void {
@@ -437,23 +424,42 @@ export function useChatComposerMentions(props: {
     setSkillOptions([]);
     setPluginOptions([]);
     setSkillTarget(undefined);
-    setSkillIndex(0);
+    setSlashActiveKey(undefined);
   }
 
-  function insertSlashOptionAtIndex(index: number): void {
-    const selection = visibleSlashOptions[index];
-    if (!selection) {
+  function activateSlashNavAtIndex(index: number): void {
+    const entry = slashModel.nav[index];
+    if (entry?.type === "more" || entry?.type === "less") {
+      const expanded = withSlashKind(slashExpanded, entry.kind, entry.type === "more");
+      setSlashExpanded(expanded);
+      // Show all leaves the highlight on the first row it showed; Show fewer
+      // puts it back on the group's Show all row.
+      if (entry.type === "more") {
+        setSlashActiveAt(buildSlashMenu(slashItems, skillQuery ?? "", expanded), index);
+      } else {
+        setSlashActiveKey(slashMoreKey(entry.kind));
+      }
       return;
     }
-    if (selection.kind === "command") {
+    const selection = entry?.item.value;
+    if (selection?.kind === "command") {
       insertCommand(selection.item.id);
-    } else if (selection.kind === "prompt") {
+    } else if (selection?.kind === "prompt") {
       insertSavedPrompt(selection.item);
-    } else if (selection.kind === "skill") {
+    } else if (selection?.kind === "skill") {
       insertSkillMention(selection.item);
-    } else {
+    } else if (selection?.kind === "plugin") {
       insertPluginMention(selection.item);
     }
+  }
+
+  function moveSlashActive(step: number): void {
+    setSlashActiveAt(slashModel, stepSlashActive(slashModel.nav.length, slashActiveIndex, step));
+  }
+
+  function setSlashActiveAt(menu: typeof slashModel, index: number): void {
+    const entry = menu.nav[index];
+    setSlashActiveKey(entry ? slashNavKey(entry) : undefined);
   }
 
   function removeFileMention(filePath: string): void {
@@ -477,7 +483,8 @@ export function useChatComposerMentions(props: {
     insertSavedPrompt,
     insertSkillMention,
     insertPluginMention,
-    insertSlashOptionAtIndex,
+    activateSlashNavAtIndex,
+    moveSlashActive,
     mentionIndex,
     mentionOptions,
     pendingCaretRef,
@@ -493,21 +500,16 @@ export function useChatComposerMentions(props: {
     setSelectedFileMentions,
     setSelectedPluginMentions,
     setSelectedSkillMentions,
-    setSkillIndex,
     setSkillQuery,
     showSkillHighlights,
-    skillIndex,
     skillQuery,
-    skillTargetLabel,
+    slashActiveIndex,
+    slashMenu,
+    slashNavCount: slashModel.nav.length,
+    slashSearching: skillQuery !== undefined && slashTarget === undefined,
     updateDraft,
     visibleArtifactOptions,
-    visibleCommandOptions,
     visibleFileOptions,
-    visibleHashOptionCount,
-    visiblePromptOptions,
-    visibleSkillOptions,
-    visiblePluginOptions,
-    visibleSlashOptions,
-    visibleSlashOptionCount
+    visibleHashOptionCount
   };
 }

@@ -25,7 +25,10 @@ const INTERNAL_MARKER_FILE = ".accordagents-generated.json";
 const INTERNAL_TMP_PREFIX = ".accordagents-tmp-";
 const USER_SKILL_HASH_VERSION = "user-skills-v1";
 const DEFAULT_LIMIT = 30;
-const MAX_LIMIT = 100;
+// The composer's slash menu asks for every skill of the target and filters
+// them itself (initials, group counts), so the cap must stay above any real set.
+export const USER_SKILL_SEARCH_MAX_LIMIT = 500;
+const MAX_LIMIT = USER_SKILL_SEARCH_MAX_LIMIT;
 const MAX_SKILL_FRONTMATTER_BYTES = 64 * 1024;
 
 export interface UserSkillRunContext {

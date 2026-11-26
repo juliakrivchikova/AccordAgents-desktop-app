@@ -602,6 +602,29 @@ function hasClass(name: string) {
   return (node: ReactTestInstance): boolean => typeof node.type === "string" && typeof node.props.className === "string" && node.props.className.split(" ").includes(name);
 }
 
+test("Enter does not start the chat while a typed /query is still being searched", async () => {
+  installWindowBridge({ searchUserSkills: () => new Promise(() => undefined) });
+  let starts = 0;
+  const Harness = () => {
+    const [prompt, setPrompt] = useState("");
+    return <NewChatScreen {...baseProps(readyAgents(), { prompt, onPromptChange: setPrompt, onStart: async () => { starts += 1; return true; } })} />;
+  };
+  let renderer!: ReturnType<typeof create>;
+  await act(async () => {
+    renderer = create(<Harness />);
+    await new Promise<void>((resolve) => setImmediate(resolve));
+  });
+  const prompt = () => renderer.root.findByProps({ "data-testid": "new-chat-prompt" });
+  await act(async () => prompt().props.onChange({ target: { value: "/zz" } }));
+  await act(async () => {
+    prompt().props.onKeyDown({ key: "Enter", shiftKey: false, metaKey: false, ctrlKey: false, repeat: false, preventDefault: () => undefined });
+    await new Promise<void>((resolve) => setImmediate(resolve));
+  });
+  assert.equal(starts, 0);
+  assert.equal(prompt().props.value, "/zz");
+  renderer.unmount();
+});
+
 function GoalCommandHarness(): JSX.Element {
   const [prompt, setPrompt] = useState("");
   return <NewChatScreen {...baseProps(readyAgents(), {

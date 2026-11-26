@@ -238,8 +238,8 @@
   pointer-events: none;
 }
 
-/* A composer's @-mention menu opens upward into the same corner. */
-.app-shell-root:has(.mention-menu) .app-notice-stack {
+/* A composer's @-mention and slash menus open upward into the same corner. */
+.app-shell-root:has(.mention-menu, .slash-menu) .app-notice-stack {
   visibility: hidden;
 }
 

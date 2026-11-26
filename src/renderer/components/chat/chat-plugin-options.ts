@@ -15,16 +15,17 @@ export function isSlashInvocablePlugin(plugin: PluginCatalogItem, target?: UserS
   return skill.capabilityState === "invocable" && !skill.ambiguous;
 }
 
-export function pluginSlashProviderLabels(plugin: PluginCatalogItem, providerLabel: (providerKind: ChatProviderKind) => string): string[] {
+/** The providers a slash-menu plugin runs in, for its row's marks. */
+export function pluginSlashProviderKinds(plugin: PluginCatalogItem): ChatProviderKind[] {
   if (plugin.invocation.kind === "prompt-insert") {
-    return [providerLabel(plugin.providerKind)];
+    return [plugin.providerKind];
   }
   if (plugin.invocation.kind === "mcp-passive") {
-    return plugin.installedProviderKinds.map(providerLabel);
+    return plugin.installedProviderKinds;
   }
   return plugin.providerAvailability
     .filter((provider) => provider.status === "available" || provider.status === "invocable")
-    .map((provider) => providerLabel(provider.providerKind));
+    .map((provider) => provider.providerKind);
 }
 
 function matchingInstalledProviderKinds(plugin: PluginCatalogItem, target?: UserSkillTargetSummary): ChatProviderKind[] {
