@@ -170,6 +170,11 @@
   padding: 0 4px 4px;
 }
 
+/* In the panel the list lines up with the note above it. */
+.chat-subagents-empty .chat-subagent-pick {
+  padding: 0;
+}
+
 .chat-subagents-empty p {
   margin: 0;
   padding: 0 6px;
@@ -237,47 +242,51 @@
   display: grid;
   gap: 1px;
   padding: 4px;
+  color: var(--ui-text);
+  font-size: 13px;
 }
 
 .chat-subagent-pick-scope {
   display: flex;
   align-items: center;
   gap: 8px;
-  padding: 2px 4px 6px;
+  padding: 0 6px 6px;
   color: var(--ui-text-3);
   font-size: 12px;
 }
 
+/* One line, as the Agents rows: icon, name, a word only when it is not
+   ready, the action on the right. */
 .chat-subagent-pick-row {
   display: flex;
   align-items: center;
-  gap: 10px;
-  min-height: 44px;
-  padding: 4px 6px 4px 8px;
+  gap: 8px;
+  height: 32px;
+  padding: 0 4px 0 6px;
   border-radius: var(--ui-radius-8);
 }
 
-.chat-subagent-pick-copy {
-  display: grid;
+.chat-subagent-pick-row:hover {
+  background: var(--ui-row-hover);
+}
+
+.chat-subagent-pick-row .grow {
   flex: 1;
-  min-width: 0;
-  line-height: 18px;
 }
 
 .chat-subagent-pick-name {
+  flex: none;
   font-weight: 500;
-}
-
-.chat-subagent-pick-detail {
-  overflow: hidden;
-  color: var(--ui-text-3);
-  font-size: 12px;
-  text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-.chat-subagent-pick-detail.is-off {
+.chat-subagent-pick-detail {
+  min-width: 0;
+  overflow: hidden;
   color: var(--ui-warning);
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .chat-subagent-pick-added {

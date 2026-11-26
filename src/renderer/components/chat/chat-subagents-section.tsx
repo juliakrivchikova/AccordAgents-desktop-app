@@ -32,9 +32,10 @@ export interface SubagentAddRequest {
   note?: string;
 }
 
-const READINESS_TEXT: Record<AgentReadinessState, string> = {
-  ready: "Ready",
-  "could-not-verify": "Installed",
+/** Said only when the CLI is not ready: a ready one needs no word. */
+const READINESS_TEXT: Record<AgentReadinessState, string | undefined> = {
+  ready: undefined,
+  "could-not-verify": undefined,
   "sign-in-required": "Sign in needed",
   "not-detected": "Not installed",
   "failed-to-run": "Does not start",
@@ -202,9 +203,9 @@ function SubagentPickList(props: { providers: SubagentPanelProvider[]; project?:
         <div className="chat-subagent-pick-scope">
           <span>Add to</span>
           <Tabs value={scope} onValueChange={(value) => setScope(value as SubagentProviderScope)}>
-            <TabsList>
-              <TabsTrigger value="thread">This thread</TabsTrigger>
-              <TabsTrigger value="project">Project</TabsTrigger>
+            <TabsList className="h-7">
+              <TabsTrigger value="thread" className="px-2 text-ui-12">This thread</TabsTrigger>
+              <TabsTrigger value="project" className="px-2 text-ui-12">Project</TabsTrigger>
             </TabsList>
           </Tabs>
         </div>
@@ -215,19 +216,19 @@ function SubagentPickList(props: { providers: SubagentPanelProvider[]; project?:
         // In a Cloud run chat its members run there, where Antigravity does not (this thread only).
         const unavailable = scope === "thread" && Boolean(props.main?.cloudRun) && kind === "gemini-cli";
         const label = CLI_PROVIDER_SETUP[kind].label;
+        const note = unavailable ? "Not on Cloud run" : READINESS_TEXT[readiness];
         const added = scope === "project"
           ? Boolean(props.project?.some((entry) => entry.kind === kind))
           : props.providers.some((provider) => provider.kind === kind && !provider.offList);
         return (
           <div className="chat-subagent-pick-row" key={kind} data-provider-kind={kind}>
             <ProviderIcon kind={kind} label={label} className="chat-provider-icon" bare />
-            <span className="chat-subagent-pick-copy">
-              <span className="chat-subagent-pick-name">{label}</span>
-              <span className={`chat-subagent-pick-detail${addable && !unavailable ? "" : " is-off"}`}>{unavailable ? "Not on Cloud run" : READINESS_TEXT[readiness]}</span>
-            </span>
+            <span className="chat-subagent-pick-name">{label}</span>
+            {note && <span className="chat-subagent-pick-detail">{note}</span>}
+            <span className="grow" />
             {!added && !addable && !unavailable && <Button size="xs" variant="ghost" onClick={actions.openSetup}>Set up</Button>}
             {added ? <span className="chat-subagent-pick-added">Added</span>
-              : !unavailable && <Button size="xs" variant="outline" disabled={busy} data-testid="chat-subagent-pick-add" onClick={() => void add(kind)}>Add</Button>}
+              : !unavailable && <Button size="xs" variant="ghost" disabled={busy} data-testid="chat-subagent-pick-add" onClick={() => void add(kind)}>Add</Button>}
           </div>
         );
       })}
