@@ -111,12 +111,20 @@ export interface CrashReportBreadcrumb {
   data?: Record<string, unknown>;
 }
 
+// The SDK's breadcrumbs about the computer rather than the app: sleep and
+// wake, battery, screen lock, and displays added or changed.
+const COMPUTER_EVENT_BREADCRUMB = /^(?:powerMonitor|screen)\./;
+
 /** Console output can carry prompts and replies, and the click trail names
- *  chats and members; neither is sent. Network breadcrumbs keep the method
- *  and status, not the address. */
+ *  chats and members; neither is sent. Nor are the computer's own events:
+ *  a report keeps what the app did, not the computer. Network breadcrumbs
+ *  keep the method and status, not the address. */
 export function scrubCrashReportBreadcrumb<T extends CrashReportBreadcrumb>(breadcrumb: T, homeDir = ""): T | null {
   const category = breadcrumb.category ?? "";
   if (category === "console" || category.startsWith("ui.")) {
+    return null;
+  }
+  if (category === "electron" && COMPUTER_EVENT_BREADCRUMB.test(breadcrumb.message ?? "")) {
     return null;
   }
   const scrubbed: CrashReportBreadcrumb = { ...breadcrumb };

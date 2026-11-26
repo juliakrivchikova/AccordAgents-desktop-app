@@ -185,7 +185,7 @@ export function GeneralSettingsSection(props: {
             <div className="gen-row-text">
               <div className="gen-row-title">Crash and usage reports</div>
               <div className="gen-row-desc">
-                Send error reports (the error, the app version and your operating system) and usage statistics to Sentry: active installs, operating system and language, which supported CLIs are set up, which first steps you have reached (like your first chat), which features you use (like roles and documents), how many members and roles you have, and which model providers you connect. Each record carries a random ID kept on this computer, so records of one installation can be tied together. Usage statistics never include your messages, code, file names or keys; in error reports, file paths, links and secrets are masked and error text is cut to 300 characters. Turning on applies on next restart.
+                Send error reports (the error, what the app did just before it, the app version and your operating system) and usage statistics to Sentry: active installs, operating system and language, which supported CLIs are set up, which first steps you have reached (like your first chat), which features you use (like roles and documents), how many members and roles you have, and which model providers you connect. Each record carries a random ID kept on this computer, so records of one installation can be tied together. Usage statistics never include your messages, code, file names or keys; in error reports, file paths, links and secrets are masked and error text is cut to 300 characters. Turning on applies on next restart.
               </div>
             </div>
             <Switch

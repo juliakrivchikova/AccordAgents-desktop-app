@@ -111,6 +111,20 @@ test("console and click breadcrumbs are dropped; network breadcrumbs keep no add
   );
 });
 
+test("the computer's own events are dropped and the app's window events stay", () => {
+  for (const message of ["powerMonitor.on-battery", "powerMonitor.suspend", "powerMonitor.lock-screen", "screen.display-added", "screen.display-metrics-changed"]) {
+    assert.equal(scrubCrashReportBreadcrumb({ category: "electron", message }), null, message);
+  }
+  assert.deepEqual(
+    scrubCrashReportBreadcrumb({ category: "electron", message: "app.browser-window-focus" }),
+    { category: "electron", message: "app.browser-window-focus" }
+  );
+  assert.deepEqual(
+    scrubCrashReportBreadcrumb({ category: "electron", message: "browser-window.unresponsive", data: { id: 1 } }),
+    { category: "electron", message: "browser-window.unresponsive", data: { id: 1 } }
+  );
+});
+
 test("fetch breadcrumbs lose the query string and fragment the SDK keeps apart from the URL", () => {
   assert.deepEqual(
     scrubCrashReportBreadcrumb({
