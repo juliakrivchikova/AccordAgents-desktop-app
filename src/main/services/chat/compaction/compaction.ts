@@ -29,7 +29,7 @@ import {
   appMcpToolInventoryKeyFor, appMcpToolNamesFor, appToolCapabilitiesForRun, preauthorizedAppMcpToolNamesFor
 } from "../turns/promptSections";
 import { emitChatRunFailure, emitProgress } from "../turns/replyMessages";
-import type { ChatAppMcpTokenGrant, ProgressCallback } from "../types";
+import type { ChatAppMcpTokenGrant, ParticipantTurnReservation, ProgressCallback } from "../types";
 import type { ChatModules } from "../modules";
 import type { ChatDependencies } from "../dependencies";
 
@@ -50,13 +50,36 @@ export class Compaction {
     signal?: AbortSignal,
     progress?: ProgressCallback,
     /** How it ended here (a member's own compaction goes on from it). */
-    onEnded?: (end: SelfCompactionEnd) => void
+    onEnded?: (end: SelfCompactionEnd) => void,
+    /** It holds the member's turns: any turn asked after this runs after it. */
+    onQueued?: () => void,
+    /** The member's turns, held already by the caller (from before its turn
+     *  on the server was taken); released here whatever happens. */
+    heldTurns?: ParticipantTurnReservation
+  ): Promise<StartReviewResult> {
+    try {
+      return await this.compactParticipantHeld(request, signal, progress, onEnded, onQueued, heldTurns);
+    } finally {
+      // Released by the compaction once it ran; before that, here.
+      heldTurns?.release();
+    }
+  }
+
+  private async compactParticipantHeld(
+    request: CompactChatParticipantRequest,
+    signal: AbortSignal | undefined,
+    progress: ProgressCallback | undefined,
+    onEnded: ((end: SelfCompactionEnd) => void) | undefined,
+    onQueued: (() => void) | undefined,
+    heldTurns: ParticipantTurnReservation | undefined
   ): Promise<StartReviewResult> {
     const runId = request.runId ?? randomUUID();
-    // A member that is moving is compacted once it moved, where it runs then.
+    // A member that is moving is compacted once it moved, where it runs then;
+    // one whose turns are held already is not moving (its move waits for
+    // them), and it is compacted where it runs now.
     const stored = (await this.chat.store.readStoredChatStateForRefresh(request.conversationId)).stored;
     const compacted = stored && stored.kind === "chat" ? compactRequestParticipant(stored, request) : undefined;
-    const moving = compacted ? this.chat.memberMoves.memberMoveGate(request.conversationId, compacted.id) : undefined;
+    const moving = compacted && !heldTurns ? this.chat.memberMoves.memberMoveGate(request.conversationId, compacted.id) : undefined;
     if (moving) await abortableWait(moving, signal);
     const triggeredBy = request.triggeredBy === "agent" ? "agent" : "user";
     const compactInstructions = normalizeCompactInstructions(request.instructions);
@@ -136,7 +159,8 @@ export class Compaction {
     emitProgress(runId, progress, "initial", `Compacting @${ingest.participant.handle}.`, {
       participantLabel: `@${ingest.participant.handle}`
     });
-    const reservation = this.chat.turnQueue.reserveParticipantTurn(ingest.conversation.id, ingest.participant.id);
+    const reservation = heldTurns ?? this.chat.turnQueue.reserveParticipantTurn(ingest.conversation.id, ingest.participant.id);
+    onQueued?.();
     try {
       await reservation.wait();
       const conversation = ingest.conversation;
@@ -215,7 +239,7 @@ export class Compaction {
         ? (await this.chat.host.missingRunFolder(conversation, runPath))?.reason : undefined;
       await this.chat.store.withChatMutation(conversation, async () => {
         const content = result.ok
-          ? compactSuccessMessage(participant.handle, compactInstructions)
+          ? compactSuccessMessage(participant.handle, compactInstructions, requesterHandle(conversation, request))
           : compactionFailureLine(participant.handle, missingFolder ?? result.error);
         conversation.messages.push(createChatMessage(
           "system",
@@ -421,6 +445,7 @@ export class Compaction {
               kind: "compaction",
               triggeredBy: request.triggeredBy === "agent" ? "agent" : "user",
               ...(compactInstructions ? { instructions: compactInstructions } : {}),
+              ...(request.requestedByParticipantId ? { requestedByParticipantId: request.requestedByParticipantId } : {}),
               ...(request.threadId?.trim() ? { threadId: request.threadId.trim() } : {}),
               ...(request.parentMessageId?.trim() ? { parentMessageId: request.parentMessageId.trim() } : {}),
               ...(request.chatThreadRootId?.trim() ? { chatThreadRootId: request.chatThreadRootId.trim() } : {})
@@ -515,4 +540,10 @@ export class Compaction {
     await this.deps.debugLogs.write("chat.compaction.finished", { ...auditBase, participantId: participant.id, participantHandle: participant.handle, outcome: "no-active-session" });
     return { conversation, warnings };
   }
+}
+
+/** The main session's handle when it asked for this compaction. */
+function requesterHandle(conversation: Conversation, request: CompactChatParticipantRequest): string | undefined {
+  const id = request.requestedByParticipantId;
+  return id ? chatParticipants(conversation).find((participant) => participant.id === id)?.handle : undefined;
 }

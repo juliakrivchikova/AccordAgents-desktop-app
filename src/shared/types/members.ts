@@ -2,7 +2,7 @@ import type { CloudRunRemoteExecutionMode, RemoteParticipantSessionHandle } from
 import type { ChatProviderKind, CliProviderHostVendor, ProviderKind } from "./providers";
 import type { ChatBehaviorRuleSnapshot, ChatRoleParticipantDefaults, ChatRoleRuntime } from "./roles";
 
-export type ChatAppToolCapability = "participants.manage" | "participants.request" | "compaction.request" | "permissions.request" | "scripts.request" | "participants.delegate" | "accord.start";
+export type ChatAppToolCapability = "participants.manage" | "participants.request" | "compaction.request" | "permissions.request" | "scripts.request" | "participants.delegate" | "accord.start" | "participants.compact";
 
 export interface ChatStaleRunRecovery {
   runId?: string;

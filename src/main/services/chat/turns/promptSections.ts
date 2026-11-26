@@ -10,6 +10,7 @@ import {
   resolveChatManageRolesParticipantsPermission, chatAgentModeForKind
 } from "../../../../shared/agentPermissions";
 import { normalizeChatAppToolCapabilities } from "../../../../shared/appTools";
+import { buildChatParticipantActivitySnapshot } from "../../../../shared/chatParticipantActivity";
 import { chatPermissionPromptLines, chatPermissionSummaryLine } from "../../../../shared/permissionPrompt";
 import {
   APP_CHAT_READ_ATTACHMENT_TOOL, appMcpToolNamesForCapabilities,
@@ -251,13 +252,18 @@ export function appToolCapabilitiesForRolePolicy(
     permissions.manageRolesParticipants
   ).effective;
   const staticRoleAppToolCapabilities = normalizeChatAppToolCapabilities(roleAppToolCapabilities)
-    .filter((capability) => capability !== "participants.request" && capability !== "compaction.request" && capability !== "participants.manage")
+    .filter((capability) => capability !== "participants.request" && capability !== "compaction.request" && capability !== "participants.manage" &&
+      capability !== "participants.compact")
     .filter((capability) => isMainSession || (capability !== "participants.delegate" && capability !== "accord.start"));
   return normalizeChatAppToolCapabilities([
     ...staticRoleAppToolCapabilities,
     "permissions.request",
     ...(requestParticipantsPermission === "deny" ? [] : ["participants.request" as const]),
     ...(requestCompactionPermission === "deny" ? [] : ["compaction.request" as const]),
+    // Only the main session, and only while it compacts without asking
+    // (Settings → General → New chats → Compact without asking; the User,
+    // 2026-11-26): it compacts other members too.
+    ...(isMainSession && requestCompactionPermission === "allow" ? ["participants.compact" as const] : []),
     ...(manageRolesParticipantsPermission === "deny" ? [] : ["participants.manage" as const])
   ]);
 }
@@ -278,14 +284,15 @@ export function preauthorizedAppMcpToolNamesFor(toolNames: string[]): string[] {
  *  to do it without a card (Settings → General → New chats, or "Don't ask
  *  again" on its card) decides whether it does it on its own (the User,
  *  2026-11-25). */
-export function compactionAccessLines(permissions: ChatAgentPermissions): string[] {
+export function compactionAccessLines(permissions: ChatAgentPermissions, isMainSession = false): string[] {
   switch (normalizeChatParticipantRequestPermission(normalizeChatAgentPermissions(permissions).requestCompaction)) {
     case "allow":
       return [
         "Compaction: compact your own context yourself with `app_chat_request_compaction`; User is not asked. It runs right after your reply ends, and then the app calls you again to go on, so nobody has to call you.",
         "- Do it when most of what your context holds is not needed for what comes next and a short summary carries the rest: before you start a new task or the next stage of a big task, after an investigation or approach that led nowhere, once large outputs (logs, test runs, file dumps, screenshots) have served their purpose, when you switch to unrelated work.",
         "- Not because of context size alone, not while details in your context are still needed, and not when nothing is left to do or you only wait for someone.",
-        "- Say in the reply what is done and what comes next. Give `instructions` naming what the summary must keep: the goal and User's decisions (a task that has just arrived, in full), branch and changed files, what is done and checked, open findings, the next step. Then end the reply."
+        "- Say in the reply what is done and what comes next. Give `instructions` naming what the summary must keep: the goal and User's decisions (a task that has just arrived, in full), branch and changed files, what is done and checked, open findings, the next step. Then end the reply.",
+        ...(isMainSession ? memberCompactionAccessLines() : [])
       ];
     case "ask":
       return [
@@ -294,6 +301,43 @@ export function compactionAccessLines(permissions: ChatAgentPermissions): string
     default:
       return [];
   }
+}
+
+/** Tokens above which an idle member's context is worth compacting before
+ *  it works again: about three times what a CLI's own instructions and tools
+ *  take, so the summary is a fraction of what its next turn would re-read. */
+export const MEMBER_COMPACTION_MIN_TOKENS = 100_000;
+
+/** The main session compacts other members, part of its access while it
+ *  compacts without asking (the User, 2026-11-26): a member's prompt cache
+ *  lives about an hour, so a member that grew large and comes back to work
+ *  after that re-reads its whole context at the full price. */
+function memberCompactionAccessLines(): string[] {
+  return [
+    "Members' compaction: compact another member's context with `app_chat_compact_participant`, as User would with `@handle /compact`; User is not asked. A member's prompt cache lives about an hour after its last turn: after that its next turn re-reads its whole context at the full price, while a compacted context costs a fraction of it.",
+    `- The app names in its notes, with each message, the members idle for over an hour with over ${MEMBER_COMPACTION_MIN_TOKENS.toLocaleString("en-US")} tokens of context (\`app_chat_get_participant_activity\` gives every member's \`minutesSinceLastTurn\` and \`context\` too). Before you give one of them more work (\`app_chat_request_participants\`), compact it first, with \`instructions\` naming what the summary must keep for that work (its task and User's decisions, files and branch, what is done and checked, open findings, the next step), then give it the work: it runs after the compaction.`,
+    "- Do not compact a member that is working or waiting, that worked within the last hour, whose context is smaller than that, or that has nothing more to do: a compaction re-reads its whole context once too, so it pays off only for a member that works again.",
+    "- The chat shows a line when the compaction is done: do not wait or poll for it."
+  ];
+}
+
+/** The app's note, with each message to a main session that compacts other
+ *  members, naming the members idle for over an hour with a large context
+ *  (the User, 2026-11-26): it sees them without asking, as she sees their
+ *  context indicators. Empty when there are none. */
+export function idleLargeMembersNote(conversation: Conversation, participant: ChatParticipant, permissions: ChatAgentPermissions): string {
+  if (!isMainSessionParticipant(conversation.metadata, participant.id)) return "";
+  if (normalizeChatParticipantRequestPermission(normalizeChatAgentPermissions(permissions).requestCompaction) !== "allow") return "";
+  const idle = buildChatParticipantActivitySnapshot(conversation).participants.filter((entry) =>
+    entry.participantId !== participant.id && (entry.status === "idle" || entry.status === "stopped" || entry.status === "error") &&
+    (entry.minutesSinceLastTurn ?? 0) >= 60 && (entry.context?.usedTokens ?? 0) > MEMBER_COMPACTION_MIN_TOKENS);
+  if (idle.length === 0) return "";
+  const idleFor = (minutes: number) => minutes >= 120 ? `${Math.floor(minutes / 60)} h` : `${minutes} min`;
+  return [
+    "Members idle for over an hour with a large context (their prompt cache is gone: their next turn re-reads all of it at the full price):",
+    ...idle.map((entry) => `- @${entry.handle}: idle ${idleFor(entry.minutesSinceLastTurn ?? 0)}, ${Math.round((entry.context?.usedTokens ?? 0) / 1000)}k tokens of context.`),
+    "Before you give one of them more work, compact it first with `app_chat_compact_participant`, `instructions` naming what that work needs. Leave the ones you are not giving work to as they are."
+  ].join("\n");
 }
 
 /** Leave to create scheduled tasks without a card (Settings → General →

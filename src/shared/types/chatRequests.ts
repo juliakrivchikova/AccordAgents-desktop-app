@@ -54,6 +54,9 @@ export interface CompactChatParticipantRequest {
   handle?: string;
   instructions?: string;
   triggeredBy?: "user" | "agent";
+  /** The chat's main session compacted this member
+   *  (`app_chat_compact_participant`); its line says so. */
+  requestedByParticipantId?: string;
   runId?: string;
   threadId?: string;
   parentMessageId?: string;

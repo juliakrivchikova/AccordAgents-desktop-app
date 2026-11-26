@@ -80,11 +80,17 @@ export const CHAT_TOOLS: readonly AppMcpToolContract[] = [
     effect: "app-managed",
     desktop: {
       "title": "Get Chat Member Activity",
-      "description": "Return one authoritative snapshot of every current chat member's roster status, active app-managed work, and latest finished message. This is read-only.",
+      "description": "Return one authoritative snapshot of every current chat member's roster status, active app-managed work, latest finished message, when it last worked (lastTurnEndedAt, minutesSinceLastTurn) and how full its context is (context). Name members in participants to get only theirs. This is read-only.",
       "inputSchema": {
         "type": "object",
         "additionalProperties": false,
-        "properties": {}
+        "properties": {
+          "participants": {
+            "type": "array",
+            "items": { "type": "string" },
+            "description": "Optional: only these members (handles, with or without @)."
+          }
+        }
       },
       "annotations": {
         "readOnlyHint": true,

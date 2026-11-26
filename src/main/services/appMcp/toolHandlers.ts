@@ -1,6 +1,6 @@
 import type {
   AppArtifactToolHandler, AppChatAttachmentExportHandler, AppChatAttachmentListHandler, AppChatAttachmentReadHandler,
-  AppChatCompactionRequestHandler, AppChatContextHandler, AppChatDelegateTaskHandler, AppChatMessagesHandler,
+  AppChatCompactionRequestHandler, AppChatCompactParticipantHandler, AppChatContextHandler, AppChatDelegateTaskHandler, AppChatMessagesHandler,
   AppChatParticipantActivityHandler, AppChatParticipantRequestHandler, AppChatParticipantRequestStatusHandler,
   AppChatParticipantsHandler, AppChatReactHandler, AppChatSendMessageHandler, AppChatSetTitleHandler, AppChatStartAccordHandler,
   AppMemoryToolHandler, AppParticipantChangeHandler, AppParticipantOptionsHandler, AppPermissionChangeHandler,
@@ -34,6 +34,7 @@ export class ToolHandlers {
   chatSetTitleHandler?: AppChatSetTitleHandler;
   chatDelegateTaskHandler?: AppChatDelegateTaskHandler;
   chatStartAccordHandler?: AppChatStartAccordHandler;
+  chatCompactParticipantHandler?: AppChatCompactParticipantHandler;
   artifactToolHandler?: AppArtifactToolHandler;
   scriptToolHandler?: AppScriptToolHandler;
   memoryToolHandler?: AppMemoryToolHandler;
@@ -135,6 +136,10 @@ export class ToolHandlers {
 
   setChatStartAccordHandler(handler: AppChatStartAccordHandler): void {
     this.chatStartAccordHandler = handler;
+  }
+
+  setChatCompactParticipantHandler(handler: AppChatCompactParticipantHandler): void {
+    this.chatCompactParticipantHandler = handler;
   }
 
   setArtifactToolHandler(handler: AppArtifactToolHandler): void {

@@ -1,7 +1,7 @@
-import { APP_CHAT_DELEGATE_TASK_TOOL, APP_CHAT_START_ACCORD_TOOL } from "./toolNames";
+import { APP_CHAT_COMPACT_PARTICIPANT_TOOL, APP_CHAT_DELEGATE_TASK_TOOL, APP_CHAT_START_ACCORD_TOOL } from "./toolNames";
 import type { AppMcpToolContract } from "./types";
 
-/** New members and Accords. */
+/** New members, Accords and other members' compaction. */
 export const DELEGATION_TOOLS: readonly AppMcpToolContract[] = [
   {
     // The main session's own (docs/main-session.md): only the chat's main
@@ -103,6 +103,40 @@ export const DELEGATION_TOOLS: readonly AppMcpToolContract[] = [
           }
         },
         "required": ["title", "task"]
+      },
+      "annotations": {
+        "readOnlyHint": false,
+        "destructiveHint": false,
+        "idempotentHint": false,
+        "openWorldHint": false
+      }
+    },
+  },
+  {
+    // The main session's own, only while its compaction right is allow
+    // (Settings → General → New chats → Compact without asking): it compacts
+    // another member as User would with `@x /compact` (docs/main-session.md).
+    name: APP_CHAT_COMPACT_PARTICIPANT_TOOL,
+    policyOrder: 50,
+    effect: "app-managed",
+    capability: "participants.compact",
+    desktop: {
+      "title": "Compact Another Member's Context",
+      "description": "Compact another member's context, as User would with `@handle /compact <instructions>`: its CLI replaces the older part of its conversation with a summary that keeps what instructions name. User is not asked; the chat shows a line when it is done. Returns once the compaction is queued (status started): a request you give that member afterwards runs after the compaction, so do not wait or poll for it. Refused for yourself (use app_chat_request_compaction), for a member that is working or waiting, and for one that has not worked in this chat yet.",
+      "inputSchema": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "target": {
+            "type": "string",
+            "description": "The member's handle (with or without @)."
+          },
+          "instructions": {
+            "type": "string",
+            "description": "What the summary must keep for the work that member does next: its task and User's decisions, files and branch, what is done and checked, open findings, the next step."
+          }
+        },
+        "required": ["target", "instructions"]
       },
       "annotations": {
         "readOnlyHint": false,

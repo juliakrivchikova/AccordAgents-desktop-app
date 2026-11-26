@@ -67,6 +67,15 @@ export interface ChatParticipantLastFinishedMessage {
   content: string;
 }
 
+/** How full a member's context is, as its context indicator shows it. */
+export interface ChatParticipantActivityContext {
+  usedTokens: number;
+  contextWindowTokens: number;
+  percentage: number;
+  /** When the figure was read. */
+  measuredAt: string;
+}
+
 export interface ChatParticipantActivityEntry {
   participantId: string;
   handle: string;
@@ -75,6 +84,14 @@ export interface ChatParticipantActivityEntry {
   status: ChatParticipantRosterStatus;
   activeWork: ChatParticipantActiveWork[];
   lastFinishedMessage: ChatParticipantLastFinishedMessage | null;
+  /** When the member's session last worked (its last reply's last activity,
+   *  or a compaction of it), as near as the chat knows it: a CLI's prompt
+   *  cache lives about an hour after that. Null when it never worked here. */
+  lastTurnEndedAt: string | null;
+  /** Whole minutes from lastTurnEndedAt to the snapshot. */
+  minutesSinceLastTurn: number | null;
+  /** Null when unknown, or read before the member's last compaction. */
+  context: ChatParticipantActivityContext | null;
 }
 
 export interface ChatParticipantActivitySnapshot {

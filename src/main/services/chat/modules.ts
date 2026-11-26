@@ -25,6 +25,7 @@ import { ChoiceExpiry } from "./choices/choiceExpiry";
 import { ClaudeModes } from "./approvals/claudeModes";
 import { CodexApprovals } from "./approvals/codexApprovals";
 import { Compaction } from "./compaction/compaction";
+import { MemberCompaction } from "./compaction/memberCompaction";
 import { ConnectorSignIns } from "./approvals/connectorSignIns";
 import { ContextMeter } from "./compaction/contextMeter";
 import { Delegation } from "./requests/delegation";
@@ -103,6 +104,7 @@ export interface ChatModules {
   readonly inferredRequests: InferredRequests;
   readonly accord: ChatAccord;
   readonly compaction: Compaction;
+  readonly memberCompaction: MemberCompaction;
   readonly selfCompaction: SelfCompaction;
   readonly selfCompactionResumes: SelfCompactionResumes;
   readonly scheduledTasks: ScheduledTasks;
@@ -175,6 +177,7 @@ export function createChatModules(deps: ChatDependencies): ChatModules {
   modules.inferredRequests = new InferredRequests(modules, deps);
   modules.accord = new ChatAccord(modules, deps);
   modules.compaction = new Compaction(modules, deps);
+  modules.memberCompaction = new MemberCompaction(modules, deps);
   modules.selfCompaction = new SelfCompaction(modules, deps);
   modules.selfCompactionResumes = new SelfCompactionResumes(modules, deps);
   modules.scheduledTasks = new ScheduledTasks(modules, deps);

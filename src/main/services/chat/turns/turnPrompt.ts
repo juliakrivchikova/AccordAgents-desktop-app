@@ -1,4 +1,4 @@
-import { chatViewFor } from "../../../../shared/mainSession";
+import { chatViewFor, isMainSessionParticipant } from "../../../../shared/mainSession";
 import { choicesClosedByMessage } from "../../chatChoiceExpiry";
 import type {
   ChatAgentMode, ChatAgentPermissions, ChatMessage, ChatParticipant, ChatParticipantSession, Conversation
@@ -7,7 +7,7 @@ import { isAdministratorSession } from "../members/identity";
 import { memoryIndexKey } from "../members/roleRuntime";
 import {
   ANTIGRAVITY_READ_ONLY_NOTE, antigravityAccessLines, antigravityReadOnly, appNotesBlock, chatAssistantPermissionPolicy,
-  compactionAccessLines, handleWritingLines, initialAutoTitlePromptSection, newMessageNonce, notAsCliCommand,
+  compactionAccessLines, handleWritingLines, idleLargeMembersNote, initialAutoTitlePromptSection, newMessageNonce, notAsCliCommand,
   participantPermissionPolicy, participantRepositoryLine, repoFileMentionsPromptSection, scheduledTaskAccessLines,
   skillMentionsPromptSection, triggerPromptText
 } from "./promptSections";
@@ -24,6 +24,8 @@ interface ChatPromptSectionSizes {
   moveNote: number;
   promptContext: number;
   closedChoices: number;
+  /** The main session's note of members idle long with a large context. */
+  idleLargeMembers: number;
   trigger: number;
   skills: number;
   mentions: number;
@@ -117,6 +119,7 @@ export class TurnPrompt {
     const memoryIndexBlock = options.memoryIndexBlock ?? "";
     const promptContextBlock = options.promptContextBlock ?? "";
     const closedChoicesNote = this.closedChoicesPromptSection(conversation, participant, triggerMessage);
+    const idleLargeNote = idleLargeMembersNote(conversation, participant, options.permissions);
     const autoTitleBlock = initialAutoTitlePromptSection(conversation, participant, triggerMessage);
     const triggerBlock = triggerPromptText(participant, triggerMessage, nonce);
     const skillsBlock = skillMentionsPromptSection(triggerMessage, participant.kind);
@@ -155,7 +158,7 @@ export class TurnPrompt {
       appNotesBlock(nonce, [identityNote, staticEnvelope, accessNote, moveNote]),
       memoryBlock,
       promptContextBlock,
-      appNotesBlock(nonce, [closedChoicesNote, autoTitleBlock]),
+      appNotesBlock(nonce, [closedChoicesNote, idleLargeNote, autoTitleBlock]),
       triggerBlock,
       appNotesBlock(nonce, [skillsBlock, mentionsBlock, unavailableImagesBlock, readOnlyNote, continuationNote])
     ].filter(Boolean);
@@ -170,6 +173,7 @@ export class TurnPrompt {
         moveNote: moveNote.length,
         promptContext: promptContextBlock.length,
         closedChoices: closedChoicesNote.length,
+        idleLargeMembers: idleLargeNote.length,
         trigger: triggerBlock.length,
         skills: skillsBlock.length,
         mentions: mentionsBlock.length,
@@ -214,7 +218,7 @@ export class TurnPrompt {
       participantRepositoryLine(conversation, participant.kind, options.agentMode, options.permissions),
       participantPermissionPolicy(participant.kind, options.agentMode, options.permissions, canRequestPermissions),
       ...(participant.kind === "gemini-cli" ? antigravityAccessLines(conversation.repoPath, options.agentMode, options.permissions) : []),
-      ...compactionAccessLines(options.permissions),
+      ...compactionAccessLines(options.permissions, isMainSessionParticipant(conversation.metadata, participant.id)),
       ...scheduledTaskAccessLines(participant.kind, options.agentMode, options.permissions),
       ...handleWritingLines(conversation)
     ].filter(Boolean).join("\n");

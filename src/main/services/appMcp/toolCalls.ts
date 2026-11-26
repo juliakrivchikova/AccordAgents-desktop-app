@@ -7,6 +7,7 @@ import {
   APP_CHAT_GET_CONTEXT_TOOL, APP_CHAT_GET_PARTICIPANTS_TOOL, APP_CHAT_GET_PARTICIPANT_ACTIVITY_TOOL, APP_CHAT_READ_MESSAGES_TOOL,
   APP_CHAT_LIST_ATTACHMENTS_TOOL, APP_CHAT_READ_ATTACHMENT_TOOL, APP_CHAT_EXPORT_ATTACHMENT_TOOL, APP_CHAT_REACT_TOOL,
   APP_CHAT_SEND_MESSAGE_TOOL, APP_CHAT_SET_TITLE_TOOL, APP_CHAT_DELEGATE_TASK_TOOL, APP_CHAT_START_ACCORD_TOOL,
+  APP_CHAT_COMPACT_PARTICIPANT_TOOL,
   APP_ARTIFACT_TOOL_NAMES, APP_SCRIPT_TOOL_NAMES, APP_MEMORY_TOOL_NAMES, APP_URGENT_ALERT_TOOL
 } from "../../../shared/appMcpToolContracts";
 import { appToolPolicyDenialCode, diagnosticToolName, structuredToolDenialCode, toolImageResult, toolTextResult } from "./toolResults";
@@ -100,7 +101,8 @@ export class ToolCalls {
       record.name !== APP_CHAT_SEND_MESSAGE_TOOL &&
       record.name !== APP_CHAT_SET_TITLE_TOOL &&
       record.name !== APP_CHAT_DELEGATE_TASK_TOOL &&
-      record.name !== APP_CHAT_START_ACCORD_TOOL
+      record.name !== APP_CHAT_START_ACCORD_TOOL &&
+      record.name !== APP_CHAT_COMPACT_PARTICIPANT_TOOL
     ) {
       throw new Error(`Unknown app tool: ${String(record.name ?? "")}.`);
     }
@@ -138,7 +140,7 @@ export class ToolCalls {
       if (!this.mcp.toolHandlers.chatParticipantActivityHandler) {
         throw new Error("Chat member activity is not available.");
       }
-      return toolTextResult(await this.mcp.toolHandlers.chatParticipantActivityHandler(actor));
+      return toolTextResult(await this.mcp.toolHandlers.chatParticipantActivityHandler(actor, record.arguments));
     }
     if (record.name === APP_CHAT_READ_MESSAGES_TOOL) {
       if (!this.mcp.toolHandlers.chatMessagesHandler) {
@@ -199,6 +201,15 @@ export class ToolCalls {
         throw new Error("Starting an Accord is not available.");
       }
       return toolTextResult(await this.mcp.toolHandlers.chatStartAccordHandler(actor, record.arguments));
+    }
+    if (record.name === APP_CHAT_COMPACT_PARTICIPANT_TOOL) {
+      if (!hasChatAppToolCapability(actor.capabilities, "participants.compact")) {
+        throw new Error("Only the chat's main session compacts other members, and only while it compacts without asking.");
+      }
+      if (!this.mcp.toolHandlers.chatCompactParticipantHandler) {
+        throw new Error("Compacting another member is not available.");
+      }
+      return toolTextResult(await this.mcp.toolHandlers.chatCompactParticipantHandler(actor, record.arguments));
     }
     if (record.name === APP_CHAT_REQUEST_PARTICIPANTS_TOOL) {
       if (!hasChatAppToolCapability(actor.capabilities, "participants.request")) {
