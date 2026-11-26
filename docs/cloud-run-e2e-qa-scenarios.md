@@ -560,9 +560,9 @@ Pick a genuinely small, user-visible task with one regression criterion. The poi
 | X-03 | Stop with a surviving grandchild | Settles promptly; `releaseStdio` destroys the pipes so `close` fires. | CODE-OK |
 | X-04 | Stop preserves a final message | Already-emitted content is not overwritten. | CODE-OK |
 | X-05 | Stop with the worker unreachable | UI reaches cancelled locally and reconciles with zero orphans. | SMALL-FIX — worker cancel is fire-and-forget; assert nothing keeps burning instance time invisibly |
-| X-06 | Cancelled activity | Pending cards cancel and move to finished. | CODE-OK |
+| X-06 | Cancelled activity | Pending cards cancel and move to finished. | OBSOLETE on the desktop — its Activity view was removed (the User, 2026-11-26); the phone's Activity keeps it (`scripts/mobile-activity*.test.mjs`) |
 | X-07 | Large chat load | ~14 000 rows: bounded time, zero missing/extra/invalid/duplicate rows. | CODE-OK |
-| X-08 | One corrupt chat does not take down Activity | Every other chat still renders; the bad one is flagged. | CODE-OK |
+| X-08 | One corrupt chat does not take down Activity | Every other chat still renders; the bad one is flagged. | OBSOLETE on the desktop — its Activity view was removed (the User, 2026-11-26) |
 | X-09 | Schema version floor | A DB written by a newer build is refused cleanly. | SMALL-FIX — nothing enforces a floor |
 | X-10 | Write concurrency | Two runs finishing together: no lost update. Measure it — WAL is not enabled, so writers block readers. | SMALL-FIX |
 | X-11 | Migration idempotency | Any repair that has produced an emergency `.bak` is idempotent and rollback-tested. | REAL-WORK — two real repair incidents in two days |
@@ -571,7 +571,7 @@ Pick a genuinely small, user-visible task with one regression criterion. The poi
 | X-14 | Readiness panel per platform | Every (platform × status) pair yields an actionable command with a Copy button where one exists. | SMALL-FIX |
 | X-15 | Unknown model id | The context indicator still renders via a family fallback instead of disappearing. | SMALL-FIX |
 | X-16 | Expanded command output stays open | Survives the streaming→finished transition. | CODE-OK |
-| X-17 | Activity badge matrix | running / finished / cancelled × read / unread × sidebar Activity badge × detail pane, plus rapid switching: no flicker, no race, no stuck unread. | CODE-OK |
+| X-17 | Activity badge matrix | running / finished / cancelled × read / unread × sidebar Activity badge × detail pane, plus rapid switching: no flicker, no race, no stuck unread. | OBSOLETE on the desktop — its Activity view was removed (the User, 2026-11-26); the phone's Activity keeps its own badge |
 | X-18 | Avatar contract | `test:avatar-contract` plus a CDP disc/radius sweep. Never add per-kind or per-context padding or disc overrides. | CODE-OK |
 | X-19 | Occluded-window open | Opening a conversation while the window is occluded still loads. | SMALL-FIX — user-facing, same root cause as harness rule E-03 |
 | X-20 | Warning sanitization | Raw CLI event JSON collapses to a one-line notice; no raw JSON in the timeline. | CODE-OK |

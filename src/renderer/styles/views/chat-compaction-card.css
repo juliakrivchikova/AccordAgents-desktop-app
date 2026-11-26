@@ -59,7 +59,7 @@
   box-shadow: var(--ui-shadow-sm);
 }
 
-/* Focused (by keyboard, or by Activity's Open in chat): the ring every
+/* Focused (by keyboard, or by a link that opens it): the ring every
    card draws, while Enter compacts. */
 .chat-compaction-card:focus-visible .chat-compaction-card-panel,
 .chat-compaction-card.approval-focused .chat-compaction-card-panel {

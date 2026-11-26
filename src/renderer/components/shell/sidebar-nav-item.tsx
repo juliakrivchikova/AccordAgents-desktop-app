@@ -5,17 +5,13 @@ import { cn } from "@/lib/utils";
 export function SidebarNavItem({
   icon: Icon,
   label,
-  ariaLabel,
   disabled,
-  badge,
   testId,
   onClick
 }: {
   icon: PhosphorIcon;
   label: string;
-  ariaLabel?: string;
   disabled?: boolean;
-  badge?: string;
   testId: string;
   onClick: () => void;
 }): JSX.Element {
@@ -24,7 +20,6 @@ export function SidebarNavItem({
       type="button"
       onClick={onClick}
       disabled={disabled}
-      aria-label={ariaLabel}
       data-testid={testId}
       className={cn(
         "flex h-7 w-full items-center gap-2 rounded-ui-8 px-2 text-left text-ui-13 text-ui-text",
@@ -35,19 +30,6 @@ export function SidebarNavItem({
     >
       <Icon className="size-4 shrink-0 text-ui-text-2" aria-hidden />
       <span className="min-w-0 flex-1 truncate">{label}</span>
-      {badge && (
-        <span
-          className="inline-flex h-[18px] min-w-[18px] shrink-0 items-center justify-center rounded-full bg-ui-muted px-1.5 text-ui-11 font-medium tabular-nums text-ui-text-2"
-          aria-hidden="true"
-          data-testid={`${testId}-badge`}
-        >
-          {badge}
-        </span>
-      )}
     </button>
   );
-}
-
-export function formatBadgeCount(count: number): string {
-  return count > 99 ? "99+" : String(count);
 }

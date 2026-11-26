@@ -1,8 +1,6 @@
-import type { AgentDetectionRequest, AgentHealth, ChatActivityItem, ChatMessage, ChatRunningMessageTarget, ChatSearchMessageMatch, Conversation, ConversationSummary } from "../../shared/types";
+import type { AgentDetectionRequest, AgentHealth, ChatMessage, ChatRunningMessageTarget, ChatSearchMessageMatch, Conversation, ConversationSummary } from "../../shared/types";
 import { reconcileConversationSummaryRefresh } from "../../shared/conversationSummary";
-import { buildChatActivityItems, reconcileChatActivityRefreshItems } from "../../shared/chatActivity";
-import { executeChatActivityFocus } from "../../shared/chatActivityFocus";
-import { runningParticipantTarget, withRunningActivityTarget } from "./running-participant-target";
+import { runningParticipantTarget } from "./running-participant-target";
 import {
   CONVERSATION_MESSAGE_PAGE_SIZE,
   mergeLoadedMessagePage,
@@ -21,21 +19,15 @@ import type { AppState } from "./app-state";
 import { revokePendingImageUrls } from "../components/chat/use-chat-composer-images";
 import { compareConversationSummaries, conversationTimeValue, normalizeProjectPath } from "./conversation-summaries";
 import { persistLastViewedAt } from "./storage";
-import { activityItemsWithStoredPreferences } from "./activity-item-state";
 import { focusConversationMessage } from "./focus-conversation-message";
-import { visibleTimelineAnchor } from "./activity-timeline-anchor";
 import { dropComposerFocusRequestsExcept } from "./composer-focus-request";
-
-const ACTIVITY_MESSAGE_MISSING_ERROR = "The selected activity message is no longer available.";
 
 export interface ConversationActions {
   refreshAll: () => Promise<void>;
   refreshAgents: (request?: AgentDetectionRequest) => Promise<AgentHealth[]>;
-  refreshActivity: () => Promise<void>;
   refreshConversations: () => Promise<void>;
   openConversation: (id: string) => Promise<void>;
   openConversationAndFocusMessage: (target: Pick<ChatSearchMessageMatch, "conversationId" | "messageId" | "threadRootId">) => Promise<void>;
-  openConversationAndFocusActivityItem: (item: ChatActivityItem, options?: { timelineOnly?: boolean; markViewed?: boolean }) => Promise<void>;
   markConversationViewed: (conversation: Conversation) => void;
   clearChatMessageFocus: () => void;
   loadOlderConversationMessages: () => Promise<void>;
@@ -48,7 +40,6 @@ export interface ConversationActions {
   // False when it did not take over the screen (busy, or a chat opened meanwhile).
   newChatSession: () => Promise<boolean>;
   newProjectSession: (projectRepoPath?: string) => Promise<void>;
-  returnToNewChatDraft: () => void;
   updateSelectedChatParticipantConfigIds: React.Dispatch<React.SetStateAction<Set<string>>>;
 }
 
@@ -86,51 +77,8 @@ export function useConversationActions(state: AppState): ConversationActions {
     state.setSummaries(current => {
       if (requestId !== state.summaryRefreshRequestRef.current) return current;
       const merged = reconcileConversationSummaryRefresh(current, summaries, revisionsAtStart, state.activityRevisionByConversationRef.current);
-      state.archivedConversationIdsRef.current = new Set(merged.filter(summary => summary.archived === true).map(summary => summary.id));
       return merged.sort(compareConversationSummaries);
     });
-  }
-
-  async function refreshActivity(): Promise<void> {
-    const requestId = state.activityRefreshRequestRef.current + 1;
-    state.activityRefreshRequestRef.current = requestId;
-    const revisionsAtStart = { ...state.activityRevisionByConversationRef.current };
-    state.setActivityLoading(true);
-    state.setActivityError(undefined);
-    try {
-      const activityPreferences = state.activityItemPreferencesRef.current;
-      const result = await window.consensus.listChatActivity({
-        lastViewedAtByConversationId: state.lastViewedAtRef.current,
-        excludedItemIds: [...activityPreferences.clearedItemIds],
-        ...(activityPreferences.clearedRecentThroughByGroup
-          ? { clearedRecentThroughByGroup: activityPreferences.clearedRecentThroughByGroup }
-          : {}),
-        ...(activityPreferences.clearedRecentThroughBefore
-          ? { clearedRecentThroughBefore: activityPreferences.clearedRecentThroughBefore }
-          : {})
-      });
-      if (requestId !== state.activityRefreshRequestRef.current) {
-        return;
-      }
-      state.setActivityItems((current) => {
-        return reconcileChatActivityRefreshItems(current, activityItemsWithStoredPreferences(state, result.items), {
-          revisionsAtStart,
-          revisionsNow: state.activityRevisionByConversationRef.current,
-          archivedConversationIds: state.archivedConversationIdsRef.current
-        });
-      });
-      state.setSelectedActivityItem((current) =>
-        current && state.archivedConversationIdsRef.current.has(current.conversationId) ? undefined : current
-      );
-    } catch (caught) {
-      if (requestId === state.activityRefreshRequestRef.current) {
-        state.setActivityError(errorText(caught));
-      }
-    } finally {
-      if (requestId === state.activityRefreshRequestRef.current) {
-        state.setActivityLoading(false);
-      }
-    }
   }
 
   async function refreshAll(): Promise<void> {
@@ -167,9 +115,7 @@ export function useConversationActions(state: AppState): ConversationActions {
     await openConversationForSelection(id);
   }
 
-  async function openConversationForSelection(id: string, options: { markViewed?: boolean } = {}): Promise<Conversation | undefined> {
-    const markViewed = options.markViewed !== false;
-    const previous = state.conversation;
+  async function openConversationForSelection(id: string): Promise<Conversation | undefined> {
     const requestId = state.openConversationRequestRef.current + 1;
     state.openConversationRequestRef.current = requestId;
     state.openConversationTargetRef.current = id;
@@ -180,9 +126,7 @@ export function useConversationActions(state: AppState): ConversationActions {
     }
     if (state.conversation?.id === id) {
       state.setOpeningConversationId(undefined);
-      if (markViewed) {
-        markConversationViewed(state.conversation);
-      }
+      markConversationViewed(state.conversation);
       return state.conversation;
     }
     state.setOpeningConversationId(id);
@@ -199,15 +143,7 @@ export function useConversationActions(state: AppState): ConversationActions {
       state.setMessagePage(result?.messagePage);
       if (next) {
         state.setKind(next.kind);
-        if (markViewed) {
-          markConversationViewed(next);
-        } else {
-          state.previewLoadedAtRef.current[next.id] = next.updatedAt;
-        }
-      }
-      // In Activity a preview replaces the chat behind it unseen.
-      if (previous && previous.id !== next?.id && state.railViewRef.current === "activity") {
-        markUnreadIfNews(previous);
+        markConversationViewed(next);
       }
       state.setSelectedThreadId(nextPendingDecisions[0]?.id ?? nextPendingItem?.id);
       state.setFocusedThreadId(undefined);
@@ -230,102 +166,6 @@ export function useConversationActions(state: AppState): ConversationActions {
     }
   }
 
-  async function openConversationAndFocusActivityItem(item: ChatActivityItem, options: { timelineOnly?: boolean; markViewed?: boolean } = {}): Promise<void> {
-    const initialTarget = activityFocusTarget(item, options);
-    const pendingFocusNonce = state.chatMessageFocusNonceRef.current + 1;
-    state.chatMessageFocusNonceRef.current = pendingFocusNonce;
-    state.setActivityFocusError(undefined);
-    state.setChatMessageFocusRequest({
-      conversationId: item.conversationId,
-      messageId: initialTarget.messageId,
-      threadRootId: initialTarget.threadRootId,
-      approvalId: initialTarget.approvalId,
-      nonce: pendingFocusNonce,
-      pending: true
-    });
-    let conversationRequestId: number | undefined;
-    // The row of a running member resolved to its turn in progress.
-    let runningTurnItem: ChatActivityItem | undefined;
-    // "Open in chat": the shown message the target stands for (see visibleTimelineAnchor).
-    let timelineAnchorId: string | undefined;
-    const isCurrent = (): boolean =>
-      state.chatMessageFocusNonceRef.current === pendingFocusNonce &&
-      (conversationRequestId === undefined || state.openConversationRequestRef.current === conversationRequestId);
-
-    await executeChatActivityFocus<Conversation, ChatActivityItem>({
-      isCurrent,
-      openConversation: async () => {
-        const conversation = await openConversationForSelection(item.conversationId, { markViewed: options.markViewed });
-        conversationRequestId = state.openConversationRequestRef.current;
-        return conversation;
-      },
-      resolveTarget: async (conversation) => {
-        const loadedItem = resolveLoadedActivityItemTarget(item, conversation);
-        const resolvedItem = await withRunningActivityTarget(loadedItem, conversation);
-        runningTurnItem = resolvedItem !== loadedItem ? resolvedItem : undefined;
-        const target = activityFocusTarget(resolvedItem, options);
-        return target.messageId ? resolvedItem : undefined;
-      },
-      onTargetResolved: (resolvedItem) => {
-        state.setSelectedActivityItem((current) => current?.id === item.id ? resolvedItem : current);
-      },
-      ensureTargetLoaded: (conversation, resolvedItem) => {
-        const target = activityFocusTarget(resolvedItem, options);
-        if (resolvedItem === runningTurnItem) {
-          // A turn in progress is usually far above the open page with the
-          // member's own posts in between. The chat view reads every page
-          // down to it, as for any member it opens; loading only the page
-          // around it here would leave those posts out.
-          return Promise.resolve(true);
-        }
-        if (!options.timelineOnly) {
-          return ensureActivityTargetMessagesLoaded(conversation, target.messageId, target.threadRootId, isCurrent);
-        }
-        return (async () => {
-          // A message that cannot be read ends that walk, not the open; only
-          // a target that is gone with nothing to fall back to is an error.
-          const unreadable = new Map<string, unknown>();
-          timelineAnchorId = await visibleTimelineAnchor({
-            conversation,
-            messageId: target.messageId,
-            fallbackMessageId: resolvedItem.target.messageId,
-            load: async (messageId, messages) => {
-              try {
-                const loaded = await loadActivityTargetMessages({ ...conversation, messages }, [messageId], isCurrent);
-                if (!loaded) {
-                  unreadable.set(messageId, new Error(ACTIVITY_MESSAGE_MISSING_ERROR));
-                }
-                return loaded;
-              } catch (error) {
-                unreadable.set(messageId, error);
-                return undefined;
-              }
-            }
-          });
-          if (!timelineAnchorId && isCurrent() && unreadable.has(target.messageId)) {
-            throw unreadable.get(target.messageId);
-          }
-          return Boolean(timelineAnchorId);
-        })();
-      },
-      beforeCommit: waitForNextFrame,
-      commit: (resolvedItem) => {
-        const target = activityFocusTarget(resolvedItem, options);
-        state.setChatMessageFocusRequest({
-          conversationId: item.conversationId,
-          messageId: timelineAnchorId ?? target.messageId,
-          threadRootId: target.threadRootId,
-          approvalId: target.approvalId,
-          nonce: pendingFocusNonce
-        });
-      },
-      clear: () => clearPendingActivityFocus(pendingFocusNonce),
-      fail: (caught) => {
-        state.setActivityFocusError(errorText(caught));
-      }
-    });
-  }
-
   async function openConversationAndFocusMessage(
     target: Pick<ChatSearchMessageMatch, "conversationId" | "messageId" | "threadRootId">
   ): Promise<void> {
@@ -334,7 +174,7 @@ export function useConversationActions(state: AppState): ConversationActions {
       target,
       openConversation: (conversationId) => openConversationForSelection(conversationId),
       ensureTargetMessagesLoaded: (conversation, messageId, threadRootId, isCurrent) =>
-        ensureActivityTargetMessagesLoaded(
+        ensureTargetMessagesLoaded(
           conversation,
           messageId,
           threadRootId,
@@ -344,100 +184,28 @@ export function useConversationActions(state: AppState): ConversationActions {
     });
   }
 
-  function activityFocusTarget(
-    item: ChatActivityItem,
-    options: { timelineOnly?: boolean }
-  ): { messageId: string; threadRootId?: string; approvalId?: string } {
-    const messageId = item.target.messageId?.trim() ?? "";
-    const threadRootId = item.target.threadRootId?.trim() || undefined;
-    const approvalId = item.target.approvalKind === "codex"
-      ? item.target.approvalId?.trim() || undefined
-      : undefined;
-    if (options.timelineOnly && threadRootId) {
-      return { messageId: threadRootId, approvalId };
-    }
-    return { messageId, threadRootId, approvalId };
-  }
-
   function clearChatMessageFocus(): void {
     state.chatMessageFocusNonceRef.current += 1;
     state.setChatMessageFocusRequest(undefined);
-    state.setActivityFocusError(undefined);
   }
 
-  function clearPendingActivityFocus(nonce: number): void {
-    state.setChatMessageFocusRequest((current) => current?.nonce === nonce ? undefined : current);
-  }
-
-  function resolveLoadedActivityItemTarget(item: ChatActivityItem, conversation: Conversation): ChatActivityItem {
-    if (item.target.messageId?.trim()) {
-      return item;
-    }
-    const candidates = buildChatActivityItems(conversation, {
-      lastViewedAt: state.lastViewedAtRef.current[conversation.id]
-    });
-    return candidates.find((candidate) => candidate.id === item.id && candidate.target.messageId?.trim())
-      ?? candidates.find((candidate) =>
-        candidate.kind === item.kind &&
-        candidate.target.messageId?.trim() &&
-        candidate.target.runId &&
-        candidate.target.runId === item.target.runId
-      )
-      ?? resolveRunActivityItemFromLoadedMessages(item, conversation)
-      ?? item;
-  }
-
-  function resolveRunActivityItemFromLoadedMessages(item: ChatActivityItem, conversation: Conversation): ChatActivityItem | undefined {
-    if (item.status !== "running" && item.kind !== "run") {
-      return undefined;
-    }
-    const runId = item.target.runId?.trim();
-    const message = runId
-      ? [...conversation.messages].reverse().find((candidate) => {
-        const metadata = candidate.metadata as Record<string, unknown> | undefined;
-        return metadata?.runId === runId || metadata?.remoteRunId === runId;
-      })
-      : undefined;
-    const fallbackMessage = message ?? [...conversation.messages].reverse().find((candidate) =>
-      candidate.role === "participant" &&
-      candidate.status === "pending"
-    );
-    if (!fallbackMessage) {
-      return undefined;
-    }
-    return {
-      ...item,
-      target: {
-        ...item.target,
-        messageId: fallbackMessage.id,
-        threadRootId: loadedMessageThreadRootId(fallbackMessage) ?? item.target.threadRootId
-      }
-    };
-  }
-
-  function loadedMessageThreadRootId(message: ChatMessage): string | undefined {
-    const metadata = message.metadata as Record<string, unknown> | undefined;
-    const value = metadata?.chatThreadRootId ?? metadata?.parentMessageId ?? metadata?.threadId;
-    return typeof value === "string" && value.trim() ? value.trim() : undefined;
-  }
-
-  async function ensureActivityTargetMessagesLoaded(
+  async function ensureTargetMessagesLoaded(
     conversation: Conversation,
     messageId: string,
     threadRootId: string | undefined,
     isCurrent: () => boolean,
-    missingMessageError = ACTIVITY_MESSAGE_MISSING_ERROR
+    missingMessageError: string
   ): Promise<boolean> {
-    return Boolean(await loadActivityTargetMessages(conversation, [messageId, threadRootId], isCurrent, missingMessageError));
+    return Boolean(await loadTargetMessages(conversation, [messageId, threadRootId], isCurrent, missingMessageError));
   }
 
   /** Loads the page around each target not loaded yet; gives the loaded messages
    *  once every target is among them, else undefined. */
-  async function loadActivityTargetMessages(
+  async function loadTargetMessages(
     conversation: Conversation,
     ids: Array<string | undefined>,
     isCurrent: () => boolean,
-    missingMessageError = ACTIVITY_MESSAGE_MISSING_ERROR
+    missingMessageError: string
   ): Promise<ChatMessage[] | undefined> {
     let loadedMessages = conversation.messages;
     const targetIds = [...new Set(ids.filter((id): id is string => Boolean(id)))];
@@ -477,14 +245,6 @@ export function useConversationActions(state: AppState): ConversationActions {
       ns.delete(conversation.id);
       return ns;
     });
-    state.setActivityItems((current) =>
-      current.map((item) => item.conversationId === conversation.id && item.status === "recent"
-        ? { ...item, read: true }
-        : item)
-    );
-    state.setSelectedActivityItem((current) => current?.conversationId === conversation.id && current.status === "recent"
-      ? { ...current, read: true }
-      : current);
   }
 
   async function loadOlderConversationMessages(): Promise<void> {
@@ -663,8 +423,8 @@ export function useConversationActions(state: AppState): ConversationActions {
   // Takes the conversation on screen, or one still loading, off screen.
   function dropLoadedConversation(): void {
     clearChatMessageFocus();
-    // A chat still loading (for example the Activity detail) must not land on
-    // top of what replaces it once its load finishes.
+    // A chat still loading must not land on top of what replaces it once its
+    // load finishes.
     state.openConversationRequestRef.current += 1;
     state.openConversationTargetRef.current = undefined;
     dropComposerFocusRequestsExcept(undefined);
@@ -676,30 +436,6 @@ export function useConversationActions(state: AppState): ConversationActions {
     state.setFocusedThreadId(undefined);
     state.setWarnings([]);
     state.setKind("chat");
-  }
-
-  // Drops the chat on screen (an Activity preview) and leaves the new-chat
-  // draft (prompt, images, members, repo) untouched.
-  function returnToNewChatDraft(): void {
-    const dropped = state.conversation;
-    dropLoadedConversation();
-    state.setError(undefined);
-    if (dropped) {
-      markUnreadIfNews(dropped);
-    }
-  }
-
-  // Updates to a chat that is loaded but not on screen (an Activity preview, or
-  // the chat left behind Activity) mark nothing, so a chat taken off screen
-  // that way gets the sidebar's unread dot for news since it was last viewed
-  // or loaded as a preview.
-  function markUnreadIfNews(conversation: Conversation): void {
-    const seen = [state.lastViewedAtRef.current[conversation.id], state.previewLoadedAtRef.current[conversation.id]]
-      .filter((value): value is string => Boolean(value))
-      .map(conversationTimeValue);
-    if (seen.length > 0 && conversationTimeValue(conversation.updatedAt) > Math.max(...seen)) {
-      state.setUnreadConversationIds((current) => current.has(conversation.id) ? current : new Set(current).add(conversation.id));
-    }
   }
 
   function resetNewChatState(): void {
@@ -765,9 +501,9 @@ export function useConversationActions(state: AppState): ConversationActions {
   }
 
   return {
-    refreshAll, refreshAgents, refreshActivity, refreshConversations, openConversation, openConversationAndFocusMessage, openConversationAndFocusActivityItem, markConversationViewed, clearChatMessageFocus, loadOlderConversationMessages,
+    refreshAll, refreshAgents, refreshConversations, openConversation, openConversationAndFocusMessage, markConversationViewed, clearChatMessageFocus, loadOlderConversationMessages,
     loadConversationMessagePageForMessage, jumpToParticipantLastMessage, selectRepo,
-    inspectRepo, rememberRepoPath, cancelReview, newChatSession, newProjectSession, returnToNewChatDraft,
+    inspectRepo, rememberRepoPath, cancelReview, newChatSession, newProjectSession,
     updateSelectedChatParticipantConfigIds: state.setSelectedChatParticipantConfigIds
   };
 

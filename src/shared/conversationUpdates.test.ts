@@ -3,12 +3,11 @@ import test from "node:test";
 import {
   CONVERSATION_UPDATE_TAIL_SIZE,
   applyConversationUpdate,
-  chatActivityItemsForUnknownMessages,
   conversationFromUpdate,
   fullListMessagePageInfo,
   messagePageAfterUpdate
 } from "./conversationUpdates";
-import type { ChatActivityItem, ChatMessage, Conversation, ConversationSummary, ConversationUpdate } from "./types";
+import type { ChatMessage, Conversation, ConversationSummary, ConversationUpdate } from "./types";
 import { reconcileConversationSummaryRefresh } from "./conversationSummary";
 
 test("a startup or approval refresh cannot overwrite newer pushed chat outcomes or archive state", () => {
@@ -184,32 +183,4 @@ test("the delta descriptor never leaks into the conversation handed to consumers
   assert.equal("messageDelta" in conversationFromUpdate(update), false);
   assert.equal("messageDelta" in applyConversationUpdate(conversation([]), update).conversation, false);
   assert.equal("messageDelta" in applyConversationUpdate(conversation([message("m1", "one", 1)]), update).conversation, false);
-});
-
-test("activity items for messages a delta did not carry are kept; run, approval and removed ones are not", () => {
-  const item = (id: string, kind: ChatActivityItem["kind"], messageId?: string, conversationId = "chat-1"): ChatActivityItem => ({
-    id,
-    conversationId,
-    conversationTitle: "Chat",
-    status: "pending",
-    kind,
-    title: id,
-    preview: "",
-    createdAt: "2026-01-01T00:00:00.000Z",
-    updatedAt: "2026-01-01T00:00:00.000Z",
-    target: { messageId }
-  });
-  const items = [
-    item("keep-unknown", "mention", "m1"),
-    item("drop-known", "mention", "m2"),
-    item("drop-removed", "message", "m3"),
-    item("drop-run", "run", "m1"),
-    item("drop-approval", "approval", "m1"),
-    item("drop-no-message", "message", undefined),
-    item("drop-other-chat", "mention", "m1", "chat-2")
-  ];
-  assert.deepEqual(
-    chatActivityItemsForUnknownMessages(items, "chat-1", new Set(["m2"]), ["m3"]).map((entry) => entry.id),
-    ["keep-unknown"]
-  );
 });

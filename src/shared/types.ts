@@ -20,7 +20,6 @@ export * from "./types/chatRequests";
 export * from "./types/agents";
 export * from "./types/memberActivity";
 export * from "./types/chatSearch";
-export * from "./types/chatActivity";
 export * from "./types/files";
 export * from "./types/artifacts";
 export * from "./types/appBridge";

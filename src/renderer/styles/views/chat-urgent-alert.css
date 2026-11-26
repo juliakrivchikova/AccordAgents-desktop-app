@@ -267,8 +267,8 @@ button.chat-card-row:hover {
 }
 
 /* A used approval's line (a member added, a task approved, a sign-in
-   done...) is placed as the closed Accord's line above; the ring Activity's
-   Open in chat draws goes on the line itself. */
+   done...) is placed as the closed Accord's line above; the ring a focus
+   draws goes on the line itself. */
 .chat-used-approval:focus-visible,
 .chat-used-approval.approval-focused {
   outline: none;

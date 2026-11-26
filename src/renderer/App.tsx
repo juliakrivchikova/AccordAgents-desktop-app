@@ -2,23 +2,18 @@ import React from "react";
 import { createRoot } from "react-dom/client";
 import { startRendererCrashReporting } from "./app/crash-reporting";
 import type {
-  ChatActivityItem,
   ChatParticipant,
   ChatSkillMention,
-  Conversation,
-  PluginCatalogItem,
-  StartReviewResult
+  PluginCatalogItem
 } from "../shared/types";
-import { ArrowLeftIcon, ArrowRightIcon, FilesIcon, ArrowsClockwiseIcon, IconContext, TerminalWindowIcon, XCircleIcon } from "@phosphor-icons/react";
+import { FilesIcon, ArrowsClockwiseIcon, IconContext, TerminalWindowIcon, XCircleIcon } from "@phosphor-icons/react";
 import { Button } from "@/components/ui/button";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { Toaster } from "@/components/ui/sonner";
 import { ModeToggle } from "./components/mode-toggle";
 import { ThemeProvider } from "./components/theme-provider";
 import { AppLoadingState } from "./components/loading-states";
-import { LoadingBar } from "@/components/ui/loading-bar";
 import { AppShell, Sidebar, SidebarToggleButton, TopBar } from "./components/shell";
-import { ActivityConversationTitle, ActivityView } from "./components/activity/activity-view";
 import { SettingsView } from "./components/settings/settings-view";
 import { SettingsSidebar } from "./components/settings/settings-sidebar";
 import { ConversationPanel } from "./components/conversation/conversation-panel";
@@ -57,9 +52,6 @@ import { useAppNavigation } from "./app/use-app-navigation";
 import { AppNotices } from "./app/app-notices";
 import { DictationHoldKey } from "./components/chat/dictation-hold-key";
 import { pluginNewChatDraft, pluginNewChatMentions } from "./app/plugin-new-chat";
-import { clearActivityItem, markActivityItemRead } from "./app/activity-item-state";
-import { errorText } from "./components/review/review-conversation-data";
-import { isCodexActivityApprovalItem } from "../shared/chatActivity";
 import { CHAT_SPLIT_WORKSPACE_MIN_WIDTH } from "./lib/chat-split-sizing";
 import { ChatBackgroundTasksContext } from "./components/chat/chat-roster-status";
 import { UrgentAlertActionsContext } from "./components/chat/urgent-alert-context";
@@ -84,12 +76,7 @@ function App(): JSX.Element {
   const reviewDecisionActions = useReviewDecisionActions(state, conversationActions);
   const reviewPlanActions = useReviewPlanActions(state, conversationActions);
   const settingsActions = useSettingsActions(state);
-  useAppEffects(
-    state,
-    conversationActions.refreshAll,
-    conversationActions.refreshAgents,
-    conversationActions.refreshActivity
-  );
+  useAppEffects(state, conversationActions.refreshAll, conversationActions.refreshAgents);
   const view = useAppViewModel(state);
   const machineForkSupport = useMachineForkSupport();
   const artifacts = useArtifacts(state.conversation?.id);
@@ -97,10 +84,6 @@ function App(): JSX.Element {
   // chat being set up; with neither, in the home folder.
   const terminal = useTerminalPanel(
     view.activeChatConversation?.repoPath ?? (!state.initializing && !view.hasResultContext ? state.repoPath : undefined)
-  );
-  const activityUnreadCount = state.activityItems.reduce(
-    (count, item) => count + (item.read || item.status === "running" ? 0 : 1),
-    0
   );
   const [accordDialogOpen, setAccordDialogOpen] = React.useState(false);
   // The Accord dialog's names in the sessions view, read while it is open.
@@ -141,7 +124,7 @@ function App(): JSX.Element {
     openAlertSettings: () => openSettingsSection("alerts"),
     openServerSettings: () => openSettingsSection("aws")
   }), [openSettingsSection]);
-  // A control that hides itself (a sidebar toggle, Activity, Settings, Back)
+  // A control that hides itself (a sidebar toggle, Settings, Back)
   // hands focus to its counterpart, so the keyboard and VoiceOver keep their
   // place. Only after a keyboard press: after a mouse click the moved focus
   // would draw a focus ring nobody asked for.
@@ -193,83 +176,6 @@ function App(): JSX.Element {
     });
   };
 
-  // Pending rows whose Cancel is on its way: the row says so at once and cannot
-  // be cancelled twice while the answer is applied.
-  const [cancellingActivityItemIds, setCancellingActivityItemIds] = React.useState<ReadonlySet<string>>(() => new Set());
-  const cancellingActivityItemIdsRef = React.useRef(new Set<string>());
-  const setActivityItemCancelling = (itemId: string, cancelling: boolean): void => {
-    const next = new Set(cancellingActivityItemIdsRef.current);
-    if (cancelling) next.add(itemId); else next.delete(itemId);
-    cancellingActivityItemIdsRef.current = next;
-    setCancellingActivityItemIds(next);
-  };
-
-  const applyActivityCancelResult = async (item: ChatActivityItem, conversation?: Conversation, warnings?: string[]): Promise<void> => {
-    // The answer can land after the User moved to another chat or preview; it
-    // updates its own chat only if that is still the one loaded.
-    if (conversation) {
-      state.setConversation((current) => current?.id === conversation.id ? conversation : current);
-    }
-    // Only real warnings: an empty list would wipe those of the chat on screen.
-    if (warnings?.length) {
-      state.setWarnings(warnings);
-    }
-    // Answered: the row leaves Pending now, not after the lists are re-read.
-    state.setActivityItems((items) => items.filter((candidate) => candidate.id !== item.id));
-    state.setSelectedActivityItem((current) => current?.id === item.id ? undefined : current);
-    await Promise.all([conversationActions.refreshConversations(), conversationActions.refreshActivity()]);
-  };
-
-  const cancelPendingActivityItem = async (item: ChatActivityItem): Promise<void> => {
-    if (item.status !== "pending" || cancellingActivityItemIdsRef.current.has(item.id)) {
-      return;
-    }
-    state.setError(undefined);
-    setActivityItemCancelling(item.id, true);
-    try {
-      if (item.kind === "approval" && item.target.approvalId) {
-        if (isCodexActivityApprovalItem(item)) {
-          throw new Error("Open this Codex approval in chat and select one of its offered decisions.");
-        }
-        const conversation = await window.consensus.respondToChatAppToolApproval({
-          conversationId: item.conversationId,
-          approvalId: item.target.approvalId,
-          approve: false
-        });
-        await applyActivityCancelResult(item, conversation);
-        return;
-      }
-      const sourceMessageId = item.target.sourceMessageId ?? item.target.messageId;
-      if (item.kind === "choice" && sourceMessageId && item.target.choiceId) {
-        const result: StartReviewResult = await window.consensus.respondToChatChoice({
-          conversationId: item.conversationId,
-          sourceMessageId,
-          choiceId: item.target.choiceId,
-          cancel: true,
-          runId: crypto.randomUUID()
-        });
-        await applyActivityCancelResult(item, result.conversation, result.warnings);
-        return;
-      }
-      if (item.kind === "mention" && sourceMessageId && item.target.mentionTargetParticipantIds?.length) {
-        const result: StartReviewResult = await window.consensus.respondToChatMentions({
-          conversationId: item.conversationId,
-          sourceMessageId,
-          targetParticipantIds: item.target.mentionTargetParticipantIds,
-          approve: false,
-          runId: crypto.randomUUID()
-        });
-        await applyActivityCancelResult(item, result.conversation, result.warnings);
-        return;
-      }
-      throw new Error("This activity item cannot be cancelled from the Activity list.");
-    } catch (caught) {
-      state.setError(errorText(caught));
-    } finally {
-      setActivityItemCancelling(item.id, false);
-    }
-  };
-
   const isNewChatScreen = !state.initializing && !view.hasResultContext;
   const topBarTitle = view.activeChatConversation
     ? (
@@ -291,12 +197,7 @@ function App(): JSX.Element {
       <IconButton
         label="Refresh"
         icon={ArrowsClockwiseIcon}
-        onClick={() => void (async () => {
-          await conversationActions.refreshAll();
-          if (state.railView === "activity") {
-            await conversationActions.refreshActivity();
-          }
-        })()}
+        onClick={() => void conversationActions.refreshAll()}
       />
     </>
   );
@@ -391,28 +292,6 @@ function App(): JSX.Element {
     </>
   );
   const chatUsesInlineTopBar = state.railView === "chats" && Boolean(view.activeChatConversation);
-  const openActivityItemInChat = (item: ChatActivityItem): void => {
-    state.setRailView("chats");
-    state.setSidebarCollapsed(false);
-    state.setSelectedActivityItem(undefined);
-    void conversationActions.openConversationAndFocusActivityItem(item, { timelineOnly: true });
-  };
-  // In Activity a previewed chat gets the same top row as in Chats, so a thread
-  // or artifacts panel beside it lines up with that row. Only once the
-  // selected item's own chat is loaded; until then the Activity pane keeps its
-  // header. The item is the refreshed one, so its target is current.
-  const selectedActivityId = state.selectedActivityItem?.id;
-  const activityPreviewItem = state.railView === "activity" && selectedActivityId && !state.openingConversationId
-    && view.activeChatConversation?.id === state.selectedActivityItem?.conversationId
-    ? state.activityItems.find((item) => item.id === selectedActivityId) ?? state.selectedActivityItem
-    : undefined;
-  const activityTopBar = activityPreviewItem && view.activeChatConversation ? (
-    <TopBar
-      className="pr-4 border-[var(--app-border-subtle)]"
-      title={<ActivityConversationTitle title={view.activeChatConversation.title} />}
-      actions={<IconButton label="Open in chat" icon={ArrowRightIcon} onClick={() => openActivityItemInChat(activityPreviewItem)} />}
-    />
-  ) : undefined;
   const chatTopBar = <TopBar leading={topBarLeading} title={topBarTitle} actions={topBarActions} className={isNewChatScreen ? "new-chat-topbar" : undefined} />;
   const conversationPanel = view.hasResultContext ? (
     <ConversationPanel
@@ -429,19 +308,17 @@ function App(): JSX.Element {
       renderMemberSettings={sessionsMember.actions}
       renderMemberChip={sessionsMember.controls}
       mainSessionActions={sessionsMember.mainSessionActions}
-      topBar={chatUsesInlineTopBar ? chatTopBar : activityTopBar}
+      topBar={chatUsesInlineTopBar ? chatTopBar : undefined}
       artifacts={artifacts}
     />
   ) : undefined;
-  const shellTopBar = state.railView === "settings" || state.railView === "activity" || chatUsesInlineTopBar
+  const shellTopBar = state.railView === "settings" || chatUsesInlineTopBar
     ? null
     : chatTopBar;
 
   const shell = (
     <AppShell
       sidebarCollapsed={state.sidebarCollapsed}
-      // Activity takes the sidebar's place, the way Settings does.
-      sidebarHidden={state.railView === "activity"}
       sidebarWidth={state.sidebarWidth}
       onSidebarWidthChange={state.setSidebarWidth}
       // New chat keeps the chat's workspace width, so its composer stays put
@@ -465,15 +342,10 @@ function App(): JSX.Element {
             archivedSessions={view.archivedSessions}
             activeId={state.conversation?.id}
             pendingId={state.openingConversationId}
-            activityUnreadCount={activityUnreadCount}
             busy={state.busy}
             loading={state.historyLoading}
             unreadIds={state.unreadConversationIds}
             onOpenSearch={() => setSearchOpen(true)}
-            onOpenActivity={() => {
-              navigation.showView("activity");
-              focusAfterSwitch("activity-back-to-chats");
-            }}
             onOpenSettings={() => {
               navigation.showView("settings");
               focusAfterSwitch("settings-back-to-chats");
@@ -584,54 +456,6 @@ function App(): JSX.Element {
           sidebarCollapsed={state.sidebarCollapsed}
           onExpandSidebar={expandSidebar}
           onClose={closeSettings}
-        />
-      ) : state.railView === "activity" ? (
-        <ActivityView
-          leading={(
-            <IconButton
-              label="Back to chats"
-              icon={ArrowLeftIcon}
-              data-testid="activity-back-to-chats"
-              onClick={() => {
-                navigation.leaveActivity();
-                focusAfterSwitch("sidebar-activity");
-              }}
-            />
-          )}
-          trailing={windowActions}
-          items={state.activityItems}
-          selectedItem={state.selectedActivityItem}
-          loading={state.activityLoading}
-          error={state.activityError}
-          detailError={state.activityFocusError}
-          onDismissDetailError={() => state.setActivityFocusError(undefined)}
-          detail={<div className="content-area result-layout activity-conversation-content relative">
-            {conversationPanel ?? <LoadingBar label="Loading chat" />}
-          </div>}
-          onSelect={(item) => {
-            if (isCodexActivityApprovalItem(item)) {
-              state.setRailView("chats");
-              state.setSidebarCollapsed(false);
-              state.setSelectedActivityItem(undefined);
-              window.requestAnimationFrame(() => {
-                void conversationActions.openConversationAndFocusActivityItem(item);
-              });
-              return;
-            }
-            // Selecting an activity item never marks anything read: unread state only
-            // clears through the explicit "Mark read" action (or by opening the chat
-            // itself in the chats view). markViewed: false keeps the detail open from
-            // blanket-marking the conversation's items as viewed.
-            state.setSelectedActivityItem(item);
-            void conversationActions.openConversationAndFocusActivityItem(item, { markViewed: false });
-          }}
-          onMarkRead={(item) => markActivityItemRead(state, item.id)}
-          cancellingItemIds={cancellingActivityItemIds}
-          onCancelPending={(item) => void cancelPendingActivityItem(item)}
-          onClear={(item) => clearActivityItem(state, item.id)}
-          detailHasHeader={Boolean(activityTopBar && conversationPanel)}
-          onOpenInChat={openActivityItemInChat}
-          onRetry={() => void conversationActions.refreshActivity()}
         />
       ) : state.initializing ? (
         <div className="content-area compose-layout">

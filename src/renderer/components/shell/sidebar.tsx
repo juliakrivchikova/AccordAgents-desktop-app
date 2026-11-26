@@ -1,5 +1,5 @@
 import { type ReactNode, useState } from "react";
-import { ArrowSquareInIcon, BellIcon, CaretRightIcon, FolderSimpleIcon, GearSixIcon, MagnifyingGlassIcon, NotePencilIcon, PlusIcon } from "@phosphor-icons/react";
+import { ArrowSquareInIcon, CaretRightIcon, FolderSimpleIcon, GearSixIcon, MagnifyingGlassIcon, NotePencilIcon, PlusIcon } from "@phosphor-icons/react";
 
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { HistoryLoadingState } from "@/renderer/components/loading-states";
@@ -10,7 +10,7 @@ import { DeleteConfirmationDialog } from "../settings/delete-confirmation-dialog
 import type { ConversationSummary } from "../../../shared/types";
 import { SidebarSessionRow } from "./sidebar-session-row";
 import { openCliImport } from "../cli-import/cli-import-store";
-import { SidebarNavItem, formatBadgeCount } from "./sidebar-nav-item";
+import { SidebarNavItem } from "./sidebar-nav-item";
 import { chatSearchShortcutAria, chatSearchShortcutLabel } from "../../app/chat-search-shortcut";
 import { isMacPlatform } from "../../lib/platform";
 
@@ -34,13 +34,11 @@ export interface SidebarProps {
   archivedSessions?: ConversationSummary[];
   activeId?: string;
   pendingId?: string;
-  activityUnreadCount?: number;
   busy?: boolean;
   loading?: boolean;
   unreadIds?: ReadonlySet<string>;
   macShortcuts?: boolean;
   onOpenSearch: () => void;
-  onOpenActivity: () => void;
   onOpenSettings: () => void;
   onSelect: (id: string) => void;
   onNewSession: () => void;
@@ -63,13 +61,11 @@ export const Sidebar = ({
   archivedSessions = [],
   activeId,
   pendingId,
-  activityUnreadCount = 0,
   busy,
   loading,
   unreadIds,
   macShortcuts = isMacPlatform(),
   onOpenSearch,
-  onOpenActivity,
   onOpenSettings,
   onSelect,
   onNewSession,
@@ -171,14 +167,6 @@ export const Sidebar = ({
 
       <nav className="flex flex-col gap-px px-2 pt-1.5 pb-1" aria-label="Primary">
         <SidebarNavItem icon={NotePencilIcon} label="New chat" onClick={onNewSession} disabled={busy} testId="new-chat" />
-        <SidebarNavItem
-          icon={BellIcon}
-          label="Activity"
-          ariaLabel={activityUnreadCount > 0 ? `Activity, ${activityUnreadCount} unread` : undefined}
-          onClick={onOpenActivity}
-          testId="sidebar-activity"
-          badge={activityUnreadCount > 0 ? formatBadgeCount(activityUnreadCount) : undefined}
-        />
       </nav>
 
       <ScrollArea className="min-h-0 min-w-0 flex-1 px-2 pb-2">

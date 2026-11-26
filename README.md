@@ -65,9 +65,9 @@ same feedback as a member running on your computer.
 - **Run longer work.** `/goal` keeps a member going until an objective is
   finished, `/compact` compacts a member's context, a member can watch new
   chat activity, and every run has a Stop. A Claude Code member's background
-  tasks show in the members list while they run. **Activity** lists running,
-  pending, and finished work across chats, and opening a running member takes
-  you to its turn in progress.
+  tasks show in the members list while they run, and opening a running member
+  takes you to its turn in progress. On the phone, **Activity** lists running,
+  pending, and finished work across chats.
 - **Automate checks on a schedule.** Ask a member to watch something for you:
   it writes a small node or bash script (node scripts need Node.js on the
   computer that runs them) and you approve it on a card. The

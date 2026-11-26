@@ -54,7 +54,6 @@
 @import "./views/artifacts/versions.css" layer(components);
 @import "./views/terminal.css" layer(components);
 @import "./views/file-panel.css" layer(components);
-@import "./views/activity.css" layer(components);
 @import "./views/content-markdown.css" layer(components);
 @import "./views/visual-normalization.css" layer(components);
 @import "./views/token-overrides.css" layer(components);

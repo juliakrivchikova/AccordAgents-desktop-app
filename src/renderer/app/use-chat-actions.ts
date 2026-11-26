@@ -203,16 +203,12 @@ export function useChatActions(state: AppState, conversationActions: Conversatio
     state.chatCreationRef.current = creation;
     state.setBusy(true);
     let createdConversationId: string | undefined;
-    // An Activity preview opened meanwhile is the User's later choice: the new
-    // chat must not replace it (Back from Activity lands on the new chat).
+    // A chat opened from the sidebar or search while this one was being
+    // created is the User's later choice: once it is on screen, the new chat
+    // does not take its place. An empty screen (still on New chat) shows the
+    // new chat. A chat still opening counts as on screen: the new one does not
+    // flash in before it.
     const openRequestAtStart = state.openConversationRequestRef.current;
-    const previewingElsewhere = (): boolean =>
-      state.railViewRef.current === "activity" && state.openConversationRequestRef.current !== openRequestAtStart;
-    // So is a chat opened from the sidebar or search while this one was being
-    // created: once it is on screen, the new chat does not take its place. An
-    // empty screen (still on New chat, or back from Activity) shows the new chat.
-    // A chat still opening counts as on screen: the new one does not flash in
-    // before it (Back from Activity clears that target and lands here).
     const showCreated = (created: Conversation): void => {
       state.setConversation((current) => {
         if (state.openConversationRequestRef.current === openRequestAtStart) return created;
@@ -331,15 +327,8 @@ export function useChatActions(state: AppState, conversationActions: Conversatio
       markOwnChatSeen(result.conversation);
       creation.signal.throwIfAborted();
       state.chatCreationRef.current = undefined;
-      if (!previewingElsewhere()) {
-        showCreated(result.conversation);
-        state.setWarnings(result.warnings);
-      }
-      // Opened Activity while this chat was being created: Back lands on it,
-      // not on an empty new-chat screen.
-      if (state.chatBeforeActivityRef.current && !state.chatBeforeActivityRef.current.conversationId) {
-        state.chatBeforeActivityRef.current = { conversationId: result.conversation.id };
-      }
+      showCreated(result.conversation);
+      state.setWarnings(result.warnings);
       const sendResult = await window.consensus.sendChatMessage({
         conversationId: result.conversation.id,
         runId,
@@ -349,10 +338,8 @@ export function useChatActions(state: AppState, conversationActions: Conversatio
         imageAttachments
       });
       markOwnChatSeen(sendResult.conversation);
-      if (!previewingElsewhere()) {
-        showCreated(mergeProgressIntoConversation(sendResult.conversation, state.progressLogRef.current.filter((item) => item.runId === runId)));
-        state.setWarnings([...result.warnings, ...sendResult.warnings]);
-      }
+      showCreated(mergeProgressIntoConversation(sendResult.conversation, state.progressLogRef.current.filter((item) => item.runId === runId)));
+      state.setWarnings([...result.warnings, ...sendResult.warnings]);
       await refreshPersistedProviderPreference();
       state.setQuestion("");
       state.setNewChatPendingImages((current) => {
@@ -378,12 +365,8 @@ export function useChatActions(state: AppState, conversationActions: Conversatio
         }).catch(() => window.consensus.getConversation(conversationId).catch(() => undefined));
         if (saved?.metadata.archived === true) {
           state.setConversation((current) => current?.id === conversationId ? undefined : current);
-          // Back from Activity returns to the restored draft, not the archived chat.
-          if (state.chatBeforeActivityRef.current?.conversationId === conversationId) {
-            state.chatBeforeActivityRef.current = {};
-          }
           state.setQuestion(draftMessage);
-        } else if (saved && !previewingElsewhere()) {
+        } else if (saved) {
           showCreated(saved);
         }
         await conversationActions.refreshConversations().catch(() => undefined);
@@ -483,7 +466,6 @@ export function useChatActions(state: AppState, conversationActions: Conversatio
       }
       const wasActive = state.conversation?.id === conversationId;
       state.clearChatMessageDraft(conversationId);
-      state.archivedConversationIdsRef.current.delete(conversationId);
       state.setUnreadConversationIds((current) => {
         const next = new Set(current);
         next.delete(conversationId);
@@ -499,7 +481,6 @@ export function useChatActions(state: AppState, conversationActions: Conversatio
       state.lastViewedAtRef.current = remainingLastViewed;
       persistLastViewedAt(remainingLastViewed);
       state.setSummaries((current) => current.filter((summary) => summary.id !== conversationId));
-      state.setActivityItems((current) => current.filter((item) => item.conversationId !== conversationId));
       if (wasActive) {
         await conversationActions.newChatSession();
       }
@@ -765,10 +746,9 @@ export function useChatActions(state: AppState, conversationActions: Conversatio
     state.startingChatRef.current = true;
     state.setError(undefined);
     // Still on the chat she forked from, on the same screen: no other chat
-    // opened since (from the sidebar, search, Activity or a notice), not New
-    // chat, Activity or Settings. Back from Activity and a click on the open
-    // chat count as open requests too, so the latest request is told by
-    // what it was for, never by the count alone.
+    // opened since (from the sidebar, search or a notice), not New chat or
+    // Settings. A click on the open chat counts as an open request too, so the
+    // latest request is told by what it was for, never by the count alone.
     const railViewAtClick = state.railViewRef.current;
     const openRequestAtClick = state.openConversationRequestRef.current;
     // A refusal said by a notice once she has gone elsewhere is worded by the
@@ -941,7 +921,7 @@ export function useChatActions(state: AppState, conversationActions: Conversatio
   }
 
   // An answer can take seconds to come back, and by then the User may be in
-  // another chat or previewing one in Activity. It updates its own chat only
+  // another chat. It updates its own chat only
   // while that chat is still the one loaded, and never brings it back on
   // screen: answering a card and moving on used to throw the User back to the
   // card's chat once the answer landed.

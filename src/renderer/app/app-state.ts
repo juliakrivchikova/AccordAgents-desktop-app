@@ -3,7 +3,6 @@ import type { NewChatStartAccess } from "../components/chat/use-cli-start-defaul
 import type {
   AgentHealth,
   AppSettings,
-  ChatActivityItem,
   ChatSkillMention,
   Conversation,
   ConversationKind,
@@ -26,14 +25,13 @@ import {
   persistChatSidebarWidth,
   persistSettingsSidebarWidth,
   readDismissedWarningsFromStorage,
-  readActivityItemPreferencesFromStorage,
   readInitialAppSidebarWidths,
   readInitialSidebarCollapsed,
   readLastViewedAtFromStorage
 } from "./storage";
-import type { ActivityItemPreferences, DismissedWarningMap } from "./storage";
+import type { DismissedWarningMap } from "./storage";
 
-export type RailView = "chats" | "activity" | "settings";
+export type RailView = "chats" | "settings";
 export type StateSetter<T> = React.Dispatch<React.SetStateAction<T>>;
 
 export interface AppState {
@@ -51,16 +49,6 @@ export interface AppState {
   setOlderMessagesLoading: StateSetter<boolean>;
   railView: RailView;
   setRailView: StateSetter<RailView>;
-  activityItems: ChatActivityItem[];
-  setActivityItems: StateSetter<ChatActivityItem[]>;
-  activityLoading: boolean;
-  setActivityLoading: StateSetter<boolean>;
-  activityError: string | undefined;
-  setActivityError: StateSetter<string | undefined>;
-  activityFocusError: string | undefined;
-  setActivityFocusError: StateSetter<string | undefined>;
-  selectedActivityItem: ChatActivityItem | undefined;
-  setSelectedActivityItem: StateSetter<ChatActivityItem | undefined>;
   activeSettingsSection: SettingsSection;
   setActiveSettingsSection: StateSetter<SettingsSection>;
   sidebarCollapsed: boolean;
@@ -162,26 +150,17 @@ export interface AppState {
   openConversationRequestRef: React.MutableRefObject<number>;
   // The chat the latest open request is for (undefined: a request that took
   // the chat off screen), set with each new openConversationRequestRef. The
-  // count alone does not say she opened another chat: Back from Activity
-  // and a click on the chat already open count too.
+  // count alone does not say she opened another chat: a click on the chat
+  // already open counts too.
   openConversationTargetRef: React.MutableRefObject<string | undefined>;
   chatMessageFocusNonceRef: React.MutableRefObject<number>;
-  activityRefreshRequestRef: React.MutableRefObject<number>;
   summaryRefreshRequestRef: React.MutableRefObject<number>;
   agentRefreshRequestRef: React.MutableRefObject<number>;
   activityRevisionByConversationRef: React.MutableRefObject<Record<string, number>>;
-  activityItemPreferencesRef: React.MutableRefObject<ActivityItemPreferences>;
-  archivedConversationIdsRef: React.MutableRefObject<Set<string>>;
   lastViewedAtRef: React.MutableRefObject<Record<string, string>>;
   startingChatRef: React.MutableRefObject<boolean>;
   chatCreationRef: React.MutableRefObject<AbortController | undefined>;
   railViewRef: React.MutableRefObject<RailView>;
-  // The chat on screen when Activity opened (no id: the new-chat screen), so
-  // Back returns there rather than to an Activity preview.
-  chatBeforeActivityRef: React.MutableRefObject<{ conversationId?: string } | undefined>;
-  // updatedAt of each chat when it loaded as an Activity preview: dropping it
-  // gives the sidebar dot only for news that came in after that.
-  previewLoadedAtRef: React.MutableRefObject<Record<string, string>>;
 }
 
 const NO_DRAFT_TEXT = "";
@@ -205,15 +184,9 @@ export function useAppState(): AppState {
   const [messagePage, setMessagePage] = useState<ConversationMessagePageInfo | undefined>();
   const [olderMessagesLoading, setOlderMessagesLoading] = useState(false);
   const [railView, setRailView] = useState<RailView>("chats");
-  const [activityItems, setActivityItems] = useState<ChatActivityItem[]>([]);
-  const [activityLoading, setActivityLoading] = useState(false);
-  const [activityError, setActivityError] = useState<string | undefined>();
-  const [activityFocusError, setActivityFocusError] = useState<string | undefined>();
-  const [selectedActivityItem, setSelectedActivityItem] = useState<ChatActivityItem | undefined>();
   const [activeSettingsSection, setActiveSettingsSection] = useState<SettingsSection>("general");
   const [sidebarCollapsed, setSidebarCollapsed] = useState(readInitialSidebarCollapsed);
   const [initialSidebarWidths] = useState(readInitialAppSidebarWidths);
-  const [initialActivityItemPreferences] = useState(readActivityItemPreferencesFromStorage);
   const [chatSidebarWidth, setChatSidebarWidth] = useState(initialSidebarWidths.chats);
   const [settingsSidebarWidth, setSettingsSidebarWidth] = useState(initialSidebarWidths.settings);
   const [selectedThreadId, setSelectedThreadId] = useState<string | undefined>();
@@ -277,12 +250,9 @@ export function useAppState(): AppState {
   const openConversationRequestRef = useRef(0);
   const openConversationTargetRef = useRef<string | undefined>();
   const chatMessageFocusNonceRef = useRef(0);
-  const activityRefreshRequestRef = useRef(0);
   const summaryRefreshRequestRef = useRef(0);
   const agentRefreshRequestRef = useRef(0);
   const activityRevisionByConversationRef = useRef<Record<string, number>>({});
-  const activityItemPreferencesRef = useRef<ActivityItemPreferences>(initialActivityItemPreferences);
-  const archivedConversationIdsRef = useRef<Set<string>>(new Set());
   const lastViewedAtRef = useRef<Record<string, string>>(readLastViewedAtFromStorage());
   const startingChatRef = useRef(false);
   const chatCreationRef = useRef<AbortController>();
@@ -290,8 +260,6 @@ export function useAppState(): AppState {
   // currentRunId changes) can read the current view state without stale closures.
   const railViewRef = useRef<RailView>(railView);
   railViewRef.current = railView;
-  const chatBeforeActivityRef = useRef<{ conversationId?: string }>();
-  const previewLoadedAtRef = useRef<Record<string, string>>({});
   const sidebarWidth = railView === "settings" ? settingsSidebarWidth : chatSidebarWidth;
   const setSidebarWidth = (width: number): void => {
     if (railView === "settings") {
@@ -308,9 +276,6 @@ export function useAppState(): AppState {
   return {
     settings, setSettings, agents, setAgents, summaries, setSummaries, conversation, setConversation,
     messagePage, setMessagePage, olderMessagesLoading, setOlderMessagesLoading, railView, setRailView,
-    activityItems, setActivityItems, activityLoading, setActivityLoading, activityError, setActivityError,
-    activityFocusError, setActivityFocusError,
-    selectedActivityItem, setSelectedActivityItem,
     activeSettingsSection, setActiveSettingsSection, sidebarCollapsed, setSidebarCollapsed, sidebarWidth,
     setSidebarWidth, selectedThreadId, setSelectedThreadId, focusedThreadId, setFocusedThreadId, kind, setKind, question, setQuestion,
     newChatPendingImages, setNewChatPendingImages, newChatRepoFileMentions, setNewChatRepoFileMentions,
@@ -331,7 +296,7 @@ export function useAppState(): AppState {
     setChatComposerFileMentions, clearChatMessageDraft, chatAddParticipantDraft, setChatAddParticipantDraft,
     chatMessageFocusRequest, setChatMessageFocusRequest, error, setError, unreadConversationIds,
     setUnreadConversationIds, progressLogRef, openConversationRequestRef, openConversationTargetRef, chatMessageFocusNonceRef,
-    activityRefreshRequestRef, summaryRefreshRequestRef, agentRefreshRequestRef, activityRevisionByConversationRef, activityItemPreferencesRef, archivedConversationIdsRef,
-    lastViewedAtRef, startingChatRef, chatCreationRef, railViewRef, chatBeforeActivityRef, previewLoadedAtRef
+    summaryRefreshRequestRef, agentRefreshRequestRef, activityRevisionByConversationRef,
+    lastViewedAtRef, startingChatRef, chatCreationRef, railViewRef
   };
 }

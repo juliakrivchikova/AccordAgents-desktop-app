@@ -1,11 +1,10 @@
 import { ipcMain } from "electron";
-import type { ChatSearchRequest, ConversationMessagePageRequest, ListChatActivityRequest } from "../../../shared/types";
+import type { ChatSearchRequest, ConversationMessagePageRequest } from "../../../shared/types";
 import type { DesktopApp } from "../desktopApp";
 
 export function registerConversationsIpc(desktopApp: DesktopApp): void {
   ipcMain.handle("conversations:list", () => desktopApp.storageService.listConversations());
   ipcMain.handle("chat-search:query", (_event, request: ChatSearchRequest) => desktopApp.chatSearchService.search(request));
-  ipcMain.handle("conversations:list-activity", (_event, request?: ListChatActivityRequest) => desktopApp.storageService.listChatActivity(request));
 
   ipcMain.handle("conversations:get", async (_event, id: string) => {
     const conversation = await desktopApp.storageService.getConversation(id);

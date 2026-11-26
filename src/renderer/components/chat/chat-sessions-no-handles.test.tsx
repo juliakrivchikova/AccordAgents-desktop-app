@@ -9,7 +9,6 @@ import { act, create, type ReactTestInstance } from "react-test-renderer";
 import type { ReactElement } from "react";
 
 import { TooltipProvider } from "@/components/ui/tooltip";
-import { buildChatActivityItems, knownSessionsTitles } from "../../../shared/chatActivity";
 import { sessionsViewNamesOf, sessionsViewText } from "../../../shared/sessionsViewText";
 import type { ChatAppToolApproval, ChatMessage, Conversation } from "../../../shared/types";
 import { warningNoticeEntries } from "../../app/warnings";
@@ -24,7 +23,6 @@ import { ChatSessionsLinksContext, ChatSessionsNamesContext, sessionsViewNamesFr
 import { chatDisplayContent } from "./chat-display-content";
 import { ChatUsedApprovalLine } from "./chat-used-card-row";
 import { ChatSearchResults } from "../search/chat-search-results";
-import { ActivityRow } from "../activity/activity-view";
 import { ChatMemberTaskFold } from "./chat-member-session-panel";
 import { defaultChatAgentPermissions } from "../../../shared/agentPermissions";
 import { memberRestartLine } from "../../../shared/memberRestart";
@@ -232,22 +230,6 @@ test("a sessions-view chat's cards, failed replies, status line and notes name n
   classicLaunch.unmount();
 });
 
-test("Activity rows of a sessions-view chat name the main session by nothing and a member by its task; a classic chat's keep the handle", () => {
-  const conversation = sessionsChat("sessions");
-  const pending: ChatAppToolApproval = approval(DREW, { toolName: "app_tool_permission", summary: "Grant @drew file edits", request: { kind: "toolPermission", agentMode: "default", toolName: "Edit" } as never });
-  const withApproval = { ...conversation, metadata: { ...conversation.metadata, pendingAppToolApprovals: [pending] } } as Conversation;
-  const items = buildChatActivityItems(withApproval, { now: "2026-11-20T11:00:00.000Z" });
-  assert.ok(items.length > 0);
-  for (const item of items) {
-    assert.doesNotMatch(item.title, HANDLES, item.title);
-    if (item.participant) assert.notEqual(item.participant.displayName, undefined, `${item.id}: named by the view`);
-    if (item.participant?.id === MAIN.id) assert.equal(item.participant.displayName, "");
-  }
-  const classic = buildChatActivityItems({ ...withApproval, metadata: { ...withApproval.metadata, chatView: "classic" } } as Conversation, { now: "2026-11-20T11:00:00.000Z" });
-  assert.ok(classic.some((item) => /@drew/.test(item.title)), "classic: by handle");
-  assert.ok(classic.every((item) => item.participant?.displayName === undefined));
-});
-
 test("a failed reply keeps what the member wrote; a used card keeps its command; a request to the main session shows its question alone", () => {
   const streamed = chatMessage("main-partial", "participant", 21, {
     participantId: MAIN.id, participantLabel: "@main", status: "error",
@@ -280,7 +262,7 @@ test("a failed reply keeps what the member wrote; a used card keeps its command;
   assert.equal(chatDisplayContent(request("mcp", [MAIN]), "@drew"), "@main Which colour?", "classic: as before");
 });
 
-test("search results, Activity rows and add-member cards of a sessions-view chat name nobody and show no avatar; a classic chat keeps both", () => {
+test("search results and add-member cards of a sessions-view chat name nobody and show no avatar; a classic chat keeps both", () => {
   const match = (conversationId: string, snippetText: string, sessionsView?: boolean) => ({
     kind: "message" as const, conversationId, conversationTitle: conversationId, conversationUpdatedAt: AT, archived: false, messageId: `m-${conversationId}`,
     role: "participant" as const, authorLabel: "@drew", ...(sessionsView ? { sessionsView } : {}), createdAt: AT, snippetText, highlightRanges: [], rank: 1
@@ -297,22 +279,6 @@ test("search results, Activity rows and add-member cards of a sessions-view chat
   assert.match(results.text, /@drew: Marigold planted/, "classic: the author as before");
   assert.doesNotMatch(results.text, /@drew: Marigold deployed/, "sessions view: a member's words alone");
   results.unmount();
-
-  const row = (participant: Record<string, unknown>) => (
-    <ActivityRow active={false} cancelling={false} onSelect={() => undefined} onMarkRead={() => undefined} onCancelPending={() => undefined} onClear={() => undefined}
-      item={{ id: "i", conversationId: "c", conversationTitle: "Login bug", status: "recent", kind: "message", title: "t", preview: "Done.", createdAt: AT, updatedAt: AT,
-        participant: { id: MAIN.id, handle: "main", kind: "claude-code", ...participant }, target: {} } as never} />
-  );
-  let renderer: ReturnType<typeof create> | undefined;
-  act(() => { renderer = create(<TooltipProvider>{row({ displayName: "" })}</TooltipProvider>); });
-  const sessionsRow = renderer!.root;
-  assert.equal(sessionsRow.findAll((node) => typeof node.props.className === "string" && node.props.className.split(/\s+/).includes("activity-avatar")).length, 0, "no avatar picture");
-  assert.ok(sessionsRow.findAll((node) => node.props?.["data-provider-kind"] === "claude-code").length > 0, "its provider's logo");
-  assert.doesNotMatch(shownText(sessionsRow), /@main|post in|main session/i, "named by nothing");
-  act(() => renderer!.unmount());
-  act(() => { renderer = create(<TooltipProvider>{row({})}</TooltipProvider>); });
-  assert.match(shownText(renderer!.root), /@main post in/, "classic: as before");
-  act(() => renderer!.unmount());
 
   const addition = approval(MAIN, { toolName: "app_participants_request_change", summary: "Add @reviewer",
     request: { operations: [{ type: "add_new_participant_to_chat", participant: { handle: "reviewer", roleConfigId: "generic-participant", kind: "codex-cli" } }] } as never });
@@ -343,24 +309,6 @@ test("a member's session: its task from the main session is \"Task\" and its fir
   const classic = render(false, <ChatMemberTaskFold message={task} prompt="First, ask @main which colour to use." fromMain />);
   assert.match(classic.text, /@main/, "outside the sessions view the words stay as written");
   classic.unmount();
-});
-
-test("Activity keeps a tool request's words exactly as written, and the newest row's task title speaks for a member", () => {
-  const conversation = sessionsChat("sessions");
-  const tool = approval(MAIN, { toolName: "app_tool_permission", summary: "Use Bash: gh pr edit 12 --add-reviewer @drew",
-    request: { kind: "toolPermission", agentMode: "default", toolName: "Bash" } as never });
-  // No message to preview: the row shows the approval's summary.
-  const items = buildChatActivityItems({ ...conversation, messages: [], metadata: { ...conversation.metadata, pendingAppToolApprovals: [tool] } } as Conversation, { now: "2026-11-20T11:00:00.000Z" });
-  const row = items.find((item) => item.kind === "approval");
-  assert.equal(row?.preview, "Use Bash: gh pr edit 12 --add-reviewer @drew", "a command is never reworded");
-
-  const item = (title: string, updatedAt: string, status: "pending" | "recent") => ({
-    id: `${title}-${status}`, conversationId: "c", conversationTitle: "c", status, kind: "message", title: "", preview: "", createdAt: updatedAt, updatedAt,
-    participant: { id: DREW.id, handle: "drew", kind: DREW.kind, displayName: title }, target: {}
-  }) as never;
-  const titles = knownSessionsTitles([item("Fix login", "2026-11-20T09:00:00.000Z", "pending"), item("Update docs", "2026-11-20T10:00:00.000Z", "recent")], "c");
-  assert.equal(titles.get(DREW.id), "Update docs", "an older kept row does not bring back its task");
-  assert.equal(knownSessionsTitles([item("drew", "2026-11-20T10:00:00.000Z", "recent")], "c").size, 0, "a handle is no title");
 });
 
 test("the controls under its composers and in its menus name nobody: a member's … menu, the chat title's menu, a held mode, the chips, Restart's lines", async () => {

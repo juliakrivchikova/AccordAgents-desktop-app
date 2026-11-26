@@ -1,5 +1,4 @@
 import type {
-  ChatActivityItem,
   ChatMessage,
   Conversation,
   ConversationMessagePageInfo,
@@ -134,30 +133,6 @@ export function fullListMessagePageInfo(count: number): ConversationMessagePageI
     hasMoreBefore: false,
     totalMessages: count
   };
-}
-
-/**
- * Activity items whose source message the update did not carry. A delta cannot
- * say anything about those messages, so whatever an earlier full snapshot or
- * activity refresh derived from them stands until a later update mentions them.
- * Items for messages the delta removed are dropped with the message. Run items
- * come from conversation metadata and approval items from pending-approvals
- * metadata, both always present, so those are always recomputed.
- */
-export function chatActivityItemsForUnknownMessages(
-  items: ChatActivityItem[],
-  conversationId: string,
-  knownMessageIds: Set<string>,
-  removedMessageIds: Iterable<string> = []
-): ChatActivityItem[] {
-  const removed = new Set(removedMessageIds);
-  return items.filter((item) => {
-    if (item.conversationId !== conversationId || item.kind === "run" || item.kind === "approval") {
-      return false;
-    }
-    const messageId = item.target.messageId ?? item.target.sourceMessageId;
-    return typeof messageId === "string" && messageId.length > 0 && !knownMessageIds.has(messageId) && !removed.has(messageId);
-  });
 }
 
 function insertByCreatedAt(base: ChatMessage[], inserted: ChatMessage[]): ChatMessage[] {
