@@ -18,8 +18,9 @@ import type { ResolvedChatParticipantRole } from "../types";
  *  before is given them once in its next message. 24: a message's app notes
  *  and whatever someone other than User wrote stand in blocks carrying the
  *  message's nonce, and the instructions say only text outside them is
- *  User's (buildPromptParts). */
-const CHAT_ROLE_RUNTIME_CONFIG_VERSION = 24;
+ *  User's (buildPromptParts). 25: User's preferences go into the shared
+ *  memory as well as the CLI's own (MEMBER_MEMORY_INSTRUCTIONS). */
+const CHAT_ROLE_RUNTIME_CONFIG_VERSION = 25;
 
 export function memoryIndexKey(conversationId: string, participantId: string): string {
   return `${conversationId}\u0000${participantId}`;
