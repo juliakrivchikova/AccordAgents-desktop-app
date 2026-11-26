@@ -10,7 +10,10 @@ import {
   CRASH_REPORTS_OFF_MARKER,
   CRASH_REPORT_CACHE_DIR,
   CRASH_REPORT_INSTALL_ID_FILE,
+  CRASH_REPORT_RULES_MARKER,
+  CRASH_REPORT_RULES_VERSION,
   discardCrashReportData,
+  discardCrashReportDataOfOlderRules,
   loadOrCreateCrashReportInstallId,
   readCrashReportsChoice,
   readCrashReportsEnabled,
@@ -74,6 +77,26 @@ test("what the SDK kept for later is discarded, and nothing else", async () => {
     assert.equal(await exists(path.join(dir, CRASH_REPORT_CACHE_DIR)), false);
     assert.equal(await exists(path.join(dir, "settings.json")), true);
     discardCrashReportData(dir);
+  });
+});
+
+test("what an older build queued is discarded once, before the SDK can resend it as stored", async () => {
+  await withTempDir(async (dir) => {
+    const queued = path.join(dir, CRASH_REPORT_CACHE_DIR, "queue", "old-envelope");
+    await mkdir(path.dirname(queued), { recursive: true });
+    await writeFile(queued, "envelope with the old contexts");
+    discardCrashReportDataOfOlderRules(dir);
+    assert.equal(await exists(path.join(dir, CRASH_REPORT_CACHE_DIR)), false, "the old queue is gone");
+    assert.equal((await readFile(path.join(dir, CRASH_REPORT_RULES_MARKER), "utf8")).trim(), CRASH_REPORT_RULES_VERSION);
+
+    await mkdir(path.dirname(queued), { recursive: true });
+    await writeFile(queued, "envelope kept under the current rules");
+    discardCrashReportDataOfOlderRules(dir);
+    assert.equal(await exists(queued), true, "what this build kept is sent later as usual");
+
+    await writeFile(path.join(dir, CRASH_REPORT_RULES_MARKER), "1\n");
+    discardCrashReportDataOfOlderRules(dir);
+    assert.equal(await exists(queued), false, "an older version of the rules discards again");
   });
 });
 

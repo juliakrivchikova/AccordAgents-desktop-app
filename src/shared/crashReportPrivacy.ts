@@ -112,8 +112,10 @@ export interface CrashReportBreadcrumb {
 }
 
 // The SDK's breadcrumbs about the computer rather than the app: sleep and
-// wake, battery, screen lock, and displays added or changed.
-const COMPUTER_EVENT_BREADCRUMB = /^(?:powerMonitor|screen)\./;
+// wake, battery, screen lock, displays added or changed, a screen reader or
+// other accessibility tool turned on, the graphics card's details, and a
+// proxy or certificate of the network the computer is on.
+const COMPUTER_EVENT_BREADCRUMB = /^(?:(?:powerMonitor|screen)\.|app\.(?:accessibility-support-changed|gpu-info-update|certificate-error|select-client-certificate|login)$)/;
 
 /** Console output can carry prompts and replies, and the click trail names
  *  chats and members; neither is sent. Nor are the computer's own events:

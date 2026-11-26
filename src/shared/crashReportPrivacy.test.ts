@@ -112,7 +112,8 @@ test("console and click breadcrumbs are dropped; network breadcrumbs keep no add
 });
 
 test("the computer's own events are dropped and the app's window events stay", () => {
-  for (const message of ["powerMonitor.on-battery", "powerMonitor.suspend", "powerMonitor.lock-screen", "screen.display-added", "screen.display-metrics-changed"]) {
+  for (const message of ["powerMonitor.on-battery", "powerMonitor.suspend", "powerMonitor.lock-screen", "screen.display-added", "screen.display-metrics-changed",
+    "app.accessibility-support-changed", "app.gpu-info-update", "app.certificate-error", "app.select-client-certificate", "app.login"]) {
     assert.equal(scrubCrashReportBreadcrumb({ category: "electron", message }), null, message);
   }
   assert.deepEqual(

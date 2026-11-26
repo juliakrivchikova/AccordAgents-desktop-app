@@ -14,6 +14,12 @@ export const CRASH_REPORTS_OFF_MARKER = "crash-reports-off";
 export const CRASH_REPORTS_NOTICE_SEEN_MARKER = "crash-reports-notice-seen";
 /** Where the SDK keeps its queue, scope and session between launches. */
 export const CRASH_REPORT_CACHE_DIR = "sentry";
+/** Which privacy rules the SDK's kept data was made under. The offline queue
+ *  is sent again as stored, past beforeSend, so what an older build kept
+ *  would leave with the fields the current rules remove. Raise the version
+ *  whenever the rules in crashReportPrivacy.ts send less. */
+export const CRASH_REPORT_RULES_VERSION = "2";
+export const CRASH_REPORT_RULES_MARKER = "crash-report-rules-version";
 
 const INSTALL_ID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 
@@ -67,6 +73,28 @@ export function markCrashReportsNoticeSeen(userDataDir: string): void {
  *  every launch with them off, so nothing collected then is sent later. */
 export function discardCrashReportData(userDataDir: string): void {
   rmSync(path.join(userDataDir, CRASH_REPORT_CACHE_DIR), { recursive: true, force: true });
+}
+
+/**
+ * Discards what the SDK kept under older privacy rules, before it starts and
+ * resends its queue. Throws when it cannot be discarded: reports then stay
+ * off for this launch rather than send it.
+ */
+export function discardCrashReportDataOfOlderRules(userDataDir: string): void {
+  const marker = path.join(userDataDir, CRASH_REPORT_RULES_MARKER);
+  let version = "";
+  try {
+    version = readFileSync(marker, "utf8").trim();
+  } catch {
+    // Kept by a build before the marker, or nothing kept yet.
+  }
+  if (version === CRASH_REPORT_RULES_VERSION) return;
+  discardCrashReportData(userDataDir);
+  try {
+    writeFileSync(marker, `${CRASH_REPORT_RULES_VERSION}\n`, { encoding: "utf8", mode: 0o600 });
+  } catch {
+    // Discarded again next launch: only what was kept in between is lost.
+  }
 }
 
 /**

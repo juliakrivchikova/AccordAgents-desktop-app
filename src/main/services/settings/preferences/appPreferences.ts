@@ -67,7 +67,12 @@ export class AppPreferences {
    *  CRASH_REPORTS_OFF_MARKER. */
   async setCrashReports(enabled: boolean): Promise<AppSettings> {
     writeCrashReportsChoice(userDataPath(), enabled);
-    return this.dismissCrashReportsNotice();
+    try {
+      markCrashReportsNoticeSeen(userDataPath());
+    } catch {
+      // The choice is saved; the notice may only show once more.
+    }
+    return this.settings.publicSettings.getPublicSettings();
   }
 
   /** The notice that reports are sent was closed, or the choice was made. */

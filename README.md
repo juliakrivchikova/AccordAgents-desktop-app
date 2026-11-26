@@ -248,8 +248,8 @@ the npm scripts directly: `npm run dev`, `npm run build`, `npm start`,
   happened), what the app did just before (its window events, the method and
   status of its requests, names of the programs it started), the app's name
   and version and the system's name and version. It holds no hardware,
-  memory or screen details, no sleep, battery or display events, no time
-  zone or language, and it tells
+  memory or screen details, no sleep, battery, display, accessibility or
+  network certificate events, no time zone or language, and it tells
   Sentry not to look up a place from your connection's address, which is not
   stored. Before sending one, the app masks file paths, links, email
   addresses, and anything that looks like a secret or token, and cuts error

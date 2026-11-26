@@ -3,7 +3,7 @@ import { app } from "electron";
 import { desktopUserDataDirOverride } from "../platform";
 import { startCrashReporting } from "../services/crashReporting";
 import { usageProfileUsedBefore } from "../services/usageMilestones";
-import { discardCrashReportData, loadOrCreateCrashReportInstallId, readCrashReportsEnabled } from "../services/crashReportPreferences";
+import { discardCrashReportData, discardCrashReportDataOfOlderRules, loadOrCreateCrashReportInstallId, readCrashReportsEnabled } from "../services/crashReportPreferences";
 import { readTeamDevice } from "../services/teamDevice";
 import type { DesktopApp } from "./desktopApp";
 
@@ -34,8 +34,19 @@ export function prepareProfile(desktopApp: DesktopApp): void {
   // registers the scheme the window reports through and starts the native
   // crash handler, and neither can happen later.
   desktopApp.crashReportingStart = readCrashReportsEnabled(app.getPath("userData"))
-    ? startCrashReporting(loadOrCreateCrashReportInstallId(app.getPath("userData")), { teamDevice: desktopApp.teamDevice })
+    ? startCrashReportingUnderCurrentRules(desktopApp.teamDevice)
     : discardCrashReportDataAtLaunch();
+}
+
+/** What an older build kept for later goes first: the SDK resends its queue
+ *  as stored, past the rules that would remove fields from it. */
+function startCrashReportingUnderCurrentRules(teamDevice: boolean): ReturnType<typeof startCrashReporting> {
+  try {
+    discardCrashReportDataOfOlderRules(app.getPath("userData"));
+  } catch (error) {
+    return { active: false, error: error instanceof Error ? error.message : String(error) };
+  }
+  return startCrashReporting(loadOrCreateCrashReportInstallId(app.getPath("userData")), { teamDevice });
 }
 
 function discardCrashReportDataAtLaunch(): { active: false; error?: string } {

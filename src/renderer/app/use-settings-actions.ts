@@ -100,8 +100,14 @@ export function useSettingsActions(state: AppState): SettingsActions {
     await updateSettings(() => window.consensus.setCrashReports(enabled));
   }
 
+  // Not through updateSettings: closing the notice must not clear an error
+  // card the User has not read yet.
   async function dismissCrashReportsNotice(): Promise<void> {
-    await updateSettings(() => window.consensus.dismissCrashReportsNotice());
+    try {
+      state.setSettings(await window.consensus.dismissCrashReportsNotice());
+    } catch (caught) {
+      state.setError(errorText(caught));
+    }
   }
 
   async function setCliAgentRunTimeoutMs(timeoutMs: number): Promise<void> {
