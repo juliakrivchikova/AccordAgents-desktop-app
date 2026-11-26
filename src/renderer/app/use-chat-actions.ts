@@ -127,6 +127,8 @@ export interface ChatRunScopeOptions {
 export interface StartChatAccordOptions {
   facilitatorParticipantId: string;
   targetParticipantIds: string[];
+  /** Agents-list CLIs with no member yet, made members as the Accord starts. */
+  targetProviderKinds?: ChatProviderKind[];
   subject: string;
 }
 
@@ -861,6 +863,7 @@ export function useChatActions(state: AppState, conversationActions: Conversatio
         conversationId: state.conversation.id,
         facilitatorParticipantId: options.facilitatorParticipantId,
         targetParticipantIds: options.targetParticipantIds,
+        ...(options.targetProviderKinds?.length ? { targetProviderKinds: options.targetProviderKinds } : {}),
         subject: options.subject
       });
       const saved = await window.consensus.getConversation(state.conversation.id);

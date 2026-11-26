@@ -2,6 +2,7 @@ import type { ChatAppToolApprovalRequest, ChatAppToolApprovalScope, ChatClaudePl
 import type { CloudRunRemoteExecutionMode } from "./cloudRuns";
 import type { ChatAgentMode, ChatAgentPermissions, ChatParticipantInput, ChatReasoningEffort } from "./members";
 import type { ChatImageAttachment, ChatImageInput } from "./messages";
+import type { ChatProviderKind } from "./providers";
 import type { RepoFileMention } from "./repositories";
 import type { ChatViewMode } from "./settings";
 import type { ChatSkillMention } from "./skills";
@@ -117,6 +118,10 @@ export interface StartChatAccordRequest {
   conversationId: string;
   facilitatorParticipantId: string;
   targetParticipantIds: string[];
+  /** A chat with a main session: CLIs of its Agents list with no member yet
+   *  (src/shared/accordCandidates.ts), each made a member when the Accord
+   *  starts and asked with the other members. */
+  targetProviderKinds?: ChatProviderKind[];
   subject: string;
 }
 

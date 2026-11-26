@@ -120,9 +120,11 @@ export interface ChatParticipant {
   autoWatch?: boolean;
   /** In a chat with a main session, the member that added this one without
    *  a card (the main session delegating, or a member it made adding its
-   *  own): its rights and mode never go above the main session's as they are
-   *  at each turn (docs/main-session.md). Absent for members the User added
-   *  or approved herself. Set once, when the member is added. */
+   *  own), or the main session for an Agents-list CLI an Accord the User
+   *  started added (made as for a delegated task): its rights and mode never
+   *  go above the main session's as they are at each turn
+   *  (docs/main-session.md). Absent for members the User added or approved
+   *  herself. Set once, when the member is added. */
   delegatedByParticipantId?: string;
   /** The short title the main session gave the task it made this member for
    *  (app_chat_delegate_task): its name in the sessions view

@@ -29,7 +29,7 @@ export class ChatAccord {
   constructor(
     private readonly chat: Pick<
       ChatModules,
-      | "activeRuns" | "host" | "participantBatch" | "promptSuggestions" | "requestGrants" | "store"
+      | "activeRuns" | "delegation" | "host" | "participantBatch" | "promptSuggestions" | "requestGrants" | "store"
     >,
     private readonly deps: Pick<ChatDependencies, "onReviewProgress" | "storage" | "userSkills">
   ) {}
@@ -226,6 +226,13 @@ export class ChatAccord {
     options: { author?: ChatParticipant } = {}
   ): Promise<StartChatAccordResult> {
     const warnings: string[] = [];
+    // Agents-list CLIs with no member yet (a chat with a main session) become
+    // members as for a delegated task: probed before the chat's queue, added
+    // inside it with the launch, so a refused launch adds nobody.
+    const providerKinds = [...new Set(request.targetProviderKinds ?? [])];
+    const newAgents = providerKinds.length > 0
+      ? await this.chat.delegation.prepareAccordMembers(await this.chat.store.requireChat(request.conversationId), providerKinds)
+      : undefined;
     const ingest = await this.chat.activeRuns.withChatRunLock(request.conversationId, async () => {
       const conversation = await this.chat.store.requireChat(request.conversationId);
       let prepared!: {
@@ -251,7 +258,7 @@ export class ChatAccord {
           throw new Error("Accord subject is required.");
         }
         const targetIds = Array.from(new Set(request.targetParticipantIds.map((id) => id.trim()).filter(Boolean)));
-        if (targetIds.length === 0) {
+        if (targetIds.length === 0 && !newAgents) {
           throw new Error("Choose at least one Accord member.");
         }
         if (targetIds.includes(facilitator.id)) {
@@ -261,10 +268,13 @@ export class ChatAccord {
         if (targets.some((target) => !target)) {
           throw new Error("One or more selected Accord members are no longer in this chat.");
         }
-        const selectedTargets = targets as ChatParticipant[];
-        if (selectedTargets.some((target) => target.roleConfigId === CHAT_ADMINISTRATOR_ROLE_ID)) {
+        if ((targets as ChatParticipant[]).some((target) => target.roleConfigId === CHAT_ADMINISTRATOR_ROLE_ID)) {
           throw new Error("The Chat Assistant cannot be an Accord facilitator or member.");
         }
+        const selectedTargets = [
+          ...targets as ChatParticipant[],
+          ...newAgents ? await this.chat.delegation.addAccordMembers(conversation, newAgents) : []
+        ];
         const content = accordStartMessageContent(facilitator, selectedTargets, subject);
         const accordSkill = await this.resolveAccordSkillMention(conversation, facilitator, content);
         // The main session gives its facilitator leave to ask the members

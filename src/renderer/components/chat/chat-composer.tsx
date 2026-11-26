@@ -89,6 +89,9 @@ export interface ChatComposerProps {
     content?: string
   ) => boolean | void | Promise<boolean | void>;
   accordDisabledReason?: string;
+  /** The Accord button's tooltip while it does something else than open the
+   *  Accord (it opens the Agents list to add one). */
+  accordHint?: string;
   onOpenAccord?: () => void;
   /** What a dictation belongs to (a chat, or a thread in it); changing it
    *  drops a dictation in progress. Defaults to the chat. */
@@ -154,7 +157,7 @@ export function ChatComposer(props: ChatComposerProps): JSX.Element {
   // still loading is something to send.
   const draftEmpty = !props.draft.trim() && images.pendingImages.length === 0 && mentions.selectedSkillMentions.length === 0;
   const hasLeadingPluginToken = draftStartsWithPluginMention(props.draft, mentions.selectedPluginMentions);
-  const accordTooltip = props.accordDisabledReason ?? "Start an Accord: reach agreement among chat members";
+  const accordTooltip = props.accordDisabledReason ?? props.accordHint ?? "Start an Accord: reach agreement among chat members";
   const activeRunCount = props.activeRunCount ?? 0;
   const activeRunParticipantRows = props.activeRunParticipantRows ?? [];
 

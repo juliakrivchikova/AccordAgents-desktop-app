@@ -27,6 +27,8 @@ export interface ConversationPanelProps {
   reviewPlanActions: ReviewPlanActions;
   settingsActions: SettingsActions;
   accordDisabledReason?: string;
+  /** Accord needs one more agent: its button opens the Agents list. */
+  accordNeedsAgent?: boolean;
   onOpenAccord: () => void;
   /** The sessions view: a member's … actions (its session's header), and
    *  its controls under its composer. */
@@ -47,6 +49,7 @@ export function ConversationPanel({
   reviewPlanActions,
   settingsActions,
   accordDisabledReason,
+  accordNeedsAgent,
   onOpenAccord,
   renderMemberSettings,
   renderMemberChip,
@@ -103,6 +106,7 @@ export function ConversationPanel({
             : current)}
           onChatViewError={state.setError}
           accordDisabledReason={accordDisabledReason}
+          accordNeedsAgent={accordNeedsAgent}
           onOpenAccord={onOpenAccord}
           renderMemberSettings={renderMemberSettings}
           renderMemberChip={renderMemberChip}

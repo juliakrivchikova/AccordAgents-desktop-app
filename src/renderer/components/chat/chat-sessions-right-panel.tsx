@@ -1,6 +1,7 @@
 import { useCallback, useContext, useEffect, useMemo, useRef, type ComponentProps, type ReactNode } from "react";
 import { chatSubagentProjectKey, chatSubagentProvidersOf } from "../../../shared/subagentProviders";
 
+import { ACCORD_NEEDS_AGENT_LINE } from "../../../shared/accordCandidates";
 import type { DockedAccord } from "../../../shared/accordProgress";
 import { memberSessionMessages } from "../../../shared/mainSession";
 import { SESSIONS_REMOVED_MEMBER_DETAIL, sessionsMemberDetail, sessionsMemberStatus, sessionsTaskDurationMs, type SessionsMemberRow } from "../../../shared/mainSessionView";
@@ -99,6 +100,9 @@ export function ChatSessionsRightPanel(props: {
   /** The chat's latest Accord (open, else the newest closed one). */
   latestAccord?: DockedAccord;
   onOpenAccord: (launchId: string) => void;
+  /** The chat has too few for an Accord: the Agents list, opened from the
+   *  Accord button, says so above its Add. */
+  accordNeedsAgent?: boolean;
   conversation: Conversation;
   participants: ChatParticipant[];
   participantStatusById: ReadonlyMap<string, ChatParticipantRosterStatus>;
@@ -176,7 +180,8 @@ export function ChatSessionsRightPanel(props: {
           project: settings.subagentProvidersByProject?.[chatSubagentProjectKey(conversation) ?? ""],
           thread: chatSubagentProvidersOf(conversation.metadata),
           projectScope: Boolean(chatSubagentProjectKey(conversation)),
-          main: props.participants.find((member) => member.id === conversation.metadata.mainSessionParticipantId)
+          main: props.participants.find((member) => member.id === conversation.metadata.mainSessionParticipantId),
+          ...(panel.addAgent !== undefined ? { add: { key: panel.addAgent, ...(props.accordNeedsAgent ? { note: ACCORD_NEEDS_AGENT_LINE } : {}) } } : {})
         }}
         formerRows={sessions.formerRows}
         activity={sessions.activity}

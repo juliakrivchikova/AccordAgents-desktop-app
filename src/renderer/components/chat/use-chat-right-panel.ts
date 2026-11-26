@@ -16,7 +16,9 @@ import {
  */
 export type ChatRightPanel =
   | { kind: "thread"; rootId: string }
-  | { kind: "members" }
+  /** addAgent: opened from the Accord button to add an agent (its Agents
+   *  list's Add open), a new number for each time. */
+  | { kind: "members"; addAgent?: number }
   | { kind: "member"; participantId: string; focus?: { messageId: string; nonce: number } }
   | { kind: "accord"; launchId: string };
 
@@ -25,6 +27,8 @@ export interface ChatRightPanelState {
   selectedThreadRootId?: string;
   selectThread: (rootId: string | undefined) => void;
   openMembers: () => void;
+  /** The members list with its Agents list's Add open (Accord needs one more). */
+  openAgentsToAdd: () => void;
   /** Opens a member's session, at a message of it when one is named. */
   openMember: (participantId: string, focusMessageId?: string) => void;
   openAccord: (launchId: string) => void;
@@ -43,6 +47,10 @@ export function useChatRightPanel(): ChatRightPanelState {
   }, []);
   const openMembers = useCallback(() => setPanel({ kind: "members" }), []);
   const focusNonce = useRef(0);
+  const openAgentsToAdd = useCallback(() => {
+    focusNonce.current += 1;
+    setPanel({ kind: "members", addAgent: focusNonce.current });
+  }, []);
   const openMember = useCallback((participantId: string, focusMessageId?: string) => {
     focusNonce.current += 1;
     setPanel({ kind: "member", participantId, ...(focusMessageId ? { focus: { messageId: focusMessageId, nonce: focusNonce.current } } : {}) });
@@ -61,6 +69,7 @@ export function useChatRightPanel(): ChatRightPanelState {
     selectedThreadRootId: panel?.kind === "thread" ? panel.rootId : undefined,
     selectThread,
     openMembers,
+    openAgentsToAdd,
     openMember,
     openAccord,
     close,
