@@ -62,7 +62,7 @@ export {
 // task cards and the members list, by the desktop's own rules.
 export {
   MAIN_SESSION_ROLE_ID, buildSessionsViewIndex, canSwitchChatView, chatViewFor, isChatViewMode, isMainSessionTaskMessage, isSessionsHiddenTurnFinishedNote,
-  mainSessionMemberOf, mainSessionParticipantId, mainTimelineMessages, memberSessionMessages, sessionsFormerMembers,
+  mainSessionMemberOf, mainSessionParticipantId, mainTimelineMessages, memberSessionMessages, sessionsCompactionLineWords, sessionsFormerMembers,
   sessionsTaskPlacement, sessionsViewLane, withoutLeadingMention
 } from "./mainSession";
 export {

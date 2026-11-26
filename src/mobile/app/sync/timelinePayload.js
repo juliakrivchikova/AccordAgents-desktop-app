@@ -13,6 +13,17 @@ import {
 import { dismissedFinishedNotes, dropRemovedFinishedNotes, finishedNoteOfEvent } from "./finishedNotes.js";
 import { renderMessageContentIfChanged } from "../text/messageText.js";
 
+// The line a finished compaction left (shared/mainSession.ts
+// sessionsCompactionLineOf): the member compacted and the CLI that did it.
+// It travels with no words; the sessions view words it by that CLI.
+const COMPACTING_CLIS = ["claude-code", "codex-cli", "gemini-cli"];
+
+function compactionOfEvent(event) {
+  const line = event && event.role === "system" ? event.compaction : undefined;
+  if (!line || typeof line.participantId !== "string" || !line.participantId) return undefined;
+  return { participantId: line.participantId, ...(COMPACTING_CLIS.indexOf(line.cli) >= 0 ? { cli: line.cli } : {}) };
+}
+
 // What a member posted during its turn is part of its reply (the desktop's
 // shared/interimPosts.ts): shown inside the reply, above its final words.
 // Their pictures are among the reply's own.
@@ -180,14 +191,16 @@ export async function handleRelayTimelinePayload(payload, fallbackConversationId
     const attachments = timelineAttachmentsFromEvent(event);
     const interimPosts = event.role === "participant" ? interimPostsOfEvent(event) : {};
     const activity = event.role === "participant" ? activityOfEvent(event) : {};
+    const compaction = compactionOfEvent(event);
     // A picture with no caption is still a message. Requiring text dropped it.
     if (!content && attachments.length === 0) {
       // A turn that ended with nothing to say travels hidden and empty: it
       // still ends its run below, and no bubble is stored for it.
       const endsRunUnseen = event.hidden === true && (event.status === "done" || event.status === "error");
       // A reply whose words all went out as posts during its turn shows them;
-      // a part of a turn her next message joined shows its steps.
-      if (!endsRunUnseen && !interimPosts.interimPosts && !(event.turnContinues === true && activity.activity)) {
+      // a part of a turn her next message joined shows its steps; a
+      // compaction's line travels with no words of its own.
+      if (!endsRunUnseen && !compaction && !interimPosts.interimPosts && !(event.turnContinues === true && activity.activity)) {
         continue;
       }
     }
@@ -282,6 +295,8 @@ export async function handleRelayTimelinePayload(payload, fallbackConversationId
       // The line a closed Accord left: the phone draws its card there.
       ...(role === "system" && event.accordClosed && typeof event.accordClosed.launchMessageId === "string" && event.accordClosed.launchMessageId
         ? { accordClosed: { launchMessageId: event.accordClosed.launchMessageId, ...(typeof event.accordClosed.title === "string" ? { title: event.accordClosed.title } : {}) } } : {}),
+      // A compaction's line: the sessions view shows it in that member's session.
+      ...(compaction ? { compaction: compaction } : {}),
       // Who leads that Accord and who is in it: its card without its launch.
       ...(role === "system" && event.accordLaunch && typeof event.accordLaunch.facilitator === "string" && Array.isArray(event.accordLaunch.members)
         ? { accordLaunch: { facilitator: event.accordLaunch.facilitator, members: event.accordLaunch.members.filter(function (member) { return typeof member === "string"; }) } }

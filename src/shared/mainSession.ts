@@ -224,6 +224,19 @@ export function sessionsCompactionLineText(kind: ChatProviderKind | undefined): 
   return kind === "codex-cli" ? "Context compacted" : "Conversation compacted";
 }
 
+/** The words of a message's compaction line, or undefined when it is not
+ *  one: the CLI the line names, else the compacted member's own among these
+ *  members. One rule for the desktop's line and the phone's. */
+export function sessionsCompactionLineWords(
+  message: Pick<ChatMessage, "role" | "metadata">,
+  members: readonly { id: string; kind?: string }[] | undefined
+): string | undefined {
+  const line = sessionsCompactionLineOf(message);
+  if (!line) return undefined;
+  const memberKind = members?.find((member) => member.id === line.participantId)?.kind;
+  return sessionsCompactionLineText(line.cli ?? COMPACTING_CLIS.find((kind) => kind === memberKind));
+}
+
 /** The member whose request the main session answers with this message,
  *  told by the request it answers (its source) rather than by the request's
  *  reply id, which is set only when the turn ends: so the answer is in that

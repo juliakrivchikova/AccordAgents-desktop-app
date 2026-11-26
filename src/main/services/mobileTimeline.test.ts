@@ -446,6 +446,31 @@ test("a turn-finished note travels to the phone with the reply it leads to, and 
   assert.equal(mobileWhoLabel({ ...note, metadata: { ...note.metadata, turnFinishedNote: { ...note.metadata.turnFinishedNote, participantLabel: "" } } }), "system:");
 });
 
+test("a finished compaction's line travels to the phone with its member and CLI and no words; a failed one, one with nothing to compact and a hidden one stay home", () => {
+  const compaction = (id: string, participantId: string, outcome: "completed" | "failed" | "no-active-session", extra: Partial<ChatMessage["metadata"]> = {}, cli?: "codex-cli"): ChatMessage => ({
+    id, role: "system", content: `Compacted @${participantId.slice(2)} context.`, status: "done", createdAt: "2026-11-26T10:00:00Z",
+    metadata: { compaction: { triggeredBy: "user", participantId, outcome, instructionsProvided: false, ...(cli ? { cli } : {}) }, ...extra }
+  });
+  const conversation: Conversation = {
+    id: "compact-chat", kind: "chat", title: "Compact", createdAt: "2026-11-26T09:00:00Z", updatedAt: "2026-11-26T10:00:00Z", findings: [],
+    metadata: { mainSessionParticipantId: "p-main", chatView: "sessions" },
+    messages: [
+      compaction("main-done", "p-main", "completed"),
+      compaction("drew-done", "p-drew", "completed", {}, "codex-cli"),
+      compaction("drew-failed", "p-drew", "failed"),
+      compaction("main-nothing", "p-main", "no-active-session"),
+      compaction("drew-hidden", "p-drew", "completed", { hiddenFromTimeline: true })
+    ]
+  };
+  const events = timelineEventsFromSnapshot(conversation);
+  assert.deepEqual(events.map((event) => [event.id, event.role, event.content, event.compaction]), [
+    ["main-done", "system", "", { participantId: "p-main" }],
+    ["drew-done", "system", "", { participantId: "p-drew", cli: "codex-cli" }]
+  ], "the phone words the line itself; a shell from before drops an event with no words");
+  const classic = timelineEventsFromSnapshot({ ...conversation, metadata: { ...conversation.metadata, chatView: "classic" } });
+  assert.deepEqual(classic.map((event) => event.id), ["main-done", "drew-done"], "a classic chat's lines travel too: the phone's view can switch, and its classic view draws none");
+});
+
 test("an artifact note filed under an Accord travels to the phone with its launch, so the phone folds it into the Accord's card", () => {
   const conversation: Conversation = {
     id: "accord-chat", kind: "chat", title: "Accord", createdAt: "2026-11-08T10:00:00Z", updatedAt: "2026-11-08T10:02:00Z", findings: [], metadata: {},

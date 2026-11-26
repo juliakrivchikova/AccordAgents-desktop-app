@@ -9,6 +9,7 @@ import {
   memberSessionMessages,
   sessionsCompactionLineOf,
   sessionsCompactionLineText,
+  sessionsCompactionLineWords,
   sessionsFormerMembers,
   sessionsTaskPlacement,
   sessionsViewLane,
@@ -249,6 +250,18 @@ test("a compaction's line says what the member's CLI says after it", () => {
   assert.equal(sessionsCompactionLineText("gemini-cli"), "Conversation compacted");
   assert.equal(sessionsCompactionLineText("codex-cli"), "Context compacted");
   assert.equal(sessionsCompactionLineText(undefined), "Conversation compacted", "a member no longer in the chat");
+});
+
+test("a compaction line's words: the CLI it names, else the compacted member's own, one rule for the desktop and the phone", () => {
+  const line = (cli?: "claude-code" | "codex-cli" | "gemini-cli", outcome: "completed" | "failed" = "completed"): Pick<ChatMessage, "role" | "metadata"> => ({
+    role: "system", metadata: { compaction: { triggeredBy: "user", participantId: "p-drew", outcome, instructionsProvided: false, ...(cli ? { cli } : {}) } }
+  });
+  const members = [{ id: "p-main", kind: "claude-code" }, { id: "p-drew", kind: "codex-cli" }];
+  assert.equal(sessionsCompactionLineWords(line("claude-code"), members), "Conversation compacted", "the CLI that compacted wins over the member's current one");
+  assert.equal(sessionsCompactionLineWords(line(), members), "Context compacted", "an older line reads its member's CLI");
+  assert.equal(sessionsCompactionLineWords(line(), []), "Conversation compacted", "a member no longer in the chat");
+  assert.equal(sessionsCompactionLineWords(line(), [{ id: "p-drew", kind: "" }]), "Conversation compacted", "a member whose CLI is not known");
+  assert.equal(sessionsCompactionLineWords(line("codex-cli", "failed"), members), undefined, "a failed compaction leaves no line");
 });
 
 test("the main session's answer to a member's question is in that member's session from its first token", () => {

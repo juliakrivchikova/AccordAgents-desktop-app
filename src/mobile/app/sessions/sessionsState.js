@@ -244,6 +244,9 @@ function sessionsMessageOf(row) {
       // token (shared/mainSession.ts sessionsViewLane).
       ...(role !== "user" && row.sourceMessageId ? { sourceMessageId: row.sourceMessageId } : {}),
       ...(role === "system" && row.finishedNote ? { appMessageSource: "app_turn_finished_note", turnFinishedNote: row.finishedNote } : {}),
+      // A finished compaction's line: in the compacted member's session
+      // (shared sessionsViewLane), worded by its CLI.
+      ...(role === "system" && row.compaction ? { compaction: { ...row.compaction, outcome: "completed" } } : {}),
       ...(row.accordLaunchByMainSession ? { accordLaunchByMainSession: true } : {}),
       ...(typeof row.workedMs === "number" ? { workedMs: row.workedMs } : {}),
       // A reply waiting behind its member's turn, and when a reply's own

@@ -28,6 +28,12 @@ export function sessionsMainRows(state) {
       return;
     }
     if (!state.mainIds.has(message.id) || state.placement.placedTaskIds.has(message.id)) return;
+    // The main session's compaction line: one muted line, as on the desktop.
+    if (row.compaction) {
+      const words = sessionsCompactionWordsOf(state, message);
+      if (words) rows.push({ ...base, compactionLine: words });
+      return;
+    }
     if (shared.isMainSessionTaskMessage(message, state.index)) {
       // A task its turn's reply does not hold: its rows on their own.
       rows.push({ ...base, delegations: { standalone: true, entries: sessionsDelegationsOf(state, message) } });
@@ -95,6 +101,12 @@ export function sessionsMemberSessionRows(state, member) {
     if (!ids.has(message.id)) return;
     shown += 1;
     if (isWaitingReplyRow(message)) return;
+    // Its compaction line: one muted line, as on the desktop.
+    if (drawn.compaction) {
+      const words = sessionsCompactionWordsOf(state, message);
+      if (words) rows.push({ ...drawn, presentation: "sessions", replyCount: undefined, compactionLine: words });
+      return;
+    }
     const batch = message.metadata.participantRequest;
     const given = batch && batch.requesterParticipantId !== participantId
       ? batch.items.find(function (item) { return item.targetParticipantId === participantId; })
@@ -125,6 +137,14 @@ export function sessionsMemberSessionRows(state, member) {
       status: "Done", content: "", createdAt: "", presentation: "sessions", sessionsEmpty: "Nothing in this session yet." });
   }
   return rows;
+}
+
+/** A compaction line's words, as the desktop words it (shared
+ *  sessionsCompactionLineWords): the CLI that compacted, else the member's. */
+function sessionsCompactionWordsOf(state, message) {
+  const shared = sessionsRules();
+  return typeof shared.sessionsCompactionLineWords === "function"
+    ? shared.sessionsCompactionLineWords(message, state.members) : undefined;
 }
 
 /** Stops every running turn of these members, each named to the server as
