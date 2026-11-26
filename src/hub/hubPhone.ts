@@ -4,6 +4,7 @@ import { gzipSync } from "node:zlib";
 import type { ChatMessage, ChatParticipant, ChatSavedPromptConfig, Conversation, ConversationOpenResult, ConversationSummary } from "../shared/types";
 import { CHAT_DELIVERY_POLICY_OPTIONS, resolveChatDeliveryTargets } from "../shared/chatDeliveryPolicy";
 import { matchingChatSavedPrompts } from "../shared/chatSavedPrompts";
+import { COMPACT_COMMAND_DESCRIPTION, GOAL_COMMAND_DESCRIPTION } from "../shared/slashSuggestions";
 import { isDeviceEventBlobReference, type DeviceEventBlobReference } from "../shared/deviceEventBlobs";
 import type { HubComposerCatalog, HubDevice, HubPhoneForkSource, HubPhoneScope } from "../shared/hubProtocol";
 import { mainSessionParticipantId } from "../shared/mainSession";
@@ -589,8 +590,8 @@ export class HubPhoneApi {
     const clear = target.targets.length > 0 && target.unknownHandles.length === 0;
     const needle = text.trim().toLowerCase();
     const commands = clear && target.targets.length === 1 ? [
-      ...("compact".startsWith(needle) ? [{ id: "compact", label: "/compact", description: "Compact the mentioned member context" }] : []),
-      ...("goal".startsWith(needle) ? [{ id: "goal", label: "/goal", description: "Run the mentioned member until the goal is finished" }] : [])
+      ...("compact".startsWith(needle) ? [{ id: "compact", label: "/compact", description: COMPACT_COMMAND_DESCRIPTION }] : []),
+      ...("goal".startsWith(needle) ? [{ id: "goal", label: "/goal", description: GOAL_COMMAND_DESCRIPTION }] : [])
     ] : [];
     if (!catalog) {
       return { status: 200, body: { ...empty, commands, catalogMissing: true } };

@@ -59,6 +59,19 @@
   margin-left: 0;
 }
 
+/* The line a finished compaction leaves in its member's session
+   (chat-compaction-line.tsx): muted, as Claude Code's "Conversation
+   compacted" in its transcript, with the space of a message around it. */
+.chat-compaction-line {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: 2px 0 12px;
+  color: var(--ui-text-3);
+  font-size: 13px;
+  line-height: 18px;
+}
+
 /* Cards and their folded lines take the whole reading column. */
 .chat-view.is-sessions-view :is(.chat-accord-line, .chat-used-approval, .chat-urgent-alert, .chat-artifact-note) {
   max-width: none;

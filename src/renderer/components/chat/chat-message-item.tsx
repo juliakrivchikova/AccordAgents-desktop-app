@@ -46,6 +46,7 @@ import { ChatAccordLaunchCard, accordLaunchCardForMessage } from "./chat-accord-
 import { ChatAccordClosedLine } from "./chat-accord-closed-line";
 import { accordClosedLaunchId } from "../../../shared/accordProgress";
 import { turnFinishedNoteOf } from "../../../shared/turnFinishedNoteSource";
+import { ChatCompactionLine } from "./chat-compaction-line";
 import { ChatChoiceCard } from "./chat-choice-card";
 import { chatMessageCards } from "./chat-server-card";
 import { ChatImageAttachmentStrip } from "./chat-image-attachments";
@@ -65,7 +66,7 @@ import { WorkedRow } from "./chat-worked-row";
 import { ChatWaitingMessageActions } from "./chat-waiting-message";
 import { ChatDelegationRows, ChatWorkedFold } from "./chat-delegation-fold";
 import { ChatSessionsFinishedActivity, ChatSessionsRunningReply, sessionsReplyHasActivity } from "./chat-sessions-activity";
-import { mainSessionMemberOf, withoutLeadingMention } from "../../../shared/mainSession";
+import { mainSessionMemberOf, sessionsCompactionLineOf, withoutLeadingMention } from "../../../shared/mainSession";
 import type { SessionsTaskEntry } from "../../../shared/mainSessionView";
 import { ChatAppToolApprovalList } from "./chat-app-tool-approvals";
 import { useSessionsViewLabel, useSessionsViewNames, useSessionsViewText } from "./chat-sessions-links";
@@ -164,6 +165,9 @@ export const ChatMessageItem = memo(function ChatMessageItem(props: {
   }
   if (accordClosedLaunchId(message)) {
     return <ChatAccordClosedLine message={message} />;
+  }
+  if (props.presentation === "sessions" && sessionsCompactionLineOf(message)) {
+    return <ChatCompactionLine message={message} participants={props.participants} />;
   }
   const artifactNote = artifactNoteCardForMessage(message);
   if (artifactNote) {

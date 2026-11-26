@@ -8,7 +8,7 @@ import type {
   UserSkillSummary,
   UserSkillTargetSummary
 } from "../../../shared/types";
-import type { SlashSuggestionSelection } from "../../../shared/slashSuggestions";
+import { COMPACT_COMMAND_DESCRIPTION, GOAL_COMMAND_DESCRIPTION, type SlashSuggestionSelection } from "../../../shared/slashSuggestions";
 import { artifactReference } from "../../../shared/artifacts";
 import { providerLabel } from "./chat-conversation-data";
 import {
@@ -86,7 +86,7 @@ export function compactCommandOption(query: string | undefined, target: UserSkil
   return {
     id: "compact",
     label: "/compact",
-    description: "Compact the mentioned member context"
+    description: COMPACT_COMMAND_DESCRIPTION
   };
 }
 
@@ -100,7 +100,7 @@ export function goalCommandOption(query: string | undefined, target: UserSkillTa
   return {
     id: "goal",
     label: "/goal",
-    description: "Run the mentioned member until the goal is finished"
+    description: GOAL_COMMAND_DESCRIPTION
   };
 }
 

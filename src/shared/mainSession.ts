@@ -167,6 +167,8 @@ export type SessionsViewLane =
  *   become task cards there), except its answer to a member's request, which
  *   is part of that member's session.
  * - Another member's message: in its own session.
+ * - The line a compaction of a member left: in that member's session (the
+ *   main session's own on the main timeline).
  * - Anything else (system lines, scripts, summaries): on the main timeline;
  *   the timeline's own visibility rules still hide internal lines.
  */
@@ -192,7 +194,30 @@ export function sessionsViewLane(message: ChatMessage, index: SessionsViewIndex)
     }
     return { kind: "member", participantId: message.participantId };
   }
+  const compacted = message.role === "system" ? message.metadata?.compaction?.participantId : undefined;
+  if (typeof compacted === "string" && compacted && compacted !== mainId) {
+    return { kind: "member", participantId: compacted };
+  }
   return { kind: "main" };
+}
+
+/** The line a finished compaction left (compactSuccessMessage): the sessions
+ *  view shows it in the compacted member's session, as Claude Code leaves
+ *  "Conversation compacted" in its transcript after `/compact` and after a
+ *  compaction of its own (the User agreed on 2026-11-26). A failed one is
+ *  said as a warning; one with nothing to compact shows nothing, as before. */
+export function sessionsCompactionLineOf(message: Pick<ChatMessage, "role" | "metadata">): { participantId: string } | undefined {
+  const compaction = message.role === "system" ? message.metadata?.compaction : undefined;
+  return compaction?.outcome === "completed" && typeof compaction.participantId === "string" && compaction.participantId
+    ? { participantId: compaction.participantId }
+    : undefined;
+}
+
+/** That line's words, as the member's CLI writes them: Claude Code 2.1.332
+ *  and Antigravity 1.5.18 "Conversation compacted", Codex 0.171.0 "Context
+ *  compacted". A member no longer in the chat reads as Claude Code. */
+export function sessionsCompactionLineText(kind: ChatProviderKind | undefined): string {
+  return kind === "codex-cli" ? "Context compacted" : "Conversation compacted";
 }
 
 /** The member whose request the main session answers with this message,

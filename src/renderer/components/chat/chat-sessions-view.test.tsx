@@ -11,6 +11,8 @@ import type { ChatParticipantRosterStatus } from "./chat-roster-status";
 import { ChatSessionsTimelineRow } from "./chat-sessions-timeline-row";
 import { ChatSessionsLinksContext, type ChatSessionsLinks } from "./chat-sessions-links";
 import { useChatSessionsView, type ChatSessionsView } from "./use-chat-sessions-view";
+import { isChatMessageHiddenInChat, isChatMessageHiddenInSessions } from "./chat-thread-data";
+import { memberSessionMessages, sessionsCompactionLineText } from "../../../shared/mainSession";
 import {
   DREW,
   GERA,
@@ -89,6 +91,28 @@ test("the main timeline holds the User and the main session and an open member c
   assert.equal(sessions.runningMemberCount, 1);
   assert.deepEqual(sessions.memberRows.current.map((row) => row.participant.handle), ["drew", "taylor"]);
   assert.deepEqual(sessions.memberRows.previous.map((row) => row.participant.handle), ["gera"]);
+});
+
+test("a compaction leaves its CLI's line in the compacted member's session in the sessions view; the classic view stays as it was", () => {
+  const compacted = (id: string, participantId: string, minute: number): ChatMessage => chatMessage(id, "system", minute, {
+    content: `Compacted @${participantId.slice(2)} context.`,
+    metadata: { compaction: { triggeredBy: "user", participantId, outcome: "completed", instructionsProvided: false } }
+  });
+  const messages = [...sessionsMessages(), compacted("main-compacted", MAIN.id, 20), compacted("drew-compacted", DREW.id, 21)];
+  const conversation = sessionsConversation({}, messages);
+  const sessions = sessionsOf(conversation)!;
+  assert.ok(sessions.mainMessages.some((message) => message.id === "main-compacted"), "the main session's own line is on the main timeline");
+  assert.ok(!sessions.mainMessages.some((message) => message.id === "drew-compacted"), "a member's is not");
+  const drewLine = messages.at(-1)!;
+  assert.ok(memberSessionMessages(messages, DREW.id, sessions.index).includes(drewLine));
+  assert.equal(isChatMessageHiddenInSessions(conversation, drewLine), false, "its panel shows it");
+  assert.equal(isChatMessageHiddenInChat(conversation, drewLine), true, "the classic view hides it, as before");
+
+  const mainRow = renderRow(messages.at(-2)!, sessions);
+  assert.equal(textOf(mainRow).trim(), sessionsCompactionLineText(MAIN.kind));
+  assert.equal(mainRow.findAll((node) => typeof node.type === "string" && node.props["data-message-id"] === "main-compacted").length, 1);
+  const drewRow = renderRow(drewLine, sessions);
+  assert.equal(textOf(drewRow).trim(), sessionsCompactionLineText(DREW.kind), "in the words of the member's own CLI");
 });
 
 test("rows of the main timeline: no avatar, author or thread controls; the User's message is a bubble; the turn's tasks are in its Worked fold", () => {

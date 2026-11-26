@@ -24,7 +24,7 @@ import { chatRoleLabel, participantProviderLabel } from "./chat-mention-director
 import type { ChatMessageItem } from "./chat-message-item";
 import type { ChatParticipantRosterStatus } from "./chat-roster-status";
 import { isWaitingReply, waitingMessages } from "../../../shared/waitingMessages";
-import { isChatMessageHiddenInChat } from "./chat-thread-data";
+import { isChatMessageHiddenInSessions } from "./chat-thread-data";
 import { composerSendNow } from "./chat-waiting-message";
 import type { ChatRightPanelState } from "./use-chat-right-panel";
 import type { ChatSessionsView } from "./use-chat-sessions-view";
@@ -123,7 +123,7 @@ export function ChatSessionsRightPanel(props: {
   const former = memberId && !participant ? sessions.formerRows.find((row) => row.member.id === memberId) : undefined;
   const messages = useMemo(
     () => memberId
-      ? memberSessionMessages(conversation.messages, memberId, sessions.index).filter((message) => !isChatMessageHiddenInChat(conversation, message) && !isWaitingReply(message))
+      ? memberSessionMessages(conversation.messages, memberId, sessions.index).filter((message) => !isChatMessageHiddenInSessions(conversation, message) && !isWaitingReply(message))
       : [],
     [conversation.messages, memberId, sessions.index]
   );
