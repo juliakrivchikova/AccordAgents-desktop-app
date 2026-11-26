@@ -11,7 +11,7 @@ import {
 import type { ParticipantRunResult } from "../../providers";
 import { CodexAppServerRunError } from "./appServerErrors";
 import { codexReasoningEffort, codexRunAccess, isCodexDeveloperInstructionsUnsupported } from "./appServerParams";
-import { errorText, failedCompact, isResumeMiss, reportSessionId } from "../runs/outputText";
+import { errorText, failedCompact, isResumeMiss, reportSessionId, resumeOnlyMissError } from "../runs/outputText";
 import { readOptionalFile } from "../runs/records";
 import { agentRunEnv, withAppMcpClientStatus } from "../runs/runEnvironment";
 import type { CliAgentCompactResult, CliAgentRunOptions, CliAgentWarmOptions, WarmAgentEntry } from "../types";
@@ -431,6 +431,7 @@ export class CodexRuns {
         };
       }
       if (options.sessionId && isResumeMiss(error)) {
+        if (options.resumeOnly) throw resumeOnlyMissError("Codex", error);
         const restarted = await this.runCodexOneShot(participant, options.resumeFallbackPrompt ?? prompt, repoPath, diffMode, kind, signal, {
           persistSession: options.persistSession,
           extraReadableDirs: options.extraReadableDirs,

@@ -54,6 +54,10 @@ export interface CliAgentRunOptions {
   clearCompactPrompt?: boolean;
   extraReadableDirs?: string[];
   resumeFallbackPrompt?: string;
+  /** The session must be resumed: a session the CLI cannot find is an error
+   *  (resumeOnlyMissError), never a clean start (an imported thread before
+   *  its first turn, whose history is only in that session). */
+  resumeOnly?: boolean;
   images?: CliAgentTurnImages;
   role?: CliAgentRoleOptions;
   appMcp?: CliAgentAppMcpOptions;

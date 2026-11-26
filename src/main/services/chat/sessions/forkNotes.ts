@@ -1,4 +1,5 @@
 import { memberHasFinishedReply } from "../../../../shared/forkToNewChat";
+import { cliProviderMetadata } from "../../../../shared/cliReadiness";
 import type {
   ChatMessage, ChatParticipant, ChatParticipantSession, ChatParticipantForkOrigin, ChatSessionForkSource, Conversation
 } from "../../../../shared/types";
@@ -154,4 +155,17 @@ export function recordReplySessionCut(message: ChatMessage, result: Pick<Partici
   const at = result.sessionCut?.trim();
   if (!sessionId || !at) return;
   message.metadata = { ...message.metadata, sessionCut: { sessionId, at } };
+}
+
+/** An imported thread's session at its first turn in the chat
+ *  (importIntroPending): told where it is now, once, with the chat's full
+ *  instructions above it. */
+export function importedMainSessionNote(participant: ChatParticipant): string | undefined {
+  const origin = participant.importOrigin;
+  if (!origin) return undefined;
+  const label = cliProviderMetadata(origin.kind).label;
+  return [
+    `This session is the User's own ${label} thread, now imported into an AccordAgents chat: everything before this message happened in ${label} itself, and the chat shows it as its history.`,
+    `- You are @${participant.handle}, this chat's main session. The AccordAgents session instructions above apply from now on.`
+  ].join("\n");
 }

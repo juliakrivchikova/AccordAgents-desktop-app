@@ -1,6 +1,6 @@
 import { buildConversationSnapshot, cloneConversationBody, snapshotRowsBytes, type SnapshotMessageRow } from "../../chatSnapshotDelta";
 import { chatChangeBaseline, diffChatChanges, type ChatChangeBaseline } from "../../chatChanges";
-import { chatChangesToOps } from "../../chatServerOps";
+import { chatChangesToOps, chatImportOps } from "../../chatServerOps";
 import type { HubOp } from "../../../../shared/hubOps";
 import type { ChatMessage, Conversation } from "../../../../shared/types";
 import { recordClosedAccords } from "../../../../shared/accordProgress";
@@ -23,6 +23,14 @@ const SNAPSHOT_STATE_LIMIT = 32;
 const SNAPSHOT_STATE_BYTES_LIMIT = 256 * 1024 * 1024;
 
 /** The one way a chat is read, changed and saved: mutations in turn, snapshots for the renderer, and the saves' outcomes. */
+/** How a chat save goes to the User's server: what it changed (default),
+ *  nothing (`emitChanges: false`, a copy of what the server sent), or the
+ *  whole chat at once (`serverImport`). */
+interface SaveOptions {
+  emitChanges?: boolean;
+  serverImport?: boolean;
+}
+
 export class ChatStore {
   readonly saveQueues = new Map<string, Promise<void>>();
   // Serialized message rows of the last snapshot emitted per conversation. The
@@ -339,7 +347,15 @@ export class ChatStore {
     }
   }
 
-  async saveConversation(conversation: Conversation, options: { emitChanges?: boolean } = {}): Promise<void> {
+  /** A chat imported from a CLI thread (ChatImports), saved once: it reaches
+   *  the User's server whole, as `chat.import` pages queued with the save,
+   *  rather than as one write per message (each of which would ring the
+   *  phone, src/hub/main.ts). */
+  saveImportedConversation(conversation: Conversation): Promise<void> {
+    return this.saveConversation(conversation, { serverImport: true });
+  }
+
+  async saveConversation(conversation: Conversation, options: SaveOptions = {}): Promise<void> {
     if (this.chat.deletion.deletedConversationIds.has(conversation.id)) {
       throw new Error("Chat was permanently deleted.");
     }
@@ -364,7 +380,7 @@ export class ChatStore {
   private persistConversationSnapshot(
     snapshot: Conversation,
     rows?: SnapshotMessageRow[],
-    options: { emitChanges?: boolean } = {}
+    options: SaveOptions = {}
   ): Promise<void> {
     const run = this.persistConversationSnapshotNow(snapshot, rows, options);
     this.chatSavesInFlight.add(run);
@@ -382,7 +398,7 @@ export class ChatStore {
   private async persistConversationSnapshotNow(
     snapshot: Conversation,
     rows?: SnapshotMessageRow[],
-    options: { emitChanges?: boolean } = {}
+    options: SaveOptions = {}
   ): Promise<void> {
     const link = this.chat.serverLink.current;
     // A link stopped (the app quitting, or between two links) still queues:
@@ -397,7 +413,9 @@ export class ChatStore {
       // with the save that made them so (Д9), whatever else it emits. Only
       // with a live link: the next start reconciles them.
       const cards = this.chat.serverCards.serverCardOpsFor(snapshot);
-      if (options.emitChanges !== false) {
+      if (options.serverImport) {
+        ops = chatImportOps(snapshot);
+      } else if (options.emitChanges !== false) {
         const mayWrite = (message: ChatMessage) => this.chat.host.mayWriteOnServer(snapshot, message);
         const diff = diffChatChanges(await this.chatChangeBaselineFor(snapshot.id), snapshot, { emitsConversationFields: true, ownsMessage: mayWrite });
         ops = chatChangesToOps(snapshot, diff.changes, mayWrite);

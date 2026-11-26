@@ -11,12 +11,12 @@ import type { Approved, Update } from "./types";
 // --- its own members ----------------------------------------------------------
 
 /** A member a machine adds without what only the computer writes: a
- *  session handed over and a forked main session's origin; `removed` names
- *  the fields it brought. */
+ *  session handed over, a forked main session's origin and an imported
+ *  one's; `removed` names the fields it brought. */
 export function withoutComputerOnlyFields(member: ChatParticipant): { member: ChatParticipant; removed: string[] } {
-  const removed = (["sessionHandoff", "forkOrigin"] as const).filter((field) => field in member);
+  const removed = (["sessionHandoff", "forkOrigin", "importOrigin"] as const).filter((field) => field in member);
   if (removed.length === 0) return { member, removed };
-  const { sessionHandoff: _handoff, forkOrigin: _origin, ...rest } = member;
+  const { sessionHandoff: _handoff, forkOrigin: _origin, importOrigin: _imported, ...rest } = member;
   return { member: rest, removed };
 }
 

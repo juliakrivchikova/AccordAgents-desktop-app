@@ -1,5 +1,5 @@
 import { type ReactNode, useState } from "react";
-import { BellIcon, CaretRightIcon, FolderSimpleIcon, GearSixIcon, MagnifyingGlassIcon, NotePencilIcon, PlusIcon } from "@phosphor-icons/react";
+import { ArrowSquareInIcon, BellIcon, CaretRightIcon, FolderSimpleIcon, GearSixIcon, MagnifyingGlassIcon, NotePencilIcon, PlusIcon } from "@phosphor-icons/react";
 
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { HistoryLoadingState } from "@/renderer/components/loading-states";
@@ -9,6 +9,7 @@ import { SidebarToggleButton } from "./sidebar-toggle-button";
 import { DeleteConfirmationDialog } from "../settings/delete-confirmation-dialog";
 import type { ConversationSummary } from "../../../shared/types";
 import { SidebarSessionRow } from "./sidebar-session-row";
+import { openCliImport } from "../cli-import/cli-import-store";
 import { SidebarNavItem, formatBadgeCount } from "./sidebar-nav-item";
 import { chatSearchShortcutAria, chatSearchShortcutLabel } from "../../app/chat-search-shortcut";
 import { isMacPlatform } from "../../lib/platform";
@@ -192,7 +193,17 @@ export const Sidebar = ({
               {recentSessions.map((summary) => renderSessionRow(summary, "recent"))}
             </SidebarSection>
           )}
-          <div className={SECTION_LABEL} data-testid="projects-heading">Projects</div>
+          <div className={cn(SECTION_LABEL, "justify-between pr-0.5")} data-testid="projects-heading">
+            Projects
+            <IconButton
+              size="xs"
+              icon={ArrowSquareInIcon}
+              label="Import from your CLIs"
+              tooltip="Import threads from Claude Code, Codex and Antigravity"
+              onClick={() => openCliImport()}
+              data-testid="cli-import-open"
+            />
+          </div>
           {/* A refresh keeps the rows on screen; the placeholder is for the
               first load, before there is anything to show. */}
           {loading && pinnedSessions.length + recentSessions.length + projectGroups.length === 0 ? (

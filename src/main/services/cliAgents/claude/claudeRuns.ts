@@ -28,7 +28,7 @@ import type { ClaudeOneShotStreamState } from "./types";
 import { finalTextFromMessageItems, trailingTextBlock } from "../codex/appServerText";
 import { SESSION_LOG_RETRIES } from "../constants";
 import { forkCopyNotMade, isForkSourceMissingError } from "../runs/forkSource";
-import { emitLiveOutput, errorText, failedCompact, isResumeMiss, reportSessionId } from "../runs/outputText";
+import { emitLiveOutput, errorText, failedCompact, isResumeMiss, reportSessionId, resumeOnlyMissError } from "../runs/outputText";
 import { stringField } from "../runs/records";
 import {
   agentModeForRun, agentRunEnv, normalizedExtraReadableDirs, promptWithImageFallback, withAppMcpClientStatus
@@ -412,6 +412,7 @@ export class ClaudeRuns {
       // chat context, as the warning that follows says. A fork only when its
       // source is gone (not for any other "not found").
       if (options.sessionId ? isResumeMiss(error) : Boolean(options.forkFromSessionId) && isForkSourceMissingError(errorText(error))) {
+        if (options.resumeOnly) throw resumeOnlyMissError("Claude Code", error);
         const restarted = await this.runClaudeOneShot(participant, options.resumeFallbackPrompt ?? prompt, repoPath, kind, signal, {
           persistSession: options.persistSession,
           extraReadableDirs: options.extraReadableDirs,

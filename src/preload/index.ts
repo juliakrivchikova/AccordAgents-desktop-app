@@ -3,7 +3,7 @@ import type { ScriptsUpdatedEvent } from "../shared/scripts";
 import type { CreateTerminalRequest, TerminalHostStateEvent } from "../shared/terminal";
 import type { AvatarStudioTurnRequest, SaveCustomAvatarRequest } from "../shared/avatarStudio";
 import type { HubInstallRequest, HubSetupCommandRequest, HubSetupState } from "../shared/hubSetup";
-import type { DisableSpeechToTextRequest, SpeechToTextState, TranscribeSpeechRequest } from "../shared/types";
+import type { CliImportListRequest, CliImportRequest, DisableSpeechToTextRequest, SpeechToTextState, TranscribeSpeechRequest } from "../shared/types";
 import type { SpeechHoldKey } from "../shared/speechToText";
 import type {
   CreateMachineRequest,
@@ -269,6 +269,8 @@ const bridge: AppBridge = {
   refreshPlugins: (request?: PluginListRequest) => ipcRenderer.invoke("plugins:refresh", request),
   listConversations: () => ipcRenderer.invoke("conversations:list"),
   searchChats: (request: ChatSearchRequest) => ipcRenderer.invoke("chat-search:query", request),
+  listCliImportThreads: (request: CliImportListRequest) => ipcRenderer.invoke("cli-import:list", request),
+  importCliThreads: (request: CliImportRequest) => ipcRenderer.invoke("cli-import:import", request),
   listChatActivity: (request?: ListChatActivityRequest) => ipcRenderer.invoke("conversations:list-activity", request),
   getConversation: (id: string) => ipcRenderer.invoke("conversations:get", id),
   openConversation: (id: string, limit?: number) => ipcRenderer.invoke("conversations:open", id, limit),

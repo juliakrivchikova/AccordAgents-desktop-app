@@ -12,6 +12,7 @@ import { HubServer } from "../../hub/hubServer";
 import { ChatService, REPLIES_REPAIRED_KEY } from "./chat";
 import { endAbortedServerTurn } from "./chat/runs/runOwnerRecords";
 import { chatParts } from "./chat/test/chatParts";
+import { MAIN_ROLE } from "./chat/test/forkFixtures";
 import { DeviceIdentityService, createDeviceIdentity } from "./deviceIdentity";
 import { ChatSearchService } from "./chatSearch";
 import { signHubRequest, type HubSigningIdentity } from "./hubAuth";
@@ -71,7 +72,10 @@ async function setup(t: test.TestContext) {
   const turns: Turn[] = [];
   let release: (() => void) | undefined;
   let holdTurns = false;
-  const settings = { async getPublicSettings() { return { chatRoleConfigs: [], chatParticipantConfigs: [], providers: [{ kind: "claude-code", enabled: true }] }; } };
+  const settings = {
+    async getPublicSettings() { return { chatRoleConfigs: [MAIN_ROLE], chatParticipantConfigs: [], providers: [{ kind: "claude-code", enabled: true }] }; },
+    async listMachines() { return []; }
+  };
   const cliRunner = { async detectAgents() { return []; }, async contextUsageForSession() { return undefined; }, async closeConversationSessions() { return undefined; } };
   const playTurn = async (_conversation: unknown, participant: unknown, trigger: unknown, runId: unknown, signal: unknown, _progress: unknown, options: unknown): Promise<ChatMessage[]> => {
     const turn: Turn = { participantId: (participant as ChatParticipant).id, triggerId: (trigger as ChatMessage).id, runId: runId as string, signal: signal as AbortSignal };
@@ -517,4 +521,36 @@ test("a quit that did not happen lets the server's asks start the member again",
     message: { id: "phone-back", role: "user", content: "@taylor still there?", createdAt: new Date().toISOString(), metadata: { deliveryTargets: [desk.id] } } as ChatMessage });
   await until(() => h.page("chat-back"), (page) => page.messages.some((message) => message.role === "participant" && message.status === "done"));
   assert.equal(h.turns.length, 1);
+});
+
+test("a chat imported from a CLI thread reaches the server whole, as chat.import writes, in order, and asks no turn", async (t) => {
+  const h = await setup(t);
+  await h.link.start();
+  const folder = await mkdtemp(path.join(tmpdir(), "accord-import-folder-"));
+  t.after(() => rm(folder, { recursive: true, force: true }));
+  const created = await h.chat.importCliThread({
+    kind: "claude-code", sessionId: "cli-thread", folder, title: "Imported thread",
+    entries: [
+      { role: "user", text: "First question", at: "2026-11-20T10:00:00.000Z" },
+      { role: "assistant", text: "First answer", at: "2026-11-20T10:01:00.000Z", cut: "uuid-1" },
+      { role: "user", text: "Second question", at: "2026-11-20T10:02:00.000Z" },
+      { role: "assistant", text: "Second answer", at: "2026-11-20T10:03:00.000Z", cut: "uuid-2" }
+    ]
+  });
+  const queued = await h.storage.hubClientOps().forConversation(created.id);
+  assert.deepEqual([...new Set(queued.map((row) => row.kind))], ["chat.import"], "one write for the whole chat, not one per message (each would ring the phone)");
+  const onServer = await until(() => h.page(created.id), (page) => (page as { messages?: unknown[] }).messages?.length === 6);
+  assert.equal(onServer.conversation.title, "Imported thread");
+  assert.deepEqual(onServer.messages.filter((message) => message.role !== "system").map((message) => message.content),
+    ["First question", "First answer", "Second question", "Second answer"]);
+  assert.equal(onServer.turns.length, 0, "a historical message asks no turn of anyone");
+  // A new message goes after the history here too: this computer took the
+  // server's order of the imported messages once the last page was in.
+  const mainId = String(created.metadata.mainSessionParticipantId);
+  await until(() => h.storage.getConversation(created.id), (chat) => Boolean(chat?.messages.every((message) => typeof message.metadata?.serverSeq === "number")));
+  await h.chat.sendMessage({ conversationId: created.id, content: "Third question", targetParticipantIds: [mainId] } as never);
+  await until(() => h.page(created.id), (page) => page.messages.some((message) => message.content === "Third question"));
+  const local = await until(() => h.storage.getConversation(created.id), (chat) => Boolean(chat?.messages.some((message) => message.content === "Third question" && typeof message.metadata?.serverSeq === "number")));
+  assert.deepEqual(local!.messages.filter((message) => message.role === "user").map((message) => message.content),
+    ["First question", "Second question", "Third question"], "her new message after the imported history");
 });

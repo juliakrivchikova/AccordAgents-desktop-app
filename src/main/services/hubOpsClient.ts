@@ -539,7 +539,10 @@ export class HubOpsClient {
     for (const row of await this.options.store.forConversation(conversationId)) {
       // Only the chat's own content travels in the move (its fields and
       // messages); turns, cards and documents are sent as they were queued.
-      if (!row.kind.startsWith("conversation.") && !row.kind.startsWith("message.")) continue;
+      // A chat imported from a CLI thread here went up whole as `chat.import`
+      // pages: the move brought it too, so they are not sent again (a page
+      // sent later would put back the title it was made with).
+      if (!row.kind.startsWith("conversation.") && !row.kind.startsWith("message.") && row.kind !== "chat.import") continue;
       await this.options.store.accept(row.opId, 0, at);
       this.answer(row.opId, { status: "accepted", seq: 0 });
     }

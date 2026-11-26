@@ -122,10 +122,15 @@ export class ServerChat {
       return;
     }
     if (await this.deps.storage.conversationTombstones().isDeleted(conversationId)) return;
-    // Moved to the server by the computer that held it: that computer has it
-    // already; any other device reads it again.
-    if (entries.some((entry) => entry.effect.kind === "chat.import" && entry.deviceId !== me)) {
-      await this.reloadChatFromServer(conversationId);
+    // Brought to the server whole (`chat.import`: the one-time move, or a chat
+    // imported from a CLI thread): read again once, when its last page is
+    // there, by every device; the computer that wrote it too, for the place
+    // the server gave its messages (without it a new message would sort
+    // above the whole history), as the move reads every chat after it.
+    if (entries.some((entry) => entry.effect.kind === "chat.import")) {
+      if (entries.some((entry) => entry.effect.kind === "chat.import" && entry.effect.last)) {
+        await this.reloadChatFromServer(conversationId);
+      }
       return;
     }
     let conversation = await this.deps.storage.getConversation(conversationId);

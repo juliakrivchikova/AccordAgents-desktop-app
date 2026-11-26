@@ -12,6 +12,7 @@ import { ChatAttachments } from "./attachments/chatAttachments";
 import { ChatCreation } from "./conversations/chatCreation";
 import { ChatDeletion } from "./conversations/chatDeletion";
 import { ChatForks } from "./conversations/chatForks";
+import { ChatImports } from "./conversations/chatImports";
 import { ChatHistory } from "./store/chatHistory";
 import { ChatHost } from "./host/chatHost";
 import { ChatList } from "./conversations/chatList";
@@ -80,6 +81,7 @@ export interface ChatModules {
   readonly creation: ChatCreation;
   readonly newChatOffers: NewChatOffers;
   readonly forks: ChatForks;
+  readonly imports: ChatImports;
   readonly list: ChatList;
   readonly titles: ChatTitles;
   readonly deletion: ChatDeletion;
@@ -153,6 +155,7 @@ export function createChatModules(deps: ChatDependencies): ChatModules {
   modules.creation = new ChatCreation(modules, deps);
   modules.newChatOffers = new NewChatOffers(modules, deps);
   modules.forks = new ChatForks(modules, deps);
+  modules.imports = new ChatImports(modules, deps);
   modules.list = new ChatList(modules, deps);
   modules.titles = new ChatTitles(modules, deps);
   modules.deletion = new ChatDeletion(modules, deps);

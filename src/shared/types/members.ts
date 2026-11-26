@@ -1,5 +1,6 @@
 import type { CloudRunRemoteExecutionMode, RemoteParticipantSessionHandle } from "./cloudRuns";
 import type { ChatProviderKind, CliProviderHostVendor, ProviderKind } from "./providers";
+import type { ChatParticipantImportOrigin } from "./cliImport";
 import type { ChatBehaviorRuleSnapshot, ChatRoleParticipantDefaults, ChatRoleRuntime } from "./roles";
 
 export type ChatAppToolCapability = "participants.manage" | "participants.request" | "compaction.request" | "permissions.request" | "scripts.request" | "participants.delegate" | "accord.start" | "participants.compact";
@@ -135,6 +136,11 @@ export interface ChatParticipant {
    *  device the main session runs on copies that member's session (which it
    *  holds: a fork never crosses devices) at its first turn. */
   forkOrigin?: ChatParticipantForkOrigin;
+  /** The main session of a chat imported from a CLI thread of the User's own
+   *  (src/shared/types/cliImport.ts): that thread's CLI session, which its
+   *  first turn resumes. Written once, by the computer, when the chat is
+   *  made. */
+  importOrigin?: ChatParticipantImportOrigin;
 }
 
 /** Where a forked main session comes from: a member of another chat. */
@@ -244,6 +250,12 @@ export interface ChatParticipantSession {
   /** Device-local: it moved here with this session, and its next turn tells
    *  it so (memberMovedNote); cleared once a turn of it succeeded. */
   movedHere?: { from: string; to: string; at: string };
+  /** An imported main session not yet told it is one (importOrigin): its
+   *  turns carry the chat's full instructions and its access until a turn of
+   *  it succeeded; meanwhile a session the CLI cannot resume is an error, not
+   *  a clean start (it would run without the imported history). Travels
+   *  with the session when it moves. */
+  importIntroPending?: boolean;
   /** A hash of the member's access (repository, mode, permissions, what an
    *  @handle does) as its CLI session was last told it, in its instructions
    *  or a note: the CLI keeps the instructions a session started with, so a

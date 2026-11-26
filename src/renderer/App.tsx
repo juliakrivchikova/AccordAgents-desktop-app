@@ -29,6 +29,7 @@ import { IconButton } from "./components/primitives";
 import { ChatAccordLauncherDialog } from "./components/chat/chat-accord-launcher-dialog";
 import { NewChatScreen } from "./components/chat/new-chat-screen";
 import { ChatSearchModal } from "./components/search/chat-search-modal";
+import { CliImportDialog } from "./components/cli-import/cli-import-dialog";
 import { ChatTopBarTitle } from "./components/chat/chat-top-bar-title";
 import { ChatClassicOnly, ChatViewHeaderControls } from "./components/chat/chat-view-switch";
 import { sessionsViewNamesOf } from "../shared/sessionsViewText";
@@ -517,6 +518,7 @@ function App(): JSX.Element {
         setDismissedWarningKeysByScope={state.setDismissedWarningKeysByScope}
       />
 
+      <CliImportDialog onOpenConversation={navigation.openChat} />
       <ChatSearchModal
         open={searchOpen}
         query={chatSearch.query}

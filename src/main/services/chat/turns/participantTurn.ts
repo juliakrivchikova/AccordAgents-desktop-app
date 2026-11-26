@@ -25,7 +25,7 @@ import {
 } from "../members/roleRuntime";
 import { closedByQuit, INTERRUPTED_REPLY_TEXT, markStoppedByQuit } from "../runs/interruptions";
 import {
-  forkCopyFailed, forkedMemberIdentityNote, forkStartedCleanIdentityNote, forkStartedCleanNotice, otherChatForkOrigin,
+  forkCopyFailed, forkedMemberIdentityNote, forkStartedCleanIdentityNote, forkStartedCleanNotice, importedMainSessionNote, otherChatForkOrigin,
   recordReplySessionCut
 } from "../sessions/forkNotes";
 import { recordLastMessageByParticipant } from "../store/lastMessages";
@@ -126,10 +126,13 @@ export class ParticipantTurn {
       ? session.forkFrom
       : undefined;
     const isResumingSession = Boolean(session.sessionId) || Boolean(forkSource);
+    // An imported thread's session, not yet told it is this chat's main
+    // session: told now, in full, as a new session would be at its start.
+    const importNotTold = session.importIntroPending === true;
     // Members' memory: the list of notes goes with a session's first turn,
     // with instructions sent again, and after the context was compacted. It
     // is asked now, while the rest of the turn is prepared (it never fails).
-    const memoryIndexPending = !isResumingSession || sessionState.instructionsRefreshed || this.chat.memberSessions.memoryIndexDue.has(memoryIndexKey(conversation.id, participant.id))
+    const memoryIndexPending = !isResumingSession || importNotTold || sessionState.instructionsRefreshed || this.chat.memberSessions.memoryIndexDue.has(memoryIndexKey(conversation.id, participant.id))
       ? memoryIndex(memoryAccessNow(this.chat.memberSessions.memoryAccess), { conversationId: conversation.id, participantId: participant.id })
       : undefined;
     // A Claude Code member may take this message while an earlier one is
@@ -185,7 +188,7 @@ export class ParticipantTurn {
     }
     const usePromptRole = session.roleRuntime === "prompt-fallback";
     const includeRefreshedRoleInstructions = isResumingSession && sessionState.instructionsRefreshed;
-    const primaryIncludeRoleInstructions = (usePromptRole && !isResumingSession) || includeRefreshedRoleInstructions;
+    const primaryIncludeRoleInstructions = (usePromptRole && !isResumingSession) || includeRefreshedRoleInstructions || importNotTold;
     const memoryIndexResult = await memoryIndexPending;
     const memoryIndexBlock = memoryIndexResult?.text;
     // Shown again after a compaction until the server's list was given.
@@ -204,7 +207,8 @@ export class ParticipantTurn {
     // first one may fail after the copy was made: the copy's id is reported
     // before the turn runs).
     const forkNotTold = Boolean(forkSource) || (Boolean(session.forkedFromParticipantId) && !session.instructionsAccessHash);
-    const identityNoteBlock = forkedMemberIdentityNote(conversation, participant, session, forkNotTold);
+    const identityNoteBlock = forkedMemberIdentityNote(conversation, participant, session, forkNotTold)
+      ?? (importNotTold ? importedMainSessionNote(participant) : undefined);
     const access: ChatMemberAccess = { agentMode, permissions };
     // Compacted since its access was last said (accessRestateDue; after a
     // restart, as its session keeps it): said again in full. A new session
@@ -212,7 +216,7 @@ export class ParticipantTurn {
     const restateKey = memoryIndexKey(conversation.id, participant.id);
     if (session.instructionsAccessHash === INSTRUCTIONS_ACCESS_RESTATE) this.chat.memberSessions.accessRestateDue.add(restateKey);
     const restateDue = isResumingSession && this.chat.memberSessions.accessRestateDue.has(restateKey);
-    const carriesCurrentAccess = restateDue || !isResumingSession;
+    const carriesCurrentAccess = restateDue || !isResumingSession || importNotTold;
     const accessNote = forkNotTold || restateDue
       ? `Your access: ${this.chat.turnPrompt.participantDynamicHeader(conversation, participant, session, access)}`
       : isResumingSession ? this.chat.memberSessions.accessChangedNote(conversation, participant, session, access) : undefined;
@@ -510,6 +514,7 @@ export class ParticipantTurn {
         }),
         extraReadableDirs: [workspacePath],
         resumeFallbackPrompt,
+        ...(importNotTold ? { resumeOnly: true } : {}),
         ...(turnImages.images ? { images: turnImages.images } : {}),
         role,
         appMcp: appMcp
@@ -800,6 +805,7 @@ export class ParticipantTurn {
       // conversation (by its CLI, in this turn or in a reply nobody waited
       // on) makes the next turn say it again, unless this turn said it after.
       const told = !signal?.aborted && result.ok;
+      if (told) delete session.importIntroPending;
       const compactedNow = this.chat.turnPrompt.noteMemberCompactions(conversation.id, participant);
       if (told && carriesCurrentAccess && !compactedNow) this.chat.memberSessions.accessRestateDue.delete(restateKey);
       if (this.chat.memberSessions.accessRestateDue.has(restateKey)) {

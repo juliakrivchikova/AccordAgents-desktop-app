@@ -44,6 +44,7 @@ import type { createFileEditFlusher } from "../services/filePanelWindow";
 import type { WorkspaceFileResolver } from "../services/workspaceFiles";
 import type { SettingsService } from "../services/settings";
 import type { StorageService } from "../services/storage";
+import type { CliImportService } from "../services/cliImport";
 import type { ChatSearchService } from "../services/chatSearch";
 import type { PluginService } from "../services/plugins";
 import type { UserSkillsService } from "../services/userSkills";
@@ -72,6 +73,7 @@ export interface DesktopApp {
   storageService: StorageService;
   debugLogService: DebugLogService;
   chatSearchService: ChatSearchService;
+  cliImportService: CliImportService;
   terminalService: TerminalService;
   quitConfirmation: QuitConfirmation;
   workspaceFileResolver: WorkspaceFileResolver;

@@ -99,6 +99,26 @@ export class ConversationLists {
     });
   }
 
+  /** The CLI sessions the chats already hold, by chat: every member's
+   *  session id and every imported main session's thread, for the CLI import
+   *  to open a thread's chat rather than make a second one (a session id can
+   *  change after a turn, and a move takes the record away). No message is
+   *  read. */
+  async listChatCliSessions(): Promise<Array<{ conversationId: string; sessionId: string }>> {
+    await this.storage.schema.init();
+    const rows = await this.storage.sqlite.queryJson<{ conversationId?: unknown; sessionId?: unknown }>(
+      `select c.id as conversationId, json_extract(s.value, '$.sessionId') as sessionId
+         from conversations c, json_each(coalesce(nullif(c.body_json, ''), c.payload_json), '$.metadata.participantSessions') s
+        where c.kind = 'chat' and json_valid(coalesce(nullif(c.body_json, ''), c.payload_json))
+       union
+       select c.id as conversationId, json_extract(p.value, '$.importOrigin.sessionId') as sessionId
+         from conversations c, json_each(coalesce(nullif(c.body_json, ''), c.payload_json), '$.metadata.participants') p
+        where c.kind = 'chat' and json_valid(coalesce(nullif(c.body_json, ''), c.payload_json));`
+    );
+    return rows.flatMap((row) => typeof row.conversationId === "string" && typeof row.sessionId === "string" && row.sessionId.trim()
+      ? [{ conversationId: row.conversationId, sessionId: row.sessionId.trim() }] : []);
+  }
+
   /** Each chat's members, as the runtime fields that say which provider they
    *  run on (the CLI and any added provider) and their role (to tell the
    *  Assistant apart), for the usage signals. One
