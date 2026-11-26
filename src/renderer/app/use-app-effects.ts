@@ -1,17 +1,10 @@
 import { useEffect, useRef } from "react";
 import type { AgentDetectionRequest } from "../../shared/types";
-import {
-  buildChatActivityItemsForConversationUpdate,
-  knownSessionsTitles,
-  mergeChatActivityItems,
-  preservedRecentChatActivityItems
-} from "../../shared/chatActivity";
 import { chatImportedAtMs } from "../../shared/mainSession";
 import { SIDEBAR_COLLAPSED_STORAGE_KEY } from "./constants";
 import { conversationTimeValue, upsertConversationSummary } from "./conversation-summaries";
 import type { AppState } from "./app-state";
 import { persistLastViewedAt } from "./storage";
-import { activityItemsWithStoredPreferences } from "./activity-item-state";
 import {
   conversationMatchesSnapshot,
   conversationRelevantRunIds,
@@ -23,7 +16,6 @@ import {
 } from "../lib/conversation-message-pages";
 import {
   applyConversationUpdate,
-  chatActivityItemsForUnknownMessages,
   conversationFromUpdate,
   messagePageAfterUpdate
 } from "../../shared/conversationUpdates";
@@ -35,8 +27,7 @@ import {
 export function useAppEffects(
   state: AppState,
   refreshAll: () => Promise<void>,
-  refreshAgents: (request?: AgentDetectionRequest) => Promise<unknown>,
-  refreshActivity: () => Promise<void>
+  refreshAgents: (request?: AgentDetectionRequest) => Promise<unknown>
 ): void {
   const deletedConversationIds = useRef(new Set<string>());
   // Each listed chat's time as the list last had it: an update that leaves it
@@ -50,7 +41,6 @@ export function useAppEffects(
 
   useEffect(() => window.consensus.onConversationDeleted(conversationId => {
     deletedConversationIds.current.add(conversationId);
-    state.archivedConversationIdsRef.current.delete(conversationId);
     state.activityRevisionByConversationRef.current = {
       ...state.activityRevisionByConversationRef.current,
       [conversationId]: (state.activityRevisionByConversationRef.current[conversationId] ?? 0) + 1
@@ -60,8 +50,6 @@ export function useAppEffects(
     state.lastViewedAtRef.current = lastViewed;
     persistLastViewedAt(lastViewed);
     state.setSummaries(current => current.filter(summary => summary.id !== conversationId));
-    state.setActivityItems(current => current.filter(item => item.conversationId !== conversationId));
-    state.setSelectedActivityItem(current => current?.conversationId === conversationId ? undefined : current);
     state.clearChatMessageDraft(conversationId);
     if (state.conversation?.id === conversationId) {
       state.setConversation(undefined);
@@ -73,10 +61,6 @@ export function useAppEffects(
 
   useEffect(() => {
     void refreshAll();
-  }, []);
-
-  useEffect(() => {
-    void refreshActivity();
   }, []);
 
   useEffect(() => {
@@ -163,66 +147,25 @@ export function useAppEffects(
       const listedAt = listedUpdatedAt.current.get(update.id);
       const timeMoved = listedAt === undefined || conversationTimeValue(update.updatedAt) > conversationTimeValue(listedAt);
       const updatedConversation = conversationFromUpdate(update);
-      const archived = update.archived === true || update.metadata.archived === true;
       state.activityRevisionByConversationRef.current = {
         ...state.activityRevisionByConversationRef.current,
         [update.id]: (state.activityRevisionByConversationRef.current[update.id] ?? 0) + 1
       };
-      const archivedConversationIds = new Set(state.archivedConversationIdsRef.current);
-      if (archived) {
-        archivedConversationIds.add(update.id);
-      } else {
-        archivedConversationIds.delete(update.id);
-      }
-      state.archivedConversationIdsRef.current = archivedConversationIds;
       // The update itself: a delta says whether the whole chat has a reply
       // not ended yet, which its few carried messages cannot.
       state.setSummaries((current) => upsertConversationSummary(current, update));
-      if (archived) {
-        state.setSelectedActivityItem((current) => current?.conversationId === update.id ? undefined : current);
-      }
       state.setConversation((current) => {
         const isActive = current?.id === update.id;
         const matchesCurrentSnapshot = conversationMatchesSnapshot(current, updatedConversation, state.currentRunId);
         // A delta carries only the messages that changed plus the newest window,
         // so it is merged into the loaded chat when that chat is open; for any
-        // other chat it only refreshes summaries, activity and unread state.
+        // other chat it only refreshes summaries and unread state.
         const applied = applyConversationUpdate(isActive ? current : undefined, update);
         const updated = applied.conversation;
         const canReplace = matchesCurrentSnapshot && (isActive || !update.messageDelta);
-        // The loaded conversation counts as "being viewed" only while the chats view is
-        // on screen. A chat left open behind the activity or settings views must not
-        // silently mark new finished runs as read, or the sidebar Activity badge never appears.
-        // The activity view (including an open detail pane) never auto-reads items:
-        // there, unread state clears only through the explicit "Mark read" action.
+        // The loaded conversation counts as "being viewed" only while the chats
+        // view is on screen: a chat left open behind Settings is not seen.
         const timelineVisible = conversationTimelineVisibleNow(state);
-        const viewedLive = isActive && matchesCurrentSnapshot && timelineVisible;
-        const knownMessageIds = new Set(updated.messages.map((message) => message.id));
-        state.setActivityItems((activityCurrent) => {
-          // A delta carries the newest window only: members whose task is
-          // older keep the task title the rows already show (sessions view).
-          const activityItems = activityItemsWithStoredPreferences(
-            state,
-            buildChatActivityItemsForConversationUpdate(updated, {
-              lastViewedAt: state.lastViewedAtRef.current[update.id],
-              treatAsViewed: viewedLive,
-              preferences: state.activityItemPreferencesRef.current,
-              knownTitles: knownSessionsTitles(activityCurrent, update.id)
-            })
-          );
-          const preservedReadItems = preservedRecentChatActivityItems(activityCurrent, update.id, {
-            archived,
-            treatAsRead: isActive && timelineVisible
-          });
-          // Messages the delta did not carry cannot be recomputed here; keep what
-          // an earlier full snapshot or activity refresh said about them.
-          const preservedUnknownItems = update.messageDelta && !archived
-            ? chatActivityItemsForUnknownMessages(activityCurrent, update.id, knownMessageIds, update.messageDelta.removedIds)
-            : [];
-          return mergeChatActivityItems(activityCurrent, [...preservedUnknownItems, ...activityItems, ...preservedReadItems], {
-            replaceConversationId: update.id
-          });
-        });
         if (!canReplace) {
           // An imported chat is news once something happens in it here.
           if (!isActive && timeMoved && conversationTimeValue(update.updatedAt) > chatImportedAtMs(update.metadata)) {

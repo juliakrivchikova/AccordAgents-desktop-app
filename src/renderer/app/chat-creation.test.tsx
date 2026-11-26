@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { act, create, type ReactTestRenderer } from "react-test-renderer";
-import type { AgentHealth, ChatActivityItem, ChatMessage, Conversation, ReviewProgress, StartReviewResult } from "../../shared/types";
+import type { AgentHealth, Conversation, ReviewProgress, StartReviewResult } from "../../shared/types";
 import { useAppState, type AppState } from "./app-state";
 import { DEFAULT_SETTINGS } from "./constants";
 import { useAppEffects } from "./use-app-effects";
@@ -177,52 +177,13 @@ test("successful creation sends once, clears the draft, and a duplicate Start ca
   let pending!: Promise<boolean>;
   await act(async () => { pending = h.actions().startChat(); });
   await act(async () => { assert.equal(await h.actions().startChat(), false); });
-  // Activity opened while the chat was being created: Back lands on the new chat.
-  h.state().chatBeforeActivityRef.current = {};
   await act(async () => { h.creation.resolve({ conversation: conversation(), warnings: [] }); });
-  assert.deepEqual(h.state().chatBeforeActivityRef.current, { conversationId: "created" });
   await act(async () => { h.sent.resolve({ conversation: conversation(), warnings: [] }); assert.equal(await pending, true); });
   assert.deepEqual(h.calls, ["create", `send:${h.runId()}`]);
   assert.equal(h.state().conversation?.id, "created");
   assert.equal(h.state().question, "");
   assert.equal(h.state().busy, false);
   assert.equal(h.state().chatCreationRef.current, undefined);
-  await act(async () => { h.renderer.unmount(); });
-});
-
-test("Back from an Activity preview drops it, keeps the draft, and gives it a dot only for news it never showed", async () => {
-  const h = await harness();
-  const [before, after] = ["2026-09-13T00:00:00.000Z", "2026-09-13T00:00:05.000Z"];
-  // [last viewed, loaded as a preview at, dot]
-  const cases = [[before, undefined, true], [after, undefined, false], [undefined, before, true], [undefined, after, false], [undefined, undefined, false]] as const;
-  for (const [lastViewed, previewLoadedAt, dot] of cases) {
-    await act(async () => {
-      h.state().lastViewedAtRef.current = lastViewed ? { preview: lastViewed } : {};
-      h.state().previewLoadedAtRef.current = previewLoadedAt ? { preview: previewLoadedAt } : {};
-      h.state().setUnreadConversationIds(new Set());
-      h.state().setConversation({ ...conversation(), id: "preview", updatedAt: after });
-    });
-    await act(async () => { h.navigation().returnToNewChatDraft(); });
-    assert.equal(h.state().conversation, undefined);
-    assert.equal(h.state().question, "Draft must survive");
-    assert.equal(h.state().unreadConversationIds.has("preview"), dot, `viewed ${lastViewed}, previewed ${previewLoadedAt}`);
-  }
-  await act(async () => { h.renderer.unmount(); });
-});
-
-test("a preview still loading when Back is pressed never lands on screen or counts as viewed", async () => {
-  // jsdom has no animation frames; opening a chat waits for one.
-  globalThis.requestAnimationFrame ??= (callback) => setTimeout(() => callback(0), 0) as unknown as number;
-  const h = await harness();
-  let loading!: Promise<void>;
-  await act(async () => { loading = h.navigation().openConversation("late"); });
-  assert.equal(h.state().openingConversationId, "late");
-  await act(async () => { h.navigation().returnToNewChatDraft(); });
-  await act(async () => { h.opened.resolve({ conversation: { ...conversation(), id: "late" } }); await loading; });
-  assert.equal(h.state().conversation, undefined);
-  assert.equal(h.state().openingConversationId, undefined);
-  assert.equal(h.state().lastViewedAtRef.current.late, undefined);
-  assert.equal(h.state().question, "Draft must survive");
   await act(async () => { h.renderer.unmount(); });
 });
 
@@ -282,18 +243,6 @@ test("a card answer that lands while its chat is still open updates that chat", 
   await act(async () => { h.renderer.unmount(); });
 });
 
-test("Back from Activity while the new chat is being created still lands on the new chat", async () => {
-  const h = await harness();
-  let pending!: Promise<boolean>;
-  await act(async () => { pending = h.actions().startChat(); });
-  // Back from Activity drops any preview first; that is not another chat opened.
-  await act(async () => { h.navigation().returnToNewChatDraft(); });
-  await act(async () => { h.creation.resolve({ conversation: conversation(), warnings: [] }); });
-  await act(async () => { h.sent.resolve({ conversation: conversation(), warnings: [] }); assert.equal(await pending, true); });
-  assert.equal(h.state().conversation?.id, "created");
-  await act(async () => { h.renderer.unmount(); });
-});
-
 test("a chat opened from the sidebar while the new chat is being created stays on screen", async () => {
   globalThis.requestAnimationFrame ??= (callback) => setTimeout(() => callback(0), 0) as unknown as number;
   const h = await harness();
@@ -317,7 +266,7 @@ function clearNotices(): void {
 // Fork to new chat takes up to a second or so to make its chat. What she
 // opened meanwhile is her later choice: the fork does not replace it nor take
 // its keyboard; it is listed and a notice offers to open it. Driven through
-// the app's own navigation (sidebar, Activity, Settings, Back), as App.tsx
+// the app's own navigation (sidebar, Settings, Back), as App.tsx
 // wires it.
 async function forkHarness() {
   globalThis.requestAnimationFrame ??= (callback) => setTimeout(() => callback(0), 0) as unknown as number;
@@ -393,13 +342,12 @@ test("a fork made after she opened another chat leaves that chat on screen with 
   await act(async () => { f.h.renderer.unmount(); });
 });
 
-test("a fork made after she went to New chat, Activity or Settings leaves her there; Open takes her to it", async () => {
-  for (const leave of ["new chat", "activity", "settings"] as const) {
+test("a fork made after she went to New chat or Settings leaves her there; Open takes her to it", async () => {
+  for (const leave of ["new chat", "settings"] as const) {
     const f = await forkHarness();
     await f.startFork();
     await act(async () => {
       if (leave === "new chat") await f.h.navigation().newChatSession();
-      else if (leave === "activity") f.h.appNavigation().showView("activity");
       else f.h.appNavigation().openSettingsSection("general");
     });
     await f.settle();
@@ -435,8 +383,8 @@ test("Open on a fork's notice never leaves its keyboard request behind for a lat
   await act(async () => { f.h.renderer.unmount(); });
 });
 
-test("a fork she stayed for opens with its keyboard, also after Settings and back, a click on her chat, or Back from Activity to it", async () => {
-  for (const meanwhile of ["nothing", "Settings and back", "the same chat clicked", "Back from Activity", "Back from an Activity preview"] as const) {
+test("a fork she stayed for opens with its keyboard, also after Settings and back, or a click on her chat", async () => {
+  for (const meanwhile of ["nothing", "Settings and back", "the same chat clicked"] as const) {
     const f = await forkHarness();
     await f.startFork();
     const nav = () => f.h.appNavigation();
@@ -445,12 +393,6 @@ test("a fork she stayed for opens with its keyboard, also after Settings and bac
       await act(async () => { nav().returnToChats(); });
     }
     if (meanwhile === "the same chat clicked") await act(async () => { nav().openChat("source"); });
-    if (meanwhile === "Back from Activity" || meanwhile === "Back from an Activity preview") {
-      await act(async () => { nav().showView("activity"); });
-      // A preview of another chat replaces hers while Activity is open.
-      if (meanwhile === "Back from an Activity preview") await act(async () => { await f.h.navigation().openConversation("other"); });
-      await act(async () => { nav().leaveActivity(); });
-    }
     await f.settle();
     assert.equal(f.h.state().conversation?.id, "source", `${meanwhile}: back on her chat`);
     assert.equal(await f.finishFork(), true, meanwhile);
@@ -524,59 +466,4 @@ test("a fork refused after she went elsewhere says so by a notice, not in the ch
   assert.match(String(g.h.state().error), /cannot be forked to a new chat/);
   assert.deepEqual(g.notices(), []);
   await act(async () => { g.h.renderer.unmount(); });
-});
-
-/** A member's answer to a choice card on the main timeline follows the User's
- *  hidden pick; Activity's "Open in chat" for it lands on the card. */
-function choiceAnswerChat(messages: ChatMessage[]): Conversation {
-  return { ...conversation(), id: "choice-chat", messages };
-}
-const choiceAt = "2026-11-04T19:00:00.000Z";
-const choiceAsk: ChatMessage = { id: "ask", role: "user", content: "@taylor which store?", createdAt: choiceAt, status: "done" };
-const choiceCard: ChatMessage = { id: "card", role: "participant", participantId: "taylor", content: "Pick one.", createdAt: choiceAt, status: "done",
-  metadata: { threadId: "ask", parentMessageId: "ask", sourceMessageId: "ask",
-    pendingChoice: { id: "c", title: "Store", question: "Which?", options: [{ id: "a", label: "A" }], status: "selected" } } };
-// As ChatService.respondToChoice writes it: the card's threadId (its chain), the card as parent.
-const choicePick: ChatMessage = { id: "pick", role: "user", content: "Choice selected.", createdAt: choiceAt, status: "done",
-  metadata: { threadId: "ask", parentMessageId: "card", sourceMessageId: "card", hiddenFromTimeline: true } };
-const choiceReply: ChatMessage = { id: "reply", role: "participant", participantId: "taylor", content: "Going with A.", createdAt: choiceAt, status: "done",
-  metadata: { parentMessageId: "pick", sourceMessageId: "pick", approvedContinuation: true } };
-const choiceReplyItem = {
-  id: "recent:choice-chat:reply", conversationId: "choice-chat", conversationTitle: "hello", status: "recent", kind: "message",
-  title: "@taylor recently finished", preview: "Going with A.", createdAt: choiceAt, updatedAt: choiceAt,
-  // As Activity names it: the reply, in the "thread" of its parent, the hidden pick.
-  target: { messageId: "reply", threadRootId: "pick" }
-} as ChatActivityItem;
-
-async function openChoiceReplyInChat(pages: Record<string, ChatMessage[]>) {
-  // The focus commits on the next frame; jsdom alone has no frames.
-  const frames = globalThis as unknown as { requestAnimationFrame?: (callback: FrameRequestCallback) => number };
-  frames.requestAnimationFrame ??= (callback) => setTimeout(() => callback(Date.now()), 0) as unknown as number;
-  const h = await harness();
-  const asked: string[] = [];
-  (window.consensus as unknown as { listConversationMessages: unknown }).listConversationMessages =
-    async (request: { aroundMessageId?: string }) => {
-      asked.push(request.aroundMessageId ?? "");
-      const messages = pages[request.aroundMessageId ?? ""] ?? [];
-      return { messages, hasMoreBefore: false, totalMessages: 3, oldestSequence: messages.length ? 0 : undefined, newestSequence: messages.length ? 0 : undefined };
-    };
-  await act(async () => { h.state().setConversation(choiceAnswerChat([choiceAsk, choicePick, choiceReply])); });
-  await act(async () => { await h.navigation().openConversationAndFocusActivityItem(choiceReplyItem, { timelineOnly: true }); });
-  return { h, asked };
-}
-
-test("Open in chat for a member's answer to a main-timeline card lands on the card, read when not loaded", async () => {
-  const { h, asked } = await openChoiceReplyInChat({ card: [choiceCard] });
-  assert.equal(h.state().chatMessageFocusRequest?.messageId, "card");
-  assert.equal(h.state().chatMessageFocusRequest?.pending, undefined, "the focus is committed, not left waiting");
-  assert.deepEqual(asked, ["card"], "only the card is read; the hidden pick was already loaded");
-  assert.equal(h.state().activityFocusError, undefined);
-  await act(async () => { h.renderer.unmount(); });
-});
-
-test("Open in chat whose card cannot be read lands on the answer itself, with no error", async () => {
-  const { h } = await openChoiceReplyInChat({});
-  assert.equal(h.state().chatMessageFocusRequest?.messageId, "reply");
-  assert.equal(h.state().activityFocusError, undefined);
-  await act(async () => { h.renderer.unmount(); });
 });

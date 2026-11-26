@@ -2,7 +2,7 @@ import path from "node:path";
 import { userDataPath } from "../platform";
 import type {
   ChatForkSeenReply, ChatMessage, ChatParticipantRequestBatch, ChatRunningMessageTarget, Conversation, ConversationMessagePage,
-  ConversationMessagePageRequest, ConversationOpenResult, ConversationSummary, ListChatActivityRequest, ListChatActivityResult
+  ConversationMessagePageRequest, ConversationOpenResult, ConversationSummary
 } from "../../shared/types";
 import type { ChatSearchDocument } from "../../shared/chatSearchDocuments";
 import { DeviceEventBlobStorage } from "./deviceEventBlobStorage";
@@ -126,10 +126,6 @@ export class StorageService {
     truncated: boolean;
   }> {
     return this.modules.chatActivity.listPendingChoiceMessages(conversationIds);
-  }
-
-  listChatActivity(request: ListChatActivityRequest = {}): Promise<ListChatActivityResult> {
-    return this.modules.chatActivity.listChatActivity(request);
   }
 
   getConversation(id: string): Promise<Conversation | undefined> {

@@ -2,9 +2,8 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { create } from "react-test-renderer";
 
-import type { ChatActivityItem, ChatAppToolApproval, ChatCodexApprovalRequest, ChatMessage } from "../../../shared/types";
+import type { ChatAppToolApproval, ChatCodexApprovalRequest, ChatMessage } from "../../../shared/types";
 import {
-  chatActivityShowsGenericCancel,
   chatApprovalKeyboardAction,
   chatApprovalPlacement,
   chatApprovalShowsGenericSkip,
@@ -175,13 +174,6 @@ test("Codex operation renders parsed command actions and protected context", () 
   renderer.unmount();
 });
 
-test("Activity hides generic cancellation for Codex while preserving ordinary approval cancellation", () => {
-  const codexItem = activityApproval("activity-codex", "approval-codex", "codex");
-  const ordinaryItem = activityApproval("activity-ordinary", "approval-ordinary");
-  assert.equal(chatActivityShowsGenericCancel(codexItem), false);
-  assert.equal(chatActivityShowsGenericCancel(ordinaryItem), true);
-});
-
 test("submitted Codex decisions are one line with no controls", () => {
   for (const status of ["approved", "denied"] as const) {
     const approval = codexApproval(`approval-${status}`, "participant", "run");
@@ -236,25 +228,6 @@ function codexApproval(id: string, participantId: string, runId: string): ChatAp
     createdAt: NOW,
     updatedAt: NOW,
     resumeContext: { runId, triggerMessageId: "trigger" }
-  };
-}
-
-function activityApproval(id: string, approvalId: string, approvalKind?: "codex"): ChatActivityItem {
-  return {
-    id,
-    conversationId: "conversation",
-    conversationTitle: "Approval chat",
-    status: "pending",
-    kind: "approval",
-    title: "Approval required",
-    preview: "Pending approval",
-    createdAt: NOW,
-    updatedAt: NOW,
-    target: {
-      approvalId,
-      messageId: "message",
-      ...(approvalKind ? { approvalKind } : {})
-    }
   };
 }
 

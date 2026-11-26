@@ -239,11 +239,10 @@
   background: var(--app-surface);
 }
 
-/* One segmented control for every hand-made tab list (Activity status,
-   artifact status and edit mode, the plugin catalog, the Roles, Memory and
+/* One segmented control for every hand-made tab list (artifact status and edit mode, the plugin catalog, the Roles, Memory and
    Environment filters): a quiet track, the
    chosen tab raised on it. */
-:is(.activity-status-tabs, .artifact-list-tabs, .artifact-fab-segment, .plugins-tabs, .roles-filter-tabs) {
+:is(.artifact-list-tabs, .artifact-fab-segment, .plugins-tabs, .roles-filter-tabs) {
   display: inline-flex;
   flex: none;
   align-items: center;
@@ -255,11 +254,11 @@
   background: var(--ui-bg-subtle);
 }
 
-:is(.activity-status-tabs, .artifact-list-tabs) {
+:is(.artifact-list-tabs) {
   margin: 8px 12px;
 }
 
-:is(.activity-status-tab, .artifact-list-tab, .artifact-fab-segment button, .plugins-tabs button, .roles-filter-tab) {
+:is(.artifact-list-tab, .artifact-fab-segment button, .plugins-tabs button, .roles-filter-tab) {
   display: inline-flex;
   height: var(--ui-control-xs);
   align-items: center;
@@ -277,27 +276,27 @@
     box-shadow var(--ui-duration-base) var(--ui-ease-out);
 }
 
-:is(.activity-status-tab, .artifact-list-tab, .artifact-fab-segment button, .plugins-tabs button, .roles-filter-tab):hover {
+:is(.artifact-list-tab, .artifact-fab-segment button, .plugins-tabs button, .roles-filter-tab):hover {
   color: var(--ui-text);
 }
 
-:is(.activity-status-tab[data-active="true"], .artifact-list-tab.is-active, .artifact-fab-segment button.is-selected, .plugins-tabs button[aria-selected="true"], .roles-filter-tab.is-selected) {
+:is(.artifact-list-tab.is-active, .artifact-fab-segment button.is-selected, .plugins-tabs button[aria-selected="true"], .roles-filter-tab.is-selected) {
   background: var(--ui-bg);
   color: var(--ui-text);
   box-shadow: var(--ui-shadow-sm), 0 0 0 1px var(--ui-border-subtle);
 }
 
-:is(.activity-status-tab, .artifact-list-tab, .artifact-fab-segment button, .plugins-tabs button, .roles-filter-tab):focus-visible {
+:is(.artifact-list-tab, .artifact-fab-segment button, .plugins-tabs button, .roles-filter-tab):focus-visible {
   outline: none;
   box-shadow: var(--focus-ring);
 }
 
-:is(.activity-status-tab, .artifact-list-tab, .artifact-fab-segment button, .plugins-tabs button, .roles-filter-tab):disabled {
+:is(.artifact-list-tab, .artifact-fab-segment button, .plugins-tabs button, .roles-filter-tab):disabled {
   cursor: default;
   opacity: 0.5;
 }
 
-:is(.activity-status-tab-count, .artifact-list-tab span) {
+:is(.artifact-list-tab span) {
   color: var(--ui-text-3);
   font-variant-numeric: tabular-nums;
 }

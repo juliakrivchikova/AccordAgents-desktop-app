@@ -1,4 +1,4 @@
-import type { ChatActivityItem, ChatRunningMessageTarget, Conversation } from "../../shared/types";
+import type { ChatRunningMessageTarget, Conversation } from "../../shared/types";
 import { runningMessageForParticipant, runningMessageTarget } from "../../shared/chatRunningMessage";
 
 /** Where a running member's turn in progress is. Asked of the whole chat,
@@ -18,26 +18,4 @@ export async function runningParticipantTarget(
     const loaded = runningMessageForParticipant(conversation, participantId);
     return loaded ? runningMessageTarget(loaded) : undefined;
   }
-}
-
-/** A running member's Activity row opens the member's turn in progress, the
- *  same message every other way of opening a running member opens. */
-export async function withRunningActivityTarget(item: ChatActivityItem, conversation: Conversation): Promise<ChatActivityItem> {
-  const participantId = item.kind === "run" && item.status === "running" ? item.participant?.id?.trim() : undefined;
-  if (!participantId) {
-    return item;
-  }
-  const target = await runningParticipantTarget(conversation, participantId);
-  if (!target) {
-    return item;
-  }
-  return {
-    ...item,
-    target: {
-      ...item.target,
-      messageId: target.messageId,
-      threadRootId: target.threadRootId,
-      messageIsApproximate: undefined
-    }
-  };
 }

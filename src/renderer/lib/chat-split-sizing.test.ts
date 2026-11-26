@@ -56,5 +56,4 @@ test("the CSS grid uses the same main minimum and fallback split as the JS", () 
   assert.match(chat, new RegExp(`--chat-main-floor: min\\(var\\(--chat-main-min-width\\), calc\\(${mainShare}% - 1px\\)\\);`));
   assert.equal(chat.match(/minmax\(var\(--chat-main-floor\), 1fr\)/g)?.length, 3);
   assert.doesNotMatch(chat, /minmax\(var\(--chat-main-min-width\)/);
-  assert.match(css("activity.css"), /\.activity-detail-body \.chat-view \{\s*--chat-main-min-width: 412px;/);
 });

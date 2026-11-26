@@ -4,7 +4,6 @@ import test from "node:test";
 import { APP_SCRIPTS_REQUEST_CHANGE_TOOL } from "../../shared/appMcpToolContracts";
 import { choiceCardId } from "../../shared/hubCards";
 import type { HubCard, HubFeedResponse } from "../../shared/hubOps";
-import { buildChatActivityItems } from "../../shared/chatActivity";
 import { controlCardFromChoiceMessage, controlCardFromHubCard } from "../../shared/mobileControlCards";
 import { defaultChatAgentPermissions, normalizeChatAgentPermissions } from "../../shared/agentPermissions";
 import type { ChatAppToolApproval, ChatMessage, ChatParticipant, Conversation } from "../../shared/types";
@@ -355,10 +354,10 @@ test("a machine member's choice expires on its machine once the User went on wit
     (read) => Boolean(read.messages?.find((message) => message.id === "expiring-choice")?.metadata?.pendingChoice?.expiredAt));
   const shown = controlCardFromChoiceMessage("cards-expiry", page.messages.find((message) => message.id === "expiring-choice")!);
   assert.deepEqual([shown?.status, shown?.outcome], ["answered", "Expired"]);
-  // The desktop: the card is expired and Pending lists nothing.
+  // The desktop: the card is expired and nothing waits for her.
   const desktopCopy = await until(() => h.desktopStorage.getConversation("cards-expiry"),
     (item) => Boolean(item?.messages.find((message) => message.id === "expiring-choice")?.metadata?.pendingChoice?.expiredAt));
-  assert.deepEqual(buildChatActivityItems(desktopCopy).filter((item) => item.kind === "choice" && item.status === "pending"), []);
+  assert.deepEqual(desktopCopy!.messages.filter((message) => message.metadata?.pendingChoice?.status === "pending"), []);
   // An answer from the phone that crossed the expiry is refused by the server.
   const late = await h.phoneAnswers("cards-expiry", cardId, { selectedOptionId: "files" });
   assert.equal(late.result.status, "rejected");

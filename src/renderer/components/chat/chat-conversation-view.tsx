@@ -423,9 +423,7 @@ export function ChatConversationView(props: ChatConversationViewProps): JSX.Elem
             if (event.defaultPrevented) {
               return;
             }
-            if (viewport.dismissMessageFocus(event.target)) {
-              props.onDismissMessageFocus?.();
-            }
+            viewport.dismissMessageFocus(event.target);
           }}
         >
           <ChatViewHeaderContext.Provider value={headerState}>{props.topBar}</ChatViewHeaderContext.Provider>

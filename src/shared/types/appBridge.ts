@@ -28,7 +28,6 @@ import type {
   AwsWorkerOperationSnapshot, AwsWorkerStartRequest, AwsWorkerStartResult, AwsWorkerStatus, ConnectAwsWorkerRequest,
   SetAwsAutoStopRequest
 } from "./awsWorker";
-import type { ListChatActivityRequest, ListChatActivityResult } from "./chatActivity";
 import type {
   AddChatParticipantRequest, ChatPinState, ChatViewState, CloseAccordCardRequest, CompactChatParticipantRequest,
   CreateChatConversationRequest, DeleteChatConversationRequest, DismissConversationWarningsRequest,
@@ -216,7 +215,6 @@ export interface AppBridge {
   /** Each thread as a chat that goes on in its CLI session; a thread a chat
    *  already holds is not imported again (that chat is returned). */
   importCliThreads(request: CliImportRequest): Promise<CliImportResult>;
-  listChatActivity(request?: ListChatActivityRequest): Promise<ListChatActivityResult>;
   getConversation(id: string): Promise<Conversation | undefined>;
   openConversation(id: string, limit?: number): Promise<ConversationOpenResult | undefined>;
   listConversationMessages(request: ConversationMessagePageRequest): Promise<ConversationMessagePage>;

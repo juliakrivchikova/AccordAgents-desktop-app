@@ -1,8 +1,8 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import type { ChatActivityItem, ChatMessage, ChatParticipant, ChatRunningMessageTarget, Conversation } from "../../shared/types";
-import { runningParticipantTarget, withRunningActivityTarget } from "./running-participant-target";
+import type { ChatMessage, ChatParticipant, ChatRunningMessageTarget, Conversation } from "../../shared/types";
+import { runningParticipantTarget } from "./running-participant-target";
 
 const taylor: ChatParticipant = { id: "taylor", handle: "taylor", roleConfigId: "engineer", kind: "claude-code" };
 
@@ -54,34 +54,4 @@ test("when the whole-chat read fails, the open page answers", async () => {
   });
   const page = chat([pending("page-turn", "2026-10-31T20:00:01.000Z", "run-1")]);
   assert.deepEqual(await runningParticipantTarget(page, "taylor"), { messageId: "page-turn" });
-});
-
-const runItem: ChatActivityItem = {
-  id: "run:chat:run-2",
-  conversationId: "chat",
-  conversationTitle: "chat",
-  status: "running",
-  kind: "run",
-  title: "@taylor is running",
-  preview: "",
-  createdAt: "2026-10-31T20:00:00.000Z",
-  updatedAt: "2026-10-31T20:00:00.000Z",
-  participant: { id: "taylor", handle: "taylor", kind: "claude-code" },
-  target: { runId: "run-2", messageId: "newest-post", threadRootId: "old-root", messageIsApproximate: true }
-};
-
-test("a running member's Activity row opens its turn in progress, keeping its run", async () => {
-  withStorage(async () => ({ messageId: "turn" }));
-  const resolved = await withRunningActivityTarget(runItem, chat([]));
-  assert.deepEqual(resolved.target, { runId: "run-2", messageId: "turn", threadRootId: undefined, messageIsApproximate: undefined });
-});
-
-test("other Activity rows, and a running row with no turn found, are left as they are", async () => {
-  const calls = withStorage(async () => undefined);
-  assert.equal(await withRunningActivityTarget(runItem, chat([])), runItem);
-  const finished: ChatActivityItem = { ...runItem, status: "recent", kind: "message" };
-  assert.equal(await withRunningActivityTarget(finished, chat([])), finished);
-  const nobody: ChatActivityItem = { ...runItem, participant: undefined };
-  assert.equal(await withRunningActivityTarget(nobody, chat([])), nobody);
-  assert.deepEqual(calls, ["chat:taylor"]);
 });

@@ -17,7 +17,6 @@ export interface AppShellProps {
   /** Under the content, across the workspace: the terminal panel. */
   bottomPanel?: React.ReactNode;
   sidebarCollapsed?: boolean;
-  sidebarHidden?: boolean;
   sidebarWidth: number;
   onSidebarWidthChange: (width: number) => void;
   minWorkspaceWidth?: number;
@@ -30,7 +29,6 @@ export const AppShell = ({
   children,
   bottomPanel,
   sidebarCollapsed = false,
-  sidebarHidden = false,
   sidebarWidth,
   onSidebarWidthChange,
   minWorkspaceWidth = MIN_APP_WORKSPACE_WIDTH,
@@ -39,16 +37,13 @@ export const AppShell = ({
   const rootRef = React.useRef<HTMLDivElement>(null);
   const cleanupResizeRef = React.useRef<(() => void) | null>(null);
   const sidebarSlotRef = React.useRef<HTMLDivElement>(null);
-  const previousSidebarHiddenRef = React.useRef(sidebarHidden);
   const [isResizingSidebar, setIsResizingSidebar] = React.useState(false);
   const [rootWidth, setRootWidth] = React.useState<number | undefined>();
   const normalizedSidebarWidth = normalizeAppSidebarWidth(sidebarWidth);
-  const secondarySidebarCollapsed = sidebarCollapsed || sidebarHidden;
-  const sidebarVisibilityChanged = previousSidebarHiddenRef.current !== sidebarHidden;
   const effectiveSidebarMax = rootWidth !== undefined
     ? maxAppSidebarWidthForContainer(rootWidth, minWorkspaceWidth)
     : MAX_APP_SIDEBAR_WIDTH;
-  const effectiveSidebarWidth = secondarySidebarCollapsed || rootWidth === undefined
+  const effectiveSidebarWidth = sidebarCollapsed || rootWidth === undefined
     ? normalizedSidebarWidth
     : Math.min(normalizedSidebarWidth, effectiveSidebarMax);
 
@@ -56,8 +51,8 @@ export const AppShell = ({
   React.useEffect(() => () => cleanupResizeRef.current?.(), []);
   // A collapsed sidebar is out of the Tab order too, not only hidden from view.
   React.useEffect(() => {
-    sidebarSlotRef.current?.toggleAttribute("inert", secondarySidebarCollapsed);
-  }, [secondarySidebarCollapsed]);
+    sidebarSlotRef.current?.toggleAttribute("inert", sidebarCollapsed);
+  }, [sidebarCollapsed]);
   React.useLayoutEffect(() => {
     const root = rootRef.current;
     if (!root) {
@@ -75,9 +70,6 @@ export const AppShell = ({
       window.removeEventListener("resize", updateMetrics);
     };
   }, []);
-  React.useLayoutEffect(() => {
-    previousSidebarHiddenRef.current = sidebarHidden;
-  }, [sidebarHidden]);
 
   function startSidebarResize(event: React.PointerEvent<HTMLDivElement>): void {
     const root = rootRef.current;
@@ -112,23 +104,21 @@ export const AppShell = ({
       // macOS draws the traffic lights over the top-left corner of the window,
       // so title rows at the window's left edge leave room for them.
       data-platform={isMacPlatform() ? "mac" : undefined}
-      data-sidebar-collapsed={secondarySidebarCollapsed ? "true" : undefined}
-      data-sidebar-hidden={sidebarHidden ? "true" : undefined}
+      data-sidebar-collapsed={sidebarCollapsed ? "true" : undefined}
       ref={rootRef}
       style={{ "--app-sidebar-width": `${effectiveSidebarWidth}px` } as React.CSSProperties}
       className={cn(
         "app-shell-root grid h-full min-h-0 text-foreground",
         isResizingSidebar && "resizing-sidebar",
-        sidebarVisibilityChanged && "switching-sidebar-visibility",
         className
       )}
     >
       {/* The sidebar stays mounted while collapsed so the slot width can animate
           and its scroll/expansion state survives a hide/show. */}
-      <div ref={sidebarSlotRef} data-shell="sidebar-slot" className="app-shell-sidebar-slot" aria-hidden={secondarySidebarCollapsed || undefined}>
+      <div ref={sidebarSlotRef} data-shell="sidebar-slot" className="app-shell-sidebar-slot" aria-hidden={sidebarCollapsed || undefined}>
         {sidebar}
       </div>
-      {!secondarySidebarCollapsed && (
+      {!sidebarCollapsed && (
         <div
           className="app-shell-sidebar-resizer"
           role="separator"

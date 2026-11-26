@@ -45,7 +45,6 @@
     visibility 0s linear var(--ui-duration-slow);
 }
 
-.app-shell-root.switching-sidebar-visibility .app-shell-sidebar-slot > [data-shell="sidebar"],
 .app-shell-root.resizing-sidebar .app-shell-sidebar-slot > [data-shell="sidebar"] {
   transition: none;
 }
@@ -101,7 +100,7 @@
 
 /* Traffic lights sit over the window's top-left corner. The sidebar's top row
    always starts there; a workspace row starts there only while the sidebar
-   is out (collapsed, or replaced by Activity). */
+   is out (collapsed). */
 .app-shell-root[data-platform="mac"] {
   --app-traffic-light-inset: 80px;
 }
@@ -133,8 +132,8 @@
 }
 
 /* Rows that are not at the top of the window never drag it: a chat's side
-   panels when the chat has no top row of its own (inside Activity while the
-   selected item's chat is still loading), and the sidebar while collapsed. */
+   panels when the chat has no top row of its own, and the sidebar while
+   collapsed. */
 .app-shell-root[data-platform="mac"] .chat-view:not(.with-inline-topbar) [data-titlebar],
 .app-shell-root[data-platform="mac"][data-sidebar-collapsed="true"] .app-shell-sidebar-slot [data-titlebar] {
   -webkit-app-region: no-drag;
@@ -144,8 +143,7 @@
    part that crosses a title row. */
 .app-shell-sidebar-resizer,
 .artifacts-panel-resizer,
-.thread-resizer,
-.activity-list-resizer {
+.thread-resizer {
   -webkit-app-region: no-drag;
 }
 

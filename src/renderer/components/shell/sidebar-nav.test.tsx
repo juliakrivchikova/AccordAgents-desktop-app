@@ -43,13 +43,11 @@ test("search opens with Command-K on macOS and Ctrl-K elsewhere, on any keyboard
   assert.equal(chatSearchShortcutAria(false), "Control+K");
 });
 
-test("the sidebar leads with search, New chat and Activity, and keeps Settings at the bottom", () => {
+test("the sidebar leads with search and New chat, has no Activity, and keeps Settings at the bottom", () => {
   const calls: string[] = [];
   const renderer = renderSidebar({
-    activityUnreadCount: 3,
     onOpenSearch: () => calls.push("search"),
     onNewSession: () => calls.push("new"),
-    onOpenActivity: () => calls.push("activity"),
     onOpenSettings: () => calls.push("settings")
   });
 
@@ -57,35 +55,24 @@ test("the sidebar leads with search, New chat and Activity, and keeps Settings a
     .findAll((node) => typeof node.type === "string" && typeof node.props["data-testid"] === "string")
     .map((node) => node.props["data-testid"] as string)
     .filter((id) => ["chat-search-trigger", "new-chat", "sidebar-activity", "project-group", "sidebar-settings"].includes(id));
-  assert.deepEqual(order, ["chat-search-trigger", "new-chat", "sidebar-activity", "project-group", "sidebar-settings"]);
+  // The desktop has no Activity view (the User, 2026-11-26): nothing between
+  // New chat and the chat lists.
+  assert.deepEqual(order, ["chat-search-trigger", "new-chat", "project-group", "sidebar-settings"]);
 
   const search = byTestId(renderer, "chat-search-trigger");
   assert.equal(search.props["aria-label"], "Search chats");
   assert.equal(search.props["aria-keyshortcuts"], "Meta+K");
   assert.equal(textOf(byTestId(renderer, "chat-search-shortcut")), "⌘K");
 
-  const activity = byTestId(renderer, "sidebar-activity");
-  assert.equal(activity.props["aria-label"], "Activity, 3 unread");
-  assert.equal(textOf(byTestId(renderer, "sidebar-activity-badge")), "3");
-
   search.props.onClick();
   byTestId(renderer, "new-chat").props.onClick();
-  activity.props.onClick();
   byTestId(renderer, "sidebar-settings").props.onClick();
-  assert.deepEqual(calls, ["search", "new", "activity", "settings"]);
+  assert.deepEqual(calls, ["search", "new", "settings"]);
 });
 
-test("Activity has no badge when nothing is unread, and Windows shows Ctrl K", () => {
-  const renderer = renderSidebar({ activityUnreadCount: 0, macShortcuts: false });
-  const activity = byTestId(renderer, "sidebar-activity");
-  assert.equal(activity.props["aria-label"], undefined);
-  assert.equal(renderer.root.findAllByProps({ "data-testid": "sidebar-activity-badge" }).length, 0);
+test("Windows shows Ctrl K, and New chat is disabled while busy", () => {
+  const renderer = renderSidebar({ macShortcuts: false, busy: true });
   assert.equal(textOf(byTestId(renderer, "chat-search-shortcut")), "Ctrl K");
-});
-
-test("the Activity badge caps large counts and New chat is disabled while busy", () => {
-  const renderer = renderSidebar({ activityUnreadCount: 250, busy: true });
-  assert.equal(textOf(byTestId(renderer, "sidebar-activity-badge")), "99+");
   assert.equal(byTestId(renderer, "new-chat").props.disabled, true);
 });
 
@@ -137,8 +124,8 @@ test("Pinned and Recents come before the projects, and Pinned only when a chat i
   const order = renderer.root
     .findAll((node) => typeof node.type === "string" && typeof node.props["data-testid"] === "string")
     .map((node) => node.props["data-testid"] as string)
-    .filter((id) => ["sidebar-activity", "pinned-group", "recents-group", "projects-heading", "project-group", "sidebar-settings"].includes(id));
-  assert.deepEqual(order, ["sidebar-activity", "pinned-group", "recents-group", "projects-heading", "project-group", "sidebar-settings"]);
+    .filter((id) => ["new-chat", "pinned-group", "recents-group", "projects-heading", "project-group", "sidebar-settings"].includes(id));
+  assert.deepEqual(order, ["new-chat", "pinned-group", "recents-group", "projects-heading", "project-group", "sidebar-settings"]);
   const rowsIn = (section: string) => renderer.root
     .findAll((node) => typeof node.type === "string" && node.props["data-testid"] === "project-session" && node.props["data-section"] === section)
     .map((node) => node.props["data-conversation-id"] as string);
@@ -189,7 +176,6 @@ function renderSidebar(overrides: Partial<SidebarProps>): ReactTestRenderer {
         }]}
         macShortcuts
         onOpenSearch={() => undefined}
-        onOpenActivity={() => undefined}
         onOpenSettings={() => undefined}
         onSelect={() => undefined}
         onNewSession={() => undefined}

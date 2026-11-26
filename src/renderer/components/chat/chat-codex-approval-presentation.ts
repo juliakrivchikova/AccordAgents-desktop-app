@@ -1,5 +1,4 @@
-import type { ChatActivityItem, ChatAppToolApproval, ChatCodexApprovalRequest, Conversation } from "../../../shared/types";
-import { isCodexActivityApprovalItem } from "../../../shared/chatActivity";
+import type { ChatAppToolApproval, ChatCodexApprovalRequest, Conversation } from "../../../shared/types";
 import {
   isCodexGuardianDeniedApprovalMethod,
   isCodexGuardianTimedOutApprovalMethod
@@ -22,21 +21,6 @@ export function chatCodexApprovalShowsCancel(codexRequest: ChatCodexApprovalRequ
 
 export function chatCodexApprovalShowsCompactResult(approval: ChatAppToolApproval): boolean {
   return approval.status !== "pending" && chatCodexApprovalRequest(approval) !== undefined;
-}
-
-export function chatActivityShowsGenericCancel(item: ChatActivityItem): boolean {
-  if (item.status !== "pending") return false;
-  if (item.kind === "approval") {
-    return !isCodexActivityApprovalItem(item) && Boolean(item.target.approvalId?.trim());
-  }
-  const sourceMessageId = item.target.sourceMessageId ?? item.target.messageId;
-  if (item.kind === "choice") {
-    return Boolean(sourceMessageId?.trim() && item.target.choiceId?.trim());
-  }
-  if (item.kind === "mention") {
-    return Boolean(sourceMessageId?.trim() && item.target.mentionTargetParticipantIds?.length);
-  }
-  return false;
 }
 
 export type ChatApprovalKeyboardAction = { type: "select"; index: number } | { type: "submit" };

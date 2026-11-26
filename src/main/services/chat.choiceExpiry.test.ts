@@ -2,7 +2,6 @@ import assert from "node:assert/strict";
 import { tmpdir } from "node:os";
 import test from "node:test";
 import { defaultChatAgentPermissions, normalizeChatAgentPermissions } from "../../shared/agentPermissions";
-import { buildChatActivityItems } from "../../shared/chatActivity";
 import { DEFAULT_CHAT_PROMPT_CONTEXT } from "../../shared/chatPromptContext";
 import { choiceCardId } from "../../shared/hubCards";
 import type { ChatMessage, ChatParticipant, ChatRoleConfig, Conversation, ParticipantConfig } from "../../shared/types";
@@ -99,7 +98,9 @@ async function until(done: () => boolean, ms = 5_000): Promise<void> {
   }
 }
 
-const pendingChoiceItems = (saved: Conversation) => buildChatActivityItems(saved).filter((item) => item.kind === "choice" && item.status === "pending");
+// The cards still waiting on her: pending, and not answered elsewhere already.
+const pendingChoices = (saved: Conversation) => saved.messages.filter((message) =>
+  message.metadata?.pendingChoice?.status === "pending" && message.metadata.serverCard?.state !== "answered");
 
 test("a member's choice closes as soon as the User writes to that member instead: closed everywhere, shown as expired, and the member is told", async (t) => {
   const h = harness(conversation(), { [taylor.id]: [ASKING] });
@@ -108,7 +109,7 @@ test("a member's choice closes as soon as the User writes to that member instead
   const asking = h.askingMessage();
   assert.equal(asking.metadata?.pendingChoice?.status, "pending");
   assert.ok(asking.metadata?.pendingChoice?.askedAt, "the card keeps when it was asked");
-  assert.equal(pendingChoiceItems(h.stored()).length, 1, "listed under Pending");
+  assert.equal(pendingChoices(h.stored()).length, 1, "waiting on her");
   assert.equal(h.prompts.at(-1)?.includes("was closed without an answer"), false, "the first turn closed nothing");
 
   await h.send("@taylor let's do something else first");
@@ -122,8 +123,7 @@ test("a member's choice closes as soon as the User writes to that member instead
   const choice = h.choiceOf(asking.id);
   assert.equal(choice?.status, "cancelled", "closed as a cancelled card is, on every surface");
   assert.equal(choice?.cancelledAt, choice?.expiredAt);
-  assert.equal(pendingChoiceItems(h.stored()).length, 0, "gone from Pending");
-  assert.equal(buildChatActivityItems(h.stored()).some((item) => item.target?.messageId === asking.id), false, "nor listed as finished");
+  assert.equal(pendingChoices(h.stored()).length, 0, "no longer waiting on her");
   // An answer she gave while the card still waited on her screen, arriving
   // after it expired: taken, and the member goes on with it.
   const runsBefore = h.runs.length;
@@ -177,7 +177,7 @@ test("removing a member closes its waiting cards; a card of a member already gon
   const closed = h.choiceOf(asking.id);
   assert.deepEqual([closed?.status, Boolean(closed?.expiredAt), Boolean(closed?.memberGoneAt)], ["cancelled", true, true], "closed with its member");
   assert.equal(h.stored().messages.find((message) => message.id === "mentions")?.metadata?.pendingMentions?.[0]?.status, "rejected", "its mention approvals too");
-  assert.equal(pendingChoiceItems(h.stored()).length, 0, "gone from Pending");
+  assert.equal(pendingChoices(h.stored()).length, 0, "no longer waiting on her");
 
   // A card of a member that left before this fix: closed when the app starts.
   const gone: ChatMessage = { id: "gone-card", role: "participant", participantId: "old-leo", participantLabel: "@leo", content: "Which?", status: "done",
