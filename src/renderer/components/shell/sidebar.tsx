@@ -208,7 +208,9 @@ export const Sidebar = ({
               const visibleSessions = expanded ? group.sessions : group.sessions.slice(0, INITIAL_PROJECT_SESSION_LIMIT);
               const hiddenCount = group.sessions.length - visibleSessions.length;
               return (
-                <section key={group.key} className="min-w-0" data-testid="project-group" data-project-key={group.key}>
+                // The project's row and its chats' rows keep the same 1px gap
+                // between them, so two highlighted rows never touch.
+                <section key={group.key} className="flex min-w-0 flex-col gap-px" data-testid="project-group" data-project-key={group.key}>
                     <div className="group flex min-w-0 items-center gap-0.5">
                       {/* As Recents: the name, then its caret; its chats start under the name. */}
                       <button type="button" onClick={() => toggleProject(group.key)} aria-expanded={!collapsed} data-testid="project-toggle" className={cn(ROW, "min-w-0 flex-1 gap-1.5 text-ui-text-2")}>
