@@ -147,6 +147,9 @@ export class HubSemantic {
   private noteSource?: NoteSource;
   private closing = new AbortController();
   private settingsQueue: Promise<unknown> = Promise.resolve();
+  private starting?: Promise<void>;
+  /** The background pass under way (close waits for it). */
+  private catchingUpRun?: Promise<void>;
 
   constructor(private readonly options: HubSemanticOptions) {}
 
@@ -159,17 +162,24 @@ export class HubSemantic {
   }
 
   /** Reads the key and, with one, the prints kept, then prints what is missing. */
-  async start(): Promise<void> {
-    await this.init();
-    const settings = await this.settings();
-    if (settings.openAiKey && !settings.keyError) this.enable(settings.openAiKey);
+  start(): Promise<void> {
+    this.starting ??= (async () => {
+      await this.init();
+      const settings = await this.settings();
+      if (settings.openAiKey && !settings.keyError && !this.closing.signal.aborted) this.enable(settings.openAiKey);
+    })();
+    return this.starting;
   }
 
+  /** Stops, and waits for what is under way to stop: nothing reads or
+   *  writes the database after it returns. */
   async close(): Promise<void> {
     this.nextGeneration();
     this.epoch += 1;
     this.closing.abort();
     if (this.settleTimer) clearTimeout(this.settleTimer);
+    await this.starting?.catch(() => undefined);
+    await this.catchingUpRun?.catch(() => undefined);
     await this.draining?.catch(() => undefined);
   }
 
@@ -248,7 +258,11 @@ export class HubSemantic {
     this.lastError = undefined;
     this.caughtUp = false;
     this.queryBackoffUntil = 0;
-    void this.keepCatchingUp(this.generation);
+    const run = this.keepCatchingUp(this.generation);
+    this.catchingUpRun = run;
+    void run.finally(() => {
+      if (this.catchingUpRun === run) this.catchingUpRun = undefined;
+    });
   }
 
   /** Off: nothing more is printed, and the prints held in memory are let go
