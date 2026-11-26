@@ -400,6 +400,8 @@ export class ChatSearchIndex {
     endMarker: string;
     limit: number;
     offset?: number;
+    /** Best match first (a member's search by any word), not newest chat first. */
+    orderByRank?: boolean;
   }): Promise<StoredChatSearchQueryResult> {
     await this.ensureChatSearchIndex();
     if (request.conversationIds.length === 0) {
@@ -459,7 +461,7 @@ export class ChatSearchIndex {
         where chat_search_fts match ${sqlString(request.matchQuery)}
           and conversation_id in ${sqlStringList(request.conversationIds)}
           and document_kind = 'message'
-        order by conversation_updated_at desc, conversation_id asc, created_at asc, message_id asc
+        order by ${request.orderByRank ? "bm25(chat_search_fts) asc, " : ""}conversation_updated_at desc, conversation_id asc, created_at asc, message_id asc
         limit ${request.limit}
         offset ${Math.max(0, Math.floor(request.offset ?? 0))}
       ), match_counts as (
@@ -489,7 +491,7 @@ export class ChatSearchIndex {
         union all
         select * from match_counts
       )
-      order by rowOrder, sortUpdatedAt desc, conversationId asc, createdAt asc, messageId asc;
+      order by rowOrder, ${request.orderByRank ? "rank asc, " : ""}sortUpdatedAt desc, conversationId asc, createdAt asc, messageId asc;
     `);
     const titleRows = rows.filter((row) => row.rowKind === "title");
     const messageRows = rows.filter((row) => row.rowKind === "message");

@@ -1,4 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
+import type { ChatSearchService } from "../main/services/chatSearch";
 import type { StorageService } from "../main/services/storage";
 import type { HubDevice } from "../shared/hubProtocol";
 import type { ChatParticipant, Conversation } from "../shared/types";
@@ -10,6 +11,7 @@ import {
   MEMORY_INDEX_STALE_DAYS,
   MEMORY_LIST_MAX,
   MEMORY_LIVE_NOTES_MAX,
+  MEMORY_PICK_MAX,
   MEMORY_QUERY_MAX_CHARS,
   MEMORY_SEARCH_DEFAULT_LIMIT,
   MEMORY_SEARCH_MAX_LIMIT,
@@ -34,13 +36,19 @@ import {
   type MemoryNoteKind,
   type MemoryNoteSummary,
   type MemoryOwnerListValue,
+  type MemoryPickValue,
   type MemoryResult,
   type MemoryScope,
+  type MemorySearchHit,
   type MemorySearchValue,
   type MemoryTagCount,
   type MemoryTagsValue
 } from "../shared/memory";
 import { homeDeviceId } from "./hubOps";
+import { candidateAnchors, rankCounted, searchTextOf, searchWords as wordsAsked, snippetOf, wordCounts, type SearchWord } from "./memoryWordSearch";
+import type { HubSemantic, PrintableNote } from "./semantic/hubSemantic";
+import { searchProjectChats } from "./semantic/projectChatSearch";
+import { NOTE_PASSAGE_CHARS, QUERY_MAX_CHARS, passageRanges, takeTurns } from "./semantic/semanticVectors";
 
 const SCHEMA_SQL = `
   create table if not exists member_memory_notes (
@@ -96,6 +104,22 @@ const BUMP_SQL = "update member_memory_counter set value = value + 1 where key =
 const SEQ_SQL = "(select value from member_memory_counter where key = 'change_seq')";
 
 const DAY_MS = 24 * 60 * 60_000;
+/** Notes counted for a search before the server answers other requests. */
+const COUNT_BATCH = 50;
+/**
+ * Notes picked for a message by meaning (prints of 1536 numbers), tuned on
+ * the User's notes and messages (2026-11-26: 37 queries with known answers,
+ * 60 of her real messages): a note at least this close, and close to the
+ * closest one, fits. Her real messages got notes about one time in five,
+ * and nothing for "ok", "done" or "I'm home".
+ */
+const PICK_MIN = 0.4;
+const PICK_GAP = 0.07;
+/** A note further than this in meaning is not given by a search (it may
+ *  still come for a word it holds). */
+const SEARCH_MEANING_MIN = 0.15;
+const PICK_PRINT_TIMEOUT_MS = 3_000;
+const SEARCH_PRINT_TIMEOUT_MS = 4_000;
 const REQUEST_ID = /^[A-Za-z0-9._:-]{1,128}$/;
 const NOTE_ID = /^[A-Za-z0-9-]{8,64}$/;
 
@@ -121,7 +145,7 @@ interface Row {
 }
 
 /** The member a request is for, as the server's copy of the chat has it. */
-interface MemberContext {
+export interface MemberContext {
   conversationId: string;
   participantId: string;
   deviceId: string;
@@ -148,11 +172,28 @@ export class HubMemory {
   /** When stale statuses were last archived (at most every few minutes). */
   private sweptAt?: number;
 
+  private readonly semantic?: HubSemantic;
+  private readonly chatSearch?: ChatSearchService;
+
   constructor(
     private readonly storage: StorageService,
     private readonly log: (event: string, payload: Record<string, unknown>) => void = () => undefined,
-    private readonly now: () => Date = () => new Date()
-  ) {}
+    private readonly now: () => Date = () => new Date(),
+    /** Search by meaning (the User's OpenAI key) and the chats' word index. */
+    search: { semantic?: HubSemantic; chatSearch?: ChatSearchService } = {}
+  ) {
+    this.semantic = search.semantic;
+    this.chatSearch = search.chatSearch;
+    this.semantic?.setNoteSource({ notesPage: (afterId, limit) => this.notesPage(afterId, limit) });
+  }
+
+  /** Notes not archived, by id, as they are printed (HubSemantic). */
+  private async notesPage(afterId: string, limit: number): Promise<PrintableNote[]> {
+    await this.init();
+    const rows = await this.query<{ id: string; title: string; tagsJson: string; body: string }>(`select id, title, tags_json as tagsJson, body
+      from member_memory_notes where archived_at is null and id > ${quote(afterId)} order by id limit ${Math.max(1, Math.floor(limit))};`);
+    return rows.map((row) => ({ id: row.id, title: row.title, tags: parseTags(row.tagsJson), body: row.body }));
+  }
 
   private init(): Promise<void> {
     this.ready ??= (async () => {
@@ -187,6 +228,15 @@ export class HubMemory {
     }
     if (device.role === "phone") return denied("The phone does not read or write members' memory.");
     switch (request.action) {
+      case "semantic-settings":
+      case "semantic-key": {
+        if (device.role !== "owner") return denied("Only the computer that set up this server gives it the OpenAI key.");
+        if (!this.semantic) return invalid("This server does not search by meaning.");
+        if (request.action === "semantic-settings") return { ok: true, value: await this.semantic.view() };
+        if (request.remove === true) return { ok: true, value: await this.semantic.removeKey() };
+        const set = await this.semantic.setKey(request.key);
+        return set.ok ? set : invalid(set.message);
+      }
       case "list":
       case "owner-read":
       case "delete":
@@ -201,6 +251,8 @@ export class HubMemory {
       case "index":
       case "tags":
       case "search":
+      case "pick":
+      case "chat-search":
       case "read":
       case "write":
       case "archive": {
@@ -209,7 +261,11 @@ export class HubMemory {
         // In the same order as changes: a version read for a change is never
         // moved on by an archive in between.
         await this.serialize(() => this.sweepIfDue());
-        if (request.action === "index") return this.index(member);
+        if (request.action === "index") return this.index(member, request.picks === true);
+        if (request.action === "pick") return this.pick(member, request);
+        if (request.action === "chat-search") {
+          return searchProjectChats({ storage: this.storage, semantic: this.semantic, chatSearch: this.chatSearch, log: this.log }, member, request);
+        }
         if (request.action === "tags") return { ok: true, value: { tags: await this.tagsInUse(member, MEMORY_TAGS_MAX_LISTED) } satisfies MemoryTagsValue };
         if (request.action === "search") return this.search(member, request);
         if (request.action === "read") return this.readNote(request.noteId, member);
@@ -282,7 +338,16 @@ export class HubMemory {
       change_seq = ${SEQ_SQL} where ${stale};`);
   }
 
-  private async index(member: MemberContext): Promise<MemoryResult<MemoryIndexValue>> {
+  private async index(member: MemberContext, picks: boolean): Promise<MemoryResult<MemoryIndexValue>> {
+    // Notes that fit come with each message instead (the User, 2026-11-26:
+    // 3–5 that fit rather than the same 25 every time).
+    // Only while picks can be made (the key works, every note is printed,
+    // OpenAI answers): otherwise the list, as without the key.
+    if (picks && this.semantic?.ready()) {
+      const counted = await this.query<{ total: number }>(`select count(*) as total from member_memory_notes where ${this.visibleSql(member)};`);
+      const tags = await this.tagsInUse(member, MEMORY_INDEX_MAX_TAGS);
+      return { ok: true, value: { notes: [], more: Number(counted[0]?.total ?? 0), ...(tags.length ? { tags } : {}), picks: true } };
+    }
     const cutoff = new Date(this.now().getTime() - MEMORY_INDEX_STALE_DAYS * DAY_MS).toISOString();
     const activity = "max(updated_at, coalesce(verified_at, ''), coalesce(last_read_at, ''))";
     const rank = `case when kind = 'status' and author = ${quote(member.handle)} then 0
@@ -307,21 +372,121 @@ export class HubMemory {
   }
 
   private async search(member: MemberContext, request: Extract<HubMemoryRequest, { action: "search" }>): Promise<MemoryResult<MemorySearchValue>> {
-    const filters = this.filters(request);
+    if (request.query !== undefined && !validQuery(request.query)) return invalid(QUERY_RULE);
+    const words = typeof request.query === "string" ? wordsAsked(request.query) : [];
+    // Words are looked for below, ranked. A query with no word in it (only
+    // one-letter words or signs) keeps the notes holding all it has, as before.
+    const filters = this.filters(words.length ? { ...request, query: undefined } : request);
     if ("code" in filters) return { ok: false, error: filters };
     const limit = clampLimit(request.limit);
-    const rows = await this.query<Row>(`select ${SUMMARY_COLUMNS} from member_memory_notes where ${this.visibleSql(member)}${filters.sql}
-      order by max(updated_at, coalesce(verified_at, ''), coalesce(last_read_at, '')) desc limit ${limit};`);
-    this.log("hub.memory.search", { conversationId: member.conversationId, found: rows.length });
-    return { ok: true, value: { notes: rows.map(summaryOf) } };
+    const where = `${this.visibleSql(member)}${filters.sql}`;
+    const activity = "max(updated_at, coalesce(verified_at, ''), coalesce(last_read_at, ''))";
+    if (!words.length) {
+      const rows = await this.query<Row>(`select ${SUMMARY_COLUMNS} from member_memory_notes where ${where} order by ${activity} desc limit ${limit};`);
+      this.log("hub.memory.search", { conversationId: member.conversationId, found: rows.length });
+      return { ok: true, value: { notes: rows.map(summaryOf), ranking: "any-word" } };
+    }
+    // With the User's OpenAI key: the closest in meaning and the best by
+    // words take turns, meaning first (a name or an id asked is not buried).
+    const [byWords, meaning] = await Promise.all([
+      this.rankByWords(where, words),
+      this.semantic?.enabled() ? this.rankByMeaning(request.query as string, where) : Promise.resolve(undefined)
+    ]);
+    const wordOrder: Array<{ row: Row; part?: number }> = byWords.map((row) => ({ row }));
+    const ordered = meaning?.length ? takeTurns<{ row: Row; part?: number }>(meaning, wordOrder, (item) => item.row.id) : wordOrder;
+    const top = ordered.slice(0, limit);
+    const bodies = new Map<string, string>();
+    if (top.length) {
+      const read = await this.query<{ id: string; body: string }>(`select id, body from member_memory_notes where id in (${top.map((item) => quote(item.row.id)).join(", ")});`);
+      for (const row of read) bodies.set(row.id, row.body);
+    }
+    const notes: MemorySearchHit[] = top.map((item) => ({ ...summaryOf(item.row), snippet: snippetOf(passageOf(bodies.get(item.row.id) ?? "", item.part), words) }));
+    const ranking = meaning?.length ? "meaning" : "any-word";
+    this.log("hub.memory.search", { conversationId: member.conversationId, found: notes.length, words: words.length, ranking });
+    return { ok: true, value: { notes, ranking } };
+  }
+
+  /** The notes holding any word asked, best match first. */
+  private async rankByWords(where: string, words: SearchWord[]): Promise<Array<Row & { activity: string }>> {
+    const activity = "max(updated_at, coalesce(verified_at, ''), coalesce(last_read_at, ''))";
+    // Candidates: the notes holding any word's first letters (all its forms
+    // hold them). Their search text is read to rank them; bodies only for the
+    // notes given back.
+    const holds = candidateAnchors(words).map((anchor) => `instr(search_text, ${quote(anchor)}) > 0`).join(" or ");
+    const rows = await this.query<Row & { activity: string; searchText: string }>(`select ${SUMMARY_COLUMNS}, ${activity} as activity, search_text as searchText
+      from member_memory_notes where ${where} and (${holds});`);
+    const corpus = await this.query<{ total: number; averageLength: number | null }>(`select count(*) as total, avg(length(search_text)) as averageLength
+      from member_memory_notes where ${where};`);
+    // Counted a few notes at a time: on a server full of long notes this takes
+    // a while, and other requests are answered meanwhile.
+    const counted: Array<{ note: (typeof rows)[number]; counts: number[] }> = [];
+    for (const [index, row] of rows.entries()) {
+      if (index > 0 && index % COUNT_BATCH === 0) await new Promise<void>((resolve) => setImmediate(resolve));
+      counted.push({ note: row, counts: wordCounts(row.searchText, words) });
+    }
+    const ranked = rankCounted(counted, words, { total: Number(corpus[0]?.total ?? rows.length), averageLength: Number(corpus[0]?.averageLength ?? 0) });
+    // Equal scores: the most recently active first, as without words.
+    ranked.sort((left, right) => right.score - left.score || (left.note.activity < right.note.activity ? 1 : left.note.activity > right.note.activity ? -1 : 0));
+    return ranked.map((item) => item.note);
+  }
+
+  /** The notes closest in meaning to a query, with the passage that is
+   *  closest; undefined when OpenAI did not answer (search goes by words). */
+  private async rankByMeaning(query: string, where: string): Promise<Array<{ row: Row; part: number }> | undefined> {
+    const print = await this.semantic?.printQuery(query, SEARCH_PRINT_TIMEOUT_MS);
+    if (!print || !this.semantic) return undefined;
+    const rows = await this.query<Row>(`select ${SUMMARY_COLUMNS} from member_memory_notes where ${where};`);
+    const scores = this.semantic.noteCloseness(print, rows.map((row) => row.id));
+    return rows.flatMap((row) => {
+      const score = scores.get(row.id);
+      return score && score.score >= SEARCH_MEANING_MIN ? [{ row, part: score.part, score: score.score }] : [];
+    }).sort((left, right) => right.score - left.score).map(({ row, part }) => ({ row, part }));
+  }
+
+  /**
+   * The notes that fit a message, by meaning: only those close enough, at
+   * most a few, none the member was given in its session already (unless
+   * changed since). With no key, or when OpenAI does not answer, none.
+   */
+  private async pick(member: MemberContext, request: Extract<HubMemoryRequest, { action: "pick" }>): Promise<MemoryResult<MemoryPickValue>> {
+    // Not now (no key, notes still printed, OpenAI not answering): said so,
+    // and the member's device gives the list instead for a while.
+    if (!this.semantic?.ready()) return { ok: true, value: { enabled: false, notes: [] } };
+    if (typeof request.text !== "string" || request.text.includes("\u0000")) return invalid("Give the message's text to pick notes for.");
+    const shown = new Map<string, number>();
+    if (request.shown !== undefined) {
+      if (!Array.isArray(request.shown) || request.shown.length > MEMORY_LIVE_NOTES_MAX) return invalid("shown lists the notes given already, by id and version.");
+      for (const item of request.shown) if (item && typeof item.id === "string" && Number.isSafeInteger(item.version)) shown.set(item.id, item.version);
+    }
+    const print = await this.semantic.printQuery(request.text.slice(0, QUERY_MAX_CHARS), PICK_PRINT_TIMEOUT_MS);
+    if (!print) return { ok: true, value: { enabled: false, notes: [] } };
+    // Every turn asks: only ids and versions are read for all, summaries for the few picked.
+    const visible = await this.query<{ id: string; version: number }>(`select id, version from member_memory_notes where ${this.visibleSql(member)};`);
+    const scores = this.semantic.noteCloseness(print, visible.map((row) => row.id));
+    const ranked = visible.flatMap((row) => {
+      const score = scores.get(row.id)?.score;
+      return score === undefined ? [] : [{ row, score }];
+    }).sort((left, right) => right.score - left.score);
+    const closest = ranked[0]?.score ?? 0;
+    const picked = ranked
+      .filter((item) => item.score >= PICK_MIN && item.score >= closest - PICK_GAP && shown.get(item.row.id) !== Number(item.row.version))
+      .slice(0, MEMORY_PICK_MAX);
+    const rows = picked.length
+      ? await this.query<Row>(`select ${SUMMARY_COLUMNS} from member_memory_notes where id in (${picked.map((item) => quote(item.row.id)).join(", ")}) and ${this.visibleSql(member)};`)
+      : [];
+    const byId = new Map(rows.map((row) => [row.id, row]));
+    const notes = picked.flatMap((item) => {
+      const row = byId.get(item.row.id);
+      return row ? [summaryOf(row)] : [];
+    });
+    this.log("hub.memory.pick", { conversationId: member.conversationId, picked: notes.length, closest: Math.round(closest * 1000) / 1000 });
+    return { ok: true, value: { enabled: true, notes } };
   }
 
   private filters(request: { query?: unknown; tags?: unknown; tag?: unknown; kind?: unknown; scope?: unknown }): { sql: string } | MemoryError {
     let sql = "";
     if (request.query !== undefined) {
-      if (typeof request.query !== "string" || request.query.length > MEMORY_QUERY_MAX_CHARS || request.query.includes("\u0000")) {
-        return { code: "invalid_request", message: "Search by words under 500 characters." };
-      }
+      if (!validQuery(request.query)) return { code: "invalid_request", message: QUERY_RULE };
       for (const word of searchWords(request.query)) sql += ` and instr(search_text, ${quote(word)}) > 0`;
     }
     const tags = request.tags !== undefined ? request.tags : request.tag !== undefined ? [request.tag] : undefined;
@@ -392,6 +557,7 @@ export class HubMemory {
       1, ${quote(now)}, ${quote(now)}, ${quote(now)}, ${fields.awaitingRepository ? 1 : 0}, ${quote(key)}, ${quote(hash)}, ${quote(`${key}:${hash}`)},
       ${SEQ_SQL}, ${quote(fields.body)}, ${quote(searchText(fields))});`);
     this.log("hub.memory.created", { noteId: id, kind: fields.kind, scope: fields.scope, deviceId: device.deviceId, conversationId: member.conversationId });
+    this.semantic?.noteChanged({ id, title: fields.title, tags: fields.tags, body: fields.body });
     return this.readNote(id, undefined);
   }
 
@@ -438,6 +604,7 @@ export class HubMemory {
       return { ok: false, error: { code: "conflict", message: `The note changed meanwhile; it is at version ${after[0].version} now. Read it again and redo the change on top of it.`, current: summaryOf(after[0]) } };
     }
     this.log("hub.memory.updated", { noteId: row.id, version: row.version + 1, deviceId: device.deviceId, conversationId: member.conversationId });
+    this.semantic?.noteChanged({ id: row.id, title: fields.title, tags: fields.tags, body: fields.body });
     return { ok: true, value: noteOf(after[0]) };
   }
 
@@ -538,6 +705,7 @@ export class HubMemory {
         ${note.version}, ${quote(note.createdAt)}, ${quote(note.updatedAt)}, ${note.verifiedAt ? quote(note.verifiedAt) : "null"},
         ${note.awaitingRepository ? 1 : 0}, ${note.archivedAt ? quote(note.archivedAt) : "null"}, ${SEQ_SQL},
         ${quote(note.body)}, ${quote(searchText(note))});`);
+      if (!note.archivedAt) this.semantic?.noteChanged({ id: note.id, title: note.title, tags: note.tags, body: note.body });
       imported += 1;
     }
     this.log("hub.memory.imported", { deviceId: device.deviceId, imported, skipped });
@@ -554,6 +722,7 @@ export class HubMemory {
         delete from member_memory_notes where id = ${quote(noteId)};`);
     }
     this.log("hub.memory.deleted", { noteId, deviceId: device.deviceId, existed: Boolean(rows[0]) });
+    if (rows[0]) this.semantic?.noteRemoved(noteId);
     return { ok: true, value: { deleted: Boolean(rows[0]) } };
   }
 }
@@ -698,11 +867,25 @@ function parseTags(json: string): string[] {
   }
 }
 
-/** Lower case by the language's own rules (sqlite's lower() knows only ASCII). */
-function searchText(fields: { title: string; body: string; tags: string[] }): string {
-  return `${fields.title}\n${fields.tags.join(" ")}\n${fields.body}`.toLocaleLowerCase();
+/** The passage of a body a print was made from (the whole body when none). */
+function passageOf(body: string, part: number | undefined): string {
+  if (part === undefined) return body;
+  const range = passageRanges(body, NOTE_PASSAGE_CHARS)[part];
+  return range ? body.slice(range.start, range.end) : body;
 }
 
+/** Lower case by the language's own rules (sqlite's lower() knows only ASCII). */
+function searchText(fields: { title: string; body: string; tags: string[] }): string {
+  return searchTextOf(fields);
+}
+
+const QUERY_RULE = `Search by words under ${MEMORY_QUERY_MAX_CHARS} characters.`;
+
+function validQuery(query: unknown): query is string {
+  return typeof query === "string" && query.length <= MEMORY_QUERY_MAX_CHARS && !query.includes("\u0000");
+}
+
+/** The owner's list (Settings → Memory) keeps notes holding every word typed. */
 function searchWords(query: string): string[] {
   return [...new Set(query.toLocaleLowerCase().split(/\s+/).map((word) => word.trim()).filter(Boolean))].slice(0, 12);
 }

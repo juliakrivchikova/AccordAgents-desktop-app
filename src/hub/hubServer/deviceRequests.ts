@@ -2,7 +2,7 @@ import type { IncomingMessage, ServerResponse } from "node:http";
 import { HUB_MAX_BODY_BYTES, type HubDevice } from "../../shared/hubProtocol";
 import type { HubOps } from "../hubOps";
 import type { HubMemory } from "../hubMemory";
-import { isMemoryChangeAction } from "../../shared/memory";
+import { isMemoryPostAction } from "../../shared/memory";
 import {
   HUB_ARTIFACT_PATH, HUB_ARTIFACTS_PATH, HUB_CARDS_PATH, HUB_CHAT_PATH, HUB_CHATS_PATH, HUB_FEED_PATH, HUB_OPS_PATH,
   HUB_TURNS_PATH, type HubCardsResponse, type HubFeedGone, type HubLiveSettings, type HubMachineSettings,
@@ -86,7 +86,8 @@ export class DeviceRequests {
       const text = url.searchParams.get("request") ?? "";
       try { parsed = JSON.parse(text) as unknown; } catch { throw new HubRequestError(400, "Invalid memory request."); }
       const action = (parsed as { action?: unknown } | undefined)?.action;
-      if (typeof action !== "string" || isMemoryChangeAction(action)) throw new HubRequestError(400, "A change to memory is a POST.");
+      // A key or a message's text never comes in an address (logs keep those).
+      if (typeof action !== "string" || isMemoryPostAction(action)) throw new HubRequestError(400, "A change to memory is a POST.");
     } else if (request.method === "POST") {
       parsed = parseJson(body);
     } else {

@@ -71,7 +71,7 @@ export class ChatSearchService {
 
   private async searchNow(request: ChatSearchRequest): Promise<ChatSearchResponse> {
     const requestedAt = new Date().toISOString();
-    const matchQuery = buildChatSearchMatchQuery(request?.query);
+    const matchQuery = request?.anyWord ? buildAnyWordMatchQuery(request.query) : buildChatSearchMatchQuery(request?.query);
     const cursor = decodeCursor(request?.cursor, matchQuery);
     if (!matchQuery || !validRequester(request?.requester) || cursor === null) {
       return unavailableResponse([], requestedAt, "invalid-request");
@@ -118,7 +118,14 @@ export class ChatSearchService {
         })
       );
       const sourceSnapshotAt = new Date().toISOString();
-      const scope = resolveRequesterScope(snapshots, request.requester);
+      const requesterScope = resolveRequesterScope(snapshots, request.requester);
+      // A member's search of its project's other chats: only that project's,
+      // its own left out.
+      const scope = requesterScope && (request.repoPath !== undefined || request.excludeConversationId)
+        ? requesterScope.filter((snapshot) =>
+          (request.repoPath === undefined || (snapshot.repoPath || null) === (request.repoPath || null)) &&
+          snapshot.conversationId !== request.excludeConversationId)
+        : requesterScope;
       if (!scope) {
         return {
           scope: [],
@@ -237,7 +244,8 @@ export class ChatSearchService {
       startMarker,
       endMarker,
       limit: limit + 1,
-      offset
+      offset,
+      ...(request.anyWord ? { orderByRank: true } : {})
     }));
     const hasMore = result.messageMatches.length > limit;
     const messagePage = result.messageMatches.slice(0, limit);
@@ -334,6 +342,37 @@ export function buildChatSearchMatchQuery(value: unknown): string | undefined {
   }
   return terms.map((term, index) => `"${term.replaceAll('"', '""')}"${index === terms.length - 1 ? "*" : ""}`)
     .join(" AND ");
+}
+
+/**
+ * A member's search: a message holding any word asked is found, a word in
+ * its other forms too (the same first letters as memoryWordSearch counts a
+ * form by), best match first.
+ */
+export function buildAnyWordMatchQuery(value: unknown): string | undefined {
+  if (typeof value !== "string") {
+    return undefined;
+  }
+  const terms = value
+    .slice(0, MAX_QUERY_CHARS)
+    .normalize("NFKC")
+    .toLocaleLowerCase()
+    .match(/[\p{L}\p{M}\p{N}_]+/gu)
+    ?.filter((term) => [...term].length > 1);
+  if (!terms?.length) {
+    return undefined;
+  }
+  // Two-letter words match only themselves (as memoryWordSearch counts
+  // them): "на" is not every word starting with it.
+  const stems = new Map<string, string>();
+  for (const term of terms) {
+    const letters = [...term];
+    const keep = letters.length <= 4 ? letters.length : letters.length === 5 ? 4 : 5;
+    const stem = letters.slice(0, keep).join("");
+    stems.set(stem, `"${stem.replaceAll('"', '""')}"${letters.length > 2 ? "*" : ""}`);
+    if (stems.size >= MAX_QUERY_TERMS) break;
+  }
+  return [...stems.values()].join(" OR ");
 }
 
 export function parseChatSearchSnippet(

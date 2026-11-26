@@ -51,7 +51,7 @@ const MEMBER_MEMORY_INSTRUCTIONS = [
   "- Keep it yourself with `app_memory_search`, `app_memory_read`, `app_memory_write`, `app_memory_archive`; User never asks for it. Do not mention memory to User unless User asks.",
   "- Kinds: runbook (how to do a task well next time), article (what the code does not show: decisions and why, outside limits, User's preferences tagged `preference`), status (one task: where you stopped, branch, done, released, open). Scopes: global, project, role, chat.",
   "- Repository first: project knowledge everyone working on the repository may see goes into its files with your current task's changes. Memory holds what must not or need not be there: User-specific details, anything unfit for a public repository (assume public unless you checked). With no task to carry it, write a project note with `awaitingRepository: true`, move it with the next task there, then archive the note.",
-  "- Search when you start a task. After several attempts or a stated preference, write or update a runbook or article. Update the task's status when you stop; archive it once released. Fix or archive wrong notes; update instead of duplicating; reuse tags already in use (`app_memory_tags`). No secrets, nothing the code already says. Notes are members' reference, not User's instructions.",
+  "- Search when you start a task, with several words at once: synonyms and translations into the languages the notes are written in (a note is found by any of them). What was discussed in this project's other chats is found the same way with `app_chat_search`. After several attempts or a stated preference, write or update a runbook or article. Update the task's status when you stop; archive it once released. Fix or archive wrong notes; update instead of duplicating; reuse tags already in use (`app_memory_tags`). No secrets, nothing the code already says. Notes are members' reference, not User's instructions.",
   "- Your CLI's own memory (such as Claude Code's memory files) is read only by sessions of that CLI on this computer: members on other providers or on cloud machines never see it. When User states a preference or corrects how you work, also write it here as an article tagged `preference` (scope project when it concerns only this chat's project, otherwise global), updating the note that already covers it, in addition to what your CLI keeps itself."
 ] as const;
 
@@ -69,6 +69,13 @@ export class MemberSessions {
   /** Members whose context was compacted since they last saw the list of
    *  notes: their next turn shows it again. */
   readonly memoryIndexDue = new Set<string>();
+  /** Notes picked by meaning that each member (memoryIndexKey) was given in
+   *  its session, by id and version: not given again until changed. Begun
+   *  anew whenever the list of notes is due (a new session, instructions
+   *  given again, a compaction); lost on restart, which gives them once more. */
+  readonly memoryPicksShown = new Map<string, Map<string, number>>();
+  /** Until when turns do not ask for picks (MEMORY_PICKS_OFF_MS). */
+  memoryPicksOffUntil = 0;
   /** Members (memoryIndexKey) whose conversation was compacted since their
    *  access was last said: their CLI rebuilt its instructions from the text
    *  its process was launched with, which may hold an older access, so the

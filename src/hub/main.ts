@@ -8,6 +8,7 @@ import { StorageService } from "../main/services/storage";
 import { createHeadlessPlatform, setHostPlatform, userDataPath } from "../main/platform";
 import { HubOps } from "./hubOps";
 import { HubMemory } from "./hubMemory";
+import { HubSemantic } from "./semantic/hubSemantic";
 import { HubAlerts, type HubAlertsOptions } from "./hubAlerts";
 import { HubPush, loadOrCreateVapidKeys } from "./hubPush";
 import { HubRetention, hubRetentionConfig } from "./hubRetention";
@@ -135,6 +136,14 @@ export function composeHub(options: {
   // The chats as the server owns them (agreements Д1–Д5): devices' writes,
   // the feed they read, and turns.
   const ops = new HubOps(storage, log);
+  // Search by meaning, once the User gives her OpenAI key (Settings → General).
+  const qaOpenAi = process.env.ACCORDAGENTS_HUB_OPENAI_URL?.trim();
+  const semantic = new HubSemantic({
+    storage, log,
+    ...(options.fetchImpl ? { fetchImpl: options.fetchImpl } : {}),
+    // Local QA only: an OpenAI stand-in on this computer.
+    ...(qaOpenAi && /^http:\/\/(127\.0\.0\.1|localhost)(:\d+)?$/.test(qaOpenAi) ? { openAiBaseUrl: qaOpenAi } : {})
+  });
   /** The machine a member of a chat runs on, if it runs on one. Read
    *  without the chat's messages: a chat can be thousands of them. */
   const turnHome = async (conversationId: string, participantId: string): Promise<string | undefined> => {
@@ -177,8 +186,14 @@ export function composeHub(options: {
       }).catch(() => undefined);
       return;
     }
+    // Search by meaning forgets what is gone, and takes in a chat moved here.
+    if (effect.kind === "conversation.delete") semantic.chatRemoved(entry.conversationId);
+    if (effect.kind === "message.remove") semantic.messageRemoved(entry.conversationId, effect.messageId);
+    if (effect.kind === "chat.import" && effect.last && conversation?.kind === "chat") semantic.chatImported(conversation.id);
     if (!conversation || (effect.kind !== "message.create" && effect.kind !== "message.update")) return;
     const message = effect.message;
+    // Printed for search by meaning once it is a finished, shown message.
+    if (conversation.kind === "chat") semantic.messageChanged(conversation.id, message);
     // A member's reply that is done now and was running (or new and done).
     const settled = message.role === "participant" && (message.status === "done" || message.status === "error") &&
       (effect.kind === "message.create" || previous?.status === "pending");
@@ -212,7 +227,7 @@ export function composeHub(options: {
   });
   const phoneApi = phone;
   // Members' long-term memory, beside the chats (shared/memory.ts).
-  const memory = new HubMemory(storage, log);
+  const memory = new HubMemory(storage, log, undefined, { semantic, chatSearch: search });
   // Urgent alerts: Telegram, then calls (shared/urgentAlerts.ts). Local QA
   // gives the address a tunnel reaches this server at.
   const publicUrlOverride = options.alerts && "publicUrlOverride" in options.alerts
@@ -242,6 +257,7 @@ export function composeHub(options: {
     alerts
   });
   waker.start();
+  void semantic.start().catch((error: unknown) => log("hub.semantic.start-error", { message: error instanceof Error ? error.message : String(error) }));
   void alerts.start().catch((error: unknown) => log("hub.alerts.start-error", { message: error instanceof Error ? error.message : String(error) }));
   // What the server kept for the order of signed events it had before it
   // owned the chats (Д7): nothing reads it any more, and it goes once, in the
@@ -250,11 +266,12 @@ export function composeHub(options: {
   const dropped = storage.dropLegacyEventTables({ keepBodies: true, signal: dropping.signal, log })
     .catch((error: unknown) => log("hub.legacy-tables.error", { message: error instanceof Error ? error.message : String(error) }));
   return {
-    server, push, waker, feed, progress, phone: phoneApi, ops, memory, alerts,
+    server, push, waker, feed, progress, phone: phoneApi, ops, memory, alerts, semantic,
     close: async () => {
       push.close();
       waker.close();
       await alerts.close();
+      await semantic.close();
       dropping.abort();
       await server.close();
       await dropped;

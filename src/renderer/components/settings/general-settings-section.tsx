@@ -17,6 +17,7 @@ import type {
 } from "../../../shared/types";
 import { BetaUpdatesRow } from "./beta-updates-row";
 import { SpeechToTextRow } from "./speech-to-text-row";
+import { SemanticSearchRow } from "./semantic-search-row";
 import { ClaudeChromeRow } from "./claude-chrome-row";
 import { DevicePairingSection } from "./device-pairing-section";
 import { HubServerSection } from "./hub-server-section";
@@ -179,6 +180,7 @@ export function GeneralSettingsSection(props: {
             />
           </div>
           <SpeechToTextRow />
+          <SemanticSearchRow />
           <BetaUpdatesRow enabled={props.betaUpdates} onChange={props.setBetaUpdates} />
           <div className="gen-card-divider" />
           <div className="gen-row">

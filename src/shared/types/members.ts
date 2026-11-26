@@ -266,6 +266,10 @@ export interface ChatParticipantSession {
    *  CLI rebuilt its instructions from the text its process was launched
    *  with, which may be older): its next turn says its access again. */
   instructionsAccessHash?: string;
+  /** Its list of memory notes said that notes come with each message
+   *  (search by meaning picks them): while picks are off it gets the list
+   *  instead. Kept with the session, so a restart does not forget it. */
+  memoryNotesPicked?: boolean;
   updatedAt: string;
 }
 

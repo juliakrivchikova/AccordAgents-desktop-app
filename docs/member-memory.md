@@ -92,6 +92,124 @@ not there yet.
   reference, not the User's instructions.
 - A list or tool call the server could not answer says so and never reads as
   "no memory". The list waits at most 4 s before the turn starts without it.
+- With search by meaning on (below), that list gives way to the notes that fit
+  each message: a line says so (with how many notes the member can see and
+  the tags in use), and each turn carries the few notes picked for its
+  message. An app that does not add picks (an older desktop or machine
+  runtime) asks without `picks` and still gets the list. The server answers
+  with picks only while it can pick (the key works, every note is printed,
+  OpenAI answers); a pick it cannot make says `enabled: false`, and the app
+  then stops asking for a minute and gives a session told that notes come
+  with each message the list in that same turn (or, when the server did not
+  answer at all, with its next one). What a session was told is kept with it
+  (`ChatParticipantSession.memoryNotesPicked`), so an app restart does not
+  forget it.
+- `app_chat_search` finds messages in the other chats of the member's project
+  (a chat with no project searches the other chats with no project; the
+  User, 2026-11-26: "в других чатах этого проекта"; the member's own chat is
+  in its context): by any word asked, in any form, best match first, always
+  (the chats' word index, `ChatSearchService` with `anyWord`, `repoPath` and
+  `excludeConversationId`), and by meaning when it is on, the two taking
+  turns. With neither answering it says so rather than finding nothing. It returns the chat's title, the author, the time and the
+  passage, never whole messages. It goes through the memory route, so the
+  server checks the member as for memory.
+
+## Search by words (without a key)
+
+`app_memory_search` with `query` (`src/hub/memoryWordSearch.ts`), decided by
+the User on 2026-11-26 (chat document "Поиск по смыслу: память, чаты,
+инструкции"): memory must get as much better as it can without a model.
+
+- A note is found when it has **any** of the words asked, not all of them.
+- A word counts in its other forms, the same rule for every language: a
+  word of 3–4 letters finds the words it starts ("test" → "tests", "ключ" →
+  "ключи"); words whose shorter one has 5 letters share the first 4 ("ветка"
+  → "ветку"); longer ones the first 5 ("deploy" → "deployment"). Two-letter
+  words match only themselves; one-letter words are left out. A word of 5
+  letters or more found inside a longer word ("session" in "sqliteSession")
+  counts half. In scripts written without spaces (Chinese, Japanese, Thai…)
+  a word is found anywhere, as before. Letters keep their marks (Hindi vowel
+  signs). A query with no word left keeps the old rule.
+- Notes are ranked by BM25, a match in the title weighing three times and in
+  a tag twice; equal scores go most recently active first. A note holding
+  only words more than half of the notes hold ("на", "the") is left out,
+  unless every word asked is such a word. At most 32 different words count.
+- Each note found comes with `snippet`: the passage of its body (at most 220
+  characters, "…" included, never half a character) where most of the words
+  asked are close together, or the body's start when only the title or a tag
+  matched. The answer carries `ranking: "any-word"`.
+- An older server (it updates itself soon after the app) finds only notes
+  holding every word; an empty answer from it to several words tells the
+  member to search one word at a time.
+- Members are told (tool description and `MEMBER_MEMORY_INSTRUCTIONS`) to ask
+  with several words at once: synonyms and translations into the languages
+  the notes are written in. The model is the member itself.
+- Cost: candidates are the notes holding the first letters of a word asked
+  (two-letter words only when nothing longer is asked); their search text is
+  read and counted 50 notes at a time, bodies only for the notes returned. On
+  the User's notes it is instant; at the server's limit (2000 notes of 16 KB
+  where every word matches) counting takes about a second on a Mac.
+- Measured on the User's 59 notes with 37 queries written for them (23 of
+  them in another language than the notes): the right note in the first
+  five for 35% of the queries as asked (3% with the old rule), and 100% when
+  asked as members are told to (by taylor, who knows the notes: an upper
+  bound). Settings → Memory's search box keeps the old rule: it is a filter.
+
+## Search by meaning (with the User's OpenAI key)
+
+Decided by the User on 2026-11-26 (same chat document): OpenAI
+`text-embedding-3-small`, her key, for her chats only.
+
+- The key is entered in Settings → General ("Search by meaning"). It goes to
+  her server and stays there (`hub_documents` "semantic-search", like the
+  Telegram token for alerts): the server searches, so the server holds it.
+  It is checked with one request before it is kept; Settings shows only that a
+  key is entered, how much is printed, and why OpenAI stopped taking it. The
+  key is sent only as POST (`MEMORY_POST_ONLY_ACTIONS`), never in an address.
+- The server (`src/hub/semantic/`) keeps a print of every memory note not
+  archived and every message shown in a chat (the User's, and members'
+  finished replies). Long text is cut into passages (notes 1200 characters,
+  messages 1500, at most 8 per message), each printed. Notes keep the whole
+  print (1536 numbers), messages the first 512; one signed byte per number.
+  A message is printed as the chat shows it (`printableText`: what the chat
+  hides is not found; a member's posts during its turn are, with its reply)
+  and read again when found. Prints are kept in `semantic_prints` and read
+  into memory once, side by side in big blocks (`PrintArena`): on the User's
+  ~21 thousand messages about 15 MB of the server's memory, let go when the
+  key is removed or refused.
+- New notes and messages are printed as they come (1.5 s after, in batches);
+  the old ones once, in the background, a page at a time, with a pause
+  between requests. A restart prints only what changed (a hash of the text).
+  A message hidden or removed, or a chat deleted, is forgotten at once (even
+  while it is being printed); a chat moved to the server is printed from the
+  database a page at a time once it arrives. A key removed or changed stops
+  the work done for the old one at once (its requests and waits are called
+  off). The whole pass over the User's ~22 thousand messages reads 220 pages
+  of at most about 170 KB (about 3 s of reading on her Mac, 2026-11-26). Prints of anything else gone are forgotten at the end of that pass
+  (only what was printed before it began). A pass the database failed is
+  tried again, later and later, while the key stays the same.
+- `app_memory_search`: the closest in meaning (closer than 0.15) and the best
+  by the words asked take turns, meaning first; `ranking: "meaning"`. On her
+  notes, meaning first then words put the right note in the first five for
+  82% of queries naming an id or a class; taking turns for all of them,
+  keeping the first place of every query asked by meaning (sums of scores and
+  reciprocal ranks lost it for a third). The passage is the closest one, cut
+  around the words asked.
+- Notes for each message (`pick`): only notes at least 0.40 close and within
+  0.07 of the closest, at most 5, none the member was given in its session
+  already unless changed since (the app keeps that per session; it starts
+  over when the list is due: a new session, instructions given again, a
+  compaction). Tuned on the User's 59 notes, 37 queries and 60 of her real
+  messages: notes came for about one message in five, and none for "ok",
+  "done" or "I'm home".
+- OpenAI not answering in time (4 s for a search, 3 s for a pick): the same
+  search by words, and no picks; for 30 s after, nothing waits on OpenAI.
+  OpenAI refusing the key (or no credit left, told by its code): the server
+  stops using it and Settings says why until a new key is given or the key is
+  removed. A refusal of a key replaced meanwhile stops nothing.
+- Measured on her notes (2026-11-26): full prints of passages put the right
+  note in the first three for all 37 queries; 512 numbers for 95%. Cost: about
+  $0.08 once for all her chats, then under a cent a month.
 
 ## Keeping it tidy without the User
 
@@ -117,12 +235,12 @@ not there yet.
 - The list is not shown again after a compaction the CLI starts on its own, nor
   in a fresh session the CLI starts when a resume fails; members are told to
   search memory when they start a task.
-- Search is by words contained in the title, tags or body, without an index;
-  fine for hundreds of notes.
+- Search reads the notes holding the first letters of any word asked,
+  without an index; fine for hundreds of notes.
 
 ## Not in v1
 
-Semantic search, agreement between members on a note, any trace of memory in
+Agreement between members on a note, any trace of memory in
 the chat or on the phone, editing a note in Settings, notes of a deleted chat
 being removed with it (they stay, shown under "deleted chat", until deleted in
 Settings).

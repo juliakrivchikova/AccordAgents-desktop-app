@@ -136,12 +136,21 @@ export type MemoryResult<T> = { ok: true; value: T } | { ok: false; error: Memor
 
 /** One signed request to the server's memory. */
 export type HubMemoryRequest =
-  | ({ action: "index" } & MemoryMemberRef)
+  // `picks`: the asking app adds notes picked by meaning to each message
+  // (memoryPicks); with search by meaning on, the list is then left out.
+  | ({ action: "index"; picks?: boolean } & MemoryMemberRef)
   | ({ action: "tags" } & MemoryMemberRef)
   | ({ action: "search" } & MemoryMemberRef & MemorySearchQuery)
   | ({ action: "read"; noteId: string } & MemoryMemberRef)
   | ({ action: "write" } & MemoryMemberRef & MemoryWriteRequest)
   | ({ action: "archive" } & MemoryMemberRef & MemoryArchiveRequest)
+  // Notes that fit a message, by meaning (only with the User's OpenAI key).
+  | ({ action: "pick"; text: string; shown?: MemoryShownNote[] } & MemoryMemberRef)
+  // Messages of the chats of this chat's project.
+  | ({ action: "chat-search"; query: string; limit?: number } & MemoryMemberRef)
+  // The owner only: the OpenAI key for search by meaning (Settings → General).
+  | { action: "semantic-settings" }
+  | { action: "semantic-key"; key?: string; remove?: boolean }
   // The owner only (Settings → Memory).
   | ({ action: "list" } & MemoryOwnerListQuery)
   | { action: "owner-read"; noteId: string }
@@ -194,11 +203,14 @@ export interface MemoryOwnerListQuery {
 }
 
 export interface MemoryIndexValue {
+  /** Empty when notes are picked for each message instead (`picks`). */
   notes: MemoryNoteSummary[];
   /** How many visible notes there are beyond the ones listed. */
   more: number;
   /** The tags used most among the notes this member sees. */
   tags?: MemoryTagCount[];
+  /** Search by meaning is on: notes that fit come with each message. */
+  picks?: boolean;
 }
 
 /** A tag in use, with how many notes (not archived) carry it. */
@@ -211,8 +223,86 @@ export interface MemoryTagsValue {
   tags: MemoryTagCount[];
 }
 
+/** A note found by search: with the passage where the words asked were
+ *  found (absent for a search by tags, kind or scope only). */
+export interface MemorySearchHit extends MemoryNoteSummary {
+  snippet?: string;
+}
+
 export interface MemorySearchValue {
+  /** Best match first when words were asked; otherwise the most recently
+   *  written, read or confirmed first. */
+  notes: MemorySearchHit[];
+  /** "meaning": the closest in meaning (the User's OpenAI key) and the best
+   *  by the words asked take turns, meaning first. "any-word": a note with any word asked is found,
+   *  ranked. Absent from an older server, which finds only notes holding
+   *  every word. */
+  ranking?: "any-word" | "meaning";
+}
+
+/** A note a member was already given in its session (not given again
+ *  until it changes). */
+export interface MemoryShownNote {
+  id: string;
+  version: number;
+}
+
+/** At most this many notes are picked for one message. */
+export const MEMORY_PICK_MAX = 5;
+/** What of a message notes are picked for (the rest is not looked at). */
+export const MEMORY_PICK_TEXT_MAX_CHARS = 6000;
+/** At most this many notes given already are named with a pick. */
+export const MEMORY_PICK_SHOWN_MAX = 500;
+
+export interface MemoryPickValue {
+  /** Whether the server picks by meaning (the User's OpenAI key is set). */
+  enabled: boolean;
+  /** The notes that fit, closest first; often none. */
   notes: MemoryNoteSummary[];
+}
+
+export const CHAT_SEARCH_DEFAULT_LIMIT = 10;
+export const CHAT_SEARCH_MAX_LIMIT = 30;
+
+/** A message found in the chats of a member's project. */
+export interface ChatSearchHit {
+  conversationId: string;
+  chatTitle: string;
+  messageId: string;
+  /** "User", or the member's handle. */
+  author: string;
+  createdAt: string;
+  /** Where the message matched, cut short. */
+  snippet: string;
+}
+
+export interface ChatSearchValue {
+  hits: ChatSearchHit[];
+  /** "meaning": the closest in meaning and the best by the words asked take
+   *  turns, meaning first; "any-word": messages holding any word asked. */
+  ranking: "meaning" | "any-word";
+  /** Old messages are still being printed: some are found by words only. */
+  catchingUp?: boolean;
+}
+
+/** What Settings shows of search by meaning: never the key itself. */
+export interface SemanticSettingsView {
+  keySet: boolean;
+  /** Why the key stopped working (OpenAI refused it, no credit left). */
+  keyError?: string;
+  notesPrinted?: number;
+  messagesPrinted?: number;
+  /** Old notes and messages are still being printed. */
+  catchingUp?: boolean;
+  /** The last failure while printing (OpenAI unreachable, slowed down). */
+  lastError?: string;
+}
+
+/** What Settings → General gets: the server's view, or why there is none. */
+export interface SemanticSettingsResult {
+  status: "ok" | "unavailable";
+  view?: SemanticSettingsView;
+  message?: string;
 }
 
 export interface MemoryOwnerListValue {
@@ -271,4 +361,18 @@ export const MEMORY_CHANGE_ACTIONS = ["write", "archive", "delete", "import"] as
 
 export function isMemoryChangeAction(action: string): boolean {
   return (MEMORY_CHANGE_ACTIONS as readonly string[]).includes(action);
+}
+
+/** Sent as POST though they change no note: a message's whole text (too
+ *  long for an address), and the OpenAI key (never in an address, which
+ *  logs may keep). */
+export const MEMORY_POST_ONLY_ACTIONS = ["pick", "semantic-key"] as const;
+
+/** A server older than this app does not know the action asked. */
+export function isUnknownMemoryAction(result: MemoryResult<unknown>): boolean {
+  return !result.ok && result.error.code === "invalid_request" && /^Unknown memory action/.test(result.error.message);
+}
+
+export function isMemoryPostAction(action: string): boolean {
+  return isMemoryChangeAction(action) || (MEMORY_POST_ONLY_ACTIONS as readonly string[]).includes(action);
 }

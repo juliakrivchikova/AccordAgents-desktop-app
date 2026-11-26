@@ -178,6 +178,8 @@ export class ServerChatLink {
       const why = message.slice(0, 200);
       return { ok: false, error: { code: "server_unavailable", message: request.action === "delete"
         ? `Your server did not confirm the deletion (${why}). Open the list again to see whether the note is still there.`
+        : request.action === "semantic-key"
+          ? `Your server did not confirm the key (${why}). Open Settings again to see whether it was saved.`
         : isMemoryChangeAction(request.action)
           ? `Your server did not confirm this change (${why}). It may still have reached it: read the note again before trying again.`
           : `Your server could not be reached (${why}), so memory was not read. It does not mean there is no memory.` } };

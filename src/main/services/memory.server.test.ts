@@ -578,3 +578,54 @@ test("Settings names the chats of notes kept in several chats (and none of a del
   assert.deepEqual(await storage.conversationTitles([CHAT_A]), { [CHAT_A]: "Plans" });
   assert.deepEqual(await storage.conversationTitles([]), {});
 });
+
+test("a search by words finds a note with any of them, in any form, best first, with the passage; only notes the member sees", async (t) => {
+  const { tool } = await setup(t);
+  const write = (title: string, body: string, scope = "project", tags: string[] = []) =>
+    tool("desktop", CHAT_A, taylor, APP_MEMORY_WRITE_TOOL, { kind: "runbook", title, body, scope, tags });
+  ok(await write("Выпуск беты", "Релиз беты идёт через GitHub Actions. Перед выпуском закройте открытые вопросы к пользователю."));
+  ok(await write("Deploying the bot", "To deploy the bot to production, push the image and roll the ECS service. Releases are tagged first."));
+  ok(await write("Lunch places", "Where the team eats on Fridays."));
+  ok(await write("Role checklist for releases", "Review the diff before a release.", "role"));
+  const search = async (member: ChatParticipant, conversationId: string, args: Record<string, unknown>) =>
+    ok<MemorySearchValue>(await tool("desktop", conversationId, member, APP_MEMORY_SEARCH_TOOL, args)).notes;
+
+  // Synonyms and a translation at once; "релизы" finds "Релиз", "releases" finds "Releases".
+  const found = await search(taylor, CHAT_A, { query: "релизы выпуск releases deploying" });
+  // Both strong matches first (the title and the body), the one-word match last.
+  assert.deepEqual(found.slice(0, 2).map((note) => note.title).sort(), ["Deploying the bot", "Выпуск беты"]);
+  assert.equal(found[2]?.title, "Role checklist for releases");
+  assert.equal(found.length, 3);
+  const passage = (title: string) => found.find((note) => note.title === title)?.snippet ?? "";
+  assert.match(passage("Deploying the bot"), /deploy the bot to production/);
+  assert.match(passage("Выпуск беты"), /^Релиз беты идёт через GitHub Actions\. Перед выпуском/);
+  // Another role does not find the role note; a limit is kept.
+  assert.deepEqual((await search(sam, CHAT_A, { query: "releases" })).map((note) => note.title), ["Deploying the bot"]);
+  assert.equal((await search(taylor, CHAT_A, { query: "релизы выпуск releases deploying", limit: 1 })).length, 1);
+  // Filters still apply to a search by words.
+  assert.deepEqual((await search(taylor, CHAT_A, { query: "releases", scope: "role" })).map((note) => note.title), ["Role checklist for releases"]);
+  // One short word finds its forms; the answer says it is ranked by any word.
+  const short = ok<MemorySearchValue>(await tool("desktop", CHAT_A, taylor, APP_MEMORY_SEARCH_TOOL, { query: "релиз" }));
+  assert.deepEqual(short.notes.map((note) => note.title), ["Выпуск беты"]);
+  assert.equal(short.ranking, "any-word");
+  // No words: the most recent first, without passages.
+  const recent = await search(taylor, CHAT_A, {});
+  assert.equal(recent.length, 4);
+  assert.ok(recent.every((note) => note.snippet === undefined));
+  // A query with no word left (one letter) keeps notes holding all it has.
+  assert.deepEqual((await search(taylor, CHAT_A, { query: "ф" })).map((note) => note.title), []);
+  assert.deepEqual((await search(taylor, CHAT_A, { query: "nothing like this" })).map((note) => note.title), []);
+  refused(await tool("desktop", CHAT_A, taylor, APP_MEMORY_SEARCH_TOOL, { query: "x".repeat(501) }), "invalid_request");
+});
+
+test("an empty answer to several words from an older server tells the member to search word by word", async () => {
+  const asked: unknown[] = [];
+  const older = (value: MemorySearchValue) => ({ memory: async <T>(request: unknown) => { asked.push(request); return { ok: true, value } as unknown as MemoryResult<T>; } });
+  const actor = { conversationId: CHAT_A, participantId: taylor.id };
+  const empty = await callMemoryTool(older({ notes: [] }), actor, APP_MEMORY_SEARCH_TOOL, { query: "deploy release выкатка" }) as { note?: string };
+  assert.match(empty.note ?? "", /older than this app and finds only notes holding every word asked\. Search again with one word at a time\./);
+  // One word, something found, or a current server: nothing added.
+  assert.equal((await callMemoryTool(older({ notes: [] }), actor, APP_MEMORY_SEARCH_TOOL, { query: "deploy" }) as { note?: string }).note, undefined);
+  assert.equal((await callMemoryTool(older({ notes: [], ranking: "any-word" }), actor, APP_MEMORY_SEARCH_TOOL, { query: "deploy release" }) as { note?: string }).note, undefined);
+  assert.equal(asked.length, 3);
+});
