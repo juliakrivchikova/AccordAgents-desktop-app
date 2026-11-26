@@ -1,7 +1,6 @@
 import { useCallback, useContext, useEffect, useMemo, useRef, type ComponentProps, type ReactNode } from "react";
-import { chatSubagentProjectKey, chatSubagentProvidersOf } from "../../../shared/subagentProviders";
+import { chatSubagentProvidersOf } from "../../../shared/subagentProviders";
 
-import { ACCORD_NEEDS_AGENT_LINE } from "../../../shared/accordCandidates";
 import type { DockedAccord } from "../../../shared/accordProgress";
 import { memberSessionMessages } from "../../../shared/mainSession";
 import { SESSIONS_REMOVED_MEMBER_DETAIL, sessionsMemberDetail, sessionsMemberStatus, sessionsTaskDurationMs, type SessionsMemberRow } from "../../../shared/mainSessionView";
@@ -177,11 +176,10 @@ export function ChatSessionsRightPanel(props: {
         onOpenAccord={props.onOpenAccord}
         rows={sessions.memberRows}
         subagents={{
-          project: settings.subagentProvidersByProject?.[chatSubagentProjectKey(conversation) ?? ""],
+          defaults: settings.subagentDefaults,
           thread: chatSubagentProvidersOf(conversation.metadata),
-          projectScope: Boolean(chatSubagentProjectKey(conversation)),
           main: props.participants.find((member) => member.id === conversation.metadata.mainSessionParticipantId),
-          ...(panel.addAgent !== undefined ? { add: { key: panel.addAgent, ...(props.accordNeedsAgent ? { note: ACCORD_NEEDS_AGENT_LINE } : {}) } } : {})
+          ...(panel.addAgent !== undefined ? { add: { key: panel.addAgent, ...(props.accordNeedsAgent ? { forAccord: true } : {}) } } : {})
         }}
         formerRows={sessions.formerRows}
         activity={sessions.activity}

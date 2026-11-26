@@ -80,7 +80,12 @@ export interface StoredSettings {
   assistantProviderKind?: ChatProviderKind;
   /** How a new chat starts besides its CLI (shared/newChatDefaults.ts). */
   newChatDefaults?: unknown;
-  /** The projects' sub-agent providers (shared/subagentProviders.ts). */
+  /** Each CLI's model and effort for the agents a chat gives tasks to
+   *  (Settings → General → Agents, shared/subagentProviders.ts). */
+  subagentDefaults?: unknown;
+  /** The projects' lists of agents from before Settings' defaults
+   *  (2026-11-26, never released): no longer read, but kept in the file as
+   *  stored, so a downgrade keeps them. */
   subagentProvidersByProject?: unknown;
   /** The view new chats opened in before every new chat opened in the
    *  sessions view: no longer read, but kept in the file as stored, so a

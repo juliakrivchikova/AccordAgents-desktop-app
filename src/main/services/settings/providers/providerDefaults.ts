@@ -1,6 +1,6 @@
 import { applyNewChatDefaultsUpdate, newChatDefaultsForProvider, normalizeNewChatDefaults } from "../../../../shared/newChatDefaults";
-import type { AppSettings, AgentHealth, ChatProviderKind, NewChatDefaultsUpdate, ProviderSettingsUpdate, SubagentProviderChange } from "../../../../shared/types";
-import { applySubagentProviderChange, normalizeSubagentProvidersByProject, subagentProjectKey } from "../../../../shared/subagentProviders";
+import type { AppSettings, AgentHealth, ChatProviderKind, NewChatDefaultsUpdate, ProviderSettingsUpdate, SubagentDefaultUpdate } from "../../../../shared/types";
+import { applySubagentDefaultUpdate, normalizeSubagentProviderEntries } from "../../../../shared/subagentProviders";
 import { preferredReadyAssistantProviderKind } from "../../../../shared/cliReadiness";
 import { normalizeChatProviderKind } from "../stored/storedDefaults";
 import type { SettingsModules } from "../modules";
@@ -47,29 +47,27 @@ export class ProviderDefaults {
     });
   }
 
-  /** How a new chat starts besides its CLI (Settings → General → New chats,
-   *  shared/newChatDefaults.ts). */
-  /** A change to a project's sub-agent providers (the side panel's Project scope). */
-  async updateProjectSubagentProviders(repoPath: string, change: SubagentProviderChange): Promise<AppSettings> {
-    const key = subagentProjectKey(repoPath);
-    if (!key) {
-      throw new Error("This chat has no project folder: change its own sub-agents instead.");
+  /** One CLI's model and effort for the agents a chat gives tasks to
+   *  (Settings → General → Agents, shared/subagentProviders.ts). */
+  async setSubagentDefault(update: SubagentDefaultUpdate): Promise<AppSettings> {
+    if (!update || typeof update !== "object" || !normalizeChatProviderKind(update.kind)) {
+      throw new Error(`Unknown provider: ${String(update?.kind)}`);
     }
     return this.withAssistantProviderMutation(async () => {
       const stored = await this.settings.settingsStore.readStored();
-      const byProject = normalizeSubagentProvidersByProject(stored.subagentProvidersByProject) ?? {};
-      const next = applySubagentProviderChange("project", byProject[key] ?? [], change);
-      if (next.length > 0) {
-        byProject[key] = next;
-      } else {
-        delete byProject[key];
+      const current = normalizeSubagentProviderEntries(stored.subagentDefaults, false);
+      const next = applySubagentDefaultUpdate(current, update);
+      if (JSON.stringify(next) === JSON.stringify(current)) {
+        return this.settings.publicSettings.getPublicSettings();
       }
-      stored.subagentProvidersByProject = byProject;
+      stored.subagentDefaults = next;
       await this.settings.settingsStore.writeStored(stored);
       return this.settings.publicSettings.getPublicSettings();
     });
   }
 
+  /** How a new chat starts besides its CLI (Settings → General → New chats,
+   *  shared/newChatDefaults.ts). */
   async setNewChatDefaults(update: NewChatDefaultsUpdate): Promise<AppSettings> {
     if (!update || typeof update !== "object" || Array.isArray(update)) {
       throw new Error("Invalid new chat settings.");

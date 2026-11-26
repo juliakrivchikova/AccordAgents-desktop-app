@@ -1,6 +1,6 @@
 import { chatViewFor, isMainSessionChat, mainSessionParticipantId } from "./mainSession";
-import { chatSubagentProjectKey, chatSubagentProvidersOf, effectiveSubagentProviders } from "./subagentProviders";
-import type { ChatParticipant, ConversationMetadata, EffectiveSubagentProvider, SubagentProviderEntry } from "./types";
+import { chatSubagentProvidersOf, effectiveSubagentProviders, type SubagentListInput } from "./subagentProviders";
+import type { ChatParticipant, ConversationMetadata, EffectiveSubagentProvider } from "./types";
 
 // Who an Accord the User starts can include (the User, 2026-11-26): the
 // chat's members and, in a chat with a main session, each CLI of its Agents
@@ -11,12 +11,13 @@ import type { ChatParticipant, ConversationMetadata, EffectiveSubagentProvider, 
 export const ACCORD_NEEDS_MEMBERS_REASON = "Add at least two members to start Accord.";
 export const ACCORD_NEEDS_AGENT_TOOLTIP = "Accord needs at least one more agent. Add one in the side panel's Agents list.";
 export const ACCORD_NEEDS_AGENT_LINE = "Accord needs at least one more agent. Add one here.";
+/** The same, when no other CLI can be added here: one has to be set up first. */
+export const ACCORD_NEEDS_AGENT_SETUP_LINE = "Accord needs at least one more agent. Set up another CLI in Settings.";
 
 type AccordMember = Pick<ChatParticipant, "id" | "kind" | "cloudRun">;
 
 export interface AccordChat {
-  repoPath?: string;
-  metadata: Pick<ConversationMetadata, "mainSessionParticipantId" | "chatView" | "subagentProviders" | "machineRepository">
+  metadata: Pick<ConversationMetadata, "mainSessionParticipantId" | "chatView" | "subagentProviders">
     & { participants?: unknown; archived?: unknown };
 }
 
@@ -37,20 +38,19 @@ export type AccordLaunch =
 export function accordCandidates<T extends AccordMember>(
   members: readonly T[],
   chat: AccordChat,
-  projectLists: Readonly<Record<string, SubagentProviderEntry[]>> | undefined
+  /** The CLIs ready where the chat's members run, and Settings' model and effort for each. */
+  list: Pick<SubagentListInput, "ready" | "defaults">
 ): AccordCandidates<T> {
   const mainId = mainSessionParticipantId(chat.metadata);
   const main = mainId ? members.find((member) => member.id === mainId) : undefined;
   if (!main) {
     return { members: [...members], providers: [] };
   }
-  // A chat from before the list has none to offer: it is added in the side panel first.
-  const agents = effectiveSubagentProviders(projectLists?.[chatSubagentProjectKey(chat) ?? ""], chatSubagentProvidersOf(chat.metadata)) ?? [];
+  // A Cloud run main session's members run there too, where Antigravity does not.
+  const agents = effectiveSubagentProviders({ ...list, thread: chatSubagentProvidersOf(chat.metadata), cloudRun: Boolean(main.cloudRun) });
   // The main session is not one of its own CLI's agents.
   const taken = new Set(members.filter((member) => member.id !== main.id).map((member) => member.kind));
-  // A Cloud run main session's members run there too, where Antigravity does not.
-  const providers = agents.filter((agent) => !taken.has(agent.kind) && !(main.cloudRun && agent.kind === "gemini-cli"));
-  return { members: [...members], providers };
+  return { members: [...members], providers: agents.filter((agent) => !taken.has(agent.kind)) };
 }
 
 /** What the composer's Accord button does (an open chat). */

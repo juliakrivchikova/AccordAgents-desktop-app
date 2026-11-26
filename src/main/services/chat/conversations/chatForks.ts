@@ -145,7 +145,7 @@ export class ChatForks {
           running: false,
           mainSessionParticipantId: mainSession.id,
           chatView: DEFAULT_CHAT_VIEW,
-          // A new chat: its project's sub-agents, none of its own yet.
+          // A new chat: every ready CLI, no changes of its own yet.
           subagentProviders: { entries: [] }
         }
       };

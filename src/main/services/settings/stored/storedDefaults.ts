@@ -1,5 +1,5 @@
 import { normalizeNewChatDefaults } from "../../../../shared/newChatDefaults";
-import { normalizeSubagentProvidersByProject } from "../../../../shared/subagentProviders";
+import { normalizeSubagentProviderEntries } from "../../../../shared/subagentProviders";
 import { isTrustedDeviceRecord } from "../../../../shared/machineTrust";
 import { normalizeMachinePowerHandoffRecords } from "../../../../shared/machinePowerHandoff";
 import type { ChatProviderKind } from "../../../../shared/types";
@@ -72,8 +72,11 @@ export function mergeDefaults(settings: StoredSettings): StoredSettings {
     cliProviderHosts: normalizedCliProviderHosts(settings),
     assistantProviderKind: normalizeChatProviderKind(settings.assistantProviderKind),
     newChatDefaults: settings.newChatDefaults === undefined ? undefined : normalizeNewChatDefaults(settings.newChatDefaults),
-    // An emptied map stays ({}): a machine importing the snapshot clears its own.
-    subagentProvidersByProject: settings.subagentProvidersByProject === undefined ? undefined : normalizeSubagentProvidersByProject(settings.subagentProvidersByProject) ?? {},
+    // An emptied list stays ([]): a machine importing the snapshot clears its own.
+    subagentDefaults: settings.subagentDefaults === undefined ? undefined : normalizeSubagentProviderEntries(settings.subagentDefaults, false),
+    // Not read (Settings' defaults replaced the projects' lists); kept as
+    // stored for a downgrade.
+    ...(settings.subagentProvidersByProject !== undefined ? { subagentProvidersByProject: settings.subagentProvidersByProject } : {}),
     // Not read (every new chat opens in the sessions view); kept as stored
     // for a downgrade.
     ...(settings.defaultChatView === "classic" || settings.defaultChatView === "sessions" ? { defaultChatView: settings.defaultChatView } : {}),

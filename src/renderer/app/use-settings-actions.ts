@@ -5,6 +5,7 @@ import type {
   CliProviderHostUpdate,
   ChatProviderKind,
   NewChatDefaultsUpdate,
+  SubagentDefaultUpdate,
   ChatPromptContextSettings,
   ChatRoleConfigUpdate,
   ChatSavedPromptConfigUpdate,
@@ -22,6 +23,7 @@ export interface SettingsActions {
   updateProvider: (provider: ProviderSettings, patch: { enabled?: boolean; model?: string }) => Promise<void>;
   setAssistantProviderKind: (kind: ChatProviderKind) => Promise<void>;
   setNewChatDefaults: (update: NewChatDefaultsUpdate) => Promise<void>;
+  setSubagentDefault: (update: SubagentDefaultUpdate) => Promise<void>;
   setRepoFileOpenPreference: (action: RepoFileOpenAction | null) => Promise<void>;
   setRepoFileExternalOpenPreference: (action: RepoFileExternalOpenAction | null) => Promise<void>;
   setBetaUpdates: (enabled: boolean) => Promise<void>;
@@ -82,6 +84,10 @@ export function useSettingsActions(state: AppState): SettingsActions {
 
   async function setNewChatDefaults(update: NewChatDefaultsUpdate): Promise<void> {
     await updateSettings(() => window.consensus.setNewChatDefaults(update));
+  }
+
+  async function setSubagentDefault(update: SubagentDefaultUpdate): Promise<void> {
+    await updateSettings(() => window.consensus.setSubagentDefault(update));
   }
 
   async function setRepoFileOpenPreference(action: RepoFileOpenAction | null): Promise<void> {
@@ -263,6 +269,7 @@ export function useSettingsActions(state: AppState): SettingsActions {
     updateProvider,
     setAssistantProviderKind,
     setNewChatDefaults,
+    setSubagentDefault,
     setRepoFileOpenPreference,
     setRepoFileExternalOpenPreference,
     setBetaUpdates,

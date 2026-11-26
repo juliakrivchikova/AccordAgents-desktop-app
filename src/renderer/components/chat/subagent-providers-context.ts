@@ -1,14 +1,14 @@
 import { createContext, useContext } from "react";
 
-import type { AgentHealth, ProviderSettings, SubagentProviderChange, SubagentProviderScope } from "../../../shared/types";
+import type { AgentHealth, ProviderSettings, SubagentProviderChange } from "../../../shared/types";
 
-/** What the side panel's Agents need from the app: the CLIs found here (for
- *  Add), how to change the chat's or its project's list, and where a CLI is
- *  set up. Rarely changes, so a context rather than props through the view. */
+/** What the side panel's Agents need from the app: the CLIs found here (the
+ *  list is those that are ready), how to change the chat's list, and where a
+ *  CLI is set up. Rarely changes, so a context rather than props through the view. */
 export interface SubagentProvidersActions {
   agents: readonly AgentHealth[];
   providers: readonly ProviderSettings[];
-  update: (scope: SubagentProviderScope, change: SubagentProviderChange) => Promise<boolean>;
+  update: (change: SubagentProviderChange) => Promise<boolean>;
   /** Settings → General, where a CLI is installed and signed in. */
   openSetup: () => void;
 }

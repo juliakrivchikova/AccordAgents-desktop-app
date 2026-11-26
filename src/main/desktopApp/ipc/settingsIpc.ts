@@ -1,7 +1,7 @@
 import { app, ipcMain } from "electron";
 import type {
   CliProviderHostUpdate, DeleteAgentEnvironmentVariableRequest, ChatBehaviorRuleConfigUpdate, ChatProviderKind,
-  NewChatDefaultsUpdate, ChatPromptContextSettings, ChatSavedPromptConfigUpdate, ChatParticipantConfigUpdate,
+  NewChatDefaultsUpdate, SubagentDefaultUpdate, ChatPromptContextSettings, ChatSavedPromptConfigUpdate, ChatParticipantConfigUpdate,
   ChatRoleConfigUpdate, ProviderKind, ProviderSettingsUpdate, SaveAgentEnvironmentVariableRequest
 } from "../../../shared/types";
 import { stopCrashReporting } from "../../services/crashReporting";
@@ -101,6 +101,8 @@ export function registerSettingsIpc(desktopApp: DesktopApp): void {
 
   ipcMain.handle("settings:set-new-chat-defaults", (_event, update: NewChatDefaultsUpdate) =>
     desktopApp.settingsService.setNewChatDefaults(update));
+  ipcMain.handle("settings:set-subagent-default", (_event, update: SubagentDefaultUpdate) =>
+    desktopApp.settingsService.setSubagentDefault(update));
 
   ipcMain.handle("settings:save-chat-role", (_event, update: ChatRoleConfigUpdate) => desktopApp.settingsService.saveChatRoleConfig(update));
   ipcMain.handle("settings:archive-chat-role", (_event, id: string) => desktopApp.settingsService.archiveChatRoleConfig(id));

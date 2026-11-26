@@ -17,18 +17,24 @@ verbatim there). Modelled on T3 Code (`~/reference/t3code`,
   `--resume <id> --fork-session`, Codex app-server `thread/fork`). Antigravity
   has no fork, and a fork cannot cross providers or devices: the tool refuses
   it and the main session starts a clean member with a full brief instead.
-- **It gives tasks only to the chat's sub-agents** (the User, 2026-11-26;
+- **It gives tasks only to the chat's agents** (the User, 2026-11-26;
   `src/shared/subagentProviders.ts`). The side panel's Agents list the CLIs it
-  may use, each with a model and an effort: a project's list in Settings (by
-  the chat's folder) and the thread's own layer over it, a value set in the
-  thread winning over the project's, which wins over the CLI's own default.
-  A task without a provider goes to the main session's own CLI when it is in
-  the list, else to the first one; a provider outside the list is refused
-  (`provider_not_in_chat`), and a new chat with no list says the User adds
-  them. A chat made before the list has none and gives tasks to any ready CLI
-  as before; its first change in the panel gives it a layer that keeps the
-  providers its members already use. A change applies to new tasks; members
-  already at work keep their own model and effort.
+  may use, each with a model and an effort: every CLI that is ready (installed,
+  signed in, on in Settings) is there from the start, with no Add step, on its
+  model and effort from Settings → General → Agents (the CLI's own when none is
+  set there; for the main session's own CLI with nothing set, the main
+  session's model and effort). A chat may take a CLI out, bring it back (the
+  panel's + shows only then) or give it a model and effort of its own, for that
+  chat only; a value set in the chat wins over Settings', which wins over the
+  CLI's own. There is no project scope: the projects' lists of the first
+  version (`subagentProvidersByProject`) are no longer read. Ready is counted
+  where the main session's members run: on this computer for the panel and a
+  local main session, on its machine for a main session there; a Cloud run main
+  session's list leaves out Antigravity. A task without a provider goes to the
+  main session's own CLI when it is in the list, else to the first one; a CLI
+  the chat took out is refused (`provider_not_in_chat`), one that is not ready
+  `provider_unavailable`. A change applies to new tasks; members already at
+  work keep their own model and effort.
 - **The main session is woken only by its own tasks** (the User,
   2026-11-21): when the tasks it gave end. A member's turn that is not its
   task (the User's message in that member's session, a scheduled task's
@@ -56,8 +62,10 @@ verbatim there). Modelled on T3 Code (`~/reference/t3code`,
   `Delegation.addAccordMembers`), then the Accord runs as with any member.
   With fewer than two candidates, the sessions view's Accord button opens the
   side panel on its Agents list with Add open and the line "Accord needs at
-  least one more agent. Add one here."; the classic view keeps its disabled
-  button and "Add at least two members to start Accord."
+  least one more agent. Add one here." when the chat took a ready CLI out, else
+  the line "Accord needs at least one more agent. Set up another CLI in
+  Settings." with Set up; the classic view keeps its disabled button and "Add
+  at least two members to start Accord."
   **An Accord looks the same whoever starts it** (the User, 2026-11-26): the
   main session never runs the accord skill ad hoc, which would leave no card
   and every step as a note of its own. A draft collection is filed under the

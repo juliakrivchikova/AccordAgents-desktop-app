@@ -7,7 +7,8 @@ import { act, create, type ReactTestInstance } from "react-test-renderer";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { buildSessionsViewIndex, memberSessionMessages } from "../../../shared/mainSession";
 import { latestTaskByMember, sessionsMemberActivity, sessionsMemberRows, sessionsMemberTitle } from "../../../shared/mainSessionView";
-import type { AppSettings, ChatMessage, Conversation } from "../../../shared/types";
+import type { AgentHealth, AppSettings, ChatMessage, Conversation } from "../../../shared/types";
+import { SubagentProvidersContext } from "./subagent-providers-context";
 import { FORK_TO_NEW_CHAT_DETAIL, FORK_TO_NEW_CHAT_LABEL } from "../../../shared/forkToNewChat";
 import { ChatParticipantRosterRow } from "./chat-participant-roster-row";
 import { forkToNewChatReasonFor, machineForkSupportFrom } from "./use-fork-to-new-chat";
@@ -429,18 +430,33 @@ test("the side panel has no title and no main session row, says nothing when emp
   assert.equal(renderer!.root.find(byTestId("chat-members-body")).findAll(byTestId("chat-members-row"))[0]?.props["data-participant-id"], DREW.id, "the delegated sessions first");
   act(() => renderer!.unmount());
 
-  let empty: ReturnType<typeof create> | undefined;
-  act(() => {
-    empty = create(
-      <TooltipProvider>
-        <ChatMembersPanel rows={{ current: [], previous: [] }} activity={sessionsMemberActivity([])} runIdsByParticipantId={new Map()}
-          memberTitle={() => ""} onOpenMember={noop} onClose={noop} />
-      </TooltipProvider>
-    );
-  });
-  // A thread with no agents says so and offers to add them (variant B, the User, 2026-11-26).
-  assert.match(textOf(empty!.root.find(byTestId("chat-subagents-empty"))), /^No agents yet\./);
-  act(() => empty!.unmount());
+  // A new chat's Agents are every ready CLI, with no Add step and no scope
+  // switch (the User, 2026-11-26); none ready says so and offers Set up.
+  const agentsPanel = (ready: string[]): ReturnType<typeof create> => {
+    const agents = ["codex-cli", "claude-code", "gemini-cli"].map((kind) => (ready.includes(kind)
+      ? { kind, label: kind, installed: true, detection: "detected", runnable: "ready", authentication: "ready" }
+      : { kind, label: kind, installed: false, detection: "not-detected" })) as unknown as AgentHealth[];
+    let created: ReturnType<typeof create> | undefined;
+    act(() => {
+      created = create(
+        <TooltipProvider>
+          <SubagentProvidersContext.Provider value={{ agents, providers: [], update: async () => true, openSetup: noop }}>
+            <ChatMembersPanel rows={{ current: [], previous: [] }} activity={sessionsMemberActivity([])} runIdsByParticipantId={new Map()}
+              subagents={{ thread: { entries: [] } }} memberTitle={() => ""} onOpenMember={noop} onClose={noop} />
+          </SubagentProvidersContext.Provider>
+        </TooltipProvider>
+      );
+    });
+    return created!;
+  };
+  const listed = agentsPanel(["claude-code", "codex-cli"]);
+  assert.deepEqual(listed.root.findAll(byTestId("chat-subagent")).map((row) => row.props["data-provider-kind"]), ["claude-code", "codex-cli"]);
+  assert.equal(listed.root.findAll(byTestId("chat-subagent-add")).length, 0, "nothing to add");
+  assert.equal(listed.root.findAll(byTestId("chat-subagents-empty")).length, 0);
+  act(() => listed.unmount());
+  const empty = agentsPanel([]);
+  assert.match(textOf(empty.root.find(byTestId("chat-subagents-empty"))), /^No CLI is ready\./);
+  act(() => empty.unmount());
 
   const session = renderSession({ member: DREW, readOnly: false, settings: <span data-testid="drew-settings" />, chip: <span data-testid="drew-chip" /> });
   assert.equal(session.root.findAll(byTestId("drew-settings")).length, 1, "its … menu in its session's header");

@@ -38,6 +38,7 @@ import { forkToNewChatReasonFor, useMachineForkSupport } from "./components/chat
 import { renderNewChatMemberMark } from "./components/chat/chat-member-mark";
 import { chatViewFor } from "../shared/mainSession";
 import { accordCandidates, accordLaunch } from "../shared/accordCandidates";
+import { readyProviderKinds } from "../shared/cliReadiness";
 import { chatRoleLabel } from "./components/chat/chat-conversation-data";
 import { defaultChatParticipantDraft } from "./components/chat/chat-participant-drafts";
 import type { DraftPluginMention } from "./components/chat/chat-composer-draft-utils";
@@ -135,7 +136,7 @@ function App(): JSX.Element {
   const subagentActions = React.useMemo<SubagentProvidersActions>(() => ({
     agents: state.agents,
     providers: state.settings.providers,
-    update: (scope, change) => updateSubagentsRef.current(scope, change),
+    update: (change) => updateSubagentsRef.current(change),
     openSetup: () => openSettingsSection("general")
   }), [state.agents, state.settings.providers, openSettingsSection]);
   const urgentAlertActions = React.useMemo(() => ({
@@ -307,7 +308,9 @@ function App(): JSX.Element {
   );
   // In a chat with a main session the CLIs of its Agents list count too: each
   // without a member yet gets one as the Accord starts.
-  const accordAgents = accordChat ? accordCandidates(accordEligibleParticipants, accordChat, state.settings.subagentProvidersByProject).providers : [];
+  const accordAgents = accordChat
+    ? accordCandidates(accordEligibleParticipants, accordChat, { ready: readyProviderKinds(state.agents, state.settings.providers), defaults: state.settings.subagentDefaults }).providers
+    : [];
   const accordState = accordChat ? accordLaunch({ members: accordEligibleParticipants, providers: accordAgents }, accordChat) : undefined;
   const accordDisabledReason = !accordState
     ? "Open a chat to start Accord."
@@ -557,6 +560,7 @@ function App(): JSX.Element {
           updateProvider={settingsActions.updateProvider}
           setAssistantProviderKind={settingsActions.setAssistantProviderKind}
           setNewChatDefaults={settingsActions.setNewChatDefaults}
+          setSubagentDefault={settingsActions.setSubagentDefault}
           saveChatRoleConfig={settingsActions.saveChatRoleConfig}
           archiveChatRoleConfig={settingsActions.archiveChatRoleConfig}
           saveChatBehaviorRuleConfig={settingsActions.saveChatBehaviorRuleConfig}
