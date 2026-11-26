@@ -34,6 +34,9 @@ export interface ClaudeWarmProcessState {
    *  live list so its notification can still be named. */
   backgroundTaskLabels: Map<string, string>;
   backgroundTaskOrigins: Map<string, CliAgentReplyOrigin | undefined>;
+  /** When each task was first reported (ISO), foreground ones too, until
+   *  its notification says it ended: "running 3m" in the app. */
+  backgroundTaskStartedAt: Map<string, string>;
   /** Tasks whose notification already arrived; a stale `background_tasks_changed`
    *  ordered after it must not resurrect them. */
   finishedTaskIds: Set<string>;

@@ -125,7 +125,7 @@ test("not moved: a member that answers or has background tasks, a machine on an 
   const idle = () => withReply(chatConversation([participant], [chatSession(participant, "sess-1")]), participant);
   const tasks = testService(idle());
   tasks.service.setMachineSessionMove(() => ({ support: "supported", name: "Box", machineId: "box" }));
-  chatParts(tasks.service).backgroundTasks.memberBackgroundTasks.set("chat-move", new Map([[participant.id, { source: "local", labels: ["npm run dev"] }]]));
+  chatParts(tasks.service).backgroundTasks.memberBackgroundTasks.set("chat-move", new Map([[participant.id, { source: "local", tasks: [{ label: "npm run dev" }] }]]));
   await assert.rejects(move(tasks.service), /@admin has background tasks running\. Move it when they are done\./, "a move never stops them unasked");
 
   const old = testService(idle());
@@ -299,7 +299,7 @@ test("a machine whose member is answering or has background tasks says so, and h
   service.setHostMachineId("box");
   const link = fakeServerLink("machine-device");
   service.setServerLink(link);
-  chatParts(service).backgroundTasks.memberBackgroundTasks.set(conversation.id, new Map([[participant.id, { source: "local", labels: ["npm run dev"] }]]));
+  chatParts(service).backgroundTasks.memberBackgroundTasks.set(conversation.id, new Map([[participant.id, { source: "local", tasks: [{ label: "npm run dev" }] }]]));
 
   await service.startServerTurn({ runId: "turn-export", conversationId: conversation.id, messageId: "anchor", participantId: participant.id, state: "requested",
     request: { kind: "session.export", askedAt: new Date().toISOString() } });

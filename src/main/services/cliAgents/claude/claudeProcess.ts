@@ -106,6 +106,7 @@ export class ClaudeProcess {
       backgroundTasks: new Map(),
       backgroundTaskLabels: new Map(),
       backgroundTaskOrigins: new Map(),
+      backgroundTaskStartedAt: new Map(),
       finishedTaskIds: new Set(),
       pendingNotices: [],
       sessionId: options.sessionId ?? newSessionId,

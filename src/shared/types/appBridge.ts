@@ -53,7 +53,7 @@ import type {
   OpenLocalFileResult, ReadFilePreviewRequest, RepoFileExternalOpenAction, RepoFileOpenAction, UnsavedFileEdit,
   WriteFilePreviewRequest, WriteFilePreviewResult
 } from "./files";
-import type { ChatBackgroundTasksEvent, ReviewProgress } from "./messages";
+import type { ChatBackgroundTask, ChatBackgroundTasksEvent, ReviewProgress } from "./messages";
 import type { CreatePhoneInviteRequest, CreatePhoneInviteResult, RevokePhoneInviteResult } from "./phoneInvites";
 import type { ChatProviderKind, CliProviderHostUpdate, ProviderKind, ProviderModelCatalog, ProviderSettingsUpdate } from "./providers";
 import type {
@@ -360,6 +360,6 @@ export interface AppBridge {
   getChatPromptSuggestions(conversationId: string): Promise<ChatPromptSuggestion[]>;
   onChatPromptSuggestions(callback: (update: ChatPromptSuggestionsUpdate) => void): () => void;
   /** Live background work of the chat's members, by member id. */
-  getChatBackgroundTasks(conversationId: string): Promise<Record<string, string[]>>;
+  getChatBackgroundTasks(conversationId: string): Promise<Record<string, ChatBackgroundTask[]>>;
   onChatBackgroundTasks(callback: (event: ChatBackgroundTasksEvent) => void): () => void;
 }

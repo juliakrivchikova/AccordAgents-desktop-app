@@ -19,12 +19,20 @@ export interface ChatReactor {
 
 export type ChatMessageReactions = Record<string, ChatReactor[]>;
 
-/** A chat member's live background work (Claude Code `run_in_background`),
- *  by task name; an empty list means none is running any more. */
+/** One background task a member left running (Claude Code
+ *  `run_in_background`): its name and when it started (ISO). The start is
+ *  missing from a machine on an older runtime, which sends names only. */
+export interface ChatBackgroundTask {
+  label: string;
+  startedAt?: string;
+}
+
+/** A chat member's live background work; an empty list means none is
+ *  running any more. */
 export interface ChatBackgroundTasksEvent {
   conversationId: string;
   participantId: string;
-  labels: string[];
+  tasks: ChatBackgroundTask[];
 }
 
 /** What a member wrote during its turn with app_chat_send_message, kept in

@@ -13,6 +13,7 @@ export function makeClaudeWarmHarness(runner: any, options: { lifecycle?: boolea
     backgroundTasks: new Map<string, string>(),
     backgroundTaskLabels: new Map<string, string>(),
     backgroundTaskOrigins: new Map<string, unknown>(),
+    backgroundTaskStartedAt: new Map<string, string>(),
     finishedTaskIds: new Set<string>(),
     pendingNotices: [] as unknown[],
     cancelRequests: new Map<string, unknown>(),

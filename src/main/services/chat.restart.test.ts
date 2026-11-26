@@ -35,7 +35,7 @@ test("a restart says how many background tasks it stopped", async () => {
   const participant = chatParticipant();
   const conversation = chatConversation([participant], [chatSession(participant, "session-1")]);
   const { service, storage, closed } = testService(conversation);
-  chatParts(service).backgroundTasks.memberBackgroundTasks.set(conversation.id, new Map([[participant.id, { source: "local", labels: ["npm run dev", "tail -f log"] }]]));
+  chatParts(service).backgroundTasks.memberBackgroundTasks.set(conversation.id, new Map([[participant.id, { source: "local", tasks: [{ label: "npm run dev" }, { label: "tail -f log" }] }]]));
 
   await assert.rejects(service.restartParticipant({ conversationId: conversation.id, participantId: participant.id }),
     /@admin has background tasks running\. Restart it again to stop them\./, "never stopped without the User's word");
@@ -307,7 +307,7 @@ test("a machine does not run a restart asked too long ago, nor stop background t
   await waitFor(() => outcomes().length === 1);
   assert.deepEqual(outcomes(), ["error"]);
 
-  chatParts(service).backgroundTasks.memberBackgroundTasks.set(conversation.id, new Map([[participant.id, { source: "local", labels: ["npm run dev"] }]]));
+  chatParts(service).backgroundTasks.memberBackgroundTasks.set(conversation.id, new Map([[participant.id, { source: "local", tasks: [{ label: "npm run dev" }] }]]));
   await service.startServerTurn({ runId: "turn-tasks", conversationId: conversation.id, messageId: "anchor", participantId: participant.id, state: "requested",
     request: { kind: "restart", askedAt: new Date().toISOString() } });
   await waitFor(() => outcomes().length === 2);

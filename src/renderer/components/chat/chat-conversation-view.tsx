@@ -19,6 +19,7 @@ import { MessageLinkContext } from "../content/markdown-text";
 import { MentionDirectoryContext } from "../content/participant-hover-card";
 import { RunStatusLine } from "../conversation/timeline-primitives";
 import { IconButton } from "../primitives";
+import { ChatBackgroundTasksLine } from "./chat-background-tasks-line";
 import { ChatComposer } from "./chat-composer";
 import { ChatSessionsPresentationContext, renderComposerMemberMark } from "./chat-member-mark";
 import {
@@ -512,6 +513,7 @@ export function ChatConversationView(props: ChatConversationViewProps): JSX.Elem
               contextLead={sessions ? <ComposerRepoLead repoPath={props.conversation.repoPath} repo={repo} onRepoChange={setRepo}
                 lockedReason={props.isRunning ? FOLDER_BUSY_REASON : undefined} /> : undefined}
               testId="chat-main-composer"
+              below={sessions ? <ChatBackgroundTasksLine participantId={sessions.mainSessionId} /> : undefined}
               sendNow={sessions && composerSendNow(props.conversation.messages, sessions.mainSessionId, props.onStopRun)}
               takesFocusRequests
               renderParticipantAvatar={renderComposerMemberMark}

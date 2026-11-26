@@ -155,6 +155,41 @@ test("claude warm reply ends at its result while its background task keeps runni
   assert.equal(outputs.some((event) => /Waiting for background work/.test(event.text)), false);
 });
 
+test("claude warm: a background task's start is when the CLI first named it, kept through later lists, and dropped once the task ended", async () => {
+  const runner = makeRunner() as any;
+  const harness = makeClaudeWarmHarness(runner, { lifecycle: true });
+  const { send, state } = harness;
+  harness.addReply({ origin: { runId: "run-1", messageId: "reply-1" } });
+  send({ type: "command_lifecycle", command_uuid: "cmd-1", state: "started" });
+  send({ type: "system", subtype: "init" });
+  // Claude Code 2.1.332 lists the task before it reports it started.
+  send({ type: "system", subtype: "background_tasks_changed", tasks: [{ task_id: "t1", description: "Run the soak" }] });
+  const first = state.backgroundTaskStartedAt.get("t1");
+  assert.ok(first && !Number.isNaN(Date.parse(first)));
+  await new Promise((resolve) => setTimeout(resolve, 5));
+  send({ type: "system", subtype: "task_started", task_id: "t1", description: "Run the soak", is_backgrounded: true });
+  send({ type: "system", subtype: "background_tasks_changed", tasks: [{ task_id: "t1", description: "Run the soak" }, { task_id: "t2", description: "Watch logs" }] });
+  assert.equal(state.backgroundTaskStartedAt.get("t1"), first, "later events never restart its clock");
+  assert.ok(state.backgroundTaskStartedAt.get("t2"), "a task named later gets its own start");
+  send({ type: "system", subtype: "task_notification", task_id: "t1", status: "completed" });
+  assert.equal(state.backgroundTaskStartedAt.has("t1"), false, "a finished task is forgotten");
+  const second = state.backgroundTaskStartedAt.get("t2");
+  send({ type: "system", subtype: "background_tasks_changed", tasks: [] });
+  send({ type: "system", subtype: "background_tasks_changed", tasks: [{ task_id: "t2", description: "Watch logs" }] });
+  assert.equal(state.backgroundTaskStartedAt.get("t2"), second, "a list that left it out, out of order, does not restart its clock");
+  send({ type: "system", subtype: "task_notification", task_id: "t2", status: "stopped" });
+  assert.equal(state.backgroundTaskStartedAt.size, 0);
+
+  // A command that ran in the foreground and was moved to the background has
+  // run since it started.
+  send({ type: "system", subtype: "task_started", task_id: "t3", description: "Long build", is_backgrounded: false });
+  const foreground = state.backgroundTaskStartedAt.get("t3");
+  await new Promise((resolve) => setTimeout(resolve, 5));
+  send({ type: "system", subtype: "background_tasks_changed", tasks: [{ task_id: "t3", description: "Long build" }] });
+  assert.ok(foreground);
+  assert.equal(state.backgroundTaskStartedAt.get("t3"), foreground);
+});
+
 test("claude warm: a background task finishing while idle produces a self-started reply that is attached, replayed and settled", async () => {
   const runner = makeRunner() as any;
   const harness = makeClaudeWarmHarness(runner, { lifecycle: true });

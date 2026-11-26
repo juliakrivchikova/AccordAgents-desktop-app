@@ -40,6 +40,7 @@ await build({
     "renderer/components/chat/chat-timeline-topup.test.tsx",
     "renderer/components/chat/chat-sessions-view.test.tsx",
     "renderer/components/chat/chat-sessions-panels.test.tsx",
+    "renderer/components/chat/chat-background-tasks-line.test.tsx",
     "renderer/components/chat/chat-composer-controls.test.tsx",
     "renderer/components/chat/chat-composer-focus.test.tsx",
     "renderer/components/chat/chat-sessions-identity.test.tsx",

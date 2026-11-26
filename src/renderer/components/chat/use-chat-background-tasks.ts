@@ -1,11 +1,12 @@
 import { useEffect, useMemo, useState } from "react";
+import type { ChatBackgroundTask } from "../../../shared/types";
 
 interface LoadedBackgroundTasks {
   conversationId: string;
-  byParticipant: Record<string, string[]>;
+  byParticipant: Record<string, ChatBackgroundTask[]>;
 }
 
-const EMPTY: ReadonlyMap<string, readonly string[]> = new Map();
+const EMPTY: ReadonlyMap<string, readonly ChatBackgroundTask[]> = new Map();
 
 /**
  * Live background work of the open chat's members (Claude Code
@@ -15,7 +16,7 @@ const EMPTY: ReadonlyMap<string, readonly string[]> = new Map();
  * Each time a chat is opened its list is loaded afresh; changes pushed while
  * that load is on its way are applied on top of its answer, never dropped.
  */
-export function useChatBackgroundTasks(conversationId: string | undefined): ReadonlyMap<string, readonly string[]> {
+export function useChatBackgroundTasks(conversationId: string | undefined): ReadonlyMap<string, readonly ChatBackgroundTask[]> {
   const [loaded, setLoaded] = useState<LoadedBackgroundTasks | undefined>();
   useEffect(() => {
     if (!conversationId) {
@@ -23,16 +24,16 @@ export function useChatBackgroundTasks(conversationId: string | undefined): Read
       return undefined;
     }
     let cancelled = false;
-    let base: Record<string, string[]> | undefined;
-    const pushed = new Map<string, string[]>();
+    let base: Record<string, ChatBackgroundTask[]> | undefined;
+    const pushed = new Map<string, ChatBackgroundTask[]>();
     const publish = (): void => {
       if (cancelled || !base) {
         return;
       }
       const byParticipant = { ...base };
-      for (const [participantId, labels] of pushed) {
-        if (labels.length > 0) {
-          byParticipant[participantId] = labels;
+      for (const [participantId, tasks] of pushed) {
+        if (tasks.length > 0) {
+          byParticipant[participantId] = tasks;
         } else {
           delete byParticipant[participantId];
         }
@@ -44,7 +45,7 @@ export function useChatBackgroundTasks(conversationId: string | undefined): Read
       if (event.conversationId !== conversationId) {
         return;
       }
-      pushed.set(event.participantId, event.labels);
+      pushed.set(event.participantId, event.tasks);
       publish();
     });
     const answer = window.consensus.getChatBackgroundTasks?.(conversationId);
