@@ -77,6 +77,12 @@ not there yet.
   spelling of it (members are told to reuse tags).
 - The way to keep memory is part of every member's static instructions
   (`MEMBER_MEMORY_INSTRUCTIONS` in `chat/`).
+- A CLI's own memory (Claude Code's memory files, for example) is read only by
+  sessions of that CLI on that computer, so members are told to write a
+  preference or correction of the User here too, as an article tagged
+  `preference`, besides what their CLI keeps (the User, 2026-11-26: the main
+  session had kept her preferences only in Claude Code's memory files, where
+  members on other providers and on cloud machines never saw them).
 - A session's first turn, a turn that sends the instructions again, and the
   first turn after a compaction carry a short list of relevant notes (titles
   and tags, at most 25): the member's own open statuses first, then project

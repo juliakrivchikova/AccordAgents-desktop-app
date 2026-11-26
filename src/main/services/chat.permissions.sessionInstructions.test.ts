@@ -236,6 +236,8 @@ test("members' memory: every member is told how to keep it, a new session's prom
   assert.match(roles[0], /Repository first: project knowledge everyone working on the repository may see goes into its files with your current task's changes/);
   assert.match(roles[0], /anything unfit for a public repository \(assume public unless you checked\)/);
   assert.match(roles[0], /write a project note with `awaitingRepository: true`, move it with the next task there, then archive the note/);
+  // A CLI's own memory stays on its computer: User's preferences go to the shared memory too.
+  assert.match(roles[0], /Your CLI's own memory \(such as Claude Code's memory files\) is read only by sessions of that CLI on this computer: members on other providers or on cloud machines never see it\. When User states a preference or corrects how you work, also write it here as an article tagged `preference`/);
 
   await send("memory-run-2", "@codex Second task.", 2);
   assert.doesNotMatch(prompts[1], /Long-term memory \(notes members keep/);
