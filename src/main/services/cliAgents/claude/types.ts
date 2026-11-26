@@ -34,6 +34,8 @@ export interface ClaudeWarmProcessState {
    *  live list so its notification can still be named. */
   backgroundTaskLabels: Map<string, string>;
   backgroundTaskOrigins: Map<string, CliAgentReplyOrigin | undefined>;
+  /** When each live task was first reported (ISO), for "running 3m". */
+  backgroundTaskStartedAt: Map<string, string>;
   /** Tasks whose notification already arrived; a stale `background_tasks_changed`
    *  ordered after it must not resurrect them. */
   finishedTaskIds: Set<string>;

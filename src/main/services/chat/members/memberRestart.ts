@@ -99,7 +99,7 @@ export class MemberRestart {
       // not a run of the chat yet; the process knows it.
       const runner = this.deps.cliRunner as Partial<Pick<CliAgentRunner, "memberProcessAnswering" | "closeWarmAgents">>;
       if (runner.memberProcessAnswering?.call(this.deps.cliRunner, conversationId, participantId)) throw busy;
-      const backgroundTasks = this.chat.backgroundTasks.memberBackgroundTasks.get(conversationId)?.get(participantId)?.labels.length ?? 0;
+      const backgroundTasks = this.chat.backgroundTasks.memberBackgroundTasks.get(conversationId)?.get(participantId)?.tasks.length ?? 0;
       if (backgroundTasks > 0 && !stopBackgroundTasks) {
         throw new Error(`@${member.handle} has background tasks running. Restart it again to stop them.`);
       }

@@ -5,6 +5,7 @@ import { isChatMessageHiddenFromTimeline } from "./chatTimelineVisibility";
 import type { ChatParticipantRosterStatus } from "./chatParticipantStatus";
 import type {
   ChatAppToolApproval,
+  ChatBackgroundTask,
   ChatMessage,
   ChatParticipant,
   ChatParticipantActiveWork,
@@ -25,7 +26,7 @@ interface RunOwnerState {
 export function buildChatParticipantActivitySnapshot(
   conversation: Conversation,
   snapshotAt = new Date().toISOString(),
-  backgroundTasks?: ReadonlyMap<string, readonly string[]>
+  backgroundTasks?: ReadonlyMap<string, readonly ChatBackgroundTask[]>
 ): ChatParticipantActivitySnapshot {
   const participants = chatParticipants(conversation);
   const participantIds = new Set(participants.map((participant) => participant.id));

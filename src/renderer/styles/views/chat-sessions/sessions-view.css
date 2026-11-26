@@ -161,3 +161,80 @@
   height: 16px;
   border-radius: 6px;
 }
+
+/* The main session's background tasks under the composer, as Claude Code
+   shows them under its prompt (the User chose it, 2026-11-26). */
+.chat-background-tasks {
+  display: flex;
+  min-width: 0;
+  margin-top: calc(-1 * var(--space-2) + 6px);
+  padding-inline: 10px;
+}
+
+.chat-background-tasks-line {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  border-radius: var(--ui-radius-8);
+  color: var(--ui-text-3);
+  font-size: 12px;
+  line-height: 18px;
+  cursor: default;
+  outline: none;
+}
+
+.chat-background-tasks-line:focus-visible {
+  box-shadow: 0 0 0 2px var(--ui-focus-ring);
+}
+
+.chat-background-tasks-card {
+  z-index: var(--z-popover);
+  display: grid;
+  gap: 4px;
+  width: 320px;
+  max-width: calc(100vw - 16px);
+  padding: 10px 12px;
+  border: 1px solid var(--ui-border);
+  border-radius: var(--ui-radius-12);
+  background: var(--ui-bg);
+  box-shadow: var(--shadow-md);
+  color: var(--ui-text-3);
+  font-size: 12px;
+  line-height: 18px;
+}
+
+.chat-background-tasks-card-title {
+  color: var(--ui-text-3);
+}
+
+.chat-background-tasks-list {
+  display: grid;
+  gap: 2px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.chat-background-tasks-row {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  min-width: 0;
+  font-size: 13px;
+}
+
+.chat-background-tasks-name {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--ui-text);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.chat-background-tasks-time {
+  flex: none;
+  color: var(--ui-text-3);
+  font-variant-numeric: tabular-nums;
+}

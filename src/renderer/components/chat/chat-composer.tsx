@@ -107,6 +107,9 @@ export interface ChatComposerProps {
   /** The chat's main composer: it takes the keyboard when its chat asked
    *  for it before it was opened (composer-focus-request.ts). */
   takesFocusRequests?: boolean;
+  /** The sessions view: a status line under the composer (the main
+   *  session's background tasks). */
+  below?: React.ReactNode;
 }
 
 /** Enter with nothing typed this soon after a message went is the same press. */
@@ -446,6 +449,7 @@ export function ChatComposer(props: ChatComposerProps): JSX.Element {
         </div>
       </div>
       </ComposerFooterSlot.Provider>
+      {props.below}
     </div>
   );
 }

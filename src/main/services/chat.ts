@@ -9,7 +9,7 @@ import type { ChatCardAppliers } from "./chatCards";
 import type { HubOpOutcome } from "./hubOpsClient";
 import type { MachineSessionMoveTarget } from "../../shared/memberSessionMove";
 import type {
-  AgentContextUsage, AddChatParticipantRequest, ChatBackgroundTasksEvent, ChatImageAttachment, ChatMessage, ChatParticipant,
+  AgentContextUsage, AddChatParticipantRequest, ChatBackgroundTask, ChatBackgroundTasksEvent, ChatImageAttachment, ChatMessage, ChatParticipant,
   ChatParticipantActivitySnapshot, ChatParticipantConfig, ChatParticipantInput, CliProviderHost, ChatPermissionRequestToolResult,
   ChatProviderKind, ChatRosterAvailableOptions, CompactChatParticipantRequest, RestartChatParticipantRequest, Conversation,
   ConversationSummary, ConversationUpdate, ChatPromptSuggestion, ChatPromptSuggestionsUpdate, CreateChatConversationRequest,
@@ -694,7 +694,7 @@ export class ChatService {
   }
 
   /** The live background tasks of a chat's members, by member id. */
-  backgroundTasksForConversation(conversationId: string): Record<string, string[]> {
+  backgroundTasksForConversation(conversationId: string): Record<string, ChatBackgroundTask[]> {
     return this.modules.backgroundTasks.backgroundTasksForConversation(conversationId);
   }
 

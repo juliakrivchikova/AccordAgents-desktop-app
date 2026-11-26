@@ -393,6 +393,7 @@ export class ClaudeReplyFlow {
     const tasks: CliAgentBackgroundTask[] = ended ? [] : Array.from(state.backgroundTasks.entries()).map(([id, label]) => ({
       id,
       label,
+      startedAt: taskStartedAt(state, id),
       origin: state.backgroundTaskOrigins.get(id)
     }));
     const signature = JSON.stringify(tasks.map((task) => [task.id, task.label, task.origin?.messageId]));
@@ -432,6 +433,7 @@ export class ClaudeReplyFlow {
         state.backgroundTasks.set(taskId, label);
         state.backgroundTaskLabels.set(taskId, label);
         state.backgroundTaskOrigins.set(taskId, state.active?.origin ?? state.lastOrigin);
+        taskStartedAt(state, taskId);
       }
       return;
     }
@@ -450,6 +452,12 @@ export class ClaudeReplyFlow {
         state.backgroundTaskLabels.set(taskId, label);
         if (!state.backgroundTaskOrigins.has(taskId)) {
           state.backgroundTaskOrigins.set(taskId, state.active?.origin ?? state.lastOrigin);
+        }
+        taskStartedAt(state, taskId);
+      }
+      for (const taskId of Array.from(state.backgroundTaskStartedAt.keys())) {
+        if (!live.has(taskId)) {
+          state.backgroundTaskStartedAt.delete(taskId);
         }
       }
       state.backgroundTasks = live;
@@ -476,6 +484,7 @@ export class ClaudeReplyFlow {
       state.backgroundTasks.delete(taskId);
       state.backgroundTaskLabels.delete(taskId);
       state.backgroundTaskOrigins.delete(taskId);
+      state.backgroundTaskStartedAt.delete(taskId);
       state.finishedTaskIds.add(taskId);
     }
     // The CLI also reports a long *foreground* command as a task
@@ -537,4 +546,17 @@ export class ClaudeReplyFlow {
       });
     }
   }
+}
+
+/** When a background task was first reported: the CLI's events carry no
+ *  time (verified on Claude Code 2.1.332: `background_tasks_changed` may even
+ *  come before `task_started`), so the first one to name it starts its clock. */
+function taskStartedAt(state: ClaudeWarmProcessState, taskId: string): string {
+  const known = state.backgroundTaskStartedAt.get(taskId);
+  if (known) {
+    return known;
+  }
+  const now = new Date().toISOString();
+  state.backgroundTaskStartedAt.set(taskId, now);
+  return now;
 }

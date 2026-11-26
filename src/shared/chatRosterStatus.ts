@@ -1,7 +1,7 @@
 import { activeRunSummaryForConversation } from "./chatActiveRuns";
 import { readParticipantCompactions } from "./chatRunState";
 import type { ChatParticipantRosterStatus } from "./chatParticipantStatus";
-import type { ChatAppToolApproval, Conversation } from "./types";
+import type { ChatAppToolApproval, ChatBackgroundTask, Conversation } from "./types";
 
 export { activeRunIdsForConversation, activeRunSummaryForConversation } from "./chatActiveRuns";
 
@@ -21,7 +21,7 @@ const STATUS_RANK: Record<NonIdleRosterStatus, number> = {
  *  more pressing shows as working in the background. */
 export function buildChatParticipantStatusMap(
   activeChatConversation: Conversation | undefined,
-  backgroundTasks?: ReadonlyMap<string, readonly string[]>
+  backgroundTasks?: ReadonlyMap<string, readonly ChatBackgroundTask[]>
 ): Map<string, ChatParticipantRosterStatus> {
   const statuses = new Map<string, ChatParticipantRosterStatus>();
   if (!activeChatConversation) {
@@ -40,8 +40,8 @@ export function buildChatParticipantStatusMap(
     }
   };
 
-  for (const [participantId, labels] of backgroundTasks ?? []) {
-    if (labels.length > 0) {
+  for (const [participantId, tasks] of backgroundTasks ?? []) {
+    if (tasks.length > 0) {
       setStatus(participantId, "background");
     }
   }

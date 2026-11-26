@@ -103,7 +103,7 @@ export class MemberMoves {
       if (this.chat.members.memberAnswersNow(chat, member.id) || this.chat.memberRestart.memberRestartsInFlight.has(`${chat.id}:${member.id}`)) {
         throw new Error(`${label} is busy. Move it when it is done.`);
       }
-      if ((this.chat.backgroundTasks.memberBackgroundTasks.get(chat.id)?.get(member.id)?.labels.length ?? 0) > 0) {
+      if ((this.chat.backgroundTasks.memberBackgroundTasks.get(chat.id)?.get(member.id)?.tasks.length ?? 0) > 0) {
         throw new Error(`${label} has background tasks running. Move it when they are done.`);
       }
     };
@@ -372,7 +372,7 @@ export class MemberMoves {
    *  and not taken yet is passed on as it is. */
   private async exportSessionHere(chat: Conversation, participant: ChatParticipant, signal: AbortSignal): Promise<Omit<MemberSessionExportReport, "runId" | "participantId">> {
     if (this.chat.members.memberAnswersNow(chat, participant.id)) return { reason: "busy" };
-    if ((this.chat.backgroundTasks.memberBackgroundTasks.get(chat.id)?.get(participant.id)?.labels.length ?? 0) > 0) return { reason: "background" };
+    if ((this.chat.backgroundTasks.memberBackgroundTasks.get(chat.id)?.get(participant.id)?.tasks.length ?? 0) > 0) return { reason: "background" };
     const reservation = this.chat.turnQueue.reserveParticipantTurn(chat.id, participant.id, "exclusive");
     try {
       await reservation.wait();

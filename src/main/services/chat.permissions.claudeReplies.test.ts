@@ -4,6 +4,7 @@ import { AppMcpService } from "./appMcp";
 import { appMcpParts } from "./appMcp/test/appMcpParts";
 import { chatParts } from "./chat/test/chatParts";
 import { participantTurnMode } from "./chat/members/roleRuntime";
+import { backgroundTasksFromWire, backgroundTasksToWire } from "../../shared/machineLink";
 import type { ChatMessage, ChatParticipant } from "../../shared/types";
 import { chatConversation, chatParticipant, NOW, testService, waitFor } from "./chat/test/permissionFixtures";
 
@@ -473,34 +474,51 @@ test("a Claude member's live background tasks are reported to the app as they st
   await waitFor(() => Boolean(warmOptions));
   assert.equal(typeof warmOptions.onBackgroundTasksChanged, "function");
 
-  warmOptions.onBackgroundTasksChanged([{ id: "t1", label: "Run the soak", origin: warmOptions.origin }]);
-  warmOptions.onBackgroundTasksChanged([{ id: "t1", label: "Run the soak", origin: warmOptions.origin }]);
-  assert.deepEqual(service.backgroundTasksForConversation(conversation.id), { [participant.id]: ["Run the soak"] });
+  const startedAt = "2026-11-26T10:00:00.000Z";
+  warmOptions.onBackgroundTasksChanged([{ id: "t1", label: "Run the soak", startedAt, origin: warmOptions.origin }]);
+  warmOptions.onBackgroundTasksChanged([{ id: "t1", label: "Run the soak", startedAt, origin: warmOptions.origin }]);
+  assert.deepEqual(service.backgroundTasksForConversation(conversation.id), { [participant.id]: [{ label: "Run the soak", startedAt }] });
   assert.equal(events.length, 1, "an unchanged list is not reported again");
   await waitFor(() => storage.current.messages.some((message: ChatMessage) => message.content === "Started the soak."));
   assert.equal(JSON.stringify(storage.current).includes("Run the soak"), false, "live state is not written into the chat");
 
   warmOptions.onBackgroundTasksChanged([]);
   assert.deepEqual(service.backgroundTasksForConversation(conversation.id), {});
-  assert.deepEqual(events.at(-1), { conversationId: conversation.id, participantId: participant.id, labels: [] });
+  assert.deepEqual(events.at(-1), { conversationId: conversation.id, participantId: participant.id, tasks: [] });
 });
 
 test("a machine's members' background tasks show until that machine reports them done or goes away", () => {
   const { service } = testService();
-  const events: Array<{ participantId: string; labels: string[] }> = [];
+  const events: Array<{ participantId: string; tasks: Array<{ label: string; startedAt?: string }> }> = [];
   service.onBackgroundTasksChanged((event) => events.push(event));
-  service.applyMachineBackgroundTasks("machine-a", { conversationId: "c1", participantId: "p1", labels: ["build"] });
-  service.applyMachineBackgroundTasks("machine-a", { conversationId: "c1", participantId: "p2", labels: ["watch"] });
-  service.applyMachineBackgroundTasks("machine-b", { conversationId: "c1", participantId: "p3", labels: ["serve"] });
-  assert.deepEqual(service.backgroundTasksForConversation("c1"), { p1: ["build"], p2: ["watch"], p3: ["serve"] });
-  service.applyMachineBackgroundTasks("machine-a", { conversationId: "c1", participantId: "p1", labels: [] });
+  service.applyMachineBackgroundTasks("machine-a", { conversationId: "c1", participantId: "p1", tasks: [{ label: "build", startedAt: "2026-11-26T10:00:00.000Z" }] });
+  service.applyMachineBackgroundTasks("machine-a", { conversationId: "c1", participantId: "p2", tasks: [{ label: "watch" }] });
+  service.applyMachineBackgroundTasks("machine-b", { conversationId: "c1", participantId: "p3", tasks: [{ label: "serve" }] });
+  assert.deepEqual(service.backgroundTasksForConversation("c1"), {
+    p1: [{ label: "build", startedAt: "2026-11-26T10:00:00.000Z" }], p2: [{ label: "watch" }], p3: [{ label: "serve" }]
+  });
+  service.applyMachineBackgroundTasks("machine-a", { conversationId: "c1", participantId: "p1", tasks: [] });
   assert.deepEqual(Object.keys(service.backgroundTasksForConversation("c1")).sort(), ["p2", "p3"]);
   service.replaceMachineBackgroundTasks("machine-a", []);
-  assert.deepEqual(service.backgroundTasksForConversation("c1"), { p3: ["serve"] }, "only the machine that went away is cleared");
-  assert.deepEqual(events.at(-1), { conversationId: "c1", participantId: "p2", labels: [] });
+  assert.deepEqual(service.backgroundTasksForConversation("c1"), { p3: [{ label: "serve" }] }, "only the machine that went away is cleared");
+  assert.deepEqual(events.at(-1), { conversationId: "c1", participantId: "p2", tasks: [] });
   // A machine's full list after its hello replaces what it reported before.
-  service.applyMachineBackgroundTasks("machine-b", { conversationId: "c1", participantId: "p4", labels: ["stale"] });
-  service.replaceMachineBackgroundTasks("machine-b", [{ conversationId: "c1", participantId: "p3", labels: ["serve", "tail"] }]);
-  assert.deepEqual(service.backgroundTasksForConversation("c1"), { p3: ["serve", "tail"] });
+  service.applyMachineBackgroundTasks("machine-b", { conversationId: "c1", participantId: "p4", tasks: [{ label: "stale" }] });
+  service.replaceMachineBackgroundTasks("machine-b", [{ conversationId: "c1", participantId: "p3", tasks: [{ label: "serve" }, { label: "tail" }] }]);
+  assert.deepEqual(service.backgroundTasksForConversation("c1"), { p3: [{ label: "serve" }, { label: "tail" }] });
   assert.deepEqual(service.localBackgroundTasks(), [], "a machine's members are not reported as this host's");
+});
+
+test("a cloud member's background tasks keep their start over the machine link, and an older runtime's names still show", () => {
+  const tasks = [{ label: "Run the soak", startedAt: "2026-11-26T10:00:00.000Z" }, { label: "Watch logs" }];
+  const wire = backgroundTasksToWire(tasks);
+  assert.deepEqual(wire.labels, ["Run the soak", "Watch logs"], "a desktop on an older version reads the names as before");
+  assert.deepEqual(backgroundTasksFromWire(wire.labels, wire.startedAt), tasks);
+  assert.deepEqual(backgroundTasksFromWire(["build"], undefined), [{ label: "build" }], "an older runtime sends names only");
+  assert.deepEqual(
+    backgroundTasksFromWire([7, "build", "serve"], ["2026-11-26T10:00:00.000Z", "2026-11-26T11:00:00.000Z", "not a time"]),
+    [{ label: "build", startedAt: "2026-11-26T11:00:00.000Z" }, { label: "serve" }],
+    "each start stays with its own name, and a bad one is dropped"
+  );
+  assert.equal(backgroundTasksFromWire(Array.from({ length: 80 }, (_, index) => `task ${index}`), []).length, 50);
 });

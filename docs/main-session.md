@@ -425,7 +425,15 @@ switch is disabled.
     session itself runs and nothing is typed, its send button is Stop for
     the main session's run, as in T3 Code and Claude; with something typed
     a secondary Stop stands next to Send (a CLI interrupts whatever is in
-    its prompt), and Send still sends the message to it;
+    its prompt), and Send still sends the message to it. While the main
+    session has background tasks running, a line under the composer says
+    only "2 background tasks", as Claude Code says it under its prompt; its
+    hover card lists each task with how long it runs ("running 14m"), and
+    the names stay out of the line (the User, 2026-11-26;
+    `ChatBackgroundTasksLine`). The start is the time the CLI first named
+    the task (its events carry none), taken where the CLI runs and sent with
+    the task from a machine; a machine on an older runtime sends names only,
+    and its tasks say only "running";
   - the main timeline holds the User's messages to the main session, the
     main session's messages, system lines and the cards the User must
     answer; the member-added cards of its delegations are not shown

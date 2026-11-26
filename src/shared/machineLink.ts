@@ -13,7 +13,7 @@
  */
 
 import type { CliStartDefaultsByKind } from "./cliStartDefaults";
-import type { ChatMessage } from "./types";
+import type { ChatBackgroundTask, ChatMessage } from "./types";
 import type { MachineProgressFrame } from "./machineProgress";
 import type { TrustedDeviceRecord } from "./machineTrust";
 
@@ -212,6 +212,9 @@ export interface MachineMemberBackgroundBody {
   conversationId: string;
   participantId: string;
   labels: string[];
+  /** When each task in `labels` started (ISO, same order; "" when not
+   *  known). Missing from a machine on an older runtime. */
+  startedAt?: string[];
 }
 
 /** Every member hosted on this machine with background work running now, as
@@ -220,7 +223,26 @@ export interface MachineMemberBackgroundBody {
  *  died meanwhile stays shown. */
 export interface MachineMemberBackgroundSnapshotBody {
   type: "machine.member.background.snapshot";
-  members: Array<{ conversationId: string; participantId: string; labels: string[] }>;
+  members: Array<{ conversationId: string; participantId: string; labels: string[]; startedAt?: string[] }>;
+}
+
+/** A member's background tasks as the link carries them: names in
+ *  `labels` (what every runtime reads) and their starts beside them. */
+export function backgroundTasksToWire(tasks: readonly ChatBackgroundTask[]): { labels: string[]; startedAt: string[] } {
+  return { labels: tasks.map((task) => task.label), startedAt: tasks.map((task) => task.startedAt ?? "") };
+}
+
+/** The tasks a machine sent, at most 50: a start that is missing, not a
+ *  string or not a time is left out (an older runtime sends none). */
+export function backgroundTasksFromWire(labels: unknown[], startedAt: unknown): ChatBackgroundTask[] {
+  const starts = Array.isArray(startedAt) ? startedAt : [];
+  const tasks: ChatBackgroundTask[] = [];
+  labels.forEach((label, index) => {
+    if (typeof label !== "string" || tasks.length >= 50) return;
+    const start = starts[index];
+    tasks.push(typeof start === "string" && start && !Number.isNaN(Date.parse(start)) ? { label, startedAt: start } : { label });
+  });
+  return tasks;
 }
 
 /** The desktop is back on the link and asks for that list. */

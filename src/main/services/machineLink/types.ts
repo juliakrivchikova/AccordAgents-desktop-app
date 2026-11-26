@@ -1,6 +1,6 @@
 import type { MachineRecord } from "../../../shared/machineLink";
 import type { MobilePairingPackage } from "../../../shared/mobilePairing";
-import type { ReviewProgress } from "../../../shared/types";
+import type { ChatBackgroundTasksEvent, ReviewProgress } from "../../../shared/types";
 import type { TunnelClient } from "../hubTunnelClient";
 import type { DeviceIdentityService } from "../deviceIdentity";
 
@@ -31,8 +31,8 @@ export interface MachineLinkOptions {
  *  (`snapshot` empty) when the machine went away. */
 export interface MachineMemberBackgroundEvent {
   machineId: string;
-  member?: { conversationId: string; participantId: string; labels: string[] };
-  snapshot?: Array<{ conversationId: string; participantId: string; labels: string[] }>;
+  member?: ChatBackgroundTasksEvent;
+  snapshot?: ChatBackgroundTasksEvent[];
 }
 
 /** The machine that sent it is named: the desktop offers a suggestion only

@@ -19,6 +19,7 @@ import os from "node:os";
 import path from "node:path";
 import {
   MACHINE_LINK_PROTOCOL,
+  backgroundTasksToWire,
   isMachineLinkEnvelope,
   type MachineAttachmentResultBody,
   type MachineHelloBody,
@@ -665,7 +666,7 @@ export class MachineHostService {
       members: this.chat.localBackgroundTasks().map((event) => ({
         conversationId: event.conversationId,
         participantId: event.participantId,
-        labels: event.labels
+        ...backgroundTasksToWire(event.tasks)
       }))
     }, to).catch((error) => {
       void this.debugLogs.write("machine-host.background.snapshot-not-sent", { message: errorMessage(error) });
@@ -678,7 +679,7 @@ export class MachineHostService {
       type: "machine.member.background",
       conversationId: event.conversationId,
       participantId: event.participantId,
-      labels: event.labels
+      ...backgroundTasksToWire(event.tasks)
     }, to).catch((error) => {
       void this.debugLogs.write("machine-host.background.not-sent", { participantId: event.participantId, message: errorMessage(error) });
     });

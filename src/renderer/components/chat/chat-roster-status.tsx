@@ -1,5 +1,6 @@
 import { createContext, useContext } from "react";
 import type { ChatParticipantRosterStatus } from "../../../shared/chatParticipantStatus";
+import type { ChatBackgroundTask } from "../../../shared/types";
 
 export type { ChatParticipantRosterStatus };
 
@@ -16,8 +17,8 @@ const ROSTER_STATUS_LABELS: Record<ChatParticipantRosterStatus, string> = {
 // Shared borderless dot + label status indicator, reused by the roster name line and
 // the message meta row. Intentionally NOT a pill (no background/border) so it reads as
 // inline status text rather than a badge.
-/** The names of each member's running background tasks in the open chat. */
-export const ChatBackgroundTasksContext = createContext<ReadonlyMap<string, readonly string[]>>(new Map());
+/** Each member's running background tasks in the open chat. */
+export const ChatBackgroundTasksContext = createContext<ReadonlyMap<string, readonly ChatBackgroundTask[]>>(new Map());
 
 export function backgroundTasksStatusLabel(count: number): string {
   return count <= 1 ? "1 background task" : `${count} background tasks`;
@@ -39,7 +40,7 @@ export function RosterStatusIndicator({
       ? backgroundTasksStatusLabel(backgroundTasks.length)
       : ROSTER_STATUS_LABELS[status];
   const title = status === "background" && backgroundTasks.length > 0
-    ? `Running in the background:\n${backgroundTasks.join("\n")}`
+    ? `Running in the background:\n${backgroundTasks.map((task) => task.label).join("\n")}`
     : `Status: ${label}`;
   return (
     <span className={`chat-rt-status is-${status}`} title={title}>

@@ -96,13 +96,18 @@ input.on("line", (line) => {
   const selfResumedSeen = new Promise<void>((resolve) => { markSelfResumed = resolve; });
   let repliesStarted = 0;
   const backgroundReports: string[][] = [];
+  const reportedStarts: string[] = [];
+  const testStartedAt = Date.now();
   const warm = {
     conversationId: "conversation-background",
     participantId: participant.id,
     contextKey: "context-background",
     idleTimeoutMs: 60_000,
     onReplyStarted: () => { repliesStarted += 1; },
-    onBackgroundTasksChanged: (tasks: any[]) => { backgroundReports.push(tasks.map((task) => `${task.label}@${task.origin?.messageId}`)); },
+    onBackgroundTasksChanged: (tasks: any[]) => {
+      backgroundReports.push(tasks.map((task) => `${task.label}@${task.origin?.messageId}`));
+      reportedStarts.push(...tasks.map((task) => task.startedAt));
+    },
     origin: { runId: "run-1", messageId: "reply-1" },
     onSelfResumedTurn: (turn: any) => {
       selfResumed.push(turn);
@@ -164,6 +169,9 @@ input.on("line", (line) => {
     assert.ok(outputs.some((event) => /Background task finished: fixture background task/.test(event.text)));
     assert.deepEqual(backgroundReports, [["fixture background task@reply-1"], []],
       "the member's background work is reported once when it starts, with the reply that started it, and once when it ends");
+    assert.equal(reportedStarts.length, 1);
+    const started = Date.parse(reportedStarts[0]!);
+    assert.ok(started >= testStartedAt && started <= Date.now(), "the task is reported with the time the CLI first named it");
     await assertFixtureProcessStops(helperPid);
   } finally {
     await runner.shutdownWarmAgents();

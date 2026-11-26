@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import {
-  MACHINE_LINK_PROTOCOL, isMachineLinkEnvelope, MACHINE_ATTACHMENT_PART_BYTES, machineSigningKey,
+  MACHINE_LINK_PROTOCOL, backgroundTasksFromWire, isMachineLinkEnvelope, MACHINE_ATTACHMENT_PART_BYTES, machineSigningKey,
   type MachineAttachmentRequestBody, type MachineHelloBody, type MachineLinkEnvelope, type MachineLinkMessage
 } from "../../../shared/machineLink";
 import { decodeMachineProgress, type MachineProgressFrame } from "../../../shared/machineProgress";
@@ -8,7 +8,7 @@ import type { Conversation, ReviewProgress } from "../../../shared/types";
 import { openMachinePayload, sealChannelPayload, sealMachinePayload } from "../machineChannelSealing";
 import { signMachineControl, verifyMachineControl } from "../machineControlAuthentication";
 import { LIVE_PROGRESS_RUNS_MAX } from "./constants";
-import { cleanBackgroundLabels, errorMessage } from "./linkText";
+import { errorMessage } from "./linkText";
 import type { MachineConnection, MachineMemberBackgroundEvent, MachinePromptSuggestionEvent } from "./types";
 import type { MachineLinkModules } from "./modules";
 import type { MachineLinkDependencies } from "./dependencies";
@@ -86,7 +86,7 @@ export class MachineMessages {
         if (typeof body.conversationId !== "string" || typeof body.participantId !== "string" || !Array.isArray(body.labels)) return;
         this.emitMemberBackground({
           machineId: connection.record.id,
-          member: { conversationId: body.conversationId, participantId: body.participantId, labels: cleanBackgroundLabels(body.labels) }
+          member: { conversationId: body.conversationId, participantId: body.participantId, tasks: backgroundTasksFromWire(body.labels, body.startedAt) }
         });
         return;
       case "machine.member.background.snapshot":
@@ -96,7 +96,7 @@ export class MachineMessages {
           snapshot: body.members
             .filter((member) => member && typeof member.conversationId === "string" && typeof member.participantId === "string" && Array.isArray(member.labels))
             .slice(0, 500)
-            .map((member) => ({ conversationId: member.conversationId, participantId: member.participantId, labels: cleanBackgroundLabels(member.labels) }))
+            .map((member) => ({ conversationId: member.conversationId, participantId: member.participantId, tasks: backgroundTasksFromWire(member.labels, member.startedAt) }))
         });
         return;
       case "machine.turn.suggestion":

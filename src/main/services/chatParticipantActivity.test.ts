@@ -991,7 +991,7 @@ test("members see a member's live background work in its activity status, as the
   const worker = participant("worker", "worker", "claude-code");
   const idle = participant("idle", "idle", "codex-cli");
   const conversation = chatConversation([worker, idle]);
-  const snapshot = buildChatParticipantActivitySnapshot(conversation, SNAPSHOT_AT, new Map([[worker.id, ["Run the soak"]]]));
+  const snapshot = buildChatParticipantActivitySnapshot(conversation, SNAPSHOT_AT, new Map([[worker.id, [{ label: "Run the soak" }]]]));
   assert.equal(snapshot.participants.find((entry) => entry.participantId === worker.id)?.status, "background");
   assert.equal(snapshot.statusCounts.background, 1);
   assert.equal(snapshot.statusCounts.idle, 1);

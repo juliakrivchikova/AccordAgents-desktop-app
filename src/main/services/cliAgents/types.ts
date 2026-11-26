@@ -151,6 +151,8 @@ export interface CliAgentWarmOptions {
 export interface CliAgentBackgroundTask {
   id: string;
   label: string;
+  /** When the CLI first reported it (ISO): its events carry no time. */
+  startedAt: string;
   origin?: CliAgentReplyOrigin;
 }
 
