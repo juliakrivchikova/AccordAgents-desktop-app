@@ -138,7 +138,7 @@ test("the main session compacts an idle member on this computer: its CLI gets th
   const line = storage.current.messages.find((message: any) => message.metadata?.compaction?.outcome === "completed");
   assert.equal(line.content, "@main compacted @worker context. Focus: Keep the API task and the open review findings.");
   assert.deepEqual(line.metadata.compaction, {
-    triggeredBy: "agent", participantId: worker.id, outcome: "completed", instructionsProvided: true, requestedByParticipantId: main.id
+    triggeredBy: "agent", participantId: worker.id, outcome: "completed", instructionsProvided: true, cli: worker.kind, requestedByParticipantId: main.id
   });
   assert.equal(storage.current.metadata.agentContextUsageByParticipant[worker.id].usedTokens, 30_000);
   await waitFor(() => !(storage.current.metadata.activeRunIds ?? []).length, 3000);

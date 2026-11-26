@@ -220,7 +220,7 @@ export class MemberCompaction {
     if (!latest) return;
     await this.chat.store.withChatMutation(latest, async () => {
       latest.messages.push(createChatMessage("system", line, undefined,
-        compactMessageMetadata({ runId, triggeredBy: "agent", instructions, requestedByParticipantId: caller.id }, target.id, "failed")));
+        compactMessageMetadata({ runId, triggeredBy: "agent", instructions, requestedByParticipantId: caller.id }, target, "failed")));
       latest.updatedAt = new Date().toISOString();
       await this.chat.store.saveConversation(latest);
       this.chat.store.queueSnapshot(latest);

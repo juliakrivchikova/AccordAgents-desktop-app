@@ -217,6 +217,8 @@ test("opened from the Accord button with too few for an Accord, the side panel s
   const met = open(false);
   assert.equal(met.root.findAll(byTestId("chat-subagents-note")).length, 0, "once Accord has enough, the line is gone");
   met.unmount();
+});
+
 test("in the sessions view the card names members by model and effort; a submitted draft and the published version open in the document", async (t) => {
   resetAccordDockStoreForTests();
   resetMemberModelCatalogs();
