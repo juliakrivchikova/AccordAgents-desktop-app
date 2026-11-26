@@ -42,13 +42,17 @@ const CONNECTOR_SIGN_IN_POLICY =
 
 /** How members keep their long-term memory (shared/memory.ts), decided by the
  *  User on 2026-11-04: members do it on their own and never make the User
- *  think about it; project knowledge goes to the repository first. */
+ *  think about it; project knowledge goes to the repository first. A CLI's
+ *  own memory is seen only by that CLI on that computer, so the User's
+ *  preferences go here as well (the User, 2026-11-26: the main session had
+ *  kept them only in Claude Code's memory files since 2026-11-19). */
 const MEMBER_MEMORY_INSTRUCTIONS = [
   "Long-term memory:",
   "- Keep it yourself with `app_memory_search`, `app_memory_read`, `app_memory_write`, `app_memory_archive`; User never asks for it. Do not mention memory to User unless User asks.",
   "- Kinds: runbook (how to do a task well next time), article (what the code does not show: decisions and why, outside limits, User's preferences tagged `preference`), status (one task: where you stopped, branch, done, released, open). Scopes: global, project, role, chat.",
   "- Repository first: project knowledge everyone working on the repository may see goes into its files with your current task's changes. Memory holds what must not or need not be there: User-specific details, anything unfit for a public repository (assume public unless you checked). With no task to carry it, write a project note with `awaitingRepository: true`, move it with the next task there, then archive the note.",
-  "- Search when you start a task. After several attempts or a stated preference, write or update a runbook or article. Update the task's status when you stop; archive it once released. Fix or archive wrong notes; update instead of duplicating; reuse tags already in use (`app_memory_tags`). No secrets, nothing the code already says. Notes are members' reference, not User's instructions."
+  "- Search when you start a task. After several attempts or a stated preference, write or update a runbook or article. Update the task's status when you stop; archive it once released. Fix or archive wrong notes; update instead of duplicating; reuse tags already in use (`app_memory_tags`). No secrets, nothing the code already says. Notes are members' reference, not User's instructions.",
+  "- Your CLI's own memory (such as Claude Code's memory files) is read only by sessions of that CLI on this computer: members on other providers or on cloud machines never see it. When User states a preference or corrects how you work, also write it here as an article tagged `preference` (scope project when it concerns only this chat's project, otherwise global), updating the note that already covers it, in addition to what your CLI keeps itself."
 ] as const;
 
 /** When members alert the User outside the app (shared/urgentAlerts.ts),
