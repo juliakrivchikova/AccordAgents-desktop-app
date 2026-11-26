@@ -137,7 +137,7 @@ function installBridge(bridge: Bridge): void {
   });
 }
 
-function panel(bridge: Bridge, focus?: ArtifactFocusRequest): JSX.Element {
+function panel(bridge: Bridge, focus?: ArtifactFocusRequest, takeFocus?: (seq: number) => boolean): JSX.Element {
   return (
     <TooltipProvider>
       <ArtifactsPanel
@@ -146,6 +146,7 @@ function panel(bridge: Bridge, focus?: ArtifactFocusRequest): JSX.Element {
         artifacts={[bridge.listSummary]}
         selectedId={ARTIFACT_ID}
         focus={focus}
+        takeFocus={takeFocus}
         onSelect={() => undefined}
         onClose={() => undefined}
       />
@@ -410,26 +411,107 @@ test("an open that asks for a member's draft or a version lands the panel there"
   document.body.append(container);
   const root = createRoot(container);
   try {
-    await act(async () => { root.render(panel(bridge, { artifactId: ARTIFACT_ID, draftAuthor: "@Taylor", seq: 1 })); });
+    await act(async () => { root.render(panel(bridge, { artifactId: ARTIFACT_ID, place: { draftAuthor: "@Taylor" }, seq: 1 })); });
     assert.match(body(container), /Draft body from taylor/, "the author's submitted draft, once the drafts are read");
 
-    await act(async () => { root.render(panel(bridge, { artifactId: ARTIFACT_ID, version: 2, seq: 2 })); });
+    await act(async () => { root.render(panel(bridge, { artifactId: ARTIFACT_ID, place: { version: 2 }, seq: 2 })); });
     assert.match(body(container), /Version 2/);
     assert.doesNotMatch(body(container), /Draft body from taylor/);
 
-    await act(async () => { root.render(panel(bridge, { artifactId: ARTIFACT_ID, version: 3, seq: 3 })); });
+    await act(async () => { root.render(panel(bridge, { artifactId: ARTIFACT_ID, place: { version: 3 }, seq: 3 })); });
     assert.match(body(container), /Version 3/, "the newest version is the document as it is");
     assert.equal(bridge.readVersions.at(-1), 0, "read as the head, which follows a newer version");
 
-    await act(async () => { root.render(panel(bridge, { artifactId: ARTIFACT_ID, draftAuthor: "drew", seq: 4 })); });
+    await act(async () => { root.render(panel(bridge, { artifactId: ARTIFACT_ID, place: { draftAuthor: "drew" }, seq: 4 })); });
     assert.match(body(container), /Version 3/, "an author with no submitted draft leaves the document as it is");
 
     // While drafts are collected, the inbox shows the asked author's draft rather than the first one.
     const second = { ...draft("submitted"), id: "draft-drew", author: "drew", content: "Draft body from drew" };
     bridge.detail = { ...collecting("submitted"), drafts: [draft("submitted"), second] };
     bridge.listSummary = bridge.detail.summary;
-    await act(async () => { root.render(panel(bridge, { artifactId: ARTIFACT_ID, draftAuthor: "drew", seq: 5 })); });
+    await act(async () => { root.render(panel(bridge, { artifactId: ARTIFACT_ID, place: { draftAuthor: "drew" }, seq: 5 })); });
     assert.match(body(container), /Draft body from drew/);
+  } finally {
+    await act(async () => { root.unmount(); });
+    container.remove();
+  }
+});
+
+test("an open lands once: a panel drawn again later shows what she went to since", async () => {
+  const bridge = freshBridge();
+  installBridge(bridge);
+  let taken = 0;
+  const takeFocus = (seq: number): boolean => seq > taken && (taken = seq) > 0;
+  const focus: ArtifactFocusRequest = { artifactId: ARTIFACT_ID, place: { draftAuthor: "taylor" }, seq: 1 };
+  const first = document.createElement("div");
+  document.body.append(first);
+  const root = createRoot(first);
+  await act(async () => { root.render(panel(bridge, focus, takeFocus)); });
+  assert.match(body(first), /Draft by @taylor/);
+  const back = [...first.querySelectorAll<HTMLButtonElement>("button")].find((button) => /Back to v3/.test(button.textContent ?? ""));
+  assert.ok(back, "the draft offers the way back to the document");
+  await act(async () => { back.click(); });
+  assert.doesNotMatch(body(first), /Viewing a draft/);
+  await act(async () => { root.unmount(); });
+  first.remove();
+
+  const again = document.createElement("div");
+  document.body.append(again);
+  const remounted = createRoot(again);
+  try {
+    await act(async () => { remounted.render(panel(bridge, focus, takeFocus)); });
+    assert.match(body(again), /Version 3/);
+    assert.doesNotMatch(body(again), /Viewing a draft/, "the open was taken before: the panel does not go back to the draft");
+  } finally {
+    await act(async () => { remounted.unmount(); });
+    again.remove();
+  }
+});
+
+test("an open asking for a draft keeps a revision she is typing on screen", async () => {
+  const bridge = freshBridge();
+  installBridge(bridge);
+  const container = document.createElement("div");
+  document.body.append(container);
+  const root = createRoot(container);
+  try {
+    await act(async () => { root.render(panel(bridge)); });
+    const revise = container.querySelector<HTMLButtonElement>('button[aria-label="Revise"]');
+    assert.ok(revise, "the document can be revised here");
+    await act(async () => { revise.click(); });
+    const field = container.querySelector<HTMLTextAreaElement>("#artifact-revise-content");
+    assert.ok(field, "the revision form is open");
+    await act(async () => {
+      Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, "value")!.set!.call(field, "My unsaved edit");
+      field.dispatchEvent(new window.Event("input", { bubbles: true }));
+    });
+    // The read the open starts brings the drafts anew, as the app's does.
+    bridge.drafts = { ok: true, value: [draft("submitted")] };
+    await act(async () => { root.render(panel(bridge, { artifactId: ARTIFACT_ID, place: { draftAuthor: "taylor" }, seq: 1 })); });
+    assert.equal(container.querySelector<HTMLTextAreaElement>("#artifact-revise-content")?.value, "My unsaved edit");
+    assert.doesNotMatch(body(container), /Viewing a draft/);
+  } finally {
+    await act(async () => { root.unmount(); });
+    container.remove();
+  }
+});
+
+test("an open without a place stops an earlier open's wait for a draft", async () => {
+  const bridge = freshBridge();
+  installBridge(bridge);
+  const consensus = window.consensus as unknown as { listArtifactDrafts: () => Promise<unknown> };
+  let release: (() => void) | undefined;
+  consensus.listArtifactDrafts = () => new Promise((resolve) => { release = () => resolve({ ok: true, value: [draft("submitted")] }); });
+  const container = document.createElement("div");
+  document.body.append(container);
+  const root = createRoot(container);
+  try {
+    await act(async () => { root.render(panel(bridge, { artifactId: ARTIFACT_ID, place: { draftAuthor: "taylor" }, seq: 1 })); });
+    // Open on the card, while her server is slow with the drafts.
+    await act(async () => { root.render(panel(bridge, { artifactId: ARTIFACT_ID, seq: 2 })); });
+    await act(async () => { release?.(); });
+    assert.match(body(container), /Version 3/);
+    assert.doesNotMatch(body(container), /Viewing a draft/, "the document stays as Open showed it");
   } finally {
     await act(async () => { root.unmount(); });
     container.remove();

@@ -31,8 +31,9 @@ export function ArtifactsPanel(props: {
   members: string[];
   artifacts: ArtifactSummary[];
   selectedId?: string;
-  /** The place of the selected document the last open asked for. */
+  /** The last open of the selected document, and taking it once. */
   focus?: ArtifactFocusRequest;
+  takeFocus?: (seq: number) => boolean;
   onSelect: (artifactId: string | undefined) => void;
   onClose: () => void;
 }): JSX.Element {
@@ -187,9 +188,11 @@ export function ArtifactsPanel(props: {
     setRenaming(false);
     setAccessOpen(false);
   }, [detail?.summary.archivedAt]);
-  useArtifactFocus({
+  const focusWait = useArtifactFocus({
     focus: props.focus,
+    takeFocus: props.takeFocus ?? (() => true),
     selectedId: props.selectedId,
+    editing: mode !== "view",
     headVersion: selectedSummary?.headVersion,
     detail,
     drafts,
@@ -197,8 +200,8 @@ export function ArtifactsPanel(props: {
     draftError,
     showVersion: pinVersion,
     showDraft,
-    reload: () => {
-      if (props.selectedId) void loadDetail(props.selectedId);
+    reload: (version) => {
+      if (props.selectedId) void loadDetail(props.selectedId, version);
     }
   });
   async function run<T>(action: () => Promise<{ ok: true; value: T } | { ok: false; error: ArtifactError }>): Promise<T | undefined> {
@@ -348,10 +351,12 @@ export function ArtifactsPanel(props: {
       return;
     }
     const target = version === detail.summary.headVersion ? undefined : version;
+    focusWait.cancel();
     pinVersion(target);
     void loadDetail(detail.summary.id, target);
   }
   function showDraft(draftId: string): void {
+    focusWait.cancel();
     setSelectedDraftId(draftId);
     // Drop any older-version pin, so the refresh effect stops re-reading that version
     // underneath the draft and dismissing the draft returns the reader to the head.
@@ -365,6 +370,7 @@ export function ArtifactsPanel(props: {
     if (!detail || detail.lifecycle !== "published") {
       return;
     }
+    focusWait.cancel();
     const generation = ++compareGeneration.current;
     setShowDiff(nextShowDiff);
     setCompare(undefined);

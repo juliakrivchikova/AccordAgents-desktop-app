@@ -99,7 +99,7 @@ function Stage(props: { stage: AccordStage; participants?: ChatParticipant[]; ma
       <StageMark state={stage.state} />
       <span className="chat-accord-progress-stage-text">
         {openVersion
-          ? <button type="button" className="chat-accord-progress-label is-link" onClick={openVersion}>{stage.label}</button>
+          ? <button type="button" className="chat-accord-progress-label is-link" onClick={openVersion}><span className="sr-only">Open </span>{stage.label}</button>
           : <span className="chat-accord-progress-label">{stage.label}</span>}
         {detail && <span className="chat-accord-progress-detail">{detail}</span>}
         {stage.members.length > 0 && (
@@ -118,7 +118,12 @@ function Stage(props: { stage: AccordStage; participants?: ChatParticipant[]; ma
               // A submitted draft opens in the document's panel (the User, 2026-11-26).
               const openDraft = stage.key === "drafts" && member.given ? open.draft : undefined;
               return openDraft
-                ? <button key={member.handle} type="button" className={`${className} is-link`} onClick={() => openDraft(member.handle)}>{content}</button>
+                ? (
+                  <button key={member.handle} type="button" className={`${className} is-link`} onClick={() => openDraft(member.handle)}>
+                    <span className="sr-only">Open the draft of </span>
+                    {content}
+                  </button>
+                )
                 : <span key={member.handle} className={className}>{content}</span>;
             })}
           </span>

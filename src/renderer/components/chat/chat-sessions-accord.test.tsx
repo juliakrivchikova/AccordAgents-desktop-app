@@ -24,8 +24,9 @@ import type { ChatSessionsView } from "./use-chat-sessions-view";
 
 const NOW = "2026-11-20T10:00:00.000Z";
 const noop = (): void => undefined;
+// What is on screen: words for screen readers only are left out.
 const textOf = (node: ReactTestInstance | string): string =>
-  typeof node === "string" ? node : node.children.map(textOf).join("");
+  typeof node === "string" ? node : node.props?.className === "sr-only" ? "" : node.children.map(textOf).join("");
 const hasClass = (name: string) => (node: ReactTestInstance): boolean =>
   typeof node.type === "string" && typeof node.props.className === "string" && node.props.className.split(/\s+/).includes(name);
 const byTestId = (id: string) => (node: ReactTestInstance): boolean => typeof node.type === "string" && node.props["data-testid"] === id;

@@ -100,6 +100,7 @@ export function ChatSidePanel(props: {
       artifacts={artifacts.artifacts}
       selectedId={artifacts.selectedId}
       focus={artifacts.focus}
+      takeFocus={artifacts.takeFocus}
       onSelect={artifacts.selectArtifact}
       onClose={artifacts.closePanel}
     />

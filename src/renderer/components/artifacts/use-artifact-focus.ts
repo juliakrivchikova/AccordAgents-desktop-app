@@ -17,14 +17,20 @@ export function submittedDraftOf(drafts: readonly ArtifactDraftView[], author: s
 
 /**
  * Lands the panel on the place an open asked for (an Accord's card: a
- * version, a member's draft), once per request. A version is shown at once.
- * A draft is looked for in the drafts read after the click (the document is
+ * version, a member's draft), once per open. A version is shown at once. A
+ * draft is looked for in the drafts read after the click (the document is
  * read again for it: a draft submitted a moment ago is in a list the panel
- * has not read yet); the document is shown as it is when the author has none.
+ * has not read yet); the document is shown as it is when the author has
+ * none. A form on screen (a revision she is typing) is never replaced, as the
+ * panel's own pickers wait for it too, and anything she does in the panel
+ * meanwhile (`cancel`) or another open stops the wait for a draft.
  */
 export function useArtifactFocus(props: {
   focus?: ArtifactFocusRequest;
+  takeFocus: (seq: number) => boolean;
   selectedId?: string;
+  /** A form is on screen (revising, creating). */
+  editing: boolean;
   headVersion?: number;
   detail?: ArtifactReadResult;
   drafts: readonly ArtifactDraftView[];
@@ -34,29 +40,38 @@ export function useArtifactFocus(props: {
   draftError?: unknown;
   showVersion: (version: number | undefined) => void;
   showDraft: (draftId: string) => void;
-  /** Reads the selected document and its drafts again. */
-  reload: () => void;
-}): void {
-  const { focus, selectedId, detail, drafts, draftsFor, draftError } = props;
+  /** Reads the selected document (one version of it) and its drafts again. */
+  reload: (version?: number) => void;
+}): { cancel: () => void } {
+  const { focus, selectedId, detail, drafts, draftsFor, draftError, editing } = props;
   // The drafts as they were at the click: only a read after it answers.
   const [pending, setPending] = useState<{ artifactId: string; author: string; drafts: readonly ArtifactDraftView[]; draftError: unknown }>();
   useEffect(() => {
-    if (!focus || focus.artifactId !== selectedId) return;
-    if ("version" in focus) {
+    if (!focus) {
       setPending(undefined);
-      // The newest version is the document as it is, which follows a newer one.
-      props.showVersion(focus.version === props.headVersion ? undefined : focus.version);
       return;
     }
-    setPending({ artifactId: focus.artifactId, author: focus.draftAuthor, drafts, draftError });
+    if (focus.artifactId !== selectedId || !props.takeFocus(focus.seq)) return;
+    setPending(undefined);
+    const place = focus.place;
+    if (!place || editing) return;
+    if ("version" in place) {
+      // The newest version is the document as it is, which follows a newer one.
+      const head = Math.max(props.headVersion ?? 0, detail?.summary.id === focus.artifactId ? detail.summary.headVersion : 0);
+      const target = place.version === head ? undefined : place.version;
+      props.showVersion(target);
+      props.reload(target);
+      return;
+    }
+    setPending({ artifactId: focus.artifactId, author: place.draftAuthor, drafts, draftError });
     // Under the draft, the document as it is (no older version pinned).
     props.showVersion(undefined);
     props.reload();
-    // Once per request: a request is new when its seq is.
+    // Once per open: an open is new when its seq is.
   }, [focus?.seq, selectedId]);
   useEffect(() => {
     if (!pending) return;
-    if (pending.artifactId !== selectedId) {
+    if (pending.artifactId !== selectedId || editing) {
       setPending(undefined);
       return;
     }
@@ -65,5 +80,6 @@ export function useArtifactFocus(props: {
     const draft = submittedDraftOf(detail.lifecycle === "collecting_drafts" ? detail.drafts : drafts, pending.author);
     setPending(undefined);
     if (draft) props.showDraft(draft.id);
-  }, [pending, selectedId, detail, drafts, draftsFor, draftError]);
+  }, [pending, selectedId, detail, drafts, draftsFor, draftError, editing]);
+  return { cancel: () => setPending(undefined) };
 }

@@ -31,7 +31,12 @@ export function useDockedAccord(
   const participantsRef = useRef(participants);
   participantsRef.current = participants;
   // Every update brings a new member list: keyed by what the card shows of it.
-  const participantsKey = participants.map((member) => `${member.id}:${member.handle}:${member.kind}:${member.avatarId ?? ""}`).join("\n");
+  // The sessions view names a member by its model and effort and where it
+  // runs (useMemberModelSummary), so those count too.
+  const participantsKey = participants.map((member) => [
+    member.id, member.handle, member.kind, member.avatarId ?? "", member.model ?? "", member.reasoningEffort ?? "",
+    member.hostId ?? "", member.hostVendor ?? "", member.homeMachineId ?? "", member.cloudRun ? "cloud" : ""
+  ].join(":")).join("\n");
   // Worked out again only when the notes, the lines or the members change,
   // not on every update of a running turn; the chat's Accords are read once
   // for all its lines.
