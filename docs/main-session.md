@@ -474,6 +474,19 @@ switch is disabled.
     main session's messages, system lines and the cards the User must
     answer; the member-added cards of its delegations are not shown
     (`isMainSessionDelegationRosterCard`);
+  - a finished compaction leaves a muted line in the compacted session, as
+    Claude Code leaves "Conversation compacted" in its transcript after
+    `/compact` and after a compaction of its own: the main session's on the
+    main timeline, a member's in its session in the side panel
+    (`sessionsCompactionLineOf`, `ChatCompactionLine`; the User, 2026-11-26).
+    Its words are those of the CLI that compacted, recorded with the line
+    (`metadata.compaction.cli`; Codex: "Context compacted"); a failed one is
+    a warning, one with nothing to compact shows nothing, the classic view
+    shows none. The phone's sessions view shows the same line in the same
+    places: it travels with the member and the CLI and no words of its own
+    (`MobileTimelineEvent.compaction`), so a phone app from before drops it,
+    and both apps word it by `sessionsCompactionLineWords`. The composer's `/compact` and `/goal` hints say
+    what the command does for the session it goes to, naming no member;
   - the main session's tasks are not cards: each is a row inside the
     "Worked for …" fold of the reply of the turn that gave it
     (`sessionsTaskPlacement`, by the message both answer; under the reply

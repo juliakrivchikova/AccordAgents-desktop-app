@@ -7,6 +7,7 @@ import type {
   UserSkillSummary,
   UserSkillTargetSummary
 } from "../../../shared/types";
+import { COMPACT_COMMAND_DESCRIPTION, GOAL_COMMAND_DESCRIPTION } from "../../../shared/slashSuggestions";
 import { artifactReference } from "../../../shared/artifacts";
 import {
   normalizePluginIconSpacers,
@@ -80,7 +81,7 @@ export function compactCommandOption(target: UserSkillTargetSummary | undefined)
   return {
     id: "compact",
     label: "/compact",
-    description: "Compact the mentioned member context"
+    description: COMPACT_COMMAND_DESCRIPTION
   };
 }
 
@@ -91,7 +92,7 @@ export function goalCommandOption(target: UserSkillTargetSummary | undefined): S
   return {
     id: "goal",
     label: "/goal",
-    description: "Run the mentioned member until the goal is finished"
+    description: GOAL_COMMAND_DESCRIPTION
   };
 }
 

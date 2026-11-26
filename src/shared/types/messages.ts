@@ -4,6 +4,7 @@ import type { ChatCardRefusal, ChatPendingChoice, ChatPendingMention, ChatServer
 import type { ChatImportNotice } from "./cliImport";
 import type { ChatParticipantRequestBatch } from "./memberRequests";
 import type { ChatMessageSessionCut, ChatStaleRunRecovery } from "./members";
+import type { ChatProviderKind } from "./providers";
 import type { RepoFileMention } from "./repositories";
 import type { ChatRosterChangeOutcome } from "./rosterChanges";
 import type { ChatSkillMention } from "./skills";
@@ -162,6 +163,10 @@ export interface ChatMessageMetadata {
     instructionsProvided: boolean;
     /** The main session that compacted this member (`app_chat_compact_participant`). */
     requestedByParticipantId?: string;
+    /** The CLI that compacted it, whose words its line in the sessions view
+     *  uses. Absent on lines from before 2026-11-26 and from a machine on an
+     *  older runtime: the member's current CLI is used then. */
+    cli?: ChatProviderKind;
   };
   /** A machine's hidden answer to a `session.export` turn: where it put the
    *  member's session on the User's server for its move. */

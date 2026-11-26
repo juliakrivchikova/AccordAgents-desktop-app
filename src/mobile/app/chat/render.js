@@ -290,6 +290,7 @@ export async function render(connectionStatus) {
       ...(entry.accordLaunchMessageId ? { accordLaunchMessageId: entry.accordLaunchMessageId } : {}),
       ...(entry.accordLaunch ? { accordLaunch: entry.accordLaunch } : {}),
       ...(entry.accordClosed ? { accordClosed: entry.accordClosed } : {}),
+      ...(entry.compaction ? { compaction: entry.compaction } : {}),
       // The desktop publishes the in-progress row the moment it accepts the
       // message, before routing has picked anyone, and can only guess a
       // handle from an explicit @mention in the text. With no mention there
@@ -413,7 +414,8 @@ export async function render(connectionStatus) {
         status: "Done", content: "", createdAt: "", presentation: "sessions", accordScreen: accordScreen }]
       : sessionsMainRows(sessions);
   } else {
-    rows = groupRowsIntoThreads(rows, openThread).rows;
+    // A compaction's line is the sessions view's only, as on the desktop.
+    rows = groupRowsIntoThreads(rows.filter(function (row) { return !row.compaction; }), openThread).rows;
   }
   // A member that left the chat is read only: no composer under it.
   const readOnlyScreen = Boolean(sessionMember && sessionMember.former) || Boolean(accordScreen);

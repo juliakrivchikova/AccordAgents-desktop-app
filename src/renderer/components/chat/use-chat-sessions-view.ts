@@ -33,7 +33,7 @@ import { sessionsMentionText, sessionsViewNames, sessionsViewText } from "../../
 import type { ChatAppToolApproval, ChatMessage, ChatParticipant, ChatViewMode, Conversation } from "../../../shared/types";
 import type { ChatParticipantRosterStatus } from "./chat-roster-status";
 import { isWaitingReply, waitingMessages, type WaitingMessage } from "../../../shared/waitingMessages";
-import { isChatMessageHiddenInChat } from "./chat-thread-data";
+import { isChatMessageHiddenInSessions } from "./chat-thread-data";
 
 export { useChatSessionsChrome } from "./use-chat-sessions-chrome";
 
@@ -122,7 +122,7 @@ export function useChatSessionsView(input: {
     const messages = conversation.messages;
     const index = buildSessionsViewIndex(messages, mainId);
     // A reply that has not started has no row: the message it answers says so.
-    const shown = (message: ChatMessage): boolean => !isChatMessageHiddenInChat(conversation, message) && !isWaitingReply(message);
+    const shown = (message: ChatMessage): boolean => !isChatMessageHiddenInSessions(conversation, message) && !isWaitingReply(message);
     const openCards = openMemberCardMessages(messages, index).filter(shown);
     const openCardMessageIds = new Set(openCards.map((message) => message.id));
     const lane = messages.filter((message) => openCardMessageIds.has(message.id) ||

@@ -9,7 +9,7 @@ import type {
   ChatViewMode,
   Conversation
 } from "../../shared/types";
-import { chatImportedAtMs, chatMessageAddressees, chatViewFor } from "../../shared/mainSession";
+import { chatImportedAtMs, chatMessageAddressees, chatViewFor, sessionsCompactionLineOf } from "../../shared/mainSession";
 import { remoteRunStreamingStartedAt } from "../../shared/remoteRunStreaming";
 import { firstTextLine, sessionsTaskTitle } from "../../shared/mainSessionView";
 import { APP_CHAT_SEND_MESSAGE_TOOL } from "../../shared/appMcpToolContracts";
@@ -170,6 +170,13 @@ export interface MobileTimelineEvent {
   accordClosed?: { launchMessageId: string; title?: string };
   /** Who leads that Accord and who is in it (the card without its launch). */
   accordLaunch?: { facilitator: string; members: string[] };
+  /** The line a finished compaction left (shared/mainSession.ts
+   *  sessionsCompactionLineOf): the member compacted and the CLI that did
+   *  it. The sessions view shows it in that member's session, in the CLI's
+   *  words; the classic view shows none. Its content travels empty: the
+   *  phone words the line itself, and a phone shell from before drops an
+   *  event with no words instead of drawing the stored sentence. */
+  compaction?: { participantId: string; cli?: ChatProviderKind };
   /** The User's message: the members it was addressed to where it was
    *  written (shared/mainSession.ts chatMessageAddressees), which the
    *  sessions view places it by. */
@@ -331,7 +338,8 @@ function messageIsVisibleOnPhone(message: ChatMessage): boolean {
  *  "Auto-resumed @x after member request", control text, waiting statuses,
  *  inferred request carriers — is off the phone's too, by the same rule; only
  *  artifact notes and turn-finished notes among system messages are the
- *  User's to see. A hidden
+ *  User's to see (and, for the sessions view only, the line a finished
+ *  compaction left: messageTravelsToPhone lets it through). A hidden
  *  member message still travels, flagged: it can be the message that ends a
  *  run, and without it the phone's pending row for that run never settles. */
 export function messageIsHiddenOnPhone(
@@ -362,6 +370,11 @@ function isEmptyFinishedTurn(message: ChatMessage): boolean {
 }
 
 function messageTravelsToPhone(conversation: Pick<Conversation, "messages">, message: ChatMessage): boolean {
+  // The line a finished compaction left, for the sessions view (the desktop's
+  // isChatMessageHiddenInSessions); a line the desktop hid stays home.
+  if (sessionsCompactionLineOf(message)) {
+    return message.metadata?.hiddenFromTimeline !== true;
+  }
   if (!messageIsVisibleOnPhone(message) && !isEmptyFinishedTurn(message)) {
     return false;
   }
@@ -411,6 +424,7 @@ function timelineEventFromMessage(
   const midTurn = message.role === "participant" && message.status === "done" &&
     message.metadata?.appMessageSource === APP_CHAT_SEND_MESSAGE_TOOL;
   const finishedNote = turnFinishedNoteOf(message);
+  const compaction = sessionsCompactionLineOf(message);
   const addressees = message.role === "user" ? chatMessageAddressees(message).slice(0, PHONE_ADDRESSEES_MAX) : [];
   const request = message.role === "participant" && !hidden ? mobileTaskBatch(message.metadata?.participantRequest) : undefined;
   const interimPosts = message.role === "participant" && !hidden ? mobileInterimPosts(message) : [];
@@ -434,6 +448,7 @@ function timelineEventFromMessage(
       ? { accordClosed: { launchMessageId: accordClosedLaunchId(message) as string, ...(accordClosedLineTitle(message) ? { title: accordClosedLineTitle(message) } : {}) } }
       : {}),
     ...(message.role === "system" && message.metadata?.accordLaunch ? { accordLaunch: message.metadata.accordLaunch } : {}),
+    ...(compaction ? { compaction } : {}),
     ...(addressees.length ? { addressees } : {}),
     ...(request ? { participantRequest: request } : {}),
     ...(message.role === "participant" && message.metadata?.accordLaunchByMainSession === true ? { accordLaunchByMainSession: true as const } : {}),
@@ -448,7 +463,7 @@ function timelineEventFromMessage(
     ...(typeof message.metadata?.threadId === "string" && message.metadata.threadId !== message.id ? { threadId: message.metadata.threadId } : {}),
     ...(message.role === "participant" && typeof message.metadata?.sourceMessageId === "string" && message.metadata.sourceMessageId
       ? { sourceMessageId: message.metadata.sourceMessageId } : {}),
-    content: message.content.trim() || message.role !== "participant" || message.status !== "pending"
+    content: compaction ? "" : message.content.trim() || message.role !== "participant" || message.status !== "pending"
       ? message.content
       : pendingParticipantContent(message.participantLabel),
     ...(attachments.length > 0 ? { attachments } : {}),

@@ -61,7 +61,8 @@ test("chat:send routes exact @participant /compact to participant compaction", a
       triggeredBy: "user",
       participantId: participant.id,
       outcome: "completed",
-      instructionsProvided: false
+      instructionsProvided: false,
+      cli: participant.kind
     });
     assert.deepEqual(debugEvents.map(({ event, payload }) => ({ event, triggeredBy: payload.triggeredBy, outcome: payload.outcome })), [
       { event: "chat.compaction.requested", triggeredBy: "user", outcome: undefined },

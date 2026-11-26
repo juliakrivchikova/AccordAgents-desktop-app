@@ -177,6 +177,8 @@ export type SessionsViewLane =
  *   become task cards there), except its answer to a member's request, which
  *   is part of that member's session.
  * - Another member's message: in its own session.
+ * - The line a compaction of a member left: in that member's session (the
+ *   main session's own on the main timeline).
  * - Anything else (system lines, scripts, summaries): on the main timeline;
  *   the timeline's own visibility rules still hide internal lines.
  */
@@ -202,7 +204,47 @@ export function sessionsViewLane(message: ChatMessage, index: SessionsViewIndex)
     }
     return { kind: "member", participantId: message.participantId };
   }
+  const compacted = message.role === "system" ? message.metadata?.compaction?.participantId : undefined;
+  if (typeof compacted === "string" && compacted && compacted !== mainId) {
+    return { kind: "member", participantId: compacted };
+  }
   return { kind: "main" };
+}
+
+/** The line a finished compaction left (compactSuccessMessage): the sessions
+ *  view shows it in the compacted member's session, as Claude Code leaves
+ *  "Conversation compacted" in its transcript after `/compact` and after a
+ *  compaction of its own (the User agreed on 2026-11-26). A failed one is
+ *  said as a warning; one with nothing to compact shows nothing, as before. */
+export function sessionsCompactionLineOf(message: Pick<ChatMessage, "role" | "metadata">): { participantId: string; cli?: ChatProviderKind } | undefined {
+  const compaction = message.role === "system" ? message.metadata?.compaction : undefined;
+  if (compaction?.outcome !== "completed" || typeof compaction.participantId !== "string" || !compaction.participantId) return undefined;
+  const cli = COMPACTING_CLIS.find((kind) => kind === compaction.cli);
+  return { participantId: compaction.participantId, ...(cli ? { cli } : {}) };
+}
+
+const COMPACTING_CLIS: readonly ChatProviderKind[] = ["claude-code", "codex-cli", "gemini-cli"];
+
+/** That line's words, as the CLI that compacted writes them: Claude Code
+ *  2.1.332 and Antigravity 1.5.18 "Conversation compacted", Codex 0.171.0
+ *  "Context compacted". The CLI is the one the line names, else the member's
+ *  own; a line of neither (an older machine's, of a member no longer in the
+ *  chat) reads as Claude Code's. */
+export function sessionsCompactionLineText(kind: ChatProviderKind | undefined): string {
+  return kind === "codex-cli" ? "Context compacted" : "Conversation compacted";
+}
+
+/** The words of a message's compaction line, or undefined when it is not
+ *  one: the CLI the line names, else the compacted member's own among these
+ *  members. One rule for the desktop's line and the phone's. */
+export function sessionsCompactionLineWords(
+  message: Pick<ChatMessage, "role" | "metadata">,
+  members: readonly { id: string; kind?: string }[] | undefined
+): string | undefined {
+  const line = sessionsCompactionLineOf(message);
+  if (!line) return undefined;
+  const memberKind = members?.find((member) => member.id === line.participantId)?.kind;
+  return sessionsCompactionLineText(line.cli ?? COMPACTING_CLIS.find((kind) => kind === memberKind));
 }
 
 /** The member whose request the main session answers with this message,

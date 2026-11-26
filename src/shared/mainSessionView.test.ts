@@ -7,6 +7,9 @@ import {
   isSessionsHiddenTurnFinishedNote,
   mainTimelineMessages,
   memberSessionMessages,
+  sessionsCompactionLineOf,
+  sessionsCompactionLineText,
+  sessionsCompactionLineWords,
   sessionsFormerMembers,
   sessionsTaskPlacement,
   sessionsViewLane,
@@ -215,6 +218,50 @@ test("a scheduled task's wake-up of one member is part of that member's session,
   const index = buildSessionsViewIndex(messages, "p-main");
   assert.deepEqual(mainTimelineMessages(messages, index).map((entry) => entry.id), ["script-main", "script-none"]);
   assert.deepEqual(memberSessionMessages(messages, "p-drew", index).map((entry) => entry.id), ["script-drew"]);
+});
+
+test("a compaction's line is in the compacted member's session, the main session's own on the main timeline; only a finished one is a line", () => {
+  const compaction = (id: string, participantId: string, outcome: "completed" | "failed" | "no-active-session"): ChatMessage =>
+    message(id, "system", 40, { content: `Compacted @${participantId.slice(2)} context.`, metadata: { compaction: { triggeredBy: "user", participantId, outcome, instructionsProvided: false } } });
+  const mainDone = compaction("main-compacted", "p-main", "completed");
+  const drewDone = compaction("drew-compacted", "p-drew", "completed");
+  const drewFailed = compaction("drew-failed", "p-drew", "failed");
+  const mainNothing = compaction("main-nothing", "p-main", "no-active-session");
+  const messages = [...chat(), mainDone, drewDone, drewFailed, mainNothing];
+  const index = buildSessionsViewIndex(messages, "p-main");
+  assert.deepEqual(sessionsViewLane(mainDone, index), { kind: "main" });
+  assert.deepEqual(sessionsViewLane(drewDone, index), { kind: "member", participantId: "p-drew" });
+  assert.deepEqual(sessionsViewLane(drewFailed, index), { kind: "member", participantId: "p-drew" }, "a failed one belongs to its member too, though it shows no line");
+  assert.ok(memberSessionMessages(messages, "p-drew", index).some((entry) => entry.id === "drew-compacted"));
+  assert.ok(!mainTimelineMessages(messages, index).some((entry) => entry.id === "drew-compacted"), "a member's compaction is not on the main timeline");
+  assert.deepEqual(sessionsCompactionLineOf(mainDone), { participantId: "p-main" }, "a line from before the CLI was recorded");
+  const recorded = { ...drewDone, metadata: { compaction: { ...drewDone.metadata!.compaction!, cli: "codex-cli" as const } } };
+  assert.deepEqual(sessionsCompactionLineOf(recorded), { participantId: "p-drew", cli: "codex-cli" });
+  const unknownCli = { ...drewDone, metadata: { compaction: { ...drewDone.metadata!.compaction!, cli: "openai" as never } } };
+  assert.deepEqual(sessionsCompactionLineOf(unknownCli), { participantId: "p-drew" }, "a CLI it does not know is left out");
+  assert.equal(sessionsCompactionLineOf(drewFailed), undefined, "a failed compaction is said as a warning, not as this line");
+  assert.equal(sessionsCompactionLineOf(mainNothing), undefined);
+  assert.equal(sessionsCompactionLineOf({ ...mainDone, role: "participant" }), undefined, "only the app's own line");
+  assert.equal(sessionsCompactionLineOf(message("plain", "system", 41)), undefined);
+});
+
+test("a compaction's line says what the member's CLI says after it", () => {
+  assert.equal(sessionsCompactionLineText("claude-code"), "Conversation compacted");
+  assert.equal(sessionsCompactionLineText("gemini-cli"), "Conversation compacted");
+  assert.equal(sessionsCompactionLineText("codex-cli"), "Context compacted");
+  assert.equal(sessionsCompactionLineText(undefined), "Conversation compacted", "a member no longer in the chat");
+});
+
+test("a compaction line's words: the CLI it names, else the compacted member's own, one rule for the desktop and the phone", () => {
+  const line = (cli?: "claude-code" | "codex-cli" | "gemini-cli", outcome: "completed" | "failed" = "completed"): Pick<ChatMessage, "role" | "metadata"> => ({
+    role: "system", metadata: { compaction: { triggeredBy: "user", participantId: "p-drew", outcome, instructionsProvided: false, ...(cli ? { cli } : {}) } }
+  });
+  const members = [{ id: "p-main", kind: "claude-code" }, { id: "p-drew", kind: "codex-cli" }];
+  assert.equal(sessionsCompactionLineWords(line("claude-code"), members), "Conversation compacted", "the CLI that compacted wins over the member's current one");
+  assert.equal(sessionsCompactionLineWords(line(), members), "Context compacted", "an older line reads its member's CLI");
+  assert.equal(sessionsCompactionLineWords(line(), []), "Conversation compacted", "a member no longer in the chat");
+  assert.equal(sessionsCompactionLineWords(line(), [{ id: "p-drew", kind: "" }]), "Conversation compacted", "a member whose CLI is not known");
+  assert.equal(sessionsCompactionLineWords(line("codex-cli", "failed"), members), undefined, "a failed compaction leaves no line");
 });
 
 test("the main session's answer to a member's question is in that member's session from its first token", () => {

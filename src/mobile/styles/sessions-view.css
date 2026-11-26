@@ -259,3 +259,20 @@
   border-radius: 12px;
   background: var(--s2);
 }
+
+/* The line a finished compaction leaves in its member's session
+   (sessionsCards.js sessionsCompactionLineElement): muted, as the desktop's
+   .chat-compaction-line and Claude Code's "Conversation compacted". */
+.sessions-compaction-line {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--mut);
+  font: 400 13px/18px var(--sans);
+}
+
+.sessions-compaction-line > svg {
+  flex-shrink: 0;
+}

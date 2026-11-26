@@ -5,6 +5,7 @@ import {
   chatParticipantRequestReplyRootMap
 } from "../../../shared/chatParticipantRequestThreads";
 import { accordFoldedMessageIds, isRepeatedAccordClosedLine } from "../../../shared/accordProgress";
+import { sessionsCompactionLineOf } from "../../../shared/mainSession";
 import { turnFinishedNoteOf } from "../../../shared/turnFinishedNoteSource";
 import { isEmptyFinishedReply } from "../../../shared/turnContinues";
 import type { ChatParticipantRequestBatch, Conversation } from "../../../shared/types";
@@ -22,6 +23,14 @@ export function isChatMessageHiddenInChat(conversation: Pick<Conversation, "mess
     (message.role === "system" && isRepeatedAccordClosedLine(conversation.messages, message)) ||
     // Kept when a thread starts at it: nothing else opens that thread.
     (isEmptyFinishedReply(message) && !conversation.messages.some((reply) => reply.metadata?.chatThreadRootId === message.id && reply.id !== message.id));
+}
+
+/** A message the sessions view draws no row for: what the chat hides, except
+ *  the line a finished compaction left, which stays in that member's session
+ *  there (sessionsCompactionLineOf). */
+export function isChatMessageHiddenInSessions(conversation: Pick<Conversation, "messages">, message: Conversation["messages"][number]): boolean {
+  if (sessionsCompactionLineOf(message) && message.metadata?.hiddenFromTimeline !== true) return false;
+  return isChatMessageHiddenInChat(conversation, message);
 }
 
 /** A message drawn as a row of the chat's main timeline: shown, and not a thread reply. */
