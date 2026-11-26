@@ -53,6 +53,10 @@ export class ProviderDefaults {
     if (!update || typeof update !== "object" || !normalizeChatProviderKind(update.kind)) {
       throw new Error(`Unknown provider: ${String(update?.kind)}`);
     }
+    const valueOk = (value: unknown): boolean => value === undefined || value === null || typeof value === "string";
+    if (!valueOk(update.model) || !valueOk(update.reasoningEffort)) {
+      throw new Error("Invalid agent model or effort.");
+    }
     return this.withAssistantProviderMutation(async () => {
       const stored = await this.settings.settingsStore.readStored();
       const current = normalizeSubagentProviderEntries(stored.subagentDefaults, false);

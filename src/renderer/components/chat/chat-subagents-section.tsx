@@ -59,8 +59,9 @@ export function ChatSubagentsSection(props: {
     return next;
   });
   const canAdd = props.addable.length > 0;
-  // Accord needs one more agent and none can be added here: one is set up first.
-  const accordSetup = Boolean(props.add?.forAccord) && !canAdd;
+  // Accord needs one more agent and none can be added here: one is set up
+  // first. Not said while the CLIs are still being checked.
+  const accordSetup = Boolean(props.add?.forAccord) && !canAdd && !props.checking;
   const empty = props.providers.length === 0 && !props.checking;
   return (
     <div className="chat-side-section" data-testid="chat-members-agents">
@@ -69,7 +70,7 @@ export function ChatSubagentsSection(props: {
         {running > 0 && <span className="chat-subagents-running" data-testid="chat-subagents-running"><i aria-hidden />{running} running</span>}
         <span className="grow" />
         {canAdd && <ChatSubagentAdd key={props.add?.key} addable={props.addable}
-          openAtStart={props.add !== undefined && props.add.key !== answered} note={props.add?.forAccord ? ACCORD_NEEDS_AGENT_LINE : undefined}
+          openAtStart={Boolean(props.add?.forAccord) && props.add?.key !== answered} note={props.add?.forAccord ? ACCORD_NEEDS_AGENT_LINE : undefined}
           onClosed={() => setAnswered(props.add?.key)} />}
       </div>
       {(empty || accordSetup) && (

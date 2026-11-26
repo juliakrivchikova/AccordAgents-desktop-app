@@ -98,9 +98,10 @@ export function applySubagentDefaultUpdate(entries: readonly SubagentProviderEnt
   return index < 0 ? [...entries, next] : entries.map((entry, at) => at === index ? next : entry);
 }
 
-function withValues(entry: SubagentProviderEntry, rawModel: string | undefined, rawEffort: string | undefined): SubagentProviderEntry {
+/** Values as they came over IPC: what is not a string is no value. */
+function withValues(entry: SubagentProviderEntry, rawModel: unknown, rawEffort: unknown): SubagentProviderEntry {
   const next: SubagentProviderEntry = { kind: entry.kind };
-  const model = rawModel?.trim();
+  const model = typeof rawModel === "string" ? rawModel.trim() : undefined;
   const reasoningEffort = normalizeChatReasoningEffort(rawEffort, entry.kind);
   if (model) next.model = model;
   if (reasoningEffort) next.reasoningEffort = reasoningEffort;
