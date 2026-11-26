@@ -406,6 +406,9 @@ const bridge: AppBridge = {
   listMemoryNotes: (request) => ipcRenderer.invoke("memory:list", request),
   readMemoryNote: (request) => ipcRenderer.invoke("memory:read", request),
   deleteMemoryNote: (request) => ipcRenderer.invoke("memory:delete", request),
+  getSemanticSearchSettings: () => ipcRenderer.invoke("semantic-search:settings"),
+  setSemanticSearchKey: (request) => ipcRenderer.invoke("semantic-search:set-key", request),
+  removeSemanticSearchKey: () => ipcRenderer.invoke("semantic-search:remove-key"),
   listMachineInactivityQuestions: (): Promise<MachineInactivityQuestion[]> => ipcRenderer.invoke("machines:inactivity-questions"),
   answerMachineInactivity: (request: AnswerMachineInactivityRequest): Promise<MachineInactivityQuestion[]> =>
     ipcRenderer.invoke("machines:inactivity-answer", request),

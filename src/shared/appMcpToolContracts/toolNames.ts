@@ -54,6 +54,9 @@ export const APP_MEMORY_READ_TOOL = "app_memory_read";
 export const APP_MEMORY_WRITE_TOOL = "app_memory_write";
 export const APP_MEMORY_ARCHIVE_TOOL = "app_memory_archive";
 export const APP_MEMORY_TAGS_TOOL = "app_memory_tags";
+/** Messages of the chats of a member's project (through the User's server,
+ *  beside memory: HubMemory "chat-search"). */
+export const APP_CHAT_SEARCH_TOOL = "app_chat_search";
 
 /** Reaching the User outside the app when something urgent happens
  *  (shared/urgentAlerts.ts). */
@@ -64,7 +67,8 @@ export const APP_MEMORY_TOOL_NAMES = [
   APP_MEMORY_TAGS_TOOL,
   APP_MEMORY_READ_TOOL,
   APP_MEMORY_WRITE_TOOL,
-  APP_MEMORY_ARCHIVE_TOOL
+  APP_MEMORY_ARCHIVE_TOOL,
+  APP_CHAT_SEARCH_TOOL
 ] as const;
 
 export const APP_SCRIPT_TOOL_NAMES = [

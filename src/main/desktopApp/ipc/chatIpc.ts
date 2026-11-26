@@ -7,7 +7,7 @@ import type {
   SetChatPinnedRequest, SetChatViewRequest, ChatViewState, ChatPinState, SendChatMessageRequest, StartChatAccordRequest,
   UpdateChatParticipantRuntimeRequest, RemoveChatParticipantRequest
 } from "../../../shared/types";
-import type { MemoryNote, MemoryNoteIdRequest, MemorySettingsListRequest } from "../../../shared/memory";
+import type { MemoryNote, MemoryNoteIdRequest, MemorySettingsListRequest, SemanticSettingsResult, SemanticSettingsView } from "../../../shared/memory";
 import { emitReviewProgress } from "../chatServices";
 import { listMemoryNotesForSettings } from "../toolWiring";
 import { observeAddedMember } from "../usageSignals";
@@ -194,6 +194,19 @@ export function registerChatIpc(desktopApp: DesktopApp): void {
 
   ipcMain.handle("memory:read", (_event, request: MemoryNoteIdRequest) =>
     desktopApp.serverChatLink.memory<MemoryNote>({ action: "owner-read", noteId: String(request?.noteId ?? "") }));
+
+  // Search by meaning: the key goes to the User's server and stays there;
+  // only whether one is set comes back (SemanticSettingsView).
+  ipcMain.handle("semantic-search:settings", async (): Promise<SemanticSettingsResult> => {
+    const result = await desktopApp.serverChatLink.memory<SemanticSettingsView>({ action: "semantic-settings" });
+    if (result.ok) return { status: "ok", view: result.value };
+    const older = result.error.code === "invalid_request" && /Unknown memory action/.test(result.error.message);
+    return { status: "unavailable", message: older ? "Your server is older than this app; it searches by meaning once it updates." : result.error.message };
+  });
+  ipcMain.handle("semantic-search:set-key", (_event, request: { key?: unknown }) =>
+    desktopApp.serverChatLink.memory<SemanticSettingsView>({ action: "semantic-key", key: typeof request?.key === "string" ? request.key : "" }));
+  ipcMain.handle("semantic-search:remove-key", () =>
+    desktopApp.serverChatLink.memory<SemanticSettingsView>({ action: "semantic-key", remove: true }));
 
   ipcMain.handle("memory:delete", async (_event, request: MemoryNoteIdRequest) => {
     const noteId = String(request?.noteId ?? "");

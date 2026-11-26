@@ -9,7 +9,7 @@ import { parseNativeGoalCommand } from "../../../../shared/nativeGoalCommand";
 import { chatParticipantHome, chatParticipantHomeUnassignedMessage } from "../../../../shared/chatParticipantHome";
 import { claudeCodePermissionMode, isForkSourceMissingError, type ClaudePermissionMode, type CliAgentReplyStart } from "../../cliAgents";
 import type { ParticipantRunResult } from "../../providers";
-import { memoryAccessNow, memoryIndex } from "../../memoryTools";
+import { MEMORY_PICKS_OFF_MS, memoryAccessNow, memoryIndex, memoryPicks } from "../../memoryTools";
 import { NativeProcessUnavailableError } from "../../nativeProcess";
 import { consumeOneTimePermissionApprovals, oneTimePermissionApprovalsForParticipant } from "../approvals/permissionGrants";
 import { pendingChoiceFromAgentReply } from "../choices/choiceRecords";
@@ -129,9 +129,22 @@ export class ParticipantTurn {
     // Members' memory: the list of notes goes with a session's first turn,
     // with instructions sent again, and after the context was compacted. It
     // is asked now, while the rest of the turn is prepared (it never fails).
-    const memoryIndexPending = !isResumingSession || sessionState.instructionsRefreshed || this.chat.memberSessions.memoryIndexDue.has(memoryIndexKey(conversation.id, participant.id))
-      ? memoryIndex(memoryAccessNow(this.chat.memberSessions.memoryAccess), { conversationId: conversation.id, participantId: participant.id })
+    const memoryKey = memoryIndexKey(conversation.id, participant.id);
+    const memoryIndexIsDue = !isResumingSession || sessionState.instructionsRefreshed || this.chat.memberSessions.memoryIndexDue.has(memoryKey);
+    const memoryActor = { conversationId: conversation.id, participantId: participant.id };
+    const memoryIndexPending = memoryIndexIsDue
+      ? memoryIndex(memoryAccessNow(this.chat.memberSessions.memoryAccess), memoryActor)
       : undefined;
+    // The notes that fit this message, by meaning (only with the User's
+    // OpenAI key; none for replies coming back). A note given earlier in the
+    // session is not given again until it changes; a session told its list
+    // anew starts over.
+    if (memoryIndexIsDue) this.chat.memberSessions.memoryPicksShown.delete(memoryKey);
+    const shownPicks = this.chat.memberSessions.memoryPicksShown.get(memoryKey);
+    const memoryPicksPending = options.continuation || Date.now() < this.chat.memberSessions.memoryPicksOffUntil ? undefined : memoryPicks(
+      memoryAccessNow(this.chat.memberSessions.memoryAccess), memoryActor, promptTriggerMessage.content,
+      [...(shownPicks ?? new Map<string, number>())].map(([id, version]) => ({ id, version }))
+    );
     // A Claude Code member may take this message while an earlier one is
     // still waiting in its CLI; context counts as delivered only once the CLI
     // has handed that message to a step (onReplyStarted below).
@@ -187,7 +200,14 @@ export class ParticipantTurn {
     const includeRefreshedRoleInstructions = isResumingSession && sessionState.instructionsRefreshed;
     const primaryIncludeRoleInstructions = (usePromptRole && !isResumingSession) || includeRefreshedRoleInstructions;
     const memoryIndexResult = await memoryIndexPending;
-    const memoryIndexBlock = memoryIndexResult?.text;
+    const memoryPicksResult = await memoryPicksPending;
+    if (memoryPicksResult?.off) this.chat.memberSessions.memoryPicksOffUntil = Date.now() + MEMORY_PICKS_OFF_MS;
+    if (memoryPicksResult?.notes.length) {
+      const shown = this.chat.memberSessions.memoryPicksShown.get(memoryKey) ?? new Map<string, number>();
+      for (const note of memoryPicksResult.notes) shown.set(note.id, note.version);
+      this.chat.memberSessions.memoryPicksShown.set(memoryKey, shown);
+    }
+    const memoryIndexBlock = [memoryIndexResult?.text, memoryPicksResult?.text].filter(Boolean).join("\n\n") || undefined;
     // Shown again after a compaction until the server's list was given.
     if (memoryIndexResult?.delivered) this.chat.memberSessions.memoryIndexDue.delete(memoryIndexKey(conversation.id, participant.id));
     // It moved here with its session: told once where it is now (until a

@@ -92,6 +92,18 @@ not there yet.
   reference, not the User's instructions.
 - A list or tool call the server could not answer says so and never reads as
   "no memory". The list waits at most 4 s before the turn starts without it.
+- With search by meaning on (below), that list gives way to the notes that fit
+  each message: a line says so (with how many notes the member can see and
+  the tags in use), and each turn carries the few notes picked for its
+  message. An app that does not add picks (an older desktop or machine
+  runtime) asks without `picks` and still gets the list.
+- `app_chat_search` finds messages in the chats of the member's project (a
+  chat with no project searches chats with no project; the User, 2026-11-26):
+  by meaning when it is on, and by any word asked, in any form, best match
+  first, always (the chats' word index, `ChatSearchService` with `anyWord`
+  and `repoPath`). It returns the chat's title, the author, the time and the
+  passage, never whole messages. It goes through the memory route, so the
+  server checks the member as for memory.
 
 ## Search by words (without a key)
 
@@ -134,6 +146,46 @@ the User on 2026-11-26 (chat document "Поиск по смыслу: памят�
   asked as members are told to (by taylor, who knows the notes: an upper
   bound). Settings → Memory's search box keeps the old rule: it is a filter.
 
+## Search by meaning (with the User's OpenAI key)
+
+Decided by the User on 2026-11-26 (same chat document): OpenAI
+`text-embedding-3-small`, her key, for her chats only.
+
+- The key is entered in Settings → General ("Search by meaning"). It goes to
+  her server and stays there (`hub_documents` "semantic-search", like the
+  Telegram token for alerts): the server searches, so the server holds it.
+  It is checked with one request before it is kept; Settings shows only that a
+  key is entered, how much is printed, and why OpenAI stopped taking it. The
+  key is sent only as POST (`MEMORY_POST_ONLY_ACTIONS`), never in an address.
+- The server (`src/hub/semantic/`) keeps a print of every memory note not
+  archived and every message shown in a chat (the User's, and members'
+  finished replies). Long text is cut into passages (notes 1200 characters,
+  messages 1500, at most 8 per message), each printed. Notes keep the whole
+  print (1536 numbers), messages the first 512; one signed byte per number.
+  On the User's ~21 thousand messages that is about 12 MB of the server's
+  memory. Prints are kept in `semantic_prints` and read into memory once.
+- New notes and messages are printed as they come (1.5 s after, in batches);
+  the old ones once, in the background, a page at a time, with a pause
+  between requests. A restart prints only what changed (a hash of the text).
+  Prints of what is gone (deleted, archived, hidden) are forgotten at the end
+  of that pass.
+- `app_memory_search`: closest in meaning first (closer than 0.15), then the
+  notes holding a word asked that meaning did not bring; `ranking: "meaning"`.
+  The passage is the closest one, cut around the words asked.
+- Notes for each message (`pick`): only notes at least 0.40 close and within
+  0.07 of the closest, at most 5, none the member was given in its session
+  already unless changed since (the app keeps that per session; it starts
+  over when the list is due: a new session, instructions given again, a
+  compaction). Tuned on the User's 59 notes, 37 queries and 60 of her real
+  messages: notes came for about one message in five, and none for "ok",
+  "done" or "I'm home".
+- OpenAI not answering in time (4 s for a search, 3 s for a pick): the same
+  search by words, and no picks. OpenAI refusing the key (or no credit left):
+  the server stops using it and Settings says why until a new key is given.
+- Measured on her notes (2026-11-26): full prints of passages put the right
+  note in the first three for all 37 queries; 512 numbers for 95%. Cost: about
+  $0.08 once for all her chats, then under a cent a month.
+
 ## Keeping it tidy without the User
 
 - A write with the same title in the same kind and place is refused with the
@@ -163,7 +215,7 @@ the User on 2026-11-26 (chat document "Поиск по смыслу: памят�
 
 ## Not in v1
 
-Semantic search, agreement between members on a note, any trace of memory in
+Agreement between members on a note, any trace of memory in
 the chat or on the phone, editing a note in Settings, notes of a deleted chat
 being removed with it (they stay, shown under "deleted chat", until deleted in
 Settings).

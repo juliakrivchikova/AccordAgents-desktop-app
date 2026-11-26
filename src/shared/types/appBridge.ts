@@ -317,6 +317,10 @@ export interface AppBridge {
   listMemoryNotes(request: import("../memory").MemorySettingsListRequest): Promise<import("../memory").MemorySettingsListResult>;
   readMemoryNote(request: import("../memory").MemoryNoteIdRequest): Promise<import("../memory").MemoryResult<import("../memory").MemoryNote>>;
   deleteMemoryNote(request: import("../memory").MemoryNoteIdRequest): Promise<import("../memory").MemoryResult<{ deleted: boolean }>>;
+  // Search by meaning (Settings → General): the User's OpenAI key, kept on her server.
+  getSemanticSearchSettings(): Promise<import("../memory").SemanticSettingsResult>;
+  setSemanticSearchKey(request: { key: string }): Promise<import("../memory").MemoryResult<import("../memory").SemanticSettingsView>>;
+  removeSemanticSearchKey(): Promise<import("../memory").MemoryResult<import("../memory").SemanticSettingsView>>;
   // Machines transport: machines that host participants.
   listMachines(): Promise<MachineListResult>;
   getCloudRunPreparation(request: Pick<import("../cloudRunPreparation").PrepareCloudRunRequest, "provider" | "instanceId">): Promise<import("../cloudRunPreparation").CloudRunPreparationState | undefined>;

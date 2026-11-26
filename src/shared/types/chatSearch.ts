@@ -7,6 +7,12 @@ export interface ChatSearchRequest {
   query: string;
   limit?: number;
   cursor?: string;
+  /** The server's own use (a member's search of its project's chats): a
+   *  message with any word asked, in any form, best match first. */
+  anyWord?: boolean;
+  /** The server's own use: only the chats of this project folder (null:
+   *  chats with no project). */
+  repoPath?: string | null;
 }
 
 export interface ChatSearchHighlightRange {
