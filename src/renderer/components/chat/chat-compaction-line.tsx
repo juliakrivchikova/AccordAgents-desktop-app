@@ -12,7 +12,7 @@ export function ChatCompactionLine(props: {
 }): JSX.Element | null {
   const line = sessionsCompactionLineOf(props.message);
   if (!line) return null;
-  const kind = props.participants?.find((participant) => participant.id === line.participantId)?.kind;
+  const kind = line.cli ?? props.participants?.find((participant) => participant.id === line.participantId)?.kind;
   return (
     <div data-message-id={props.message.id} className="chat-compaction-line">
       <ArrowsInSimpleIcon size={14} aria-hidden="true" />

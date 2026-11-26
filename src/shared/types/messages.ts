@@ -3,6 +3,7 @@ import type { UrgentAlertView } from "../urgentAlerts";
 import type { ChatCardRefusal, ChatPendingChoice, ChatPendingMention, ChatServerCardMark } from "./cards";
 import type { ChatParticipantRequestBatch } from "./memberRequests";
 import type { ChatMessageSessionCut, ChatStaleRunRecovery } from "./members";
+import type { ChatProviderKind } from "./providers";
 import type { RepoFileMention } from "./repositories";
 import type { ChatRosterChangeOutcome } from "./rosterChanges";
 import type { ChatSkillMention } from "./skills";
@@ -151,6 +152,10 @@ export interface ChatMessageMetadata {
     participantId: string;
     outcome: "completed" | "failed" | "no-active-session";
     instructionsProvided: boolean;
+    /** The CLI that compacted it, whose words its line in the sessions view
+     *  uses. Absent on lines from before 2026-11-26 and from a machine on an
+     *  older runtime: the member's current CLI is used then. */
+    cli?: ChatProviderKind;
   };
   /** A machine's hidden answer to a `session.export` turn: where it put the
    *  member's session on the User's server for its move. */

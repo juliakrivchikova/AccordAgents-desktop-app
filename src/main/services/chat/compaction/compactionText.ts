@@ -211,7 +211,7 @@ export function compactRequestParticipant(conversation: Conversation, request: C
 
 export function compactMessageMetadata(
   request: Pick<CompactChatParticipantRequest, "threadId" | "parentMessageId" | "chatThreadRootId" | "runId" | "triggeredBy" | "instructions">,
-  participantId: string,
+  participant: Pick<ChatParticipant, "id" | "kind">,
   outcome: "completed" | "failed" | "no-active-session"
 ): ChatMessageMetadata {
   return {
@@ -221,9 +221,10 @@ export function compactMessageMetadata(
     runId: request.runId?.trim() || undefined,
     compaction: {
       triggeredBy: request.triggeredBy === "agent" ? "agent" : "user",
-      participantId,
+      participantId: participant.id,
       outcome,
-      instructionsProvided: Boolean(request.instructions?.trim())
+      instructionsProvided: Boolean(request.instructions?.trim()),
+      cli: participant.kind
     }
   };
 }

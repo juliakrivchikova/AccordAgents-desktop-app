@@ -233,7 +233,11 @@ test("a compaction's line is in the compacted member's session, the main session
   assert.deepEqual(sessionsViewLane(drewFailed, index), { kind: "member", participantId: "p-drew" }, "a failed one belongs to its member too, though it shows no line");
   assert.ok(memberSessionMessages(messages, "p-drew", index).some((entry) => entry.id === "drew-compacted"));
   assert.ok(!mainTimelineMessages(messages, index).some((entry) => entry.id === "drew-compacted"), "a member's compaction is not on the main timeline");
-  assert.deepEqual(sessionsCompactionLineOf(mainDone), { participantId: "p-main" });
+  assert.deepEqual(sessionsCompactionLineOf(mainDone), { participantId: "p-main" }, "a line from before the CLI was recorded");
+  const recorded = { ...drewDone, metadata: { compaction: { ...drewDone.metadata!.compaction!, cli: "codex-cli" as const } } };
+  assert.deepEqual(sessionsCompactionLineOf(recorded), { participantId: "p-drew", cli: "codex-cli" });
+  const unknownCli = { ...drewDone, metadata: { compaction: { ...drewDone.metadata!.compaction!, cli: "openai" as never } } };
+  assert.deepEqual(sessionsCompactionLineOf(unknownCli), { participantId: "p-drew" }, "a CLI it does not know is left out");
   assert.equal(sessionsCompactionLineOf(drewFailed), undefined, "a failed compaction is said as a warning, not as this line");
   assert.equal(sessionsCompactionLineOf(mainNothing), undefined);
   assert.equal(sessionsCompactionLineOf({ ...mainDone, role: "participant" }), undefined, "only the app's own line");

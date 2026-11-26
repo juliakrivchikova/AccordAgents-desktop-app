@@ -96,7 +96,7 @@ export class Compaction {
               "system",
               `@${participant.handle} does not have an active session to compact yet.`,
               undefined,
-              compactMessageMetadata(request, participant.id, "no-active-session")
+              compactMessageMetadata(request, participant, "no-active-session")
             ));
             conversation.updatedAt = new Date().toISOString();
             await this.chat.store.saveConversation(conversation);
@@ -221,7 +221,7 @@ export class Compaction {
           "system",
           content,
           undefined,
-          compactMessageMetadata(request, participant.id, result.ok ? "completed" : "failed")
+          compactMessageMetadata(request, participant, result.ok ? "completed" : "failed")
         ));
         if (!result.ok) {
           warnings.push(content);
@@ -470,7 +470,7 @@ export class Compaction {
         : machineCompactionFailureLine(participant.handle, stoppedBeforeStart ? "interrupted" : "failed",
           stoppedBeforeStart ? undefined : "the machine ended the compaction without saying how it went");
       await this.chat.store.withChatMutation(conversation, async () => {
-        conversation.messages.push(createChatMessage("system", content, undefined, compactMessageMetadata(request, participant.id, "failed")));
+        conversation.messages.push(createChatMessage("system", content, undefined, compactMessageMetadata(request, participant, "failed")));
         conversation.updatedAt = new Date().toISOString();
         await this.chat.store.saveConversation(conversation);
       });
@@ -507,7 +507,7 @@ export class Compaction {
         "system",
         `@${participant.handle} does not have an active session to compact yet.`,
         undefined,
-        compactMessageMetadata({ ...request, runId }, participant.id, "no-active-session")
+        compactMessageMetadata({ ...request, runId }, participant, "no-active-session")
       ));
       conversation.updatedAt = new Date().toISOString();
       await this.chat.store.saveConversation(conversation);

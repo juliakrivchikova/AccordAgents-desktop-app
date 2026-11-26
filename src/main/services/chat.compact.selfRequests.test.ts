@@ -124,7 +124,8 @@ test("requestSelfCompactionFromTool queues behind the current participant turn a
       triggeredBy: "agent",
       participantId: participant.id,
       outcome: "completed",
-      instructionsProvided: true
+      instructionsProvided: true,
+      cli: participant.kind
     });
     assert.deepEqual(debugEvents.filter(({ event }) => event.startsWith("chat.compaction.")).map(({ event, payload }) => ({ event, triggeredBy: payload.triggeredBy, outcome: payload.outcome })), [
       { event: "chat.compaction.requested", triggeredBy: "agent", outcome: undefined },

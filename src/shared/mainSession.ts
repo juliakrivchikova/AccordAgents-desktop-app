@@ -206,16 +206,20 @@ export function sessionsViewLane(message: ChatMessage, index: SessionsViewIndex)
  *  "Conversation compacted" in its transcript after `/compact` and after a
  *  compaction of its own (the User agreed on 2026-11-26). A failed one is
  *  said as a warning; one with nothing to compact shows nothing, as before. */
-export function sessionsCompactionLineOf(message: Pick<ChatMessage, "role" | "metadata">): { participantId: string } | undefined {
+export function sessionsCompactionLineOf(message: Pick<ChatMessage, "role" | "metadata">): { participantId: string; cli?: ChatProviderKind } | undefined {
   const compaction = message.role === "system" ? message.metadata?.compaction : undefined;
-  return compaction?.outcome === "completed" && typeof compaction.participantId === "string" && compaction.participantId
-    ? { participantId: compaction.participantId }
-    : undefined;
+  if (compaction?.outcome !== "completed" || typeof compaction.participantId !== "string" || !compaction.participantId) return undefined;
+  const cli = COMPACTING_CLIS.find((kind) => kind === compaction.cli);
+  return { participantId: compaction.participantId, ...(cli ? { cli } : {}) };
 }
 
-/** That line's words, as the member's CLI writes them: Claude Code 2.1.332
- *  and Antigravity 1.5.18 "Conversation compacted", Codex 0.171.0 "Context
- *  compacted". A member no longer in the chat reads as Claude Code. */
+const COMPACTING_CLIS: readonly ChatProviderKind[] = ["claude-code", "codex-cli", "gemini-cli"];
+
+/** That line's words, as the CLI that compacted writes them: Claude Code
+ *  2.1.332 and Antigravity 1.5.18 "Conversation compacted", Codex 0.171.0
+ *  "Context compacted". The CLI is the one the line names, else the member's
+ *  own; a line of neither (an older machine's, of a member no longer in the
+ *  chat) reads as Claude Code's. */
 export function sessionsCompactionLineText(kind: ChatProviderKind | undefined): string {
   return kind === "codex-cli" ? "Context compacted" : "Conversation compacted";
 }

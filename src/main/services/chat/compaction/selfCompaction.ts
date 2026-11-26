@@ -357,7 +357,7 @@ export class SelfCompaction {
         compactionFailureLine(participant.handle, message),
         undefined,
         {
-          ...compactMessageMetadata({ runId, triggeredBy: "agent", instructions }, participant.id, "failed"),
+          ...compactMessageMetadata({ runId, triggeredBy: "agent", instructions }, participant, "failed"),
           threadId: "system"
         }
       ));

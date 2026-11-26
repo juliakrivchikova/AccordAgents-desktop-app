@@ -113,6 +113,12 @@ test("a compaction leaves its CLI's line in the compacted member's session in th
   assert.equal(mainRow.findAll((node) => typeof node.type === "string" && node.props["data-message-id"] === "main-compacted").length, 1);
   const drewRow = renderRow(drewLine, sessions);
   assert.equal(textOf(drewRow).trim(), sessionsCompactionLineText(DREW.kind), "in the words of the member's own CLI");
+  // A member removed since: the CLI its line recorded still words it.
+  const removedCodex = chatMessage("removed-compacted", "system", 22, {
+    content: "Compacted @kim context.",
+    metadata: { compaction: { triggeredBy: "user", participantId: "p-kim", outcome: "completed", instructionsProvided: false, cli: "codex-cli" } }
+  });
+  assert.equal(textOf(renderRow(removedCodex, sessions)).trim(), sessionsCompactionLineText("codex-cli"));
 });
 
 test("rows of the main timeline: no avatar, author or thread controls; the User's message is a bubble; the turn's tasks are in its Worked fold", () => {
