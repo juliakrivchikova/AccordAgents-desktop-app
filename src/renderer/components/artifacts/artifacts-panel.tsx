@@ -194,9 +194,12 @@ export function ArtifactsPanel(props: {
     detail,
     drafts,
     draftsFor,
-    draftsFailed: Boolean(draftError),
+    draftError,
     showVersion: pinVersion,
-    showDraft
+    showDraft,
+    reload: () => {
+      if (props.selectedId) void loadDetail(props.selectedId);
+    }
   });
   async function run<T>(action: () => Promise<{ ok: true; value: T } | { ok: false; error: ArtifactError }>): Promise<T | undefined> {
     setBusy(true);

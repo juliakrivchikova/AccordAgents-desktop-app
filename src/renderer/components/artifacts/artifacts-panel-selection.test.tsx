@@ -423,6 +423,13 @@ test("an open that asks for a member's draft or a version lands the panel there"
 
     await act(async () => { root.render(panel(bridge, { artifactId: ARTIFACT_ID, draftAuthor: "drew", seq: 4 })); });
     assert.match(body(container), /Version 3/, "an author with no submitted draft leaves the document as it is");
+
+    // While drafts are collected, the inbox shows the asked author's draft rather than the first one.
+    const second = { ...draft("submitted"), id: "draft-drew", author: "drew", content: "Draft body from drew" };
+    bridge.detail = { ...collecting("submitted"), drafts: [draft("submitted"), second] };
+    bridge.listSummary = bridge.detail.summary;
+    await act(async () => { root.render(panel(bridge, { artifactId: ARTIFACT_ID, draftAuthor: "drew", seq: 5 })); });
+    assert.match(body(container), /Draft body from drew/);
   } finally {
     await act(async () => { root.unmount(); });
     container.remove();

@@ -17,10 +17,10 @@ export function submittedDraftOf(drafts: readonly ArtifactDraftView[], author: s
 
 /**
  * Lands the panel on the place an open asked for (an Accord's card: a
- * version, a member's draft), once per request. A version is shown at once;
- * a draft once the document's drafts are read (a published document's list
- * comes a moment after it), and the document as it is when the author has
- * none to show.
+ * version, a member's draft), once per request. A version is shown at once.
+ * A draft is looked for in the drafts read after the click (the document is
+ * read again for it: a draft submitted a moment ago is in a list the panel
+ * has not read yet); the document is shown as it is when the author has none.
  */
 export function useArtifactFocus(props: {
   focus?: ArtifactFocusRequest;
@@ -30,35 +30,40 @@ export function useArtifactFocus(props: {
   drafts: readonly ArtifactDraftView[];
   /** The document the `drafts` list was read for, once it was. */
   draftsFor?: string;
-  draftsFailed: boolean;
+  /** Why the last read of the drafts failed; a new value for every failure. */
+  draftError?: unknown;
   showVersion: (version: number | undefined) => void;
   showDraft: (draftId: string) => void;
+  /** Reads the selected document and its drafts again. */
+  reload: () => void;
 }): void {
-  const { focus, selectedId } = props;
-  const [pendingAuthor, setPendingAuthor] = useState<{ artifactId: string; author: string }>();
+  const { focus, selectedId, detail, drafts, draftsFor, draftError } = props;
+  // The drafts as they were at the click: only a read after it answers.
+  const [pending, setPending] = useState<{ artifactId: string; author: string; drafts: readonly ArtifactDraftView[]; draftError: unknown }>();
   useEffect(() => {
     if (!focus || focus.artifactId !== selectedId) return;
     if ("version" in focus) {
-      setPendingAuthor(undefined);
+      setPending(undefined);
       // The newest version is the document as it is, which follows a newer one.
       props.showVersion(focus.version === props.headVersion ? undefined : focus.version);
-    } else {
-      setPendingAuthor({ artifactId: focus.artifactId, author: focus.draftAuthor });
-    }
-    // Once per request: a request is new when its seq is.
-  }, [focus?.seq, selectedId]);
-  const { detail, drafts, draftsFor, draftsFailed } = props;
-  useEffect(() => {
-    if (!pendingAuthor) return;
-    if (pendingAuthor.artifactId !== selectedId) {
-      setPendingAuthor(undefined);
       return;
     }
-    if (!detail || detail.summary.id !== pendingAuthor.artifactId) return;
-    const collecting = detail.lifecycle === "collecting_drafts";
-    if (!collecting && draftsFor !== detail.summary.id && !draftsFailed) return;
-    const draft = submittedDraftOf(collecting ? detail.drafts : drafts, pendingAuthor.author);
-    setPendingAuthor(undefined);
+    setPending({ artifactId: focus.artifactId, author: focus.draftAuthor, drafts, draftError });
+    // Under the draft, the document as it is (no older version pinned).
+    props.showVersion(undefined);
+    props.reload();
+    // Once per request: a request is new when its seq is.
+  }, [focus?.seq, selectedId]);
+  useEffect(() => {
+    if (!pending) return;
+    if (pending.artifactId !== selectedId) {
+      setPending(undefined);
+      return;
+    }
+    if (drafts === pending.drafts && draftError === pending.draftError) return;
+    if (!detail || detail.summary.id !== pending.artifactId || draftsFor !== pending.artifactId) return;
+    const draft = submittedDraftOf(detail.lifecycle === "collecting_drafts" ? detail.drafts : drafts, pending.author);
+    setPending(undefined);
     if (draft) props.showDraft(draft.id);
-  }, [pendingAuthor, selectedId, detail, drafts, draftsFor, draftsFailed]);
+  }, [pending, selectedId, detail, drafts, draftsFor, draftError]);
 }
