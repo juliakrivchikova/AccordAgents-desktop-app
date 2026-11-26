@@ -11,6 +11,8 @@ import { avatarForChatParticipant } from "../chat/chat-avatars";
 const JUDGE_AVATAR_URL = new URL("../../assets/judge-flaticon-5452982.png", import.meta.url).href;
 const CLAUDE_AVATAR_URL = new URL("../../assets/claude-avatar.png", import.meta.url).href;
 const CODEX_AVATAR_URL = new URL("../../assets/codex-cli.svg", import.meta.url).href;
+// Gemini members run in Antigravity (agy): its mark, as the provider icons show it.
+const ANTIGRAVITY_AVATAR_URL = new URL("../../assets/antigravity-logo.png", import.meta.url).href;
 
 export const USER_AVATAR: AvatarSpec = { kind: "user", label: "You", mediaMode: "glyph" };
 export const ARBITER_AVATAR: AvatarSpec = { kind: "arbiter", label: "Arbiter", mediaMode: "glyph" };
@@ -76,11 +78,7 @@ function avatarGraphic(spec: AvatarSpec, mediaMode: NonNullable<AvatarSpec["medi
     return <img className={mediaClassName} src={spec.imageUrl} alt="" aria-hidden="true" />;
   }
   if (spec.kind === "gemini") {
-    return (
-      <svg className={mediaClassName} viewBox="0 0 24 24" aria-hidden="true">
-        <path d="M12 2.8c1 5 4.2 8.2 9.2 9.2-5 1-8.2 4.2-9.2 9.2-1-5-4.2-8.2-9.2-9.2 5-1 8.2-4.2 9.2-9.2Z" />
-      </svg>
-    );
+    return <img className={mediaClassName} src={ANTIGRAVITY_AVATAR_URL} alt="" aria-hidden="true" />;
   }
   return <span className={mediaClassName}>{spec.initials || initials(spec.label)}</span>;
 }

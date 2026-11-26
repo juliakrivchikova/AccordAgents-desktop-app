@@ -67,7 +67,7 @@ export const CHAT_AVATAR_CATALOG: ChatAvatarCatalogEntry[] = [
   { id: "claude-dog", kind: "claude-code", label: "Claude dog", assetFile: "participant-claude-dog.png", mediaMode: "photo" },
   { id: "claude-frog", kind: "claude-code", label: "Claude frog", assetFile: "participant-claude-frog.png", mediaMode: "photo" },
   { id: "claude-hamster", kind: "claude-code", label: "Claude hamster", assetFile: "participant-claude-hamster.png", mediaMode: "photo" },
-  { id: "gemini-logo", kind: "gemini-cli", label: "Gemini logo", assetFile: "gemini-cli.svg", mediaMode: "glyph", glyphKind: "gemini" }
+  { id: "gemini-logo", kind: "gemini-cli", label: "Antigravity logo", assetFile: "antigravity-logo.png", mediaMode: "glyph", glyphKind: "gemini" }
 ];
 
 /** The file name a surface that copies the catalog next to itself (the phone)

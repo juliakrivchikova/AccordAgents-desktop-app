@@ -21,7 +21,7 @@ const CHAT_AVATAR_URLS = {
   "codex-frog": new URL("../../assets/participant-codex-frog.png", import.meta.url).href,
   "codex-hamster": new URL("../../assets/participant-codex-hamster.png", import.meta.url).href,
   "claude-logo": new URL("../../assets/claude-avatar.png", import.meta.url).href,
-  "gemini-logo": new URL("../../assets/gemini-cli.svg", import.meta.url).href,
+  "gemini-logo": new URL("../../assets/antigravity-logo.png", import.meta.url).href,
   "claude-human": new URL("../../assets/participant-claude-human.png", import.meta.url).href,
   "claude-bunny": new URL("../../assets/participant-claude-bunny.png", import.meta.url).href,
   "claude-cat": new URL("../../assets/participant-claude-cat.png", import.meta.url).href,
