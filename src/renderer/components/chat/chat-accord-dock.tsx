@@ -1,8 +1,10 @@
-import { useContext, useEffect, useRef, useSyncExternalStore, type ReactNode } from "react";
+import { Fragment, useContext, useEffect, useRef, useSyncExternalStore, type ReactNode } from "react";
 import { CheckIcon, CaretDownIcon, CaretRightIcon, XIcon } from "@phosphor-icons/react";
 import {
   accordProgressNoteHead, accordProgressStages, accordProgressStatus, type AccordStage, type AccordStepState
 } from "../../../shared/accordProgress";
+import type { AccordLaunchCard } from "../../../shared/accordLaunchCard";
+import type { MachineListResult } from "../../../shared/machineLink";
 import type { ChatParticipant } from "../../../shared/types";
 import type { DockedAccord } from "./use-accord-progress";
 import { ArtifactsContext } from "../artifacts/artifacts-context";
@@ -15,6 +17,8 @@ import {
 import { avatarForChatParticipant } from "./chat-avatars";
 import { ChatMemberMark } from "./chat-member-mark";
 import { useChatSessionsLinks, useSessionsViewText } from "./chat-sessions-links";
+import { useMachineList } from "./use-cli-start-defaults";
+import { useMemberModelSummary } from "./use-member-model-summary";
 
 // The chat's newest Accord, pinned above the composer (the User, 2026-11-08):
 // where it stands, with every member's draft and signature, the current
@@ -52,46 +56,71 @@ function MemberMark(props: { handle: string; participants?: ChatParticipant[] })
   return <ChatMemberMark className="chat-accord-progress-avatar" markClassName="is-chip" avatar={avatar} member={participant} tooltip={null} />;
 }
 
-/** A member's name on an Accord's card: its handle, or in the sessions view
- *  (no handles there) its task's title; the main session is named by
- *  nothing there ("": its logo alone). */
-function useMemberName(): (handle: string) => string {
+const handleKey = (handle: string): string => handle.replace(/^@/, "").toLowerCase();
+
+/** The main session in the sessions view, which the card's head names by
+ *  nothing (it is the session the card is in). */
+function useIsUnnamedMain(): (handle: string) => boolean {
   const links = useChatSessionsLinks();
-  return (handle) => {
-    const key = handle.replace(/^@/, "").toLowerCase();
-    if (!links) return `@${handle.replace(/^@/, "")}`;
-    return key === links.mainHandle?.toLowerCase() ? "" : links.byHandle.get(key)?.title ?? handle.replace(/^@/, "");
-  };
+  return (handle) => Boolean(links?.mainHandle) && handleKey(handle) === links?.mainHandle?.toLowerCase();
 }
 
-function MemberName(props: { handle: string }): JSX.Element | null {
-  const name = useMemberName()(props.handle);
-  return name ? <span>{name}</span> : null;
+/** The model a member runs on and its effort, as its composer's chips name
+ *  them ("Opus 5.5 Extra High"). */
+function MemberModelLabel(props: { member: ChatParticipant; machines: MachineListResult }): JSX.Element {
+  const { model, effort } = useMemberModelSummary(props.member, props.machines);
+  return <>{effort ? `${model} ${effort}` : model}</>;
 }
 
-function Stage(props: { stage: AccordStage; participants?: ChatParticipant[] }): JSX.Element {
-  const { stage } = props;
+/** A member's name on an Accord's card: its handle in the classic view; in
+ *  the sessions view (no handles there) the model it runs on and its effort
+ *  (the User, 2026-11-26), a former member its task's title. */
+function AccordMemberName(props: { handle: string; participants?: ChatParticipant[]; machines: MachineListResult }): JSX.Element {
+  const links = useChatSessionsLinks();
+  const key = handleKey(props.handle);
+  if (!links) return <>{`@${props.handle.replace(/^@/, "")}`}</>;
+  const member = props.participants?.find((item) => item.handle.toLowerCase() === key);
+  if (member) return <MemberModelLabel member={member} machines={props.machines} />;
+  return <>{links.byHandle.get(key)?.title ?? props.handle.replace(/^@/, "")}</>;
+}
+
+/** What a click on a stage opens: a member's draft, the published version. */
+interface StageOpeners {
+  draft?: (handle: string) => void;
+  version?: () => void;
+}
+
+function Stage(props: { stage: AccordStage; participants?: ChatParticipant[]; machines: MachineListResult; open: StageOpeners }): JSX.Element {
+  const { stage, open } = props;
   const detail = useSessionsViewText()(stage.detail ?? "");
+  const openVersion = stage.key === "publish" ? open.version : undefined;
   return (
     <li className={`chat-accord-progress-stage is-${stage.state}`}>
       <StageMark state={stage.state} />
       <span className="chat-accord-progress-stage-text">
-        <span className="chat-accord-progress-label">{stage.label}</span>
+        {openVersion
+          ? <button type="button" className="chat-accord-progress-label is-link" onClick={openVersion}>{stage.label}</button>
+          : <span className="chat-accord-progress-label">{stage.label}</span>}
         {detail && <span className="chat-accord-progress-detail">{detail}</span>}
         {stage.members.length > 0 && (
           <span className="chat-accord-progress-members">
-            {stage.members.map((member) => (
-              <span
-                key={member.handle}
-                className={`chat-accord-progress-member${member.given ? " is-given" : member.waiting ? " is-waiting" : ""}`}
-              >
-                <span aria-hidden="true" className="chat-accord-progress-avatar-slot">
-                  <MemberMark handle={member.handle} participants={props.participants} />
-                </span>
-                <MemberName handle={member.handle} />
-                {member.given && <CheckIcon className="chat-accord-progress-member-check" size={12} aria-label="done" />}
-              </span>
-            ))}
+            {stage.members.map((member) => {
+              const className = `chat-accord-progress-member${member.given ? " is-given" : member.waiting ? " is-waiting" : ""}`;
+              const content = (
+                <>
+                  <span aria-hidden="true" className="chat-accord-progress-avatar-slot">
+                    <MemberMark handle={member.handle} participants={props.participants} />
+                  </span>
+                  <span><AccordMemberName handle={member.handle} participants={props.participants} machines={props.machines} /></span>
+                  {member.given && <CheckIcon className="chat-accord-progress-member-check" size={12} aria-label="done" />}
+                </>
+              );
+              // A submitted draft opens in the document's panel (the User, 2026-11-26).
+              const openDraft = stage.key === "drafts" && member.given ? open.draft : undefined;
+              return openDraft
+                ? <button key={member.handle} type="button" className={`${className} is-link`} onClick={() => openDraft(member.handle)}>{content}</button>
+                : <span key={member.handle} className={className}>{content}</span>;
+            })}
           </span>
         )}
       </span>
@@ -126,6 +155,15 @@ export function ChatAccordCard(props: {
   const { version } = progress;
   const folded = props.folded;
   const appText = useSessionsViewText();
+  const machines = useMachineList();
+  // A member's draft and the published version open in the document's panel
+  // (the User, 2026-11-26).
+  const open: StageOpeners = artifacts
+    ? {
+        draft: (handle) => artifacts.openArtifact(progress.artifactId, { draftAuthor: handle }),
+        ...(version ? { version: () => artifacts.openArtifact(progress.artifactId, { version: version.number }) } : {})
+      }
+    : {};
   return (
     <section
       className={`chat-accord-dock${progress.reached ? " is-reached" : ""}${folded ? " is-folded" : ""}`}
@@ -141,12 +179,12 @@ export function ChatAccordCard(props: {
             title={folded ? "Show the Accord's steps" : "Fold into one line"}
             onClick={props.onToggleFold}
           >
-            <AccordHeading launch={props.launch} title={title} folded={folded} />
+            <AccordHeading launch={props.launch} title={title} folded={folded} participants={props.participants} machines={machines} />
             <CaretDownIcon className="chat-accord-dock-chevron" size={16} aria-hidden="true" />
           </button>
         ) : (
           <div className="chat-accord-dock-toggle is-static">
-            <AccordHeading launch={props.launch} title={title} folded={folded} />
+            <AccordHeading launch={props.launch} title={title} folded={folded} participants={props.participants} machines={machines} />
           </div>
         )}
         {props.onClose && (
@@ -156,7 +194,7 @@ export function ChatAccordCard(props: {
       {!folded && (
         <>
           <ol className="chat-accord-progress-stages" aria-label="Accord progress">
-            {accordProgressStages(progress).map((stage) => <Stage key={stage.key} stage={stage} participants={props.participants} />)}
+            {accordProgressStages(progress).map((stage) => <Stage key={stage.key} stage={stage} participants={props.participants} machines={machines} open={open} />)}
           </ol>
           {version && (
             <div className="chat-accord-progress-note">
@@ -180,16 +218,31 @@ export function ChatAccordCard(props: {
   );
 }
 
-/** " · led by X · with Y, Z": a member named by nothing (the main session in
- *  the sessions view) is left out. */
-function accordHeadingMeta(lead: string, members: readonly string[]): string {
-  const named = members.filter(Boolean);
-  return `${lead ? ` · led by ${lead}` : ""}${named.length > 0 ? ` · with ${named.join(", ")}` : ""}`;
+/** " · led by X · with Y, Z": the main session in the sessions view is
+ *  left out (named by nothing there). */
+function AccordHeadingPeople(props: { card: AccordLaunchCard; participants?: ChatParticipant[]; machines: MachineListResult }): JSX.Element {
+  const unnamed = useIsUnnamedMain();
+  const { card } = props;
+  const members = card.members.filter((handle) => !unnamed(handle));
+  const name = (handle: string): JSX.Element => <AccordMemberName handle={handle} participants={props.participants} machines={props.machines} />;
+  return (
+    <>
+      {!unnamed(card.facilitator) && <> · led by {name(card.facilitator)}</>}
+      {members.length > 0 && (
+        <> · with {members.map((handle, index) => <Fragment key={handle}>{index > 0 && ", "}{name(handle)}</Fragment>)}</>
+      )}
+    </>
+  );
 }
 
-function AccordHeading(props: { launch: DockedAccord; title: string; folded: boolean }): JSX.Element {
+function AccordHeading(props: {
+  launch: DockedAccord;
+  title: string;
+  folded: boolean;
+  participants?: ChatParticipant[];
+  machines: MachineListResult;
+}): JSX.Element {
   const { card, progress } = props.launch;
-  const name = useMemberName();
   return (
     <>
       <span className="chat-accord-dock-icon" aria-hidden="true">
@@ -200,7 +253,7 @@ function AccordHeading(props: { launch: DockedAccord; title: string; folded: boo
         {!props.folded && (
           <span className="chat-accord-dock-meta">
             <span className="chat-accord-dock-kind">Accord</span>
-            {accordHeadingMeta(name(card.facilitator), card.members.map(name))}
+            <AccordHeadingPeople card={card} participants={props.participants} machines={props.machines} />
           </span>
         )}
       </span>

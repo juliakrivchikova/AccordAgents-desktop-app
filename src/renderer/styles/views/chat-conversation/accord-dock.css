@@ -240,6 +240,40 @@
   border-color: var(--app-accent);
 }
 
+/* A submitted draft and the published version open in the document's panel. */
+button.chat-accord-progress-member {
+  background: none;
+  cursor: pointer;
+  font-family: inherit;
+  text-align: left;
+  transition: background-color 120ms var(--ui-ease-out);
+}
+
+button.chat-accord-progress-member:hover {
+  background: var(--ui-row-hover);
+}
+
+.chat-accord-progress-label.is-link {
+  align-self: flex-start;
+  padding: 0;
+  border: 0;
+  background: none;
+  cursor: pointer;
+  font-family: inherit;
+  text-align: left;
+  transition: color 120ms var(--ui-ease-out);
+}
+
+.chat-accord-progress-label.is-link:hover {
+  color: var(--ui-link);
+}
+
+button.chat-accord-progress-member:focus-visible,
+.chat-accord-progress-label.is-link:focus-visible {
+  outline: 2px solid var(--ui-focus-ring);
+  outline-offset: 2px;
+}
+
 .chat-accord-progress-avatar-slot {
   display: inline-flex;
   flex: none;

@@ -15,6 +15,8 @@ import type {
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { ArtifactDetailView } from "./artifact-detail";
 import { ArtifactsPanel } from "./artifacts-panel";
+import { submittedDraftOf } from "./use-artifact-focus";
+import type { ArtifactFocusRequest } from "./use-artifacts";
 
 declare global {
   var ACCORD_RENDERER_JSDOM: boolean | undefined;
@@ -135,7 +137,7 @@ function installBridge(bridge: Bridge): void {
   });
 }
 
-function panel(bridge: Bridge): JSX.Element {
+function panel(bridge: Bridge, focus?: ArtifactFocusRequest): JSX.Element {
   return (
     <TooltipProvider>
       <ArtifactsPanel
@@ -143,6 +145,7 @@ function panel(bridge: Bridge): JSX.Element {
         members={["user", "drew", "taylor"]}
         artifacts={[bridge.listSummary]}
         selectedId={ARTIFACT_ID}
+        focus={focus}
         onSelect={() => undefined}
         onClose={() => undefined}
       />
@@ -397,4 +400,43 @@ test("a diff for a superseded pair is never captioned as the current one", async
     await act(async () => { root.unmount(); });
     container.remove();
   }
+});
+
+// An Accord's card opens a member's draft and the published version (the User, 2026-11-26).
+test("an open that asks for a member's draft or a version lands the panel there", async () => {
+  const bridge = freshBridge();
+  installBridge(bridge);
+  const container = document.createElement("div");
+  document.body.append(container);
+  const root = createRoot(container);
+  try {
+    await act(async () => { root.render(panel(bridge, { artifactId: ARTIFACT_ID, draftAuthor: "@Taylor", seq: 1 })); });
+    assert.match(body(container), /Draft body from taylor/, "the author's submitted draft, once the drafts are read");
+
+    await act(async () => { root.render(panel(bridge, { artifactId: ARTIFACT_ID, version: 2, seq: 2 })); });
+    assert.match(body(container), /Version 2/);
+    assert.doesNotMatch(body(container), /Draft body from taylor/);
+
+    await act(async () => { root.render(panel(bridge, { artifactId: ARTIFACT_ID, version: 3, seq: 3 })); });
+    assert.match(body(container), /Version 3/, "the newest version is the document as it is");
+    assert.equal(bridge.readVersions.at(-1), 0, "read as the head, which follows a newer version");
+
+    await act(async () => { root.render(panel(bridge, { artifactId: ARTIFACT_ID, draftAuthor: "drew", seq: 4 })); });
+    assert.match(body(container), /Version 3/, "an author with no submitted draft leaves the document as it is");
+  } finally {
+    await act(async () => { root.unmount(); });
+    container.remove();
+  }
+});
+
+test("the draft a chip opens is the author's submitted one, else the newest it submitted", () => {
+  const of = (id: string, author: string, state: ArtifactDraftView["state"], submittedAt?: string): ArtifactDraftView =>
+    ({ ...draft(state), id, author, ...(submittedAt ? { submittedAt } : { submittedAt: undefined }) });
+  const older = of("old", "drew", "superseded", "2026-09-20T10:00:00.000Z");
+  const newer = of("new", "drew", "withdrawn", "2026-09-20T11:00:00.000Z");
+  const waiting = of("waiting", "drew", "submitted", "2026-09-20T09:00:00.000Z");
+  assert.equal(submittedDraftOf([older, newer, waiting], "@Drew")?.id, "waiting");
+  assert.equal(submittedDraftOf([older, newer], "drew")?.id, "new");
+  assert.equal(submittedDraftOf([of("editing", "drew", "editing")], "drew"), undefined, "never submitted");
+  assert.equal(submittedDraftOf([waiting], "taylor"), undefined);
 });

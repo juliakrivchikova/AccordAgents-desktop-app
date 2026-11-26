@@ -13,6 +13,8 @@ import { IconButton } from "../primitives";
 import { ArtifactDetailView, formatArtifactRelativeTimestamp, type ArtifactCompareState } from "./artifact-detail";
 import { ArtifactActionsMenu } from "./artifact-actions-menu";
 import { ArtifactVersionSubmenu, artifactSubtitleParts } from "./artifact-version-selector";
+import { useArtifactFocus } from "./use-artifact-focus";
+import type { ArtifactFocusRequest } from "./use-artifacts";
 import { AccessArtifactForm, CreateArtifactForm } from "./artifact-forms";
 import type { ArtifactAccessValues } from "./artifact-forms";
 import { useArtifactsPanelResize } from "./use-artifacts-panel-resize";
@@ -29,6 +31,8 @@ export function ArtifactsPanel(props: {
   members: string[];
   artifacts: ArtifactSummary[];
   selectedId?: string;
+  /** The place of the selected document the last open asked for. */
+  focus?: ArtifactFocusRequest;
   onSelect: (artifactId: string | undefined) => void;
   onClose: () => void;
 }): JSX.Element {
@@ -183,6 +187,17 @@ export function ArtifactsPanel(props: {
     setRenaming(false);
     setAccessOpen(false);
   }, [detail?.summary.archivedAt]);
+  useArtifactFocus({
+    focus: props.focus,
+    selectedId: props.selectedId,
+    headVersion: selectedSummary?.headVersion,
+    detail,
+    drafts,
+    draftsFor,
+    draftsFailed: Boolean(draftError),
+    showVersion: pinVersion,
+    showDraft
+  });
   async function run<T>(action: () => Promise<{ ok: true; value: T } | { ok: false; error: ArtifactError }>): Promise<T | undefined> {
     setBusy(true);
     clearTransient();
@@ -316,17 +331,21 @@ export function ArtifactsPanel(props: {
       void loadDetail(detail.summary.id, viewVersion);
     }
   }
-  function showVersion(version: number): void {
-    if (!detail) {
-      return;
-    }
-    const target = version === detail.summary.headVersion ? undefined : version;
+  // One version on screen (none: the head), with no draft or comparison over it.
+  function pinVersion(target: number | undefined): void {
     setSelectedDraftId(undefined);
     setViewVersion(target);
     setShowDiff(false);
     setCompare(undefined);
     compareGeneration.current += 1;
     setDiffBusy(false);
+  }
+  function showVersion(version: number): void {
+    if (!detail) {
+      return;
+    }
+    const target = version === detail.summary.headVersion ? undefined : version;
+    pinVersion(target);
     void loadDetail(detail.summary.id, target);
   }
   function showDraft(draftId: string): void {
