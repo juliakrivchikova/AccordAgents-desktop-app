@@ -1,5 +1,6 @@
 import type { CliStartDefaultsByKind } from "../../shared/cliStartDefaults";
 import type { ForkToNewChatMachineSupport } from "../../shared/forkToNewChat";
+import type { ImportedThread } from "./chat/conversations/chatImports";
 import type { CliModesMachineSupport } from "../../shared/chatAccessModes";
 import { randomUUID } from "node:crypto";
 import type { HubNewChatOptions } from "../../shared/hubProtocol";
@@ -249,6 +250,12 @@ export class ChatService {
 
   createConversation(request: CreateChatConversationRequest, signal?: AbortSignal, progress?: ProgressCallback): Promise<StartReviewResult> {
     return this.modules.creation.createConversation(request, signal, progress);
+  }
+
+  /** A chat made from a CLI thread of the User's own, going on in that CLI
+   *  session (docs/design/cli-import/plan.md). */
+  importCliThread(thread: ImportedThread, folder?: string): Promise<Conversation> {
+    return this.modules.imports.createImportedConversation(thread, folder);
   }
 
   /**

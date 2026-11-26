@@ -38,6 +38,7 @@ import type {
   StartChatAccordRequest, StartChatAccordResult, ToggleChatReactionRequest, UpdateChatParticipantRuntimeRequest
 } from "./chatRequests";
 import type { ChatSearchRequest, ChatSearchResponse } from "./chatSearch";
+import type { CliImportListRequest, CliImportListResult, CliImportRequest, CliImportResult } from "./cliImport";
 import type {
   CloudRunsSettingsUpdate, CloudRunWorkerDoctorReport, CloudRunWorkerSettings, CloudRunWorkerSetupProgress,
   CloudRunWorkerTestResult
@@ -209,6 +210,11 @@ export interface AppBridge {
   refreshPlugins(request?: PluginListRequest): Promise<PluginListResult>;
   listConversations(): Promise<ConversationSummary[]>;
   searchChats(request: ChatSearchRequest): Promise<ChatSearchResponse>;
+  /** The User's own CLI threads on this computer (docs/design/cli-import/plan.md). */
+  listCliImportThreads(request: CliImportListRequest): Promise<CliImportListResult>;
+  /** Each thread as a chat that goes on in its CLI session; a thread a chat
+   *  already holds is not imported again (that chat is returned). */
+  importCliThreads(request: CliImportRequest): Promise<CliImportResult>;
   listChatActivity(request?: ListChatActivityRequest): Promise<ListChatActivityResult>;
   getConversation(id: string): Promise<Conversation | undefined>;
   openConversation(id: string, limit?: number): Promise<ConversationOpenResult | undefined>;

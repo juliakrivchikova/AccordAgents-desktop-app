@@ -34,7 +34,7 @@ export class MemberMoves {
   constructor(
     private readonly chat: Pick<
       ChatModules,
-      | "activeRuns" | "backgroundTasks" | "bodyTransport" | "host" | "machineSupport" | "memberRestart" | "memberSessions"
+      | "activeRuns" | "backgroundTasks" | "bodyTransport" | "host" | "imports" | "machineSupport" | "memberRestart" | "memberSessions"
       | "members" | "remoteTurns" | "serverLink" | "serverTurns" | "store" | "turnQueue"
     >,
     private readonly deps: Pick<ChatDependencies, "cliRunner" | "debugLogs">
@@ -148,10 +148,15 @@ export class MemberMoves {
         if (current.sessionHandoff && session?.importedHandoff !== current.sessionHandoff.blob.blobHash) {
           // Handed here and not taken yet: that session goes on, as it is.
           handoff = current.sessionHandoff;
-        } else if (session?.sessionId) {
-          await runner.closeWarmAgents?.call(this.deps.cliRunner, conversation.id, member.id, "member-moved");
-          handoff = await this.packLocalSession(latest, session, label);
-          if (!handoff) sessionNote = "Its session was not found on this computer, so it starts a new one there.";
+        } else {
+          // An imported thread that has not run here yet goes with its
+          // session too, not told yet that it is the main session.
+          const local = session?.sessionId ? session : await this.chat.imports.importedSessionToMove(latest, member);
+          if (local?.sessionId) {
+            await runner.closeWarmAgents?.call(this.deps.cliRunner, conversation.id, member.id, "member-moved");
+            handoff = await this.packLocalSession(latest, local, label);
+            if (!handoff) sessionNote = "Its session was not found on this computer, so it starts a new one there.";
+          }
         }
       } else if (sourceMachineId) {
         const exported = await this.exportSessionFromMachine(latest, current);
@@ -519,6 +524,9 @@ export class MemberMoves {
         ...(typeof moved.roleInstructions === "string" ? { roleInstructions: moved.roleInstructions } : {}),
         ...(typeof moved.roleLabel === "string" ? { roleLabel: moved.roleLabel } : {}),
         ...(Array.isArray(moved.participantBehaviorRules) ? { participantBehaviorRules: moved.participantBehaviorRules } : {}),
+        // An imported thread's session not told yet that it is the main
+        // session: told at its first turn there (ParticipantTurn).
+        ...(moved.importIntroPending === true ? { importIntroPending: true } : {}),
         importedHandoff: handoff.blob.blobHash,
         movedHere: {
           from: placeName(handoff.fromName) ?? "another computer",

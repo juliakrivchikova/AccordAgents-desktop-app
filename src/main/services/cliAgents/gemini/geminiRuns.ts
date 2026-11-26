@@ -24,7 +24,7 @@ import {
   startGeminiGoalRunTail, startGeminiRunTail, writeGeminiSessionSettings
 } from "./runTail";
 import { ANSI_ESCAPE_RE } from "../models/claudeModelProbe";
-import { errorText, reportSessionId, truncateText } from "../runs/outputText";
+import { errorText, reportSessionId, resumeOnlyMissError, truncateText } from "../runs/outputText";
 import { readOptionalFile } from "../runs/records";
 import { agentRunEnv, promptWithImageFallback, withAppMcpClientStatus } from "../runs/runEnvironment";
 import type { CliAgentCompactResult, CliAgentRoleOptions, CliAgentRunOptions } from "../types";
@@ -435,6 +435,7 @@ export class GeminiRuns {
         : runResult;
     } catch (error) {
       if (options.sessionId && (error instanceof CliGeminiResumeMissError || isGeminiResumeMissText(errorText(error)))) {
+        if (options.resumeOnly) throw resumeOnlyMissError("Antigravity", error);
         const restarted = await this.runGeminiOneShot(participant, options.resumeFallbackPrompt ?? prompt, repoPath, kind, signal, {
           persistSession: options.persistSession,
           extraReadableDirs: options.extraReadableDirs,

@@ -9,7 +9,7 @@ import { ConsensusService } from "../services/consensus";
 import { AppMcpService } from "../services/appMcp";
 import { AppSkillsService } from "../services/appSkills";
 import { AgentEnvironmentService } from "../services/agentEnvironment";
-import { commandEnvironment, ensureLoginShellEnvPrimed, onComputerEnvironmentRead, setCommandDebugLogger } from "../services/command";
+import { commandEnvironment, ensureLoginShellEnvPrimed, onComputerEnvironmentRead, resolveCommandPath, setCommandDebugLogger } from "../services/command";
 import { LocalCliSignInService } from "../services/localCliSignIn";
 import { DebugLogService } from "../services/debugLogs";
 import { GitService } from "../services/git";
@@ -22,6 +22,7 @@ import { FILE_PREVIEW_PROTOCOL } from "../../shared/filePreview";
 import { SettingsService } from "../services/settings";
 import { StorageService } from "../services/storage";
 import { ChatSearchService } from "../services/chatSearch";
+import { CliImportService } from "../services/cliImport";
 import { resolveSqliteExecutable } from "../services/sqliteCli";
 import { PluginService } from "../services/plugins";
 import { UserSkillsService } from "../services/userSkills";
@@ -64,6 +65,16 @@ export function createCoreServices(desktopApp: DesktopApp): void {
   desktopApp.storageService = new StorageService({ sqliteExecutable: desktopApp.sqliteExecutable });
   desktopApp.debugLogService = new DebugLogService();
   desktopApp.chatSearchService = new ChatSearchService(desktopApp.storageService, desktopApp.debugLogService);
+  // The User's own CLI threads on this computer, read where each CLI keeps
+  // them (docs/design/cli-import/plan.md).
+  desktopApp.cliImportService = new CliImportService({
+    codexExecutable: async () => {
+      await ensureLoginShellEnvPrimed();
+      return resolveCommandPath("codex", commandEnvironment());
+    },
+    sqliteExecutable: desktopApp.sqliteExecutable,
+    env: () => commandEnvironment()
+  });
 
   // The terminal panel: shells run in their own utility process, so heavy output
   // or a crash of the native terminal module never reaches this process.

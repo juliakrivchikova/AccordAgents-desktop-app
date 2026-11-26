@@ -16,6 +16,7 @@ import { registerMachinesIpc } from "./machinesIpc";
 import { registerHubIpc } from "./hubIpc";
 import { registerSpeechIpc } from "./speechIpc";
 import { registerArtifactsIpc } from "./artifactsIpc";
+import { registerCliImportIpc } from "./cliImportIpc";
 import type { DesktopApp } from "../desktopApp";
 
 /** Answers everything the window asks of the main process. */
@@ -38,4 +39,5 @@ export function registerIpc(desktopApp: DesktopApp): void {
   registerHubIpc(desktopApp);
   registerSpeechIpc(desktopApp);
   registerArtifactsIpc(desktopApp);
+  registerCliImportIpc(desktopApp);
 }

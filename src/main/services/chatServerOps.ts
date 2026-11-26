@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { LOCAL_MESSAGE_METADATA_KEYS, SHARED_CONVERSATION_METADATA_KEYS, type ChatChange } from "./chatChanges";
-import type { HubCard, HubConversationFields, HubOp, HubOpEffect, HubTurn } from "../../shared/hubOps";
+import { HUB_OP_MAX_BYTES, type HubCard, type HubConversationFields, type HubOp, type HubOpEffect, type HubTurn } from "../../shared/hubOps";
 import type { HubOpOutcome, HubOpWithdrawal } from "./hubOpsClient";
 import type { ChatMessage, Conversation } from "../../shared/types";
 
@@ -229,4 +229,61 @@ export function turnsOfEffect(effect: HubOpEffect): HubTurn[] {
   if (effect.kind === "message.create") return effect.turns ?? [];
   if (effect.kind === "turn.request" || effect.kind === "turn.claim" || effect.kind === "turn.stop" || effect.kind === "turn.finish") return [effect.turn];
   return [];
+}
+
+const IMPORT_PAGE_BYTES = Math.floor(HUB_OP_MAX_BYTES * 0.8);
+const IMPORT_PAGE_MESSAGES = 200;
+
+/** A whole chat as the writes that bring it to the User's server at once
+ *  (`chat.import`, which only the computer that holds the chat writes, and
+ *  which rings nobody): its fields with the first page, its messages in
+ *  order, the order with the last page, or alone after it when that page
+ *  would be too large. Used for the one-time move of the chats to a server
+ *  and for a chat imported from a CLI thread. */
+export function chatImportOps(conversation: Conversation, messages: ChatMessage[] = conversation.messages): HubOp[] {
+  const fields = { ...conversationFieldsOf(conversation), updatedAt: conversation.updatedAt };
+  const moved = messages.map(messageForImport);
+  const order = moved.map((message) => message.id);
+  const pages: ChatMessage[][] = [];
+  let current: ChatMessage[] = [];
+  let bytes = 0;
+  for (const message of moved) {
+    const size = Buffer.byteLength(JSON.stringify(message));
+    if (current.length > 0 && (bytes + size > IMPORT_PAGE_BYTES || current.length >= IMPORT_PAGE_MESSAGES)) {
+      pages.push(current);
+      current = [];
+      bytes = 0;
+    }
+    current.push(message);
+    bytes += size;
+  }
+  pages.push(current);
+  const ops: HubOp[] = [];
+  for (let index = 0; index < pages.length; index += 1) {
+    const last = index === pages.length - 1;
+    const withOrder = last && Buffer.byteLength(JSON.stringify(order)) + bytesOf(pages[index]!) < IMPORT_PAGE_BYTES;
+    ops.push({
+      opId: newOpId(), kind: "chat.import", conversationId: conversation.id, messages: pages[index]!,
+      ...(index === 0 ? { conversation: fields } : {}),
+      ...(withOrder ? { order } : {})
+    });
+    if (last && !withOrder) ops.push({ opId: newOpId(), kind: "chat.import", conversationId: conversation.id, messages: [], order });
+  }
+  return ops;
+}
+
+function bytesOf(messages: ChatMessage[]): number {
+  return messages.reduce((sum, message) => sum + Buffer.byteLength(JSON.stringify(message)), 0);
+}
+
+/** A message as it moves to the server: this device's bookkeeping out,
+ *  reactions kept (they are the chat's). */
+function messageForImport(message: ChatMessage): ChatMessage {
+  const { metadata, ...rest } = message;
+  if (!metadata) return { ...rest };
+  const shared: Record<string, unknown> = { ...metadata };
+  for (const key of LOCAL_MESSAGE_METADATA_KEYS) delete shared[key];
+  delete shared.serverSeq;
+  delete shared.serverWriter;
+  return Object.keys(shared).length ? { ...rest, metadata: shared as ChatMessage["metadata"] } : { ...rest };
 }

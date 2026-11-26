@@ -106,3 +106,17 @@ test("the list names the provider of each chat's main session, by role, and none
     await rm(directory, { recursive: true, force: true });
   }
 });
+
+test("the CLI import finds the chat that holds a thread, by a member's session or an imported main session's origin", async () => {
+  const directory = await mkdtemp(path.join(tmpdir(), "accordagents-chat-cli-sessions-"));
+  const storage = new StorageService({ dbPath: path.join(directory, "accordagents.sqlite3") });
+  try {
+    await storage.saveConversation(chat("ran", [asked], { participantSessions: [{ participantId: "m", sessionId: "codex-thread" }, { participantId: "n", sessionId: "" }] }));
+    // Imported, its first turn not run yet: no session record, only the origin.
+    await storage.saveConversation(chat("imported", [asked], { participants: [{ id: "main", handle: "main", kind: "claude-code", importOrigin: { kind: "claude-code", sessionId: "claude-thread" } }] }));
+    const found = (await storage.listChatCliSessions()).map((row) => `${row.sessionId}:${row.conversationId}`).sort();
+    assert.deepEqual(found, ["claude-thread:imported", "codex-thread:ran"]);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});

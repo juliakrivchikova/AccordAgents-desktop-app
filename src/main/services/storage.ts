@@ -102,6 +102,10 @@ export class StorageService {
     return this.modules.conversationLists.listChatMemberProviders();
   }
 
+  listChatCliSessions(): Promise<Array<{ conversationId: string; sessionId: string }>> {
+    return this.modules.conversationLists.listChatCliSessions();
+  }
+
   /** The chats with a User message written since `since` (the weekly usage
    *  snapshot), each with what decides the view it is shown in
    *  (shared/mainSession.ts chatViewFor): its main session, whether that is

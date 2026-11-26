@@ -1,6 +1,7 @@
 import type { DeviceEventBlobReference } from "../deviceEventBlobs";
 import type { UrgentAlertView } from "../urgentAlerts";
 import type { ChatCardRefusal, ChatPendingChoice, ChatPendingMention, ChatServerCardMark } from "./cards";
+import type { ChatImportNotice } from "./cliImport";
 import type { ChatParticipantRequestBatch } from "./memberRequests";
 import type { ChatMessageSessionCut, ChatStaleRunRecovery } from "./members";
 import type { RepoFileMention } from "./repositories";
@@ -174,6 +175,10 @@ export interface ChatMessageMetadata {
    *  that ran the turn, when its CLI said (Claude Code's stream, Codex's
    *  turn). */
   sessionCut?: ChatMessageSessionCut;
+  /** The line that opens a chat imported from a CLI thread: where its
+   *  history comes from (src/shared/types/cliImport.ts). Shown on every
+   *  device, though it is a system line. */
+  importNotice?: ChatImportNotice;
   queuedBehind?: { handle: string };
   /** The reply waits behind its member's turn before it: the shared word
    *  of `queuedBehind` (which stays on the device), so the phone shows it

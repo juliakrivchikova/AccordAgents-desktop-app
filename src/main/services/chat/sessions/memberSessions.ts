@@ -77,7 +77,7 @@ export class MemberSessions {
   constructor(
     private readonly chat: Pick<
       ChatModules,
-      | "agentEnvironment" | "forks" | "host" | "memberMoves" | "permissionRequests" | "store" | "turnPrompt"
+      | "agentEnvironment" | "forks" | "host" | "imports" | "memberMoves" | "permissionRequests" | "store" | "turnPrompt"
     >,
     private readonly deps: Pick<ChatDependencies, "debugLogs">
   ) {}
@@ -337,6 +337,7 @@ export class MemberSessions {
     const role = await this.chat.agentEnvironment.resolvedRoleForParticipant(participant);
     const session = await this.newSessionForParticipant(participant, role, runtimeConfigVersion);
     const forkOriginUnavailable = await this.chat.forks.startFromForkOrigin(conversation, participant, session);
+    this.chat.imports.startFromImportOrigin(conversation, participant, session);
     return {
       session,
       instructionsRefreshed: false,

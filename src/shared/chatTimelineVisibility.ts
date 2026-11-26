@@ -32,6 +32,11 @@ export function isChatMessageHiddenFromTimeline(
   if (turnFinishedNoteOf(message)) {
     return false;
   }
+  // And the line that opens a chat imported from a CLI thread: where its
+  // history comes from.
+  if (message.metadata?.importNotice) {
+    return false;
+  }
   // And the line a closed Accord leaves where the User closed it.
   if (accordClosedLaunchId(message)) {
     return false;

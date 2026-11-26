@@ -4,7 +4,7 @@ import type { ChatAppToolApprovalPolicy, ChatParticipant, ChatParticipantRequest
 /** Where a member runs: what decides which device takes its turns, the
  *  session it is handed when it moves, and the member of another chat a
  *  forked main session copies (only the computer writes any of them). */
-export const HOME_FIELDS = ["homeMachineId", "cloudRun", "remoteExecution", "sessionHandoff", "forkOrigin"] as const;
+export const HOME_FIELDS = ["homeMachineId", "cloudRun", "remoteExecution", "sessionHandoff", "forkOrigin", "importOrigin"] as const;
 
 export function participantsOf(value: unknown): ChatParticipant[] {
   return Array.isArray(value) ? value.filter((item): item is ChatParticipant => Boolean(item) && typeof (item as { id?: unknown }).id === "string") : [];

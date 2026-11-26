@@ -2,8 +2,7 @@ import type { HubAlertRequest, HubAlertResult } from "../../shared/urgentAlerts"
 import { accordClosedLaunchId } from "../../shared/accordProgress";
 import { HubClient, HubIdentityError, HubHttpError } from "./hubClient";
 import { HubOpsClient, HUB_FEED_CURSOR_KEY, type HubOpOutcome } from "./hubOpsClient";
-import { conversationFieldsOf, newOpId, type ChatServerLink, type ChatServerQueue } from "./chatServerOps";
-import { LOCAL_MESSAGE_METADATA_KEYS } from "./chatChanges";
+import { chatImportOps, newOpId, type ChatServerLink, type ChatServerQueue } from "./chatServerOps";
 import type { HubSigningIdentity } from "./hubAuth";
 import type { StorageService } from "./storage";
 import type { ChatService } from "./chat";
@@ -17,7 +16,6 @@ import type { MemoryServerAccess } from "./memoryTools";
 /** Messages in one page of a chat moving to the server (well under the
  *  server's limit for one operation). */
 const IMPORT_PAGE_BYTES = Math.floor(HUB_OP_MAX_BYTES * 0.8);
-const IMPORT_PAGE_MESSAGES = 200;
 /** A document action a request is already carrying when its writer stops
  *  waiting gets this much longer for that request's answer. */
 const ARTIFACT_IN_FLIGHT_WAIT_MS = 10_000;
@@ -658,11 +656,13 @@ export class ServerChatLink {
     const onServer = new Set(chats.map((chat) => chat.id));
     for (const chat of chats) await this.options.chat.reloadChatFromServer(chat.id);
     // A chat this device holds that the server no longer has (deleted while
-    // this device was away), unless this device created it and has not sent it.
+    // this device was away), unless this device created or imported it and
+    // has not sent it.
     for (const summary of await this.options.storage.listConversations()) {
       if (summary.kind !== "chat" || onServer.has(summary.id)) continue;
       const queued = await this.options.storage.hubClientOps().forConversation(summary.id);
-      if (!queued.some((row) => row.kind === "conversation.create" && row.status === "queued")) await this.options.chat.reloadChatFromServer(summary.id);
+      const unsent = queued.some((row) => (row.kind === "conversation.create" || row.kind === "chat.import") && row.status === "queued");
+      if (!unsent) await this.options.chat.reloadChatFromServer(summary.id);
     }
     // Every chat's documents as the server holds them.
     await this.reloadArtifacts(chats.map((chat) => chat.id));
@@ -873,45 +873,20 @@ export class ServerChatLink {
     return { pages: pages.length };
   }
 
-  /** One chat moved to the server, in pages; returns the pages sent. */
+  /** One chat moved to the server, in pages; returns the writes sent. */
   private async importChat(client: HubClient, conversation: Conversation): Promise<number> {
-    const fields = { ...conversationFieldsOf(conversation), updatedAt: conversation.updatedAt };
     // A closed Accord's line the old server refused draws nothing: moved, it
     // would fold that Accord on every device.
-    const messages = conversation.messages
-      .filter((message) => !(accordClosedLaunchId(message) && message.metadata?.serverRejected))
-      .map(messageForImport);
-    const order = messages.map((message) => message.id);
-    const pages: ChatMessage[][] = [];
-    let current: ChatMessage[] = [];
-    let bytes = 0;
-    for (const message of messages) {
-      const size = Buffer.byteLength(JSON.stringify(message));
-      if (current.length > 0 && (bytes + size > IMPORT_PAGE_BYTES || current.length >= IMPORT_PAGE_MESSAGES)) {
-        pages.push(current);
-        current = [];
-        bytes = 0;
-      }
-      current.push(message);
-      bytes += size;
-    }
-    pages.push(current);
-    for (let index = 0; index < pages.length; index += 1) {
-      const last = index === pages.length - 1;
-      const op: HubOp = {
-        opId: newOpId(), kind: "chat.import", conversationId: conversation.id, messages: pages[index],
-        ...(index === 0 ? { conversation: fields } : {}),
-        // The order goes alone when it would make the last page too large.
-        ...(last && Buffer.byteLength(JSON.stringify(order)) + bytesOf(pages[index]) < IMPORT_PAGE_BYTES ? { order } : {})
-      };
+    const ops = chatImportOps(conversation, conversation.messages
+      .filter((message) => !(accordClosedLaunchId(message) && message.metadata?.serverRejected)));
+    for (const op of ops) {
       // Its pictures go first, as with every message written to a server:
       // made while this computer had only the server inside the app, or
       // before the User set up this one, they are not there yet.
       await this.putPictures([op], client);
       await this.writeOne(client, op);
-      if (last && !("order" in op)) await this.writeOne(client, { opId: newOpId(), kind: "chat.import", conversationId: conversation.id, messages: [], order });
     }
-    return pages.length;
+    return ops.length;
   }
 
   private async writeOne(client: HubClient, op: HubOp): Promise<void> {
@@ -921,22 +896,6 @@ export class ServerChatLink {
       throw new Error(`The server did not take chat ${op.conversationId}: ${result && result.status === "rejected" ? result.reason : "no answer"}`);
     }
   }
-}
-
-function bytesOf(messages: ChatMessage[]): number {
-  return messages.reduce((sum, message) => sum + Buffer.byteLength(JSON.stringify(message)), 0);
-}
-
-/** A message as it moves to the server: this device's bookkeeping out,
- *  reactions kept (they are the chat's). */
-function messageForImport(message: ChatMessage): ChatMessage {
-  const { metadata, ...rest } = message;
-  if (!metadata) return { ...rest };
-  const shared: Record<string, unknown> = { ...metadata };
-  for (const key of LOCAL_MESSAGE_METADATA_KEYS) delete shared[key];
-  delete shared.serverSeq;
-  delete shared.serverWriter;
-  return Object.keys(shared).length ? { ...rest, metadata: shared as ChatMessage["metadata"] } : { ...rest };
 }
 
 /** The operation's answer, or undefined when none came within `ms`. */

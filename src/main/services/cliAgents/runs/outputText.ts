@@ -44,6 +44,13 @@ export function isResumeMiss(error: unknown): boolean {
   return /resume|session|conversation|thread/.test(message) && /not found|missing|unknown|cannot|can't|no .*session|no .*found|does not exist/.test(message);
 }
 
+/** A session that must be resumed (CliAgentRunOptions.resumeOnly) and could
+ *  not be: said, and nothing started anew. */
+export function resumeOnlyMissError(cliLabel: string, error: unknown): Error {
+  const cause = errorText(error).trim();
+  return new Error(`Could not continue the ${cliLabel} session${cause ? `: ${cause}` : ""}. The chat keeps its history; nothing ran.`);
+}
+
 export function failedCompact(participant: ParticipantConfig, error: unknown): CliAgentCompactResult {
   return {
     participant,

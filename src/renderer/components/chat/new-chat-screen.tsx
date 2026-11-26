@@ -64,6 +64,7 @@ import { sortSavedParticipantOptionsByUsage } from "./new-chat-participant-usage
 import { useCloseOnOutside, useNewChatMenuMaxHeight } from "./new-chat-menu-hooks";
 import { NewChatModelChip } from "./new-chat-model-chip";
 import { NewChatRecent } from "./new-chat-recent";
+import { NewChatFromClis } from "../cli-import/new-chat-from-clis";
 import { ChatCreationStatusLine } from "./chat-creation-state";
 import { ComposerBranchMenu, ComposerContextStrip, ComposerFooterSlot } from "./composer-context";
 import { FOLDER_BUSY_REASON, folderBusy, normalizeProjectPath, projectLabelForPath } from "../../../shared/newChat";
@@ -480,6 +481,7 @@ export function NewChatScreen(props: {
             <h1 className="new-chat-title">{props.repoPath ? `New chat in ${projectLabelForPath(props.repoPath)}` : "New chat"}</h1>
             <p className="new-chat-hint">Describe the task. / runs a command, # adds a file.</p>
             {props.repoPath && props.onOpenChat && <NewChatRecent summaries={props.summaries} repoPath={props.repoPath} onOpen={props.onOpenChat} />}
+            {props.repoPath && props.onOpenChat && <NewChatFromClis key={props.repoPath} repoPath={props.repoPath} onOpen={props.onOpenChat} />}
           </>
         )}
       </div>

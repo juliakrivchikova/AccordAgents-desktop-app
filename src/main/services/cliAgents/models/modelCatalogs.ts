@@ -7,9 +7,9 @@ import {
 } from "../../../../shared/cliStartDefaults";
 import { GEMINI_API_KEY_SETTINGS, geminiApiKeyEnv } from "../../../../shared/cliProviderHosts";
 import { normalizeChatReasoningEffort } from "../../../../shared/reasoningEffort";
-import { commandEnvironment, ensureLoginShellEnvPrimed, resolveCommandPath, runCommand, spawnCommand } from "../../command";
+import { commandEnvironment, ensureLoginShellEnvPrimed, resolveCommandPath, runCommand } from "../../command";
 import { CLAUDE_CODE_COMMAND_ENV_OPTIONS } from "../claude/commandEnvironment";
-import { codexAppServerMessageKind } from "../codex/appServerErrors";
+import { withCodexAppServerOneOff } from "../codex/appServerOneOff";
 import { codexModelReasoningEfforts } from "../codex/appServerParams";
 import { antigravityStartAccess } from "../gemini/runTail";
 import {
@@ -21,9 +21,7 @@ import {
 } from "./claudeModelProbe";
 import { claudeModelProbeExpectScript, dedupeModels, fallbackModelsForKind, withConfiguredModel } from "./modelLists";
 import { agyModelsInvocation, cliConfigStamp, parseAgyModelList, textField, withCliStartModel } from "./startDefaults";
-import { errorText } from "../runs/outputText";
 import { asRecord, stringField } from "../runs/records";
-import type { CodexAppServerPendingRequest } from "../types";
 import type { CliModules } from "../modules";
 import type { CliDependencies } from "../dependencies";
 
@@ -136,135 +134,16 @@ export class ModelCatalogs {
   private async listCodexModelCatalog(fetchedAt: string): Promise<ProviderModelCatalog> {
     await ensureLoginShellEnvPrimed();
     const codexExecutable = await this.cli.cliRuns.codexExecutableForRun();
-    const child = spawnCommand(codexExecutable, ["app-server", "--listen", "stdio://"], {
+    return withCodexAppServerOneOff({
+      executable: codexExecutable,
       env: commandEnvironment(),
-      stdio: ["pipe", "pipe", "pipe"],
-      windowsHide: true
-    });
-    child.stdout.setEncoding("utf8");
-    child.stderr.setEncoding("utf8");
-
-    let nextRequestId = 1;
-    let stdoutBuffer = "";
-    let stderr = "";
-    let closed = false;
-    const pendingRequests = new Map<number, CodexAppServerPendingRequest>();
-
-    const cleanup = (cause?: Error): void => {
-      if (closed) {
-        return;
-      }
-      closed = true;
-      const error = cause ?? new Error(`codex app-server model probe ended before receiving a response${stderr.trim() ? `: ${errorText(stderr)}` : ""}`);
-      for (const pending of pendingRequests.values()) {
-        pending.reject(error);
-      }
-      pendingRequests.clear();
-      if (!child.killed && child.exitCode === null) {
-        child.kill("SIGTERM");
-      }
-    };
-
-    const sendRequest = (method: string, params: unknown): Promise<unknown> => {
-      if (closed || child.exitCode !== null || child.killed) {
-        return Promise.reject(new Error("codex app-server process is not running"));
-      }
-      const id = nextRequestId;
-      nextRequestId += 1;
-      return new Promise<unknown>((resolve, reject) => {
-        pendingRequests.set(id, { method, resolve, reject });
-        child.stdin.write(`${JSON.stringify({ method, id, params })}\n`, (error) => {
-          if (error) {
-            pendingRequests.delete(id);
-            reject(error);
-          }
-        });
-      });
-    };
-
-    const writeServerMessage = (message: Record<string, unknown>): Promise<void> => new Promise<void>((resolve, reject) => {
-      child.stdin.write(`${JSON.stringify(message)}\n`, (error) => error ? reject(error) : resolve());
-    });
-
-    const handleResponse = (record: Record<string, unknown>): void => {
-      const id = typeof record.id === "number" ? record.id : undefined;
-      if (id === undefined) {
-        return;
-      }
-      const pending = pendingRequests.get(id);
-      if (!pending) {
-        return;
-      }
-      pendingRequests.delete(id);
-      const error = asRecord(record.error);
-      if (error) {
-        pending.reject(new Error(stringField(error, "message") ?? `${pending.method} failed`));
-        return;
-      }
-      pending.resolve(record.result);
-    };
-
-    child.stdout.on("data", (chunk: string) => {
-      stdoutBuffer += chunk;
-      let lineBreak = stdoutBuffer.indexOf("\n");
-      while (lineBreak >= 0) {
-        const line = stdoutBuffer.slice(0, lineBreak).trim();
-        stdoutBuffer = stdoutBuffer.slice(lineBreak + 1);
-        if (line) {
-          try {
-            const event = JSON.parse(line) as unknown;
-            const record = asRecord(event);
-            if (record) {
-              const kind = codexAppServerMessageKind(record);
-              if (kind === "server-request") {
-                const id = typeof record.id === "string" || typeof record.id === "number" ? record.id : undefined;
-                const method = stringField(record, "method");
-                if (id !== undefined && method === "currentTime/read") {
-                  void writeServerMessage({ id, result: { currentTimeAt: Math.floor(Date.now() / 1_000) } }).catch(cleanup);
-                } else if (id !== undefined && method) {
-                  const message = method === "account/chatgptAuthTokens/refresh"
-                    ? "The model catalog uses Codex CLI-managed authentication and never supplies external ChatGPT tokens. A refresh callback indicates an unsupported authentication contract."
-                    : `The model catalog does not support the Codex client request ${method}.`;
-                  void writeServerMessage({ id, error: { code: -32601, message } }).catch(cleanup);
-                }
-              } else if (kind === "response") {
-                handleResponse(record);
-              }
-            }
-          } catch {
-            // Ignore non-JSON status output.
-          }
-        }
-        lineBreak = stdoutBuffer.indexOf("\n");
-      }
-    });
-    child.stderr.on("data", (chunk: string) => {
-      stderr += chunk;
-    });
-    child.once("exit", (code) => {
-      cleanup(new Error(`codex app-server model probe exited with code ${code ?? "unknown"}${stderr.trim() ? `: ${errorText(stderr)}` : ""}`));
-    });
-
-    const timeout = setTimeout(() => {
-      cleanup(new Error(`codex app-server model probe timed out${stderr.trim() ? `: ${errorText(stderr)}` : ""}`));
-    }, MODEL_CATALOG_TIMEOUT_MS);
-    try {
-      await sendRequest("initialize", {
-        clientInfo: {
-          name: "accordagents",
-          title: "AccordAgents",
-          version: "0.1.0"
-        },
-        capabilities: {
-          experimentalApi: true,
-          requestAttestation: false,
-          optOutNotificationMethods: []
-        }
-      });
+      purpose: "model probe",
+      timeoutMs: MODEL_CATALOG_TIMEOUT_MS
+    }, async ({ request, stderrNote }) => {
       const models: ProviderModel[] = [];
       let cursor: string | undefined;
       do {
-        const result = asRecord(await sendRequest("model/list", { cursor: cursor ?? null, includeHidden: false, limit: 100 }));
+        const result = asRecord(await request("model/list", { cursor: cursor ?? null, includeHidden: false, limit: 100 }));
         const data = Array.isArray(result?.data) ? result.data : [];
         for (const item of data) {
           const record = asRecord(item);
@@ -291,13 +170,13 @@ export class ModelCatalogs {
       } while (cursor);
 
       if (models.length === 0) {
-        throw new Error(`codex app-server returned no models${stderr.trim() ? `: ${errorText(stderr)}` : ""}`);
+        throw new Error(`codex app-server returned no models${stderrNote()}`);
       }
       // What Codex starts a session in with the User's own config: a member
       // without a model of its own runs the one config.toml names, not the
       // one model/list marks default (GPT-6-Luna listed default while her
       // config ran gpt-5.6-luna, 2026-11-22).
-      const config = await this.readCodexStartConfig(sendRequest);
+      const config = await this.readCodexStartConfig(request);
       const listed = withCliStartModel(models, config ? textField(config.model) : undefined);
       const startModel = listed.find((model) => model.recommended);
       const reasoningEffort = config ? normalizeChatReasoningEffort(textField(config.model_reasoning_effort) as ChatReasoningEffort | undefined, "codex-cli") : undefined;
@@ -314,10 +193,7 @@ export class ModelCatalogs {
         fetchedAt,
         ...(startDefaults ? { startDefaults } : {})
       };
-    } finally {
-      clearTimeout(timeout);
-      cleanup();
-    }
+    });
   }
 
   /** The User's effective Codex config as Codex reads it (`config/read`:
