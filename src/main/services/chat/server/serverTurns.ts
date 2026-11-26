@@ -250,6 +250,9 @@ export class ServerTurns {
             conversationId: chat.id, participantId: participant.id, handle: participant.handle,
             instructions: typeof request.instructions === "string" ? request.instructions : compact?.instructions,
             triggeredBy: request.triggeredBy === "agent" ? "agent" : "user", runId,
+            // The chat's main session asked for it (app_chat_compact_participant).
+            ...(request.kind === "compaction" && typeof request.requestedByParticipantId === "string"
+              ? { requestedByParticipantId: request.requestedByParticipantId } : {}),
             // Asked as a compaction: in the thread it was asked from (none for
             // a member's own); typed as a message: under that message.
             ...(request.kind === "compaction"

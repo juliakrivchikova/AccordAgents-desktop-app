@@ -50,6 +50,9 @@ export type AppChatDelegateTaskHandler = (actor: AppMcpActor, request: unknown) 
 
 export type AppChatStartAccordHandler = (actor: AppMcpActor, request: unknown) => Promise<unknown>;
 
+/** The main session compacts another member (app_chat_compact_participant). */
+export type AppChatCompactParticipantHandler = (actor: AppMcpActor, request: unknown) => Promise<unknown>;
+
 export type AppArtifactToolHandler = (actor: AppMcpActor, toolName: string, request: unknown) => Promise<unknown>;
 
 export type AppScriptToolHandler = (actor: AppMcpActor, toolName: string, request: unknown) => Promise<unknown>;

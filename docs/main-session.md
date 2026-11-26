@@ -623,7 +623,15 @@ name no main session.
   right to compact its context without a card (`requestCompaction` `allow`;
   off: `ask`). With the right it is told when to compact on its own (before
   a new task, before the next stage of a big one); after its compaction the
-  app calls it again (docs/chat-roles-and-participants.md).
+  app calls it again (docs/chat-roles-and-participants.md). With it, and only
+  with it, the main session also compacts other members
+  (`app_chat_compact_participant`, the User, 2026-11-26): before it gives
+  more work to a member whose last turn ended over an hour ago and whose
+  context is over 100,000 tokens, it compacts that member first with
+  instructions naming what the work needs, because the member's prompt cache
+  is gone and its next turn would re-read the whole context at full price.
+  It is the User's `@x /compact <instructions>`, wherever the member runs;
+  the line says "@main compacted @x context. Focus: …".
 - **Create scheduled tasks without asking**, a switch, off by default (the
   User, 2026-11-25): the main session's right to create scheduled tasks
   without a card (`scheduleWithoutAsking`). Its `app_scripts_request_change`

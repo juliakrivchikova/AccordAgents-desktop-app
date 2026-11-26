@@ -134,6 +134,30 @@ test("a machine changes what concerns its own members; members elsewhere, the fo
   assert.equal(started.body.results[0].status, "rejected");
 });
 
+test("a machine compacts a member elsewhere only for the chat's main session that runs on it and compacts without asking", async (t) => {
+  const h = await hub(t);
+  const write = async (right: "allow" | "ask", mainMachine = "machine-1") => {
+    const chat = id("chat");
+    const main = { id: "p-main", handle: "main", label: "Main", roleConfigId: "main-session", homeMachineId: mainMachine, permissions: { requestCompaction: right } };
+    const desk = { id: "p-desk", handle: "desk", label: "Desk" };
+    await h.write(h.owner, { opId: id("op"), kind: "conversation.create", conversationId: chat,
+      conversation: { title: "Plans", kind: "chat", createdAt: new Date().toISOString(), metadata: { participants: [main, desk], mainSessionParticipantId: "p-main" } } } as HubOp);
+    await h.write(h.owner, { opId: id("op"), kind: "message.create", conversationId: chat, message: userMessage("u-user", "earlier words") });
+    return (request: Record<string, unknown>) => h.write(h.machine, { opId: id("op"), kind: "turn.request", conversationId: chat,
+      runId: `turn-${id("x")}`, messageId: "u-user", participantId: "p-desk", request } as HubOp);
+  };
+  const allowed = await write("allow");
+  assert.equal((await allowed({ kind: "compaction", triggeredBy: "agent", instructions: "Keep it.", requestedByParticipantId: "p-main" })).body.results[0].status,
+    "accepted", "its main session compacts the computer's member");
+  assert.equal((await allowed({ kind: "compaction", triggeredBy: "agent" })).body.results[0].status, "rejected", "not without naming the main session");
+  assert.equal((await allowed({ kind: "turn", requestedByParticipantId: "p-main" })).body.results[0].status, "rejected", "and only to compact it");
+  const asks = await write("ask");
+  assert.equal((await asks({ kind: "compaction", requestedByParticipantId: "p-main" })).body.results[0].status, "rejected", "Compact without asking off");
+  const elsewhere = await write("allow", "machine-2");
+  assert.equal((await elsewhere({ kind: "compaction", requestedByParticipantId: "p-main" })).body.results[0].status, "rejected",
+    "a machine the main session does not run on");
+});
+
 test("the User's rules for members come only from her computer, and a machine adds members by them", async (t) => {
   const h = await hub(t);
   const chat = id("chat");

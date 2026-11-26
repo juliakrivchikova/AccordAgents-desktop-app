@@ -336,7 +336,8 @@ export class SelfCompaction {
           participantId: participant.id,
           runId: turn.runId,
           triggeredBy: request.triggeredBy === "agent" ? "agent" : "user",
-          ...(typeof request.instructions === "string" ? { instructions: request.instructions } : {})
+          ...(typeof request.instructions === "string" ? { instructions: request.instructions } : {}),
+          ...(typeof request.requestedByParticipantId === "string" ? { requestedByParticipantId: request.requestedByParticipantId } : {})
         }, run.signal, this.deps.onReviewProgress);
       } finally {
         run.cleanup();

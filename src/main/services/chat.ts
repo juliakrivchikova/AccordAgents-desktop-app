@@ -449,6 +449,11 @@ export class ChatService {
     return this.modules.accord.startAccordFromTool(actor, rawRequest);
   }
 
+  /** The main session compacts another member (app_chat_compact_participant). */
+  compactParticipantFromTool(actor: ChatAppMcpActor, rawRequest: unknown): Promise<Record<string, unknown>> {
+    return this.modules.memberCompaction.compactParticipantFromTool(actor, rawRequest);
+  }
+
   requestSelfCompactionFromTool(actor: ChatAppMcpActor, rawRequest: unknown): Promise<Record<string, unknown>> {
     return this.modules.selfCompaction.requestSelfCompactionFromTool(actor, rawRequest);
   }

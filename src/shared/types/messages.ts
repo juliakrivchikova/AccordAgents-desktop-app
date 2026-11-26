@@ -151,6 +151,8 @@ export interface ChatMessageMetadata {
     participantId: string;
     outcome: "completed" | "failed" | "no-active-session";
     instructionsProvided: boolean;
+    /** The main session that compacted this member (`app_chat_compact_participant`). */
+    requestedByParticipantId?: string;
   };
   /** A machine's hidden answer to a `session.export` turn: where it put the
    *  member's session on the User's server for its move. */

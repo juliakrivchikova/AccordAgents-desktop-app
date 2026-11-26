@@ -1,4 +1,4 @@
-import { chatViewFor } from "../../../../shared/mainSession";
+import { chatViewFor, isMainSessionParticipant } from "../../../../shared/mainSession";
 import { choicesClosedByMessage } from "../../chatChoiceExpiry";
 import type {
   ChatAgentMode, ChatAgentPermissions, ChatMessage, ChatParticipant, ChatParticipantSession, Conversation
@@ -214,7 +214,7 @@ export class TurnPrompt {
       participantRepositoryLine(conversation, participant.kind, options.agentMode, options.permissions),
       participantPermissionPolicy(participant.kind, options.agentMode, options.permissions, canRequestPermissions),
       ...(participant.kind === "gemini-cli" ? antigravityAccessLines(conversation.repoPath, options.agentMode, options.permissions) : []),
-      ...compactionAccessLines(options.permissions),
+      ...compactionAccessLines(options.permissions, isMainSessionParticipant(conversation.metadata, participant.id)),
       ...scheduledTaskAccessLines(participant.kind, options.agentMode, options.permissions),
       ...handleWritingLines(conversation)
     ].filter(Boolean).join("\n");

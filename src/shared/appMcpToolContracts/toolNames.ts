@@ -15,6 +15,7 @@ export const APP_ARTIFACT_REVISE_TOOL = "app_artifact_revise";
 export const APP_ARTIFACT_SET_ACCESS_TOOL = "app_artifact_set_access";
 export const APP_ARTIFACT_SET_ARCHIVED_TOOL = "app_artifact_set_archived";
 export const APP_ARTIFACT_SIGN_TOOL = "app_artifact_sign";
+export const APP_CHAT_COMPACT_PARTICIPANT_TOOL = "app_chat_compact_participant";
 export const APP_CHAT_DELEGATE_TASK_TOOL = "app_chat_delegate_task";
 export const APP_CHAT_EXPORT_ATTACHMENT_TOOL = "app_chat_export_attachment";
 export const APP_CHAT_GET_CONTEXT_TOOL = "app_chat_get_context";

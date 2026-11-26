@@ -8,7 +8,10 @@ export const CHAT_APP_TOOL_CAPABILITIES: ChatAppToolCapability[] = [
   // The main session's own (shared/mainSession.ts): give a member a task
   // without a card, and start an Accord.
   "participants.delegate",
-  "accord.start"
+  "accord.start",
+  // The main session's own, only while it compacts without asking: compact
+  // another member's context (docs/main-session.md).
+  "participants.compact"
 ];
 
 export function normalizeChatAppToolCapabilities(value: unknown): ChatAppToolCapability[] {

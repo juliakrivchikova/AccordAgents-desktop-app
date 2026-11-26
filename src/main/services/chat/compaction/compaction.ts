@@ -50,7 +50,9 @@ export class Compaction {
     signal?: AbortSignal,
     progress?: ProgressCallback,
     /** How it ended here (a member's own compaction goes on from it). */
-    onEnded?: (end: SelfCompactionEnd) => void
+    onEnded?: (end: SelfCompactionEnd) => void,
+    /** It holds the member's turns: any turn asked after this runs after it. */
+    onQueued?: () => void
   ): Promise<StartReviewResult> {
     const runId = request.runId ?? randomUUID();
     // A member that is moving is compacted once it moved, where it runs then.
@@ -137,6 +139,7 @@ export class Compaction {
       participantLabel: `@${ingest.participant.handle}`
     });
     const reservation = this.chat.turnQueue.reserveParticipantTurn(ingest.conversation.id, ingest.participant.id);
+    onQueued?.();
     try {
       await reservation.wait();
       const conversation = ingest.conversation;
@@ -215,7 +218,7 @@ export class Compaction {
         ? (await this.chat.host.missingRunFolder(conversation, runPath))?.reason : undefined;
       await this.chat.store.withChatMutation(conversation, async () => {
         const content = result.ok
-          ? compactSuccessMessage(participant.handle, compactInstructions)
+          ? compactSuccessMessage(participant.handle, compactInstructions, requesterHandle(conversation, request))
           : compactionFailureLine(participant.handle, missingFolder ?? result.error);
         conversation.messages.push(createChatMessage(
           "system",
@@ -421,6 +424,7 @@ export class Compaction {
               kind: "compaction",
               triggeredBy: request.triggeredBy === "agent" ? "agent" : "user",
               ...(compactInstructions ? { instructions: compactInstructions } : {}),
+              ...(request.requestedByParticipantId ? { requestedByParticipantId: request.requestedByParticipantId } : {}),
               ...(request.threadId?.trim() ? { threadId: request.threadId.trim() } : {}),
               ...(request.parentMessageId?.trim() ? { parentMessageId: request.parentMessageId.trim() } : {}),
               ...(request.chatThreadRootId?.trim() ? { chatThreadRootId: request.chatThreadRootId.trim() } : {})
@@ -515,4 +519,10 @@ export class Compaction {
     await this.deps.debugLogs.write("chat.compaction.finished", { ...auditBase, participantId: participant.id, participantHandle: participant.handle, outcome: "no-active-session" });
     return { conversation, warnings };
   }
+}
+
+/** The main session's handle when it asked for this compaction. */
+function requesterHandle(conversation: Conversation, request: CompactChatParticipantRequest): string | undefined {
+  const id = request.requestedByParticipantId;
+  return id ? chatParticipants(conversation).find((participant) => participant.id === id)?.handle : undefined;
 }

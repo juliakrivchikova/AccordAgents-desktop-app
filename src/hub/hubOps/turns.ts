@@ -1,7 +1,7 @@
 import { isMemberRestartTurnRequest } from "../../shared/memberRestart";
 import { isMemberSessionExportTurnRequest } from "../../shared/memberSessionMove";
 import { claimOutcomeFor } from "../../main/services/hubOpsStore";
-import { askNeedsApproval, machineMayAsk, runsOnMachine } from "../hubMachineScope";
+import { askNeedsApproval, machineMayAsk, machineMayCompact, runsOnMachine } from "../hubMachineScope";
 import type { HubDevice } from "../../shared/hubProtocol";
 import { chatViewFor } from "../../shared/mainSession";
 import type { HubFeedEntry, HubOp, HubOpEffect, HubOpResult, HubTurn } from "../../shared/hubOps";
@@ -103,7 +103,12 @@ export class Turns {
       if (device.role === "machine") {
         const members = Array.isArray(conversation.metadata?.participants) ? conversation.metadata.participants as Array<{ id?: unknown; homeMachineId?: string }> : [];
         const member = (id: unknown) => members.find((item) => item?.id === id);
-        if (!runsOnMachine(member(op.participantId), device.machineId)) {
+        const elsewhere = !runsOnMachine(member(op.participantId), device.machineId);
+        // But the chat's main session on this machine compacts a member that
+        // runs elsewhere, as the computer may, while it compacts without asking.
+        const mainCompacts = elsewhere && op.request?.kind === "compaction" &&
+          machineMayCompact(conversation, device.machineId, op.participantId, op.request);
+        if (elsewhere && !mainCompacts) {
           const message = conversation.messages.find((item) => item.id === op.messageId);
           const ownMembers = message?.role === "participant" && runsOnMachine(member(message.participantId), device.machineId);
           if (!ownMembers || op.request?.kind === "compaction" || isMemberRestartTurnRequest(op.request)) {

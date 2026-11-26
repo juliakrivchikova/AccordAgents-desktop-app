@@ -1,3 +1,4 @@
+import { normalizeAgentContextUsage } from "./agentContext";
 import { activeRunSummaryForConversation } from "./chatActiveRuns";
 import { buildChatParticipantStatusMap } from "./chatRosterStatus";
 import { readParticipantCompactions } from "./chatRunState";
@@ -8,6 +9,7 @@ import type {
   ChatMessage,
   ChatParticipant,
   ChatParticipantActiveWork,
+  ChatParticipantActivityEntry,
   ChatParticipantActivitySnapshot,
   ChatParticipantRequestStatus,
   Conversation,
@@ -242,7 +244,9 @@ export function buildChatParticipantActivitySnapshot(
       model: participant.model?.trim() || null,
       status,
       activeWork: sortActiveWork(activeWorkByParticipantId.get(participant.id) ?? []),
-      lastFinishedMessage: lastFinishedMessage(conversation, participant.id)
+      lastFinishedMessage: lastFinishedMessage(conversation, participant.id),
+      lastTurnEndedAt: lastTurnEndedAt(conversation, participant.id),
+      context: participantContext(conversation, participant.id)
     };
   });
 
@@ -446,6 +450,38 @@ function lastFinishedMessage(
     };
   }
   return null;
+}
+
+/** When the member's session last worked: the last activity of its newest
+ *  finished reply, or a compaction of it that came later. No message says
+ *  when a reply ended; its last step is the nearest the chat knows. */
+function lastTurnEndedAt(conversation: Conversation, participantId: string): string | null {
+  let latest = "";
+  for (let index = conversation.messages.length - 1; index >= 0; index -= 1) {
+    const message = conversation.messages[index];
+    const compaction = message.metadata?.compaction;
+    if (message.role === "system" && compaction?.participantId === participantId && compaction.outcome === "completed") {
+      if (message.createdAt > latest) latest = message.createdAt;
+      continue;
+    }
+    if (message.role !== "participant" || message.participantId !== participantId || message.status === "pending" ||
+      isChatMessageHiddenFromTimeline(message)) continue;
+    for (const at of messageActivityTimestamps(message)) {
+      if (at > latest) latest = at;
+    }
+    break;
+  }
+  return latest || null;
+}
+
+function participantContext(conversation: Conversation, participantId: string): ChatParticipantActivityEntry["context"] {
+  const record = conversation.metadata.agentContextUsageByParticipant;
+  const usage = record && typeof record === "object" && !Array.isArray(record)
+    ? normalizeAgentContextUsage((record as Record<string, unknown>)[participantId])
+    : undefined;
+  return usage
+    ? { usedTokens: usage.usedTokens, contextWindowTokens: usage.contextWindowTokens, percentage: usage.percentage, measuredAt: usage.updatedAt }
+    : null;
 }
 
 function sortActiveWork(work: ChatParticipantActiveWork[]): ChatParticipantActiveWork[] {

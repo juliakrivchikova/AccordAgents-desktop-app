@@ -1,6 +1,6 @@
 import type {
   AppArtifactToolHandler, AppChatAttachmentExportHandler, AppChatAttachmentListHandler, AppChatAttachmentReadHandler,
-  AppChatCompactionRequestHandler, AppChatContextHandler, AppChatDelegateTaskHandler, AppChatMessagesHandler,
+  AppChatCompactionRequestHandler, AppChatCompactParticipantHandler, AppChatContextHandler, AppChatDelegateTaskHandler, AppChatMessagesHandler,
   AppChatParticipantActivityHandler, AppChatParticipantRequestHandler, AppChatParticipantRequestStatusHandler,
   AppChatParticipantsHandler, AppChatReactHandler, AppChatSendMessageHandler, AppChatSetTitleHandler, AppChatStartAccordHandler,
   AppMemoryToolHandler, AppParticipantChangeHandler, AppParticipantOptionsHandler, AppPermissionChangeHandler,
@@ -118,6 +118,10 @@ export class AppMcpService {
 
   setChatStartAccordHandler(handler: AppChatStartAccordHandler): void {
     this.modules.toolHandlers.setChatStartAccordHandler(handler);
+  }
+
+  setChatCompactParticipantHandler(handler: AppChatCompactParticipantHandler): void {
+    this.modules.toolHandlers.setChatCompactParticipantHandler(handler);
   }
 
   setArtifactToolHandler(handler: AppArtifactToolHandler): void {

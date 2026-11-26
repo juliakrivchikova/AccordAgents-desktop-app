@@ -191,7 +191,13 @@ export function pendingCompactionCard(conversation: Conversation, participantId:
     approval.requesterParticipantId === participantId && approval.resumeContext && runIdBase(approval.resumeContext.runId) === runIdBase(runId));
 }
 
-export function compactSuccessMessage(handle: string, instructions: string | undefined): string {
+export function compactSuccessMessage(handle: string, instructions: string | undefined, requestedByHandle?: string): string {
+  // The main session compacted it (app_chat_compact_participant): the User
+  // did not, so the line says who and what it kept.
+  if (requestedByHandle) {
+    const focus = instructions ? firstTextLine(instructions, 300) : "";
+    return `@${requestedByHandle} compacted @${handle} context${focus ? `. Focus: ${focus}` : "."}`;
+  }
   if (!instructions) {
     return `Compacted @${handle} context.`;
   }
@@ -210,10 +216,11 @@ export function compactRequestParticipant(conversation: Conversation, request: C
 }
 
 export function compactMessageMetadata(
-  request: Pick<CompactChatParticipantRequest, "threadId" | "parentMessageId" | "chatThreadRootId" | "runId" | "triggeredBy" | "instructions">,
+  request: Pick<CompactChatParticipantRequest, "threadId" | "parentMessageId" | "chatThreadRootId" | "runId" | "triggeredBy" | "instructions" | "requestedByParticipantId">,
   participantId: string,
   outcome: "completed" | "failed" | "no-active-session"
 ): ChatMessageMetadata {
+  const requestedBy = request.requestedByParticipantId?.trim();
   return {
     threadId: request.threadId?.trim() || undefined,
     parentMessageId: request.parentMessageId?.trim() || undefined,
@@ -223,7 +230,8 @@ export function compactMessageMetadata(
       triggeredBy: request.triggeredBy === "agent" ? "agent" : "user",
       participantId,
       outcome,
-      instructionsProvided: Boolean(request.instructions?.trim())
+      instructionsProvided: Boolean(request.instructions?.trim()),
+      ...(requestedBy ? { requestedByParticipantId: requestedBy } : {})
     }
   };
 }
