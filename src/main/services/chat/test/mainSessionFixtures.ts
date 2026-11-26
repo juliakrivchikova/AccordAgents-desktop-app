@@ -235,6 +235,20 @@ export function mainActor(capabilities: string[] = ["participants.manage", "part
   };
 }
 
+/** The /accord skill as the user's skills offer it to Claude Code and Codex. */
+export function accordSkills() {
+  const variant = (kind: ChatProviderKind) => ({ providerKind: kind, scope: "personal", rootKind: "personal", sourceKey: "src", frontmatterName: "accord", contentHash: "hash", capabilityState: "invocable" });
+  const skill = {
+    skillId: "skill-1", displayName: "/accord", frontmatterName: "accord", description: "Accord", contentHash: "hash", capabilityState: "invocable",
+    variants: [variant("claude-code"), variant("codex-cli")]
+  };
+  return {
+    async search() { return { skills: [skill] }; },
+    async validateMentionForParticipant(mention: unknown) { return { ok: true, mention }; },
+    async resolveInvocableSkillsForParticipant() { return [{ name: "accord", dir: "/tmp/accord-skill" }]; }
+  };
+}
+
 export async function waitFor(predicate: () => boolean, timeoutMs = 2000): Promise<void> {
   const startedAt = Date.now();
   while (Date.now() - startedAt < timeoutMs) {

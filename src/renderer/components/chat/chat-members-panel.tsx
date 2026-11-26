@@ -8,7 +8,7 @@ import { IconButton } from "../primitives";
 import { ChatAccordRow } from "./chat-accord-dock";
 import { ChatAgentRow, type ChatAgentDetail } from "./chat-agent-row";
 import { ChatProviderMark, ChatProviderMarkSlot } from "./chat-member-mark";
-import { ChatSubagentsSection, type SubagentMainSession } from "./chat-subagents-section";
+import { ChatSubagentsSection, type SubagentAddRequest, type SubagentMainSession } from "./chat-subagents-section";
 import { subagentPanelProviders } from "./subagent-panel";
 import { useMachineList } from "./use-cli-start-defaults";
 import type { SessionsFormerRow } from "./use-chat-sessions-view";
@@ -20,8 +20,9 @@ export interface ChatMembersPanelProps {
   rows: { current: readonly SessionsMemberRow[]; previous: readonly SessionsMemberRow[] };
   /** The CLIs the main session gives tasks to: its project's list and the
    *  chat's own layer (none: a chat from before the list); projectScope when
-   *  the chat has a project folder to keep a list for. */
-  subagents?: { project?: readonly SubagentProviderEntry[]; thread?: ChatSubagentProviders; projectScope: boolean; main?: SubagentMainSession };
+   *  the chat has a project folder to keep a list for; add when opened to
+   *  add one (the Accord button). */
+  subagents?: { project?: readonly SubagentProviderEntry[]; thread?: ChatSubagentProviders; projectScope: boolean; main?: SubagentMainSession; add?: SubagentAddRequest };
   /** Members no longer in the chat, whose sessions stay readable. */
   formerRows?: readonly SessionsFormerRow[];
   activity: SessionsMemberActivity;
@@ -107,7 +108,7 @@ export function ChatMembersPanel(props: ChatMembersPanelProps): JSX.Element {
           </div>
         )}
         <ChatSubagentsSection providers={providers} project={props.subagents?.project} main={props.subagents?.main}
-          legacy={Boolean(props.subagents) && !props.subagents?.thread}
+          legacy={Boolean(props.subagents) && !props.subagents?.thread} add={props.subagents?.add}
           projectScope={props.subagents?.projectScope ?? false} renderRow={renderRow} />
         {/* Sessions that ended and members no longer in the chat, in one quiet group. */}
         <ChatAgentsGroup label="History" testId="chat-members-history" count={props.rows.previous.length + former.length}>

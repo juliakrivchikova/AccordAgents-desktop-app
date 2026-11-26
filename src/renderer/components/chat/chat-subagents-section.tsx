@@ -25,6 +25,13 @@ import { hasThreadOverride, type SubagentPanelProvider } from "./subagent-panel"
 import { useSubagentProvidersActions } from "./subagent-providers-context";
 import { chipModelLabel, useMemberModelCatalog } from "./chat-member-model-name";
 
+/** The Agents list opened to add one (the Accord button, when Accord needs
+ *  one more): its Add open, a new key each time, and what it is for. */
+export interface SubagentAddRequest {
+  key: number;
+  note?: string;
+}
+
 const READINESS_TEXT: Record<AgentReadinessState, string> = {
   ready: "Ready",
   "could-not-verify": "Installed",
@@ -47,6 +54,7 @@ export function ChatSubagentsSection(props: {
   /** A chat from before the list: it may give tasks to any ready CLI until one is added. */
   legacy?: boolean;
   projectScope: boolean;
+  add?: SubagentAddRequest;
   renderRow: (row: SessionsMemberRow) => JSX.Element;
 }): JSX.Element {
   const [open, setOpen] = useState<ReadonlySet<ChatProviderKind>>(new Set());
@@ -62,13 +70,14 @@ export function ChatSubagentsSection(props: {
         <h3 className="chat-side-heading">Agents</h3>
         {running > 0 && <span className="chat-subagents-running" data-testid="chat-subagents-running"><i aria-hidden />{running} running</span>}
         <span className="grow" />
-        {props.providers.length > 0 && <ChatSubagentAdd providers={props.providers} project={props.project} main={props.main} projectScope={props.projectScope} />}
+        {props.providers.length > 0 && <ChatSubagentAdd key={props.add?.key} providers={props.providers} project={props.project} main={props.main}
+          projectScope={props.projectScope} openAtStart={props.add !== undefined} note={props.add?.note} />}
       </div>
       {props.providers.length === 0 ? (
         <div className="chat-subagents-empty" data-testid="chat-subagents-empty">
-          <p>{props.legacy
+          <p className={props.add?.note ? "is-note" : undefined} data-testid={props.add?.note ? "chat-subagents-note" : undefined}>{props.add?.note ?? (props.legacy
             ? "This chat can give tasks to any ready CLI. Add one to choose which it may use."
-            : "No agents yet. Add the CLIs this chat can give tasks to."}</p>
+            : "No agents yet. Add the CLIs this chat can give tasks to.")}</p>
           <SubagentPickList providers={props.providers} project={props.project} main={props.main} projectScope={props.projectScope} />
         </div>
       ) : props.providers.map((provider) => (
@@ -143,14 +152,22 @@ function SubagentValues(props: { provider: SubagentPanelProvider; main?: Subagen
   );
 }
 
-function ChatSubagentAdd(props: { providers: SubagentPanelProvider[]; project?: readonly SubagentProviderEntry[]; main?: SubagentMainSession; projectScope: boolean }): JSX.Element {
-  const [open, setOpen] = useState(false);
+function ChatSubagentAdd(props: {
+  providers: SubagentPanelProvider[];
+  project?: readonly SubagentProviderEntry[];
+  main?: SubagentMainSession;
+  projectScope: boolean;
+  openAtStart: boolean;
+  note?: string;
+}): JSX.Element {
+  const [open, setOpen] = useState(props.openAtStart);
   return (
     <Popover open={open} onOpenChange={setOpen}>
       <PopoverTrigger asChild>
         <IconButton icon={PlusIcon} label="Add agent" tooltip="Add agent" data-testid="chat-subagent-add" />
       </PopoverTrigger>
       <PopoverContent align="end" className="chat-subagent-pop w-[300px] gap-0 p-0">
+        {props.note && <p className="chat-subagent-pick-note" data-testid="chat-subagents-note">{props.note}</p>}
         <SubagentPickList providers={props.providers} project={props.project} main={props.main} projectScope={props.projectScope} onAdded={() => setOpen(false)} />
       </PopoverContent>
     </Popover>

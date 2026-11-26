@@ -7,9 +7,10 @@ import { act, create, type ReactTestInstance } from "react-test-renderer";
 import type { ReactElement } from "react";
 
 import { TooltipProvider } from "@/components/ui/tooltip";
+import { ACCORD_NEEDS_AGENT_LINE } from "../../../shared/accordCandidates";
 import { parseAccordLaunchCard } from "../../../shared/accordLaunchCard";
 import { accordProgressFromNotes, type DockedAccord } from "../../../shared/accordProgress";
-import type { AppSettings, Conversation } from "../../../shared/types";
+import type { AppSettings, ChatParticipant, Conversation } from "../../../shared/types";
 import { ArtifactsContext } from "../artifacts/artifacts-context";
 import { resetAccordDockStoreForTests } from "./accord-dock-store";
 import { ChatAccordDockSlot } from "./chat-accord-dock";
@@ -18,6 +19,7 @@ import { ChatSessionsPresentationContext } from "./chat-member-mark";
 import { ChatSessionsRightPanel, type ChatPanelMessageContext } from "./chat-sessions-right-panel";
 import { DREW, MAIN, PARTICIPANTS } from "./chat-sessions-fixtures.test";
 import type { ChatRightPanel, ChatRightPanelState } from "./use-chat-right-panel";
+import { SubagentProvidersContext, type SubagentProvidersActions } from "./subagent-providers-context";
 import type { ChatSessionsView } from "./use-chat-sessions-view";
 
 const NOW = "2026-11-20T10:00:00.000Z";
@@ -97,12 +99,13 @@ test("above the composer the sessions view keeps one line, Accord · name · whe
 function rightPanel(panel: ChatRightPanel, calls: string[]): ChatRightPanelState {
   return {
     panel, memberDrafts: {}, selectThread: noop, setMemberDraft: noop, reset: noop,
-    openMembers: () => calls.push("members"), openMember: (id) => calls.push(`member:${id}`),
+    openMembers: () => calls.push("members"), openAgentsToAdd: () => calls.push("add-agent"), openMember: (id) => calls.push(`member:${id}`),
     openAccord: (id) => calls.push(`accord:${id}`), close: () => calls.push("close")
   };
 }
 
-function rightPanelElement(panel: ChatRightPanel, calls: string[], latest?: DockedAccord): ReactElement {
+function rightPanelElement(panel: ChatRightPanel, calls: string[], latest?: DockedAccord,
+  chat: { conversation?: Conversation; participants?: ChatParticipant[]; accordNeedsAgent?: boolean } = {}): ReactElement {
   const settings = { chatRoleConfigs: [] } as unknown as AppSettings;
   return (
     <ChatSessionsRightPanel
@@ -110,8 +113,9 @@ function rightPanelElement(panel: ChatRightPanel, calls: string[], latest?: Dock
       sessions={{ memberRows: { current: [], previous: [] } } as unknown as ChatSessionsView}
       latestAccord={latest}
       onOpenAccord={(id) => calls.push(`open-accord:${id}`)}
-      conversation={{ id: "chat-1", messages: [] } as unknown as Conversation}
-      participants={PARTICIPANTS}
+      accordNeedsAgent={chat.accordNeedsAgent}
+      conversation={chat.conversation ?? { id: "chat-1", messages: [] } as unknown as Conversation}
+      participants={chat.participants ?? PARTICIPANTS}
       participantStatusById={new Map()}
       runIdsByParticipantId={new Map()}
       messageContext={{ settings } as unknown as ChatPanelMessageContext}
@@ -175,4 +179,28 @@ test("the members panel lists the chat's latest Accord first, as a row that open
   ));
   assert.equal(none.root.findAll(byTestId("chat-members-accord")).length, 0, "no Accord, no row");
   none.unmount();
+});
+
+test("opened from the Accord button with too few for an Accord, the side panel says what Accord needs and adds a CLI from its Agents list", async () => {
+  const updates: unknown[] = [];
+  const actions: SubagentProvidersActions = {
+    agents: [], providers: [], openSetup: noop,
+    update: async (scope, change) => { updates.push([scope, change]); return true; }
+  };
+  const conversation = { id: "chat-1", messages: [], metadata: { participants: [MAIN], mainSessionParticipantId: MAIN.id, subagentProviders: { entries: [] } } } as unknown as Conversation;
+  const open = (accordNeedsAgent: boolean): ReturnType<typeof renderIn> => renderIn(true, (
+    <SubagentProvidersContext.Provider value={actions}>
+      {rightPanelElement({ kind: "members", addAgent: 1 }, [], undefined, { conversation, participants: [MAIN], accordNeedsAgent })}
+    </SubagentProvidersContext.Provider>
+  ));
+  const panel = open(true);
+  assert.equal(textOf(panel.root.find(byTestId("chat-subagents-note"))), ACCORD_NEEDS_AGENT_LINE);
+  const codex = panel.root.find((node) => node.type === "div" && node.props["data-provider-kind"] === "codex-cli");
+  await act(async () => codex.find(byTestId("chat-subagent-pick-add")).props.onClick());
+  assert.deepEqual(updates, [["thread", { type: "add", kind: "codex-cli" }]]);
+  panel.unmount();
+
+  const met = open(false);
+  assert.equal(met.root.findAll(byTestId("chat-subagents-note")).length, 0, "once Accord has enough, the line is gone");
+  met.unmount();
 });

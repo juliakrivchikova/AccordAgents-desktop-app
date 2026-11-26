@@ -48,6 +48,16 @@ verbatim there). Modelled on T3 Code (`~/reference/t3code`,
   Approvals of members' commands still reach the User on the main timeline.
 - **Only the main session can start an Accord** (`app_chat_start_accord`); a
   member that needs one asks the main session. The User still can, as today.
+  When she does, each CLI of the Agents list with no member here yet counts
+  as a candidate (the User, 2026-11-26; `src/shared/accordCandidates.ts`):
+  Start Accord lists it as "New agent", and starting the Accord makes its
+  member first, as the main session's member for a task that names only that
+  CLI (its model and effort from the list, held to the main session,
+  `Delegation.addAccordMembers`), then the Accord runs as with any member.
+  With fewer than two candidates, the sessions view's Accord button opens the
+  side panel on its Agents list with Add open and the line "Accord needs at
+  least one more agent. Add one here."; the classic view keeps its disabled
+  button and "Add at least two members to start Accord."
 - **In the sessions view an @handle in a member's reply starts nobody**
   (the User, 2026-11-22), as a mention in text wakes nobody in Claude Code:
   no turn, no task row, whoever wrote it (the main session included) and

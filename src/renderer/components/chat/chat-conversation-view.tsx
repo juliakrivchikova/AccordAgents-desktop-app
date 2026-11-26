@@ -12,6 +12,7 @@ import type {
   RepoFileMention
 } from "../../../shared/types";
 import type { ChatThreadSummary } from "./chat-thread-data";
+import { ACCORD_NEEDS_AGENT_TOOLTIP } from "../../../shared/accordCandidates";
 import { activeRunSummaryForConversation } from "../../../shared/chatActiveRuns";
 import { LocalFileLinkContext, LocalFileOpenChooser } from "../content/local-file-link";
 import { MessageLinkContext } from "../content/markdown-text";
@@ -240,6 +241,12 @@ export function ChatConversationView(props: ChatConversationViewProps): JSX.Elem
   const sessionsChrome = useChatSessionsChrome({
     sessions, viewMode, rightPanel, participantsById, closeArtifacts: artifacts.closePanel, accordOpen: Boolean(dockedAccord)
   });
+  // Accord needs one more agent (accordLaunch): the side panel opens on its
+  // Agents list with Add open, in the place of any file or artifact there.
+  const openAgentsToAdd = (): void => {
+    artifacts.closePanel();
+    rightPanel.openAgentsToAdd();
+  };
   // The names the app's own words use in the sessions view, the same object
   // while no name changes (rows that read them are not drawn again per token).
   const sessionsNames = useStableSessionsViewNames(sessionsChrome.links);
@@ -483,7 +490,7 @@ export function ChatConversationView(props: ChatConversationViewProps): JSX.Elem
               onDraftChange={props.onDraftChange}
               onSend={sendDraft}
               accordDisabledReason={props.accordDisabledReason}
-              onOpenAccord={props.onOpenAccord}
+              {...(props.accordNeedsAgent && sessions ? { accordHint: ACCORD_NEEDS_AGENT_TOOLTIP, onOpenAccord: openAgentsToAdd } : { onOpenAccord: props.onOpenAccord })}
               isRunning={props.isRunning}
               activeRunCount={activeRunSummary.runIds.length}
               activeRunParticipantRows={activeRunParticipantRows}
@@ -538,7 +545,8 @@ export function ChatConversationView(props: ChatConversationViewProps): JSX.Elem
               renderMemberChip: props.renderMemberChip,
               onStopRuns: props.onStopRun ? stopRuns : undefined,
               latestAccord,
-              onOpenAccord: sessionsChrome.openAccord ?? rightPanel.openAccord
+              onOpenAccord: sessionsChrome.openAccord ?? rightPanel.openAccord,
+              accordNeedsAgent: props.accordNeedsAgent
             } : undefined}
           />
           {showArtifactsPanel && (

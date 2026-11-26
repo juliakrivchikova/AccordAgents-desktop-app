@@ -9,7 +9,7 @@ import { applyChatAccessOptionById, selectedChatAccessOption } from "../../share
 import { buildGeminiExecInvocation } from "./geminiExec";
 import type { ChatAgentPermissions, ChatMessage, ChatParticipant, ChatProviderKind, Conversation } from "../../shared/types";
 import {
-  childActor, clone, delegatedManager, delegationBatches, GENERIC_ROLE, MAIN_ROLE, mainActor, mainSession, mainSessionChat,
+  accordSkills, childActor, clone, delegatedManager, delegationBatches, GENERIC_ROLE, MAIN_ROLE, mainActor, mainSession, mainSessionChat,
   member, NOW, participantsOf, permissions, sessionRecord, testService, waitFor
 } from "./chat/test/mainSessionFixtures";
 
@@ -248,19 +248,6 @@ test("members of a main-session chat ask the main session, not User, and do not 
 });
 
 // --- Accord --------------------------------------------------------------------
-
-function accordSkills() {
-  const variant = (kind: ChatProviderKind) => ({ providerKind: kind, scope: "personal", rootKind: "personal", sourceKey: "src", frontmatterName: "accord", contentHash: "hash", capabilityState: "invocable" });
-  const skill = {
-    skillId: "skill-1", displayName: "/accord", frontmatterName: "accord", description: "Accord", contentHash: "hash", capabilityState: "invocable",
-    variants: [variant("claude-code"), variant("codex-cli")]
-  };
-  return {
-    async search() { return { skills: [skill] }; },
-    async validateMentionForParticipant(mention: unknown) { return { ok: true, mention }; },
-    async resolveInvocableSkillsForParticipant() { return [{ name: "accord", dir: "/tmp/accord-skill" }]; }
-  };
-}
 
 test("the main session's Accord is launched as its own message and read as an Accord card", async () => {
   const main = mainSession();

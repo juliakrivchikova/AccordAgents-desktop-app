@@ -178,6 +178,19 @@
   line-height: 18px;
 }
 
+/* Why the list was opened from the Accord button: what Accord needs. */
+.chat-subagents-empty p.is-note {
+  color: var(--ui-text-2);
+}
+
+.chat-subagent-pick-note {
+  margin: 0;
+  padding: 10px 12px 2px;
+  color: var(--ui-text-2);
+  font-size: 12px;
+  line-height: 18px;
+}
+
 /* The settings window and the Add list. */
 .chat-subagent-pop-head {
   display: flex;

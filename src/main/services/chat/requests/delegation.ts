@@ -1,9 +1,11 @@
 import { isMainSessionParticipant, isRoleOfferedForNewMembers } from "../../../../shared/mainSession";
 import { randomUUID } from "node:crypto";
 import type {
-  ChatAgentPermissions, ChatMessage, ChatParticipant, ChatParticipantInput, ChatParticipantChangeRequest,
-  ChatParticipantRequestBatch, ChatParticipantRequestItem, ChatRosterChangeParticipantInput
+  AppSettings, ChatAgentPermissions, ChatMessage, ChatParticipant, ChatParticipantInput, ChatParticipantChangeRequest,
+  ChatParticipantRequestBatch, ChatParticipantRequestItem, ChatParticipantRequestPermission, ChatParticipantSession,
+  ChatProviderKind, ChatRosterChangeParticipantInput, Conversation
 } from "../../../../shared/types";
+import { accordCandidates } from "../../../../shared/accordCandidates";
 import { normalizeChatReasoningEffort } from "../../../../shared/reasoningEffort";
 import { CLI_PROVIDER_SETUP } from "../../../../shared/cliReadiness";
 import { chatSubagentProjectKey, chatSubagentProvidersOf, effectiveSubagentProviders } from "../../../../shared/subagentProviders";
@@ -78,99 +80,11 @@ export class Delegation {
         : `User turned off adding members for @${caller.handle}.`);
     }
     const settings = await this.deps.settings.getPublicSettings();
-    const roleConfigId = input.roleConfigId ?? GENERIC_PARTICIPANT_ROLE_ID;
-    // Only the roles offered for new members (not the Workflow Manager's,
-    // which manages members by default: the main session took its place).
-    if (roleConfigId === CHAT_ADMINISTRATOR_ROLE_ID || !isRoleOfferedForNewMembers(roleConfigId)) {
-      return delegationRefusal("invalid_role", "A member you give a task to cannot have the main session, Chat Assistant or Workflow Manager role.");
+    const prepared = await this.newMemberInput(conversation, caller, manage, settings, input);
+    if ("refusal" in prepared) {
+      return prepared.refusal;
     }
-    const role = settings.chatRoleConfigs.find((item) => item.id === roleConfigId && !item.archivedAt);
-    if (!role) {
-      return delegationRefusal("invalid_role", `No role ${roleConfigId}. Call app_participants_describe_options for the roles.`);
-    }
-
-    // What the main session really has now is the ceiling (its mode's
-    // effective rights, its own right to manage members).
-    const callerMode = normalizeChatAgentMode(caller.agentMode);
-    const ceiling: ChatAgentPermissions = {
-      ...effectiveChatAgentPermissionsForProvider(caller.kind, callerMode, normalizeChatAgentPermissions(caller.permissions)),
-      manageRolesParticipants: manage
-    };
-    // The chat's sub-agents (its side panel): the provider asked for must be one
-    // of them; none named, the main session's own when it is one, else the first.
-    // A chat from before the list has none: any ready CLI, as before.
-    const subagents = effectiveSubagentProviders(
-      settings.subagentProvidersByProject?.[chatSubagentProjectKey(conversation) ?? ""],
-      chatSubagentProvidersOf(conversation.metadata)
-    );
-    // A Cloud run main session's members run there too, where Antigravity does not.
-    const runnable = subagents?.filter((provider) => !(caller.cloudRun && provider.kind === "gemini-cli"));
-    const subagent = subagents && (input.kind
-      ? subagents.find((provider) => provider.kind === input.kind)
-      : runnable?.find((provider) => provider.kind === caller.kind) ?? runnable?.[0]);
-    if (subagents && !subagent) {
-      return delegationRefusal("provider_not_in_chat", subagents.length === 0
-        ? "This chat has no sub-agents yet. User adds them in the chat's side panel."
-        : `${CLI_PROVIDER_SETUP[input.kind!].label} is not among this chat's sub-agents (${subagents.map((provider) => CLI_PROVIDER_SETUP[provider.kind].label).join(", ")}). Give the task to one of them, or ask User to add it in the chat's side panel.`);
-    }
-    const kind = subagent?.kind ?? input.kind ?? caller.kind;
-    const sameProvider = kind === caller.kind;
-    // A sub-agent with a model of its own runs on its CLI's own backend, not on
-    // another vendor the main session's CLI may be bound to; a fork goes there too.
-    const childHostId = sameProvider && !subagent?.model ? caller.hostId : undefined;
-    // A model named without a provider is one of the main session's own CLI's.
-    if (subagents && !input.kind && input.model && !sameProvider) {
-      return delegationRefusal("invalid_request", `Name the provider (kind) for model ${input.model}: this chat's sub-agents send the task to ${CLI_PROVIDER_SETUP[kind].label}, not your own CLI.`);
-    }
-    const access = clampChatAgentAccess(kind,
-      { agentMode: input.agentMode ?? callerMode, permissions: delegationRequestedPermissions(input.permissions, ceiling) },
-      { agentMode: callerMode, permissions: ceiling });
-    const agentMode = access.agentMode;
-    const permissions = access.permissions;
-    if (participantManagementChangeEscalates(role, permissions)) {
-      return delegationRefusal("not_allowed", `Managing members beyond what the ${role.label} role gives needs User's approval. Ask User, or add the member with app_participants_request_change.`);
-    }
-
     const start = input.start ?? "clean";
-    const callerSession = chatSessions(conversation).find((session) => session.participantId === caller.id);
-    if (start === "fork") {
-      const unavailable = this.chat.forks.forkUnavailableReason(caller, callerSession, kind, childHostId);
-      if (unavailable) {
-        return delegationRefusal("fork_unavailable", unavailable);
-      }
-      // The CLI session is kept for the folder it runs in: the copy runs in
-      // the same one.
-      permissions.repoRead = ceiling.repoRead;
-    }
-
-    const childModel = input.model ?? subagent?.model ?? (sameProvider ? caller.model : undefined);
-    // The main session's effort goes with its own model: another model may lack it.
-    // A chat from before the list keeps the old rule (its own CLI, any model).
-    const inheritsCallerEffort = sameProvider && (!subagents || childModel === caller.model);
-    const baseHandle = input.handle ?? delegatedMemberHandleBase(role, kind);
-    const item: ChatParticipantInput = {
-      handle: uniqueHandle(baseHandle, new Set(chatParticipants(conversation).map((participant) => participant.handle.toLowerCase()))),
-      roleConfigId: role.id,
-      kind,
-      // The provider's model and effort for this chat, then the main session's own.
-      model: childModel,
-      reasoningEffort: normalizeChatReasoningEffort(input.reasoningEffort ?? subagent?.reasoningEffort ??
-        (inheritsCallerEffort ? caller.reasoningEffort : undefined), kind),
-      hostId: childHostId,
-      agentMode,
-      permissions,
-      // Where the main session runs: a cloud main session's members run on
-      // the same machine.
-      remoteExecution: preservedRemoteExecution(caller.remoteExecution),
-      homeMachineId: caller.homeMachineId,
-      cloudRun: caller.cloudRun
-    };
-    try {
-      const agents = await this.chat.agentEnvironment.detectAgentsForReadiness();
-      assertParticipantProvidersReady([item], agents, settings.providers ?? [], settings.cliProviderHosts ?? []);
-    } catch (error) {
-      return delegationRefusal("provider_unavailable", error instanceof Error ? error.message : String(error));
-    }
 
     const requesterDepth = actor.participantRequestDepth ?? 0;
     const depth = requesterDepth + 1;
@@ -202,47 +116,7 @@ export class Delegation {
       // No limit on how many tasks the main session gives for one User
       // message (the User, 2026-11-20): only the depth limit above holds.
       const chainRootId = actor.chainRootId ?? actor.triggerMessageId ?? randomUUID();
-      const handles = new Set(chatParticipants(conversation).map((participant) => participant.handle.toLowerCase()));
-      const [validated] = await this.chat.creation.validateParticipants(
-        [{ ...item, handle: uniqueHandle(baseHandle, handles) }],
-        chatParticipants(conversation),
-        false,
-        settings.chatRoleConfigs.filter((candidate) => !candidate.archivedAt)
-      );
-      const summary = `Add @${validated.handle}`;
-      const memberInput: ChatRosterChangeParticipantInput = {
-        handle: validated.handle,
-        roleConfigId: validated.roleConfigId,
-        kind: validated.kind,
-        model: validated.model,
-        reasoningEffort: validated.reasoningEffort,
-        hostId: validated.hostId,
-        agentMode: validated.agentMode,
-        permissions: validated.permissions,
-        remoteExecution: preservedRemoteExecution(validated.remoteExecution)
-      };
-      // Recorded as the member change the main session made under its
-      // Manage members "allow", one-off (not saved as a preset).
-      const request: ChatParticipantChangeRequest = {
-        reason: input.reason,
-        operations: [{ type: "add_new_participant_to_chat", saveAsPreset: false, participant: memberInput }]
-      };
-      const [marked] = markAddedWithoutCard(conversation, this.chat.rosterChanges.applyPreparedRosterChange(conversation, {
-        request: { reason: input.reason, operations: [{ type: "add", participant: memberInput }] },
-        participants: [validated],
-        summary,
-        managementEscalation: false
-      }), callerNow.id);
-      const child = withTaskTitle(conversation, marked, input.title);
-      const approval = newAppToolApproval(conversation, callerNow, APP_PARTICIPANTS_REQUEST_CHANGE_TOOL, "participants.manage", request, summary, "auto-applied");
-      approval.approvalScope = "chat";
-      approval.appliedParticipantIds = [child.id];
-      upsertAppToolApproval(conversation, approval);
-      conversation.messages.push(createChatMessage("system", `Auto-applied member request from @${callerNow.handle}: ${summary}.`, undefined, {
-        threadId: "system"
-      }));
-
-      const session = await this.chat.memberSessions.newSessionForParticipant(child);
+      const { child, session } = await this.addNewMember(conversation, callerNow, prepared, settings, { reason: input.reason, title: input.title });
       if (start === "fork" && sessionNow) {
         session.forkFrom = { participantId: callerNow.id, sessionId: sessionNow.sessionId, kind: child.kind };
         session.forkedFromParticipantId = callerNow.id;
@@ -339,5 +213,240 @@ export class Delegation {
       start,
       forked: start === "fork"
     };
+  }
+
+  /**
+   * The members an Accord the User starts adds for the Agents-list CLIs it
+   * names (src/shared/accordCandidates.ts). Each is made as the main
+   * session's member for a task that names only its CLI: on the CLI's model
+   * and effort from the list, with the main session's mode and rights at
+   * most, where the main session runs. Read before the chat's queue (probing
+   * the CLIs takes seconds); addAccordMembers adds them inside it.
+   */
+  async prepareAccordMembers(conversation: Conversation, kinds: readonly ChatProviderKind[]): Promise<PreparedAccordMembers> {
+    const main = accordMainSession(conversation);
+    const settings = await this.deps.settings.getPublicSettings();
+    const unique = [...new Set(kinds)];
+    assertAccordProviders(conversation, unique, settings);
+    const manage = await this.chat.permissionRequests.manageRolesParticipantsPermissionForParticipant(main);
+    const members: PreparedMember[] = [];
+    for (const kind of unique) {
+      const prepared = await this.newMemberInput(conversation, main, manage, settings, { kind, start: "clean" });
+      if ("refusal" in prepared) {
+        throw new Error(String(prepared.refusal.reason));
+      }
+      members.push(prepared);
+    }
+    return { settings, members };
+  }
+
+  /** Inside the chat's queue: adds the prepared members to the chat as it is
+   *  now, as the User's change (no member asked for them). */
+  async addAccordMembers(conversation: Conversation, prepared: PreparedAccordMembers): Promise<ChatParticipant[]> {
+    if (prepared.members.length === 0) {
+      return [];
+    }
+    const main = accordMainSession(conversation);
+    assertAccordProviders(conversation, prepared.members.map((member) => member.item.kind), prepared.settings);
+    const added: ChatParticipant[] = [];
+    for (const member of prepared.members) {
+      const { child, session } = await this.addNewMember(conversation, main, member, prepared.settings, { byUser: true });
+      upsertSession(conversation, session);
+      added.push(child);
+    }
+    return added;
+  }
+
+  /** What the main session's new member is made of: its CLI from the chat's
+   *  Agents list, its model and effort, mode and rights no broader than the
+   *  main session's, the machine the main session runs on. Or why not. */
+  private async newMemberInput(
+    conversation: Conversation,
+    caller: ChatParticipant,
+    manage: ChatParticipantRequestPermission,
+    settings: AppSettings,
+    input: Omit<ChatTaskDelegationInput, "task" | "title" | "reason">
+  ): Promise<PreparedMember | { refusal: Record<string, unknown> }> {
+    const refuse = (code: string, reason: string): { refusal: Record<string, unknown> } => ({ refusal: delegationRefusal(code, reason) });
+    const roleConfigId = input.roleConfigId ?? GENERIC_PARTICIPANT_ROLE_ID;
+    // Only the roles offered for new members (not the Workflow Manager's,
+    // which manages members by default: the main session took its place).
+    if (roleConfigId === CHAT_ADMINISTRATOR_ROLE_ID || !isRoleOfferedForNewMembers(roleConfigId)) {
+      return refuse("invalid_role", "A member you give a task to cannot have the main session, Chat Assistant or Workflow Manager role.");
+    }
+    const role = settings.chatRoleConfigs.find((item) => item.id === roleConfigId && !item.archivedAt);
+    if (!role) {
+      return refuse("invalid_role", `No role ${roleConfigId}. Call app_participants_describe_options for the roles.`);
+    }
+
+    // What the main session really has now is the ceiling (its mode's
+    // effective rights, its own right to manage members).
+    const callerMode = normalizeChatAgentMode(caller.agentMode);
+    const ceiling: ChatAgentPermissions = {
+      ...effectiveChatAgentPermissionsForProvider(caller.kind, callerMode, normalizeChatAgentPermissions(caller.permissions)),
+      manageRolesParticipants: manage
+    };
+    // The chat's sub-agents (its side panel): the provider asked for must be one
+    // of them; none named, the main session's own when it is one, else the first.
+    // A chat from before the list has none: any ready CLI, as before.
+    const subagents = effectiveSubagentProviders(
+      settings.subagentProvidersByProject?.[chatSubagentProjectKey(conversation) ?? ""],
+      chatSubagentProvidersOf(conversation.metadata)
+    );
+    // A Cloud run main session's members run there too, where Antigravity does not.
+    const runnable = subagents?.filter((provider) => !(caller.cloudRun && provider.kind === "gemini-cli"));
+    const subagent = subagents && (input.kind
+      ? subagents.find((provider) => provider.kind === input.kind)
+      : runnable?.find((provider) => provider.kind === caller.kind) ?? runnable?.[0]);
+    if (subagents && !subagent) {
+      return refuse("provider_not_in_chat", subagents.length === 0
+        ? "This chat has no sub-agents yet. User adds them in the chat's side panel."
+        : `${CLI_PROVIDER_SETUP[input.kind!].label} is not among this chat's sub-agents (${subagents.map((provider) => CLI_PROVIDER_SETUP[provider.kind].label).join(", ")}). Give the task to one of them, or ask User to add it in the chat's side panel.`);
+    }
+    const kind = subagent?.kind ?? input.kind ?? caller.kind;
+    const sameProvider = kind === caller.kind;
+    // A sub-agent with a model of its own runs on its CLI's own backend, not on
+    // another vendor the main session's CLI may be bound to; a fork goes there too.
+    const childHostId = sameProvider && !subagent?.model ? caller.hostId : undefined;
+    // A model named without a provider is one of the main session's own CLI's.
+    if (subagents && !input.kind && input.model && !sameProvider) {
+      return refuse("invalid_request", `Name the provider (kind) for model ${input.model}: this chat's sub-agents send the task to ${CLI_PROVIDER_SETUP[kind].label}, not your own CLI.`);
+    }
+    const access = clampChatAgentAccess(kind,
+      { agentMode: input.agentMode ?? callerMode, permissions: delegationRequestedPermissions(input.permissions, ceiling) },
+      { agentMode: callerMode, permissions: ceiling });
+    const agentMode = access.agentMode;
+    const permissions = access.permissions;
+    if (participantManagementChangeEscalates(role, permissions)) {
+      return refuse("not_allowed", `Managing members beyond what the ${role.label} role gives needs User's approval. Ask User, or add the member with app_participants_request_change.`);
+    }
+
+    if (input.start === "fork") {
+      const callerSession = chatSessions(conversation).find((session) => session.participantId === caller.id);
+      const unavailable = this.chat.forks.forkUnavailableReason(caller, callerSession, kind, childHostId);
+      if (unavailable) {
+        return refuse("fork_unavailable", unavailable);
+      }
+      // The CLI session is kept for the folder it runs in: the copy runs in
+      // the same one.
+      permissions.repoRead = ceiling.repoRead;
+    }
+
+    const childModel = input.model ?? subagent?.model ?? (sameProvider ? caller.model : undefined);
+    // The main session's effort goes with its own model: another model may lack it.
+    // A chat from before the list keeps the old rule (its own CLI, any model).
+    const inheritsCallerEffort = sameProvider && (!subagents || childModel === caller.model);
+    const baseHandle = input.handle ?? delegatedMemberHandleBase(role, kind);
+    const item: PreparedMember["item"] = {
+      handle: uniqueHandle(baseHandle, new Set(chatParticipants(conversation).map((participant) => participant.handle.toLowerCase()))),
+      roleConfigId: role.id,
+      kind,
+      // The provider's model and effort for this chat, then the main session's own.
+      model: childModel,
+      reasoningEffort: normalizeChatReasoningEffort(input.reasoningEffort ?? subagent?.reasoningEffort ??
+        (inheritsCallerEffort ? caller.reasoningEffort : undefined), kind),
+      hostId: childHostId,
+      agentMode,
+      permissions,
+      // Where the main session runs: a cloud main session's members run on
+      // the same machine.
+      remoteExecution: preservedRemoteExecution(caller.remoteExecution),
+      homeMachineId: caller.homeMachineId,
+      cloudRun: caller.cloudRun
+    };
+    try {
+      const agents = await this.chat.agentEnvironment.detectAgentsForReadiness();
+      assertParticipantProvidersReady([item], agents, settings.providers ?? [], settings.cliProviderHosts ?? []);
+    } catch (error) {
+      return refuse("provider_unavailable", error instanceof Error ? error.message : String(error));
+    }
+    return { item, baseHandle };
+  }
+
+  /** Adds a prepared member to the chat as it is now (inside its queue), held
+   *  to the main session (markAddedWithoutCard), with a new CLI session. The
+   *  main session's own addition is recorded as its auto-applied member
+   *  request; one the User's Accord adds is said as her own addition is. */
+  private async addNewMember(
+    conversation: Conversation,
+    mainSession: ChatParticipant,
+    prepared: PreparedMember,
+    settings: AppSettings,
+    options: { reason?: string; title?: string; byUser?: boolean }
+  ): Promise<{ child: ChatParticipant; session: ChatParticipantSession }> {
+    const handles = new Set(chatParticipants(conversation).map((participant) => participant.handle.toLowerCase()));
+    const [validated] = await this.chat.creation.validateParticipants(
+      [{ ...prepared.item, handle: uniqueHandle(prepared.baseHandle, handles) }],
+      chatParticipants(conversation),
+      false,
+      settings.chatRoleConfigs.filter((candidate) => !candidate.archivedAt)
+    );
+    const summary = `Add @${validated.handle}`;
+    const memberInput: ChatRosterChangeParticipantInput = {
+      handle: validated.handle,
+      roleConfigId: validated.roleConfigId,
+      kind: validated.kind,
+      model: validated.model,
+      reasoningEffort: validated.reasoningEffort,
+      hostId: validated.hostId,
+      agentMode: validated.agentMode,
+      permissions: validated.permissions,
+      remoteExecution: preservedRemoteExecution(validated.remoteExecution)
+    };
+    const [marked] = markAddedWithoutCard(conversation, this.chat.rosterChanges.applyPreparedRosterChange(conversation, {
+      request: { reason: options.reason, operations: [{ type: "add", participant: memberInput }] },
+      participants: [validated],
+      summary,
+      managementEscalation: false
+    }), mainSession.id);
+    const child = withTaskTitle(conversation, marked, options.title);
+    if (options.byUser) {
+      conversation.messages.push(createChatMessage("system", `Added @${child.handle} to the chat for the Accord.`, undefined, { threadId: "system" }));
+    } else {
+      // Recorded as the member change the main session made under its
+      // Manage members "allow", one-off (not saved as a preset).
+      const request: ChatParticipantChangeRequest = {
+        reason: options.reason,
+        operations: [{ type: "add_new_participant_to_chat", saveAsPreset: false, participant: memberInput }]
+      };
+      const approval = newAppToolApproval(conversation, mainSession, APP_PARTICIPANTS_REQUEST_CHANGE_TOOL, "participants.manage", request, summary, "auto-applied");
+      approval.approvalScope = "chat";
+      approval.appliedParticipantIds = [child.id];
+      upsertAppToolApproval(conversation, approval);
+      conversation.messages.push(createChatMessage("system", `Auto-applied member request from @${mainSession.handle}: ${summary}.`, undefined, {
+        threadId: "system"
+      }));
+    }
+    const session = await this.chat.memberSessions.newSessionForParticipant(child);
+    return { child, session };
+  }
+}
+
+interface PreparedMember {
+  item: ChatParticipantInput & { kind: ChatProviderKind };
+  baseHandle: string;
+}
+
+export interface PreparedAccordMembers {
+  settings: AppSettings;
+  members: PreparedMember[];
+}
+
+function accordMainSession(conversation: Conversation): ChatParticipant {
+  const main = chatParticipants(conversation).find((participant) => isMainSessionParticipant(conversation.metadata, participant.id));
+  if (!main) {
+    throw new Error("Only a chat with a main session adds agents for an Accord.");
+  }
+  return main;
+}
+
+/** Each CLI is still one the Accord can add: in the chat's Agents list, with
+ *  no member here yet (one may have been added since the dialog opened). */
+function assertAccordProviders(conversation: Conversation, kinds: readonly ChatProviderKind[], settings: AppSettings): void {
+  const members = chatParticipants(conversation).filter((participant) => participant.roleConfigId !== CHAT_ADMINISTRATOR_ROLE_ID);
+  const open = new Set(accordCandidates(members, conversation, settings.subagentProvidersByProject).providers.map((provider) => provider.kind));
+  const missing = kinds.find((kind) => !open.has(kind));
+  if (missing) {
+    throw new Error(`${CLI_PROVIDER_SETUP[missing].label} is not in this chat's Agents list, or it has a member here already. Start the Accord again.`);
   }
 }

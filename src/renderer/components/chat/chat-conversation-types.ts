@@ -55,6 +55,10 @@ export interface ChatConversationViewProps {
     targetParticipantIds?: string[]
   ) => Promise<boolean>;
   accordDisabledReason?: string;
+  /** The sessions view of a chat with a main session has too few for an
+   *  Accord (accordLaunch): the button opens the side panel's Agents list to
+   *  add one instead of the Accord dialog. */
+  accordNeedsAgent?: boolean;
   onOpenAccord?: () => void;
   onSendThread: (
     rootMessage: Conversation["messages"][number],

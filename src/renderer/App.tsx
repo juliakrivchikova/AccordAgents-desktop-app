@@ -37,6 +37,7 @@ import { sessionsMemberSettings } from "./app/sessions-member-settings";
 import { forkToNewChatReasonFor, useMachineForkSupport } from "./components/chat/use-fork-to-new-chat";
 import { renderNewChatMemberMark } from "./components/chat/chat-member-mark";
 import { chatViewFor } from "../shared/mainSession";
+import { accordCandidates, accordLaunch } from "../shared/accordCandidates";
 import { chatRoleLabel } from "./components/chat/chat-conversation-data";
 import { defaultChatParticipantDraft } from "./components/chat/chat-participant-drafts";
 import type { DraftPluginMention } from "./components/chat/chat-composer-draft-utils";
@@ -304,14 +305,14 @@ function App(): JSX.Element {
     () => view.activeChatParticipants.filter((participant) => !isChatAssistantParticipant(participant)),
     [view.activeChatParticipants]
   );
-  const accordDisabledReason = !view.activeChatConversation
+  // In a chat with a main session the CLIs of its Agents list count too: each
+  // without a member yet gets one as the Accord starts.
+  const accordAgents = accordChat ? accordCandidates(accordEligibleParticipants, accordChat, state.settings.subagentProvidersByProject).providers : [];
+  const accordState = accordChat ? accordLaunch({ members: accordEligibleParticipants, providers: accordAgents }, accordChat) : undefined;
+  const accordDisabledReason = !accordState
     ? "Open a chat to start Accord."
-    : view.activeChatConversation.metadata.archived === true
-      ? "Archived chats cannot start Accord."
-      : accordEligibleParticipants.length < 2
-          ? "Add at least two members to start Accord."
-          : undefined;
-  const canStartAccord = Boolean(view.activeChatConversation && !accordDisabledReason);
+    : accordState.kind === "disabled" ? accordState.reason : undefined;
+  const canStartAccord = accordState?.kind === "ready";
   const terminalToggle = (
     <IconButton
       label="Terminal"
@@ -424,6 +425,7 @@ function App(): JSX.Element {
       reviewPlanActions={reviewPlanActions}
       settingsActions={settingsActions}
       accordDisabledReason={accordDisabledReason}
+      accordNeedsAgent={accordState?.kind === "add-agent"}
       onOpenAccord={() => setAccordDialogOpen(true)}
       renderMemberSettings={sessionsMember.actions}
       renderMemberChip={sessionsMember.controls}
@@ -537,6 +539,7 @@ function App(): JSX.Element {
         <ChatAccordLauncherDialog
           open={accordDialogOpen}
           participants={accordEligibleParticipants}
+          providers={accordAgents}
           disabled={!canStartAccord}
           participantRoleLabel={(participant) => chatRoleLabel(state.settings.chatRoleConfigs, participant)}
           onOpenChange={setAccordDialogOpen}

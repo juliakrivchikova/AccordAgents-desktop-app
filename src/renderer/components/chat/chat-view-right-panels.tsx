@@ -41,6 +41,7 @@ export function ChatViewRightPanels(props: {
     onStopRuns?: (runIds: readonly string[]) => void;
     latestAccord?: DockedAccord;
     onOpenAccord: (launchId: string) => void;
+    accordNeedsAgent?: boolean;
     renderMemberSettings?: (participantId: string) => ReactNode;
     renderMemberChip?: (participantId: string) => ReactNode;
   };
@@ -99,6 +100,7 @@ export function ChatViewRightPanels(props: {
           onStopRuns={sessions.onStopRuns}
           latestAccord={sessions.latestAccord}
           onOpenAccord={sessions.onOpenAccord}
+          accordNeedsAgent={sessions.accordNeedsAgent}
           renderMemberSettings={sessions.renderMemberSettings}
           renderMemberChip={sessions.renderMemberChip}
         />

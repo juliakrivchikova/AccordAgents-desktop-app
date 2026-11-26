@@ -3,7 +3,8 @@ import { CheckIcon } from "@phosphor-icons/react";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Textarea } from "@/components/ui/textarea";
-import type { ChatParticipant } from "../../../shared/types";
+import { CLI_PROVIDER_SETUP } from "../../../shared/cliReadiness";
+import type { ChatParticipant, ChatProviderKind, EffectiveSubagentProvider } from "../../../shared/types";
 import {
   type AccordLauncherPreferences,
   nextAccordSubjectHistory,
@@ -17,7 +18,7 @@ import {
 import { AppSelect, FormRow } from "../primitives";
 import { chatParticipantDisplayName, isChatAssistantParticipant } from "../conversation/conversation-display";
 import { avatarForChatParticipant } from "./chat-avatars";
-import { ChatMemberMark, ChatSessionsPresentationContext } from "./chat-member-mark";
+import { ChatMemberMark, ChatProviderMark, ChatSessionsPresentationContext } from "./chat-member-mark";
 import { AccordMergeIcon } from "./accord-merge-icon";
 import { providerLabel } from "./chat-conversation-data";
 import { sessionsViewLabel, type SessionsViewNames } from "../../../shared/sessionsViewText";
@@ -27,12 +28,16 @@ import { Delayed } from "@/components/ui/delayed";
 export interface ChatAccordLauncherPayload {
   facilitatorParticipantId: string;
   targetParticipantIds: string[];
+  targetProviderKinds: ChatProviderKind[];
   subject: string;
 }
 
 export function ChatAccordLauncherDialog(props: {
   open: boolean;
   participants: ChatParticipant[];
+  /** A chat with a main session: its Agents-list CLIs with no member yet,
+   *  each made a member when the Accord starts (accordCandidates). */
+  providers?: readonly EffectiveSubagentProvider[];
   disabled?: boolean;
   participantRoleLabel: (participant: ChatParticipant) => string;
   onOpenChange: (open: boolean) => void;
@@ -52,6 +57,11 @@ export function ChatAccordLauncherDialog(props: {
     names ? sessionsViewLabel(participant.handle, names) : chatParticipantDisplayName(participant);
   const [facilitatorId, setFacilitatorId] = React.useState("");
   const [targetIds, setTargetIds] = React.useState<string[]>([]);
+  const providers = props.providers ?? NO_PROVIDERS;
+  const [providerKinds, setProviderKinds] = React.useState<ChatProviderKind[]>([]);
+  // The CLIs offered, as a key: the list is worked out again on every update
+  // of the chat, and only a change in it starts the selection over.
+  const providersKey = providers.map((provider) => provider.kind).join(" ");
   const [subject, setSubject] = React.useState("");
   const [saving, setSaving] = React.useState(false);
   const [preferences, setPreferences] = React.useState<AccordLauncherPreferences>(() => readAccordLauncherPreferences());
@@ -74,14 +84,16 @@ export function ChatAccordLauncherDialog(props: {
     setPreferences(stored);
     setFacilitatorId(facilitatorParticipantId);
     setTargetIds(participants.filter((participant) => participant.id !== facilitatorParticipantId).map((participant) => participant.id));
+    setProviderKinds(providersKey ? providersKey.split(" ") as ChatProviderKind[] : []);
     setSubject("");
-  }, [participants, props.open]);
+  }, [participants, providersKey, props.open]);
 
   const resolvedFacilitatorId = facilitatorId || preferredAccordFacilitator(participants, preferences)?.id || "";
   const targetOptions = participants.filter((participant) => participant.id !== resolvedFacilitatorId);
   const selectedTargetIds = targetOptions.filter((participant) => targetIds.includes(participant.id)).map((participant) => participant.id);
   const facilitator = participants.find((participant) => participant.id === resolvedFacilitatorId);
-  const validation = validationMessage(resolvedFacilitatorId, selectedTargetIds, subject);
+  const selectedProviderKinds = providers.filter((provider) => providerKinds.includes(provider.kind)).map((provider) => provider.kind);
+  const validation = validationMessage(resolvedFacilitatorId, selectedTargetIds.length + selectedProviderKinds.length, subject);
   const canSubmit = !saving && !props.disabled && !validation;
 
   const setFacilitator = (value: string): void => {
@@ -105,6 +117,10 @@ export function ChatAccordLauncherDialog(props: {
     );
   };
 
+  const toggleProvider = (kind: ChatProviderKind): void => {
+    setProviderKinds((current) => current.includes(kind) ? current.filter((item) => item !== kind) : [...current, kind]);
+  };
+
   const submit = async (): Promise<void> => {
     if (!canSubmit) {
       return;
@@ -114,6 +130,7 @@ export function ChatAccordLauncherDialog(props: {
       const started = await props.onStart({
         facilitatorParticipantId: resolvedFacilitatorId,
         targetParticipantIds: selectedTargetIds,
+        targetProviderKinds: selectedProviderKinds,
         subject: subject.trim()
       });
       if (started) {
@@ -236,7 +253,31 @@ export function ChatAccordLauncherDialog(props: {
                   </label>
                 );
               })}
-              {targetOptions.length === 0 && (
+              {providers.map((provider) => {
+                const checked = providerKinds.includes(provider.kind);
+                const label = CLI_PROVIDER_SETUP[provider.kind].label;
+                return (
+                  <label className={`chat-accord-target${checked ? " is-selected" : ""}`} key={provider.kind} data-testid="chat-accord-new-agent">
+                    <input
+                      className="chat-accord-target-checkbox"
+                      type="checkbox"
+                      checked={checked}
+                      disabled={saving || props.disabled}
+                      aria-label={`Select ${label}`}
+                      onChange={() => toggleProvider(provider.kind)}
+                    />
+                    <span className="chat-accord-target-check" aria-hidden="true">
+                      <CheckIcon size={12} />
+                    </span>
+                    <ChatProviderMark member={{ kind: provider.kind }} className="is-mini" tile={props.sessions !== true} />
+                    <span className="chat-accord-target-title" title="From the side panel's Agents list: joins the chat when the Accord starts.">
+                      <strong>{label}</strong>
+                      <span>- New agent</span>
+                    </span>
+                  </label>
+                );
+              })}
+              {targetOptions.length === 0 && providers.length === 0 && (
                 <div className="chat-accord-empty">Add another member to start Accord.</div>
               )}
             </div>
@@ -262,11 +303,13 @@ export function ChatAccordLauncherDialog(props: {
 
 const SUBJECT_REQUIRED = "Enter a subject.";
 
-function validationMessage(facilitatorId: string, targetIds: string[], subject: string): string | undefined {
+const NO_PROVIDERS: readonly EffectiveSubagentProvider[] = [];
+
+function validationMessage(facilitatorId: string, targetCount: number, subject: string): string | undefined {
   if (!facilitatorId) {
     return "Choose who leads.";
   }
-  if (targetIds.length === 0) {
+  if (targetCount === 0) {
     return "Choose at least one member.";
   }
   if (!subject.trim()) {
