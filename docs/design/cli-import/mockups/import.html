@@ -1,0 +1,538 @@
+<!doctype html>
+<html lang="ru" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>CLI import variants</title>
+<style>
+  :root {
+    --ui-bg: #ffffff; --ui-bg-sidebar: #f7f7f8; --ui-bg-panel: #fbfbfc; --ui-bg-subtle: #f3f3f5; --ui-bg-muted: #eaeaed; --ui-bg-elevated: #ffffff;
+    --ui-overlay: rgba(15, 15, 18, 0.32);
+    --ui-border-subtle: #eeeef1; --ui-border: #e4e4e8; --ui-border-strong: #d0d0d6;
+    --ui-text: #18181b; --ui-text-2: #4f4f58; --ui-text-3: #6c6c75; --ui-text-disabled: #b6b6bd;
+    --ui-primary: #7357d0; --ui-primary-hover: #6447c4; --ui-primary-fg: #ffffff;
+    --ui-select-bg: rgba(115, 87, 208, 0.1); --ui-select-fg: #5a3fb8;
+    --ui-row-hover: rgba(115, 87, 208, 0.06); --ui-row-active: rgba(115, 87, 208, 0.12);
+    --ui-focus-ring: #7357d0; --ui-link: #6447c4;
+    --ui-success: #15803d; --ui-warning: #b45309; --ui-danger: #dc2626; --ui-info: #2563eb;
+    --ui-success-dot: #22c55e; --ui-warning-dot: #f59e0b; --ui-danger-dot: #ef4444; --ui-info-dot: #3b82f6;
+    --ui-code-bg: #f4f4f6;
+    --ui-shadow-sm: 0 1px 2px rgba(16, 16, 20, 0.05);
+    --ui-shadow-md: 0 0 0 1px var(--ui-border), 0 8px 24px -6px rgba(16, 16, 20, 0.14);
+    --ui-shadow-lg: 0 0 0 1px var(--ui-border), 0 24px 48px -12px rgba(16, 16, 20, 0.24);
+    --page: #e9e9ee;
+    --font-body: "Inter Variable", "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    --font-code: "JetBrains Mono Variable", ui-monospace, "SF Mono", Menlo, monospace;
+  }
+  [data-theme="dark"] {
+    --ui-bg: #121214; --ui-bg-sidebar: #0d0d0f; --ui-bg-panel: #151518; --ui-bg-subtle: #1c1c20; --ui-bg-muted: #26262b; --ui-bg-elevated: #1b1b1f;
+    --ui-overlay: rgba(0, 0, 0, 0.5);
+    --ui-border-subtle: #1f1f23; --ui-border: #29292e; --ui-border-strong: #3a3a41;
+    --ui-text: #ececef; --ui-text-2: #b0b0b9; --ui-text-3: #8c8c96; --ui-text-disabled: #4d4d55;
+    --ui-select-bg: rgba(143, 120, 232, 0.16); --ui-select-fg: #c7b9ff;
+    --ui-row-hover: rgba(143, 120, 232, 0.08); --ui-row-active: rgba(143, 120, 232, 0.16);
+    --ui-focus-ring: #8f78e8; --ui-link: #a996f2;
+    --ui-success: #4ade80; --ui-warning: #fbbf24; --ui-danger: #f87171; --ui-info: #60a5fa;
+    --ui-code-bg: #1d1d21;
+    --ui-shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.4);
+    --ui-shadow-md: 0 0 0 1px var(--ui-border), 0 10px 28px -6px rgba(0, 0, 0, 0.6);
+    --ui-shadow-lg: 0 0 0 1px var(--ui-border), 0 28px 56px -12px rgba(0, 0, 0, 0.7);
+    --page: #050506;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; }
+  body { background: var(--page); color: var(--ui-text); font-family: var(--font-body); font-size: 13px; line-height: 1.45; -webkit-font-smoothing: antialiased; }
+  button { font: inherit; color: inherit; background: none; border: 0; padding: 0; cursor: pointer; }
+  svg.i { width: 14px; height: 14px; flex: none; fill: currentColor; }
+  svg.i16 { width: 16px; height: 16px; }
+  svg.i12 { width: 12px; height: 12px; }
+
+  /* page chrome (not the app) */
+  .page-head { max-width: 1240px; margin: 0 auto; padding: 20px 16px 8px; display: flex; flex-wrap: wrap; gap: 12px; align-items: center; justify-content: space-between; }
+  .page-head h1 { font-size: 16px; font-weight: 600; margin: 0; }
+  .page-head p { margin: 2px 0 0; color: var(--ui-text-3); font-size: 12px; }
+  .tabs { display: inline-flex; gap: 2px; padding: 2px; border-radius: 8px; background: var(--ui-bg-muted); }
+  .tabs button { height: 24px; padding: 0 10px; border-radius: 6px; font-size: 12px; font-weight: 500; color: var(--ui-text-2); }
+  .tabs button[aria-selected="true"] { background: var(--ui-bg); color: var(--ui-text); box-shadow: var(--ui-shadow-sm); }
+  .note { max-width: 1240px; margin: 0 auto 10px; padding: 0 16px; color: var(--ui-text-2); font-size: 12px; }
+  .note b { color: var(--ui-text); font-weight: 500; }
+  .stage { max-width: 1240px; margin: 0 auto 32px; padding: 0 16px; overflow-x: auto; }
+  .variant { display: none; }
+  .variant.on { display: block; }
+
+  /* app window */
+  .win { position: relative; width: 1200px; height: 740px; margin: 0 auto; display: flex; border-radius: 12px; overflow: hidden; background: var(--ui-bg-sidebar); box-shadow: var(--ui-shadow-lg); }
+  .side { width: 268px; flex: none; display: flex; flex-direction: column; padding: 0 8px 8px; }
+  .lights { height: 46px; display: flex; align-items: center; gap: 8px; padding-left: 8px; }
+  .lights i { width: 12px; height: 12px; border-radius: 50%; display: block; }
+  .lights i:nth-child(1) { background: #ff5f57; } .lights i:nth-child(2) { background: #febc2e; } .lights i:nth-child(3) { background: #28c840; }
+  .lights .tog { margin-left: 18px; color: var(--ui-text-3); display: flex; }
+  .search { height: 28px; display: flex; align-items: center; gap: 8px; padding: 0 8px; border-radius: 8px; background: var(--ui-bg-subtle); border: 1px solid var(--ui-border-subtle); color: var(--ui-text-3); margin-bottom: 6px; }
+  .search kbd { margin-left: auto; font-family: var(--font-body); font-size: 11px; padding: 0 4px; border-radius: 4px; border: 1px solid var(--ui-border); }
+  .nav { height: 28px; display: flex; align-items: center; gap: 8px; padding: 0 8px; border-radius: 8px; color: var(--ui-text); width: 100%; text-align: left; }
+  .nav:hover, .row:hover { background: var(--ui-row-hover); }
+  .sec { display: flex; align-items: center; justify-content: space-between; height: 28px; padding: 0 8px; margin-top: 10px; color: var(--ui-text-3); font-size: 12px; font-weight: 500; }
+  .sec .acts { display: flex; gap: 2px; }
+  .ib { width: 24px; height: 24px; display: inline-grid; place-items: center; border-radius: 8px; color: var(--ui-text-3); }
+  .ib:hover { background: var(--ui-row-hover); color: var(--ui-text); }
+  .ib.hot { background: var(--ui-row-active); color: var(--ui-select-fg); }
+  .proj { height: 28px; display: flex; align-items: center; gap: 8px; padding: 0 8px; color: var(--ui-text-2); }
+  .chat { height: 28px; display: flex; align-items: center; gap: 8px; padding: 0 8px; border-radius: 8px; color: var(--ui-text); white-space: nowrap; }
+  .chat span.t { overflow: hidden; text-overflow: ellipsis; flex: 1; }
+  .chat.sel { background: var(--ui-row-active); color: var(--ui-select-fg); }
+  .chat .gl { width: 12px; height: 12px; }
+  .dot { width: 6px; height: 6px; border-radius: 50%; background: var(--ui-primary); flex: none; }
+  .side-foot { margin-top: auto; display: flex; align-items: center; gap: 8px; height: 32px; padding: 0 8px; color: var(--ui-text); border-top: 1px solid var(--ui-border-subtle); padding-top: 8px; }
+  .side-foot .r { margin-left: auto; display: flex; gap: 4px; color: var(--ui-text-3); }
+  .main { flex: 1; margin: 8px 8px 8px 0; border-radius: 12px; background: var(--ui-bg); border: 1px solid var(--ui-border-subtle); display: flex; flex-direction: column; overflow: hidden; position: relative; }
+  .mhead { height: 46px; flex: none; display: flex; align-items: center; gap: 8px; padding: 0 16px; border-bottom: 1px solid var(--ui-border-subtle); font-size: 14px; font-weight: 600; }
+  .mhead .r { margin-left: auto; color: var(--ui-text-3); display: flex; gap: 4px; }
+  .mhead .sub { font-weight: 400; color: var(--ui-text-3); font-size: 12px; display: inline-flex; align-items: center; gap: 6px; }
+  .mbody { flex: 1; overflow: auto; position: relative; }
+
+  /* provider marks */
+  .gl { width: 14px; height: 14px; flex: none; display: inline-block; background-size: contain; background-repeat: no-repeat; background-position: center; }
+  .gl.claude { background: #d97757; -webkit-mask: url(data:image/png;base64,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) center / contain no-repeat; mask: url(data:image/png;base64,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) center / contain no-repeat; }
+  [data-theme="dark"] .gl.claude { background: #e8896b; }
+  .gl.agy { background-image: url(data:image/png;base64,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); }
+  .gl.codex { background: none; }
+  .gl.codex svg { width: 100%; height: 100%; display: block; }
+
+  /* kit pieces */
+  .btn { height: 28px; padding: 0 12px; border-radius: 8px; font-weight: 500; display: inline-flex; align-items: center; gap: 6px; white-space: nowrap; transition: background .12s cubic-bezier(.2,0,0,1); }
+  .btn.md { height: 32px; }
+  .btn.xs { height: 24px; padding: 0 8px; font-size: 12px; }
+  .btn.primary { background: var(--ui-primary); color: var(--ui-primary-fg); }
+  .btn.primary:hover { background: var(--ui-primary-hover); }
+  .btn.secondary { background: var(--ui-bg-subtle); border: 1px solid var(--ui-border); color: var(--ui-text); }
+  .btn.secondary:hover { background: var(--ui-row-hover); }
+  .btn.ghost { color: var(--ui-text-2); }
+  .btn.ghost:hover { background: var(--ui-row-hover); color: var(--ui-text); }
+  .btn.link { color: var(--ui-link); padding: 0 4px; height: auto; }
+  .cb { width: 14px; height: 14px; border-radius: 4px; border: 1px solid var(--ui-border-strong); display: inline-grid; place-items: center; flex: none; background: var(--ui-bg); }
+  .cb.on { background: var(--ui-primary); border-color: var(--ui-primary); color: #fff; }
+  .cb.part::after { content: ""; width: 8px; height: 2px; border-radius: 1px; background: var(--ui-primary); }
+  .cb.off { opacity: .4; }
+  .cb svg { width: 10px; height: 10px; fill: currentColor; }
+  .sw { width: 26px; height: 16px; border-radius: 8px; background: var(--ui-bg-muted); position: relative; flex: none; border: 1px solid var(--ui-border); }
+  .sw::after { content: ""; position: absolute; top: 1px; left: 1px; width: 12px; height: 12px; border-radius: 50%; background: #fff; box-shadow: 0 1px 2px rgba(0,0,0,.25); }
+  .sw.on { background: var(--ui-primary); border-color: var(--ui-primary); }
+  .sw.on::after { left: 11px; }
+  .seg { display: inline-flex; padding: 2px; border-radius: 8px; background: var(--ui-bg-subtle); border: 1px solid var(--ui-border-subtle); gap: 2px; }
+  .seg button { height: 24px; padding: 0 8px; border-radius: 6px; display: inline-flex; align-items: center; gap: 6px; color: var(--ui-text-2); font-weight: 500; font-size: 12px; }
+  .seg button .n { color: var(--ui-text-3); font-weight: 400; }
+  .seg button.on { background: var(--ui-bg); color: var(--ui-text); box-shadow: var(--ui-shadow-sm); }
+  .field { height: 28px; display: flex; align-items: center; gap: 8px; padding: 0 8px; border-radius: 8px; border: 1px solid var(--ui-border); background: var(--ui-bg); color: var(--ui-text-3); }
+  .muted { color: var(--ui-text-3); }
+  .small { font-size: 12px; }
+  .mono { font-family: var(--font-code); font-size: 12px; }
+  .st { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; white-space: nowrap; }
+  .st i { width: 6px; height: 6px; border-radius: 50%; display: inline-block; }
+  .st.warn { color: var(--ui-warning); } .st.warn i { background: var(--ui-warning-dot); }
+  .st.ok { color: var(--ui-success); } .st.ok i { background: var(--ui-success-dot); }
+  .st.info { color: var(--ui-text-3); } .st.info i { background: var(--ui-text-disabled); }
+  .st.link { color: var(--ui-link); }
+
+  /* dialog */
+  .scrim { position: absolute; inset: 0; background: var(--ui-overlay); display: grid; place-items: center; z-index: 5; }
+  .dlg { width: 900px; height: 600px; border-radius: 12px; background: var(--ui-bg-elevated); box-shadow: var(--ui-shadow-lg); display: flex; flex-direction: column; overflow: hidden; }
+  .dlg-h { height: 46px; flex: none; display: flex; align-items: center; gap: 8px; padding: 0 12px 0 16px; font-size: 14px; font-weight: 600; }
+  .dlg-h .x { margin-left: auto; }
+  .dlg-tools { display: flex; align-items: center; gap: 8px; padding: 0 16px 10px; border-bottom: 1px solid var(--ui-border-subtle); }
+  .dlg-tools .field { width: 220px; margin-left: auto; }
+  .dlg-b { flex: 1; display: flex; min-height: 0; }
+  .col-l { width: 300px; flex: none; border-right: 1px solid var(--ui-border-subtle); overflow: auto; padding: 6px; }
+  .col-r { flex: 1; overflow: auto; padding: 6px 6px 6px 8px; display: flex; flex-direction: column; }
+  .grp { height: 24px; display: flex; align-items: center; padding: 0 8px; margin-top: 6px; font-size: 11px; font-weight: 500; color: var(--ui-text-3); }
+  .prow { display: flex; align-items: center; gap: 8px; min-height: 40px; padding: 4px 8px; border-radius: 8px; }
+  .prow.sel { background: var(--ui-row-active); }
+  .prow .nm { font-weight: 500; }
+  .prow .pa { font-size: 12px; color: var(--ui-text-3); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .prow .tx { flex: 1; min-width: 0; display: flex; flex-direction: column; }
+  .cnts { display: flex; align-items: center; gap: 6px; font-size: 12px; color: var(--ui-text-3); }
+  .cnts span { display: inline-flex; align-items: center; gap: 3px; }
+  .cnts .gl { width: 12px; height: 12px; }
+  .rhead { display: flex; align-items: center; gap: 8px; height: 36px; padding: 0 8px; }
+  .rhead .nm { font-weight: 600; font-size: 14px; }
+  .rhead .r { margin-left: auto; display: flex; gap: 8px; align-items: center; }
+  .trow { display: grid; grid-template-columns: 14px 14px minmax(0,1fr) auto 44px; gap: 10px; align-items: center; height: 32px; padding: 0 8px; border-radius: 8px; }
+  .trow:hover { background: var(--ui-row-hover); }
+  .trow .t { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .trow .tm { text-align: right; color: var(--ui-text-3); font-size: 12px; }
+  .trow .mt { color: var(--ui-text-3); font-size: 12px; white-space: nowrap; }
+  .trow.dim .t { color: var(--ui-text-3); }
+  .trow.sel { background: var(--ui-row-active); }
+  .dlg-f { height: 56px; flex: none; display: flex; align-items: center; gap: 8px; padding: 0 16px; border-top: 1px solid var(--ui-border-subtle); }
+  .dlg-f .r { margin-left: auto; display: flex; gap: 8px; }
+  .toggle-line { display: inline-flex; align-items: center; gap: 8px; color: var(--ui-text-2); font-size: 12px; }
+
+  /* new chat */
+  .nc { height: 100%; display: flex; flex-direction: column; }
+  .nc-hero { flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 6px; padding: 0 24px; }
+  .nc-hero .logo { width: 32px; height: 32px; border-radius: 50%; background: conic-gradient(from 200deg, #ff4f8b, #7357d0, #ff8a3d, #ff4f8b); margin-bottom: 10px; }
+  .nc-hero h2 { margin: 0; font-size: 20px; font-weight: 600; }
+  .nc-hero .sub { color: var(--ui-text-3); font-size: 14px; }
+  .nc-list { width: 560px; margin-top: 18px; display: flex; flex-direction: column; }
+  .nc-label { height: 24px; display: flex; align-items: center; justify-content: space-between; padding: 0 8px; font-size: 12px; color: var(--ui-text-3); font-weight: 500; margin-top: 8px; }
+  .nc-row { height: 32px; display: flex; align-items: center; gap: 10px; padding: 0 8px; border-radius: 8px; color: var(--ui-text-2); }
+  .nc-row:hover { background: var(--ui-row-hover); color: var(--ui-text); }
+  .nc-row .t { flex: 1; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .nc-row .tm { color: var(--ui-text-3); font-size: 12px; width: 32px; text-align: right; }
+  .nc-row .btn { opacity: 0; }
+  .nc-row:hover .btn, .nc-row.hov .btn { opacity: 1; }
+  .nc-row.hov { background: var(--ui-row-hover); color: var(--ui-text); }
+  .composer { margin: 0 24px 20px; border-radius: 12px; border: 1px solid var(--ui-border); background: var(--ui-bg-elevated); }
+  .strip { display: flex; align-items: center; gap: 14px; height: 40px; padding: 0 12px; border-bottom: 1px solid var(--ui-border-subtle); color: var(--ui-text-2); }
+  .strip span { display: inline-flex; align-items: center; gap: 6px; }
+  .strip .r { margin-left: auto; display: flex; gap: 14px; }
+  .cin { height: 44px; padding: 12px; color: var(--ui-text-3); font-size: 14px; }
+  .cbar { display: flex; align-items: center; gap: 8px; padding: 0 8px 8px; color: var(--ui-text-3); }
+  .send { margin-left: auto; width: 28px; height: 28px; border-radius: 50%; background: var(--ui-bg-muted); display: grid; place-items: center; color: var(--ui-text-3); }
+  .send.on { background: var(--ui-primary); color: #fff; }
+  .pop { position: absolute; z-index: 4; width: 560px; border-radius: 12px; background: var(--ui-bg-elevated); box-shadow: var(--ui-shadow-md); padding: 6px; }
+
+  /* settings */
+  .set { display: flex; height: 100%; }
+  .set-nav { width: 200px; flex: none; border-right: 1px solid var(--ui-border-subtle); padding: 10px 8px; display: flex; flex-direction: column; gap: 1px; }
+  .set-nav .nav.sel { background: var(--ui-row-active); color: var(--ui-select-fg); }
+  .set-c { flex: 1; overflow: auto; padding: 20px 28px; }
+  .set-c h2 { font-size: 20px; font-weight: 600; margin: 0 0 4px; }
+  .set-c .lead { color: var(--ui-text-3); margin: 0 0 18px; max-width: 640px; }
+  .card { border: 1px solid var(--ui-border); border-radius: 8px; background: var(--ui-bg); }
+  .srow { display: flex; align-items: center; gap: 10px; min-height: 44px; padding: 6px 12px; border-bottom: 1px solid var(--ui-border-subtle); }
+  .srow:last-child { border-bottom: 0; }
+  .srow .tx { flex: 1; min-width: 0; display: flex; flex-direction: column; }
+  .srow .tx .d { font-size: 12px; color: var(--ui-text-3); }
+  .srow .tx b { font-weight: 500; }
+  .sh { display: flex; align-items: center; justify-content: space-between; margin: 22px 0 8px; }
+  .sh h3 { margin: 0; font-size: 14px; font-weight: 600; }
+  .ptable { width: 100%; border-collapse: collapse; }
+  .ptable th { text-align: left; font-size: 12px; font-weight: 500; color: var(--ui-text-3); height: 32px; padding: 0 12px; border-bottom: 1px solid var(--ui-border-subtle); }
+  .ptable td { height: 40px; padding: 0 12px; border-bottom: 1px solid var(--ui-border-subtle); white-space: nowrap; }
+  .ptable tr:last-child td { border-bottom: 0; }
+  .ptable tr:hover td { background: var(--ui-row-hover); }
+  .ptable .nm { font-weight: 500; }
+  .ptable .pa { font-size: 12px; color: var(--ui-text-3); }
+  .loadbar { position: absolute; top: 0; left: 0; right: 0; height: 2px; overflow: hidden; }
+  .loadbar::after { content: ""; position: absolute; top: 0; left: -30%; width: 30%; height: 2px; background: var(--ui-primary); animation: lb 1.2s cubic-bezier(.4,0,.2,1) infinite; }
+  @keyframes lb { to { left: 100%; } }
+  @media (prefers-reduced-motion: reduce) { .loadbar::after { animation: none; left: 0; width: 40%; } }
+
+  /* chat timeline */
+  .tl { max-width: 768px; margin: 0 auto; padding: 18px 24px 8px; display: flex; flex-direction: column; gap: 14px; }
+  .imp { display: flex; gap: 10px; align-items: flex-start; padding: 10px 12px; border-radius: 8px; background: var(--ui-bg-subtle); border: 1px solid var(--ui-border-subtle); color: var(--ui-text-2); font-size: 12px; }
+  .imp .tx { flex: 1; }
+  .imp b { color: var(--ui-text); font-weight: 500; }
+  .um { align-self: flex-end; max-width: 72%; background: var(--ui-bg-subtle); border-radius: 12px; padding: 8px 12px; font-size: 14px; }
+  .am { font-size: 14px; color: var(--ui-text); display: flex; flex-direction: column; gap: 4px; }
+  .am .who { display: flex; align-items: center; gap: 6px; font-size: 12px; color: var(--ui-text-3); }
+  .worked { display: inline-flex; align-items: center; gap: 6px; color: var(--ui-text-3); font-size: 12px; }
+  .divider { display: flex; align-items: center; gap: 10px; color: var(--ui-text-3); font-size: 12px; }
+  .divider::before, .divider::after { content: ""; flex: 1; height: 1px; background: var(--ui-border-subtle); }
+  .ann { position: absolute; z-index: 6; max-width: 250px; padding: 8px 10px; border-radius: 8px; background: var(--ui-text); color: var(--ui-bg); font-size: 12px; line-height: 1.4; box-shadow: var(--ui-shadow-md); }
+  .ann b { font-weight: 600; }
+  .legend { max-width: 1240px; margin: 14px auto 0; padding: 0 16px; display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 10px; }
+  .legend div { background: var(--ui-bg); border: 1px solid var(--ui-border-subtle); border-radius: 8px; padding: 10px 12px; color: var(--ui-text-2); font-size: 12px; }
+  .legend b { color: var(--ui-text); font-weight: 600; display: block; margin-bottom: 4px; font-size: 13px; }
+</style>
+</head>
+<body>
+<svg width="0" height="0" style="position:absolute" aria-hidden="true"><symbol id="Folder" viewBox="0 0 256 256"><path d="M216,72H131.31L104,44.69A15.86,15.86,0,0,0,92.69,40H40A16,16,0,0,0,24,56V200.62A15.4,15.4,0,0,0,39.38,216H216.89A15.13,15.13,0,0,0,232,200.89V88A16,16,0,0,0,216,72ZM40,56H92.69l16,16H40ZM216,200H40V88H216Z"/></symbol><symbol id="ChatCircle" viewBox="0 0 256 256"><path d="M128,24A104,104,0,0,0,36.18,176.88L24.83,210.93a16,16,0,0,0,20.24,20.24l34.05-11.35A104,104,0,1,0,128,24Zm0,192a87.87,87.87,0,0,1-44.06-11.81,8,8,0,0,0-6.54-.67L40,216,52.47,178.6a8,8,0,0,0-.66-6.54A88,88,0,1,1,128,216Z"/></symbol><symbol id="MagnifyingGlass" viewBox="0 0 256 256"><path d="M229.66,218.34l-50.07-50.06a88.11,88.11,0,1,0-11.31,11.31l50.06,50.07a8,8,0,0,0,11.32-11.32ZM40,112a72,72,0,1,1,72,72A72.08,72.08,0,0,1,40,112Z"/></symbol><symbol id="ArrowSquareIn" viewBox="0 0 256 256"><path d="M128,136v64a8,8,0,0,1-16,0V155.32L45.66,221.66a8,8,0,0,1-11.32-11.32L100.68,144H56a8,8,0,0,1,0-16h64A8,8,0,0,1,128,136ZM208,32H80A16,16,0,0,0,64,48V96a8,8,0,0,0,16,0V48H208V176H160a8,8,0,0,0,0,16h48a16,16,0,0,0,16-16V48A16,16,0,0,0,208,32Z"/></symbol><symbol id="Check" viewBox="0 0 256 256"><path d="M229.66,77.66l-128,128a8,8,0,0,1-11.32,0l-56-56a8,8,0,0,1,11.32-11.32L96,188.69,218.34,66.34a8,8,0,0,1,11.32,11.32Z"/></symbol><symbol id="Warning" viewBox="0 0 256 256"><path d="M236.8,188.09,149.35,36.22h0a24.76,24.76,0,0,0-42.7,0L19.2,188.09a23.51,23.51,0,0,0,0,23.72A24.35,24.35,0,0,0,40.55,224h174.9a24.35,24.35,0,0,0,21.33-12.19A23.51,23.51,0,0,0,236.8,188.09ZM222.93,203.8a8.5,8.5,0,0,1-7.48,4.2H40.55a8.5,8.5,0,0,1-7.48-4.2,7.59,7.59,0,0,1,0-7.72L120.52,44.21a8.75,8.75,0,0,1,15,0l87.45,151.87A7.59,7.59,0,0,1,222.93,203.8ZM120,144V104a8,8,0,0,1,16,0v40a8,8,0,0,1-16,0Zm20,36a12,12,0,1,1-12-12A12,12,0,0,1,140,180Z"/></symbol><symbol id="CaretRight" viewBox="0 0 256 256"><path d="M181.66,133.66l-80,80a8,8,0,0,1-11.32-11.32L164.69,128,90.34,53.66a8,8,0,0,1,11.32-11.32l80,80A8,8,0,0,1,181.66,133.66Z"/></symbol><symbol id="CaretDown" viewBox="0 0 256 256"><path d="M213.66,101.66l-80,80a8,8,0,0,1-11.32,0l-80-80A8,8,0,0,1,53.66,90.34L128,164.69l74.34-74.35a8,8,0,0,1,11.32,11.32Z"/></symbol><symbol id="Plus" viewBox="0 0 256 256"><path d="M224,128a8,8,0,0,1-8,8H136v80a8,8,0,0,1-16,0V136H40a8,8,0,0,1,0-16h80V40a8,8,0,0,1,16,0v80h80A8,8,0,0,1,224,128Z"/></symbol><symbol id="Gear" viewBox="0 0 256 256"><path d="M128,80a48,48,0,1,0,48,48A48.05,48.05,0,0,0,128,80Zm0,80a32,32,0,1,1,32-32A32,32,0,0,1,128,160Zm88-29.84q.06-2.16,0-4.32l14.92-18.64a8,8,0,0,0,1.48-7.06,107.21,107.21,0,0,0-10.88-26.25,8,8,0,0,0-6-3.93l-23.72-2.64q-1.48-1.56-3-3L186,40.54a8,8,0,0,0-3.94-6,107.71,107.71,0,0,0-26.25-10.87,8,8,0,0,0-7.06,1.49L130.16,40Q128,40,125.84,40L107.2,25.11a8,8,0,0,0-7.06-1.48A107.6,107.6,0,0,0,73.89,34.51a8,8,0,0,0-3.93,6L67.32,64.27q-1.56,1.49-3,3L40.54,70a8,8,0,0,0-6,3.94,107.71,107.71,0,0,0-10.87,26.25,8,8,0,0,0,1.49,7.06L40,125.84Q40,128,40,130.16L25.11,148.8a8,8,0,0,0-1.48,7.06,107.21,107.21,0,0,0,10.88,26.25,8,8,0,0,0,6,3.93l23.72,2.64q1.49,1.56,3,3L70,215.46a8,8,0,0,0,3.94,6,107.71,107.71,0,0,0,26.25,10.87,8,8,0,0,0,7.06-1.49L125.84,216q2.16.06,4.32,0l18.64,14.92a8,8,0,0,0,7.06,1.48,107.21,107.21,0,0,0,26.25-10.88,8,8,0,0,0,3.93-6l2.64-23.72q1.56-1.48,3-3L215.46,186a8,8,0,0,0,6-3.94,107.71,107.71,0,0,0,10.87-26.25,8,8,0,0,0-1.49-7.06Zm-16.1-6.5a73.93,73.93,0,0,1,0,8.68,8,8,0,0,0,1.74,5.48l14.19,17.73a91.57,91.57,0,0,1-6.23,15L187,173.11a8,8,0,0,0-5.1,2.64,74.11,74.11,0,0,1-6.14,6.14,8,8,0,0,0-2.64,5.1l-2.51,22.58a91.32,91.32,0,0,1-15,6.23l-17.74-14.19a8,8,0,0,0-5-1.75h-.48a73.93,73.93,0,0,1-8.68,0,8,8,0,0,0-5.48,1.74L100.45,215.8a91.57,91.57,0,0,1-15-6.23L82.89,187a8,8,0,0,0-2.64-5.1,74.11,74.11,0,0,1-6.14-6.14,8,8,0,0,0-5.1-2.64L46.43,170.6a91.32,91.32,0,0,1-6.23-15l14.19-17.74a8,8,0,0,0,1.74-5.48,73.93,73.93,0,0,1,0-8.68,8,8,0,0,0-1.74-5.48L40.2,100.45a91.57,91.57,0,0,1,6.23-15L69,82.89a8,8,0,0,0,5.1-2.64,74.11,74.11,0,0,1,6.14-6.14A8,8,0,0,0,82.89,69L85.4,46.43a91.32,91.32,0,0,1,15-6.23l17.74,14.19a8,8,0,0,0,5.48,1.74,73.93,73.93,0,0,1,8.68,0,8,8,0,0,0,5.48-1.74L155.55,40.2a91.57,91.57,0,0,1,15,6.23L173.11,69a8,8,0,0,0,2.64,5.1,74.11,74.11,0,0,1,6.14,6.14,8,8,0,0,0,5.1,2.64l22.58,2.51a91.32,91.32,0,0,1,6.23,15l-14.19,17.74A8,8,0,0,0,199.87,123.66Z"/></symbol><symbol id="Bell" viewBox="0 0 256 256"><path d="M221.8,175.94C216.25,166.38,208,139.33,208,104a80,80,0,1,0-160,0c0,35.34-8.26,62.38-13.81,71.94A16,16,0,0,0,48,200H88.81a40,40,0,0,0,78.38,0H208a16,16,0,0,0,13.8-24.06ZM128,216a24,24,0,0,1-22.62-16h45.24A24,24,0,0,1,128,216ZM48,184c7.7-13.24,16-43.92,16-80a64,64,0,1,1,128,0c0,36.05,8.28,66.73,16,80Z"/></symbol><symbol id="NotePencil" viewBox="0 0 256 256"><path d="M229.66,58.34l-32-32a8,8,0,0,0-11.32,0l-96,96A8,8,0,0,0,88,128v32a8,8,0,0,0,8,8h32a8,8,0,0,0,5.66-2.34l96-96A8,8,0,0,0,229.66,58.34ZM124.69,152H104V131.31l64-64L188.69,88ZM200,76.69,179.31,56,192,43.31,212.69,64ZM224,128v80a16,16,0,0,1-16,16H48a16,16,0,0,1-16-16V48A16,16,0,0,1,48,32h80a8,8,0,0,1,0,16H48V208H208V128a8,8,0,0,1,16,0Z"/></symbol><symbol id="X" viewBox="0 0 256 256"><path d="M205.66,194.34a8,8,0,0,1-11.32,11.32L128,139.31,61.66,205.66a8,8,0,0,1-11.32-11.32L116.69,128,50.34,61.66A8,8,0,0,1,61.66,50.34L128,116.69l66.34-66.35a8,8,0,0,1,11.32,11.32L139.31,128Z"/></symbol><symbol id="ClockCounterClockwise" viewBox="0 0 256 256"><path d="M136,80v43.47l36.12,21.67a8,8,0,0,1-8.24,13.72l-40-24A8,8,0,0,1,120,128V80a8,8,0,0,1,16,0Zm-8-48A95.44,95.44,0,0,0,60.08,60.15C52.81,67.51,46.35,74.59,40,82V64a8,8,0,0,0-16,0v40a8,8,0,0,0,8,8H72a8,8,0,0,0,0-16H49c7.15-8.42,14.27-16.35,22.39-24.57a80,80,0,1,1,1.66,114.75,8,8,0,1,0-11,11.64A96,96,0,1,0,128,32Z"/></symbol><symbol id="SidebarSimple" viewBox="0 0 256 256"><path d="M216,40H40A16,16,0,0,0,24,56V200a16,16,0,0,0,16,16H216a16,16,0,0,0,16-16V56A16,16,0,0,0,216,40ZM40,56H80V200H40ZM216,200H96V56H216V200Z"/></symbol><symbol id="TerminalWindow" viewBox="0 0 256 256"><path d="M128,128a8,8,0,0,1-3,6.25l-40,32a8,8,0,1,1-10-12.5L107.19,128,75,102.25a8,8,0,1,1,10-12.5l40,32A8,8,0,0,1,128,128Zm48,24H136a8,8,0,0,0,0,16h40a8,8,0,0,0,0-16Zm56-96V200a16,16,0,0,1-16,16H40a16,16,0,0,1-16-16V56A16,16,0,0,1,40,40H216A16,16,0,0,1,232,56ZM216,200V56H40V200H216Z"/></symbol><symbol id="ArrowsClockwise" viewBox="0 0 256 256"><path d="M224,48V96a8,8,0,0,1-8,8H168a8,8,0,0,1,0-16h28.69L182.06,73.37a79.56,79.56,0,0,0-56.13-23.43h-.45A79.52,79.52,0,0,0,69.59,72.71,8,8,0,0,1,58.41,61.27a96,96,0,0,1,135,.79L208,76.69V48a8,8,0,0,1,16,0ZM186.41,183.29a80,80,0,0,1-112.47-.66L59.31,168H88a8,8,0,0,0,0-16H40a8,8,0,0,0-8,8v48a8,8,0,0,0,16,0V179.31l14.63,14.63A95.43,95.43,0,0,0,130,222.06h.53a95.36,95.36,0,0,0,67.07-27.33,8,8,0,0,0-11.18-11.44Z"/></symbol><symbol id="Sun" viewBox="0 0 256 256"><path d="M120,40V16a8,8,0,0,1,16,0V40a8,8,0,0,1-16,0Zm72,88a64,64,0,1,1-64-64A64.07,64.07,0,0,1,192,128Zm-16,0a48,48,0,1,0-48,48A48.05,48.05,0,0,0,176,128ZM58.34,69.66A8,8,0,0,0,69.66,58.34l-16-16A8,8,0,0,0,42.34,53.66Zm0,116.68-16,16a8,8,0,0,0,11.32,11.32l16-16a8,8,0,0,0-11.32-11.32ZM192,72a8,8,0,0,0,5.66-2.34l16-16a8,8,0,0,0-11.32-11.32l-16,16A8,8,0,0,0,192,72Zm5.66,114.34a8,8,0,0,0-11.32,11.32l16,16a8,8,0,0,0,11.32-11.32ZM48,128a8,8,0,0,0-8-8H16a8,8,0,0,0,0,16H40A8,8,0,0,0,48,128Zm80,80a8,8,0,0,0-8,8v24a8,8,0,0,0,16,0V216A8,8,0,0,0,128,208Zm112-88H216a8,8,0,0,0,0,16h24a8,8,0,0,0,0-16Z"/></symbol><symbol id="DotsThree" viewBox="0 0 256 256"><path d="M140,128a12,12,0,1,1-12-12A12,12,0,0,1,140,128Zm56-12a12,12,0,1,0,12,12A12,12,0,0,0,196,116ZM60,116a12,12,0,1,0,12,12A12,12,0,0,0,60,116Z"/></symbol><symbol id="Image" viewBox="0 0 256 256"><path d="M216,40H40A16,16,0,0,0,24,56V200a16,16,0,0,0,16,16H216a16,16,0,0,0,16-16V56A16,16,0,0,0,216,40Zm0,16V158.75l-26.07-26.06a16,16,0,0,0-22.63,0l-20,20-44-44a16,16,0,0,0-22.62,0L40,149.37V56ZM40,172l52-52,80,80H40Zm176,28H194.63l-36-36,20-20L216,181.38V200ZM144,100a12,12,0,1,1,12,12A12,12,0,0,1,144,100Z"/></symbol><symbol id="ArrowUp" viewBox="0 0 256 256"><path d="M205.66,117.66a8,8,0,0,1-11.32,0L136,59.31V216a8,8,0,0,1-16,0V59.31L61.66,117.66a8,8,0,0,1-11.32-11.32l72-72a8,8,0,0,1,11.32,0l72,72A8,8,0,0,1,205.66,117.66Z"/></symbol><symbol id="GitBranch" viewBox="0 0 256 256"><path d="M232,64a32,32,0,1,0-40,31v17a8,8,0,0,1-8,8H96a23.84,23.84,0,0,0-8,1.38V95a32,32,0,1,0-16,0v66a32,32,0,1,0,16,0V144a8,8,0,0,1,8-8h88a24,24,0,0,0,24-24V95A32.06,32.06,0,0,0,232,64ZM64,64A16,16,0,1,1,80,80,16,16,0,0,1,64,64ZM96,192a16,16,0,1,1-16-16A16,16,0,0,1,96,192ZM200,80a16,16,0,1,1,16-16A16,16,0,0,1,200,80Z"/></symbol><symbol id="Info" viewBox="0 0 256 256"><path d="M128,24A104,104,0,1,0,232,128,104.11,104.11,0,0,0,128,24Zm0,192a88,88,0,1,1,88-88A88.1,88.1,0,0,1,128,216Zm16-40a8,8,0,0,1-8,8,16,16,0,0,1-16-16V128a8,8,0,0,1,0-16,16,16,0,0,1,16,16v40A8,8,0,0,1,144,176ZM112,84a12,12,0,1,1,12,12A12,12,0,0,1,112,84Z"/></symbol><symbol id="FolderDashed" viewBox="0 0 256 256"><path d="M96,208a8,8,0,0,1-8,8H39.38A15.4,15.4,0,0,1,24,200.62V192a8,8,0,0,1,16,0v8H88A8,8,0,0,1,96,208Zm64-8H128a8,8,0,0,0,0,16h32a8,8,0,0,0,0-16Zm64-56a8,8,0,0,0-8,8v48H200a8,8,0,0,0,0,16h16.89A15.13,15.13,0,0,0,232,200.89V152A8,8,0,0,0,224,144Zm-8-72H168a8,8,0,0,0,0,16h48v24a8,8,0,0,0,16,0V88A16,16,0,0,0,216,72ZM24,80V56A16,16,0,0,1,40,40H92.69A15.86,15.86,0,0,1,104,44.69l29.66,29.65A8,8,0,0,1,128,88H32A8,8,0,0,1,24,80Zm16-8h68.69l-16-16H40Zm-8,88a8,8,0,0,0,8-8V120a8,8,0,0,0-16,0v32A8,8,0,0,0,32,160Z"/></symbol></svg>
+<template id="codex-svg"><svg viewBox="0 0 24 24"><defs><linearGradient id="cg" x1="12" x2="12" y1="0" y2="24" gradientUnits="userSpaceOnUse"><stop stop-color="#B1A7FF"/><stop offset=".5" stop-color="#7A9DFF"/><stop offset="1" stop-color="#3941FF"/></linearGradient></defs><path fill="url(#cg)" fill-rule="evenodd" clip-rule="evenodd" d="M8.086.457a6.105 6.105 0 013.046-.415c1.333.153 2.521.72 3.564 1.7a.117.117 0 00.107.029c1.408-.346 2.762-.224 4.061.366l.063.03.154.076c1.357.703 2.33 1.77 2.918 3.198.278.679.418 1.388.421 2.126a5.655 5.655 0 01-.18 1.631.167.167 0 00.04.155 5.982 5.982 0 011.578 2.891c.385 1.901-.01 3.615-1.183 5.14l-.182.22a6.063 6.063 0 01-2.934 1.851.162.162 0 00-.108.102c-.255.736-.511 1.364-.987 1.992-1.199 1.582-2.962 2.462-4.948 2.451-1.583-.008-2.986-.587-4.21-1.736a.145.145 0 00-.14-.032c-.518.167-1.04.191-1.604.185a5.924 5.924 0 01-2.595-.622 6.058 6.058 0 01-2.146-1.781c-.203-.269-.404-.522-.551-.821a7.74 7.74 0 01-.495-1.283 6.11 6.11 0 01-.017-3.064.166.166 0 00.008-.074.115.115 0 00-.037-.064 5.958 5.958 0 01-1.38-2.202 5.196 5.196 0 01-.333-1.589 6.915 6.915 0 01.188-2.132c.45-1.484 1.309-2.648 2.577-3.493.282-.188.55-.334.802-.438.286-.12.573-.22.861-.304a.129.129 0 00.087-.087A6.016 6.016 0 015.635 2.31C6.315 1.464 7.132.846 8.086.457zm-.804 7.85a.848.848 0 00-1.473.842l1.694 2.965-1.688 2.848a.849.849 0 001.46.864l1.94-3.272a.849.849 0 00.007-.854l-1.94-3.393zm5.446 6.24a.849.849 0 000 1.695h4.848a.849.849 0 000-1.696h-4.848z"/></svg></template>
+
+<div class="page-head">
+  <div>
+    <h1>Импорт тредов из Claude Code, Codex и Antigravity</h1>
+    <p>Макеты на токенах <span class="mono">app-theme.css</span> и иконках Phosphor. Цифры в списках взяты из замера данных на этом Mac 26.11.2026, названия тредов выдуманы.</p>
+  </div>
+  <div style="display:flex;gap:8px;flex-wrap:wrap">
+    <div class="tabs" role="tablist" id="vtabs">
+      <button role="tab" aria-selected="true" data-v="a">A. Диалог импорта</button>
+      <button role="tab" aria-selected="false" data-v="b">B. В New chat</button>
+      <button role="tab" aria-selected="false" data-v="c">C. Settings → Import</button>
+      <button role="tab" aria-selected="false" data-v="d">После импорта</button>
+    </div>
+    <div class="tabs" role="tablist" id="ttabs">
+      <button role="tab" aria-selected="false" data-t="light">Light</button>
+      <button role="tab" aria-selected="true" data-t="dark">Dark</button>
+    </div>
+  </div>
+</div>
+
+<!-- ============ A ============ -->
+<section class="variant on" id="v-a">
+  <p class="note"><b>A. Один диалог для всего.</b> Открывается кнопкой у заголовка Projects в сайдбаре и ссылкой из New chat. Слева папки, где CLI запускались, справа их треды. Галочка у папки берёт все её треды. Повторный импорт не создаёт дубль: тред, который уже есть, показывает Open.</p>
+  <div class="stage"><div class="win">
+    <aside class="side">
+    <div class="lights"><i></i><i></i><i></i><span class="tog"><svg class="i16 i"><use href="#SidebarSimple"/></svg></span></div>
+    <div class="search"><svg class="i"><use href="#MagnifyingGlass"/></svg>Search chats<kbd>⌘K</kbd></div>
+    <button class="nav"><svg class="i"><use href="#NotePencil"/></svg>New chat</button>
+    <button class="nav"><svg class="i"><use href="#Bell"/></svg>Activity</button>
+    <div class="sec">Recents<span></span></div>
+    <div class="sec">Projects<span class="acts"><button class="ib hot" aria-label="Import from CLIs"><svg class="i"><use href="#ArrowSquareIn"/></svg></button><button class="ib" aria-label="New project"><svg class="i"><use href="#Plus"/></svg></button></span></div>
+    <div class="proj"><svg class="i"><use href="#Folder"/></svg>rename-app<svg class="i12 i muted"><use href="#CaretDown"/></svg></div>
+    
+    <div class="chat"><span class="gl codex cx"></span><span class="t">Audit of rename performance on mobile</span><span class="dot"></span></div>
+    <div class="chat"><span class="gl codex cx"></span><span class="t">Paywall copy for the trial screen</span></div>
+    <div class="proj"><svg class="i"><use href="#Folder"/></svg>ai-consensus<svg class="i12 i muted"><use href="#CaretDown"/></svg></div>
+    <div class="chat"><span class="gl claude"></span><span class="t">Chat</span></div>
+    <div class="chat"><span class="gl codex cx"></span><span class="t">Chat</span><span class="dot"></span></div>
+    <div class="chat"><svg class="i muted"><use href="#ChatCircle"/></svg><span class="t">Chat</span></div>
+    <div class="proj"><svg class="i"><use href="#Folder"/></svg>my-app<svg class="i12 i muted"><use href="#CaretDown"/></svg></div>
+    <div class="chat"><span class="gl agy"></span><span class="t">Performance audit, mobile and desktop</span><span class="dot"></span></div>
+    <div class="proj"><svg class="i"><use href="#Folder"/></svg>No project<svg class="i12 i muted"><use href="#CaretDown"/></svg></div>
+    <div class="chat"><span class="gl claude"></span><span class="t">hello @claude</span><span class="dot"></span></div>
+    <div class="side-foot"><svg class="i"><use href="#Gear"/></svg>Settings<span class="r"><svg class="i"><use href="#Sun"/></svg><svg class="i"><use href="#ArrowsClockwise"/></svg></span></div>
+  </aside>
+    <div class="main">
+      <div class="mhead">New chat</div>
+      <div class="mbody"></div>
+      <div class="scrim">
+        <div class="dlg" role="dialog" aria-label="Import from your CLIs">
+          <div class="dlg-h">Import from your CLIs<button class="ib x" aria-label="Close"><svg class="i"><use href="#X"/></svg></button></div>
+          <div class="dlg-tools">
+            <div class="seg">
+              <button class="on">All <span class="n">1,832</span></button>
+              <button><span class="gl claude" style="width:12px;height:12px"></span>Claude Code <span class="n">789</span></button>
+              <button><span class="gl codex cx" style="width:12px;height:12px"></span>Codex <span class="n">959</span></button>
+              <button><span class="gl agy" style="width:12px;height:12px"></span>Antigravity <span class="n">84</span></button>
+            </div>
+            <div class="field"><svg class="i"><use href="#MagnifyingGlass"/></svg>Search threads</div>
+          </div>
+          <div class="dlg-b">
+            <div class="col-l">
+              <div class="grp">FOLDERS ON THIS COMPUTER</div>
+              <div class="prow sel"><span class="cb part"></span><div class="tx"><span class="nm">rename-app</span><span class="pa">~/Projects/rename-app</span></div><div class="cnts"><span>352</span></div></div>
+              <div class="prow"><span class="cb"></span><div class="tx"><span class="nm">frontend</span><span class="pa">~/Projects/frontend</span></div><div class="cnts"><span>134</span></div></div>
+              <div class="prow"><span class="cb"></span><div class="tx"><span class="nm">rename_landing</span><span class="pa">~/Projects/rename_landing</span></div><div class="cnts"><span>132</span></div></div>
+              <div class="prow"><span class="cb"></span><div class="tx"><span class="nm">my-app</span><span class="pa">~/Projects/my-app</span></div><div class="cnts"><span>53</span></div></div>
+              <div class="prow"><span class="cb"></span><div class="tx"><span class="nm">noemaVision</span><span class="pa">~/Projects/noemaVision</span></div><div class="cnts"><span>42</span></div></div>
+              <div class="prow"><span class="cb"></span><div class="tx"><span class="nm">probe</span><span class="pa">~/Projects/probe</span></div><div class="cnts"><span>20</span></div></div>
+              <div class="prow"><span class="cb"></span><div class="tx"><span class="nm">Apppeers</span><span class="pa">~/Projects/Apppeers</span></div><div class="cnts"><span>13</span></div></div>
+              <div class="grp">FOLDER IS GONE</div>
+              <div class="prow"><span class="cb"></span><div class="tx"><span class="nm" style="display:flex;gap:6px;align-items:center"><svg class="i muted"><use href="#FolderDashed"/></svg>caudena-academy</span><span class="pa">~/Projects/caudena-academy</span></div><div class="cnts"><span>28</span></div></div>
+              <div class="prow"><span class="cb"></span><div class="tx"><span class="nm" style="display:flex;gap:6px;align-items:center"><svg class="i muted"><use href="#FolderDashed"/></svg>consumer</span><span class="pa">~/Projects/consumer</span></div><div class="cnts"><span>28</span></div></div>
+              <div class="grp">ONE THREAD EACH (236 FOLDERS)</div>
+              <div class="prow"><svg class="i muted"><use href="#CaretRight"/></svg><div class="tx"><span class="muted">Show</span></div></div>
+            </div>
+            <div class="col-r">
+              <div class="rhead">
+                <span class="nm">rename-app</span>
+                <span class="cnts"><span><span class="gl claude"></span>70</span><span><span class="gl codex cx"></span>245</span><span><span class="gl agy"></span>37</span></span>
+                <div class="r"><span class="muted small">Newest first</span><button class="btn xs ghost">Select all</button></div>
+              </div>
+              <div class="trow sel"><span class="cb on"><svg><use href="#Check"/></svg></span><span class="gl claude"></span><span class="t">Rename preview freezes on 5k files</span><span class="mt">212 messages</span><span class="tm">2d</span></div>
+              <div class="trow sel"><span class="cb on"><svg><use href="#Check"/></svg></span><span class="gl claude"></span><span class="t">Folder watcher rewrite</span><span class="st warn"><i></i>Updated 2 min ago</span><span class="tm">2m</span></div>
+              <div class="trow sel"><span class="cb on"><svg><use href="#Check"/></svg></span><span class="gl agy"></span><span class="t">Sentry: empty template on first run</span><span class="mt">6 messages</span><span class="tm">1w</span></div>
+              <div class="trow sel"><span class="cb on"><svg><use href="#Check"/></svg></span><span class="gl codex cx"></span><span class="t">Windows path length in batch rename</span><span class="mt">64 messages</span><span class="tm">9d</span></div>
+              <div class="trow dim"><span class="cb off"></span><span class="gl codex cx"></span><span class="t">Paywall copy for the trial screen</span><span class="st link">In AccordAgents, Open</span><span class="tm">3w</span></div>
+              <div class="trow"><span class="cb"></span><span class="gl claude"></span><span class="t">Undo history after a crash</span><span class="mt">38 messages</span><span class="tm">3w</span></div>
+              <div class="trow"><span class="cb"></span><span class="gl codex cx"></span><span class="t">Localize onboarding into German</span><span class="mt">17 messages</span><span class="tm">1mo</span></div>
+              <div class="trow"><span class="cb"></span><span class="gl codex cx"></span><span class="t">Speed up EXIF reading</span><span class="mt">143 messages</span><span class="tm">1mo</span></div>
+              <div class="trow"><span class="cb"></span><span class="gl claude"></span><span class="t">Release notes 3.4</span><span class="mt">2 messages</span><span class="tm">2mo</span></div>
+              <div class="trow"><span class="cb"></span><span class="gl codex cx"></span><span class="t">Keyboard shortcuts in the rules editor</span><span class="mt">52 messages</span><span class="tm">2mo</span></div>
+            </div>
+          </div>
+          <div class="dlg-f">
+            <span class="toggle-line"><span class="sw"></span>Show automated runs</span>
+            <span class="muted small" style="margin-left:12px">4 threads, 330 messages</span><span class="st warn" style="margin-left:12px"><i></i>1 thread was updated in its CLI 2 min ago</span>
+            <div class="r"><button class="btn md ghost">Cancel</button><button class="btn md primary">Import 4 threads</button></div>
+          </div>
+        </div>
+      </div>
+      <div class="ann" style="left:640px;top:520px">«Updated 2 min ago»: тред недавно менялся в CLI. Его берёт и галочка папки; внизу тогда предупреждение, что продолжение в двух местах перемешает ходы.</div>
+      <div class="ann" style="left:16px;top:560px;max-width:236px">«Show automated runs» выключен: скрыты SDK-сессии Claude и треды <span class="mono">codex exec</span> и сабагентов, по признакам, которые сообщают сами CLI.</div>
+    </div>
+  </div></div>
+</section>
+
+<!-- ============ B ============ -->
+<section class="variant" id="v-b">
+  <p class="note"><b>B. Прямо в New chat, для выбранной папки.</b> Под последними чатами папки появляется «From your CLIs»: три свежих треда этой папки, которых ещё нет в приложении. Continue открывает чат сразу, без диалога. «All 37» и ссылка «Browse CLI threads» под заголовком (она есть всегда, даже пока список папки не прочитан) открывают диалог A, уже отфильтрованный по этой папке. Это аналог <span class="mono">claude --resume</span> и <span class="mono">codex resume</span>, которые по умолчанию тоже показывают сессии текущей папки.</p>
+  <div class="stage"><div class="win">
+    <aside class="side">
+    <div class="lights"><i></i><i></i><i></i><span class="tog"><svg class="i16 i"><use href="#SidebarSimple"/></svg></span></div>
+    <div class="search"><svg class="i"><use href="#MagnifyingGlass"/></svg>Search chats<kbd>⌘K</kbd></div>
+    <button class="nav"><svg class="i"><use href="#NotePencil"/></svg>New chat</button>
+    <button class="nav"><svg class="i"><use href="#Bell"/></svg>Activity</button>
+    <div class="sec">Recents<span></span></div>
+    <div class="sec">Projects<span class="acts"><button class="ib" aria-label="Import from CLIs"><svg class="i"><use href="#ArrowSquareIn"/></svg></button><button class="ib" aria-label="New project"><svg class="i"><use href="#Plus"/></svg></button></span></div>
+    <div class="proj"><svg class="i"><use href="#Folder"/></svg>rename-app<svg class="i12 i muted"><use href="#CaretDown"/></svg></div>
+    
+    <div class="chat"><span class="gl codex cx"></span><span class="t">Audit of rename performance on mobile</span><span class="dot"></span></div>
+    <div class="chat"><span class="gl codex cx"></span><span class="t">Paywall copy for the trial screen</span></div>
+    <div class="proj"><svg class="i"><use href="#Folder"/></svg>ai-consensus<svg class="i12 i muted"><use href="#CaretDown"/></svg></div>
+    <div class="chat"><span class="gl claude"></span><span class="t">Chat</span></div>
+    <div class="chat"><span class="gl codex cx"></span><span class="t">Chat</span><span class="dot"></span></div>
+    <div class="chat"><svg class="i muted"><use href="#ChatCircle"/></svg><span class="t">Chat</span></div>
+    <div class="proj"><svg class="i"><use href="#Folder"/></svg>my-app<svg class="i12 i muted"><use href="#CaretDown"/></svg></div>
+    <div class="chat"><span class="gl agy"></span><span class="t">Performance audit, mobile and desktop</span><span class="dot"></span></div>
+    <div class="proj"><svg class="i"><use href="#Folder"/></svg>No project<svg class="i12 i muted"><use href="#CaretDown"/></svg></div>
+    <div class="chat"><span class="gl claude"></span><span class="t">hello @claude</span><span class="dot"></span></div>
+    <div class="side-foot"><svg class="i"><use href="#Gear"/></svg>Settings<span class="r"><svg class="i"><use href="#Sun"/></svg><svg class="i"><use href="#ArrowsClockwise"/></svg></span></div>
+  </aside>
+    <div class="main">
+      <div class="mhead">New chat<div class="r"><svg class="i"><use href="#TerminalWindow"/></svg></div></div>
+      <div class="mbody nc">
+        <div class="nc-hero">
+          <div class="logo"></div>
+          <h2>New chat in rename-app</h2>
+          <div class="sub">Describe the task. / runs a command, # adds a file. <button class="btn link small" style="display:inline">Browse CLI threads</button></div>
+          <div class="nc-list">
+            <div class="nc-row"><svg class="i"><use href="#ChatCircle"/></svg><span class="t">Audit of rename performance on mobile and desktop</span><span class="tm">1h</span></div>
+            <div class="nc-row"><svg class="i"><use href="#ChatCircle"/></svg><span class="t">Paywall copy for the trial screen</span><span class="tm">3w</span></div>
+            <div class="nc-label"><span>From your CLIs</span><button class="btn link small">All 37</button></div>
+            <div class="nc-row hov"><span class="gl claude"></span><span class="t">Rename preview freezes on 5k files</span><button class="btn xs secondary">Continue</button><span class="tm">2d</span></div>
+            <div class="nc-row"><span class="gl agy"></span><span class="t">Sentry: empty template on first run</span><button class="btn xs secondary">Continue</button><span class="tm">1w</span></div>
+            <div class="nc-row"><span class="gl codex cx"></span><span class="t">Windows path length in batch rename</span><button class="btn xs secondary">Continue</button><span class="tm">9d</span></div>
+          </div>
+        </div>
+        <div class="composer">
+          <div class="strip"><span><svg class="i"><use href="#Folder"/></svg>rename-app<svg class="i12 i"><use href="#CaretDown"/></svg></span><span><svg class="i"><use href="#GitBranch"/></svg>main<svg class="i12 i"><use href="#CaretDown"/></svg></span>
+            <div class="r"><span><span class="gl codex cx"></span>GPT-6.2-Astra<svg class="i12 i"><use href="#CaretDown"/></svg></span><span>Extra High<svg class="i12 i"><use href="#CaretDown"/></svg></span><span>Ask for approval<svg class="i12 i"><use href="#CaretDown"/></svg></span></div></div>
+          <div class="cin">What are you working on?</div>
+          <div class="cbar"><svg class="i16 i"><use href="#Image"/></svg><span style="margin-left:auto" class="toggle-line"><span class="sw"></span>Plan mode</span><span class="send" style="margin-left:12px"><svg class="i"><use href="#ArrowUp"/></svg></span></div>
+        </div>
+      </div>
+      <div class="ann" style="left:760px;top:300px">Continue: явная кнопка, строка целиком не кликается. Чат открывается с историей треда, модель берётся из сессии, следующее сообщение идёт в ту же сессию CLI.</div>
+      <div class="ann" style="left:24px;top:110px;max-width:230px">Блок есть и у папки без чатов. Список читается заранее и не появляется позже, пока экран открыт: ничего не сдвигает. Импортированные треды стоят выше, среди чатов папки.</div>
+    </div>
+  </div></div>
+</section>
+
+<!-- ============ C ============ -->
+<section class="variant" id="v-c">
+  <p class="note"><b>C. Отдельный раздел Settings → Import.</b> Сводка по трём CLI и таблица папок, импорт папками целиком, с прогрессом. Удобно один раз перенести всё, неудобно каждый день: в New chat его не видно.</p>
+  <div class="stage"><div class="win">
+    <aside class="side">
+    <div class="lights"><i></i><i></i><i></i><span class="tog"><svg class="i16 i"><use href="#SidebarSimple"/></svg></span></div>
+    <div class="search"><svg class="i"><use href="#MagnifyingGlass"/></svg>Search chats<kbd>⌘K</kbd></div>
+    <button class="nav"><svg class="i"><use href="#NotePencil"/></svg>New chat</button>
+    <button class="nav"><svg class="i"><use href="#Bell"/></svg>Activity</button>
+    <div class="sec">Recents<span></span></div>
+    <div class="sec">Projects<span class="acts"><button class="ib" aria-label="Import from CLIs"><svg class="i"><use href="#ArrowSquareIn"/></svg></button><button class="ib" aria-label="New project"><svg class="i"><use href="#Plus"/></svg></button></span></div>
+    <div class="proj"><svg class="i"><use href="#Folder"/></svg>rename-app<svg class="i12 i muted"><use href="#CaretDown"/></svg></div>
+    
+    <div class="chat"><span class="gl codex cx"></span><span class="t">Audit of rename performance on mobile</span><span class="dot"></span></div>
+    <div class="chat"><span class="gl codex cx"></span><span class="t">Paywall copy for the trial screen</span></div>
+    <div class="proj"><svg class="i"><use href="#Folder"/></svg>ai-consensus<svg class="i12 i muted"><use href="#CaretDown"/></svg></div>
+    <div class="chat"><span class="gl claude"></span><span class="t">Chat</span></div>
+    <div class="chat"><span class="gl codex cx"></span><span class="t">Chat</span><span class="dot"></span></div>
+    <div class="chat"><svg class="i muted"><use href="#ChatCircle"/></svg><span class="t">Chat</span></div>
+    <div class="proj"><svg class="i"><use href="#Folder"/></svg>my-app<svg class="i12 i muted"><use href="#CaretDown"/></svg></div>
+    <div class="chat"><span class="gl agy"></span><span class="t">Performance audit, mobile and desktop</span><span class="dot"></span></div>
+    <div class="proj"><svg class="i"><use href="#Folder"/></svg>No project<svg class="i12 i muted"><use href="#CaretDown"/></svg></div>
+    <div class="chat"><span class="gl claude"></span><span class="t">hello @claude</span><span class="dot"></span></div>
+    <div class="side-foot"><svg class="i"><use href="#Gear"/></svg>Settings<span class="r"><svg class="i"><use href="#Sun"/></svg><svg class="i"><use href="#ArrowsClockwise"/></svg></span></div>
+  </aside>
+    <div class="main">
+      <div class="loadbar"></div>
+      <div class="mhead">Settings</div>
+      <div class="mbody set">
+        <div class="set-nav">
+          <button class="nav"><svg class="i"><use href="#Gear"/></svg>General</button>
+          <button class="nav">Members</button>
+          <button class="nav">Roles</button>
+          <button class="nav">Environment</button>
+          <button class="nav">Your server</button>
+          <button class="nav">Machines</button>
+          <button class="nav sel"><svg class="i"><use href="#ArrowSquareIn"/></svg>Import</button>
+        </div>
+        <div class="set-c">
+          <h2>Import</h2>
+          <p class="lead">Threads you ran in Claude Code, Codex and Antigravity on this computer. An imported thread becomes a chat in its folder and goes on in the same CLI session.</p>
+          <div class="card">
+            <div class="srow"><span class="gl claude" style="width:16px;height:16px"></span><div class="tx"><b>Claude Code</b><span class="d">789 threads in 326 folders. 343 threads are in folders that are gone.</span></div><span class="st ok"><i></i>Found</span></div>
+            <div class="srow"><span class="gl codex cx" style="width:16px;height:16px"></span><div class="tx"><b>Codex</b><span class="d">959 threads in 85 folders. 98 threads are in folders that are gone.</span></div><span class="st ok"><i></i>Found</span></div>
+            <div class="srow"><span class="gl agy" style="width:16px;height:16px"></span><div class="tx"><b>Antigravity</b><span class="d">84 agy threads in 14 folders. 100 older Antigravity app conversations cannot be read by agy and are not listed.</span></div><span class="st ok"><i></i>Found</span></div>
+          </div>
+          <div class="sh"><h3>Folders</h3><span class="st info"><i></i>Importing 41 of 352</span></div>
+          <div class="card">
+            <table class="ptable">
+              <thead><tr><th style="width:28px"></th><th>Folder</th><th>Threads</th><th>Last active</th><th style="text-align:right">Status</th></tr></thead>
+              <tbody>
+                <tr><td><span class="cb on"><svg><use href="#Check"/></svg></span></td><td><div class="nm">rename-app</div><div class="pa">~/Projects/rename-app</div></td><td><span class="cnts"><span><span class="gl claude"></span>70</span><span><span class="gl codex cx"></span>245</span><span><span class="gl agy"></span>37</span></span></td><td class="muted">2 min ago</td><td style="text-align:right"><span class="st info"><i></i>41 of 352</span></td></tr>
+                <tr><td><span class="cb"></span></td><td><div class="nm">frontend</div><div class="pa">~/Projects/frontend</div></td><td><span class="cnts"><span><span class="gl claude"></span>21</span><span><span class="gl codex cx"></span>113</span></span></td><td class="muted">2d</td><td style="text-align:right"><button class="btn xs secondary">Import 134</button></td></tr>
+                <tr><td><span class="cb"></span></td><td><div class="nm">rename_landing</div><div class="pa">~/Projects/rename_landing</div></td><td><span class="cnts"><span><span class="gl claude"></span>18</span><span><span class="gl codex cx"></span>114</span></span></td><td class="muted">4d</td><td style="text-align:right"><button class="btn xs secondary">Import 132</button></td></tr>
+                <tr><td><span class="cb"></span></td><td><div class="nm">my-app</div><div class="pa">~/Projects/my-app</div></td><td><span class="cnts"><span><span class="gl codex cx"></span>53</span></span></td><td class="muted">3w</td><td style="text-align:right"><span class="st ok"><i></i>Imported</span></td></tr>
+                <tr><td><span class="cb"></span></td><td><div class="nm" style="display:flex;gap:6px;align-items:center"><svg class="i muted"><use href="#FolderDashed"/></svg>consumer</div><div class="pa">~/Projects/consumer</div></td><td><span class="cnts"><span><span class="gl codex cx"></span>28</span></span></td><td class="muted">2mo</td><td style="text-align:right"><span style="display:inline-flex;gap:8px;align-items:center"><span class="st warn"><i></i>Folder is gone</span><button class="btn xs secondary">Choose folder</button></span></td></tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div></div>
+</section>
+
+<!-- ============ D ============ -->
+<section class="variant" id="v-d">
+  <p class="note"><b>После импорта (общий для A, B, C).</b> Чат стоит в своей папке в сайдбаре, как любой чат, со значком оркестратора слева (решение 8.7: вариант A, в цвете). Сверху ленты одна видимая строка о происхождении, дальше история из транскрипта: сообщения пользователя и ответы, шаги инструментов и картинки не показываются (они остаются в сессии). В шапке и у ответов глифа провайдера нет, как везде в режиме Sessions. Композер обычный: следующее сообщение продолжает ту же сессию CLI.</p>
+  <div class="stage"><div class="win">
+    <aside class="side">
+    <div class="lights"><i></i><i></i><i></i><span class="tog"><svg class="i16 i"><use href="#SidebarSimple"/></svg></span></div>
+    <div class="search"><svg class="i"><use href="#MagnifyingGlass"/></svg>Search chats<kbd>⌘K</kbd></div>
+    <button class="nav"><svg class="i"><use href="#NotePencil"/></svg>New chat</button>
+    <button class="nav"><svg class="i"><use href="#Bell"/></svg>Activity</button>
+    <div class="sec">Recents<span></span></div>
+    <div class="sec">Projects<span class="acts"><button class="ib" aria-label="Import from CLIs"><svg class="i"><use href="#ArrowSquareIn"/></svg></button><button class="ib" aria-label="New project"><svg class="i"><use href="#Plus"/></svg></button></span></div>
+    <div class="proj"><svg class="i"><use href="#Folder"/></svg>rename-app<svg class="i12 i muted"><use href="#CaretDown"/></svg></div>
+    <div class="chat sel"><span class="gl claude"></span><span class="t">Rename preview freezes on 5k files</span></div>
+    <div class="chat"><span class="gl codex cx"></span><span class="t">Audit of rename performance on mobile</span><span class="dot"></span></div>
+    <div class="chat"><span class="gl codex cx"></span><span class="t">Paywall copy for the trial screen</span></div>
+    <div class="proj"><svg class="i"><use href="#Folder"/></svg>ai-consensus<svg class="i12 i muted"><use href="#CaretDown"/></svg></div>
+    <div class="chat"><span class="gl claude"></span><span class="t">Chat</span></div>
+    <div class="chat"><span class="gl codex cx"></span><span class="t">Chat</span><span class="dot"></span></div>
+    <div class="chat"><svg class="i muted"><use href="#ChatCircle"/></svg><span class="t">Chat</span></div>
+    <div class="proj"><svg class="i"><use href="#Folder"/></svg>my-app<svg class="i12 i muted"><use href="#CaretDown"/></svg></div>
+    <div class="chat"><span class="gl agy"></span><span class="t">Performance audit, mobile and desktop</span><span class="dot"></span></div>
+    <div class="proj"><svg class="i"><use href="#Folder"/></svg>No project<svg class="i12 i muted"><use href="#CaretDown"/></svg></div>
+    <div class="chat"><span class="gl claude"></span><span class="t">hello @claude</span><span class="dot"></span></div>
+    <div class="side-foot"><svg class="i"><use href="#Gear"/></svg>Settings<span class="r"><svg class="i"><use href="#Sun"/></svg><svg class="i"><use href="#ArrowsClockwise"/></svg></span></div>
+  </aside>
+    <div class="main">
+      <div class="mhead">Rename preview freezes on 5k files<div class="r"><svg class="i"><use href="#TerminalWindow"/></svg><svg class="i"><use href="#SidebarSimple"/></svg></div></div>
+      <div class="mbody">
+        <div class="tl">
+          <div class="imp"><svg class="i16 i"><use href="#ArrowSquareIn"/></svg><div class="tx"><b>Imported from Claude Code</b> on 26 Nov: 212 messages, 12 Nov to 24 Nov. Tool steps and pictures stay in the session and are not shown here. Your next message continues the same session.</div></div>
+          <div class="um">The preview list hangs for ~8 s when I drop a folder with 5k files. Can you find why?</div>
+          <div class="am"><div>The preview recomputes every rule for all rows on each keystroke. I moved it to a worker and batched updates per animation frame; on 5k files the first paint is now under 300 ms.</div></div>
+          <div class="um">Good. Keep the old behavior for fewer than 200 files.</div>
+          <div class="am"><div>Done: below 200 files the preview runs on the main thread as before.</div></div>
+          <div class="um">Now add a test for the 200-file threshold.</div>
+        </div>
+      </div>
+      <div class="composer">
+        <div class="strip"><span><svg class="i"><use href="#Folder"/></svg>rename-app</span><span><svg class="i"><use href="#GitBranch"/></svg>main<svg class="i12 i"><use href="#CaretDown"/></svg></span>
+          <div class="r"><span><span class="gl claude"></span>Opus 5.5<svg class="i12 i"><use href="#CaretDown"/></svg></span><span>High<svg class="i12 i"><use href="#CaretDown"/></svg></span><span>Ask before edits<svg class="i12 i"><use href="#CaretDown"/></svg></span></div></div>
+        <div class="cin">Reply…</div>
+        <div class="cbar"><svg class="i16 i"><use href="#Image"/></svg><span class="send" style="margin-left:auto"><svg class="i"><use href="#ArrowUp"/></svg></span></div>
+      </div>
+          </div>
+  </div></div>
+</section>
+
+<div class="legend">
+  <div><b>Рекомендация: B + A</b>Каждый день: B в New chat (тред этой папки за один клик). Найти старое или взять папку целиком: тот же диалог A, открытый из сайдбара или «All 37». C не делать: это A без контекста папки.</div>
+  <div><b>Что не меняется</b>Сайдбар, New chat и композер остаются как есть. Новое только: кнопка импорта у Projects, блок «From your CLIs», диалог, Checkbox в ките и видимая строка происхождения в ленте (и на телефоне).</div>
+  <div><b>Статусы</b>Точка с цветным текстом вместо плашек: «In AccordAgents, Open», «Updated 2 min ago», «Folder is gone». Удалённая папка: при импорте Choose folder, сессия идёт в выбранной папке. У agy команды всё равно пойдут в старую папку (так ведёт себя сам agy), строка об этом предупреждает.</div>
+</div>
+
+<script>
+  const codex = document.getElementById("codex-svg").innerHTML;
+  document.querySelectorAll(".gl.cx").forEach((el, i) => { el.innerHTML = codex.replace(/id="cg"/, `id="cg${i}"`).replace(/url\(#cg\)/, `url(#cg${i})`); });
+  const vt = document.getElementById("vtabs");
+  vt.addEventListener("click", (e) => {
+    const b = e.target.closest("button"); if (!b) return;
+    vt.querySelectorAll("button").forEach((x) => x.setAttribute("aria-selected", String(x === b)));
+    document.querySelectorAll(".variant").forEach((s) => s.classList.toggle("on", s.id === "v-" + b.dataset.v));
+  });
+  const tt = document.getElementById("ttabs");
+  tt.addEventListener("click", (e) => {
+    const b = e.target.closest("button"); if (!b) return;
+    tt.querySelectorAll("button").forEach((x) => x.setAttribute("aria-selected", String(x === b)));
+    document.documentElement.dataset.theme = b.dataset.t;
+  });
+</script>
+</body>
+</html>
