@@ -20,6 +20,14 @@ participant. Not for an ordinary answer, a normal review, a "double-check", or a
 "what do you think". When unsure whether User wants multiple participants, ask
 first.
 
+**The chat's main session starts an Accord, it does not run one ad hoc.** If you
+are the chat's main session and this turn was not started by an Accord launch
+(the app-written message `@<you> /accord` with `Subject:` and `Selected accord
+members:`), do not run this skill now: call `app_chat_start_accord` with the
+members and the subject, then end the turn. The app posts the Accord's card in
+the chat, as User's Accord button does, and your Accord turn starts from that
+launch; the app refuses a draft collection created outside it.
+
 ## Core Rules — independent drafts first; approval = current signatures
 
 Before anyone sees another participant's proposal, every Accord author must submit

@@ -138,10 +138,13 @@ export function wireArtifactToolHandler(
     }
     // Only a new draft collection records where it was started: an Accord's
     // launch, when the member leads that Accord (its card shows the progress).
+    // The main session gets none outside its launch (accordCollectionOrigin).
     const creatingCollection = toolName === APP_ARTIFACT_CREATE_TOOL && isCollectingCreate(request);
-    const originMessageId = creatingCollection
-      ? await chatService.accordLaunchMessageIdForActor(actor).catch(() => undefined)
-      : undefined;
+    const origin = creatingCollection ? await chatService.accordCollectionOrigin(actor) : {};
+    if (origin.refusal) {
+      return { ok: false, error: origin.refusal };
+    }
+    const originMessageId = origin.originMessageId;
     return dispatch(member, actor.conversationId, toolName, request, originMessageId ? { originMessageId } : undefined);
   });
 }

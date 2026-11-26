@@ -155,6 +155,10 @@ export function testService(options: {
     conversationTombstones() {
       return { isDeleted: async () => false, mark: async () => undefined, pendingCopies: async () => [] };
     },
+    async conversationMessageById(id: string, messageId: string): Promise<ChatMessage | undefined> {
+      const found = this.current.id === id ? this.current.messages.find((message: ChatMessage) => message.id === messageId) : undefined;
+      return found ? clone(found) : undefined;
+    },
     async requestRunCancel(): Promise<void> {},
     async takeRunCancelRequests(): Promise<string[]> {
       return [];

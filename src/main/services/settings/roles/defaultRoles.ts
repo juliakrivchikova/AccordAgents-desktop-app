@@ -22,7 +22,7 @@ export const DEFAULT_CHAT_ROLES: ChatRoleConfig[] = [
     id: MAIN_SESSION_ROLE_ID,
     label: "Main session",
     instructions: DEFAULT_MAIN_SESSION_INSTRUCTIONS,
-    version: 2,
+    version: 3,
     builtIn: true,
     appToolCapabilities: ["participants.manage", "participants.delegate", "accord.start"] satisfies ChatAppToolCapability[],
     participantDefaults: {
@@ -30,7 +30,7 @@ export const DEFAULT_CHAT_ROLES: ChatRoleConfig[] = [
       requestParticipants: "allow",
       manageRolesParticipants: "allow"
     } satisfies ChatRoleParticipantDefaults,
-    updatedAt: "2026-11-21T00:00:00.000Z"
+    updatedAt: "2026-11-26T00:00:00.000Z"
   },
   {
     id: "administrator",

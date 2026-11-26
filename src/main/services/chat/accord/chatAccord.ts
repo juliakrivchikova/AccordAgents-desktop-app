@@ -31,7 +31,7 @@ export class ChatAccord {
       ChatModules,
       | "activeRuns" | "delegation" | "host" | "participantBatch" | "promptSuggestions" | "requestGrants" | "store"
     >,
-    private readonly deps: Pick<ChatDependencies, "onReviewProgress" | "storage" | "userSkills">
+    private readonly deps: Pick<ChatDependencies, "debugLogs" | "onReviewProgress" | "storage" | "userSkills">
   ) {}
 
   /**
@@ -84,7 +84,12 @@ export class ChatAccord {
         status: "started",
         launchMessageId: started.sourceMessageId,
         facilitator: `@${facilitator.handle}`,
-        members: members.map((member) => `@${member.handle}`)
+        members: members.map((member) => `@${member.handle}`),
+        // Leading it itself, the main session runs it in the turn the launch
+        // starts, after this one; begun here it would have no card.
+        ...(facilitator.id === caller.id
+          ? { next: "You lead it. Your Accord turn starts from the launch once this turn ends: end this turn now and do not run the Accord in it." }
+          : {})
       };
     } catch (error) {
       return delegationRefusal("not_started", error instanceof Error ? error.message : String(error));
@@ -138,8 +143,8 @@ export class ChatAccord {
   // facilitator: the User's launch message at the root of the turn's thread
   // (or the turn's own trigger). Worked out by the app from its own records,
   // so a member cannot tie a document to an Accord it does not lead.
-  async accordLaunchMessageIdForActor(actor: ChatAppMcpActor): Promise<string | undefined> {
-    const conversation = await this.chat.store.requireChat(actor.conversationId);
+  async accordLaunchMessageIdForActor(actor: ChatAppMcpActor, loaded?: Conversation): Promise<string | undefined> {
+    const conversation = loaded ?? await this.chat.store.requireChat(actor.conversationId);
     const participant = chatParticipants(conversation).find((candidate) => candidate.id === actor.participantId);
     if (!participant) {
       return undefined;
@@ -159,6 +164,58 @@ export class ChatAccord {
       }
     }
     return undefined;
+  }
+
+  /**
+   * Where a new draft collection is filed, so its Accord shows as one card
+   * (the User, 2026-11-26: an Accord looks the same whether she starts it or
+   * the main session does): under the launch the member's turn runs for
+   * (accordLaunchMessageIdForActor), else under the chat's newest launch when
+   * the member leads it, it is open and no document is filed under it yet --
+   * the Accord the member is running though its turn's trigger is another
+   * message (her message joined the running step and took the turn's tools
+   * along, or the launch's turn ended before the document and she said to go
+   * on). The chat's main session is refused one outside any launch: an
+   * Accord it ran by itself would have no card, and its every step would
+   * stand in the chat as a note of its own. It starts one with
+   * app_chat_start_accord, as her Accord button does.
+   */
+  async accordCollectionOrigin(actor: ChatAppMcpActor): Promise<AccordCollectionOrigin> {
+    let conversation: Conversation;
+    let originMessageId: string | undefined;
+    try {
+      // One read of the chat for every question: a long chat is costly to load.
+      conversation = await this.chat.store.requireChat(actor.conversationId);
+      originMessageId = await this.accordLaunchMessageIdForActor(actor, conversation);
+    } catch (error) {
+      // The chat could not be read: filed under nothing, as before, rather
+      // than refused for a reason that is not the member's.
+      void this.deps.debugLogs.write("chat.accord.collection-origin-unread", {
+        conversationId: actor.conversationId,
+        participantId: actor.participantId,
+        error: error instanceof Error ? error.message : String(error)
+      }).catch(() => undefined);
+      return {};
+    }
+    if (originMessageId) {
+      return { originMessageId };
+    }
+    const participant = chatParticipants(conversation).find((candidate) => candidate.id === actor.participantId);
+    const open = participant ? openLaunchLedBy(conversation, normalizeArtifactMember(participant.handle)) : undefined;
+    if (open) {
+      return { originMessageId: open };
+    }
+    // Refused only where the way it is pointed to is open to it.
+    if (!isMainSessionParticipant(conversation.metadata, actor.participantId) || !hasChatAppToolCapability(actor.capabilities, "accord.start")) {
+      return {};
+    }
+    return {
+      refusal: {
+        code: "accord_not_launched",
+        message: "An Accord is started with app_chat_start_accord, not run ad hoc: call it with the members and the subject "
+          + "and end this turn. The app posts the Accord's card and your Accord turn starts from it."
+      }
+    };
   }
 
   // Append a brief artifact note ("@gera revised [Plan](#artifact:id) · v3") to
@@ -397,4 +454,26 @@ export class ChatAccord {
       skill.variants.some((variant) => variant.providerKind === participant.kind && variant.capabilityState === "invocable")
     );
   }
+}
+
+/** Where a new draft collection is filed, or why it is refused (ChatAccord.accordCollectionOrigin). */
+export interface AccordCollectionOrigin {
+  originMessageId?: string;
+  refusal?: { code: string; message: string };
+}
+
+/** The chat's newest Accord launch, when the member leads it, it is not
+ *  folded away and no document is filed under it yet. Only the newest: an
+ *  older launch is never reached back for. */
+function openLaunchLedBy(conversation: Conversation, handle: string): string | undefined {
+  for (let index = conversation.messages.length - 1; index >= 0; index -= 1) {
+    const message = conversation.messages[index]!;
+    const card = accordLaunchCardForMessage(message);
+    if (!card) continue;
+    if (normalizeArtifactMember(card.facilitator) !== handle || accordClosedLaunchIds(conversation.messages).includes(message.id)) {
+      return undefined;
+    }
+    return conversation.messages.some((other) => other.metadata?.accordLaunchMessageId === message.id) ? undefined : message.id;
+  }
+  return undefined;
 }

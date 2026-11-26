@@ -46,6 +46,7 @@ import type { ChatScriptHost } from "./chat/tools/scheduledTasks";
 import type {
   ChatAppMcpActor, ChatAppMcpGateway, ChatApprovalExecutionGuard, ChatDispatchReplyContext, ProgressCallback
 } from "./chat/types";
+import type { AccordCollectionOrigin } from "./chat/accord/chatAccord";
 import { createChatModules, type ChatModules } from "./chat/modules";
 
 export { REPLIES_REPAIRED_KEY } from "./chat/runs/interruptions";
@@ -595,6 +596,12 @@ export class ChatService {
   // so a member cannot tie a document to an Accord it does not lead.
   accordLaunchMessageIdForActor(actor: ChatAppMcpActor): Promise<string | undefined> {
     return this.modules.accord.accordLaunchMessageIdForActor(actor);
+  }
+
+  // Where a member's new draft collection is filed, or why the main session
+  // may not create one in this turn (ChatAccord.accordCollectionOrigin).
+  accordCollectionOrigin(actor: ChatAppMcpActor): Promise<AccordCollectionOrigin> {
+    return this.modules.accord.accordCollectionOrigin(actor);
   }
 
   // Append a brief artifact note ("@gera revised [Plan](#artifact:id) · v3") to
