@@ -9,7 +9,7 @@ import type {
   ChatViewMode,
   Conversation
 } from "../../shared/types";
-import { chatMessageAddressees, chatViewFor } from "../../shared/mainSession";
+import { chatImportedAtMs, chatMessageAddressees, chatViewFor } from "../../shared/mainSession";
 import { remoteRunStreamingStartedAt } from "../../shared/remoteRunStreaming";
 import { firstTextLine, sessionsTaskTitle } from "../../shared/mainSessionView";
 import { APP_CHAT_SEND_MESSAGE_TOOL } from "../../shared/appMcpToolContracts";
@@ -277,8 +277,11 @@ export function phoneActivityEvents(conversation: Conversation, now = Date.now()
   const pendingByRun = new Map<string, MobileTimelineEvent>();
   const doneByMember = new Map<string, MobileTimelineEvent>();
   const askingByMember = new Map<string, MobileTimelineEvent>();
+  // An imported chat's history happened in the CLI, before it came here.
+  const importedAtMs = chatImportedAtMs(conversation.metadata);
   for (const message of conversation.messages) {
     if (message.role !== "participant" || !messageTravelsToPhone(conversation, message) || messageIsHiddenOnPhone(conversation, message)) continue;
+    if (Date.parse(message.createdAt) < importedAtMs) continue;
     const status = message.status ?? "done";
     if (status === "done" && !(now - Date.parse(message.createdAt) <= PHONE_ACTIVITY_DONE_MS)) continue;
     if (status !== "pending" && status !== "done") continue;

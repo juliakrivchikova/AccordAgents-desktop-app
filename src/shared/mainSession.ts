@@ -81,6 +81,16 @@ export function mainSessionParticipantId(metadata: ChatMetadataLike | undefined)
   return participantsOf(metadata).some((participant) => participant.id === id) ? id : undefined;
 }
 
+/** When the chat's main session came in from a CLI thread of the User's own
+ *  (ChatParticipant.importOrigin), in ms: anything older is that thread's
+ *  history, not work done in the app. 0 for any other chat. */
+export function chatImportedAtMs(metadata: ChatMetadataLike | undefined): number {
+  const id = mainSessionParticipantId(metadata);
+  const importedAt = participantsOf(metadata).find((participant) => participant.id === id)?.importOrigin?.importedAt;
+  const ms = importedAt ? Date.parse(importedAt) : Number.NaN;
+  return Number.isFinite(ms) ? ms : 0;
+}
+
 export function isMainSessionChat(metadata: ChatMetadataLike | undefined): boolean {
   return mainSessionParticipantId(metadata) !== undefined;
 }

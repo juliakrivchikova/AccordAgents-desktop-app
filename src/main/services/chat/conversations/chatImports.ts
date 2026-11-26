@@ -142,7 +142,9 @@ export class ChatImports {
       title: thread.title.trim() || `${cliProviderMetadata(thread.kind).label} thread`,
       kind: "chat",
       createdAt: importedAt,
-      updatedAt: importedAt,
+      // Listed where the thread's last turn was, as the CLI's resume list
+      // orders it, not all at the import.
+      updatedAt: notice.lastAt ?? importedAt,
       repoPath,
       messages,
       findings: [],

@@ -1,4 +1,5 @@
 import { activeRunSummaryForConversation } from "./chatActiveRuns";
+import { chatImportedAtMs } from "./mainSession";
 import { sessionsMentionText, sessionsViewLabel, sessionsViewNamesOf, sessionsViewSummaryText, sessionsViewText } from "./sessionsViewText";
 import type {
   ChatActivityItem,
@@ -129,8 +130,13 @@ export function buildChatActivityItems(
     });
   }
 
+  // An imported chat's history happened in the CLI, before it came here.
+  const importedAtMs = chatImportedAtMs(conversation.metadata);
   for (const message of conversation.messages) {
     if (message.role !== "participant" || message.status !== "done" || !isVisibleTimelineMessage(message)) {
+      continue;
+    }
+    if (importedAtMs > 0 && timeValue(message.createdAt) < importedAtMs) {
       continue;
     }
     if (hasClosedCard(message)) {

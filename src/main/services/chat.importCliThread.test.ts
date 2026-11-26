@@ -3,6 +3,8 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
+import { buildChatActivityItems } from "../../shared/chatActivity";
+import { phoneActivityEvents } from "./mobileTimeline";
 import { isChatMessageHiddenFromTimeline } from "../../shared/chatTimelineVisibility";
 import type { ChatMessage } from "../../shared/types";
 import { participantsOf, sessionsOf, testService, waitFor } from "./chat/test/forkFixtures";
@@ -58,6 +60,9 @@ test("an imported thread is a chat whose main session resumes its CLI session, t
     const asks = history.filter((message: ChatMessage) => message.role === "user").map((message) => (message.metadata as { deliveryTargets?: unknown } | undefined)?.deliveryTargets);
     assert.deepEqual(asks, [undefined, undefined], "a historical message asks no turn of anyone");
     assert.deepEqual(history.at(-1)!.metadata?.sessionCut, { sessionId: "cli-thread-1", at: "uuid-b" }, "Fork cuts at the reply she saw");
+    assert.equal(saved.updatedAt, "2026-11-20T10:03:00.000Z", "listed where its last turn was, not at the import");
+    assert.deepEqual(buildChatActivityItems(saved, { now: "2026-11-21T00:00:00.000Z" }), [], "its history is not activity in the app");
+    assert.deepEqual(phoneActivityEvents(saved, Date.parse("2026-11-21T00:00:00.000Z")), [], "nor on the phone");
 
     await service.sendMessage({ conversationId: created.id, runId: "run-1", content: "Now add a test.", targetParticipantIds: [main.id] });
     await waitFor(() => runs.length === 1);
@@ -68,6 +73,10 @@ test("an imported thread is a chat whose main session resumes its CLI session, t
     assert.match(first.prompt, /This session is the User's own Claude Code thread, now imported into an AccordAgents chat/);
     assert.doesNotMatch(first.prompt, /Why is the preview slow\?/, "the session holds its history already");
     await waitFor(() => sessionsOf(storage.store.get(created.id)).some((session) => session.sessionId === "cli-thread-1" && session.importIntroPending === undefined));
+    await waitFor(() => storage.store.get(created.id)!.messages.some((message) => message.content === "On it." && message.status === "done"));
+    const activity = buildChatActivityItems(storage.store.get(created.id)!).filter((item) => item.status === "recent");
+    assert.deepEqual(activity.map((item) => item.preview), ["On it."], "a reply here is");
+    assert.deepEqual(phoneActivityEvents(storage.store.get(created.id)!).map((event) => event.content), ["On it."], "on the phone too");
 
     await service.sendMessage({ conversationId: created.id, runId: "run-2", content: "And the docs.", targetParticipantIds: [main.id] });
     await waitFor(() => runs.length === 2);

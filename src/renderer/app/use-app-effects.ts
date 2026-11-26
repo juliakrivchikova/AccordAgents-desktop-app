@@ -6,6 +6,7 @@ import {
   mergeChatActivityItems,
   preservedRecentChatActivityItems
 } from "../../shared/chatActivity";
+import { chatImportedAtMs } from "../../shared/mainSession";
 import { SIDEBAR_COLLAPSED_STORAGE_KEY } from "./constants";
 import { conversationTimeValue, upsertConversationSummary } from "./conversation-summaries";
 import type { AppState } from "./app-state";
@@ -223,7 +224,8 @@ export function useAppEffects(
           });
         });
         if (!canReplace) {
-          if (!isActive && timeMoved) {
+          // An imported chat is news once something happens in it here.
+          if (!isActive && timeMoved && conversationTimeValue(update.updatedAt) > chatImportedAtMs(update.metadata)) {
             const lastViewed = state.lastViewedAtRef.current[update.id];
             if (!lastViewed || conversationTimeValue(update.updatedAt) > conversationTimeValue(lastViewed)) {
               state.setUnreadConversationIds((prev) => {
