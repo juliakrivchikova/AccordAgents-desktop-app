@@ -428,12 +428,16 @@ export class ClaudeReplyFlow {
     }
     if (subtype === "task_started") {
       const taskId = stringField(record, "task_id");
+      // A foreground command's clock starts too: moved to the background
+      // later, it has run since it started.
+      if (taskId && !state.finishedTaskIds.has(taskId)) {
+        taskStartedAt(state, taskId);
+      }
       if (taskId && record.is_backgrounded === true && !state.finishedTaskIds.has(taskId)) {
         const label = claudeBackgroundTaskLabel(stringField(record, "description") ?? taskId);
         state.backgroundTasks.set(taskId, label);
         state.backgroundTaskLabels.set(taskId, label);
         state.backgroundTaskOrigins.set(taskId, state.active?.origin ?? state.lastOrigin);
-        taskStartedAt(state, taskId);
       }
       return;
     }
@@ -455,11 +459,9 @@ export class ClaudeReplyFlow {
         }
         taskStartedAt(state, taskId);
       }
-      for (const taskId of Array.from(state.backgroundTaskStartedAt.keys())) {
-        if (!live.has(taskId)) {
-          state.backgroundTaskStartedAt.delete(taskId);
-        }
-      }
+      // A start is dropped when the task's notification says it ended, not
+      // when one list leaves it out: a list that comes out of order must not
+      // restart its clock.
       state.backgroundTasks = live;
       // A finished task is remembered only to ignore a stale list that still
       // names it; once a list without it arrives, it can be forgotten.
@@ -548,9 +550,13 @@ export class ClaudeReplyFlow {
   }
 }
 
-/** When a background task was first reported: the CLI's events carry no
- *  time (verified on Claude Code 2.1.332: `background_tasks_changed` may even
- *  come before `task_started`), so the first one to name it starts its clock. */
+/** Starts kept for tasks the CLI never reported ended, before the oldest
+ *  not running in the background are forgotten. */
+const TASK_STARTS_KEPT = 200;
+
+/** When a task was first reported: the CLI's events carry no time (verified
+ *  on Claude Code 2.1.332: `background_tasks_changed` may even come before
+ *  `task_started`), so the first one to name it starts its clock. */
 function taskStartedAt(state: ClaudeWarmProcessState, taskId: string): string {
   const known = state.backgroundTaskStartedAt.get(taskId);
   if (known) {
@@ -558,5 +564,13 @@ function taskStartedAt(state: ClaudeWarmProcessState, taskId: string): string {
   }
   const now = new Date().toISOString();
   state.backgroundTaskStartedAt.set(taskId, now);
+  for (const oldest of state.backgroundTaskStartedAt.keys()) {
+    if (state.backgroundTaskStartedAt.size <= TASK_STARTS_KEPT) {
+      break;
+    }
+    if (oldest !== taskId && !state.backgroundTasks.has(oldest)) {
+      state.backgroundTaskStartedAt.delete(oldest);
+    }
+  }
   return now;
 }

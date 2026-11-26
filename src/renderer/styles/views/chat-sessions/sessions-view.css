@@ -188,20 +188,14 @@
   box-shadow: 0 0 0 2px var(--ui-focus-ring);
 }
 
-.chat-background-tasks-card {
-  z-index: var(--z-popover);
-  display: grid;
+/* The side panel's hover card (.chat-agent-card), wider for task names; a
+   long list scrolls inside the room above the composer. */
+.chat-agent-card.chat-background-tasks-card {
   gap: 4px;
   width: 320px;
   max-width: calc(100vw - 16px);
-  padding: 10px 12px;
-  border: 1px solid var(--ui-border);
-  border-radius: var(--ui-radius-12);
-  background: var(--ui-bg);
-  box-shadow: var(--shadow-md);
-  color: var(--ui-text-3);
-  font-size: 12px;
-  line-height: 18px;
+  max-height: var(--radix-hover-card-content-available-height, 420px);
+  overflow-y: auto;
 }
 
 .chat-background-tasks-card-title {

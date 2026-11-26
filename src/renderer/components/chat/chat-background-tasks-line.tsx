@@ -35,12 +35,12 @@ export const ChatBackgroundTasksLine = ({ participantId }: ChatBackgroundTasksLi
             align="start"
             sideOffset={8}
             collisionPadding={8}
-            className="chat-background-tasks-card"
+            className="chat-agent-card chat-background-tasks-card"
             data-testid="chat-background-tasks-card"
           >
             <span className="chat-background-tasks-card-title">Background tasks</span>
             <ul className="chat-background-tasks-list">
-              {tasks.map((task, index) => <BackgroundTaskRow key={`${index}:${task.label}`} task={task} />)}
+              {tasks.map((task, index) => <ChatBackgroundTaskRow key={`${index}:${task.label}`} task={task} />)}
             </ul>
           </HoverCard.Content>
         </HoverCard.Portal>
@@ -49,7 +49,8 @@ export const ChatBackgroundTasksLine = ({ participantId }: ChatBackgroundTasksLi
   );
 };
 
-const BackgroundTaskRow = ({ task }: { task: ChatBackgroundTask }): JSX.Element => (
+/** One task in the hover card: its name and how long it runs. */
+export const ChatBackgroundTaskRow = ({ task }: { task: ChatBackgroundTask }): JSX.Element => (
   <li className="chat-background-tasks-row">
     <span className="chat-background-tasks-name">{task.label}</span>
     <span className="chat-background-tasks-time">

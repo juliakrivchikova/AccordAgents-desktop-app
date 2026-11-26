@@ -13,6 +13,7 @@ const runtimeCustomProperties = new Set([
   "--chat-composer-clearance",
   "--chat-thread-width",
   "--radix-dropdown-menu-content-available-height",
+  "--radix-hover-card-content-available-height",
   "--radix-popover-content-available-height",
   "--radix-popover-trigger-width",
   "--segmented-tabs-count",
