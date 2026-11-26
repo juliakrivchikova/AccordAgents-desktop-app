@@ -10,8 +10,9 @@ interface ChatBackgroundTasksLineProps {
   participantId: string;
 }
 
-/** The main session's background work under the sessions view's composer,
- *  as Claude Code shows it under its prompt: only "2 background tasks";
+/** A session's background work under its composer in the sessions view (the
+ *  main session's under the main composer, a member's in its panel), as
+ *  Claude Code shows it under its prompt: only "2 background tasks";
  *  hovering lists each task with how long it runs. The names stay out of the
  *  line itself (the User, 2026-11-26). Nothing while none runs. */
 export const ChatBackgroundTasksLine = ({ participantId }: ChatBackgroundTasksLineProps): JSX.Element | null => {

@@ -433,7 +433,9 @@ switch is disabled.
     `ChatBackgroundTasksLine`). The start is the time the CLI first named
     the task (its events carry none), taken where the CLI runs and sent with
     the task from a machine; a machine on an older runtime sends names only,
-    and its tasks say only "running";
+    and its tasks say only "running". A member's session in the side panel
+    has the same line under its own composer, for that member's background
+    tasks (the User, 2026-11-26: as each session in Claude Code has it);
   - the main timeline holds the User's messages to the main session, the
     main session's messages, system lines and the cards the User must
     answer; the member-added cards of its delegations are not shown

@@ -7,6 +7,7 @@ import { MarkdownText } from "../content/markdown-text";
 import { TimelineLoadMoreRow } from "../conversation/timeline-primitives";
 import { IconButton } from "../primitives";
 import type { WaitingMessage } from "../../../shared/waitingMessages";
+import { ChatBackgroundTasksLine } from "./chat-background-tasks-line";
 import { ChatComposer, type ChatComposerSendNow } from "./chat-composer";
 import { ChatProviderMark, renderComposerMemberMark } from "./chat-member-mark";
 import { useSessionsViewNames } from "./chat-sessions-links";
@@ -198,6 +199,7 @@ export function ChatMemberSessionPanel(props: {
           placeholder={`Message ${props.title}...`}
           sendNow={props.sendNow}
           footerChip={props.chip}
+          below={<ChatBackgroundTasksLine participantId={member.id} />}
           testId="chat-member-composer"
           renderParticipantAvatar={renderComposerMemberMark}
           participantRoleLabel={() => ""}
