@@ -212,6 +212,13 @@ export function useChatConversationViewport(props: {
   function scrollToLatest(): void {
     clearUserScrollIntent();
     setStickToBottom(true);
+    // A jump to a message leaves the virtualizer steering to its row for up to five
+    // seconds; an offset target ends that, so an older page landing then cannot pull
+    // the view back up.
+    const timeline = timelineRef.current;
+    if (timeline && props.chatTimelineRows.length > 0) {
+      chatVirtualizer.scrollToOffset(timeline.scrollHeight, { align: "start" });
+    }
     scheduleScrollToChatBottom();
   }
 

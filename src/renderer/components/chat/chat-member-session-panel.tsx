@@ -12,7 +12,7 @@ import { ChatProviderMark, renderComposerMemberMark } from "./chat-member-mark";
 import { useSessionsViewNames } from "./chat-sessions-links";
 import { sessionsMentionText } from "../../../shared/sessionsViewText";
 import { ChatMessageItem } from "./chat-message-item";
-import { followsLatestAfterScroll, isScrollKey } from "./chat-timeline-follow";
+import { followsLatestAfterScroll, isScrollKey, SUBPIXEL_PX } from "./chat-timeline-follow";
 import { ChatElapsed, ChatWorkStatusLabel } from "./chat-task-card";
 
 type ChatMessageItemProps = ComponentProps<typeof ChatMessageItem>;
@@ -95,6 +95,7 @@ export function ChatMemberSessionPanel(props: {
   const userScrollUntilRef = useRef(0);
   const markUserScroll = (): void => { userScrollUntilRef.current = Date.now() + USER_SCROLL_INTENT_MS; };
   const focusedNonceRef = useRef<number | undefined>();
+  const firstMessageIdRef = useRef<string | undefined>();
   const last = props.messages[props.messages.length - 1];
   useLayoutEffect(() => {
     stuckRef.current = true;
@@ -116,12 +117,17 @@ export function ChatMemberSessionPanel(props: {
     }
     // Not while the User is scrolling, as in the main timeline: a message landing
     // before her first step's scroll event would pin the panel back and erase it.
-    if (body && stuckRef.current && Date.now() > userScrollUntilRef.current) {
+    const pinned = Boolean(body && stuckRef.current && Date.now() > userScrollUntilRef.current);
+    if (body && pinned) {
       body.scrollTop = body.scrollHeight;
     }
     // Older messages landing above move the position by the browser's own scroll
-    // anchoring; recorded here, its scroll event is not taken for the User's.
-    if (body) {
+    // anchoring; recorded here, its scroll event is not taken for the User's. Only
+    // then or after the pin: otherwise it would swallow a move of hers still on its way.
+    const firstId = props.messages[0]?.id;
+    const prepended = firstMessageIdRef.current !== undefined && firstId !== firstMessageIdRef.current;
+    firstMessageIdRef.current = firstId;
+    if (body && (pinned || prepended)) {
       lastScrollTopRef.current = body.scrollTop;
     }
   }, [member.id, props.focus?.nonce, props.messages.length, last?.content.length, last?.status]);
@@ -140,6 +146,8 @@ export function ChatMemberSessionPanel(props: {
     if (sent) {
       props.onDraftChange("");
       stuckRef.current = true;
+      // Her own message is shown even right after a wheel turn.
+      userScrollUntilRef.current = 0;
     }
     return sent;
   }
@@ -179,6 +187,7 @@ export function ChatMemberSessionPanel(props: {
           const contentShrank = body.scrollHeight < lastScrollHeightRef.current;
           lastScrollTopRef.current = body.scrollTop;
           lastScrollHeightRef.current = body.scrollHeight;
+          const wasFollowing = stuckRef.current;
           stuckRef.current = followsLatestAfterScroll({
             distanceFromBottom: body.scrollHeight - body.scrollTop - body.clientHeight,
             moved,
@@ -186,6 +195,10 @@ export function ChatMemberSessionPanel(props: {
             userScrolling: Date.now() <= userScrollUntilRef.current,
             following: stuckRef.current
           });
+          // Back at the end, her scroll is over: the next message follows at once.
+          if (stuckRef.current && (!wasFollowing || moved > SUBPIXEL_PX)) {
+            userScrollUntilRef.current = 0;
+          }
         }}
       >
         {props.hasOlderMessages && (
