@@ -77,3 +77,21 @@ test("the last look moves sessions and still drops logs that are not usage signa
   prepareOutgoingEnvelope([[{ type: "session" }, kept]], { teamDevice: false });
   assert.equal(kept.attrs.environment, "beta");
 });
+
+test("only the kinds of record the app sends leave; feedback, metrics, spans and the like do not", () => {
+  const event = { message: "error" };
+  const items: Array<[{ type?: string; item_count?: number }, unknown]> = [
+    [{ type: "event" }, event],
+    [{ type: "feedback" }, { contexts: { device: { memory_size: 1 } } }],
+    [{ type: "trace_metric" }, {}],
+    [{ type: "span" }, {}],
+    [{ type: "transaction" }, {}],
+    [{ type: "attachment" }, "bytes"],
+    [{ type: "session" }, { sid: "s", attrs: { environment: "beta" } }],
+    [{ type: "client_report" }, {}],
+    [{}, {}]
+  ];
+  prepareOutgoingEnvelope(items, { teamDevice: false });
+  assert.deepEqual(items.map(([header]) => header.type), ["event", "session", "client_report"]);
+  assert.equal(items[0][1], event, "an error event goes as beforeSend left it");
+});

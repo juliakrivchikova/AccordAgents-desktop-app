@@ -8,7 +8,7 @@ import { normalizeChatAutoWatchWakeLimit } from "../../../../shared/chatAutoWatc
 import { normalizeChatPromptContextSettings } from "../../../../shared/chatPromptContext";
 import { normalizeCliAgentRunTimeoutMs } from "../../../../shared/cliAgentRunSettings";
 import { mobileControlSettingsFromEnvironment } from "../../../../shared/mobilePairing";
-import { readCrashReportsChoice } from "../../crashReportPreferences";
+import { crashReportsNoticeDue, readCrashReportsChoice } from "../../crashReportPreferences";
 import { normalizeCustomAvatars } from "../avatars/avatarFiles";
 import { normalizeCloudRunsSettings } from "../aws/storedAws";
 import { normalizeBetaUpdates } from "../preferences/storedPreferences";
@@ -28,6 +28,7 @@ export class PublicSettings {
       roundLimitDefault: stored.roundLimitDefault,
       betaUpdates: normalizeBetaUpdates(stored.betaUpdates),
       crashReports: readCrashReportsChoice(userDataPath()),
+      crashReportsNotice: crashReportsNoticeDue(userDataPath()),
       cliAgentRunTimeoutMs: normalizeCliAgentRunTimeoutMs(stored.cliAgentRunTimeoutMs),
       chatParticipantRequestMaxDepth: normalizeChatParticipantRequestMaxDepth(stored.chatParticipantRequestMaxDepth),
       chatParticipantRequestPromptMaxChars: normalizeChatParticipantRequestPromptMaxChars(stored.chatParticipantRequestPromptMaxChars),

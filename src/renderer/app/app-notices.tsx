@@ -15,6 +15,10 @@ export function AppNotices(props: {
   warnings: WarningNoticeEntry[];
   warningScope: string;
   conversationId?: string;
+  /** Shown once per installation: reports are sent and can be turned off. */
+  crashReportsNotice: boolean;
+  onDismissCrashReportsNotice: () => void;
+  onOpenCrashReportsSetting: () => void;
   /** How the open chat's view words a notice (warningNoticeEntries). */
   noticeText?: (text: string) => string;
   setError: (value: string | undefined) => void;
@@ -46,7 +50,7 @@ export function AppNotices(props: {
   }
 
   const machineQuestions = machineInactivity.questions;
-  if (!props.error && props.warnings.length === 0 && machineQuestions.length === 0) {
+  if (!props.error && props.warnings.length === 0 && machineQuestions.length === 0 && !props.crashReportsNotice) {
     return null;
   }
 
@@ -75,6 +79,25 @@ export function AppNotices(props: {
             action={<IconButton label="Dismiss error" icon={XIcon} size="xs" onClick={() => props.setError(undefined)} />}
           >
             {props.noticeText ? props.noticeText(displayNoticeText(props.error)) : displayNoticeText(props.error)}
+          </Notice>
+        </div>
+      )}
+      {props.crashReportsNotice && (
+        <div className="app-notice-card" data-testid="crash-reports-notice">
+          <Notice tone="info" title="Error reports and usage statistics are on">
+            <p>
+              AccordAgents sends them with a random ID of this installation. You can turn this off in Settings → General.
+            </p>
+            <div className="app-notice-actions">
+              <Button type="button" variant="outline" size="sm" data-testid="crash-reports-notice-settings"
+                onClick={props.onOpenCrashReportsSetting}>
+                Open Settings
+              </Button>
+              <Button type="button" variant="outline" size="sm" data-testid="crash-reports-notice-ok"
+                onClick={props.onDismissCrashReportsNotice}>
+                OK
+              </Button>
+            </div>
           </Notice>
         </div>
       )}

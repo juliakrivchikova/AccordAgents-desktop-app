@@ -494,6 +494,12 @@ function App(): JSX.Element {
         warnings={view.visibleWarnings}
         warningScope={view.warningScope}
         noticeText={view.noticeText}
+        crashReportsNotice={state.settings.crashReportsNotice}
+        onDismissCrashReportsNotice={() => void settingsActions.dismissCrashReportsNotice()}
+        onOpenCrashReportsSetting={() => {
+          openSettingsSection("general");
+          void settingsActions.dismissCrashReportsNotice();
+        }}
         conversationId={state.conversation?.id}
         setError={(value) => state.setError(value)}
         setWarnings={state.setWarnings}

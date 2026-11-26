@@ -26,6 +26,7 @@ const SETTINGS: AppSettings = {
   roundLimitDefault: 2,
   betaUpdates: false,
   crashReports: true,
+  crashReportsNotice: false,
   cliAgentRunTimeoutMs: 86_400_000,
   chatParticipantRequestMaxDepth: 2,
   chatParticipantRequestPromptMaxChars: 50_000,

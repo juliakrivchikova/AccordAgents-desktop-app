@@ -6,9 +6,10 @@ import type { MachineInactivityQuestion } from "../../shared/machineLink";
 import { AppNotices } from "./app-notices";
 import type { DismissedWarningMap } from "./storage";
 
-function harness(options: { error?: string; warnings: string[]; dismissFails?: boolean; questions?: MachineInactivityQuestion[] }) {
+function harness(options: { error?: string; warnings: string[]; dismissFails?: boolean; questions?: MachineInactivityQuestion[]; crashReportsNotice?: boolean }) {
   const calls: string[] = [];
   let error = options.error;
+  let crashReportsNotice = options.crashReportsNotice ?? false;
   let warnings = [...options.warnings];
   let dismissed: DismissedWarningMap = {};
   let questions = [...(options.questions ?? [])];
@@ -33,6 +34,9 @@ function harness(options: { error?: string; warnings: string[]; dismissFails?: b
         warnings={warnings.map((text) => ({ key: text, text }))}
         warningScope="chat:c1"
         conversationId="c1"
+        crashReportsNotice={crashReportsNotice}
+        onDismissCrashReportsNotice={() => { crashReportsNotice = false; calls.push("crash-notice:ok"); }}
+        onOpenCrashReportsSetting={() => { crashReportsNotice = false; calls.push("crash-notice:settings"); }}
         setError={(value) => { error = value; calls.push(`error:${value ?? "-"}`); }}
         setWarnings={(update) => { warnings = typeof update === "function" ? update(warnings) : update; }}
         setDismissedWarningKeysByScope={(update) => { dismissed = typeof update === "function" ? update(dismissed) : update; }}
@@ -107,4 +111,24 @@ test("Remove is the other answer", async () => {
   await act(async () => { await new Promise((resolve) => setTimeout(resolve, 0)); });
   assert.ok(h.calls.includes("answer:m2:remove"));
   assert.equal(h.renderer().toJSON(), null);
+});
+
+test("the reports notice says what is sent and how to turn it off, and either button closes it", async () => {
+  assert.equal(harness({ warnings: [] }).renderer().toJSON(), null, "no notice once it was seen");
+  const text = (h: ReturnType<typeof harness>): string => h.renderer().root.findAll((node) => node.props["data-testid"] === "crash-reports-notice")
+    .flatMap((card) => card.findAll((child) => typeof child.children?.[0] === "string").map((child) => child.children.join("")))
+    .join(" ");
+  const ok = harness({ warnings: ["Run was interrupted.", "Model fell back."], crashReportsNotice: true });
+  assert.match(text(ok), /Error reports and usage statistics are on/);
+  assert.match(text(ok), /random ID of this installation/);
+  assert.match(text(ok), /Settings → General/);
+  await ok.click("Dismiss all");
+  assert.match(text(ok), /are on/, "Dismiss all closes warnings, not this notice");
+  await ok.click("OK");
+  assert.ok(ok.calls.includes("crash-notice:ok"));
+  assert.equal(text(ok), "");
+  const settings = harness({ warnings: [], crashReportsNotice: true });
+  await settings.click("Open Settings");
+  assert.ok(settings.calls.includes("crash-notice:settings"));
+  assert.equal(settings.renderer().toJSON(), null);
 });
