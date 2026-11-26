@@ -46,18 +46,19 @@ function accord(): DockedAccord {
   return { launchId: "launch-1", card, progress };
 }
 
-function renderIn(sessions: boolean, element: ReactElement): { root: ReactTestInstance; unmount: () => void } {
+function renderIn(sessions: boolean, element: ReactElement): { root: ReactTestInstance; update: (next: ReactElement) => void; unmount: () => void } {
   let renderer: ReturnType<typeof create> | undefined;
+  const wrap = (inner: ReactElement): ReactElement => (
+    <TooltipProvider>
+      <ArtifactsContext.Provider value={{ byId: new Map(), openArtifact: noop }}>
+        <ChatSessionsPresentationContext.Provider value={sessions}>{inner}</ChatSessionsPresentationContext.Provider>
+      </ArtifactsContext.Provider>
+    </TooltipProvider>
+  );
   act(() => {
-    renderer = create(
-      <TooltipProvider>
-        <ArtifactsContext.Provider value={{ byId: new Map(), openArtifact: noop }}>
-          <ChatSessionsPresentationContext.Provider value={sessions}>{element}</ChatSessionsPresentationContext.Provider>
-        </ArtifactsContext.Provider>
-      </TooltipProvider>
-    );
+    renderer = create(wrap(element));
   });
-  return { root: renderer!.root, unmount: () => act(() => renderer!.unmount()) };
+  return { root: renderer!.root, update: (next) => act(() => renderer!.update(wrap(next))), unmount: () => act(() => renderer!.unmount()) };
 }
 
 test("above the composer the sessions view keeps one line, Accord · name · where it stands, that opens the Accord in the right panel", async (t) => {
@@ -188,16 +189,20 @@ test("opened from the Accord button with too few for an Accord, the side panel s
     update: async (scope, change) => { updates.push([scope, change]); return true; }
   };
   const conversation = { id: "chat-1", messages: [], metadata: { participants: [MAIN], mainSessionParticipantId: MAIN.id, subagentProviders: { entries: [] } } } as unknown as Conversation;
-  const open = (accordNeedsAgent: boolean): ReturnType<typeof renderIn> => renderIn(true, (
+  const element = (accordNeedsAgent: boolean, chat = conversation): ReactElement => (
     <SubagentProvidersContext.Provider value={actions}>
-      {rightPanelElement({ kind: "members", addAgent: 1 }, [], undefined, { conversation, participants: [MAIN], accordNeedsAgent })}
+      {rightPanelElement({ kind: "members", addAgent: 1 }, [], undefined, { conversation: chat, participants: [MAIN], accordNeedsAgent })}
     </SubagentProvidersContext.Provider>
-  ));
+  );
+  const open = (accordNeedsAgent: boolean): ReturnType<typeof renderIn> => renderIn(true, element(accordNeedsAgent));
   const panel = open(true);
   assert.equal(textOf(panel.root.find(byTestId("chat-subagents-note"))), ACCORD_NEEDS_AGENT_LINE);
   const codex = panel.root.find((node) => node.type === "div" && node.props["data-provider-kind"] === "codex-cli");
   await act(async () => codex.find(byTestId("chat-subagent-pick-add")).props.onClick());
   assert.deepEqual(updates, [["thread", { type: "add", kind: "codex-cli" }]]);
+  const added = { ...conversation, metadata: { ...conversation.metadata, subagentProviders: { entries: [{ kind: "codex-cli" }] } } } as unknown as Conversation;
+  panel.update(element(false, added));
+  assert.equal(panel.root.find(byTestId("chat-subagent-add")).props["data-state"], "closed", "the list that added it answered the request: Add does not open again");
   panel.unmount();
 
   const met = open(false);

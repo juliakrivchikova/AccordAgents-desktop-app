@@ -58,6 +58,9 @@ export function ChatSubagentsSection(props: {
   renderRow: (row: SessionsMemberRow) => JSX.Element;
 }): JSX.Element {
   const [open, setOpen] = useState<ReadonlySet<ChatProviderKind>>(new Set());
+  // The Accord's request to add an agent that the empty list's own Add list
+  // answered: the header's Add must not open again for it.
+  const [answered, setAnswered] = useState<number>();
   const running = props.providers.reduce((count, provider) => count + provider.running, 0);
   const toggle = (kind: ChatProviderKind): void => setOpen((current) => {
     const next = new Set(current);
@@ -71,14 +74,15 @@ export function ChatSubagentsSection(props: {
         {running > 0 && <span className="chat-subagents-running" data-testid="chat-subagents-running"><i aria-hidden />{running} running</span>}
         <span className="grow" />
         {props.providers.length > 0 && <ChatSubagentAdd key={props.add?.key} providers={props.providers} project={props.project} main={props.main}
-          projectScope={props.projectScope} openAtStart={props.add !== undefined} note={props.add?.note} />}
+          projectScope={props.projectScope} openAtStart={props.add !== undefined && props.add.key !== answered} note={props.add?.note} />}
       </div>
       {props.providers.length === 0 ? (
         <div className="chat-subagents-empty" data-testid="chat-subagents-empty">
           <p className={props.add?.note ? "is-note" : undefined} data-testid={props.add?.note ? "chat-subagents-note" : undefined}>{props.add?.note ?? (props.legacy
             ? "This chat can give tasks to any ready CLI. Add one to choose which it may use."
             : "No agents yet. Add the CLIs this chat can give tasks to.")}</p>
-          <SubagentPickList providers={props.providers} project={props.project} main={props.main} projectScope={props.projectScope} />
+          <SubagentPickList providers={props.providers} project={props.project} main={props.main} projectScope={props.projectScope}
+            onAdded={() => setAnswered(props.add?.key)} />
         </div>
       ) : props.providers.map((provider) => (
         <SubagentRow key={provider.kind} provider={provider} open={open.has(provider.kind)} onToggle={() => toggle(provider.kind)}
