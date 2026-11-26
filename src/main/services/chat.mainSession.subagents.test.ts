@@ -190,3 +190,25 @@ test("an Accord started here for a main session on a machine offers the CLIs tha
     .service.startAccord({ conversationId: "conversation-1", facilitatorParticipantId: "main-id", targetParticipantIds: [], targetProviderKinds: [kind], subject: "Pick it." });
   await assert.rejects(start("codex-cli"), /Codex is not in this chat's Agents list/, "ready here, not installed on the machine");
 });
+
+// The order the User settled on 2026-11-27 (through the main session): the
+// chat's change, then General, then for the main session's own CLI with
+// nothing in General the main session's values, else the CLI's own.
+test("an agent's model and effort: the chat's change, then General, then the main session's for its own CLI, else the CLI's own", async () => {
+  const main = mainSession("claude-code", { model: "opus", reasoningEffort: "xhigh" });
+  const cases: Array<[string, unknown[], Record<string, unknown>[], ChatProviderKind, string | undefined, string | undefined]> = [
+    ["General empty, own CLI: the main session's model and effort, as before", [], [], "claude-code", "opus", "xhigh"],
+    ["General empty, another CLI: the CLI's own", [], [], "codex-cli", undefined, undefined],
+    ["General set: wins over the main session's", [], [{ kind: "claude-code", model: "sonnet", reasoningEffort: "low" }], "claude-code", "sonnet", "low"],
+    ["the chat's change wins over General", [{ kind: "claude-code", model: "haiku", reasoningEffort: "medium" }],
+      [{ kind: "claude-code", model: "sonnet", reasoningEffort: "low" }], "claude-code", "haiku", "medium"],
+    ["General for another CLI", [], [{ kind: "codex-cli", model: "gpt-6.2-astra", reasoningEffort: "high" }], "codex-cli", "gpt-6.2-astra", "high"]
+  ];
+  for (const [name, own, defaults, kind, model, effort] of cases) {
+    const { service, storage } = testService({ conversation: chatWithList(own, main), settings: { subagentDefaults: defaults as never } });
+    const result = await service.delegateTaskFromTool(mainActor(), { task: "Do it.", kind });
+    assert.equal(result.ok, true, `${name}: ${JSON.stringify(result)}`);
+    const child = childOf(storage.current, result.participantId);
+    assert.deepEqual([child.model, child.reasoningEffort], [model, effort], name);
+  }
+});
