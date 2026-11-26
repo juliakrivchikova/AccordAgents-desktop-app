@@ -340,7 +340,7 @@ export class ChatService {
     return this.modules.members.updateParticipantRuntime(request, moved);
   }
 
-  /** A change to the chat's sub-agents (its side panel), for this chat or its project. */
+  /** A change to the chat's Agents list (its side panel), for this chat only. */
   updateSubagentProviders(request: UpdateChatSubagentProvidersRequest): Promise<UpdateChatSubagentProvidersResult> {
     return this.modules.members.updateSubagentProviders(request);
   }

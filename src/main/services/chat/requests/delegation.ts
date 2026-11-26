@@ -19,6 +19,7 @@ import { newAppToolApproval, upsertAppToolApproval } from "../approvals/approval
 import { CHAT_ADMINISTRATOR_ROLE_ID, GENERIC_PARTICIPANT_ROLE_ID } from "../constants";
 import { assertParticipantProvidersReady, chatParticipants, chatSessions, uniqueHandle, upsertSession } from "../members/identity";
 import { chatSubagentList, readySubagentKinds } from "../members/subagentList";
+import { subagentMachineOf, subagentReadyOnMachine } from "../../../../shared/subagentReadiness";
 import { delegationRefusal, markAddedWithoutCard, normalizeTaskDelegation, withTaskTitle } from "../members/removalRules";
 import { delegatedMemberHandleBase, delegationRequestedPermissions, participantManagementChangeEscalates } from "../members/rosterRequests";
 import { CHAT_PARTICIPANT_REQUEST_WAIT_DEFAULT_MS } from "./constants";
@@ -110,6 +111,11 @@ export class Delegation {
         throw new Error("The requesting member is no longer in this chat.");
       }
       const sessionNow = chatSessions(conversation).find((session) => session.participantId === caller.id);
+      // The User may have taken the CLI out of the chat while its CLIs were checked.
+      if (subagentRemovedInChat(chatSubagentProvidersOf(conversation.metadata), prepared.item.kind)) {
+        refusal = delegationRefusal("provider_not_in_chat", `User took ${CLI_PROVIDER_SETUP[prepared.item.kind].label} out of this chat's Agents list. Give the task to another of its agents.`);
+        return;
+      }
       if (start === "fork" && !sessionNow?.sessionId?.trim()) {
         refusal = delegationRefusal("fork_unavailable", "Your CLI session has no id yet to copy.");
         return;
@@ -228,18 +234,23 @@ export class Delegation {
     const main = accordMainSession(conversation);
     const settings = await this.deps.settings.getPublicSettings();
     const agents = await this.readiness();
+    // Where the main session's members run: here, or on its machine, whose
+    // CLIs are those it said it has (this computer's are not the machine's).
+    const ready = this.chat.host.ownsParticipant(main)
+      ? readySubagentKinds(agents, settings, main)
+      : subagentReadyOnMachine(subagentMachineOf(main, await this.deps.settings.listMachines()));
     const unique = [...new Set(kinds)];
-    assertAccordProviders(conversation, unique, settings, agents);
+    assertAccordProviders(conversation, unique, settings, ready);
     const manage = await this.chat.permissionRequests.manageRolesParticipantsPermissionForParticipant(main);
     const members: PreparedMember[] = [];
     for (const kind of unique) {
-      const prepared = await this.newMemberInput(conversation, main, manage, settings, { kind, start: "clean" }, agents);
+      const prepared = await this.newMemberInput(conversation, main, manage, settings, { kind, start: "clean" }, { agents, ready });
       if ("refusal" in prepared) {
         throw new Error(String(prepared.refusal.reason));
       }
       members.push(prepared);
     }
-    return { settings, agents, members };
+    return { settings, ready, members };
   }
 
   /** Inside the chat's queue: adds the prepared members to the chat as it is
@@ -250,7 +261,7 @@ export class Delegation {
     }
     const main = accordMainSession(conversation);
     // The CLIs as read before the queue: probing them again here would hold it.
-    assertAccordProviders(conversation, prepared.members.map((member) => member.item.kind), prepared.settings, prepared.agents);
+    assertAccordProviders(conversation, prepared.members.map((member) => member.item.kind), prepared.settings, prepared.ready);
     const added: ChatParticipant[] = [];
     for (const member of prepared.members) {
       const { child, session } = await this.addNewMember(conversation, main, member, prepared.settings, { byUser: true });
@@ -269,7 +280,7 @@ export class Delegation {
     manage: ChatParticipantRequestPermission,
     settings: AppSettings,
     input: Omit<ChatTaskDelegationInput, "task" | "title" | "reason">,
-    detected?: AgentHealth[]
+    known?: { agents: AgentHealth[]; ready: readonly ChatProviderKind[] }
   ): Promise<PreparedMember | { refusal: Record<string, unknown> }> {
     const refuse = (code: string, reason: string): { refusal: Record<string, unknown> } => ({ refusal: delegationRefusal(code, reason) });
     const roleConfigId = input.roleConfigId ?? GENERIC_PARTICIPANT_ROLE_ID;
@@ -296,11 +307,12 @@ export class Delegation {
     // A Cloud run main session's members run there too, where Antigravity does not.
     let agents: AgentHealth[];
     try {
-      agents = detected ?? await this.readiness();
+      agents = known?.agents ?? await this.readiness();
     } catch (error) {
       return refuse("provider_unavailable", error instanceof Error ? error.message : String(error));
     }
-    const subagents = chatSubagentList(conversation, settings, agents, Boolean(caller.cloudRun));
+    const ready = known?.ready ?? readySubagentKinds(agents, settings, caller);
+    const subagents = chatSubagentList(conversation, settings, ready, Boolean(caller.cloudRun));
     const subagent = input.kind
       ? subagents.find((provider) => provider.kind === input.kind)
       : subagents.find((provider) => provider.kind === caller.kind) ?? subagents[0];
@@ -336,9 +348,11 @@ export class Delegation {
       permissions.repoRead = ceiling.repoRead;
     }
 
-    // The chat's model for the CLI (its own, else Settings'), then for the
-    // main session's own CLI the main session's model.
-    const childModel = input.model ?? subagent.model ?? (sameProvider ? caller.model : undefined);
+    // The chat's model and effort for the CLI (its own, else Settings'). With
+    // nothing set for the main session's own CLI, the main session's model;
+    // an effort set without a model was chosen for the CLI's own model.
+    const inheritsCaller = sameProvider && !subagent.model && !subagent.reasoningEffort;
+    const childModel = input.model ?? subagent.model ?? (inheritsCaller ? caller.model : undefined);
     // The main session's effort goes with its own model: another model may lack it.
     const inheritsCallerEffort = sameProvider && childModel === caller.model;
     const baseHandle = input.handle ?? delegatedMemberHandleBase(role, kind);
@@ -438,8 +452,8 @@ interface PreparedMember {
 
 export interface PreparedAccordMembers {
   settings: AppSettings;
-  /** The CLIs' readiness, read before the chat's queue. */
-  agents: AgentHealth[];
+  /** The CLIs ready where the main session's members run, read before the chat's queue. */
+  ready: readonly ChatProviderKind[];
   members: PreparedMember[];
 }
 
@@ -453,9 +467,9 @@ function accordMainSession(conversation: Conversation): ChatParticipant {
 
 /** Each CLI is still one the Accord can add: in the chat's Agents list, with
  *  no member here yet (one may have been added since the dialog opened). */
-function assertAccordProviders(conversation: Conversation, kinds: readonly ChatProviderKind[], settings: AppSettings, agents: AgentHealth[]): void {
+function assertAccordProviders(conversation: Conversation, kinds: readonly ChatProviderKind[], settings: AppSettings, ready: readonly ChatProviderKind[]): void {
   const members = chatParticipants(conversation).filter((participant) => participant.roleConfigId !== CHAT_ADMINISTRATOR_ROLE_ID);
-  const open = new Set(accordCandidates(members, conversation, { ready: readySubagentKinds(agents, settings), defaults: settings.subagentDefaults })
+  const open = new Set(accordCandidates(members, conversation, { ready, defaults: settings.subagentDefaults })
     .providers.map((provider) => provider.kind));
   const missing = kinds.find((kind) => !open.has(kind));
   if (missing) {

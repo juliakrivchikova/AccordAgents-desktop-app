@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import type { AgentHealth, ChatProviderKind, Conversation } from "../../shared/types";
-import { mainActor, mainSession, mainSessionChat, participantsOf, testService } from "./chat/test/mainSessionFixtures";
+import { accordSkills, mainActor, mainSession, mainSessionChat, NOW, participantsOf, testService } from "./chat/test/mainSessionFixtures";
 
 // The chat's agents (its side panel, the User, 2026-11-26): every CLI that is
 // ready, on its model and effort from Settings → General → Agents; a chat may
@@ -135,4 +135,58 @@ test("the main session's effort goes with a member on its own model", async () =
   const result = await service.delegateTaskFromTool(mainActor(), { task: "Do it.", model: "gpt-6.2-astra" });
   assert.equal(result.ok, true, JSON.stringify(result));
   assert.equal(childOf(storage.current, result.participantId).reasoningEffort, "xhigh");
+});
+
+// Review of 2026-11-27: an added provider, an effort set alone, a CLI taken
+// out while the CLIs were checked, and a main session on a machine.
+
+test("a main session on an added provider gives tasks to its own CLI there, though that CLI is not signed in itself", async () => {
+  const main = mainSession("claude-code", { hostId: "zai", model: "glm-5" });
+  const signedOut = readiness(["codex-cli"]).map((agent) => agent.kind === "claude-code"
+    ? { ...agent, installed: true, detection: "detected", runnable: "ready", authentication: "required" } as unknown as AgentHealth
+    : agent);
+  const { service, storage } = testService({
+    conversation: chatWithList([], main), agents: signedOut,
+    settings: { cliProviderHosts: [{ id: "zai", cli: "claude-code", label: "Z.ai", hasApiKey: true, vendor: "zai" }] as never }
+  });
+  const options = await service.describeRosterOptionsForTool(mainActor());
+  assert.deepEqual(options.chatSubagents?.map((agent) => agent.kind), ["claude-code", "codex-cli"]);
+  const result = await service.delegateTaskFromTool(mainActor(), { task: "Do it." });
+  assert.equal(result.ok, true, JSON.stringify(result));
+  const child = childOf(storage.current, result.participantId);
+  assert.equal(child.kind, "claude-code");
+  assert.equal(child.hostId, "zai", "on the main session's provider");
+  assert.equal(child.model, "glm-5");
+});
+
+test("an effort set alone for the main session's CLI goes with the CLI's own model, not the main session's", async () => {
+  const main = mainSession("claude-code", { model: "opus", reasoningEffort: "xhigh" });
+  const { service, storage } = testService({ conversation: chatWithList([], main), settings: { subagentDefaults: [{ kind: "claude-code", reasoningEffort: "low" }] } });
+  const result = await service.delegateTaskFromTool(mainActor(), { task: "Do it." });
+  assert.equal(result.ok, true, JSON.stringify(result));
+  const child = childOf(storage.current, result.participantId);
+  assert.equal(child.model, undefined, "the CLI's own model, which that effort was chosen for");
+  assert.equal(child.reasoningEffort, "low");
+});
+
+test("a CLI the User takes out while the CLIs are checked gets no task", async () => {
+  let fixture: ReturnType<typeof testService> | undefined;
+  fixture = testService({
+    conversation: chatWithList([]),
+    onDetectAgents: () => {
+      if (fixture) fixture.storage.current.metadata.subagentProviders = { entries: [{ kind: "codex-cli", removed: true }] };
+    }
+  });
+  const refused = await fixture.service.delegateTaskFromTool(mainActor(), { task: "Do it.", kind: "codex-cli" });
+  assert.equal(refused.ok, false);
+  assert.equal(refused.code, "provider_not_in_chat");
+  assert.equal(participantsOf(fixture.storage.current).length, 1, "nobody added");
+});
+
+test("an Accord started here for a main session on a machine offers the CLIs that machine has, not this computer's", async () => {
+  const main = mainSession("claude-code", { homeMachineId: "m1" });
+  const machines = [{ id: "m1", name: "AWS", deviceId: "d1", pairingKey: "k", createdAt: NOW, lastHello: { providers: [{ kind: "gemini-cli", installed: true }] } }];
+  const start = (kind: ChatProviderKind) => testService({ conversation: chatWithList([], main), machines, userSkills: accordSkills() })
+    .service.startAccord({ conversationId: "conversation-1", facilitatorParticipantId: "main-id", targetParticipantIds: [], targetProviderKinds: [kind], subject: "Pick it." });
+  await assert.rejects(start("codex-cli"), /Codex is not in this chat's Agents list/, "ready here, not installed on the machine");
 });

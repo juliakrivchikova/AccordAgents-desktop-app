@@ -22,15 +22,19 @@ verbatim there). Modelled on T3 Code (`~/reference/t3code`,
   may use, each with a model and an effort: every CLI that is ready (installed,
   signed in, on in Settings) is there from the start, with no Add step, on its
   model and effort from Settings → General → Agents (the CLI's own when none is
-  set there; for the main session's own CLI with nothing set, the main
-  session's model and effort). A chat may take a CLI out, bring it back (the
+  set there). A chat may take a CLI out, bring it back (the
   panel's + shows only then) or give it a model and effort of its own, for that
   chat only; a value set in the chat wins over Settings', which wins over the
   CLI's own. There is no project scope: the projects' lists of the first
   version (`subagentProvidersByProject`) are no longer read. Ready is counted
-  where the main session's members run: on this computer for the panel and a
-  local main session, on its machine for a main session there; a Cloud run main
-  session's list leaves out Antigravity. A task without a provider goes to the
+  where the main session's members run (`src/shared/subagentReadiness.ts`): for
+  a main session here, the CLIs ready here, its own CLI included when it runs
+  through an added provider with a key; for one on a machine, on that machine
+  when it gives a task, and the CLIs the machine said it has installed for the
+  panel and an Accord started here; a Cloud run main session's list leaves out
+  Antigravity. With nothing set for the main session's own CLI its agents run
+  on the main session's model and effort; an effort set alone goes with the
+  CLI's own model. A task without a provider goes to the
   main session's own CLI when it is in the list, else to the first one; a CLI
   the chat took out is refused (`provider_not_in_chat`), one that is not ready
   `provider_unavailable`. A change applies to new tasks; members already at

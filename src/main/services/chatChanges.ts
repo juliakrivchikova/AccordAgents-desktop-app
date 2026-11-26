@@ -41,8 +41,8 @@ export const SHARED_CONVERSATION_METADATA_KEYS: readonly string[] = [
   "chatView",
   /** Its members were moved into their CLI's own mode once (ChatService). */
   "cliModesConvertedAt",
-  /** Its own sub-agent providers (shared/subagentProviders.ts): a main
-   *  session on a machine reads them as one here does. */
+  /** Its own changes to its Agents list (shared/subagentProviders.ts): a
+   *  main session on a machine reads them as one here does. */
   "subagentProviders"
 ];
 

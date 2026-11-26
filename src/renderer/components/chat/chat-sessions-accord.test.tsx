@@ -203,7 +203,7 @@ test("opened from the Accord button with too few for an Accord, the side panel s
   const updates: unknown[] = [];
   const opened: string[] = [];
   const actions = (ready: string[]): SubagentProvidersActions => ({
-    agents: agentsReady(ready), providers: [], openSetup: () => opened.push("setup"),
+    agents: agentsReady(ready), providers: [], hosts: [], openSetup: () => opened.push("setup"),
     update: async (change) => { updates.push(change); return true; }
   });
   const chat = (entries: unknown[]): Conversation =>

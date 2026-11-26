@@ -59,6 +59,8 @@ test("a chat's changes keep only what differs from the list Settings makes", () 
   assert.deepEqual(change([], { type: "remove", kind: "gemini-cli" }), [{ kind: "gemini-cli", removed: true }]);
   assert.deepEqual(change([{ kind: "gemini-cli", model: "gemini-4" }], { type: "remove", kind: "gemini-cli" }), [{ kind: "gemini-cli", removed: true }], "its values go with it");
   assert.deepEqual(change([{ kind: "gemini-cli", removed: true }], { type: "add", kind: "gemini-cli" }), [], "back on Settings' values");
+  assert.deepEqual(change([{ kind: "codex-cli", reasoningEffort: "xhigh" }], { type: "add", kind: "codex-cli" }), [{ kind: "codex-cli", reasoningEffort: "xhigh" }],
+    "an Add for a CLI that is not out keeps this chat's values");
   assert.deepEqual(change([], { type: "set", kind: "codex-cli", reasoningEffort: "xhigh" }), [{ kind: "codex-cli", reasoningEffort: "xhigh" }]);
   assert.deepEqual(change([{ kind: "codex-cli", reasoningEffort: "xhigh" }], { type: "set", kind: "codex-cli", model: " gpt-6-luna " }),
     [{ kind: "codex-cli", model: "gpt-6-luna" }], "Apply sets both: an effort it does not name goes back to Settings'");

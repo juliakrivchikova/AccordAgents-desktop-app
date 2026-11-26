@@ -77,10 +77,9 @@ export type ConversationMetadata = Record<string, unknown> & {
    *  message without an addressee goes to. Set when the chat is made and
    *  never changed; a chat without it is an Assistant chat from before. */
   mainSessionParticipantId?: string;
-  /** The chat's own layer over its project's sub-agent providers
-   *  (src/shared/subagentProviders.ts). Set when the chat is made; a chat
-   *  without it predates the list, and its main session may give tasks to any
-   *  ready CLI. */
+  /** The chat's own changes to its Agents list (src/shared/subagentProviders.ts):
+   *  a CLI taken out, or its own model and effort. Set empty when the chat is
+   *  made; none, or none for a CLI, means every ready CLI on Settings' values. */
   subagentProviders?: ChatSubagentProviders;
   /** The chat's view, switched by the User any number of times and shared
    *  through her server like the pin. Read it through chatViewFor(). */

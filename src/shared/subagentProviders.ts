@@ -77,7 +77,9 @@ export function applySubagentProviderChange(entries: readonly SubagentProviderEn
     return [...others, { kind: change.kind, removed: true }];
   }
   if (change.type === "add") {
-    return others; // Back in the list on Settings' values.
+    // Back in the list on Settings' values; a CLI that was not out (a second
+    // window's late Add) keeps the values this chat gave it.
+    return current?.removed ? others : [...entries];
   }
   const next = withValues({ kind: change.kind, model: current?.model, reasoningEffort: current?.reasoningEffort }, change.model, change.reasoningEffort);
   return next.model || next.reasoningEffort ? [...others, next] : others;

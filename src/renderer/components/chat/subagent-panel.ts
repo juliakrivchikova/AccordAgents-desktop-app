@@ -1,7 +1,9 @@
-import { CLI_PROVIDER_DISPLAY_ORDER, CLI_PROVIDER_SETUP, readinessForProvider, readyProviderKinds } from "../../../shared/cliReadiness";
+import { CLI_PROVIDER_DISPLAY_ORDER, CLI_PROVIDER_SETUP, readinessForProvider } from "../../../shared/cliReadiness";
+import type { MachineListResult } from "../../../shared/machineLink";
+import { mainRunsOnMachine, subagentMachineOf, subagentReadyHere, subagentReadyOnMachine, type SubagentMainPlace } from "../../../shared/subagentReadiness";
 import type { SessionsMemberRow } from "../../../shared/mainSessionView";
 import { effectiveSubagentProviders, type SubagentListInput } from "../../../shared/subagentProviders";
-import type { AgentHealth, ChatProviderKind, EffectiveSubagentProvider, ProviderSettings, SubagentProviderEntry } from "../../../shared/types";
+import type { AgentHealth, ChatProviderKind, CliProviderHost, EffectiveSubagentProvider, ProviderSettings, SubagentProviderEntry } from "../../../shared/types";
 
 // The side panel's Agents (variant B, the User, 2026-11-26): every CLI ready
 // here, less those this chat took out, each with its model and effort, and the
@@ -59,12 +61,29 @@ function uniqueKinds(rows: readonly SessionsMemberRow[]): ChatProviderKind[] {
   return [...new Set(rows.map((row) => row.participant.kind))];
 }
 
-/** The CLIs ready on this computer, and whether any is still being checked
- *  (then an empty list says nothing yet). */
-export function subagentReadiness(agents: readonly AgentHealth[], providers: readonly ProviderSettings[]): { ready: ChatProviderKind[]; checking: boolean } {
+/** The CLIs ready where the main session's members run, and whether that is
+ *  still being found out (then an empty list says nothing yet). On this
+ *  computer: those ready here (its own CLI through an added provider too). On
+ *  a machine: those its runtime said it has, as delegation there counts them. */
+export function subagentReadiness(input: {
+  agents: readonly AgentHealth[];
+  providers: readonly ProviderSettings[];
+  hosts: readonly CliProviderHost[];
+  main?: SubagentMainPlace;
+  machines: MachineListResult;
+}): { ready: ChatProviderKind[]; checking: boolean } {
+  if (input.main && mainRunsOnMachine(input.main)) {
+    // The newest greeting is the connection's; the record keeps the last one.
+    const machines = input.machines.machines.map((machine) => ({
+      ...machine,
+      lastHello: input.machines.status.find((status) => status.machineId === machine.id)?.lastHello ?? machine.lastHello
+    }));
+    const machine = subagentMachineOf(input.main, machines);
+    return { ready: subagentReadyOnMachine(machine), checking: !machine?.lastHello };
+  }
   return {
-    ready: readyProviderKinds([...agents], [...providers]),
-    checking: CLI_PROVIDER_DISPLAY_ORDER.some((kind) => readinessForProvider(kind, [...agents], [...providers]) === "checking")
+    ready: subagentReadyHere([...input.agents], [...input.providers], input.hosts, input.main),
+    checking: CLI_PROVIDER_DISPLAY_ORDER.some((kind) => readinessForProvider(kind, [...input.agents], [...input.providers]) === "checking")
   };
 }
 

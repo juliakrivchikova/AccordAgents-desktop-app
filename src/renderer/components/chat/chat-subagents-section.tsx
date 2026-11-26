@@ -9,12 +9,17 @@ import type { SessionsMemberRow } from "../../../shared/mainSessionView";
 import { reasoningEffortOptionsForProvider } from "../../../shared/reasoningEffort";
 import type { ChatProviderKind, ChatReasoningEffort } from "../../../shared/types";
 
-/** The main session's own CLI and what it runs on: a sub-agent of the same CLI
- *  with nothing set inherits them (delegation.ts). */
+/** The main session's own CLI and what it runs on: an agent of the same CLI
+ *  with nothing set inherits them (delegation.ts); where it runs decides which
+ *  CLIs are ready for its members. */
 export interface SubagentMainSession {
   kind: ChatProviderKind;
   model?: string;
   reasoningEffort?: ChatReasoningEffort;
+  /** An added provider it runs through (Z.ai and the like). */
+  hostId?: string;
+  /** The machine it runs on, if not this computer. */
+  homeMachineId?: string;
   /** A Cloud run main session's members run there too, where Antigravity does not. */
   cloudRun?: unknown;
 }
@@ -62,6 +67,8 @@ export function ChatSubagentsSection(props: {
   // Accord needs one more agent and none can be added here: one is set up
   // first. Not said while the CLIs are still being checked.
   const accordSetup = Boolean(props.add?.forAccord) && !canAdd && !props.checking;
+  // That line answered the request: a CLI taken out afterwards does not open Add by itself.
+  if (accordSetup && props.add && answered !== props.add.key) setAnswered(props.add.key);
   const empty = props.providers.length === 0 && !props.checking;
   return (
     <div className="chat-side-section" data-testid="chat-members-agents">
@@ -135,12 +142,13 @@ function SubagentCount(props: { provider: SubagentPanelProvider }): JSX.Element 
 function SubagentValues(props: { provider: SubagentPanelProvider; main?: SubagentMainSession }): JSX.Element {
   const { provider } = props;
   const { catalog } = useMemberModelCatalog({ kind: provider.kind });
-  const inherits = props.main?.kind === provider.kind;
-  const modelId = provider.model ?? (inherits ? props.main?.model : undefined);
+  // As delegation.ts gives them: the main session's model only when nothing
+  // is set for its CLI, its effort only with its own model.
+  const same = props.main?.kind === provider.kind;
+  const modelId = provider.model ?? (same && !provider.reasoningEffort ? props.main?.model : undefined);
   const found = modelId ? catalog?.models.find((item) => item.id === modelId) : undefined;
   const model = found ? chipModelLabel(found) : modelId ?? "Default";
-  // Its effort goes with its own model (delegation.ts): not with another model set here.
-  const inheritsEffort = inherits && (!provider.model || provider.model === props.main?.model);
+  const inheritsEffort = same && modelId === props.main?.model;
   const effortId = provider.reasoningEffort ?? (inheritsEffort ? props.main?.reasoningEffort : undefined);
   const effort = effortId ? reasoningEffortOptionsForProvider(provider.kind).find((item) => item.id === effortId)?.label ?? effortId : undefined;
   return (

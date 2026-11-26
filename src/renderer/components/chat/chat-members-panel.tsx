@@ -57,7 +57,9 @@ export function ChatMembersPanel(props: ChatMembersPanelProps): JSX.Element {
   const machines = useMachineList();
   const former = props.formerRows ?? [];
   const actions = useSubagentProvidersActions();
-  const { ready, checking } = subagentReadiness(actions?.agents ?? [], actions?.providers ?? []);
+  const { ready, checking } = subagentReadiness({
+    agents: actions?.agents ?? [], providers: actions?.providers ?? [], hosts: actions?.hosts ?? [], main: props.subagents?.main, machines
+  });
   const list = { ready, defaults: props.subagents?.defaults, thread: props.subagents?.thread, cloudRun: Boolean(props.subagents?.main?.cloudRun) };
   const providers = subagentPanelProviders(list, props.rows.current);
   const renderRow = (row: SessionsMemberRow): JSX.Element => {

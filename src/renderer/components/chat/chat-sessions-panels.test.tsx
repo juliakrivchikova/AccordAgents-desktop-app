@@ -440,7 +440,7 @@ test("the side panel has no title and no main session row, says nothing when emp
     act(() => {
       created = create(
         <TooltipProvider>
-          <SubagentProvidersContext.Provider value={{ agents, providers: [], update: async () => true, openSetup: noop }}>
+          <SubagentProvidersContext.Provider value={{ agents, providers: [], hosts: [], update: async () => true, openSetup: noop }}>
             <ChatMembersPanel rows={{ current: [], previous: [] }} activity={sessionsMemberActivity([])} runIdsByParticipantId={new Map()}
               subagents={{ thread: { entries: [] } }} memberTitle={() => ""} onOpenMember={noop} onClose={noop} />
           </SubagentProvidersContext.Provider>

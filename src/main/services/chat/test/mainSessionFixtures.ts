@@ -135,6 +135,10 @@ export function testService(options: {
   settings?: Partial<AppSettings>;
   /** The CLIs' readiness here; none: every CLI on in Settings counts as ready. */
   agents?: AgentHealth[];
+  /** Called each time the CLIs are checked (the User acting meanwhile). */
+  onDetectAgents?: () => void;
+  /** The machines Settings knows. */
+  machines?: unknown[];
 }) {
   const tempRoot = path.join(tmpdir(), "accordagents-main-session-test");
   const storage = {
@@ -194,7 +198,7 @@ export function testService(options: {
   const settings = {
     async getPublicSettings() { return publicSettings(); },
     async ensureAssistantProviderDefault() { return publicSettings(); },
-    async listMachines() { return []; },
+    async listMachines() { return clone(options.machines ?? []); },
     async listMachineInstalls() { return []; },
     async ensureGenericChatParticipantSeeds() { return publicSettings(); },
     async recordSuccessfulChatProvider() {},
@@ -204,7 +208,7 @@ export function testService(options: {
   };
   const runs: RunCall[] = [];
   const cliRunner = {
-    async detectAgents() { return clone(options.agents ?? []); },
+    async detectAgents() { options.onDetectAgents?.(); return clone(options.agents ?? []); },
     async run(participant: ParticipantConfig, prompt: string, _repoPath: unknown, _diffMode: unknown, _kind: unknown, signal: AbortSignal | undefined, runOptions: any) {
       runs.push({ participant, prompt, options: runOptions });
       return options.run
