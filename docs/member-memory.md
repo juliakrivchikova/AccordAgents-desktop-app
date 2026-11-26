@@ -93,6 +93,32 @@ not there yet.
 - A list or tool call the server could not answer says so and never reads as
   "no memory". The list waits at most 4 s before the turn starts without it.
 
+## Search by words (without a key)
+
+`app_memory_search` with `query` (`src/hub/memoryWordSearch.ts`), decided by
+the User on 2026-11-26 (chat document "Поиск по смыслу: память, чаты,
+инструкции"): memory must get as much better as it can without a model.
+
+- A note is found when it has **any** of the words asked, not all of them.
+- A word counts in any of its forms: words are told by their first five
+  letters, the same way for every language (no language is singled out).
+  Words shorter than two letters are left out; a query with no word left
+  keeps the old rule (notes holding everything typed).
+- Notes are ranked by BM25 over those stems, a match in the title weighing
+  three times and in a tag twice; equal scores go most recently active first.
+  Notes scoring under 15% of the best are left out (a common word or two).
+- Each note found comes with `snippet`: the passage of its body (up to 220
+  characters) where most of the words asked are close together, or the
+  body's start when only the title or a tag matched.
+- Members are told (tool description and `MEMBER_MEMORY_INSTRUCTIONS`) to ask
+  with several words at once: synonyms and translations into the languages
+  the notes are written in. The model is the member itself.
+- Measured on the User's 59 notes with 37 queries written for them (23 of
+  them in another language than the notes): the right note in the first
+  five for 38% of the queries as asked (3% with the old rule), and 100% when
+  asked as members are told to (by taylor, who knows the notes: an upper
+  bound). Settings → Memory's search box keeps the old rule: it is a filter.
+
 ## Keeping it tidy without the User
 
 - A write with the same title in the same kind and place is refused with the
@@ -117,8 +143,8 @@ not there yet.
 - The list is not shown again after a compaction the CLI starts on its own, nor
   in a fresh session the CLI starts when a resume fails; members are told to
   search memory when they start a task.
-- Search is by words contained in the title, tags or body, without an index;
-  fine for hundreds of notes.
+- Search reads the notes holding any stem asked, without an index; fine for
+  hundreds of notes (a server keeps at most 2000).
 
 ## Not in v1
 

@@ -36,11 +36,13 @@ import {
   type MemoryOwnerListValue,
   type MemoryResult,
   type MemoryScope,
+  type MemorySearchHit,
   type MemorySearchValue,
   type MemoryTagCount,
   type MemoryTagsValue
 } from "../shared/memory";
 import { homeDeviceId } from "./hubOps";
+import { noteLength, rankByWords, searchStems, snippetOf } from "./memoryWordSearch";
 
 const SCHEMA_SQL = `
   create table if not exists member_memory_notes (
@@ -307,21 +309,44 @@ export class HubMemory {
   }
 
   private async search(member: MemberContext, request: Extract<HubMemoryRequest, { action: "search" }>): Promise<MemoryResult<MemorySearchValue>> {
-    const filters = this.filters(request);
+    if (request.query !== undefined && !validQuery(request.query)) return invalid(QUERY_RULE);
+    const stems = typeof request.query === "string" ? searchStems(request.query) : [];
+    // Words are looked for below, ranked. A query with no word in it (only
+    // one-letter words or signs) keeps the notes holding all it has, as before.
+    const filters = this.filters(stems.length ? { ...request, query: undefined } : request);
     if ("code" in filters) return { ok: false, error: filters };
     const limit = clampLimit(request.limit);
-    const rows = await this.query<Row>(`select ${SUMMARY_COLUMNS} from member_memory_notes where ${this.visibleSql(member)}${filters.sql}
-      order by max(updated_at, coalesce(verified_at, ''), coalesce(last_read_at, '')) desc limit ${limit};`);
-    this.log("hub.memory.search", { conversationId: member.conversationId, found: rows.length });
-    return { ok: true, value: { notes: rows.map(summaryOf) } };
+    const where = `${this.visibleSql(member)}${filters.sql}`;
+    if (!stems.length) {
+      const rows = await this.query<Row>(`select ${SUMMARY_COLUMNS} from member_memory_notes where ${where}
+        order by max(updated_at, coalesce(verified_at, ''), coalesce(last_read_at, '')) desc limit ${limit};`);
+      this.log("hub.memory.search", { conversationId: member.conversationId, found: rows.length });
+      return { ok: true, value: { notes: rows.map(summaryOf) } };
+    }
+    // Candidates: the notes holding any stem (a word's forms all hold it).
+    // Bounded by the notes a server keeps (MEMORY_LIVE_NOTES_MAX).
+    const holds = stems.map((stem) => `instr(search_text, ${quote(stem)}) > 0`).join(" or ");
+    const activity = "max(updated_at, coalesce(verified_at, ''), coalesce(last_read_at, ''))";
+    const rows = await this.query<Row & { activity: string }>(`select ${SUMMARY_COLUMNS}, body, ${activity} as activity from member_memory_notes
+      where ${where} and (${holds});`);
+    const corpus = await this.query<{ total: number; averageLength: number | null }>(`select count(*) as total, avg(length(search_text)) as averageLength
+      from member_memory_notes where ${where};`);
+    const candidates = rows.map((row) => ({ row, title: row.title, tags: parseTags(row.tagsJson), body: row.body ?? "" }));
+    const ranked = rankByWords(candidates, stems, {
+      total: Number(corpus[0]?.total ?? candidates.length),
+      averageLength: Number(corpus[0]?.averageLength ?? 0) || candidates.reduce((sum, item) => sum + noteLength(item), 0) / Math.max(1, candidates.length)
+    });
+    // Equal scores: the most recently active first, as without words.
+    ranked.sort((left, right) => right.score - left.score || (left.note.row.activity < right.note.row.activity ? 1 : left.note.row.activity > right.note.row.activity ? -1 : 0));
+    const notes: MemorySearchHit[] = ranked.slice(0, limit).map(({ note }) => ({ ...summaryOf(note.row), snippet: snippetOf(note.body, stems) }));
+    this.log("hub.memory.search", { conversationId: member.conversationId, found: notes.length, candidates: rows.length, words: stems.length });
+    return { ok: true, value: { notes } };
   }
 
   private filters(request: { query?: unknown; tags?: unknown; tag?: unknown; kind?: unknown; scope?: unknown }): { sql: string } | MemoryError {
     let sql = "";
     if (request.query !== undefined) {
-      if (typeof request.query !== "string" || request.query.length > MEMORY_QUERY_MAX_CHARS || request.query.includes("\u0000")) {
-        return { code: "invalid_request", message: "Search by words under 500 characters." };
-      }
+      if (!validQuery(request.query)) return { code: "invalid_request", message: QUERY_RULE };
       for (const word of searchWords(request.query)) sql += ` and instr(search_text, ${quote(word)}) > 0`;
     }
     const tags = request.tags !== undefined ? request.tags : request.tag !== undefined ? [request.tag] : undefined;
@@ -703,6 +728,13 @@ function searchText(fields: { title: string; body: string; tags: string[] }): st
   return `${fields.title}\n${fields.tags.join(" ")}\n${fields.body}`.toLocaleLowerCase();
 }
 
+const QUERY_RULE = `Search by words under ${MEMORY_QUERY_MAX_CHARS} characters.`;
+
+function validQuery(query: unknown): query is string {
+  return typeof query === "string" && query.length <= MEMORY_QUERY_MAX_CHARS && !query.includes("\u0000");
+}
+
+/** The owner's list (Settings → Memory) keeps notes holding every word typed. */
 function searchWords(query: string): string[] {
   return [...new Set(query.toLocaleLowerCase().split(/\s+/).map((word) => word.trim()).filter(Boolean))].slice(0, 12);
 }

@@ -211,8 +211,16 @@ export interface MemoryTagsValue {
   tags: MemoryTagCount[];
 }
 
+/** A note found by search: with the passage where the words asked were
+ *  found (absent for a search by tags, kind or scope only). */
+export interface MemorySearchHit extends MemoryNoteSummary {
+  snippet?: string;
+}
+
 export interface MemorySearchValue {
-  notes: MemoryNoteSummary[];
+  /** Best match first when words were asked; otherwise the most recently
+   *  written, read or confirmed first. */
+  notes: MemorySearchHit[];
 }
 
 export interface MemoryOwnerListValue {
