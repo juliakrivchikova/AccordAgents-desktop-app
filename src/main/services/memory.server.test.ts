@@ -604,6 +604,10 @@ test("a search by words finds a note with any of them, in any form, best first, 
   assert.equal((await search(taylor, CHAT_A, { query: "релизы выпуск releases deploying", limit: 1 })).length, 1);
   // Filters still apply to a search by words.
   assert.deepEqual((await search(taylor, CHAT_A, { query: "releases", scope: "role" })).map((note) => note.title), ["Role checklist for releases"]);
+  // One short word finds its forms; the answer says it is ranked by any word.
+  const short = ok<MemorySearchValue>(await tool("desktop", CHAT_A, taylor, APP_MEMORY_SEARCH_TOOL, { query: "релиз" }));
+  assert.deepEqual(short.notes.map((note) => note.title), ["Выпуск беты"]);
+  assert.equal(short.ranking, "any-word");
   // No words: the most recent first, without passages.
   const recent = await search(taylor, CHAT_A, {});
   assert.equal(recent.length, 4);
@@ -612,4 +616,16 @@ test("a search by words finds a note with any of them, in any form, best first, 
   assert.deepEqual((await search(taylor, CHAT_A, { query: "ф" })).map((note) => note.title), []);
   assert.deepEqual((await search(taylor, CHAT_A, { query: "nothing like this" })).map((note) => note.title), []);
   refused(await tool("desktop", CHAT_A, taylor, APP_MEMORY_SEARCH_TOOL, { query: "x".repeat(501) }), "invalid_request");
+});
+
+test("an empty answer to several words from an older server tells the member to search word by word", async () => {
+  const asked: unknown[] = [];
+  const older = (value: MemorySearchValue) => ({ memory: async <T>(request: unknown) => { asked.push(request); return { ok: true, value } as unknown as MemoryResult<T>; } });
+  const actor = { conversationId: CHAT_A, participantId: taylor.id };
+  const empty = await callMemoryTool(older({ notes: [] }), actor, APP_MEMORY_SEARCH_TOOL, { query: "deploy release выкатка" }) as { note?: string };
+  assert.match(empty.note ?? "", /older than this app and finds only notes holding every word asked\. Search again with one word at a time\./);
+  // One word, something found, or a current server: nothing added.
+  assert.equal((await callMemoryTool(older({ notes: [] }), actor, APP_MEMORY_SEARCH_TOOL, { query: "deploy" }) as { note?: string }).note, undefined);
+  assert.equal((await callMemoryTool(older({ notes: [], ranking: "any-word" }), actor, APP_MEMORY_SEARCH_TOOL, { query: "deploy release" }) as { note?: string }).note, undefined);
+  assert.equal(asked.length, 3);
 });

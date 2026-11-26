@@ -42,7 +42,7 @@ import {
   type MemoryTagsValue
 } from "../shared/memory";
 import { homeDeviceId } from "./hubOps";
-import { noteLength, rankByWords, searchStems, snippetOf } from "./memoryWordSearch";
+import { candidateAnchors, rankCounted, searchTextOf, searchWords as wordsAsked, snippetOf, wordCounts } from "./memoryWordSearch";
 
 const SCHEMA_SQL = `
   create table if not exists member_memory_notes (
@@ -98,6 +98,8 @@ const BUMP_SQL = "update member_memory_counter set value = value + 1 where key =
 const SEQ_SQL = "(select value from member_memory_counter where key = 'change_seq')";
 
 const DAY_MS = 24 * 60 * 60_000;
+/** Notes counted for a search before the server answers other requests. */
+const COUNT_BATCH = 50;
 const REQUEST_ID = /^[A-Za-z0-9._:-]{1,128}$/;
 const NOTE_ID = /^[A-Za-z0-9-]{8,64}$/;
 
@@ -310,37 +312,46 @@ export class HubMemory {
 
   private async search(member: MemberContext, request: Extract<HubMemoryRequest, { action: "search" }>): Promise<MemoryResult<MemorySearchValue>> {
     if (request.query !== undefined && !validQuery(request.query)) return invalid(QUERY_RULE);
-    const stems = typeof request.query === "string" ? searchStems(request.query) : [];
+    const words = typeof request.query === "string" ? wordsAsked(request.query) : [];
     // Words are looked for below, ranked. A query with no word in it (only
     // one-letter words or signs) keeps the notes holding all it has, as before.
-    const filters = this.filters(stems.length ? { ...request, query: undefined } : request);
+    const filters = this.filters(words.length ? { ...request, query: undefined } : request);
     if ("code" in filters) return { ok: false, error: filters };
     const limit = clampLimit(request.limit);
     const where = `${this.visibleSql(member)}${filters.sql}`;
-    if (!stems.length) {
-      const rows = await this.query<Row>(`select ${SUMMARY_COLUMNS} from member_memory_notes where ${where}
-        order by max(updated_at, coalesce(verified_at, ''), coalesce(last_read_at, '')) desc limit ${limit};`);
-      this.log("hub.memory.search", { conversationId: member.conversationId, found: rows.length });
-      return { ok: true, value: { notes: rows.map(summaryOf) } };
-    }
-    // Candidates: the notes holding any stem (a word's forms all hold it).
-    // Bounded by the notes a server keeps (MEMORY_LIVE_NOTES_MAX).
-    const holds = stems.map((stem) => `instr(search_text, ${quote(stem)}) > 0`).join(" or ");
     const activity = "max(updated_at, coalesce(verified_at, ''), coalesce(last_read_at, ''))";
-    const rows = await this.query<Row & { activity: string }>(`select ${SUMMARY_COLUMNS}, body, ${activity} as activity from member_memory_notes
-      where ${where} and (${holds});`);
+    if (!words.length) {
+      const rows = await this.query<Row>(`select ${SUMMARY_COLUMNS} from member_memory_notes where ${where} order by ${activity} desc limit ${limit};`);
+      this.log("hub.memory.search", { conversationId: member.conversationId, found: rows.length });
+      return { ok: true, value: { notes: rows.map(summaryOf), ranking: "any-word" } };
+    }
+    // Candidates: the notes holding any word's first letters (all its forms
+    // hold them). Their search text is read to rank them; bodies only for the
+    // notes given back.
+    const holds = candidateAnchors(words).map((anchor) => `instr(search_text, ${quote(anchor)}) > 0`).join(" or ");
+    const rows = await this.query<Row & { activity: string; searchText: string }>(`select ${SUMMARY_COLUMNS}, ${activity} as activity, search_text as searchText
+      from member_memory_notes where ${where} and (${holds});`);
     const corpus = await this.query<{ total: number; averageLength: number | null }>(`select count(*) as total, avg(length(search_text)) as averageLength
       from member_memory_notes where ${where};`);
-    const candidates = rows.map((row) => ({ row, title: row.title, tags: parseTags(row.tagsJson), body: row.body ?? "" }));
-    const ranked = rankByWords(candidates, stems, {
-      total: Number(corpus[0]?.total ?? candidates.length),
-      averageLength: Number(corpus[0]?.averageLength ?? 0) || candidates.reduce((sum, item) => sum + noteLength(item), 0) / Math.max(1, candidates.length)
-    });
+    // Counted a few notes at a time: on a server full of long notes this takes
+    // a while, and other requests are answered meanwhile.
+    const counted: Array<{ note: (typeof rows)[number]; counts: number[] }> = [];
+    for (const [index, row] of rows.entries()) {
+      if (index > 0 && index % COUNT_BATCH === 0) await new Promise<void>((resolve) => setImmediate(resolve));
+      counted.push({ note: row, counts: wordCounts(row.searchText, words) });
+    }
+    const ranked = rankCounted(counted, words, { total: Number(corpus[0]?.total ?? rows.length), averageLength: Number(corpus[0]?.averageLength ?? 0) });
     // Equal scores: the most recently active first, as without words.
-    ranked.sort((left, right) => right.score - left.score || (left.note.row.activity < right.note.row.activity ? 1 : left.note.row.activity > right.note.row.activity ? -1 : 0));
-    const notes: MemorySearchHit[] = ranked.slice(0, limit).map(({ note }) => ({ ...summaryOf(note.row), snippet: snippetOf(note.body, stems) }));
-    this.log("hub.memory.search", { conversationId: member.conversationId, found: notes.length, candidates: rows.length, words: stems.length });
-    return { ok: true, value: { notes } };
+    ranked.sort((left, right) => right.score - left.score || (left.note.activity < right.note.activity ? 1 : left.note.activity > right.note.activity ? -1 : 0));
+    const top = ranked.slice(0, limit).map((item) => item.note);
+    const bodies = new Map<string, string>();
+    if (top.length) {
+      const read = await this.query<{ id: string; body: string }>(`select id, body from member_memory_notes where id in (${top.map((row) => quote(row.id)).join(", ")});`);
+      for (const row of read) bodies.set(row.id, row.body);
+    }
+    const notes: MemorySearchHit[] = top.map((row) => ({ ...summaryOf(row), snippet: snippetOf(bodies.get(row.id) ?? "", words) }));
+    this.log("hub.memory.search", { conversationId: member.conversationId, found: notes.length, candidates: rows.length, words: words.length });
+    return { ok: true, value: { notes, ranking: "any-word" } };
   }
 
   private filters(request: { query?: unknown; tags?: unknown; tag?: unknown; kind?: unknown; scope?: unknown }): { sql: string } | MemoryError {
@@ -725,7 +736,7 @@ function parseTags(json: string): string[] {
 
 /** Lower case by the language's own rules (sqlite's lower() knows only ASCII). */
 function searchText(fields: { title: string; body: string; tags: string[] }): string {
-  return `${fields.title}\n${fields.tags.join(" ")}\n${fields.body}`.toLocaleLowerCase();
+  return searchTextOf(fields);
 }
 
 const QUERY_RULE = `Search by words under ${MEMORY_QUERY_MAX_CHARS} characters.`;

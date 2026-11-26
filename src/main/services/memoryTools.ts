@@ -12,7 +12,8 @@ import {
   type MemoryIndexValue,
   type MemoryNote,
   type MemoryNoteSummary,
-  type MemoryResult
+  type MemoryResult,
+  type MemorySearchValue
 } from "../../shared/memory";
 
 /** The one way to members' memory: the User's server (ServerChatLink.memory). */
@@ -40,8 +41,8 @@ export async function callMemoryTool(access: MemoryServerAccess | undefined, act
   const args = raw && typeof raw === "object" && !Array.isArray(raw) ? raw as Record<string, unknown> : {};
   const member = { conversationId: actor.conversationId, participantId: actor.participantId };
   switch (toolName) {
-    case APP_MEMORY_SEARCH_TOOL:
-      return access.memory({
+    case APP_MEMORY_SEARCH_TOOL: {
+      const result = await access.memory<MemorySearchValue>({
         action: "search", ...member,
         ...(typeof args.query === "string" ? { query: args.query } : {}),
         ...(Array.isArray(args.tags) ? { tags: args.tags.filter((tag): tag is string => typeof tag === "string") } : {}),
@@ -49,6 +50,14 @@ export async function callMemoryTool(access: MemoryServerAccess | undefined, act
         ...(typeof args.scope === "string" ? { scope: args.scope as never } : {}),
         ...(typeof args.limit === "number" ? { limit: args.limit } : {})
       });
+      // A server older than this app finds only notes holding every word
+      // asked (it updates itself soon after the app does): an empty answer to
+      // several words says so, so the member does not take it for no memory.
+      if (result.ok && !result.value.ranking && !result.value.notes.length && typeof args.query === "string" && args.query.trim().split(/\s+/).length > 1) {
+        return { ...result, note: "Your server is older than this app and finds only notes holding every word asked. Search again with one word at a time." };
+      }
+      return result;
+    }
     case APP_MEMORY_TAGS_TOOL:
       return access.memory({ action: "tags", ...member });
     case APP_MEMORY_READ_TOOL: {

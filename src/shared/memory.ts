@@ -221,6 +221,9 @@ export interface MemorySearchValue {
   /** Best match first when words were asked; otherwise the most recently
    *  written, read or confirmed first. */
   notes: MemorySearchHit[];
+  /** "any-word": a note with any word asked is found, ranked. Absent from an
+   *  older server, which finds only notes holding every word. */
+  ranking?: "any-word";
 }
 
 export interface MemoryOwnerListValue {

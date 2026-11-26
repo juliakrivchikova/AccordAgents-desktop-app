@@ -100,22 +100,37 @@ the User on 2026-11-26 (chat document "Поиск по смыслу: памят�
 инструкции"): memory must get as much better as it can without a model.
 
 - A note is found when it has **any** of the words asked, not all of them.
-- A word counts in any of its forms: words are told by their first five
-  letters, the same way for every language (no language is singled out).
-  Words shorter than two letters are left out; a query with no word left
-  keeps the old rule (notes holding everything typed).
-- Notes are ranked by BM25 over those stems, a match in the title weighing
-  three times and in a tag twice; equal scores go most recently active first.
-  Notes scoring under 15% of the best are left out (a common word or two).
-- Each note found comes with `snippet`: the passage of its body (up to 220
-  characters) where most of the words asked are close together, or the
-  body's start when only the title or a tag matched.
+- A word counts in its other forms, the same rule for every language: a
+  word of 3–4 letters finds the words it starts ("test" → "tests", "ключ" →
+  "ключи"); words whose shorter one has 5 letters share the first 4 ("ветка"
+  → "ветку"); longer ones the first 5 ("deploy" → "deployment"). Two-letter
+  words match only themselves; one-letter words are left out. A word of 5
+  letters or more found inside a longer word ("session" in "sqliteSession")
+  counts half. In scripts written without spaces (Chinese, Japanese, Thai…)
+  a word is found anywhere, as before. Letters keep their marks (Hindi vowel
+  signs). A query with no word left keeps the old rule.
+- Notes are ranked by BM25, a match in the title weighing three times and in
+  a tag twice; equal scores go most recently active first. A note holding
+  only words more than half of the notes hold ("на", "the") is left out,
+  unless every word asked is such a word. At most 32 different words count.
+- Each note found comes with `snippet`: the passage of its body (at most 220
+  characters, "…" included, never half a character) where most of the words
+  asked are close together, or the body's start when only the title or a tag
+  matched. The answer carries `ranking: "any-word"`.
+- An older server (it updates itself soon after the app) finds only notes
+  holding every word; an empty answer from it to several words tells the
+  member to search one word at a time.
 - Members are told (tool description and `MEMBER_MEMORY_INSTRUCTIONS`) to ask
   with several words at once: synonyms and translations into the languages
   the notes are written in. The model is the member itself.
+- Cost: candidates are the notes holding the first letters of a word asked
+  (two-letter words only when nothing longer is asked); their search text is
+  read and counted 50 notes at a time, bodies only for the notes returned. On
+  the User's notes it is instant; at the server's limit (2000 notes of 16 KB
+  where every word matches) counting takes about a second on a Mac.
 - Measured on the User's 59 notes with 37 queries written for them (23 of
   them in another language than the notes): the right note in the first
-  five for 38% of the queries as asked (3% with the old rule), and 100% when
+  five for 35% of the queries as asked (3% with the old rule), and 100% when
   asked as members are told to (by taylor, who knows the notes: an upper
   bound). Settings → Memory's search box keeps the old rule: it is a filter.
 
@@ -143,8 +158,8 @@ the User on 2026-11-26 (chat document "Поиск по смыслу: памят�
 - The list is not shown again after a compaction the CLI starts on its own, nor
   in a fresh session the CLI starts when a resume fails; members are told to
   search memory when they start a task.
-- Search reads the notes holding any stem asked, without an index; fine for
-  hundreds of notes (a server keeps at most 2000).
+- Search reads the notes holding the first letters of any word asked,
+  without an index; fine for hundreds of notes.
 
 ## Not in v1
 

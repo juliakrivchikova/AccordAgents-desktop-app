@@ -17,7 +17,7 @@ export const MEMORY_TOOLS: readonly AppMcpToolContract[] = [
         "type": "object",
         "additionalProperties": false,
         "properties": {
-          "query": { "type": "string", "description": "Words to look for in the title, tags and body; a note with any of them is found, the best matches first. Give several: synonyms and translations into the languages the notes are in." },
+          "query": { "type": "string", "description": "Words to look for in the title, tags and body; a note with any of them is found, the best matches first (up to 32 words count). Give several: synonyms and translations into the languages the notes are in." },
           "tags": { "type": "array", "items": { "type": "string" }, "description": "Every tag listed must be on the note." },
           "kind": { "type": "string", "enum": ["runbook", "article", "status"] },
           "scope": { "type": "string", "enum": ["global", "project", "role", "chat"] },
