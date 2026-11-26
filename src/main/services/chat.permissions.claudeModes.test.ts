@@ -613,9 +613,13 @@ test("Claude Code's plan approval offers auto mode once the member's CLI ran in 
   const classic = chatParticipant("claude-code", { repoRead: true });
   const classicChat = chatConversation([classic]);
   const other = testService({ conversation: classicChat });
-  void other.service.requestToolPermissionFromTool(toolPermissionActor(classic, classicChat), { tool_name: "ExitPlanMode", input: { plan: "x" } });
+  const classicPending = other.service.requestToolPermissionFromTool(toolPermissionActor(classic, classicChat), { tool_name: "ExitPlanMode", input: { plan: "x" } });
   const toolCard = await pendingToolPermission(other.storage, "ExitPlanMode");
   assert.equal((toolCard.request as { planApproval?: unknown }).planApproval, undefined);
+  // Answered, so the card's wait ends with the test (left open, it kept the
+  // test process from exiting).
+  await other.service.respondToAppToolApproval({ conversationId: classicChat.id, approvalId: toolCard.id, approve: false });
+  await classicPending;
 });
 
 test("Claude Code's plan approval: after a Yes the member's mode follows the CLI and is not switched back to Plan", async () => {
