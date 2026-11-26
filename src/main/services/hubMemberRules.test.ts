@@ -4,6 +4,7 @@ import type { HubMemberRules } from "../../shared/hubProtocol";
 import type { ChatParticipantConfig, ChatRoleConfig } from "../../shared/types";
 import type { HubClient } from "./hubClient";
 import { HubMemberRulesPublisher, memberRulesFrom } from "./hubMemberRules";
+import { validMemberRules } from "../../hub/hubServer/requestChecks";
 
 test("her roles and saved members, as the server holds machines to them", () => {
   const rules = memberRulesFrom({
@@ -27,6 +28,16 @@ test("each machine's program goes with her rules: the server holds a phone's or 
   assert.deepEqual(memberRulesFrom(settings, { "m-new": true, "m-old": false }).machineCliModes, { "m-new": true, "m-old": false });
   assert.equal("machineCliModes" in memberRulesFrom(settings, {}), false, "no machine has greeted: nothing said");
   assert.equal("machineCliModes" in memberRulesFrom(settings), false);
+});
+
+test("her \"Any agent can start an Accord\" goes with her rules, as the server reads them", () => {
+  const settings = { chatRoleConfigs: [] as ChatRoleConfig[], chatParticipantConfigs: [] as ChatParticipantConfig[] };
+  assert.equal("accordFromAnySession" in memberRulesFrom(settings), false, "off unless turned on");
+  assert.equal("accordFromAnySession" in memberRulesFrom({ ...settings, newChatDefaults: { compactWithoutAsking: true } }), false);
+  const on = memberRulesFrom({ ...settings, newChatDefaults: { compactWithoutAsking: true, accordFromAnySession: true } });
+  assert.equal(on.accordFromAnySession, true);
+  assert.equal(validMemberRules(JSON.parse(JSON.stringify(on))).accordFromAnySession, true, "the server keeps it");
+  assert.equal("accordFromAnySession" in validMemberRules({ ...on, accordFromAnySession: "yes" }), false, "only true turns it on");
 });
 
 test("published whatever else is paired, once per change, and again until the server has them", async () => {

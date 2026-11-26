@@ -454,9 +454,10 @@ export class ChatService {
   }
 
   /**
-   * The main session starts an Accord (app_chat_start_accord,
-   * docs/main-session.md): the same launch as the User's, written as the
-   * main session's message. The facilitator defaults to the main session.
+   * A member starts an Accord (app_chat_start_accord, docs/main-session.md):
+   * the main session, or any member while the User's switch is on. The same
+   * launch as the User's, written as that member's message. The facilitator
+   * defaults to that member.
    */
   startAccordFromTool(actor: ChatAppMcpActor, rawRequest: unknown): Promise<Record<string, unknown>> {
     return this.modules.accord.startAccordFromTool(actor, rawRequest);

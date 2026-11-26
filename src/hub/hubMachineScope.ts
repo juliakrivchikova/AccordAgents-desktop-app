@@ -49,4 +49,4 @@ export { approvalGrantKey, approvedMessageId, keptApproval } from "./hubMachineS
 export { runsOnMachine } from "./hubMachineScope/records";
 export { changesMembers } from "./hubMachineScope/memberChanges";
 export { scopeMachineConversationUpdate } from "./hubMachineScope/conversationUpdate";
-export { machineMayAsk, machineMayCompact, askNeedsApproval } from "./hubMachineScope/askRights";
+export { machineMayAsk, machineMayCompact, askNeedsApproval, launchesFacilitator } from "./hubMachineScope/askRights";

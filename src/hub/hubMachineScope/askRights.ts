@@ -1,10 +1,12 @@
 import { chatParticipantRequestPermissionExceeds, normalizeChatParticipantRequestPermission } from "../../shared/agentPermissions";
 import { APP_CHAT_REQUEST_PARTICIPANTS_TOOL } from "../../shared/appMcpToolContracts";
+import { accordLaunchCardForMessage } from "../../shared/accordLaunchCard";
 import type { HubUserApproval } from "../../shared/hubOps";
+import type { HubMemberRules } from "../../shared/hubProtocol";
 import { mainSessionParticipantId } from "../../shared/mainSession";
 import type { ChatMessage, ChatParticipant, ChatParticipantRequestPermission, Conversation } from "../../shared/types";
 import { approvedRequests, askGrantKey } from "./grants";
-import { handleKey, lowerRight, participantsOf, permissionsOf, rank, requestRight, runsOnMachine } from "./records";
+import { CHAT_ASSISTANT_ROLE_ID, handleKey, lowerRight, participantsOf, permissionsOf, rank, requestRight, runsOnMachine } from "./records";
 import type { Leave } from "./types";
 
 export function withRequestRight(member: ChatParticipant, right: ChatParticipantRequestPermission | undefined): ChatParticipant {
@@ -60,6 +62,37 @@ export function machineMayAsk(conversation: Conversation, machineId: string | un
       Array.isArray(item.request.requests) && (item.request.requests as Array<{ target?: unknown }>).some((entry) => handleKey(entry?.target) === handle));
   });
   return answer ? { grant: askGrantKey(answer.answerOpId!, target.id) } : false;
+}
+
+/** How a launch's one run of its facilitator is noted on the server. */
+export function launchGrantKey(messageId: string, participantId: string): string {
+  return `launch:${messageId}:${participantId}`;
+}
+
+/**
+ * Whether the member a machine asks is the facilitator of an Accord one of
+ * its members started with app_chat_start_accord (the launch message): the
+ * app runs it at once, once, whatever its author may ask otherwise, as it
+ * runs the facilitator of a launch on this computer — the main session's
+ * launch, and any member's while her "Any agent can start an Accord" is on
+ * (her rules). Never a launch she does not see, never the Chat Assistant
+ * (the app refuses it as a facilitator), and once per launch: the grant is
+ * noted with the turn.
+ */
+export function launchesFacilitator(
+  conversation: Conversation,
+  message: ChatMessage,
+  targetId: string,
+  rules: Pick<HubMemberRules, "accordFromAnySession"> | undefined,
+  used: ReadonlySet<string>
+): { grant: string } | undefined {
+  if (message.role !== "participant" || message.metadata?.accordLaunchByMainSession !== true || message.metadata?.hiddenFromTimeline === true) return undefined;
+  const card = accordLaunchCardForMessage(message);
+  const target = participantsOf(conversation.metadata?.participants).find((member) => member.id === targetId);
+  if (!card || !target || target.roleConfigId === CHAT_ASSISTANT_ROLE_ID || handleKey(target.handle) !== handleKey(card.facilitator)) return undefined;
+  if (message.participantId !== mainSessionParticipantId(conversation.metadata) && rules?.accordFromAnySession !== true) return undefined;
+  const grant = launchGrantKey(message.id, target.id);
+  return used.has(grant) ? undefined : { grant };
 }
 
 /** Whether a machine's ask needs the User's approvals at all (its member

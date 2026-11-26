@@ -1,4 +1,4 @@
-import { isMainSessionParticipant } from "../../../../shared/mainSession";
+import { isMainSessionChat, isMainSessionParticipant } from "../../../../shared/mainSession";
 import { randomUUID } from "node:crypto";
 import type {
   ChatMessage, ChatMessageMetadata, ChatParticipant, ChatParticipantRequestPermission, ChatSkillMention, Conversation,
@@ -12,10 +12,11 @@ import {
   chatParticipantRequestPermissionRank, normalizeChatParticipantRequestPermission, normalizeChatAgentPermissions
 } from "../../../../shared/agentPermissions";
 import { hasChatAppToolCapability } from "../../../../shared/appTools";
+import { accordFromAnySessionOn } from "../../../../shared/newChatDefaults";
 import { advanceAutoWatchCursorForDirectTargets } from "../autoWatch/watchers";
 import { accordStartMessageContent, participantForMentionHandle, userSkillRunContext } from "../choices/mentions";
 import { CHAT_ADMINISTRATOR_ROLE_ID } from "../constants";
-import { chatParticipants } from "../members/identity";
+import { chatParticipants, participantForRun } from "../members/identity";
 import { delegationRefusal } from "../members/removalRules";
 import { recordLastMessageByParticipant } from "../store/lastMessages";
 import { createChatMessage } from "../store/messages";
@@ -31,13 +32,29 @@ export class ChatAccord {
       ChatModules,
       | "activeRuns" | "delegation" | "host" | "participantBatch" | "promptSuggestions" | "requestGrants" | "store"
     >,
-    private readonly deps: Pick<ChatDependencies, "debugLogs" | "onReviewProgress" | "storage" | "userSkills">
+    private readonly deps: Pick<ChatDependencies, "debugLogs" | "onReviewProgress" | "settings" | "storage" | "userSkills">
   ) {}
 
+  /** Settings → General → New chats → "Any agent can start an Accord", as it
+   *  is now (a machine: as the computer that set it up published it): every
+   *  member starts one, not only the main session (the User, 2026-11-26). */
+  async accordFromAnySession(): Promise<boolean> {
+    return accordFromAnySessionOn((await this.deps.settings.getPublicSettings()).newChatDefaults);
+  }
+
+  /** Whether this member starts an Accord with app_chat_start_accord now: the
+   *  main session does; another member only while the User's switch is on
+   *  (its tools were given at the start of its turn, the switch is read now). */
+  private async startsAccord(conversation: Conversation, actor: ChatAppMcpActor): Promise<boolean> {
+    if (!hasChatAppToolCapability(actor.capabilities, "accord.start")) return false;
+    return isMainSessionParticipant(conversation.metadata, actor.participantId) || await this.accordFromAnySession();
+  }
+
   /**
-   * The main session starts an Accord (app_chat_start_accord,
-   * docs/main-session.md): the same launch as the User's, written as the
-   * main session's message. The facilitator defaults to the main session.
+   * A member starts an Accord (app_chat_start_accord, docs/main-session.md):
+   * the main session, or any member while the User's switch is on. The same
+   * launch as the User's, written as that member's message. The facilitator
+   * defaults to the member that starts it.
    */
   async startAccordFromTool(actor: ChatAppMcpActor, rawRequest: unknown): Promise<Record<string, unknown>> {
     await this.chat.store.waitForQueuedSave(actor.conversationId);
@@ -47,8 +64,10 @@ export class ChatAccord {
       throw new Error("The requesting member is no longer in this chat.");
     }
     this.chat.host.assertOwnsParticipant(caller);
-    if (!hasChatAppToolCapability(actor.capabilities, "accord.start") || !isMainSessionParticipant(conversation.metadata, caller.id)) {
-      return delegationRefusal("not_main_session", "Only the chat's main session starts an Accord. Ask the main session for one.");
+    if (!await this.startsAccord(conversation, actor)) {
+      return delegationRefusal("not_main_session", isMainSessionChat(conversation.metadata)
+        ? "Only the chat's main session starts an Accord now. Ask the main session for one."
+        : "Starting an Accord is not open to you now. Ask User for one.");
     }
     const record = rawRequest && typeof rawRequest === "object" && !Array.isArray(rawRequest) ? rawRequest as Record<string, unknown> : {};
     const subject = typeof record.subject === "string" ? record.subject.trim() : "";
@@ -85,8 +104,8 @@ export class ChatAccord {
         launchMessageId: started.sourceMessageId,
         facilitator: `@${facilitator.handle}`,
         members: members.map((member) => `@${member.handle}`),
-        // Leading it itself, the main session runs it in the turn the launch
-        // starts, after this one; begun here it would have no card.
+        // Leading it itself, the member runs it in the turn the launch starts,
+        // after this one; begun here it would have no card.
         ...(facilitator.id === caller.id
           ? { next: "You lead it. Your Accord turn starts from the launch once this turn ends: end this turn now and do not run the Accord in it." }
           : {})
@@ -175,9 +194,10 @@ export class ChatAccord {
    * the Accord the member is running though its turn's trigger is another
    * message (her message joined the running step and took the turn's tools
    * along, or the launch's turn ended before the document and she said to go
-   * on). The chat's main session is refused one outside any launch: an
-   * Accord it ran by itself would have no card, and its every step would
-   * stand in the chat as a note of its own. It starts one with
+   * on). A member that starts Accords (the main session; any member while
+   * the User's "Any agent can start an Accord" is on) is refused one outside
+   * any launch: an Accord it ran by itself would have no card, and its every
+   * step would stand in the chat as a note of its own. It starts one with
    * app_chat_start_accord, as her Accord button does.
    */
   async accordCollectionOrigin(actor: ChatAppMcpActor): Promise<AccordCollectionOrigin> {
@@ -206,7 +226,7 @@ export class ChatAccord {
       return { originMessageId: open };
     }
     // Refused only where the way it is pointed to is open to it.
-    if (!isMainSessionParticipant(conversation.metadata, actor.participantId) || !hasChatAppToolCapability(actor.capabilities, "accord.start")) {
+    if (!await this.startsAccord(conversation, actor)) {
       return {};
     }
     return {
@@ -277,9 +297,9 @@ export class ChatAccord {
     signal?: AbortSignal,
     progress?: ProgressCallback,
     runId: string = randomUUID(),
-    /** The chat's main session starting it (app_chat_start_accord): the
-     *  launch is its message, and the facilitator's leave to ask members is
-     *  never more than the main session's own. */
+    /** The member starting it (app_chat_start_accord): the launch is its
+     *  message, and the facilitator's leave to ask members is never more than
+     *  that member's own. */
     options: { author?: ChatParticipant } = {}
   ): Promise<StartChatAccordResult> {
     const warnings: string[] = [];
@@ -332,10 +352,9 @@ export class ChatAccord {
           ...targets as ChatParticipant[],
           ...newAgents ? await this.chat.delegation.addAccordMembers(conversation, newAgents) : []
         ];
-        const content = accordStartMessageContent(facilitator, selectedTargets, subject);
-        const accordSkill = await this.resolveAccordSkillMention(conversation, facilitator, content);
-        // The main session gives its facilitator leave to ask the members
-        // only as far as it may ask them itself.
+        // The member gives its facilitator leave to ask the members only as
+        // far as it may ask them itself, as it runs now (a member another
+        // member added: never above the main session's).
         const author = options.author
           ? participants.find((participant) => participant.id === options.author!.id)
           : undefined;
@@ -343,11 +362,14 @@ export class ChatAccord {
           throw new Error("The member starting the Accord is no longer in this chat.");
         }
         const leave: ChatParticipantRequestPermission = author
-          ? normalizeChatParticipantRequestPermission(normalizeChatAgentPermissions(author.permissions).requestParticipants)
+          ? normalizeChatParticipantRequestPermission(normalizeChatAgentPermissions(participantForRun(conversation, author).permissions).requestParticipants)
           : "allow";
         const facilitatorLeave = normalizeChatParticipantRequestPermission(normalizeChatAgentPermissions(facilitator.permissions).requestParticipants);
         // A right the facilitator already has is not taken away.
-        const updatedFacilitator = author && chatParticipantRequestPermissionRank(facilitatorLeave) >= chatParticipantRequestPermissionRank(leave)
+        const keepsOwn = Boolean(author) && chatParticipantRequestPermissionRank(facilitatorLeave) >= chatParticipantRequestPermissionRank(leave);
+        const content = accordStartMessageContent(facilitator, selectedTargets, subject, keepsOwn ? facilitatorLeave : leave);
+        const accordSkill = await this.resolveAccordSkillMention(conversation, facilitator, content);
+        const updatedFacilitator = keepsOwn
           ? facilitator
           : this.chat.requestGrants.setParticipantRequestPermission(conversation, facilitator.id, leave) ?? facilitator;
         const metadata: ChatMessageMetadata = {

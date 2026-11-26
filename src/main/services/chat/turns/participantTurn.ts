@@ -62,7 +62,7 @@ export class ParticipantTurn {
   constructor(
     private readonly chat: Pick<
       ChatModules,
-      | "activeRuns" | "agentEnvironment" | "appMcpGrants" | "appQuit" | "approvalDecisions" | "attachments" | "backgroundTasks"
+      | "accord" | "activeRuns" | "agentEnvironment" | "appMcpGrants" | "appQuit" | "approvalDecisions" | "attachments" | "backgroundTasks"
       | "chatHistory" | "choiceExpiry" | "claudeModes" | "codexApprovals" | "executorLeases" | "forks" | "host"
       | "memberSessions" | "pendingReplies" | "permissionRequests" | "promptContext" | "promptSuggestions" | "scheduledTasks"
       | "selfCompactionResumes" | "selfResumedTurns" | "store" | "turnPrompt"
@@ -377,7 +377,7 @@ export class ParticipantTurn {
     // or scoped back to role config, native escalation silently denies every
     // un-pre-approved tool call. Keep it always-on (or give the bridge its own
     // capability) if you change this.
-    const appToolCapabilities = appToolCapabilitiesForRun(conversation, participant, session, permissions);
+    const appToolCapabilities = appToolCapabilitiesForRun(conversation, participant, session, permissions, await this.chat.accord.accordFromAnySession());
     const appMcpToolNames = appMcpToolNamesFor(appToolCapabilities);
     const appMcpToolInventoryKey = appMcpToolInventoryKeyFor(appMcpToolNames);
     const appMcpClientGenerationId = appMcpClientGenerationIdFor(conversation, participant, session, appMcpToolInventoryKey);

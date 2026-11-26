@@ -1,5 +1,6 @@
 import { normalizeChatRoleManagementPermission, normalizeOptionalChatParticipantRequestPermission } from "../../shared/agentPermissions";
 import type { HubMemberRules } from "../../shared/hubProtocol";
+import { accordFromAnySessionOn } from "../../shared/newChatDefaults";
 import type { ChatParticipantConfig, ChatRoleConfig } from "../../shared/types";
 import type { HubClient } from "./hubClient";
 
@@ -12,7 +13,7 @@ import type { HubClient } from "./hubClient";
  */
 
 export function memberRulesFrom(
-  settings: { chatRoleConfigs: ChatRoleConfig[]; chatParticipantConfigs: ChatParticipantConfig[] },
+  settings: { chatRoleConfigs: ChatRoleConfig[]; chatParticipantConfigs: ChatParticipantConfig[]; newChatDefaults?: unknown },
   /** Each machine's program, by its last hello: whether it runs the CLIs'
    *  own modes (MachineLinkService.cliModesByMachine). */
   machineCliModes?: Record<string, boolean>
@@ -37,7 +38,12 @@ export function memberRulesFrom(
       ...(preset.permissions ? { permissions: preset.permissions } : {})
     };
   }
-  return { version: 1, roles, presets, ...(machineCliModes && Object.keys(machineCliModes).length > 0 ? { machineCliModes } : {}) };
+  return {
+    version: 1, roles, presets,
+    ...(machineCliModes && Object.keys(machineCliModes).length > 0 ? { machineCliModes } : {}),
+    // Her switch, for the server's check of a member's Accord launch.
+    ...(accordFromAnySessionOn(settings.newChatDefaults) ? { accordFromAnySession: true as const } : {})
+  };
 }
 
 const RETRY_FIRST_MS = 30_000;

@@ -16,7 +16,7 @@ export function submittedDraftOf(drafts: readonly ArtifactDraftView[], author: s
 }
 
 /**
- * Lands the panel on the place an open asked for (an Accord's card: a
+ * Lands the panel on the place an open asked for (a card in the chat: a
  * version, a member's draft), once per open. A version is shown at once. A
  * draft is looked for in the drafts read after the click (the document is
  * read again for it: a draft submitted a moment ago is in a list the panel

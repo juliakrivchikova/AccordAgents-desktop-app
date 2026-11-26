@@ -19,8 +19,11 @@ import type { ResolvedChatParticipantRole } from "../types";
  *  and whatever someone other than User wrote stand in blocks carrying the
  *  message's nonce, and the instructions say only text outside them is
  *  User's (buildPromptParts). 25: User's preferences go into the shared
- *  memory as well as the CLI's own (MEMBER_MEMORY_INSTRUCTIONS). */
-const CHAT_ROLE_RUNTIME_CONFIG_VERSION = 25;
+ *  memory as well as the CLI's own (MEMBER_MEMORY_INSTRUCTIONS). 26: a
+ *  member starts an Accord with app_chat_start_accord when it has the tool
+ *  (Settings → General → "Any agent can start an Accord"), else asks the main
+ *  session (mainSessionMemberRules). */
+const CHAT_ROLE_RUNTIME_CONFIG_VERSION = 26;
 
 export function memoryIndexKey(conversationId: string, participantId: string): string {
   return `${conversationId}\u0000${participantId}`;

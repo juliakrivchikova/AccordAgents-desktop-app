@@ -74,6 +74,10 @@ export interface NewChatDefaults {
   compactWithoutAsking: boolean;
   /** Creating scheduled tasks without a card. Off (none): it asks first. */
   scheduleWithoutAsking?: true;
+  /** Every member of a chat, not only its main session, starts an Accord
+   *  (app_chat_start_accord), in every chat while it is on (the User,
+   *  2026-11-26). Off (none): only the main session does. */
+  accordFromAnySession?: true;
 }
 
 /** A change from Settings: a value, `null` to go back to the CLI's own, or
@@ -87,6 +91,7 @@ export interface NewChatDefaultsUpdate {
   homeMachineId?: string | null;
   compactWithoutAsking?: boolean;
   scheduleWithoutAsking?: boolean;
+  accordFromAnySession?: boolean;
 }
 
 /** How a chat with a main session is shown (shared/mainSession.ts): "classic"
