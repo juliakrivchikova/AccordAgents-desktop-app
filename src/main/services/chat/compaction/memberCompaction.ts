@@ -229,8 +229,12 @@ export class MemberCompaction {
 }
 
 function memberCompactionRequest(value: unknown): { target: string; instructions: string } {
-  const record = value && typeof value === "object" && !Array.isArray(value) ? value as { target?: unknown; instructions?: unknown } : {};
-  const target = typeof record.target === "string" ? record.target.trim().replace(/^@/, "") : "";
+  const record = value && typeof value === "object" && !Array.isArray(value)
+    ? value as { target?: unknown; participant?: unknown; handle?: unknown; instructions?: unknown } : {};
+  // A member named as the other member tools name it (seen live: a main
+  // session that guessed `participant` before it read the schema).
+  const named = [record.target, record.participant, record.handle].find((item) => typeof item === "string" && item.trim());
+  const target = typeof named === "string" ? named.trim().replace(/^@/, "") : "";
   if (!target) throw new Error("target is required: the member's handle.");
   const instructions = normalizeCompactInstructions(typeof record.instructions === "string" ? record.instructions : undefined);
   if (!instructions) throw new Error("instructions are required: what the summary must keep for that member's next work.");

@@ -630,6 +630,7 @@ name no main session.
   context is over 100,000 tokens, it compacts that member first with
   instructions naming what the work needs, because the member's prompt cache
   is gone and its next turn would re-read the whole context at full price.
+  The app names such members in its notes with each of its messages.
   It is the User's `@x /compact <instructions>`, wherever the member runs;
   the line says "@main compacted @x context. Focus: …".
 - **Create scheduled tasks without asking**, a switch, off by default (the

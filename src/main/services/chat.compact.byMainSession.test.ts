@@ -13,7 +13,7 @@ import type { HubOp, HubTurn } from "../../shared/hubOps";
 import { machineMayCompact } from "../../hub/hubMachineScope";
 import { chatParts } from "./chat/test/chatParts";
 import { acceptedMessage, chatConversation, chatParticipant, chatSession, fakeServerLink, fromServer, testService, waitFor } from "./chat/test/compactionFixtures";
-import { appMcpToolNamesFor, appToolCapabilitiesForRolePolicy, compactionAccessLines } from "./chat/turns/promptSections";
+import { appMcpToolNamesFor, appToolCapabilitiesForRolePolicy, compactionAccessLines, idleLargeMembersNote } from "./chat/turns/promptSections";
 
 const TWO_HOURS_AGO = new Date(Date.now() - 2 * 60 * 60_000).toISOString();
 
@@ -51,11 +51,25 @@ test("only the main session gets the tool, and only while it compacts without as
   }
   const mainLines = compactionAccessLines(permissions("allow"), true).join("\n");
   assert.match(mainLines, /app_chat_compact_participant/);
-  assert.match(mainLines, /minutesSinceLastTurn` is over 60/);
-  assert.match(mainLines, /participants: \["<its handle>"\]/);
+  assert.match(mainLines, /idle for over an hour with over 100,000 tokens/);
   assert.match(mainLines, /100,000/);
   assert.doesNotMatch(compactionAccessLines(permissions("allow"), false).join("\n"), /app_chat_compact_participant/, "a member is not told");
   assert.doesNotMatch(compactionAccessLines(permissions("ask"), true).join("\n"), /app_chat_compact_participant/, "Compact without asking off: not told");
+});
+
+test("with each message the main session is told which members are idle over an hour with a large context, and only while it compacts without asking", () => {
+  const { main, worker, conversation } = chat();
+  const note = idleLargeMembersNote(conversation, main, permissions("allow"));
+  assert.match(note, /- @worker: idle 2 h, 180k tokens of context\./);
+  assert.match(note, /app_chat_compact_participant/);
+  assert.equal(idleLargeMembersNote(conversation, main, permissions("ask")), "", "Compact without asking off");
+  assert.equal(idleLargeMembersNote(conversation, worker, permissions("allow")), "", "not a member's");
+  const recent = chat();
+  (recent.conversation.messages[0] as any).createdAt = new Date(Date.now() - 20 * 60_000).toISOString();
+  assert.equal(idleLargeMembersNote(recent.conversation, recent.main, permissions("allow")), "", "worked within the hour");
+  const small = chat();
+  (small.conversation.metadata.agentContextUsageByParticipant as any)[small.worker.id].usedTokens = 60_000;
+  assert.equal(idleLargeMembersNote(small.conversation, small.main, permissions("allow")), "", "a small context");
 });
 
 test("the activity tool says when each member last worked and how full its context is", () => {
@@ -106,7 +120,8 @@ test("the main session compacts an idle member on this computer: its CLI gets th
     }
   });
   chatParts(service).chatHistory.ensureHistoryFiles = async () => tmpdir();
-  const answer = await service.compactParticipantFromTool(actorOf(main), { target: "@worker", instructions: "Keep the API task and the open review findings." });
+  // Named as other member tools name it (`participant`), as a main session did live.
+  const answer = await service.compactParticipantFromTool(actorOf(main), { participant: "@worker", instructions: "Keep the API task and the open review findings." });
   assert.equal(answer.ok, true, JSON.stringify(answer));
   assert.equal(answer.status, "started");
   // It holds the member's turns: work given now runs after it.
@@ -137,6 +152,7 @@ test("refused: without the right, by another member, for itself, one that never 
     { name: "itself", setup: chat(), request: { target: "main", instructions: "Keep it." }, status: "rejected" },
     { name: "never worked", setup: chat({ workerReply: false }), request: { target: "worker", instructions: "Keep it." }, status: "no_active_session" },
     { name: "no instructions", setup: chat(), request: { target: "worker" }, status: "invalid_request" },
+    { name: "no member named", setup: chat(), request: { instructions: "Keep it." }, status: "invalid_request" },
     { name: "unknown", setup: chat(), request: { target: "nobody", instructions: "Keep it." }, status: "not_found" }
   ];
   for (const item of cases) {

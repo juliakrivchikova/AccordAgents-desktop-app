@@ -10,6 +10,7 @@ import {
   resolveChatManageRolesParticipantsPermission, chatAgentModeForKind
 } from "../../../../shared/agentPermissions";
 import { normalizeChatAppToolCapabilities } from "../../../../shared/appTools";
+import { buildChatParticipantActivitySnapshot } from "../../../../shared/chatParticipantActivity";
 import { chatPermissionPromptLines, chatPermissionSummaryLine } from "../../../../shared/permissionPrompt";
 import {
   APP_CHAT_READ_ATTACHMENT_TOOL, appMcpToolNamesForCapabilities,
@@ -314,10 +315,29 @@ export const MEMBER_COMPACTION_MIN_TOKENS = 100_000;
 function memberCompactionAccessLines(): string[] {
   return [
     "Members' compaction: compact another member's context with `app_chat_compact_participant`, as User would with `@handle /compact`; User is not asked. A member's prompt cache lives about an hour after its last turn: after that its next turn re-reads its whole context at the full price, while a compacted context costs a fraction of it.",
-    `- Before you give more work to an existing member (\`app_chat_request_participants\`), look at it with \`app_chat_get_participant_activity\` and \`participants: ["<its handle>"]\`: when its \`minutesSinceLastTurn\` is over 60 and its \`context.usedTokens\` is over ${MEMBER_COMPACTION_MIN_TOKENS.toLocaleString("en-US")}, compact it first, with \`instructions\` naming what the summary must keep for that work (its task and User's decisions, files and branch, what is done and checked, open findings, the next step), then give it the work: it runs after the compaction.`,
+    `- The app names in its notes, with each message, the members idle for over an hour with over ${MEMBER_COMPACTION_MIN_TOKENS.toLocaleString("en-US")} tokens of context (\`app_chat_get_participant_activity\` gives every member's \`minutesSinceLastTurn\` and \`context\` too). Before you give one of them more work (\`app_chat_request_participants\`), compact it first, with \`instructions\` naming what the summary must keep for that work (its task and User's decisions, files and branch, what is done and checked, open findings, the next step), then give it the work: it runs after the compaction.`,
     "- Do not compact a member that is working or waiting, that worked within the last hour, whose context is smaller than that, or that has nothing more to do: a compaction re-reads its whole context once too, so it pays off only for a member that works again.",
     "- The chat shows a line when the compaction is done: do not wait or poll for it."
   ];
+}
+
+/** The app's note, with each message to a main session that compacts other
+ *  members, naming the members idle for over an hour with a large context
+ *  (the User, 2026-11-26): it sees them without asking, as she sees their
+ *  context indicators. Empty when there are none. */
+export function idleLargeMembersNote(conversation: Conversation, participant: ChatParticipant, permissions: ChatAgentPermissions): string {
+  if (!isMainSessionParticipant(conversation.metadata, participant.id)) return "";
+  if (normalizeChatParticipantRequestPermission(normalizeChatAgentPermissions(permissions).requestCompaction) !== "allow") return "";
+  const idle = buildChatParticipantActivitySnapshot(conversation).participants.filter((entry) =>
+    entry.participantId !== participant.id && (entry.status === "idle" || entry.status === "stopped" || entry.status === "error") &&
+    (entry.minutesSinceLastTurn ?? 0) >= 60 && (entry.context?.usedTokens ?? 0) > MEMBER_COMPACTION_MIN_TOKENS);
+  if (idle.length === 0) return "";
+  const idleFor = (minutes: number) => minutes >= 120 ? `${Math.floor(minutes / 60)} h` : `${minutes} min`;
+  return [
+    "Members idle for over an hour with a large context (their prompt cache is gone: their next turn re-reads all of it at the full price):",
+    ...idle.map((entry) => `- @${entry.handle}: idle ${idleFor(entry.minutesSinceLastTurn ?? 0)}, ${Math.round((entry.context?.usedTokens ?? 0) / 1000)}k tokens of context.`),
+    "Before you give one of them more work, compact it first with `app_chat_compact_participant`, `instructions` naming what that work needs. Leave the ones you are not giving work to as they are."
+  ].join("\n");
 }
 
 /** Leave to create scheduled tasks without a card (Settings → General →
