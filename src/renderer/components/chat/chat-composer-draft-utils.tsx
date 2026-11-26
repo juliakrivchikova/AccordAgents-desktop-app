@@ -2,15 +2,12 @@ import type { CSSProperties } from "react";
 
 import type {
   ArtifactSummary,
-  ChatParticipant,
   ChatSavedPromptConfig,
   PluginCatalogItem,
   UserSkillSummary,
   UserSkillTargetSummary
 } from "../../../shared/types";
-import type { SlashSuggestionSelection } from "../../../shared/slashSuggestions";
 import { artifactReference } from "../../../shared/artifacts";
-import { providerLabel } from "./chat-conversation-data";
 import {
   normalizePluginIconSpacers,
   replaceActiveSlashQuery,
@@ -34,12 +31,11 @@ export interface SlashCommandOption {
   description: string;
 }
 
-export type ChatSlashSuggestion = SlashSuggestionSelection<
-  SlashCommandOption,
-  ChatSavedPromptConfig,
-  UserSkillSummary,
-  PluginCatalogItem
->;
+export type ChatSlashSuggestion =
+  | { kind: "command"; item: SlashCommandOption }
+  | { kind: "prompt"; item: ChatSavedPromptConfig }
+  | { kind: "skill"; item: UserSkillSummary }
+  | { kind: "plugin"; item: PluginCatalogItem };
 
 export interface DraftPluginMention {
   name: string;
@@ -76,11 +72,9 @@ export function activeSkillQuery(value: string): string | undefined {
   return match ? match[1] : undefined;
 }
 
-export function compactCommandOption(query: string | undefined, target: UserSkillTargetSummary | undefined): SlashCommandOption | undefined {
-  if (query === undefined || !target?.hasClearTargets || target.participantIds.length !== 1) {
-    return undefined;
-  }
-  if (!"compact".startsWith(query.toLowerCase())) {
+// The commands act on one member, so they are offered only for one clear target.
+export function compactCommandOption(target: UserSkillTargetSummary | undefined): SlashCommandOption | undefined {
+  if (!target?.hasClearTargets || target.participantIds.length !== 1) {
     return undefined;
   }
   return {
@@ -90,11 +84,8 @@ export function compactCommandOption(query: string | undefined, target: UserSkil
   };
 }
 
-export function goalCommandOption(query: string | undefined, target: UserSkillTargetSummary | undefined): SlashCommandOption | undefined {
-  if (query === undefined || !target?.hasClearTargets || target.participantIds.length !== 1) {
-    return undefined;
-  }
-  if (!"goal".startsWith(query.toLowerCase())) {
+export function goalCommandOption(target: UserSkillTargetSummary | undefined): SlashCommandOption | undefined {
+  if (!target?.hasClearTargets || target.participantIds.length !== 1) {
     return undefined;
   }
   return {
@@ -226,18 +217,6 @@ export function normalizeArtifactDraft(value: string, pluginMentions: readonly D
 
 export function repoFileBasename(filePath: string): string {
   return filePath.split("/").filter(Boolean).pop() ?? filePath;
-}
-
-export function skillPickerTargetLabel(target: UserSkillTargetSummary, participants: ChatParticipant[]): string {
-  if (!target.hasClearTargets || target.providerKinds.length === 0) {
-    return "Mention a member to select a skill";
-  }
-  const handles = target.participantIds
-    .map((id) => participants.find((participant) => participant.id === id)?.handle)
-    .filter((handle): handle is string => Boolean(handle))
-    .map((handle) => `@${handle}`);
-  const providerText = target.providerKinds.map(providerLabel).join(", ");
-  return `For ${handles.length > 0 ? handles.join(", ") : "selected target"} · ${providerText}`;
 }
 
 export function escapeRegExp(value: string): string {

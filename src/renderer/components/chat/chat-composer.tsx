@@ -256,21 +256,14 @@ export function ChatComposer(props: ChatComposerProps): JSX.Element {
           artifactOptions={mentions.visibleArtifactOptions}
           fileIndex={mentions.fileIndex}
           insertArtifactMention={mentions.insertArtifactMention}
-          insertCommand={mentions.insertCommand}
           insertFileMention={mentions.insertFileMention}
           insertMention={mentions.insertMention}
-          insertSavedPrompt={mentions.insertSavedPrompt}
-          insertSkillMention={mentions.insertSkillMention}
-          insertPluginMention={mentions.insertPluginMention}
           mentionIndex={mentions.mentionIndex}
           mentionOptions={mentions.mentionOptions}
           participantRoleLabel={props.participantRoleLabel}
           renderParticipantAvatar={props.renderParticipantAvatar}
-          skillIndex={mentions.skillIndex}
-          skillQuery={mentions.skillQuery}
-          skillTargetLabel={mentions.skillTargetLabel}
+          slashMenu={mentions.slashMenu}
           visibleFileOptions={mentions.visibleFileOptions}
-          visibleSlashOptions={mentions.visibleSlashOptions}
         />
         <ResizableTextarea
           ref={textareaRef}
@@ -319,19 +312,24 @@ export function ChatComposer(props: ChatComposerProps): JSX.Element {
               mentions.insertHashOptionAtIndex(mentions.fileIndex);
               return;
             }
-            if (mentions.visibleSlashOptionCount > 0 && event.key === "ArrowDown") {
+            if (mentions.slashNavCount > 0 && event.key === "ArrowDown") {
               event.preventDefault();
-              mentions.setSkillIndex((current) => (current + 1) % mentions.visibleSlashOptionCount);
+              mentions.moveSlashActive(1);
               return;
             }
-            if (mentions.visibleSlashOptionCount > 0 && event.key === "ArrowUp") {
+            if (mentions.slashNavCount > 0 && event.key === "ArrowUp") {
               event.preventDefault();
-              mentions.setSkillIndex((current) => (current - 1 + mentions.visibleSlashOptionCount) % mentions.visibleSlashOptionCount);
+              mentions.moveSlashActive(-1);
               return;
             }
-            if (mentions.visibleSlashOptionCount > 0 && (event.key === "Enter" || event.key === "Tab")) {
+            if (mentions.slashNavCount > 0 && (event.key === "Enter" || event.key === "Tab")) {
               event.preventDefault();
-              mentions.insertSlashOptionAtIndex(mentions.skillIndex);
+              mentions.activateSlashNavAtIndex(mentions.slashActiveIndex);
+              return;
+            }
+            if (mentions.slashSearching && (event.key === "Enter" || event.key === "Tab")) {
+              // Until the search answers, Enter would send the "/query" being typed.
+              event.preventDefault();
               return;
             }
             if (mentions.mentionOptions.length > 0 && event.key === "ArrowDown") {

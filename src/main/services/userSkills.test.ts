@@ -122,6 +122,23 @@ test("ranks the exact query match first so the highlighted result is correct", a
   });
 });
 
+test("returns every skill the slash menu asks for, past the old cap of 100", async () => {
+  await withTempWorkspace(async ({ homeDir, repoPath }) => {
+    // The slash menu filters the whole list itself; a cut list hides skills from search.
+    for (let index = 0; index < 120; index += 1) {
+      await writeSkill(path.join(homeDir, `.agents/skills/skill-${index}`), `skill-${index}`, "Skill", "body");
+    }
+    const service = new UserSkillsService({ homeDir });
+
+    const result = await service.search({ ...NOW_REQUEST, limit: 500 }, {
+      repoPath,
+      target: { hasClearTargets: true, participantIds: ["codex-1"], providerKinds: ["codex-cli"] }
+    });
+
+    assert.equal(result.skills.length, 120);
+  });
+});
+
 test("filters to variants available for every resolved target provider", async () => {
   await withTempWorkspace(async ({ homeDir, repoPath }) => {
     await writeSkill(path.join(homeDir, ".agents/skills/qa"), "qa", "QA", "codex body");

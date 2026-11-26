@@ -1,5 +1,6 @@
 import type { AgentDetectionRequest, PluginListRequest, UserSkillSummary } from "../../../shared/types";
 import type { DesktopApp } from "../desktopApp";
+import { USER_SKILL_SEARCH_MAX_LIMIT } from "../../services/userSkills";
 
 export function normalizeAgentDetectionRequest(value: unknown): AgentDetectionRequest {
   if (!value || typeof value !== "object" || Array.isArray(value)) {
@@ -30,7 +31,7 @@ export async function resolvePluginListRequest(desktopApp: DesktopApp, request?:
       };
     }
     const skills = await desktopApp.userSkillsService.search(
-      { conversationId: conversation.id, query, content, limit: 100 },
+      { conversationId: conversation.id, query, content, limit: USER_SKILL_SEARCH_MAX_LIMIT },
       desktopApp.chatService.userSkillRunContext(conversation, content)
     );
     return {
@@ -42,7 +43,7 @@ export async function resolvePluginListRequest(desktopApp: DesktopApp, request?:
   const participants = Array.isArray(request?.participants) ? request.participants : undefined;
   if (participants) {
     const skills = await desktopApp.userSkillsService.search(
-      { repoPath, participants, query, content, limit: 100 },
+      { repoPath, participants, query, content, limit: USER_SKILL_SEARCH_MAX_LIMIT },
       await desktopApp.chatService.prospectiveUserSkillRunContext({
         repoPath,
         participants,
