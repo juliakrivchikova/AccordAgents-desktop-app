@@ -74,6 +74,9 @@
 
 .new-chat-recent {
   display: grid;
+  /* The column is the list's width, not its longest title's: a long title
+     ends in an ellipsis instead of widening the screen. */
+  grid-template-columns: minmax(0, 1fr);
   gap: 2px;
   width: min(100%, 420px);
   margin-top: 14px;
@@ -104,6 +107,10 @@
 .new-chat-recent-row:focus-visible {
   outline: none;
   box-shadow: var(--focus-ring);
+}
+
+.new-chat-recent-row > svg {
+  flex: none;
 }
 
 .new-chat-recent-title {
