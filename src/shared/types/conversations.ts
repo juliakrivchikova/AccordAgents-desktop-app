@@ -27,6 +27,11 @@ export interface ConversationSummary {
    *  (`isWaitingChoice`): the chat list marks the chat with it. */
   waitingChoice?: boolean;
   chatParticipants?: ConversationSummaryChatParticipant[];
+  /** The provider of the chat's main session (shared/mainSession.ts): the
+   *  chat list shows its glyph before the title (the User, 2026-11-26,
+   *  variant A). Absent for a chat without one (a classic chat with its
+   *  Assistant). */
+  mainSessionKind?: ChatProviderKind;
 }
 
 export interface ConversationSummaryChatParticipant {

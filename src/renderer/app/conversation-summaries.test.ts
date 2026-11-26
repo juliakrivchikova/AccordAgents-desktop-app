@@ -3,6 +3,7 @@ import test from "node:test";
 
 import type { ChatMessage, Conversation, ConversationSummary, ConversationUpdate } from "../../shared/types";
 import { RECENT_CHAT_LIMIT, pinnedChatSummaries, recentChatSummaries, upsertConversationSummary, withPinnedState } from "./conversation-summaries";
+import { MAIN_SESSION_ROLE_ID } from "../../shared/mainSession";
 
 // The chat list row shows work while a run of this device is in the chat, and
 // also while a member's reply has not ended anywhere — a machine member's turn
@@ -93,3 +94,11 @@ test("a chat's pin state is taken without its other fields, and a full update ca
   assert.equal(upsertConversationSummary([], answered)[0].waitingChoice, undefined);
 });
 
+
+test("a live update names the provider of the chat's main session, as the stored list does", () => {
+  const member = (id: string, kind: string, roleConfigId: string) => ({ id, handle: id, kind, roleConfigId });
+  const kindOf = (metadata: Record<string, unknown>) => upsertConversationSummary([], chat([asked], metadata))[0]?.mainSessionKind;
+  // By role, not by position: the main session here runs on Antigravity, its member on Codex.
+  assert.equal(kindOf({ participants: [member("worker", "codex-cli", "engineer"), member("main", "gemini-cli", MAIN_SESSION_ROLE_ID)], mainSessionParticipantId: "main" }), "gemini-cli");
+  assert.equal(kindOf({ participants: [member("assistant", "codex-cli", "chat-assistant")] }), undefined, "a classic chat with its Assistant");
+});

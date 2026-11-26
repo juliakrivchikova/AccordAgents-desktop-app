@@ -1,4 +1,4 @@
-import { ArchiveIcon, BoxArrowUpIcon, PushPinIcon, PushPinSlashIcon, TrashIcon } from "@phosphor-icons/react";
+import { ArchiveIcon, BoxArrowUpIcon, ChatCircleIcon, PushPinIcon, PushPinSlashIcon, TrashIcon } from "@phosphor-icons/react";
 
 import {
   ContextMenu,
@@ -10,6 +10,7 @@ import { cn } from "@/lib/utils";
 import type { ConversationSummary } from "../../../shared/types";
 import { Spinner } from "@/components/ui/spinner";
 import { formatCompactRelativeTime } from "../../app/compact-relative-time";
+import { ChatProviderMark } from "../chat/chat-member-mark";
 
 interface SidebarSessionRowProps {
   summary: ConversationSummary;
@@ -23,8 +24,6 @@ interface SidebarSessionRowProps {
   /** Where the row is listed, for tests and styles (one chat can be listed
    *  under Pinned, Recents and its project at once). */
   section?: "pinned" | "recent" | "project" | "archived";
-  /** Listed under a project: starts under the project's name. */
-  indented?: boolean;
   onSelect: (id: string) => void;
   onArchive?: (id: string) => void;
   onUnarchive?: (id: string) => void;
@@ -51,7 +50,6 @@ export const SidebarSessionRow = ({
   working,
   unread,
   section,
-  indented = false,
   onSelect,
   onArchive,
   onUnarchive,
@@ -83,13 +81,25 @@ export const SidebarSessionRow = ({
           aria-busy={pending || working ? "true" : undefined}
           aria-current={selected ? "page" : undefined}
           className={cn(
-            "group flex h-7 w-full min-w-0 items-center gap-2 rounded-ui-8 px-2 text-left text-ui-13 text-ui-text",
+            "group flex h-7 w-full min-w-0 items-center gap-1.5 rounded-ui-8 px-2 text-left text-ui-13 text-ui-text",
             "transition-colors duration-120 ease-ui-out hover:bg-ui-row-hover",
             "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ui-focus-ring",
-            indented && "pl-7",
             selected && "bg-ui-row-active text-ui-select-fg hover:bg-ui-row-active"
           )}
         >
+          {/* Its main session's provider, in the icon column: under a project
+              it stands below the folder's icon, so the title starts under the
+              project's name (the User, 2026-11-26, variant A). One color, the
+              open chat's in the provider's own (the User, 2026-11-26). A chat
+              without one (a classic chat with its Assistant) has a plain mark.
+              The row is named by its title, as before: the mark is decorative. */}
+          {summary.mainSessionKind
+            ? (
+              <span className="flex shrink-0" aria-hidden="true">
+                <ChatProviderMark member={{ kind: summary.mainSessionKind }} className={cn("is-mini", !selected && "is-mono")} />
+              </span>
+            )
+            : <ChatCircleIcon className="size-3.5 shrink-0 text-ui-text-3" aria-hidden />}
           <span className="min-w-0 flex-1 truncate">{summary.title}</span>
           {/* Every mark sits after the title, so none moves it. */}
           {mark === "working" && <Spinner size={12} className="shrink-0" />}

@@ -82,6 +82,25 @@
   mask: url("../../../assets/claude-avatar.png") center / contain no-repeat;
 }
 
+/* The glyph in one color, the muted text's (the chat list: only the open
+   chat's row keeps the provider's own colors, the User, 2026-11-26). */
+.chat-provider-icon.is-bare.is-mono {
+  color: var(--ui-text-3);
+  --provider-setup-codex-gradient-top: currentColor;
+  --provider-setup-codex-gradient-mid: currentColor;
+  --provider-setup-codex-gradient-bottom: currentColor;
+}
+
+.chat-provider-icon.is-bare.is-mono .provider-mark-claude {
+  background: currentColor;
+}
+
+.chat-provider-icon.is-bare.is-mono .provider-mark-antigravity {
+  background: currentColor;
+  -webkit-mask: url("../../../assets/antigravity-logo.png") center / contain no-repeat;
+  mask: url("../../../assets/antigravity-logo.png") center / contain no-repeat;
+}
+
 /* Task status (task cards, members panel) */
 
 .chat-work-status {

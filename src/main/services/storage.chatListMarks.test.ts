@@ -5,6 +5,7 @@ import path from "node:path";
 import test from "node:test";
 import { StorageService } from "./storage";
 import { storageParts } from "./storage/test/storageParts";
+import { MAIN_SESSION_ROLE_ID } from "../../shared/mainSession";
 import type { ChatMessage, Conversation } from "../../shared/types";
 
 /**
@@ -83,6 +84,24 @@ test("waiting cards are found through the partial index, without reading every m
     const searches = plan.split("\n").filter((line) => /SEARCH m USING INDEX idx_conversation_messages_pending_reply/.test(line));
     assert.equal(searches.length, 2, plan);
     assert.doesNotMatch(plan, /SCAN m\b/, plan);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("the list names the provider of each chat's main session, by role, and none for a chat without one", async () => {
+  const directory = await mkdtemp(path.join(tmpdir(), "accordagents-chat-main-kind-"));
+  const storage = new StorageService({ dbPath: path.join(directory, "accordagents.sqlite3") });
+  const member = (id: string, kind: string, roleConfigId: string) => ({ id, handle: id, kind, roleConfigId });
+  try {
+    // The main session is not the first member: a member it made runs on another CLI.
+    await storage.saveConversation(chat("sessions", [asked], {
+      participants: [member("worker", "codex-cli", "engineer"), member("main", "claude-code", MAIN_SESSION_ROLE_ID)],
+      mainSessionParticipantId: "main"
+    }));
+    await storage.saveConversation(chat("classic", [asked], { participants: [member("assistant", "codex-cli", "chat-assistant"), member("victor", "claude-code", "engineer")] }));
+    const kinds = Object.fromEntries((await storage.listConversations()).map((summary) => [summary.id, summary.mainSessionKind]));
+    assert.deepEqual(kinds, { sessions: "claude-code", classic: undefined });
   } finally {
     await rm(directory, { recursive: true, force: true });
   }

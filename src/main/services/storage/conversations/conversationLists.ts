@@ -1,5 +1,5 @@
 import type { ConversationSummary } from "../../../../shared/types";
-import { normalizeConversationSummaryChatParticipants } from "../../../../shared/conversationSummary";
+import { conversationSummaryMainSessionKind, normalizeConversationSummaryChatParticipants } from "../../../../shared/conversationSummary";
 import { pendingReplyRowHintSql } from "../constants";
 import { sqlString } from "../database/sqlText";
 import type { ChatMemberProviderRow } from "../types";
@@ -26,6 +26,7 @@ export class ConversationLists {
       replyPending?: number | string | null;
       waitingChoice?: number | string | null;
       chatParticipantsJson?: string | null;
+      mainSessionParticipantId?: string | null;
     }>(
       // Besides this device's runs, whether a member's reply has not ended
       // (`isPendingReply`): a machine member's turn asked from the phone runs
@@ -59,7 +60,8 @@ export class ConversationLists {
              and json_extract(m.payload_json, '$.metadata.pendingChoice.status') = 'pending'
              and coalesce(json_extract(m.payload_json, '$.metadata.serverCard.state'), '') <> 'answered'
          ) as waitingChoice,
-         json_extract(coalesce(nullif(body_json, ''), payload_json), '$.metadata.participants') as chatParticipantsJson
+         json_extract(coalesce(nullif(body_json, ''), payload_json), '$.metadata.participants') as chatParticipantsJson,
+         json_extract(coalesce(nullif(body_json, ''), payload_json), '$.metadata.mainSessionParticipantId') as mainSessionParticipantId
        from conversations
        order by updated_at desc;`
     );
@@ -76,6 +78,9 @@ export class ConversationLists {
       const chatParticipants = row.kind === "chat"
         ? normalizeConversationSummaryChatParticipants(row.chatParticipantsJson)
         : undefined;
+      const mainSessionKind = row.kind === "chat"
+        ? conversationSummaryMainSessionKind(row.chatParticipantsJson, row.mainSessionParticipantId)
+        : undefined;
       return {
         id: row.id,
         title: row.title,
@@ -88,7 +93,8 @@ export class ConversationLists {
         archived: isArchived,
         ...(isPinned ? { pinned: true, ...(typeof row.pinnedAt === "string" && row.pinnedAt ? { pinnedAt: row.pinnedAt } : {}) } : {}),
         ...(waitingChoice ? { waitingChoice: true } : {}),
-        ...(chatParticipants ? { chatParticipants } : {})
+        ...(chatParticipants ? { chatParticipants } : {}),
+        ...(mainSessionKind ? { mainSessionKind } : {})
       };
     });
   }

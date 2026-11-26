@@ -125,7 +125,6 @@ export const Sidebar = ({
         working={working}
         unread={unread}
         section={section}
-        indented={section === "project"}
         onSelect={onSelect}
         onArchive={onArchive}
         onUnarchive={onUnarchive}

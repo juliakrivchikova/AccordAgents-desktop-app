@@ -1,4 +1,6 @@
-import type { ConversationSummary, ConversationSummaryChatParticipant } from "./types";
+import { isChatProviderKind } from "./chatProviders";
+import { mainSessionMemberOf } from "./mainSession";
+import type { ChatProviderKind, ConversationSummary, ConversationSummaryChatParticipant } from "./types";
 
 /** An async list read can finish after a newer pushed outcome. Preserve any
  * chat changed since that read began, including additions, archive and removal. */
@@ -31,7 +33,7 @@ export function normalizeConversationSummaryChatParticipants(value: unknown): Co
     }
     const record = item as Record<string, unknown>;
     const handle = typeof record.handle === "string" ? record.handle.trim().replace(/^@/, "") : "";
-    const kind = record.kind === "codex-cli" || record.kind === "claude-code" || record.kind === "gemini-cli" ? record.kind : undefined;
+    const kind = isChatProviderKind(record.kind) ? record.kind : undefined;
     if (!handle || !kind) {
       continue;
     }
@@ -45,6 +47,24 @@ export function normalizeConversationSummaryChatParticipants(value: unknown): Co
     });
   }
   return participants.length > 0 ? participants : undefined;
+}
+
+/** The provider of the chat's main session among its stored members, found
+ *  as `mainSessionMemberOf` finds it (by role; the one the chat names when
+ *  there are more), for the chat list's glyph. */
+export function conversationSummaryMainSessionKind(participants: unknown, namedId: unknown): ChatProviderKind | undefined {
+  const parsed = parseParticipantList(participants);
+  if (!Array.isArray(parsed)) {
+    return undefined;
+  }
+  const members = parsed.flatMap((item) => {
+    if (!item || typeof item !== "object" || Array.isArray(item)) return [];
+    const record = item as Record<string, unknown>;
+    if (typeof record.id !== "string") return [];
+    return [{ id: record.id, roleConfigId: typeof record.roleConfigId === "string" ? record.roleConfigId : undefined, kind: record.kind }];
+  });
+  const kind = mainSessionMemberOf(members, typeof namedId === "string" ? namedId : undefined)?.kind;
+  return isChatProviderKind(kind) ? kind : undefined;
 }
 
 function parseParticipantList(value: unknown): unknown {

@@ -1,6 +1,6 @@
 import type { ConversationSummary, ConversationUpdate } from "../../shared/types";
 import { isPendingReply, isWaitingChoice } from "../../shared/chatActiveRuns";
-import { normalizeConversationSummaryChatParticipants } from "../../shared/conversationSummary";
+import { conversationSummaryMainSessionKind, normalizeConversationSummaryChatParticipants } from "../../shared/conversationSummary";
 import type { ProjectSessionGroup } from "../components/shell";
 import { NO_PROJECT_GROUP_KEY } from "./constants";
 import { normalizeProjectPath, projectLabelForPath } from "../../shared/newChat";
@@ -126,6 +126,9 @@ function summaryFromConversation(conversation: ConversationUpdate): Conversation
   const chatParticipants = conversation.kind === "chat"
     ? normalizeConversationSummaryChatParticipants(conversation.metadata?.participants)
     : undefined;
+  const mainSessionKind = conversation.kind === "chat"
+    ? conversationSummaryMainSessionKind(conversation.metadata?.participants, conversation.metadata?.mainSessionParticipantId)
+    : undefined;
   return {
     id: conversation.id,
     title: conversation.title,
@@ -138,6 +141,7 @@ function summaryFromConversation(conversation: ConversationUpdate): Conversation
     archived: conversation.metadata?.archived === true,
     ...(pinned ? { pinned: true, ...(pinnedAt ? { pinnedAt } : {}) } : {}),
     ...(waitingChoice ? { waitingChoice: true } : {}),
-    ...(chatParticipants ? { chatParticipants } : {})
+    ...(chatParticipants ? { chatParticipants } : {}),
+    ...(mainSessionKind ? { mainSessionKind } : {})
   };
 }
