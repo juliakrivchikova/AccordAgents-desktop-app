@@ -85,11 +85,11 @@ export function scopeMachineConversationUpdate(conversation: Conversation, updat
       }
       if (runsOnMachine(existing, machineId)) {
         const kept = keepRequestRight(keepRole(keepHome(keepRights(participant, existing, changes.approved, changes.noted), existing), existing), existing,
-          () => leaveGiven(conversation, existing, changes.approved, used), changes.noted);
+          () => leaveGiven(conversation, existing, changes.approved, used, changes.rules), changes.noted);
         if (JSON.stringify(kept) !== JSON.stringify(participant)) refused.push(`participants.${participant.id}.rights`);
         return [kept];
       }
-      const kept = keepElsewhere(conversation, participant, existing, used, changes.noted);
+      const kept = keepElsewhere(conversation, participant, existing, used, changes.noted, changes.rules);
       if (JSON.stringify(kept) !== JSON.stringify(participant)) refused.push(`participants.${participant.id}`);
       return [kept];
     });

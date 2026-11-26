@@ -1,7 +1,7 @@
 import { isMemberRestartTurnRequest } from "../../shared/memberRestart";
 import { isMemberSessionExportTurnRequest } from "../../shared/memberSessionMove";
 import { claimOutcomeFor } from "../../main/services/hubOpsStore";
-import { askNeedsApproval, machineMayAsk, machineMayCompact, runsOnMachine } from "../hubMachineScope";
+import { askNeedsApproval, launchesFacilitator, machineMayAsk, machineMayCompact, runsOnMachine } from "../hubMachineScope";
 import type { HubDevice } from "../../shared/hubProtocol";
 import { chatViewFor } from "../../shared/mainSession";
 import type { HubFeedEntry, HubOp, HubOpEffect, HubOpResult, HubTurn } from "../../shared/hubOps";
@@ -118,14 +118,19 @@ export class Turns {
           if (!ownMembers || op.request?.kind === "compaction" || isMemberRestartTurnRequest(op.request)) {
             return reject(opId, "A cloud machine asks a member that runs elsewhere only to answer a message of one of its own members.");
           }
-          // Only as the app lets that member ask: with its leave to ask
-          // other members, or with the User's approval of this request.
-          const needs = askNeedsApproval(conversation, message!);
-          const asked = machineMayAsk(conversation, device.machineId, message!, op.participantId,
+          // The facilitator of an Accord its member started with the app
+          // tool runs as the app runs it, at once and once.
+          const launched = launchesFacilitator(conversation, message!, op.participantId, await this.ops.memberRules.memberRules(),
+            await store.usedGrants(op.conversationId));
+          // Otherwise only as the app lets that member ask: with its leave to
+          // ask other members, or with the User's approval of this request.
+          const needs = !launched && askNeedsApproval(conversation, message!);
+          const asked = launched ?? machineMayAsk(conversation, device.machineId, message!, op.participantId,
             needs ? await store.userApprovals(op.conversationId, device.deviceId) : [], contentHash(message!.content),
             needs ? await store.usedGrants(op.conversationId) : new Set());
           if (!asked) return reject(opId, "This member may ask a member that runs elsewhere only with leave to ask other members or with your approval.");
-          // Her approval runs the member once: noted with the turn.
+          // A launch runs its facilitator once, her approval the member once:
+          // noted with the turn.
           if (typeof asked === "object") askGrant = store.useGrantsSql(op.conversationId, [asked.grant], acceptedAt);
         }
       }

@@ -48,6 +48,26 @@ verbatim there). Modelled on T3 Code (`~/reference/t3code`,
   Approvals of members' commands still reach the User on the main timeline.
 - **Only the main session can start an Accord** (`app_chat_start_accord`); a
   member that needs one asks the main session. The User still can, as today.
+  Settings → General → New chats → **Any agent can start an Accord** (off
+  unless she turns it on; the User, 2026-11-26: one switch, as for
+  compaction) gives every member of every chat the tool, whatever its role
+  (`appToolCapabilitiesForRolePolicy`), read when each turn starts and again
+  when the tool is called (`ChatAccord.accordFromAnySession`), on this
+  computer and on a cloud machine alike (the setting travels with the
+  settings the computer publishes for its machines). Its launch is written as
+  its message, as the main session's is, and its facilitator's leave to ask
+  the members is never more than its own as it runs now (a member the main
+  session added: held to the main session's); the launch tells the
+  facilitator which leave it has. The switch goes to the User's server with
+  her member rules (`HubMemberRules.accordFromAnySession`): the server
+  accepts that leave from such a launch on the same terms (`accordNaming`),
+  and a machine's request for the facilitator's turn on a launch its member
+  wrote with the tool runs it as the app runs it, at once
+  (`launchesFacilitator`; the main session's launch too, whatever its own
+  right to ask). With it on, any member that has the tool is refused an ad
+  hoc draft collection as the main session is, below. Turning it on or off
+  changes members' tools, so each member's CLI process starts afresh on its
+  next turn, as for any change of its tools.
   When she does, each CLI of the Agents list with no member here yet counts
   as a candidate (the User, 2026-11-26; `src/shared/accordCandidates.ts`):
   Start Accord lists it as "New agent", and starting the Accord makes its

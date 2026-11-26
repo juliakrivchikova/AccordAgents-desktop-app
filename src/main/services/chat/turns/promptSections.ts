@@ -17,6 +17,7 @@ import {
   autoPreauthorizedAppMcpToolNames as classifiedAutoPreauthorizedAppMcpToolNames
 } from "../../appMcp";
 import { chatSkillMentions, repoFileMentions } from "../choices/mentions";
+import { CHAT_ADMINISTRATOR_ROLE_ID } from "../constants";
 import { messageAuthor } from "../members/identity";
 import { shortHash } from "../members/roleRuntime";
 import { participantRequestPromptForTarget } from "../requests/requestRecords";
@@ -219,7 +220,7 @@ export function mainSessionMemberRules(mainSessionHandle: string): string[] {
     `- This chat has a main session, @${mainSessionHandle}: it works with User and gives other members their tasks.`,
     `- When you need a decision or information from User, ask @${mainSessionHandle} with \`app_chat_request_participants\` instead of asking User; it answers from what it knows of User's intent and asks User itself when it must.`,
     `- Do not write a \`User choice:\` block unless @${mainSessionHandle} asked you to put a question to User.`,
-    `- Do not start an Accord; when one is needed, ask @${mainSessionHandle}.`
+    `- Start an Accord only with \`app_chat_start_accord\`; when you do not have that tool and one is needed, ask @${mainSessionHandle}.`
   ];
 }
 
@@ -227,13 +228,18 @@ export function appToolCapabilitiesForRun(
   conversation: Conversation,
   participant: ChatParticipant,
   session: ChatParticipantSession,
-  permissions: ChatAgentPermissions
+  permissions: ChatAgentPermissions,
+  /** Settings → General → New chats → "Any agent can start an Accord", as
+   *  it is when the run starts (ChatAccord.accordFromAnySession). */
+  accordFromAnySession = false
 ): ChatAppToolCapability[] {
   return appToolCapabilitiesForRolePolicy(
     session.roleAppToolCapabilities,
     session.roleParticipantDefaults,
     permissions,
-    isMainSessionParticipant(conversation.metadata, participant.id)
+    isMainSessionParticipant(conversation.metadata, participant.id),
+    // The Chat Assistant takes no part in an Accord (startAccord refuses it).
+    accordFromAnySession && session.roleConfigId !== CHAT_ADMINISTRATOR_ROLE_ID
   );
 }
 
@@ -243,7 +249,10 @@ export function appToolCapabilitiesForRolePolicy(
   permissions: ChatAgentPermissions,
   /** The chat's own main session (docs/main-session.md): only it delegates
    *  tasks and starts Accords, whatever another member's role says. */
-  isMainSession: boolean
+  isMainSession: boolean,
+  /** The User's switch: every member starts an Accord, whatever its role
+   *  says (the User, 2026-11-26). */
+  accordFromAnySession = false
 ): ChatAppToolCapability[] {
   const requestParticipantsPermission = normalizeChatParticipantRequestPermission(permissions.requestParticipants);
   const requestCompactionPermission = normalizeChatParticipantRequestPermission(permissions.requestCompaction);
@@ -264,7 +273,8 @@ export function appToolCapabilitiesForRolePolicy(
     // (Settings → General → New chats → Compact without asking; the User,
     // 2026-11-26): it compacts other members too.
     ...(isMainSession && requestCompactionPermission === "allow" ? ["participants.compact" as const] : []),
-    ...(manageRolesParticipantsPermission === "deny" ? [] : ["participants.manage" as const])
+    ...(manageRolesParticipantsPermission === "deny" ? [] : ["participants.manage" as const]),
+    ...(accordFromAnySession ? ["accord.start" as const] : [])
   ]);
 }
 

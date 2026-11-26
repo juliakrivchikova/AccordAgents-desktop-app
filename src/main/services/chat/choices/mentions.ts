@@ -1,7 +1,8 @@
 import { lstat, realpath, stat } from "node:fs/promises";
 import path from "node:path";
 import type {
-  ChatAppToolApprovalPolicy, ChatMessage, ChatParticipant, ChatProviderKind, ChatSkillMention, Conversation, RepoFileMention
+  ChatAppToolApprovalPolicy, ChatMessage, ChatParticipant, ChatParticipantRequestPermission, ChatProviderKind, ChatSkillMention, Conversation,
+  RepoFileMention
 } from "../../../../shared/types";
 import {
   effectiveChatAgentPermissionsForProvider, normalizeChatAgentMode, normalizeChatAgentPermissions
@@ -283,8 +284,20 @@ function messageIsVisibleTopLevelChatParticipant(message: ChatMessage): boolean 
 
 // The timeline reads this text back as the Accord card
 // (src/shared/accordLaunchCard.ts); a change to its wording goes there too.
-export function accordStartMessageContent(facilitator: ChatParticipant, targets: ChatParticipant[], subject: string): string {
+export function accordStartMessageContent(
+  facilitator: ChatParticipant,
+  targets: ChatParticipant[],
+  subject: string,
+  /** The facilitator's leave to ask members once it starts (the member that
+   *  starts it gives no more than its own): what the last line tells it. */
+  leave: ChatParticipantRequestPermission = "allow"
+): string {
   const targetNames = targets.map((target) => target.handle).join(", ");
+  const leaveLine = leave === "allow"
+    ? "The app has enabled request-members permission for you in this chat; the user can revoke it from your member controls."
+    : leave === "ask"
+      ? "The app has left your requests to members to the user's approval in this chat, as for the member who started it; the user can change it from your member controls."
+      : "The app has not enabled request-members permission for you in this chat; ask the user for it before you ask the members.";
   return [
     `@${facilitator.handle} /accord`,
     "",
@@ -292,7 +305,7 @@ export function accordStartMessageContent(facilitator: ChatParticipant, targets:
     subject,
     "",
     `Selected accord members: ${targetNames}.`,
-    "Run the accord skill for exactly those selected members and this subject. Use app_chat_request_participants for those members only. The app has enabled request-members permission for you in this chat; the user can revoke it from your member controls."
+    `Run the accord skill for exactly those selected members and this subject. Use app_chat_request_participants for those members only. ${leaveLine}`
   ].join("\n");
 }
 

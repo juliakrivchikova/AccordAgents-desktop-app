@@ -12,13 +12,14 @@ import {
 import { readinessForProvider } from "../../../../shared/cliReadiness";
 import { normalizeChatAttachmentListRequest, normalizeChatAttachmentReadRequest } from "../attachments/exportTargets";
 import { chatImageAttachmentForTool, visibleImageAttachmentRecords } from "../attachments/imageRecords";
-import { CHAT_CONTEXT_READ_DEFAULT_LIMIT } from "../constants";
+import { CHAT_ADMINISTRATOR_ROLE_ID, CHAT_CONTEXT_READ_DEFAULT_LIMIT } from "../constants";
 import { chatParticipants, isUserOnlyMessage, messageAuthor, normalizeBehaviorRuleIds, roleLabelForParticipant } from "../members/identity";
 import { rosterParticipantSummary } from "../members/rosterRequests";
 import { chatMessageForTool, historyFilePaths } from "../store/historyText";
 import { CHAT_CONTEXT_READ_MAX_LIMIT } from "./constants";
 import { normalizeChatMessageReadRequest } from "./toolInputs";
 import { appMcpToolNamesFor, appToolCapabilitiesForRolePolicy } from "../turns/promptSections";
+import { accordFromAnySessionOn } from "../../../../shared/newChatDefaults";
 import type { ChatAppMcpActor } from "../types";
 import type { ChatModules } from "../modules";
 import type { ChatDependencies } from "../dependencies";
@@ -136,7 +137,8 @@ export class ChatReadTools {
             role?.appToolCapabilities,
             role?.participantDefaults,
             normalizeChatAgentPermissions(participant.permissions),
-            isMainSessionParticipant(conversation.metadata, participant.id)
+            isMainSessionParticipant(conversation.metadata, participant.id),
+            accordFromAnySessionOn(settings.newChatDefaults) && participant.roleConfigId !== CHAT_ADMINISTRATOR_ROLE_ID
           ),
           kind: participant.kind,
           model: participant.model,

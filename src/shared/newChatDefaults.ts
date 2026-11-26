@@ -32,7 +32,7 @@ function accessFor(kind: ChatProviderKind | undefined, value: unknown): string |
 
 /** What is stored, as Settings reads it: anything missing or invalid is the
  *  CLI's own; compaction without asking unless turned off, scheduled tasks
- *  without asking only once turned on. */
+ *  without asking and Accords from any member only once turned on. */
 export function normalizeNewChatDefaults(value: unknown): NewChatDefaults {
   const record = value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {};
   const kind = isChatProviderKind(record.kind) ? record.kind : undefined;
@@ -47,7 +47,8 @@ export function normalizeNewChatDefaults(value: unknown): NewChatDefaults {
     ...(access ? { access } : {}),
     ...(homeMachineId ? { homeMachineId } : {}),
     compactWithoutAsking: record.compactWithoutAsking !== false,
-    ...(record.scheduleWithoutAsking === true ? { scheduleWithoutAsking: true as const } : {})
+    ...(record.scheduleWithoutAsking === true ? { scheduleWithoutAsking: true as const } : {}),
+    ...(record.accordFromAnySession === true ? { accordFromAnySession: true as const } : {})
   };
 }
 
@@ -65,7 +66,8 @@ export function applyNewChatDefaultsUpdate(current: unknown, update: NewChatDefa
     access: sameCli ? base.access : undefined,
     homeMachineId: base.homeMachineId,
     compactWithoutAsking: base.compactWithoutAsking,
-    scheduleWithoutAsking: base.scheduleWithoutAsking
+    scheduleWithoutAsking: base.scheduleWithoutAsking,
+    accordFromAnySession: base.accordFromAnySession
   };
   for (const key of ["model", "reasoningEffort", "access", "homeMachineId"] as const) {
     const value = update[key];
@@ -73,15 +75,28 @@ export function applyNewChatDefaultsUpdate(current: unknown, update: NewChatDefa
   }
   if (typeof update.compactWithoutAsking === "boolean") next.compactWithoutAsking = update.compactWithoutAsking;
   if (typeof update.scheduleWithoutAsking === "boolean") next.scheduleWithoutAsking = update.scheduleWithoutAsking;
+  if (typeof update.accordFromAnySession === "boolean") next.accordFromAnySession = update.accordFromAnySession;
   return normalizeNewChatDefaults(next);
 }
 
 /** The defaults with the CLI's model, effort and mode dropped: the provider
- *  changed, so they go back to that CLI's own (where it runs, compaction and
- *  scheduled tasks stay). */
+ *  changed, so they go back to that CLI's own (where it runs, compaction,
+ *  scheduled tasks and Accords stay). */
 export function newChatDefaultsForProvider(current: unknown): NewChatDefaults {
-  const { homeMachineId, compactWithoutAsking, scheduleWithoutAsking } = normalizeNewChatDefaults(current);
-  return { ...(homeMachineId ? { homeMachineId } : {}), compactWithoutAsking, ...(scheduleWithoutAsking ? { scheduleWithoutAsking } : {}) };
+  const { homeMachineId, compactWithoutAsking, scheduleWithoutAsking, accordFromAnySession } = normalizeNewChatDefaults(current);
+  return {
+    ...(homeMachineId ? { homeMachineId } : {}),
+    compactWithoutAsking,
+    ...(scheduleWithoutAsking ? { scheduleWithoutAsking } : {}),
+    ...(accordFromAnySession ? { accordFromAnySession } : {})
+  };
+}
+
+/** Settings → General → New chats → "Any agent can start an Accord", as it
+ *  is now: every member of every chat starts one with app_chat_start_accord,
+ *  not only the main session (the User, 2026-11-26). Off unless turned on. */
+export function accordFromAnySessionOn(defaults: unknown): boolean {
+  return normalizeNewChatDefaults(defaults).accordFromAnySession === true;
 }
 
 /** The main session's right to compact its context without a card. */

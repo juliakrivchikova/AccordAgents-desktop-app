@@ -38,7 +38,7 @@ export class Compaction {
   constructor(
     private readonly chat: Pick<
       ChatModules,
-      | "activeRuns" | "agentEnvironment" | "appMcpGrants" | "backgroundTasks" | "chatHistory" | "host" | "memberMoves"
+      | "accord" | "activeRuns" | "agentEnvironment" | "appMcpGrants" | "backgroundTasks" | "chatHistory" | "host" | "memberMoves"
       | "memberSessions" | "promptSuggestions" | "remoteTurns" | "scheduledTasks" | "selfCompaction" | "selfResumedTurns"
       | "serverLink" | "serverTurns" | "store" | "turnPrompt" | "turnQueue"
     >,
@@ -178,6 +178,8 @@ export class Compaction {
       const agentMode = agentModeForSession(session, participant);
       const permissions = await this.chat.scheduledTasks.withSchedulingWhileOn(normalizeChatAgentPermissions(participantForRun(conversation, participant).permissions));
       session.participantPermissions = permissions;
+      // The member's tools as its turns have them (the User's Accord switch too).
+      const accordFromAnySession = await this.chat.accord.accordFromAnySession();
       const runPath = runPathForParticipant(conversation, participant, workspacePath, agentMode, permissions);
       const baseCliParticipant = cliParticipantForSession(participant, session);
       const agentEnvironment = await this.chat.agentEnvironment.agentEnvironmentForParticipant(participant, baseCliParticipant.model);
@@ -188,7 +190,7 @@ export class Compaction {
       const result: CliAgentCompactResult = agentEnvironment.problem
         ? { participant: cliParticipant, ok: false, error: agentEnvironment.problem }
         : await this.deps.cliRunner.compactSession(cliParticipant, runPath, undefined, "chat", signal, {
-            ...this.memberProcessOptionsForCompaction(conversation, participant, session, request, runId, runPath, workspacePath, agentMode, permissions),
+            ...this.memberProcessOptionsForCompaction(conversation, participant, session, request, runId, runPath, workspacePath, agentMode, permissions, accordFromAnySession),
             agentEnv: agentEnvironment.env,
             settingsEnv: agentEnvironment.settingsEnv,
             agentEnvKey: agentEnvironment.version,
@@ -299,9 +301,10 @@ export class Compaction {
     runPath: string,
     workspacePath: string,
     agentMode: ChatAgentMode,
-    permissions: ChatAgentPermissions
+    permissions: ChatAgentPermissions,
+    accordFromAnySession: boolean
   ): CliAgentRunOptions {
-    const appToolCapabilities = appToolCapabilitiesForRun(conversation, participant, session, permissions);
+    const appToolCapabilities = appToolCapabilitiesForRun(conversation, participant, session, permissions, accordFromAnySession);
     const appMcpToolNames = appMcpToolNamesFor(appToolCapabilities);
     const appMcpToolInventoryKey = appMcpToolInventoryKeyFor(appMcpToolNames);
     const appMcpClientGenerationId = appMcpClientGenerationIdFor(conversation, participant, session, appMcpToolInventoryKey);

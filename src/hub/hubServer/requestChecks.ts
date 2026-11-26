@@ -91,7 +91,11 @@ export function validMemberRules(value: unknown): HubMemberRules {
       if (id(machineId) && typeof runs === "boolean") machineCliModes[machineId] = runs;
     }
   }
-  return { version: 1, roles, presets, ...(Object.keys(machineCliModes).length > 0 ? { machineCliModes } : {}) };
+  return {
+    version: 1, roles, presets,
+    ...(Object.keys(machineCliModes).length > 0 ? { machineCliModes } : {}),
+    ...((value as { accordFromAnySession?: unknown } | undefined)?.accordFromAnySession === true ? { accordFromAnySession: true as const } : {})
+  };
 }
 
 export function validMachineWake(value: unknown): import("../../shared/hubProtocol").HubMachineWakeRequest["machines"] {

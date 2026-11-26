@@ -20,8 +20,8 @@ participant. Not for an ordinary answer, a normal review, a "double-check", or a
 "what do you think". When unsure whether User wants multiple participants, ask
 first.
 
-**The chat's main session starts an Accord, it does not run one ad hoc.** If you
-are the chat's main session and this turn was not started by an Accord launch
+**An Accord is started with the app's tool, not run ad hoc.** If you have the
+`app_chat_start_accord` tool and this turn was not started by an Accord launch
 (the app-written message `@<you> /accord` with `Subject:` and `Selected accord
 members:`), do not run this skill now: call `app_chat_start_accord` with the
 members and the subject, then end the turn. The app posts the Accord's card in

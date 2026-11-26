@@ -4,7 +4,7 @@ import test from "node:test";
 import type { HubCard } from "../shared/hubOps";
 import type { HubMemberRules } from "../shared/hubProtocol";
 import type { ChatMessage, Conversation } from "../shared/types";
-import { approvalGrantKey, keptApproval, machineMayAsk, scopeMachineConversationUpdate } from "./hubMachineScope";
+import { approvalGrantKey, keptApproval, launchesFacilitator, machineMayAsk, scopeMachineConversationUpdate } from "./hubMachineScope";
 
 const hashOf = (content: string) => createHash("sha256").update(content).digest("hex");
 
@@ -516,7 +516,7 @@ test("the main session on a machine adds the member it gives a task to without a
   assert.equal(members(scopeMachineConversationUpdate(plainChat, { metadata: { participants: [deskR, mainOnMachine, { ...delegated, permissions: { ...delegated.permissions, webAccess: true } }] } }, "machine-1", { rules: mainRules })).has("p-child"), true);
 });
 
-test("in a chat with a main session only the User and the main session start an Accord", () => {
+test("in a chat with a main session only the User and the main session start an Accord, and another member's tool launch while her switch is on", () => {
   const helperOnMachine = { ...boxR, id: "p-helper", handle: "helper" };
   const leave = { ...deskR, permissions: { ...deskR.permissions, requestParticipants: "allow" } };
   const fromMember = { id: "m-acc", role: "participant", participantId: "p-helper", content: "/accord @desk please run it", createdAt: "t" };
@@ -526,9 +526,56 @@ test("in a chat with a main session only the User and the main session start an 
   const fromMain = { ...fromMember, participantId: "p-main", metadata: { accordLaunchByMainSession: true } };
   scoped = scopeMachineConversationUpdate(mainSessionChatWith([deskR, mainOnMachine, helperOnMachine], [fromMain]), { metadata: { participants: [leave, mainOnMachine, helperOnMachine] } }, "machine-1", { rules: mainRules });
   assert.equal((members(scoped).get("p-desk")?.permissions as Record<string, unknown>).requestParticipants, "allow");
+  // Another member's launch with the app tool: leave only while her "Any
+  // agent can start an Accord" is on, never more than that member's own.
+  const anyRules: HubMemberRules = { ...mainRules, accordFromAnySession: true };
+  const helperAllows = { ...helperOnMachine, permissions: { ...helperOnMachine.permissions, requestParticipants: "allow" } };
+  const fromHelperTool = { ...fromMember, metadata: { accordLaunchByMainSession: true } };
+  const helperChat = (helper: typeof helperOnMachine, message: typeof fromMember) => mainSessionChatWith([deskR, mainOnMachine, helper], [message]);
+  scoped = scopeMachineConversationUpdate(helperChat(helperAllows, fromHelperTool), { metadata: { participants: [leave, mainOnMachine, helperAllows] } }, "machine-1", { rules: mainRules });
+  assert.deepEqual(members(scoped).get("p-desk"), deskR, "switch off: the helper's launch gives none");
+  scoped = scopeMachineConversationUpdate(helperChat(helperAllows, fromHelperTool), { metadata: { participants: [leave, mainOnMachine, helperAllows] } }, "machine-1", { rules: anyRules });
+  assert.equal((members(scoped).get("p-desk")?.permissions as Record<string, unknown>).requestParticipants, "allow", "switch on: its launch gives its own allow");
+  // Held to the helper's own right: a facilitator that may not ask at all
+  // gets the helper's "ask", not "allow".
+  const helperAsks = { ...helperOnMachine, permissions: { ...helperOnMachine.permissions, requestParticipants: "ask" } };
+  const deskDenied = { ...deskR, permissions: { requestParticipants: "deny" } };
+  scoped = scopeMachineConversationUpdate(mainSessionChatWith([deskDenied, mainOnMachine, helperAsks], [fromHelperTool]), { metadata: { participants: [leave, mainOnMachine, helperAsks] } }, "machine-1", { rules: anyRules });
+  assert.equal((members(scoped).get("p-desk")?.permissions as Record<string, unknown>).requestParticipants, "ask", "no more than the helper's own ask");
+  // A helper the main session added asks no more than the main session may now.
+  const mainAsks = { ...mainOnMachine, permissions: { ...mainOnMachine.permissions, requestParticipants: "ask" } };
+  const delegatedHelper = { ...helperAllows, delegatedByParticipantId: "p-main" };
+  scoped = scopeMachineConversationUpdate(mainSessionChatWith([deskDenied, mainAsks, delegatedHelper], [fromHelperTool]), { metadata: { participants: [leave, mainAsks, delegatedHelper] } }, "machine-1", { rules: anyRules });
+  assert.equal((members(scoped).get("p-desk")?.permissions as Record<string, unknown>).requestParticipants, "ask", "held to the main session's ask");
+  scoped = scopeMachineConversationUpdate(helperChat(helperAllows, fromMember), { metadata: { participants: [leave, mainOnMachine, helperAllows] } }, "machine-1", { rules: anyRules });
+  assert.deepEqual(members(scoped).get("p-desk"), deskR, "its plain reply still gives none");
   const fromUser = { id: "m-user", role: "user", content: "@desk /accord with @helper", createdAt: "t" };
   scoped = scopeMachineConversationUpdate(mainSessionChatWith([deskR, mainOnMachine, helperOnMachine], [fromUser]), { metadata: { participants: [leave, mainOnMachine, helperOnMachine] } }, "machine-1", { rules: mainRules });
   assert.equal((members(scoped).get("p-desk")?.permissions as Record<string, unknown>).requestParticipants, "allow");
+});
+
+test("a machine runs the facilitator of its member's Accord launch elsewhere as the app does, once: the main session's, and any member's while her switch is on", () => {
+  const helperOnMachine = { ...boxR, id: "p-helper", handle: "helper" };
+  const launchText = "@desk /accord\n\nSubject:\nPick the queue.\n\nSelected accord members: helper.\nRun the accord skill for exactly those selected members and this subject. " +
+    "Use app_chat_request_participants for those members only. The app has left your requests to members to the user's approval in this chat, as for the member who started it; the user can change it from your member controls.";
+  const launch = { id: "m-launch", role: "participant", participantId: "p-helper", content: launchText, createdAt: "t", metadata: { accordLaunchByMainSession: true } } as ChatMessage;
+  const chat = mainSessionChatWith([deskR, mainOnMachine, helperOnMachine], [launch]);
+  const on = { accordFromAnySession: true as const };
+  const none = new Set<string>();
+  assert.equal(launchesFacilitator(chat, launch, "p-desk", undefined, none), undefined, "switch off: a member's launch runs nothing by itself");
+  const first = launchesFacilitator(chat, launch, "p-desk", on, none);
+  assert.deepEqual(first, { grant: "launch:m-launch:p-desk" });
+  assert.equal(launchesFacilitator(chat, launch, "p-desk", on, new Set([first!.grant])), undefined, "once per launch");
+  assert.equal(launchesFacilitator(chat, launch, "p-main", on, none), undefined, "only its facilitator");
+  assert.equal(launchesFacilitator(chat, { ...launch, metadata: {} }, "p-desk", on, none), undefined, "a reply of the same text is no launch");
+  assert.equal(launchesFacilitator(chat, { ...launch, metadata: { accordLaunchByMainSession: true, hiddenFromTimeline: true } }, "p-desk", on, none), undefined,
+    "never a launch she does not see");
+  const assistantChat = mainSessionChatWith([{ ...deskR, roleConfigId: "administrator" }, mainOnMachine, helperOnMachine], [launch]);
+  assert.equal(launchesFacilitator(assistantChat, launch, "p-desk", on, none), undefined, "never the Chat Assistant");
+  // The main session's launch runs its facilitator whatever its own right to
+  // ask (as the app runs it), which before went by that right.
+  const fromMain = { ...launch, participantId: "p-main" };
+  assert.ok(launchesFacilitator(mainSessionChatWith([deskR, mainOnMachine, helperOnMachine], [fromMain]), fromMain, "p-desk", undefined, none));
 });
 
 // --- what a machine may not raise (review of the main session, 2026-11-20) ------

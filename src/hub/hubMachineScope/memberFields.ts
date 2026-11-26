@@ -2,6 +2,7 @@ import { chatParticipantRequestPermissionExceeds } from "../../shared/agentPermi
 import { APP_TOOL_PERMISSION_TOOL } from "../../shared/appMcpToolContracts";
 import { isClaudePlanApprovalRequest } from "../../shared/claudePlanApproval";
 import type { HubUserApproval } from "../../shared/hubOps";
+import type { HubMemberRules } from "../../shared/hubProtocol";
 import type { ChatAppToolApproval, ChatParticipant, Conversation } from "../../shared/types";
 import { withRequestRight } from "./askRights";
 import { accordNaming } from "./grants";
@@ -80,10 +81,17 @@ export function latestPlanAnswersOnly(approved: Approved[], approvals: HubUserAp
 /** A member that runs elsewhere, as the server has it; given leave to ask
  *  other members when `/accord` names it (and only that, as far as it
  *  gives). */
-export function keepElsewhere(conversation: Conversation, next: ChatParticipant, current: ChatParticipant, used: ReadonlySet<string>, noted: Set<string>): ChatParticipant {
+export function keepElsewhere(
+  conversation: Conversation,
+  next: ChatParticipant,
+  current: ChatParticipant,
+  used: ReadonlySet<string>,
+  noted: Set<string>,
+  rules?: Pick<HubMemberRules, "accordFromAnySession">
+): ChatParticipant {
   const had = requestRight(current);
   if (!chatParticipantRequestPermissionExceeds(requestRight(next), had)) return current;
-  const accord = accordNaming(conversation, current, used);
+  const accord = accordNaming(conversation, current, used, rules);
   if (!accord) return current;
   const allowed = lowerRight(requestRight(next), accord.cap);
   if (rank(allowed) <= rank(had)) return current;

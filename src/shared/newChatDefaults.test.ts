@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  accordFromAnySessionOn,
   applyNewChatDefaultsUpdate,
   newChatCompactionPermission,
   newChatDefaultsForProvider,
@@ -54,6 +55,19 @@ test("scheduled tasks without asking: off unless turned on, kept through other c
   assert.equal(withNewChatRights(defaultChatAgentPermissions(), start).scheduleWithoutAsking, true);
   assert.equal(withNewChatRights({ ...defaultChatAgentPermissions(), scheduleWithoutAsking: true }, newChatMainSessionStart(undefined, { kind: "claude-code" })).scheduleWithoutAsking,
     undefined, "a row that brings it does not give it");
+});
+
+test("Accords from any member: off unless turned on, kept through other changes and another provider, read as Settings says now", () => {
+  assert.equal(normalizeNewChatDefaults({ accordFromAnySession: "yes" }).accordFromAnySession, undefined);
+  assert.equal(accordFromAnySessionOn(undefined), false, "off by default");
+  const on = applyNewChatDefaultsUpdate(undefined, { accordFromAnySession: true });
+  assert.deepEqual(on, { compactWithoutAsking: true, accordFromAnySession: true });
+  assert.equal(accordFromAnySessionOn(on), true);
+  assert.equal(applyNewChatDefaultsUpdate(on, { kind: "claude-code", model: "opus" }).accordFromAnySession, true);
+  assert.equal(applyNewChatDefaultsUpdate(on, { scheduleWithoutAsking: true }).accordFromAnySession, true);
+  assert.equal(newChatDefaultsForProvider(on).accordFromAnySession, true, "another provider keeps it");
+  assert.equal(accordFromAnySessionOn(applyNewChatDefaultsUpdate(on, { accordFromAnySession: false })), false);
+  assert.equal(applyNewChatDefaultsUpdate(on, { accordFromAnySession: false }).accordFromAnySession, undefined);
 });
 
 test("a new chat's main session starts with the choices for its own CLI, on a machine still set up, with its compaction right", () => {

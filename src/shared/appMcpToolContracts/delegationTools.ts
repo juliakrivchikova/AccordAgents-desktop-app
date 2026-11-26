@@ -147,14 +147,15 @@ export const DELEGATION_TOOLS: readonly AppMcpToolContract[] = [
     },
   },
   {
-    // The main session's own: only it starts an Accord (docs/main-session.md).
+    // The main session's own, and every member's while the User's "Any agent
+    // can start an Accord" is on (docs/main-session.md).
     name: APP_CHAT_START_ACCORD_TOOL,
     policyOrder: 49,
     effect: "app-managed",
     capability: "accord.start",
     desktop: {
       "title": "Start an Accord",
-      "description": "Start an Accord: the facilitator runs the /accord skill with the named members on the subject until they agree on one resolution. The launch is posted in the chat as yours. The facilitator defaults to you; it may ask the named members without asking User, never with broader rights than yours. Returns at once; the Accord's progress shows in the chat.",
+      "description": "Start an Accord: the facilitator runs the /accord skill with the named members on the subject until they agree on one resolution. The launch is posted in the chat as yours. The facilitator defaults to you; it may ask the named members as far as you may ask them yourself (without asking User when you may), never with broader rights than yours. Returns at once; the Accord's progress shows in the chat.",
       "inputSchema": {
         "type": "object",
         "additionalProperties": false,

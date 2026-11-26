@@ -1,8 +1,9 @@
 // Settings → General → New chats (the User, 2026-11-22; mockup
 // general-new-chats): how a new chat starts. Its CLI (the setting the Chat
 // Assistant used, AppSettings.assistantProviderKind), that CLI's model,
-// effort and permission mode in its own terms, where it runs, and whether it
-// compacts its context and creates scheduled tasks without asking
+// effort and permission mode in its own terms, where it runs, whether it
+// compacts its context and creates scheduled tasks without asking, and
+// whether any agent, not only the main session, starts an Accord
 // (src/shared/newChatDefaults.ts). The
 // New chat screen's controls start from these; a choice there is that
 // chat's only. The words name no main session (src/shared/sessionsViewText.ts).
@@ -50,6 +51,9 @@ export const COMPACT_WITHOUT_ASKING_DESCRIPTION =
 
 export const SCHEDULE_WITHOUT_ASKING_DESCRIPTION =
   "The agent creates scheduled tasks on its own; their code runs with your permissions. Off: it asks you first. A task that needs keys and any change to a task still ask.";
+
+export const ACCORD_FROM_ANY_SESSION_DESCRIPTION =
+  "In every chat, any agent starts an Accord itself, with the same card as your Accord button. Off: only the agent you talk to does; the others ask it.";
 
 export function providerDisplayLabel(provider: Pick<ProviderSettings, "kind" | "label">): string {
   return isChatProviderKind(provider.kind) ? cliProviderMetadata(provider.kind).label : provider.label;
@@ -133,6 +137,8 @@ export function NewChatDefaultsRows(props: {
         <CompactRow defaults={defaults} setNewChatDefaults={props.setNewChatDefaults} />
         <div className="gen-card-divider" />
         <ScheduleRow defaults={defaults} setNewChatDefaults={props.setNewChatDefaults} />
+        <div className="gen-card-divider" />
+        <AccordRow defaults={defaults} setNewChatDefaults={props.setNewChatDefaults} />
       </Fragment>
     );
   }
@@ -256,6 +262,8 @@ export function NewChatDefaultsRows(props: {
       <CompactRow defaults={defaults} setNewChatDefaults={props.setNewChatDefaults} />
       <div className="gen-card-divider" />
       <ScheduleRow defaults={defaults} setNewChatDefaults={props.setNewChatDefaults} />
+      <div className="gen-card-divider" />
+      <AccordRow defaults={defaults} setNewChatDefaults={props.setNewChatDefaults} />
       <FullAccessConfirmDialog
         option={confirming}
         onCancel={() => setConfirming(undefined)}
@@ -296,6 +304,23 @@ function ScheduleRow(props: { defaults: NewChatDefaults; setNewChatDefaults: (up
           data-testid="new-chat-schedule-toggle"
           checked={props.defaults.scheduleWithoutAsking === true}
           onChange={(event) => void props.setNewChatDefaults({ scheduleWithoutAsking: event.target.checked })}
+        />
+        <span />
+      </label>
+    </Row>
+  );
+}
+
+function AccordRow(props: { defaults: NewChatDefaults; setNewChatDefaults: (update: NewChatDefaultsUpdate) => Promise<void> }): JSX.Element {
+  return (
+    <Row title="Any agent can start an Accord" description={ACCORD_FROM_ANY_SESSION_DESCRIPTION}>
+      <label className="toggle">
+        <input
+          type="checkbox"
+          aria-label="Any agent can start an Accord"
+          data-testid="new-chat-accord-toggle"
+          checked={props.defaults.accordFromAnySession === true}
+          onChange={(event) => void props.setNewChatDefaults({ accordFromAnySession: event.target.checked })}
         />
         <span />
       </label>

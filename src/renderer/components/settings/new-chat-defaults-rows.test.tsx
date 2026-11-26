@@ -7,7 +7,7 @@ import { TooltipProvider } from "@/components/ui/tooltip";
 import type { AgentHealth, ChatProviderKind, NewChatDefaults, NewChatDefaultsUpdate, ProviderModelCatalog, ProviderSettings } from "../../../shared/types";
 import { applyNewChatDefaultsUpdate, newChatDefaultsForProvider } from "../../../shared/newChatDefaults";
 import { resetMemberModelCatalogs } from "../chat/chat-member-model-name";
-import { COMPACT_WITHOUT_ASKING_DESCRIPTION, NewChatDefaultsRows, SCHEDULE_WITHOUT_ASKING_DESCRIPTION } from "./new-chat-defaults-rows";
+import { ACCORD_FROM_ANY_SESSION_DESCRIPTION, COMPACT_WITHOUT_ASKING_DESCRIPTION, NewChatDefaultsRows, SCHEDULE_WITHOUT_ASKING_DESCRIPTION } from "./new-chat-defaults-rows";
 
 assert.ok(
   (globalThis as unknown as { ACCORD_RENDERER_JSDOM?: boolean }).ACCORD_RENDERER_JSDOM,
@@ -131,7 +131,7 @@ test("the New chats rows: provider, its CLI's model, effort and modes, where it 
   const text = view.text();
   for (const words of ["Provider", "The CLI a new chat runs on.", "Model", "From Claude Code's own model list.", "Effort", "Mode",
     "Claude Code's modes: Manual, Accept edits, Plan, Auto.", "Runs on", "Compact without asking", COMPACT_WITHOUT_ASKING_DESCRIPTION,
-    "Create scheduled tasks without asking", SCHEDULE_WITHOUT_ASKING_DESCRIPTION]) {
+    "Create scheduled tasks without asking", SCHEDULE_WITHOUT_ASKING_DESCRIPTION, "Any agent can start an Accord", ACCORD_FROM_ANY_SESSION_DESCRIPTION]) {
     assert.ok(text.includes(words), `shows "${words}"`);
   }
   assert.doesNotMatch(text, /main session|Default view|@main/i);
@@ -142,6 +142,7 @@ test("the New chats rows: provider, its CLI's model, effort and modes, where it 
   assert.equal(find("new-chat-runs-on-select").textContent?.trim(), "This computer");
   assert.equal((find("new-chat-compact-toggle") as HTMLInputElement).checked, true, "on by default");
   assert.equal((find("new-chat-schedule-toggle") as HTMLInputElement).checked, false, "off by default");
+  assert.equal((find("new-chat-accord-toggle") as HTMLInputElement).checked, false, "off by default");
   assert.deepEqual(await optionsOf("new-chat-mode-select"), ["Manual", "Accept edits", "Plan", "Auto"], "exactly Claude Code's own modes");
   assert.deepEqual(await optionsOf("new-chat-model-select"), ["Opus 5.5", "Haiku 5.5"]);
   await view.unmount();
@@ -155,6 +156,7 @@ test("each change is saved for the CLI it was made for; a model without the chos
   await choose("new-chat-runs-on-select", "Studio");
   await act(async () => { find("new-chat-compact-toggle").click(); });
   await act(async () => { find("new-chat-schedule-toggle").click(); });
+  await act(async () => { find("new-chat-accord-toggle").click(); });
   await settle();
   assert.deepEqual(view.updates, [
     { kind: "claude-code", reasoningEffort: "max" },
@@ -162,9 +164,11 @@ test("each change is saved for the CLI it was made for; a model without the chos
     { kind: "claude-code", model: "haiku", reasoningEffort: null },
     { homeMachineId: "m-1" },
     { compactWithoutAsking: false },
-    { scheduleWithoutAsking: true }
+    { scheduleWithoutAsking: true },
+    { accordFromAnySession: true }
   ]);
   assert.equal((find("new-chat-schedule-toggle") as HTMLInputElement).checked, true);
+  assert.equal((find("new-chat-accord-toggle") as HTMLInputElement).checked, true);
   assert.equal(find("new-chat-model-select").textContent?.trim(), "Haiku 5.5");
   assert.equal(find("new-chat-effort-select").textContent?.trim(), "Default");
   assert.equal(find("new-chat-mode-select").textContent?.trim(), "Plan");

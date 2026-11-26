@@ -4,9 +4,10 @@ import {
 } from "../../shared/appMcpToolContracts";
 import { isClaudePlanApprovalRequest } from "../../shared/claudePlanApproval";
 import type { HubCard, HubUserApproval } from "../../shared/hubOps";
+import type { HubMemberRules } from "../../shared/hubProtocol";
 import { chatViewFor, mainSessionParticipantId } from "../../shared/mainSession";
 import type { ChatAppToolApproval, ChatMessage, ChatParticipant, ChatParticipantRequestPermission, Conversation } from "../../shared/types";
-import { handleKey, participantsOf, rank, requestRight, withoutCode } from "./records";
+import { handleKey, lowerRight, participantsOf, rank, requestRight, withoutCode } from "./records";
 import type { Approved, Leave } from "./types";
 
 /** How a used approval or `/accord` is noted on the server. */
@@ -62,16 +63,30 @@ function names(message: ChatMessage, member: ChatParticipant): boolean {
  *  only the User and the main session start an Accord (docs/main-session.md),
  *  so another member's reply gives no leave, and the main session's gives no
  *  more than its own (as the app's startAccord does), as the server has it.
- *  The one that gives the most. */
-export function accordNaming(conversation: Conversation, member: ChatParticipant, used: ReadonlySet<string>): Leave | undefined {
+ *  While her "Any agent can start an Accord" is on (her rules say so),
+ *  another member's Accord launch (app_chat_start_accord) gives leave too,
+ *  never more than that member's own. The one that gives the most. */
+export function accordNaming(
+  conversation: Conversation,
+  member: ChatParticipant,
+  used: ReadonlySet<string>,
+  rules?: Pick<HubMemberRules, "accordFromAnySession">
+): Leave | undefined {
   const mainSessionId = mainSessionParticipantId(conversation.metadata);
-  const mainSession = mainSessionId ? participantsOf(conversation.metadata?.participants).find((item) => item.id === mainSessionId) : undefined;
+  const participants = participantsOf(conversation.metadata?.participants);
+  const mainSession = mainSessionId ? participants.find((item) => item.id === mainSessionId) : undefined;
   const sessionsView = chatViewFor(conversation.metadata) === "sessions";
   let best: Leave | undefined;
   for (const message of conversation.messages) {
     if (message.role !== "user" && message.role !== "participant") continue;
     if (message.role === "participant" && message.participantId === member.id) continue;
-    if (message.role === "participant" && mainSessionId && message.participantId !== mainSessionId) continue;
+    const launch = message.role === "participant" && message.metadata?.accordLaunchByMainSession === true;
+    // Another member's reply gives no leave in a chat with a main session;
+    // its launch with the app tool does, as far as its own right goes.
+    const launchedBy = launch && rules?.accordFromAnySession === true && message.participantId !== mainSessionId
+      ? participants.find((item) => item.id === message.participantId)
+      : undefined;
+    if (message.role === "participant" && mainSessionId && message.participantId !== mainSessionId && !launchedBy) continue;
     if (message.metadata?.hiddenFromTimeline === true) continue;
     if (used.has(accordGrantKey(message.id, member.id))) continue;
     const skills = (message.metadata as { skillMentions?: unknown } | undefined)?.skillMentions;
@@ -83,8 +98,13 @@ export function accordNaming(conversation: Conversation, member: ChatParticipant
     // In the sessions view a mention in a reply starts nobody: the main
     // session names a facilitator only by starting an Accord with the app
     // tool (its launch message), as the app gives that leave.
-    if (byMainSession && sessionsView && message.metadata?.accordLaunchByMainSession !== true) continue;
-    const cap: ChatParticipantRequestPermission = byMainSession ? requestRight(mainSession!) : "allow";
+    if (byMainSession && sessionsView && !launch) continue;
+    // A member the main session added asks no more than the main session
+    // may (as the app's participantForRun holds it).
+    const launcherRight = launchedBy
+      ? launchedBy.delegatedByParticipantId && mainSession ? lowerRight(requestRight(launchedBy), requestRight(mainSession)) : requestRight(launchedBy)
+      : undefined;
+    const cap: ChatParticipantRequestPermission = byMainSession ? requestRight(mainSession!) : launcherRight ?? "allow";
     if (!best || rank(cap) > rank(best.cap)) best = { cap, key: accordGrantKey(message.id, member.id) };
   }
   return best;
@@ -93,11 +113,17 @@ export function accordNaming(conversation: Conversation, member: ChatParticipant
 /** The leave to ask other members the app would have given this member: the
  *  User's "Allow for this chat" on a request it made (a request inferred from
  *  its reply only ever gets a one-time approval), or `/accord` naming it. */
-export function leaveGiven(conversation: Conversation, member: ChatParticipant, approved: Approved[], used: ReadonlySet<string>): Leave | undefined {
+export function leaveGiven(
+  conversation: Conversation,
+  member: ChatParticipant,
+  approved: Approved[],
+  used: ReadonlySet<string>,
+  rules?: Pick<HubMemberRules, "accordFromAnySession">
+): Leave | undefined {
   const answer = approved.find((item) => item.scope === "chat" && item.approval.toolName === APP_CHAT_REQUEST_PARTICIPANTS_TOOL &&
     item.card.participantId === member.id && item.request.source !== "inferred");
   if (answer) return { cap: "allow", key: answer.key };
-  return accordNaming(conversation, member, used);
+  return accordNaming(conversation, member, used, rules);
 }
 
 /** The message an approval is about (a member request's, or a mention's),

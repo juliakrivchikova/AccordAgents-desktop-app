@@ -34,6 +34,22 @@ test("delegate and start-Accord tools reach only the chat's own main session, wh
   assert.equal(appToolCapabilitiesForRun(plain, main, sessionRecord(main, "s"), normalizeChatAgentPermissions(main.permissions)).includes("participants.delegate"), false);
 });
 
+test("with Any agent can start an Accord on, every member gets the start-Accord tool, in any chat; delegating stays the main session's", () => {
+  const main = mainSession();
+  const worker = member("worker-id", "worker");
+  const conversation = mainSessionChat([main, worker]);
+  testService({ conversation });
+  const forWorker = (chat: Conversation, on: boolean) =>
+    appToolCapabilitiesForRun(chat, worker, sessionRecord(worker, "s", GENERIC_ROLE), normalizeChatAgentPermissions(worker.permissions), on);
+  assert.equal(forWorker(conversation, false).includes("accord.start"), false, "off: as before");
+  assert.ok(forWorker(conversation, true).includes("accord.start"));
+  assert.equal(forWorker(conversation, true).includes("participants.delegate"), false);
+  const plain = { ...conversation, metadata: { participants: [main, worker] } } as Conversation;
+  assert.ok(forWorker(plain, true).includes("accord.start"), "a chat without a main session too");
+  assert.ok(appToolCapabilitiesForRun(conversation, main, sessionRecord(main, "s"), normalizeChatAgentPermissions(main.permissions), false).includes("accord.start"),
+    "the main session keeps it with the switch off");
+});
+
 // --- delegation ----------------------------------------------------------------
 
 test("the main session adds a member without a card, within its own rights, and its task runs at once", async () => {
@@ -239,7 +255,7 @@ test("members of a main-session chat ask the main session, not User, and do not 
   const workerInstructions = chatParts(internals).memberSessions.sessionInstructions(conversation, worker, sessionRecord(worker, "s", GENERIC_ROLE), access, "/tmp/accordagents-history") as string;
   assert.match(workerInstructions, /ask @main with `app_chat_request_participants` instead of asking User/);
   assert.match(workerInstructions, /Do not write a `User choice:` block unless @main asked you to put a question to User\./);
-  assert.match(workerInstructions, /Do not start an Accord; when one is needed, ask @main\./);
+  assert.match(workerInstructions, /Start an Accord only with `app_chat_start_accord`; when you do not have that tool and one is needed, ask @main\./);
   assert.match(workerInstructions, /"target": "main"/);
   assert.doesNotMatch(workerInstructions, /Ask User directly/);
 
@@ -288,6 +304,82 @@ test("only the main session starts an Accord through the tool", async () => {
   assert.equal(result.ok, false);
   assert.equal(result.code, "not_main_session");
   assert.equal(storage.current.messages.length, 1);
+});
+
+test("with Any agent can start an Accord on, another member starts one through the tool, as its own message, its facilitator's leave held to its own; off, it is refused again", async () => {
+  const main = mainSession();
+  const worker = member("worker-id", "worker", { permissions: permissions({ requestParticipants: "ask" }) });
+  const lead = member("lead-id", "lead", { permissions: permissions({ requestParticipants: "deny" }) });
+  const settings: Record<string, unknown> = { newChatDefaults: { compactWithoutAsking: true, accordFromAnySession: true } };
+  const { service, storage, runs } = testService({ conversation: mainSessionChat([main, worker, lead]), userSkills: accordSkills(), settings: settings as never });
+  const workerActor = (patch: Record<string, unknown> = {}) => mainActor(["participants.request", "accord.start"], { participantId: worker.id, ...patch });
+
+  const own = await service.startAccordFromTool(workerActor(), { targets: ["main"], subject: "Pick the queue." });
+  assert.equal(own.ok, true, JSON.stringify(own));
+  assert.equal(own.facilitator, "@worker", "it leads it by default");
+  assert.match(String(own.next), /end this turn/);
+  const launch = storage.current.messages.find((message: ChatMessage) => message.id === own.launchMessageId)!;
+  assert.deepEqual([launch.role, launch.participantId, launch.metadata?.accordLaunchByMainSession], ["participant", worker.id, true]);
+  assert.deepEqual(accordLaunchCardForMessage(launch), { facilitator: "worker", members: ["main"], subject: "Pick the queue." });
+  await waitFor(() => runs.some((run) => run.participant.id === worker.id && run.prompt.includes("/accord")));
+
+  const named = await service.startAccordFromTool(workerActor(), { targets: ["main"], subject: "Agree on it.", facilitator: "lead" });
+  assert.equal(named.ok, true, JSON.stringify(named));
+  const leadAfter = participantsOf(storage.current).find((participant) => participant.id === lead.id)!;
+  assert.equal(normalizeChatAgentPermissions(leadAfter.permissions).requestParticipants, "ask", "never more than the worker may ask itself");
+
+  assert.match(String(storage.current.messages.find((message: ChatMessage) => message.id === named.launchMessageId)?.content),
+    /left your requests to members to the user's approval/, "the launch tells the facilitator what it may do");
+
+  // Turned off while its turn still has the tool: refused, nothing written.
+  settings.newChatDefaults = { compactWithoutAsking: true };
+  const count = storage.current.messages.length;
+  const refused = await service.startAccordFromTool(workerActor(), { targets: ["main"], subject: "Again." });
+  assert.deepEqual([refused.ok, refused.code], [false, "not_main_session"]);
+  assert.equal(storage.current.messages.length, count);
+  // The main session still starts one.
+  assert.equal((await service.startAccordFromTool(mainActor(), { targets: ["worker"], subject: "Main's own." })).ok, true);
+});
+
+test("a member the main session added gives its facilitator no more than the main session may now", async () => {
+  const main = mainSession("claude-code", { permissions: permissions({ requestParticipants: "ask" }) });
+  const worker = member("worker-id", "worker", { delegatedByParticipantId: main.id, permissions: permissions({ requestParticipants: "allow" }) });
+  const lead = member("lead-id", "lead", { permissions: permissions({ requestParticipants: "deny" }) });
+  const settings = { newChatDefaults: { compactWithoutAsking: true, accordFromAnySession: true } };
+  const { service, storage } = testService({ conversation: mainSessionChat([main, worker, lead]), userSkills: accordSkills(), settings: settings as never });
+  const result = await service.startAccordFromTool(mainActor(["accord.start"], { participantId: worker.id }), { targets: ["main"], subject: "X", facilitator: "lead" });
+  assert.equal(result.ok, true, JSON.stringify(result));
+  const leadAfter = participantsOf(storage.current).find((participant) => participant.id === lead.id)!;
+  assert.equal(normalizeChatAgentPermissions(leadAfter.permissions).requestParticipants, "ask", "its stored allow is held to the main session's ask");
+});
+
+test("the Chat Assistant gets no start-Accord tool from the switch", () => {
+  const main = mainSession();
+  const assistant = { ...member("assistant-id", "assistant"), roleConfigId: "administrator" };
+  const conversation = mainSessionChat([main, assistant]);
+  testService({ conversation });
+  const session = { ...sessionRecord(assistant, "s", GENERIC_ROLE), roleConfigId: "administrator" };
+  assert.equal(appToolCapabilitiesForRun(conversation, assistant, session, normalizeChatAgentPermissions(assistant.permissions), true).includes("accord.start"), false);
+});
+
+test("with Any agent can start an Accord on, any member's ad hoc draft collection is refused as the main session's is; off, it is not", async () => {
+  const main = mainSession();
+  const worker = member("worker-id", "worker");
+  const settings: Record<string, unknown> = { newChatDefaults: { compactWithoutAsking: true, accordFromAnySession: true } };
+  const { service } = testService({ conversation: mainSessionChat([main, worker]), userSkills: accordSkills(), settings: settings as never });
+  let handler: ((actor: unknown, toolName: string, request: unknown) => Promise<any>) | undefined;
+  wireArtifactToolHandler({ setArtifactToolHandler: (next: typeof handler) => { handler = next; } } as never, service,
+    async () => ({ ok: true, value: {} }));
+  const collection = { initialState: "collecting_drafts", name: "Pick the queue", operationId: "accord:y:create" };
+  const workerActor = mainActor(["participants.request", "accord.start"], { participantId: worker.id });
+  const adHoc = await handler!(workerActor, APP_ARTIFACT_CREATE_TOOL, collection);
+  assert.equal(adHoc.ok, false);
+  assert.equal(adHoc.error.code, "accord_not_launched");
+  assert.match(adHoc.error.message, /app_chat_start_accord/);
+  // A member without the tool (its turn began with the switch off) is not held to it.
+  assert.equal((await handler!(mainActor(["participants.request"], { participantId: worker.id }), APP_ARTIFACT_CREATE_TOOL, collection)).ok, true);
+  settings.newChatDefaults = { compactWithoutAsking: true };
+  assert.equal((await handler!(workerActor, APP_ARTIFACT_CREATE_TOOL, collection)).ok, true, "off: as before");
 });
 
 test("the main session's Accord always has its card: a draft collection is filed under the launch it runs for, and one with no launch at all is refused", async () => {
@@ -389,7 +481,7 @@ test("in a main-session chat shown the classic way another member's '@x /accord'
   await chatParts(service).inferredRequests.createImplicitParticipantRequestApproval(conversation, worker, [fromWorker]);
   assert.equal(conversation.messages.some((message) => message.metadata?.participantRequest), false, "no request, no Accord");
   assert.equal(normalizeChatAgentPermissions(participantsOf(conversation).find((item) => item.id === other.id)!.permissions).requestParticipants, "ask");
-  assert.ok((conversation.metadata.warnings as string[]).some((warning) => warning.includes("only this chat's own session starts one")));
+  assert.ok((conversation.metadata.warnings as string[]).some((warning) => warning.includes('"/accord" in a reply starts no Accord in this chat')));
 
   const fromMain: ChatMessage = {
     id: "main-reply", role: "participant", participantId: main.id, participantLabel: "@main",

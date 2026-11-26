@@ -308,3 +308,29 @@ test("a closed Accord's line comes only from the User's devices, once per Accord
   assert.equal(page.body.conversation.updatedAt, before.body.conversation.updatedAt, "the chat keeps its place in her list");
   assert.deepEqual((await h.storage.getConversation(chat))?.metadata.accordClosedLaunchIds, ["launch-1", "launch-2"], "the server's own record, for the phone's list");
 });
+
+test("a machine's member starts an Accord with the app tool: its facilitator elsewhere runs once while her switch is on, never with it off", async (t) => {
+  const h = await hub(t);
+  const chat = id("chat");
+  const own = { repoRead: true, webAccess: false, workspaceWrite: false, shell: { enabled: false, rules: [] } };
+  const main = { id: "p-main", handle: "main", label: "Main", kind: "claude-code", roleConfigId: "main-session", agentMode: "default", permissions: own };
+  const helper = { id: "p-helper", handle: "helper", label: "Helper", kind: "claude-code", roleConfigId: "r", homeMachineId: "machine-1", agentMode: "default",
+    permissions: { ...own, requestParticipants: "ask" } };
+  const desk = { id: "p-desk", handle: "desk", label: "Desk", kind: "claude-code", roleConfigId: "r", agentMode: "default", permissions: own };
+  await h.write(h.owner, { opId: id("op"), kind: "conversation.create", conversationId: chat,
+    conversation: { title: "Accord", kind: "chat", createdAt: new Date().toISOString(), metadata: { participants: [main, helper, desk], mainSessionParticipantId: "p-main" } } } as HubOp);
+  const launchText = "@desk /accord\n\nSubject:\nPick the queue.\n\nSelected accord members: main.\nRun the accord skill for exactly those selected members and this subject. " +
+    "Use app_chat_request_participants for those members only. The app has left your requests to members to the user's approval in this chat, as for the member who started it; the user can change it from your member controls.";
+  const status = (response: { body: HubOpsResponse }) => response.body.results[0] as { status: string; reason?: string };
+  assert.equal(status(await h.write(h.machine, { opId: id("op"), kind: "message.create", conversationId: chat,
+    message: { ...reply("m-launch", "p-helper", "done", launchText), metadata: { accordLaunchByMainSession: true } } })).status, "accepted");
+  const ask = () => h.write(h.machine, { opId: id("op"), kind: "turn.request", conversationId: chat, runId: `turn-${id("x")}`, messageId: "m-launch", participantId: "p-desk",
+    request: { kind: "turn" } } as HubOp);
+  const rules = (on: boolean) => ({ version: 1, roles: {}, presets: {}, ...(on ? { accordFromAnySession: true } : {}) });
+
+  assert.equal((await h.call(h.owner, "PUT", "/v1/member-rules", rules(false))).status, 200);
+  assert.equal(status(await ask()).status, "rejected", "switch off: its own 'ask' right goes, no card");
+  assert.equal((await h.call(h.owner, "PUT", "/v1/member-rules", rules(true))).status, 200);
+  assert.equal(status(await ask()).status, "accepted", "switch on: the facilitator runs, as the app runs it");
+  assert.equal(status(await ask()).status, "rejected", "once per launch");
+});

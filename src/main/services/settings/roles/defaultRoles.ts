@@ -22,7 +22,7 @@ export const DEFAULT_CHAT_ROLES: ChatRoleConfig[] = [
     id: MAIN_SESSION_ROLE_ID,
     label: "Main session",
     instructions: DEFAULT_MAIN_SESSION_INSTRUCTIONS,
-    version: 3,
+    version: 4,
     builtIn: true,
     appToolCapabilities: ["participants.manage", "participants.delegate", "accord.start"] satisfies ChatAppToolCapability[],
     participantDefaults: {

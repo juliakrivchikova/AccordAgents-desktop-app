@@ -390,6 +390,11 @@ export interface HubMemberRules {
    *  a machine asks; the computer refuses its own. A computer from before
    *  lists none. */
   machineCliModes?: Record<string, boolean>;
+  /** Settings → General → New chats → "Any agent can start an Accord" is
+   *  on: another member's Accord launch (app_chat_start_accord) gives its
+   *  facilitator leave to ask the members, as the main session's does, never
+   *  more than that member's own (src/hub/hubMachineScope/grants.ts). */
+  accordFromAnySession?: true;
 }
 
 export const HUB_MEMBER_RULES_PATH = "/v1/member-rules";

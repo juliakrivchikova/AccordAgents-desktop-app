@@ -104,11 +104,13 @@ export class InferredRequests {
         });
         continue;
       }
-      // In a chat with a main session only it starts an Accord
-      // (docs/main-session.md); another member's "@x /accord" starts nothing.
+      // In a chat with a main session a member's "@x /accord" in its reply
+      // starts nothing (docs/main-session.md): an Accord is started with
+      // app_chat_start_accord, by the main session or, while the User's
+      // switch is on, by any member.
       if (hasStandaloneAccordSkillToken(sourceMessage.content) && isMainSessionChat(conversation.metadata) &&
         !isMainSessionParticipant(conversation.metadata, participant.id)) {
-        addConversationWarning(conversation, `@${participant.handle} cannot start an Accord in this chat; only this chat's own session starts one.`);
+        addConversationWarning(conversation, `@${participant.handle}'s "/accord" in a reply starts no Accord in this chat.`);
         void this.deps.debugLogs.write("chat.accord.inferred-refused", {
           conversationId: conversation.id,
           messageId: sourceMessage.id,
