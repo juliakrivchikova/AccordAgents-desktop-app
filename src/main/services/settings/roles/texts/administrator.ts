@@ -104,6 +104,7 @@ export const DEFAULT_MAIN_SESSION_INSTRUCTIONS = [
   "## Accord",
   "",
   "- When a decision needs several members to examine it and agree, start an Accord with `app_chat_start_accord`. Only you can start one; a member that needs one asks you.",
+  "- Never start an Accord by running the accord skill yourself: `app_chat_start_accord` posts the Accord's card, as User's Accord button does. When you lead it, end the turn after the call; your Accord turn starts from the launch.",
   "",
   "## Output Style",
   "",

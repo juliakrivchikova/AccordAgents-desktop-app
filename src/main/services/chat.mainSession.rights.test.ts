@@ -7,6 +7,8 @@ import { accordLaunchCardForMessage } from "../../shared/accordLaunchCard";
 import { defaultChatAgentPermissions, normalizeChatAgentPermissions } from "../../shared/agentPermissions";
 import { applyChatAccessOptionById, selectedChatAccessOption } from "../../shared/chatAccessModes";
 import { buildGeminiExecInvocation } from "./geminiExec";
+import { wireArtifactToolHandler } from "../appToolWiring";
+import { APP_ARTIFACT_CREATE_TOOL } from "../../shared/appMcpToolContracts";
 import type { ChatAgentPermissions, ChatMessage, ChatParticipant, ChatProviderKind, Conversation } from "../../shared/types";
 import {
   childActor, clone, delegatedManager, delegationBatches, GENERIC_ROLE, MAIN_ROLE, mainActor, mainSession, mainSessionChat,
@@ -299,6 +301,89 @@ test("only the main session starts an Accord through the tool", async () => {
   assert.equal(result.ok, false);
   assert.equal(result.code, "not_main_session");
   assert.equal(storage.current.messages.length, 1);
+});
+
+test("the main session's Accord always has its card: a draft collection is filed under the launch it runs for, and one with no launch at all is refused", async () => {
+  const main = mainSession();
+  const worker = member("worker-id", "worker");
+  const { service, storage } = testService({ conversation: mainSessionChat([main, worker]), userSkills: accordSkills() });
+  const dispatched: Array<{ member: string; origin?: string }> = [];
+  let handler: ((actor: unknown, toolName: string, request: unknown) => Promise<any>) | undefined;
+  wireArtifactToolHandler({ setArtifactToolHandler: (next: typeof handler) => { handler = next; } } as never, service,
+    async (member, _conversationId, _toolName, _request, context) => {
+      dispatched.push({ member, ...(context?.originMessageId ? { origin: context.originMessageId } : {}) });
+      return { ok: true, value: {} };
+    });
+  const collection = { initialState: "collecting_drafts", name: "Pick the database", operationId: "accord:x:create" };
+  const create = async (actor: unknown) => {
+    dispatched.length = 0;
+    const result = await handler!(actor, APP_ARTIFACT_CREATE_TOOL, collection);
+    return { result, origin: dispatched[0]?.origin, reached: dispatched.length > 0 };
+  };
+
+  // Run by itself in the turn of User's message (the accord skill straight
+  // away), with no launch in the chat: refused before anything is made,
+  // pointing at app_chat_start_accord.
+  const adHoc = await create(mainActor());
+  assert.equal(adHoc.result.ok, false);
+  assert.equal(adHoc.result.error.code, "accord_not_launched");
+  assert.match(adHoc.result.error.message, /app_chat_start_accord/);
+  assert.equal(adHoc.reached, false, "nothing reached the documents");
+
+  // A plain document, another member's collection, or a main session that
+  // cannot start an Accord with the tool, is not held to it.
+  assert.equal((await handler!(mainActor(), APP_ARTIFACT_CREATE_TOOL, { name: "Notes", content: "Text" })).ok, true);
+  const workerOwn = await create(mainActor(["participants.request"], { participantId: worker.id }));
+  assert.deepEqual([workerOwn.result.ok, workerOwn.origin], [true, undefined]);
+  const noStartTool = await create(mainActor(["participants.request"]));
+  assert.deepEqual([noStartTool.result.ok, noStartTool.origin], [true, undefined]);
+
+  // Started with the tool, as User's button does: the main session leads it
+  // and is told to end the turn.
+  const started = await service.startAccordFromTool(mainActor(), { targets: ["worker"], subject: "Pick the database." });
+  assert.equal(started.ok, true, JSON.stringify(started));
+  assert.match(String(started.next), /end this turn/);
+  const launchId = String(started.launchMessageId);
+  assert.ok(storage.current.messages.some((message: ChatMessage) => message.id === launchId && accordLaunchCardForMessage(message)));
+  // Its collection is filed under the launch: in the turn the launch starts,
+  // in a later turn of the launch's thread, and in a turn whose trigger is
+  // another message -- the one that called the tool, her message that joined
+  // the running step, a "go on" after the launch's turn was stopped -- as long
+  // as the launch is the chat's newest, open and without a document.
+  for (const patch of [
+    { triggerMessageId: launchId, triggerThreadId: launchId },
+    { triggerMessageId: "auto-resume", triggerThreadId: launchId },
+    {},
+    { triggerMessageId: "user-joined", triggerThreadId: "user-joined" }
+  ]) {
+    const filed = await create(mainActor(undefined, patch));
+    assert.deepEqual([filed.result.ok, filed.origin], [true, launchId], JSON.stringify(patch));
+  }
+
+  // Once a document is filed under it, a collection outside its turns is not
+  // reached back for: with no other launch, it is refused again.
+  await service.postArtifactChatNote(storage.current.id, "e1", "@main created draft collection [Pick](#artifact:a1) · Drafts 0/2", { originMessageId: launchId });
+  assert.equal((await create(mainActor())).result.error?.code, "accord_not_launched");
+  assert.equal((await create(mainActor(undefined, { triggerMessageId: launchId, triggerThreadId: launchId }))).origin, launchId,
+    "its own turns still file under it");
+
+  // A newer launch another member leads hides it; a folded one is not open.
+  const named = await service.startAccordFromTool(mainActor(), { targets: ["main"], subject: "Other.", facilitator: "worker" });
+  assert.equal(named.ok, true, JSON.stringify(named));
+  assert.equal(named.next, undefined, "a facilitator it names is told nothing of the kind");
+  assert.equal((await create(mainActor())).result.error?.code, "accord_not_launched", "the newest launch is the worker's");
+  const workerLeads = await create(mainActor(["participants.request"], { participantId: worker.id }));
+  assert.equal(workerLeads.origin, String(named.launchMessageId), "the worker's collection files under the launch it leads");
+  await service.closeAccordCard({ conversationId: storage.current.id, launchMessageId: String(named.launchMessageId) });
+  assert.equal((await create(mainActor(["participants.request"], { participantId: worker.id }))).origin, undefined, "a folded launch is not open");
+
+  // A turn whose trigger cannot be read files the collection under nothing,
+  // as before, rather than refusing it for a reason that is not the member's.
+  const lookup = storage.conversationMessageById;
+  storage.conversationMessageById = async () => { throw new Error("sqlite busy"); };
+  const unread = await create(mainActor(undefined, { triggerMessageId: "paged-out", triggerThreadId: "paged-out" }));
+  storage.conversationMessageById = lookup;
+  assert.deepEqual([unread.result.ok, unread.origin], [true, undefined]);
 });
 
 test("in a main-session chat shown the classic way another member's '@x /accord' reply starts nothing; the main session's still does", async () => {

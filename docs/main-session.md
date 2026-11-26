@@ -36,6 +36,18 @@ verbatim there). Modelled on T3 Code (`~/reference/t3code`,
   Approvals of members' commands still reach the User on the main timeline.
 - **Only the main session can start an Accord** (`app_chat_start_accord`); a
   member that needs one asks the main session. The User still can, as today.
+  **An Accord looks the same whoever starts it** (the User, 2026-11-26): the
+  main session never runs the accord skill ad hoc, which would leave no card
+  and every step as a note of its own. A draft collection is filed under the
+  launch its turn runs for, else under the chat's newest launch when the
+  member leads it, it is open (not folded) and has no document yet (her
+  message joined the running step and took the turn's tools along; the
+  launch's turn was stopped and she said to go on). With no such launch the
+  main session's collection is refused (`accord_not_launched`,
+  `ChatAccord.accordCollectionOrigin`, on this computer and on a cloud
+  machine alike) and it is pointed at `app_chat_start_accord`; when it leads
+  the Accord itself, the tool's answer tells it to end the turn, and its
+  Accord turn starts from the launch, as from the User's Accord button.
 - **In the sessions view an @handle in a member's reply starts nobody**
   (the User, 2026-11-22), as a mention in text wakes nobody in Claude Code:
   no turn, no task row, whoever wrote it (the main session included) and
