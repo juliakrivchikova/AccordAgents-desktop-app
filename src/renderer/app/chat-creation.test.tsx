@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { act, create, type ReactTestRenderer } from "react-test-renderer";
-import type { AgentHealth, ChatActivityItem, ChatMessage, Conversation, ReviewProgress, StartReviewResult } from "../../shared/types";
+import type { AgentHealth, ChatActivityItem, ChatMessage, Conversation, StartReviewResult } from "../../shared/types";
 import { useAppState, type AppState } from "./app-state";
 import { DEFAULT_SETTINGS } from "./constants";
 import { useAppEffects } from "./use-app-effects";
@@ -13,7 +13,6 @@ import { ConversationPanel } from "../components/conversation/conversation-panel
 import { toast } from "sonner";
 import { takeComposerFocusRequest } from "./composer-focus-request";
 import { upsertConversationSummary } from "./conversation-summaries";
-import { chatCreationStatus } from "../components/chat/chat-creation-state";
 
 function deferred<T>() {
   let resolve!: (value: T) => void;
@@ -36,13 +35,12 @@ async function harness() {
   let actions!: ChatActions;
   let navigation!: ConversationActions;
   let appNavigation!: AppNavigation;
-  let progress!: (event: ReviewProgress) => void;
   let createRunId: string | undefined;
   let announce: ((update: Conversation) => void) | undefined;
   window.consensus = {
     onConversationDeleted: () => () => {},
     onConversationUpdated: (callback: (update: Conversation) => void) => { announce = callback; return () => {}; },
-    onReviewProgress: callback => { progress = callback; return () => {}; },
+    onReviewProgress: () => () => {},
     detectAgents: () => { calls.push("detect"); return detect.promise; },
     createChatConversation: request => { calls.push("create"); createRunId = request.runId; return creation.promise; },
     sendChatMessage: request => { calls.push(`send:${request.runId}`); return sent.promise; },
@@ -90,31 +88,22 @@ async function harness() {
     state.setNewChatRepoFileMentions([{ path: "src/main.ts" }]);
   });
   return { renderer, creation, sent, opened, detect, calls, state: () => state, actions: () => actions, navigation: () => navigation, appNavigation: () => appNavigation,
-    progress: (event: ReviewProgress) => progress(event), runId: () => createRunId,
+    runId: () => createRunId,
     /** The app's snapshot of a chat, as conversations:updated announces it. */
     announce: (update: Conversation) => announce?.(update),
     saved: (value: Conversation) => { saved = value; } };
 }
 
-test("New Chat shows only its own preparation progress; Stop preserves the draft and unlocks retry", async () => {
+test("Stop while the chat is being made preserves the draft and unlocks retry", async () => {
   const h = await harness();
   let pending!: Promise<boolean>;
   await act(async () => { pending = h.actions().startChat(); });
   assert.ok(h.runId(), h.state().error);
   // New chat stays on screen while the chat is made (no card, no blank
-  // frame, the User 2026-11-22); its status line says what this start does.
+  // frame, the User 2026-11-22), and says nothing over its composer (the
+  // User 2026-11-26: the "Creating your chat" line is gone).
   assert.equal(h.renderer.toJSON(), null);
-  const status = (): string => chatCreationStatus(h.state().progressLog, h.state().currentRunId, Boolean(h.state().chatCreationRef.current?.signal.aborted));
-  assert.equal(status(), "Creating your chat…");
-  await act(async () => {
-    h.progress({ runId: h.runId()!, phase: "initial", message: "Copying project · 42%", createdAt: new Date().toISOString() });
-    h.progress({ runId: "other-chat", phase: "initial", message: "UNRELATED", createdAt: new Date().toISOString() });
-    await new Promise(resolve => setTimeout(resolve, 30));
-  });
-  assert.match(status(), /42%/);
-  assert.doesNotMatch(status(), /UNRELATED/);
   await act(async () => { await h.navigation().cancelReview(); });
-  assert.equal(status(), "Stopping preparation…");
   await act(async () => { h.creation.reject(new Error("Chat creation cancelled.")); assert.equal(await pending, false); });
   assert.equal(h.state().busy, false);
   assert.equal(h.state().question, "Draft must survive");

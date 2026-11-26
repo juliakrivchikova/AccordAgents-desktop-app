@@ -65,7 +65,6 @@ import { useCloseOnOutside, useNewChatMenuMaxHeight } from "./new-chat-menu-hook
 import { NewChatModelChip } from "./new-chat-model-chip";
 import { NewChatRecent } from "./new-chat-recent";
 import { NewChatFromClis } from "../cli-import/new-chat-from-clis";
-import { ChatCreationStatusLine } from "./chat-creation-state";
 import { ComposerBranchMenu, ComposerContextStrip, ComposerFooterSlot } from "./composer-context";
 import { FOLDER_BUSY_REASON, folderBusy, normalizeProjectPath, projectLabelForPath } from "../../../shared/newChat";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
@@ -138,8 +137,6 @@ export function NewChatScreen(props: {
   onRepoInfoChange?: (info: GitRepoInfo) => void;
   /** Stops a chat being made (its CLI check or its creation). */
   onStopStart?: () => void;
-  /** While the chat is being made: what its preparation is doing. */
-  creationStatus?: string;
   /** Opens one of the folder's recent chats listed under the heading. */
   onOpenChat?: (conversationId: string) => void;
   onOpenProviderSettings: () => void;
@@ -505,7 +502,6 @@ export function NewChatScreen(props: {
         {!needsProviderSetup && !chosenProviderGone && assistantNote && !chosenProviderInEffect && (
           <p className="new-chat-assistant-note" data-testid="new-chat-assistant-note">{assistantNote}</p>
         )}
-        {props.creationStatus !== undefined && <ChatCreationStatusLine text={props.creationStatus} />}
         <ChatComposerAttachmentChips
           pendingImages={images.pendingImages}
           removeFileMention={mentions.removeFileMention}

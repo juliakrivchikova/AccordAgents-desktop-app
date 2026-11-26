@@ -67,7 +67,6 @@ import { SubagentProvidersContext, type SubagentProvidersActions } from "./compo
 import { restartingMembers } from "../shared/memberRestart";
 import { TerminalPanel } from "./components/terminal/terminal-panel";
 import { useTerminalPanel } from "./components/terminal/use-terminal-panel";
-import { chatCreationStatus } from "./components/chat/chat-creation-state";
 import "./styles/app.css";
 function App(): JSX.Element {
   const state = useAppState();
@@ -668,9 +667,6 @@ function App(): JSX.Element {
                 onOpenChat={navigation.openChat}
                 onRepoInfoChange={state.setRepoInfo}
                 onStopStart={() => void conversationActions.cancelReview()}
-                creationStatus={state.busy && state.startingChatRef.current
-                  ? chatCreationStatus(state.progressLog, state.currentRunId, Boolean(state.chatCreationRef.current?.signal.aborted))
-                  : undefined}
                 renderParticipantAvatar={renderNewChatMemberMark}
                 participantRoleLabel={(participant) => chatRoleLabel(state.settings.chatRoleConfigs, participant)}
                 onPromptChange={state.setQuestion}
