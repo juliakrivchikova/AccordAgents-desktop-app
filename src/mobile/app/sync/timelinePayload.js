@@ -15,13 +15,12 @@ import { renderMessageContentIfChanged } from "../text/messageText.js";
 
 // The line a finished compaction left (shared/mainSession.ts
 // sessionsCompactionLineOf): the member compacted and the CLI that did it.
-// It travels with no words; the sessions view words it by that CLI.
-const COMPACTING_CLIS = ["claude-code", "codex-cli", "gemini-cli"];
-
+// It travels with no words; the sessions view words it by that CLI, and the
+// shared rule leaves out a CLI it does not know.
 function compactionOfEvent(event) {
   const line = event && event.role === "system" ? event.compaction : undefined;
   if (!line || typeof line.participantId !== "string" || !line.participantId) return undefined;
-  return { participantId: line.participantId, ...(COMPACTING_CLIS.indexOf(line.cli) >= 0 ? { cli: line.cli } : {}) };
+  return { participantId: line.participantId, ...(typeof line.cli === "string" && line.cli ? { cli: line.cli } : {}) };
 }
 
 // What a member posted during its turn is part of its reply (the desktop's
