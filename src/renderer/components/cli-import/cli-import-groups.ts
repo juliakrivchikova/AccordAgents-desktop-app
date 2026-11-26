@@ -58,7 +58,9 @@ export function cliImportProjectSections(threads: CliImportThread[]): CliImportP
   const byKey = new Map<string, CliImportProject>();
   for (const thread of [...threads].sort(newestFirst)) {
     const key = cliImportProjectKey(thread);
-    const project = byKey.get(key) ?? { key, path: key, label: key ? projectLabelForPath(key) : "No folder", exists: false, threads: [] };
+    const project = byKey.get(key) ?? { key, path: key, label: thread.projectName ?? (key ? projectLabelForPath(key) : "No folder"), exists: false, threads: [] };
+    // A name its app gives the project wins over the folder's.
+    if (thread.projectName && project.label !== thread.projectName && !project.threads.some((other) => other.projectName)) project.label = thread.projectName;
     project.exists ||= thread.folderExists;
     project.threads.push(thread);
     byKey.set(key, project);

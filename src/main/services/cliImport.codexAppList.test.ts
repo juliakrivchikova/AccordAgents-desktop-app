@@ -29,19 +29,19 @@ interface Row {
 }
 
 const rows: Row[] = [
-  { name: "in a project's folder: by its name", thread: { cwd: REPO, name: "Fix the build", preview: "Fix it" }, listed: { folder: REPO, title: "Fix the build" } },
-  { name: "in a project's subfolder: under the project's root, by its preview", thread: { cwd: `${REPO}/packages/web`, preview: "Check the page" }, listed: { folder: `${REPO}/packages/web`, project: REPO, title: "Check the page" } },
+  { name: "in a project's folder: by its name", thread: { cwd: REPO, name: "Fix the build", preview: "Fix it" }, listed: { folder: REPO, title: "Fix the build", projectName: "rename-app" } },
+  { name: "in a project's subfolder: under the project's root, by its preview", thread: { cwd: `${REPO}/packages/web`, preview: "Check the page" }, listed: { folder: `${REPO}/packages/web`, project: REPO, title: "Check the page", projectName: "rename-app" } },
   {
     name: "a Codex worktree she put in a project of the time before the app-server: under that project",
     thread: { cwd: "/Users/me/.codex/worktrees/d334/rename-app", preview: "Ship it" },
     app: { assignedTo: LOCAL_PROJECT },
-    listed: { folder: "/Users/me/.codex/worktrees/d334/rename-app", project: REPO, title: "Ship it" }
+    listed: { folder: "/Users/me/.codex/worktrees/d334/rename-app", project: REPO, title: "Ship it", projectName: "rename-app" }
   },
   {
     name: "put in a project by its old id: under the project that id became",
     thread: { cwd: "/Users/me/Documents/Codex/2026-08-18/g", preview: "Trace it" },
     app: { assignedTo: LEGACY_PROJECT },
-    listed: { folder: "/Users/me/Documents/Codex/2026-08-18/g", project: OTHER, title: "Trace it" }
+    listed: { folder: "/Users/me/Documents/Codex/2026-08-18/g", project: OTHER, title: "Trace it", projectName: "Probe" }
   },
   { name: "a chat outside every project: on its own", thread: { cwd: "/Users/me/Documents/Codex/2026-09-05/plan", preview: "Plan a trip" }, app: { projectless: true }, listed: { folder: "/Users/me/Documents/Codex/2026-09-05/plan", title: "Plan a trip" } },
   { name: "pinned outside every project: on its own", thread: { cwd: "/Users/me/notes", preview: "Notes" }, app: { pinned: true }, listed: { folder: "/Users/me/notes", title: "Notes" } },

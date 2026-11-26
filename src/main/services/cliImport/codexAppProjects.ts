@@ -14,6 +14,7 @@ import { asRecord } from "../cliAgents/runs/records";
 /** A project of `project/list`, with its roots. */
 export interface CodexProject {
   id: string;
+  name?: string;
   roots: string[];
 }
 
@@ -75,14 +76,15 @@ export function codexAppPlace(
   thread: { id: string; cwd: string; originator?: unknown },
   projects: readonly CodexProject[],
   state: CodexAppState
-): { projectRoot?: string } | undefined {
+): { projectRoot?: string; projectName?: string } | undefined {
   if (thread.originator === OWN_ORIGINATOR) return undefined;
   const assignedId = state.assignments.get(thread.id);
   const assigned = assignedId !== undefined ? assignedProject(assignedId, projects, state) : undefined;
-  if (assigned) return { projectRoot: containingRoot(thread.cwd, assigned.roots) ?? assigned.roots[0] };
+  if (assigned) return { projectRoot: containingRoot(thread.cwd, assigned.roots) ?? assigned.roots[0], ...named(assigned) };
   if (state.projectless.has(thread.id)) return {};
   const projectRoot = containingRoot(thread.cwd, projects.flatMap((project) => project.roots));
-  if (projectRoot) return { projectRoot };
+  const owner = projectRoot ? projects.find((project) => project.roots.includes(projectRoot)) : undefined;
+  if (projectRoot) return { projectRoot, ...(owner ? named(owner) : {}) };
   return state.pinned.has(thread.id) ? {} : undefined;
 }
 
@@ -102,6 +104,10 @@ function containingRoot(folder: string, roots: readonly string[]): string | unde
     if (folder && inside && (!found || root.length > found.length)) found = root;
   }
   return found;
+}
+
+function named(project: CodexProject): { projectName?: string } {
+  return project.name ? { projectName: project.name } : {};
 }
 
 function strings(value: unknown): string[] {

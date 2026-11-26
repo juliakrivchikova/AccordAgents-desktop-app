@@ -16,6 +16,8 @@ export interface CliImportThread {
   /** The project its app lists it under, when that is not `folder` (a
    *  Claude Code session in one of the repository's worktrees). */
   project?: string;
+  /** The project's name in its app, when the app names it (Codex). */
+  projectName?: string;
   /** The thread it was started from, when its app shows it under that one
    *  (Claude's side sessions): that thread's `sessionId`. */
   parentSessionId?: string;

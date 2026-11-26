@@ -34,7 +34,11 @@ export class CodexThreads implements CliThreadReader {
         const found = threadFound(thread);
         const place = codexAppPlace({ id: found.sessionId, cwd: found.folder, originator: thread.originator }, projects, state);
         if (!place) return [];
-        return [place.projectRoot && place.projectRoot !== found.folder ? { ...found, project: place.projectRoot } : found];
+        return [{
+          ...found,
+          ...(place.projectRoot && place.projectRoot !== found.folder ? { project: place.projectRoot } : {}),
+          ...(place.projectName ? { projectName: place.projectName } : {})
+        }];
       });
     });
   }
@@ -117,7 +121,8 @@ async function listProjects(request: CodexRequest): Promise<CodexProject[]> {
   const projects: CodexProject[] = [];
   for await (const project of pages(request, "project/list", {})) {
     const roots = Array.isArray(project.roots) ? project.roots.map((root) => asRecord(root)?.path).filter((root): root is string => typeof root === "string" && root !== "") : [];
-    if (typeof project.id === "string") projects.push({ id: project.id, roots });
+    const name = typeof project.name === "string" && project.name.trim() ? project.name.trim() : undefined;
+    if (typeof project.id === "string") projects.push({ id: project.id, ...(name ? { name } : {}), roots });
   }
   return projects;
 }

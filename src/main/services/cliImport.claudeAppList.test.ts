@@ -99,3 +99,24 @@ test("Claude Code: the sessions the Claude app lists, mapped from its records", 
   }
   assert.equal(threads.length, rows.filter((row) => row.listed).length);
 });
+
+test("Claude Code: a session the app moved is listed and imported in the app's folder, by the app's title", async (t) => {
+  const scratch = await mkdtemp(path.join(tmpdir(), "aa-claude-app-moved-"));
+  t.after(() => rm(scratch, { recursive: true, force: true }));
+  const configDir = path.join(scratch, "claude");
+  const appDataDir = path.join(scratch, "app-data");
+  const records = path.join(appDataDir, "Claude", "claude-code-sessions", randomUUID(), randomUUID());
+  await mkdir(records, { recursive: true });
+  const moved = "/work/new-place";
+  await writeFile(path.join(records, `${localId(7)}.json`), JSON.stringify(record(7, { title: "Moved work", cwd: moved, originCwd: moved })));
+  // The app links the transcript into the new folder's project; its lines
+  // still name the folder it started in.
+  const folder = path.join(configDir, "projects", moved.replace(/[^a-zA-Z0-9]/g, "-"));
+  await mkdir(folder, { recursive: true });
+  await writeFile(path.join(folder, `${sessionId(7)}.jsonl`), transcript(sessionId(7), "/work/old-place"));
+  const reader = new ClaudeThreads(() => ({ CLAUDE_CONFIG_DIR: configDir }), appDataDir);
+  const [listed] = await reader.list();
+  assert.deepEqual({ folder: listed?.folder, title: listed?.title }, { folder: moved, title: "Moved work" });
+  const history = await reader.readHistory(sessionId(7));
+  assert.deepEqual({ folder: history.folder, title: history.title }, { folder: moved, title: "Moved work" }, "the chat goes on where the app runs it");
+});

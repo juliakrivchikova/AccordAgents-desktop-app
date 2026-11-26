@@ -23,6 +23,11 @@ const SESSION_FILE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{
 export class ClaudeThreads implements CliThreadReader {
   readonly kind = "claude-code" as const;
 
+  /** The folder and title the app gave each listed thread: the import takes
+   *  them, not the transcript's (a session the app moved keeps its first
+   *  folder there, and her title is the app's). */
+  private readonly appPlaces = new Map<string, { folder: string; title: string }>();
+
   constructor(private readonly env: () => NodeJS.ProcessEnv, private readonly appDataDir: string) {}
 
   async list(): Promise<CliThreadFound[]> {
@@ -50,6 +55,7 @@ export class ClaudeThreads implements CliThreadReader {
       const known = threads.get(thread.sessionId);
       if (!known || known.updatedAt < linked.updatedAt) threads.set(thread.sessionId, linked);
     }
+    for (const thread of threads.values()) this.appPlaces.set(thread.sessionId, { folder: thread.folder, title: thread.title });
     return [...threads.values()];
   }
 
@@ -89,11 +95,12 @@ export class ClaudeThreads implements CliThreadReader {
       }
     }
     endTurn();
+    const listed = this.appPlaces.get(sessionId);
     return {
       kind: "claude-code",
       sessionId: thread.sessionId,
-      folder: thread.folder,
-      title: thread.title,
+      folder: listed?.folder ?? thread.folder,
+      title: listed?.title ?? thread.title,
       ...(model ? { model } : {}),
       ...(reasoningEffort ? { reasoningEffort } : {}),
       entries
