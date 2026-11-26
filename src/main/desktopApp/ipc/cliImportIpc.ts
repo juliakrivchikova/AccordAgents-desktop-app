@@ -1,12 +1,12 @@
 import { ipcMain } from "electron";
-import type { CliImportListRequest, CliImportListResult, CliImportRequest, CliImportResult } from "../../../shared/types";
+import type { CliImportListResult, CliImportRequest, CliImportResult } from "../../../shared/types";
 import type { DesktopApp } from "../desktopApp";
 
 let importing: Promise<unknown> = Promise.resolve();
 
 /** Importing the User's own CLI threads as chats (docs/design/cli-import/plan.md). */
 export function registerCliImportIpc(desktopApp: DesktopApp): void {
-  ipcMain.handle("cli-import:list", (_event, request: CliImportListRequest) => listCliImportThreads(desktopApp, request ?? {}));
+  ipcMain.handle("cli-import:list", () => listCliImportThreads(desktopApp));
   ipcMain.handle("cli-import:import", (_event, request: CliImportRequest) => {
     // One import at a time: two at once (New chat's Continue during the
     // dialog's import) could each make a chat of the same thread.
@@ -22,8 +22,8 @@ async function chatsBySession(desktopApp: DesktopApp): Promise<Map<string, strin
   return new Map(rows.map((row) => [row.sessionId, row.conversationId]));
 }
 
-async function listCliImportThreads(desktopApp: DesktopApp, request: CliImportListRequest): Promise<CliImportListResult> {
-  const [found, known] = await Promise.all([desktopApp.cliImportService.list(request), chatsBySession(desktopApp)]);
+async function listCliImportThreads(desktopApp: DesktopApp): Promise<CliImportListResult> {
+  const [found, known] = await Promise.all([desktopApp.cliImportService.list(), chatsBySession(desktopApp)]);
   return {
     ...found,
     threads: found.threads.map((thread) => {

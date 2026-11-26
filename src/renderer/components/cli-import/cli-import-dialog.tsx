@@ -2,43 +2,49 @@ import { useEffect, useMemo, useState } from "react";
 import { MagnifyingGlassIcon } from "@phosphor-icons/react";
 
 import { Button } from "@/components/ui/button";
+import { Delayed } from "@/components/ui/delayed";
 import { Dialog, DialogContent, DialogTitle } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { LoadingBar } from "@/components/ui/loading-bar";
 import { Spinner } from "@/components/ui/spinner";
-import { Switch } from "@/components/ui/switch";
-import type { CliImportListResult, CliImportThread } from "../../../shared/types";
+import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import type { CliImportThread } from "../../../shared/types";
 import { cliProviderMetadata } from "../../../shared/cliReadiness";
 import { normalizeProjectPath } from "../../../shared/newChat";
-import { SegmentedTabs } from "../segmented-tabs";
 import {
-  cliImportFolderSections, filterCliThreads, isImportable, isRecentlyUpdated, threadKey,
-  type CliImportFolder, type CliImportKindFilter
+  cliImportProjectKey, cliImportProjectSections, cliImportThreadRows, filterCliThreads, isImportable, isRecentlyUpdated, threadKey,
+  type CliImportKindFilter, type CliImportProject
 } from "./cli-import-groups";
-import { CliImportFolderRow, CliImportThreadRow } from "./cli-import-rows";
+import { CliImportProjectRow, CliImportThreadRow } from "./cli-import-rows";
 import { closeCliImport, refreshCliImportList, useCliImportDialog, useCliImportList } from "./cli-import-store";
 
 interface CliImportDialogProps {
   onOpenConversation: (conversationId: string) => void;
 }
 
-const KINDS = ["claude-code", "codex-cli", "gemini-cli"] as const;
+const KIND_TABS: Array<{ value: CliImportKindFilter; label: string }> = [
+  { value: "all", label: "All" },
+  { value: "claude-code", label: "Claude" },
+  { value: "codex-cli", label: "Codex" },
+  { value: "gemini-cli", label: "Antigravity" }
+];
+
+const plural = (count: number, word: string): string => `${count} ${word}${count === 1 ? "" : "s"}`;
 
 /**
- * Import from your CLIs (docs/design/cli-import/plan.md, variant A): the
- * folders the User's CLIs ran in on the left, a folder's threads on the
- * right; a chosen thread becomes a chat that goes on in its CLI session.
+ * Import threads (docs/design/cli-import/plan.md, variant A): the projects
+ * the User's CLIs ran in on the left, a project's threads on the right; a
+ * chosen thread becomes a chat that goes on in its CLI session. It lists only
+ * the threads each vendor's app shows (the User, 2026-11-26).
  */
 export const CliImportDialog = ({ onOpenConversation }: CliImportDialogProps): JSX.Element => {
   const request = useCliImportDialog();
-  const remembered = useCliImportList();
-  const [automated, setAutomated] = useState(false);
-  const [withAutomated, setWithAutomated] = useState<CliImportListResult>();
+  const list = useCliImportList();
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string>();
   const [kind, setKind] = useState<CliImportKindFilter>("all");
   const [query, setQuery] = useState("");
-  const [folderKey, setFolderKey] = useState<string>();
+  const [projectKey, setProjectKey] = useState<string>();
   const [chosen, setChosen] = useState<Map<string, CliImportThread>>(new Map());
   const [folderFor, setFolderFor] = useState<Map<string, string>>(new Map());
   const [importing, setImporting] = useState(false);
@@ -51,37 +57,43 @@ export const CliImportDialog = ({ onOpenConversation }: CliImportDialogProps): J
     let current = true;
     setLoading(true);
     setError(undefined);
-    refreshCliImportList(automated)
-      .then((list) => { if (current && automated) setWithAutomated(list); })
+    refreshCliImportList()
       .catch((reason: unknown) => { if (current) setError(reason instanceof Error ? reason.message : String(reason)); })
       .finally(() => { if (current) setLoading(false); });
     return () => { current = false; };
-  }, [open, automated]);
+  }, [open]);
 
-  const list = automated ? withAutomated : remembered;
   const threads = useMemo(() => filterCliThreads(list?.threads ?? [], kind, query), [list, kind, query]);
-  const sections = useMemo(() => cliImportFolderSections(threads), [threads]);
-  const allFolders = [...sections.folders, ...sections.gone, ...sections.single];
+  const sections = useMemo(() => cliImportProjectSections(threads), [threads]);
+  const counts = useMemo(() => {
+    const all = list?.threads ?? [];
+    return new Map(KIND_TABS.map(({ value }) => [value, all.filter((thread) => value === "all" || thread.kind === value).length]));
+  }, [list]);
+  const allProjects = [...sections.projects, ...sections.gone];
   const wanted = normalizeProjectPath(request?.folder);
-  const folder = allFolders.find((item) => item.key === folderKey) ?? allFolders.find((item) => item.key === wanted) ?? allFolders[0];
+  const project = allProjects.find((item) => item.key === projectKey) ?? allProjects.find((item) => item.key === wanted) ?? allProjects[0];
+  const rows = useMemo(() => cliImportThreadRows(project?.threads ?? []), [project]);
   const now = Date.now();
   const picked = [...chosen.values()];
-  const needsFolder = picked.filter((thread) => !thread.folderExists && !folderFor.get(normalizeProjectPath(thread.folder) ?? ""));
+  const folderOf = (thread: CliImportThread): string | undefined => thread.folderExists ? undefined : folderFor.get(cliImportProjectKey(thread));
+  const needsFolder = picked.filter((thread) => !thread.folderExists && !folderOf(thread)).length;
   const recent = picked.filter((thread) => isRecentlyUpdated(thread, now)).length;
+  const goneHere = project?.threads.filter((thread) => !thread.folderExists).length ?? 0;
+  const chosenFolder = project && folderFor.get(project.key);
 
   const toggle = (thread: CliImportThread, on: boolean): void => setChosen((current) => {
     const next = new Map(current);
     if (on) next.set(threadKey(thread), thread); else next.delete(threadKey(thread));
     return next;
   });
-  const toggleAll = (target: CliImportFolder, on: boolean): void => setChosen((current) => {
+  const toggleAll = (target: CliImportProject, on: boolean): void => setChosen((current) => {
     const next = new Map(current);
     for (const thread of target.threads.filter(isImportable)) {
       if (on) next.set(threadKey(thread), thread); else next.delete(threadKey(thread));
     }
     return next;
   });
-  const chooseFolder = async (target: CliImportFolder): Promise<void> => {
+  const chooseFolder = async (target: CliImportProject): Promise<void> => {
     const selected = await window.consensus.selectRepoDirectory();
     if (selected) setFolderFor((current) => new Map(current).set(target.key, selected));
   };
@@ -96,8 +108,8 @@ export const CliImportDialog = ({ onOpenConversation }: CliImportDialogProps): J
     try {
       const result = await window.consensus.importCliThreads({
         threads: picked.map((thread) => {
-          const folderPath = thread.folderExists ? undefined : folderFor.get(normalizeProjectPath(thread.folder) ?? "");
-          return { kind: thread.kind, sessionId: thread.sessionId, ...(folderPath ? { folder: folderPath } : {}) };
+          const folder = folderOf(thread);
+          return { kind: thread.kind, sessionId: thread.sessionId, ...(folder ? { folder } : {}) };
         })
       });
       void refreshCliImportList().catch(() => undefined);
@@ -116,19 +128,19 @@ export const CliImportDialog = ({ onOpenConversation }: CliImportDialogProps): J
     }
   };
 
-  const counts = (value: CliImportKindFilter): number => (list?.threads ?? []).filter((thread) => value === "all" || thread.kind === value).length;
-  const tabs = [
-    { value: "all" as const, label: `All ${counts("all")}` },
-    ...KINDS.map((value) => ({ value, label: `${cliProviderMetadata(value).label} ${counts(value)}` }))
-  ];
-  const chosenIn = (target: CliImportFolder): number => target.threads.filter((thread) => chosen.has(threadKey(thread))).length;
-  const folderRows = (items: CliImportFolder[]) => items.map((item) => (
-    <CliImportFolderRow key={item.key} folder={item} selected={item.key === folder?.key} chosen={chosenIn(item)} onSelect={setFolderKey} onToggleAll={toggleAll} />
-  ));
-  const section = (title: string, items: CliImportFolder[]) => items.length > 0 && (
+  const section = (title: string, items: CliImportProject[]) => items.length > 0 && (
     <>
-      <div className="flex h-6 items-center px-2 pt-1.5 text-ui-11 font-medium text-ui-text-3">{title}</div>
-      {folderRows(items)}
+      <div className="flex h-7 shrink-0 items-center px-2 text-ui-12 font-medium text-ui-text-3">{title}</div>
+      {items.map((item) => (
+        <CliImportProjectRow
+          key={item.key}
+          project={item}
+          selected={item.key === project?.key}
+          chosen={item.threads.filter((thread) => chosen.has(threadKey(thread))).length}
+          onSelect={setProjectKey}
+          onToggleAll={toggleAll}
+        />
+      ))}
     </>
   );
 
@@ -136,48 +148,62 @@ export const CliImportDialog = ({ onOpenConversation }: CliImportDialogProps): J
     <Dialog open={open} onOpenChange={(next) => { if (!next) close(); }}>
       <DialogContent className="flex h-[600px] max-h-[calc(100vh-4rem)] flex-col gap-0 overflow-hidden p-0 sm:max-w-[900px]" data-testid="cli-import-dialog">
         <div className="relative flex h-[46px] shrink-0 items-center px-4">
-          <DialogTitle className="text-ui-14 font-semibold">Import from your CLIs</DialogTitle>
+          <DialogTitle className="text-ui-14 font-semibold">Import threads</DialogTitle>
           {loading && <LoadingBar className="absolute inset-x-0 bottom-0" label="Reading your CLI threads" />}
         </div>
-        <div className="flex shrink-0 items-center gap-2 border-b border-ui-border-subtle px-4 pb-2.5">
-          <SegmentedTabs value={kind} items={tabs} ariaLabel="CLI" onValueChange={setKind} />
+        <div className="flex shrink-0 items-center gap-2 border-b border-ui-border-subtle px-4 pb-3">
+          <Tabs value={kind} onValueChange={(value) => setKind(value as CliImportKindFilter)}>
+            <TabsList aria-label="CLI">
+              {KIND_TABS.map((tab) => (
+                <TabsTrigger key={tab.value} value={tab.value} className="px-2.5">
+                  {tab.label}
+                  <span className="text-ui-12 tabular-nums text-ui-text-3">{counts.get(tab.value) ?? 0}</span>
+                </TabsTrigger>
+              ))}
+            </TabsList>
+          </Tabs>
           <div className="relative ml-auto w-56">
-            <MagnifyingGlassIcon className="pointer-events-none absolute top-1/2 left-2 size-3.5 -translate-y-1/2 text-ui-text-3" aria-hidden />
-            <Input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Search threads" className="h-7 pl-7" aria-label="Search threads" />
+            <MagnifyingGlassIcon className="pointer-events-none absolute top-1/2 left-2.5 size-3.5 -translate-y-1/2 text-ui-text-3" aria-hidden />
+            <Input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Search threads" className="h-8 pl-8" aria-label="Search threads" />
           </div>
         </div>
         <div className="flex min-h-0 flex-1">
-          <div className="w-[300px] shrink-0 overflow-auto border-r border-ui-border-subtle p-1.5" data-testid="cli-import-folders">
-            {section("FOLDERS ON THIS COMPUTER", sections.folders)}
-            {section("FOLDER IS GONE", sections.gone)}
-            {section("ONE THREAD EACH", sections.single)}
+          <div className="flex w-[260px] shrink-0 flex-col overflow-x-hidden overflow-y-auto border-r border-ui-border-subtle p-1.5" data-testid="cli-import-folders">
+            {section("Projects", sections.projects)}
+            {section("Folder is gone", sections.gone)}
           </div>
-          <div className="flex min-w-0 flex-1 flex-col overflow-auto p-1.5" data-testid="cli-import-threads">
+          <div className="flex min-w-0 flex-1 flex-col overflow-x-hidden overflow-y-auto p-1.5" data-testid="cli-import-threads">
             {(list?.unavailable ?? []).map((item) => (
               <p key={item.kind} className="px-2 py-1 text-ui-12 text-ui-text-3">{cliProviderMetadata(item.kind).label}: {item.reason}</p>
             ))}
             {error && <p className="px-2 py-1 text-ui-12 text-ui-danger">{error}</p>}
-            {folder && (
-              <div className="flex h-9 shrink-0 items-center gap-2 px-2">
-                <span className="truncate text-ui-14 font-semibold">{folder.label}</span>
-                {!folder.exists && (
+            {project && (
+              <div className="flex min-h-11 shrink-0 items-center gap-3 px-2 pb-1.5" data-testid="cli-import-project-head">
+                <div className="flex min-w-0 flex-1 flex-col">
+                  <span className="truncate text-ui-14 font-semibold">{project.label}</span>
+                  {project.path && <span className="truncate text-ui-12 text-ui-text-3">{project.path}</span>}
+                </div>
+                {goneHere > 0 && (
                   <>
-                    <span className="flex items-center gap-1.5 text-ui-12 text-ui-warning">
-                      <span className="size-1.5 rounded-full bg-ui-warning-dot" aria-hidden />
-                      {folderFor.get(folder.key) ? `Goes on in ${folderFor.get(folder.key)}` : "Folder is gone"}
+                    <span className="flex min-w-0 shrink items-center gap-1.5 text-ui-12 text-ui-warning">
+                      <span className="size-1.5 shrink-0 rounded-full bg-ui-warning-dot" aria-hidden />
+                      <span className="truncate">
+                        {chosenFolder ? `Goes on in ${chosenFolder}` : project.exists ? `Folder is gone for ${plural(goneHere, "thread")}` : "Folder is gone"}
+                      </span>
                     </span>
-                    <Button variant="secondary" size="xs" onClick={() => void chooseFolder(folder)}>Choose folder</Button>
+                    <Button variant="secondary" size="xs" onClick={() => void chooseFolder(project)}>Choose folder</Button>
                   </>
                 )}
               </div>
             )}
-            {folder && !folder.exists && folder.threads.some((thread) => thread.kind === "gemini-cli") && (
+            {goneHere > 0 && project?.threads.some((thread) => thread.kind === "gemini-cli" && !thread.folderExists) && (
               <p className="px-2 pb-1 text-ui-12 text-ui-text-3">Antigravity keeps a thread in its old folder: its commands will fail there.</p>
             )}
-            {folder?.threads.map((thread) => (
+            {rows.map(({ thread, nested }) => (
               <CliImportThreadRow
                 key={threadKey(thread)}
                 thread={thread}
+                nested={nested}
                 checked={chosen.has(threadKey(thread))}
                 now={now}
                 onToggle={toggle}
@@ -187,23 +213,19 @@ export const CliImportDialog = ({ onOpenConversation }: CliImportDialogProps): J
           </div>
         </div>
         <div className="flex min-h-14 shrink-0 items-center gap-3 border-t border-ui-border-subtle px-4 py-2">
-          <label className="flex items-center gap-2 text-ui-12 text-ui-text-2">
-            <Switch checked={automated} onChange={(event) => setAutomated(event.target.checked)} />
-            Show automated runs
-          </label>
-          <span className="text-ui-12 text-ui-text-3">{picked.length} thread{picked.length === 1 ? "" : "s"}</span>
+          <span className="shrink-0 text-ui-12 tabular-nums text-ui-text-3">{picked.length} selected</span>
           {recent > 0 && (
-            <span className="flex items-center gap-1.5 text-ui-12 text-ui-warning">
-              <span className="size-1.5 rounded-full bg-ui-warning-dot" aria-hidden />
-              {recent} updated in its CLI minutes ago: going on in both places mixes their turns
+            <span className="flex min-w-0 items-center gap-1.5 text-ui-12 text-ui-warning">
+              <span className="size-1.5 shrink-0 rounded-full bg-ui-warning-dot" aria-hidden />
+              <span className="truncate">{recent} updated in its CLI minutes ago: going on in both places mixes their turns</span>
             </span>
           )}
           {failures.length > 0 && <span className="min-w-0 truncate text-ui-12 text-ui-danger" title={failures.join("\n")}>{failures[0]}</span>}
           <div className="ml-auto flex shrink-0 gap-2">
             <Button variant="ghost" onClick={close}>Cancel</Button>
-            <Button disabled={picked.length === 0 || needsFolder.length > 0 || importing} onClick={() => void runImport()} data-testid="cli-import-submit">
-              {importing && <Spinner size={14} />}
-              {needsFolder.length > 0 ? "Choose a folder first" : `Import ${picked.length} thread${picked.length === 1 ? "" : "s"}`}
+            <Button disabled={picked.length === 0 || needsFolder > 0 || importing} onClick={() => void runImport()} data-testid="cli-import-submit">
+              {importing && <Delayed><Spinner size={14} /></Delayed>}
+              {needsFolder > 0 ? "Choose a folder first" : "Import"}
             </Button>
           </div>
         </div>

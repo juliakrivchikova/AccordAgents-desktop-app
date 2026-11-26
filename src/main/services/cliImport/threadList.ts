@@ -1,5 +1,5 @@
 import { stat } from "node:fs/promises";
-import type { ChatProviderKind, CliImportListRequest, CliImportListResult, CliImportThread } from "../../../shared/types";
+import type { ChatProviderKind, CliImportListResult, CliImportThread } from "../../../shared/types";
 import { oneLine } from "./text";
 import type { CliThreadFound, CliThreadReader } from "./types";
 
@@ -7,10 +7,10 @@ const REASON_MAX_CHARS = 200;
 
 /** The threads of every CLI, newest first; a CLI whose store cannot be read
  *  is said with why, and the others are listed all the same. */
-export async function listCliThreads(readers: readonly CliThreadReader[], request: CliImportListRequest): Promise<CliImportListResult> {
+export async function listCliThreads(readers: readonly CliThreadReader[]): Promise<CliImportListResult> {
   const results = await Promise.all(readers.map(async (reader): Promise<{ kind: ChatProviderKind; threads?: CliThreadFound[]; reason?: string }> => {
     try {
-      return { kind: reader.kind, threads: await reader.list(request.includeAutomated === true) };
+      return { kind: reader.kind, threads: await reader.list() };
     } catch (error) {
       return { kind: reader.kind, reason: oneLine(error instanceof Error ? error.message : String(error), REASON_MAX_CHARS) };
     }

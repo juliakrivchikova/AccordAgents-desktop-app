@@ -73,7 +73,8 @@ export function createCoreServices(desktopApp: DesktopApp): void {
       return resolveCommandPath("codex", commandEnvironment());
     },
     sqliteExecutable: desktopApp.sqliteExecutable,
-    env: () => commandEnvironment()
+    env: () => commandEnvironment(),
+    appDataDir: app.getPath("appData")
   });
 
   // The terminal panel: shells run in their own utility process, so heavy output

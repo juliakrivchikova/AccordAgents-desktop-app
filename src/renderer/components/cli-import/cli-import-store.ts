@@ -39,11 +39,11 @@ export function closeCliImport(): void {
 }
 
 /** Reads the list again from the CLIs' stores (and remembers it). */
-export function refreshCliImportList(includeAutomated = false): Promise<CliImportListResult> {
-  const read = window.consensus.listCliImportThreads({ includeAutomated });
+export function refreshCliImportList(): Promise<CliImportListResult> {
+  const read = window.consensus.listCliImportThreads();
   reading = read;
   void read.then((list) => {
-    if (reading === read && !includeAutomated) set({ list });
+    if (reading === read) set({ list });
   }, () => undefined);
   return read;
 }

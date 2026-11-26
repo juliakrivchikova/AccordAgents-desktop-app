@@ -198,7 +198,7 @@ export const Sidebar = ({
             <IconButton
               size="xs"
               icon={ArrowSquareInIcon}
-              label="Import from your CLIs"
+              label="Import threads"
               tooltip="Import threads from Claude Code, Codex and Antigravity"
               onClick={() => openCliImport()}
               data-testid="cli-import-open"

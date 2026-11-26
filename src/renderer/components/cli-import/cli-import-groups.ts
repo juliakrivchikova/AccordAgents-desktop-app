@@ -7,22 +7,30 @@ export type CliImportKindFilter = ChatProviderKind | "all";
 /** A thread changed in its CLI this recently may still be open there. */
 export const RECENTLY_UPDATED_MS = 10 * 60_000;
 
-export interface CliImportFolder {
+/** A project the CLIs' apps list threads under: the thread's own folder, or
+ *  the repository a worktree belongs to. */
+export interface CliImportProject {
   key: string;
-  folder: string;
+  path: string;
   label: string;
+  /** Some of its threads' folders are still on this computer. */
   exists: boolean;
   /** Newest first. */
   threads: CliImportThread[];
 }
 
-/** The folders a list falls into, as the dialog lists them: folders that
- *  exist and hold several threads (most first), then folders that are gone,
- *  then folders with one thread each. */
-export interface CliImportFolderSections {
-  folders: CliImportFolder[];
-  gone: CliImportFolder[];
-  single: CliImportFolder[];
+/** The projects a list falls into, as the dialog lists them: those on this
+ *  computer, then those whose folder is gone, each newest thread first. */
+export interface CliImportProjectSections {
+  projects: CliImportProject[];
+  gone: CliImportProject[];
+}
+
+/** A thread as the dialog lists it: a side session right under the thread it
+ *  was started from, one step in. */
+export interface CliImportThreadRowItem {
+  thread: CliImportThread;
+  nested: boolean;
 }
 
 const timeOf = (value: string): number => {
@@ -30,31 +38,63 @@ const timeOf = (value: string): number => {
   return Number.isFinite(parsed) ? parsed : 0;
 };
 
+const newestFirst = (left: CliImportThread, right: CliImportThread): number => timeOf(right.updatedAt) - timeOf(left.updatedAt);
+
 /** The threads the filters let through, newest first. */
 export function filterCliThreads(threads: CliImportThread[], kind: CliImportKindFilter, query: string): CliImportThread[] {
   const words = query.trim().toLowerCase().split(/\s+/).filter(Boolean);
   return threads
     .filter((thread) => kind === "all" || thread.kind === kind)
-    .filter((thread) => words.every((word) => `${thread.title} ${thread.folder}`.toLowerCase().includes(word)))
-    .sort((left, right) => timeOf(right.updatedAt) - timeOf(left.updatedAt));
+    .filter((thread) => words.every((word) => `${thread.title} ${thread.project ?? ""} ${thread.folder}`.toLowerCase().includes(word)))
+    .sort(newestFirst);
 }
 
-export function cliImportFolderSections(threads: CliImportThread[]): CliImportFolderSections {
-  const byFolder = new Map<string, CliImportFolder>();
-  for (const thread of threads) {
-    const key = normalizeProjectPath(thread.folder) ?? "";
-    const folder = byFolder.get(key) ?? { key, folder: thread.folder, label: key ? projectLabelForPath(key) : "No folder", exists: thread.folderExists, threads: [] };
-    folder.threads.push(thread);
-    byFolder.set(key, folder);
+/** The key of the project a thread is listed under. */
+export function cliImportProjectKey(thread: Pick<CliImportThread, "project" | "folder">): string {
+  return normalizeProjectPath(thread.project ?? thread.folder) ?? "";
+}
+
+export function cliImportProjectSections(threads: CliImportThread[]): CliImportProjectSections {
+  const byKey = new Map<string, CliImportProject>();
+  for (const thread of [...threads].sort(newestFirst)) {
+    const key = cliImportProjectKey(thread);
+    const project = byKey.get(key) ?? { key, path: key, label: key ? projectLabelForPath(key) : "No folder", exists: false, threads: [] };
+    project.exists ||= thread.folderExists;
+    project.threads.push(thread);
+    byKey.set(key, project);
   }
-  const all = [...byFolder.values()];
-  const byCount = (left: CliImportFolder, right: CliImportFolder): number =>
-    right.threads.length - left.threads.length || timeOf(right.threads[0]?.updatedAt ?? "") - timeOf(left.threads[0]?.updatedAt ?? "");
-  return {
-    folders: all.filter((folder) => folder.exists && folder.threads.length > 1).sort(byCount),
-    gone: all.filter((folder) => !folder.exists).sort(byCount),
-    single: all.filter((folder) => folder.exists && folder.threads.length === 1).sort(byCount)
+  // Insertion follows the newest thread, so the map is already newest first.
+  const all = [...byKey.values()];
+  return { projects: all.filter((project) => project.exists), gone: all.filter((project) => !project.exists) };
+}
+
+/** A project's threads in list order: each side session right after the
+ *  thread it was started from (when that one is listed too), newest first
+ *  among siblings; a side session whose parent is not listed stays on top. */
+export function cliImportThreadRows(threads: CliImportThread[]): CliImportThreadRowItem[] {
+  const sorted = [...threads].sort(newestFirst);
+  const listed = new Set(sorted.map(threadKey));
+  const parentOf = (thread: CliImportThread): string | undefined => {
+    const parent = thread.parentSessionId && threadKey({ kind: thread.kind, sessionId: thread.parentSessionId });
+    return parent && parent !== threadKey(thread) && listed.has(parent) ? parent : undefined;
   };
+  const children = new Map<string, CliImportThread[]>();
+  for (const thread of sorted) {
+    const parent = parentOf(thread);
+    if (parent) children.set(parent, [...(children.get(parent) ?? []), thread]);
+  }
+  const rows: CliImportThreadRowItem[] = [];
+  const placed = new Set<string>();
+  const place = (thread: CliImportThread, nested: boolean): void => {
+    if (placed.has(threadKey(thread))) return;
+    placed.add(threadKey(thread));
+    rows.push({ thread, nested });
+    for (const child of children.get(threadKey(thread)) ?? []) place(child, true);
+  };
+  for (const thread of sorted) if (!parentOf(thread)) place(thread, false);
+  // Threads that name each other as parents have no top: list them as they come.
+  for (const thread of sorted) place(thread, false);
+  return rows;
 }
 
 /** A thread that can be chosen: not in a chat already. */
@@ -72,8 +112,8 @@ export function newestCliThreadsInFolder(threads: CliImportThread[], repoPath: s
   const folder = normalizeProjectPath(repoPath);
   if (!folder) return [];
   return threads
-    .filter((thread) => isImportable(thread) && thread.folderExists && normalizeProjectPath(thread.folder) === folder)
-    .sort((left, right) => timeOf(right.updatedAt) - timeOf(left.updatedAt))
+    .filter((thread) => isImportable(thread) && thread.folderExists && cliImportProjectKey(thread) === folder)
+    .sort(newestFirst)
     .slice(0, limit);
 }
 

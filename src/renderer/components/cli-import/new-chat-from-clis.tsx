@@ -48,9 +48,9 @@ export const NewChatFromClis = ({ repoPath, onOpen }: NewChatFromClisProps): JSX
   return (
     <div className="new-chat-recent" data-testid="new-chat-from-clis">
       <div className="flex h-6 items-center justify-between px-2 text-ui-12 font-medium text-ui-text-3">
-        {shown.length > 0 ? <span>From your CLIs</span> : <span />}
+        {shown.length > 0 ? <span>From your apps</span> : <span />}
         <Button variant="ghost" size="xs" className="text-ui-link" onClick={() => openCliImport({ folder: repoPath })} data-testid="new-chat-browse-clis">
-          Browse CLI threads
+          Browse threads
         </Button>
       </div>
       {shown.map((thread) => (

@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
-import { mkdir, mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
+import { randomUUID } from "node:crypto";
+import { mkdir, mkdtemp, realpath, rm, symlink, writeFile } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import path from "node:path";
 import test, { after, before, type TestContext } from "node:test";
@@ -14,7 +15,9 @@ import { claudeProjectFolderName, claudeProjectsDir, findClaudeTranscript } from
 
 // Real threads, made here by the installed CLIs (two turns each) in a
 // throwaway folder, read the way the import reads the User's own; each is
-// removed afterwards. A CLI that is not installed skips its tests.
+// removed afterwards. A CLI that is not installed skips its tests. The Claude
+// app's record of the Claude Code session is written here, in a throwaway
+// app data folder.
 
 const execFileAsync = promisify(execFile);
 const CLI_TIMEOUT_MS = 180_000;
@@ -30,7 +33,6 @@ type Cli = "claude" | "codex" | "agy";
 const made: Partial<Record<Cli, Made | Error>> = {};
 let service: CliImportService;
 let interactive: CliImportListResult;
-let everything: CliImportListResult;
 
 async function run(executable: string, args: string[], cwd: string, env: NodeJS.ProcessEnv = commandEnvironment()): Promise<string> {
   const running = execFileAsync(executable, args, { cwd, env, timeout: CLI_TIMEOUT_MS, maxBuffer: 16 * 1024 * 1024 });
@@ -54,7 +56,8 @@ async function throwawayFolder(name: string): Promise<string> {
 
 async function makeClaudeSession(executable: string): Promise<Made> {
   const folder = await throwawayFolder("claude");
-  // `claude -p` as the SDK runs it: its sessions are the automated ones.
+  // `claude -p` as the SDK runs it: a session the Claude app does not list
+  // by itself.
   const env = commandEnvironment();
   delete env.CLAUDE_CODE_ENTRYPOINT;
   const first = JSON.parse(await run(executable, ["-p", "--model", "haiku", "--output-format", "json", "Reply with: ok"], folder, env)) as { session_id: string };
@@ -80,6 +83,19 @@ async function makeAgyConversation(executable: string): Promise<Made> {
   return { executable, folder, sessionId: first.conversation_id };
 }
 
+const APP_ACTIVITY_AT = "2026-11-26T12:00:00.000Z";
+
+/** A folder of the Claude app's session records for one account, as the app
+ *  keeps it: the records given and a file that is not a session. */
+async function claudeAppData(name: string, records: Array<Record<string, unknown>>): Promise<string> {
+  const appDataDir = path.join(scratch, name);
+  const folder = path.join(appDataDir, "Claude", "claude-code-sessions", randomUUID(), randomUUID());
+  await mkdir(folder, { recursive: true });
+  await writeFile(path.join(folder, "account-plugins-sent.json"), "{}");
+  for (const record of records) await writeFile(path.join(folder, `${String(record.sessionId)}.json`), JSON.stringify(record));
+  return appDataDir;
+}
+
 /** Codex's own turn ids for a thread, oldest first. */
 async function codexTurnIds(executable: string, threadId: string): Promise<string[]> {
   return withCodexAppServerOneOff({ executable, env: commandEnvironment(), purpose: "test", timeoutMs: 60_000 }, async ({ request }) => {
@@ -96,9 +112,19 @@ before(async () => {
   const attempt = (executable: string | undefined, make: (executable: string) => Promise<Made>) =>
     executable ? make(executable).catch((error: unknown) => error instanceof Error ? error : new Error(String(error))) : undefined;
   [made.claude, made.codex, made.agy] = await Promise.all([attempt(claude, makeClaudeSession), attempt(codex, makeCodexThread), attempt(agy, makeAgyConversation)]);
-  service = new CliImportService({ codexExecutable: async () => codex ?? "codex", sqliteExecutable: "sqlite3" });
-  interactive = await service.list({});
-  everything = await service.list({ includeAutomated: true });
+  const claudeMade = made.claude instanceof Error ? undefined : made.claude;
+  const appDataDir = await claudeAppData("app-data", claudeMade ? [{
+    sessionId: `local_${randomUUID()}`,
+    cliSessionId: claudeMade.sessionId,
+    cwd: claudeMade.folder,
+    originCwd: claudeMade.folder,
+    title: "Import probe from the app",
+    isArchived: false,
+    createdAt: Date.parse(APP_ACTIVITY_AT) - 60_000,
+    lastActivityAt: Date.parse(APP_ACTIVITY_AT)
+  }] : []);
+  service = new CliImportService({ codexExecutable: async () => codex ?? "codex", sqliteExecutable: "sqlite3", appDataDir });
+  interactive = await service.list();
 });
 
 after(async () => {
@@ -135,16 +161,24 @@ function madeBy(cli: Cli, context: TestContext): Made | undefined {
 }
 
 
-test("Claude Code: an SDK session is listed only with automated runs, by the title /rename gave it, in the folder it ran in", (t) => {
+test("Claude Code: a session the Claude app lists is listed by the app's title in the folder it ran in; one it does not list is not", async (t) => {
   const claude = madeBy("claude", t);
   if (!claude) return;
-  assert.equal(listed(interactive, claude.sessionId), undefined, "claude -p is not one she ran");
-  const thread = listed(everything, claude.sessionId);
-  assert.ok(thread, "listed with automated runs");
+  const thread = listed(interactive, claude.sessionId);
+  assert.ok(thread, "the app lists it");
   assert.deepEqual(
-    { kind: thread.kind, folder: thread.folder, folderExists: thread.folderExists, title: thread.title, automated: thread.automated },
-    { kind: "claude-code", folder: claude.folder, folderExists: true, title: "Import probe", automated: true }
+    { kind: thread.kind, folder: thread.folder, folderExists: thread.folderExists, title: thread.title, updatedAt: thread.updatedAt, project: thread.project, parentSessionId: thread.parentSessionId },
+    { kind: "claude-code", folder: claude.folder, folderExists: true, title: "Import probe from the app", updatedAt: APP_ACTIVITY_AT, project: undefined, parentSessionId: undefined }
   );
+  const withoutRecord = new CliImportService({
+    codexExecutable: async () => { throw new Error("not here"); },
+    sqliteExecutable: "sqlite3",
+    homeDir: scratch,
+    appDataDir: await claudeAppData("app-data-without", [])
+  });
+  const { threads, unavailable } = await withoutRecord.list();
+  assert.equal(threads.find((found) => found.sessionId === claude.sessionId), undefined, "its transcript is there, the app's record is not");
+  assert.equal(unavailable.find((entry) => entry.kind === "claude-code"), undefined);
 });
 
 test("Claude Code: the history is her prompts and its replies in order, her command as typed, each turn's last reply at a uuid Fork can cut at", async (t) => {
@@ -163,16 +197,11 @@ test("Claude Code: the history is her prompts and its replies in order, her comm
   for (const reply of replies) assert.deepEqual(claudeForkCut(rows, { at: reply.cut }), { kind: "cut", at: reply.cut });
 });
 
-test("Codex: an exec thread is listed only with automated runs, by its preview, in the folder it ran in", (t) => {
+test("Codex: an exec thread outside the Codex app's projects is not listed", (t) => {
   const codex = madeBy("codex", t);
   if (!codex) return;
-  assert.equal(listed(interactive, codex.sessionId), undefined, "codex exec is not one she ran");
-  const thread = listed(everything, codex.sessionId);
-  assert.ok(thread, "listed with automated runs");
-  assert.deepEqual(
-    { kind: thread.kind, folder: thread.folder, folderExists: thread.folderExists, title: thread.title, automated: thread.automated },
-    { kind: "codex-cli", folder: codex.folder, folderExists: true, title: "Reply with: ok", automated: true }
-  );
+  assert.equal(interactive.unavailable.find((entry) => entry.kind === "codex-cli"), undefined);
+  assert.equal(listed(interactive, codex.sessionId), undefined, "the Codex app does not show it");
 });
 
 test("Codex: the history pairs each prompt with its reply, and each reply carries its turn's id", async (t) => {
@@ -187,16 +216,25 @@ test("Codex: the history pairs each prompt with its reply, and each reply carrie
   assert.deepEqual(cuts, await codexTurnIds(codex.executable, codex.sessionId));
 });
 
-test("Antigravity: a conversation is listed by its preview where it ran; its history is her requests without agy's wrapper", async (t) => {
+test("Antigravity: a conversation the app lists is listed by its preview where it ran; its history is her requests without agy's wrapper", async (t) => {
   const agy = madeBy("agy", t);
   if (!agy) return;
-  const thread = listed(interactive, agy.sessionId);
-  assert.ok(thread, "agy says nothing that marks a run as automated");
+  // agy's own folder, and an Antigravity app that lists the conversation.
+  const home = await throwawayFolder("agy-home");
+  await mkdir(path.join(home, ".gemini", "antigravity"), { recursive: true });
+  await symlink(path.join(homedir(), ".gemini", "antigravity-cli"), path.join(home, ".gemini", "antigravity-cli"));
+  await execFileAsync("sqlite3", [path.join(home, ".gemini", "antigravity", "conversation_summaries.db"), [
+    "create table conversation_summaries (conversation_id text, title text not null default '', source text not null default '');",
+    `insert into conversation_summaries values ('${agy.sessionId}', '', 'CORTEX_TRAJECTORY_SOURCE_CLI');`
+  ].join(" ")]);
+  const agyService = new CliImportService({ codexExecutable: async () => { throw new Error("not here"); }, sqliteExecutable: "sqlite3", homeDir: home, appDataDir: home });
+  const thread = listed(await agyService.list(), agy.sessionId);
+  assert.ok(thread, "the app lists it");
   assert.deepEqual(
-    { kind: thread.kind, folder: thread.folder, folderExists: thread.folderExists, title: thread.title, automated: thread.automated },
-    { kind: "gemini-cli", folder: agy.folder, folderExists: true, title: "Reply with: ok", automated: false }
+    { kind: thread.kind, folder: thread.folder, folderExists: thread.folderExists, title: thread.title },
+    { kind: "gemini-cli", folder: agy.folder, folderExists: true, title: "Reply with: ok" }
   );
-  const history = await service.readHistory({ kind: "gemini-cli", sessionId: agy.sessionId });
+  const history = await agyService.readHistory({ kind: "gemini-cli", sessionId: agy.sessionId });
   assert.ok(history.model, "the model of its responses");
   assert.deepEqual(history.entries.map((entry) => [entry.role, entry.role === "user" ? entry.text : "reply", entry.cut]), [
     ["user", "Reply with: ok", undefined], ["assistant", "reply", undefined], ["user", "Reply with: two", undefined], ["assistant", "reply", undefined]
@@ -222,13 +260,18 @@ test("CLIs whose store is not here are said and the others listed; agy's list is
     ].join(" ")]);
     await rm(`${database}-wal`, { force: true });
     await rm(`${database}-shm`, { force: true });
+    // The Antigravity app lists it.
+    await mkdir(path.join(home, ".gemini", "antigravity"));
+    await execFileAsync("sqlite3", [path.join(home, ".gemini", "antigravity", "conversation_summaries.db"),
+      `create table conversation_summaries (conversation_id text, title text); insert into conversation_summaries values ('${id}', '');`]);
     const agyOnly = new CliImportService({
       codexExecutable: async () => { throw new Error("not here"); },
       sqliteExecutable: "sqlite3",
-      env: () => ({ ...commandEnvironment(), CLAUDE_CONFIG_DIR: home }),
-      homeDir: home
+      env: () => ({ ...commandEnvironment(), CLAUDE_CONFIG_DIR: home, CODEX_HOME: home }),
+      homeDir: home,
+      appDataDir: home
     });
-    const { threads, unavailable } = await agyOnly.list({});
+    const { threads, unavailable } = await agyOnly.list();
     assert.deepEqual(threads.map((thread) => [thread.kind, thread.sessionId, thread.title, thread.folder, thread.updatedAt]), [
       ["gemini-cli", id, "Reply with: ok", "/tmp", "2026-11-26T16:05:21.500Z"]
     ]);

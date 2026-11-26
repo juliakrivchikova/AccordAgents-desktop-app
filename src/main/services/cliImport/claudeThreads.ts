@@ -3,41 +3,52 @@ import { open, readdir, readFile, stat } from "node:fs/promises";
 import path from "node:path";
 import { parseJsonRecord } from "../cliAgents/runs/records";
 import { claudeProjectsDir, findClaudeTranscript } from "../memberSessionFiles";
+import { claudeAppSessions, type ClaudeAppSession } from "./claudeAppSessions";
 import { afterLeadingBlocks, fileLines, isoTime, leadingBlockName, oneLine } from "./text";
 import type { CliImportHistory, CliImportHistoryEntry, CliThreadFound, CliThreadReader } from "./types";
 
-// Claude Code 2.1.329 keeps a session as `<projects>/<folder>/<id>.jsonl`; a
-// folder beside it holds that session's subagents and side files. Its own
-// /resume list reads 64 KiB from the end of each session file and names a
-// session by, in order: her title for it (the last `custom-title` line, else
-// `<id>/custom-title.json`), the title it made (`ai-title`), the prompt she
-// sent last (`last-prompt`), her first prompt. It leaves out sessions with
-// none of these, and sessions an SDK ran (entrypoint `sdk-cli`, `sdk-ts`,
-// `sdk-py`; `claude -p` is `sdk-cli`).
+// The list is only the sessions the Claude desktop app shows in its sidebar
+// (the owner's decision, 2026-11-26; 157 of 808 sessions on disk here). Claude
+// Code 2.1.329 keeps each as `<projects>/<folder>/<id>.jsonl`. A record with no
+// title is named as /resume names a session: her title for it (the last
+// `custom-title` line, else `<id>/custom-title.json`), the title it made
+// (`ai-title`), the prompt she sent last (`last-prompt`), her first prompt.
 
 const TAIL_BYTES = 64 * 1024;
-/** Session files read at once (1004 of them here, 2026-11-26). */
+/** Transcripts read at once (the Claude app keeps 163 sessions here,
+ *  2026-11-26). */
 const FILES_AT_ONCE = 32;
 const SESSION_FILE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\.jsonl$/i;
-const AUTOMATED_ENTRYPOINT = /^sdk-/;
 
 export class ClaudeThreads implements CliThreadReader {
   readonly kind = "claude-code" as const;
 
-  constructor(private readonly env: () => NodeJS.ProcessEnv) {}
+  constructor(private readonly env: () => NodeJS.ProcessEnv, private readonly appDataDir: string) {}
 
-  async list(includeAutomated: boolean): Promise<CliThreadFound[]> {
-    const files = await sessionFiles(claudeProjectsDir(this.env()));
-    // A session the app moved to another folder is there twice (a hard
-    // link): the newest is the one resume and readHistory find.
+  async list(): Promise<CliThreadFound[]> {
+    const sessions = await claudeAppSessions(this.appDataDir);
+    const wanted = new Set(sessions.map((session) => session.cliSessionId));
+    const transcripts = new Map<string, string[]>();
+    for (const file of await sessionFiles(claudeProjectsDir(this.env()))) {
+      const sessionId = path.basename(file, ".jsonl");
+      if (wanted.has(sessionId)) transcripts.set(sessionId, [...(transcripts.get(sessionId) ?? []), file]);
+    }
+    const listed: Array<{ session: ClaudeAppSession; thread: CliThreadFound }> = [];
+    for (let start = 0; start < sessions.length; start += FILES_AT_ONCE) {
+      const found = await Promise.all(sessions.slice(start, start + FILES_AT_ONCE).map(async (session) => {
+        const files = transcripts.get(session.cliSessionId);
+        const thread = files ? await appThreadOf(session, files).catch(() => undefined) : undefined;
+        return thread ? { session, thread } : undefined;
+      }));
+      listed.push(...found.filter((entry): entry is { session: ClaudeAppSession; thread: CliThreadFound } => Boolean(entry)));
+    }
+    const sessionIdOf = new Map(listed.map(({ session }) => [session.localId, session.cliSessionId]));
     const threads = new Map<string, CliThreadFound>();
-    for (let start = 0; start < files.length; start += FILES_AT_ONCE) {
-      const found = await Promise.all(files.slice(start, start + FILES_AT_ONCE).map((file) => claudeThreadOf(file).catch(() => undefined)));
-      for (const thread of found) {
-        if (!thread || (thread.automated && !includeAutomated)) continue;
-        const known = threads.get(thread.sessionId);
-        if (!known || known.updatedAt < thread.updatedAt) threads.set(thread.sessionId, thread);
-      }
+    for (const { session, thread } of listed) {
+      const parentSessionId = session.spawnedFrom ? sessionIdOf.get(session.spawnedFrom) : undefined;
+      const linked = parentSessionId && parentSessionId !== thread.sessionId ? { ...thread, parentSessionId } : thread;
+      const known = threads.get(thread.sessionId);
+      if (!known || known.updatedAt < linked.updatedAt) threads.set(thread.sessionId, linked);
     }
     return [...threads.values()];
   }
@@ -110,6 +121,27 @@ async function sessionFiles(projectsDir: string): Promise<string[]> {
   return files;
 }
 
+/** A session the Claude app lists, in the folder its transcript records. A
+ *  session the app moved to another folder is there twice (a hard link):
+ *  the newest is the one resume and readHistory find. */
+async function appThreadOf(session: ClaudeAppSession, files: readonly string[]): Promise<CliThreadFound | undefined> {
+  const found = await Promise.all(files.map(async (file) => ({ file, info: await stat(file) })));
+  const newest = found.reduce((best, next) => (next.info.mtimeMs > best.info.mtimeMs ? next : best));
+  // Where the app runs it now: a session it moved keeps its first folder in
+  // the transcript.
+  const folder = session.cwd ?? (await sessionHead(newest.file, false)).cwd;
+  const title = oneLine(session.title) || (await claudeThreadOf(newest.file))?.title;
+  if (!folder || !title) return undefined;
+  return {
+    kind: "claude-code",
+    sessionId: session.cliSessionId,
+    folder,
+    ...(session.originCwd && session.originCwd !== folder ? { project: session.originCwd } : {}),
+    title,
+    updatedAt: isoTime(session.lastActivityAt) ?? newest.info.mtime.toISOString()
+  };
+}
+
 /** A session as Claude Code's /resume list names it; undefined for one it
  *  leaves out (nothing she wrote, nothing named) or that names no folder. */
 async function claudeThreadOf(file: string): Promise<CliThreadFound | undefined> {
@@ -124,14 +156,12 @@ async function claudeThreadOf(file: string): Promise<CliThreadFound | undefined>
   const head = await sessionHead(file, !named);
   const title = named ?? oneLine(head.firstPrompt);
   if (!title || !head.cwd) return undefined;
-  const entrypoint = head.entrypoint ?? lastField(tail, "entrypoint");
   return {
     kind: "claude-code",
     sessionId,
     folder: head.cwd,
     title,
-    updatedAt: info.mtime.toISOString(),
-    automated: AUTOMATED_ENTRYPOINT.test(entrypoint ?? "")
+    updatedAt: info.mtime.toISOString()
   };
 }
 
@@ -177,15 +207,14 @@ async function sidecarTitle(file: string, sessionId: string): Promise<string | u
 /** Where a session ran, what ran it and (when asked) her first prompt, read a
  *  line at a time until found: its first line can be a queued prompt of
  *  800 KB (102 of 1004 sessions here), so a fixed head can miss them. */
-async function sessionHead(file: string, needPrompt: boolean): Promise<{ cwd?: string; entrypoint?: string; firstPrompt?: string }> {
-  const head: { cwd?: string; entrypoint?: string; firstPrompt?: string } = {};
+async function sessionHead(file: string, needPrompt: boolean): Promise<{ cwd?: string; firstPrompt?: string }> {
+  const head: { cwd?: string; firstPrompt?: string } = {};
   for await (const line of fileLines(file)) {
     const cwdLine = !head.cwd && line.includes("\"cwd\":\"");
     const promptLine = needPrompt && !head.firstPrompt && line.includes("\"type\":\"user\"") && !line.includes("\"type\":\"tool_result\"");
     const entry = cwdLine || promptLine ? parseJsonRecord(line) : undefined;
     if (entry && cwdLine && typeof entry.cwd === "string") {
       head.cwd = entry.cwd;
-      if (typeof entry.entrypoint === "string") head.entrypoint = entry.entrypoint;
     }
     if (entry && promptLine && entry.isSidechain !== true) head.firstPrompt = claudeUserMessage(entry)?.text || undefined;
     if (head.cwd && (!needPrompt || head.firstPrompt)) break;

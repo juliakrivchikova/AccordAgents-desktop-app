@@ -1,6 +1,7 @@
 import { ensureLoginShellEnvPrimed } from "../command";
 import { withCodexAppServerOneOff, type CodexAppServerOneOff } from "../cliAgents/codex/appServerOneOff";
 import { asRecord } from "../cliAgents/runs/records";
+import { codexAppPlace, codexHome, readCodexAppState, type CodexProject } from "./codexAppProjects";
 import { afterLeadingBlocks, isoTime, oneLine } from "./text";
 import type { CliImportHistory, CliImportHistoryEntry, CliThreadFound, CliThreadReader } from "./types";
 
@@ -10,13 +11,9 @@ import type { CliImportHistory, CliImportHistoryEntry, CliThreadFound, CliThread
 // interactive threads (the terminal, the VS Code extension, Codex Desktop);
 // it also repairs what its database says from the threads' files, which
 // takes 10-15 s for 945 threads here (2026-11-26) and drops 402 threads whose
-// files are gone, so it is not asked to skip that.
+// files are gone, so it is not asked to skip that. Of those, the list keeps
+// the ones the Codex app shows (./codexAppProjects).
 
-/** Every source kind Codex 0.170 has (ThreadSourceKind): an empty filter
- *  means the interactive ones. */
-const ALL_SOURCE_KINDS = [
-  "cli", "vscode", "exec", "appServer", "subAgent", "subAgentReview", "subAgentCompact", "subAgentThreadSpawn", "subAgentOther", "unknown"
-] as const;
 const PAGE_SIZE = 100;
 const CODEX_THREADS_TIMEOUT_MS = 120_000;
 
@@ -27,14 +24,18 @@ export class CodexThreads implements CliThreadReader {
 
   constructor(private readonly deps: { codexExecutable: () => Promise<string>; env: () => NodeJS.ProcessEnv }) {}
 
-  list(includeAutomated: boolean): Promise<CliThreadFound[]> {
+  async list(): Promise<CliThreadFound[]> {
+    // Read first: without the Codex app there is nothing to list, and no
+    // app-server to start.
+    const state = await readCodexAppState(codexHome(this.deps.env()));
     return this.withServer("thread list", async (request) => {
-      const interactive = await listThreads(request, {});
-      if (!includeAutomated) return interactive.map((thread) => threadFound(thread, false));
-      // Automated is what Codex's own filter leaves out, whatever kinds it adds.
-      const interactiveIds = new Set(interactive.map((thread) => thread.id));
-      const all = await listThreads(request, { sourceKinds: ALL_SOURCE_KINDS });
-      return all.map((thread) => threadFound(thread, !interactiveIds.has(thread.id)));
+      const [threads, projects] = await Promise.all([listThreads(request), listProjects(request)]);
+      return threads.flatMap((thread) => {
+        const found = threadFound(thread);
+        const place = codexAppPlace({ id: found.sessionId, cwd: found.folder, originator: thread.originator }, projects, state);
+        if (!place) return [];
+        return [place.projectRoot && place.projectRoot !== found.folder ? { ...found, project: place.projectRoot } : found];
+      });
     });
   }
 
@@ -103,12 +104,22 @@ async function codexHistoryEntries(request: CodexRequest, threadId: string, upda
   return entries;
 }
 
-async function listThreads(request: CodexRequest, filter: { sourceKinds?: readonly string[] }): Promise<Record<string, unknown>[]> {
+/** Its interactive threads (no source filter), the archived left out. */
+async function listThreads(request: CodexRequest): Promise<Record<string, unknown>[]> {
   const threads: Record<string, unknown>[] = [];
-  for await (const thread of pages(request, "thread/list", { archived: false, ...filter })) {
+  for await (const thread of pages(request, "thread/list", { archived: false })) {
     if (typeof thread.id === "string") threads.push(thread);
   }
   return threads;
+}
+
+async function listProjects(request: CodexRequest): Promise<CodexProject[]> {
+  const projects: CodexProject[] = [];
+  for await (const project of pages(request, "project/list", {})) {
+    const roots = Array.isArray(project.roots) ? project.roots.map((root) => asRecord(root)?.path).filter((root): root is string => typeof root === "string" && root !== "") : [];
+    if (typeof project.id === "string") projects.push({ id: project.id, roots });
+  }
+  return projects;
 }
 
 /** Every record of a paged app-server list, following its `nextCursor`. */
@@ -124,15 +135,14 @@ async function* pages(request: CodexRequest, method: string, params: Record<stri
   } while (cursor);
 }
 
-function threadFound(thread: Record<string, unknown>, automated: boolean): CliThreadFound {
+function threadFound(thread: Record<string, unknown>): CliThreadFound {
   return {
     kind: "codex-cli",
     // Thread.id is what resume takes; Thread.sessionId is shared by a tree.
     sessionId: thread.id as string,
     folder: typeof thread.cwd === "string" ? thread.cwd : "",
     title: codexTitle(thread),
-    updatedAt: isoTime(typeof thread.updatedAt === "number" ? thread.updatedAt * 1000 : undefined) ?? new Date(0).toISOString(),
-    automated
+    updatedAt: isoTime(typeof thread.updatedAt === "number" ? thread.updatedAt * 1000 : undefined) ?? new Date(0).toISOString()
   };
 }
 

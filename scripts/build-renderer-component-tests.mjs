@@ -26,6 +26,7 @@ await build({
     "renderer/components/chat/chat-composer-mention-token.test.ts",
     "renderer/components/chat/chat-composer-plugin-token.test.ts",
     "renderer/components/chat/slash-menu-model.test.ts",
+    "renderer/components/cli-import/cli-import-groups.test.ts",
     "renderer/components/chat/chat-slash-items.test.ts",
     "renderer/components/chat/use-chat-composer-slash.test.tsx",
     "renderer/components/chat/chat-participant-drafts.test.ts",

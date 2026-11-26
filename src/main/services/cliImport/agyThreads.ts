@@ -15,6 +15,11 @@ import type { CliImportHistory, CliImportHistoryEntry, CliThreadFound, CliThread
 // messages short, `transcript_full.jsonl` keeps them whole). Its rows carry
 // no title (only a preview) and nothing that tells a `--print` run from one
 // she typed in.
+//
+// The list is only the conversations the Antigravity app lists (the owner's
+// decision, 2026-11-26), from its own summaries beside agy's folder: 146
+// here, 102 made in the app (agy cannot go on with those: "trajectory not
+// found") and 44 by agy, of agy's 211 rows.
 
 const CONVERSATION_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const SQLITE_TIMEOUT_MS = 10_000;
@@ -26,6 +31,8 @@ interface AgySummary {
   last_modified_time: string;
   workspace_uris: string;
 }
+
+type AppSummary = Pick<AgySummary, "conversation_id" | "title">;
 
 export class AgyThreads implements CliThreadReader {
   readonly kind = "gemini-cli" as const;
@@ -48,31 +55,55 @@ export class AgyThreads implements CliThreadReader {
     return { kind: "gemini-cli", sessionId, folder: thread.folder, title: thread.title, ...(model ? { model } : {}), entries };
   }
 
-  /** Its summary rows whose conversation is still on disk, as agy's own
-   *  database holds them (read only). */
+  /** agy's summary rows of the conversations the Antigravity app lists,
+   *  whose conversation agy still has. */
   private async conversations(): Promise<AgySummary[]> {
     const folder = path.dirname(geminiUserSettingsPath(this.deps.homeDir));
-    const database = path.join(folder, "conversation_summaries.db");
-    if (!await isFile(database)) throw new Error("Antigravity keeps no conversations on this computer");
-    // agy keeps it in WAL mode and deletes the WAL when it closes; read only,
+    const appDatabase = path.join(path.dirname(folder), "antigravity", "conversation_summaries.db");
+    const [rows, appRows] = await Promise.all([
+      this.summaries<AgySummary>(path.join(folder, "conversation_summaries.db"), "conversation_id, title, preview, last_modified_time, workspace_uris", {
+        missing: "Antigravity keeps no conversations on this computer",
+        unreadable: "Antigravity's conversations could not be read"
+      }),
+      this.summaries<AppSummary>(appDatabase, "conversation_id, title", {
+        missing: "The Antigravity app keeps no conversations on this computer",
+        unreadable: "The Antigravity app's conversations could not be read"
+      })
+    ]);
+    const listed = listedByApp(rows, appRows);
+    const kept = await Promise.all(listed.map((row) => isFile(path.join(folder, "conversations", `${row.conversation_id}.db`))));
+    return listed.filter((_, index) => kept[index]);
+  }
+
+  /** The rows of a summaries database agy or the app keeps (read only). */
+  private async summaries<Row>(database: string, columns: string, errors: { missing: string; unreadable: string }): Promise<Row[]> {
+    if (!await isFile(database)) throw new Error(errors.missing);
+    // Both keep it in WAL mode and delete the WAL when they close; read only,
     // SQLite cannot open it without one ("unable to open database file"), and
     // with none there is nothing outside the file to miss.
     const source = await isFile(`${database}-wal`) ? ["-readonly", database] : [`${pathToFileURL(database).href}?mode=ro&immutable=1`];
-    let rows: AgySummary[];
     try {
       const { stdout } = await runCommand(this.deps.sqliteExecutable, [
         "-batch", "-bail", "-json", "-cmd", ".timeout 5000", ...source,
-        "select conversation_id, title, preview, last_modified_time, workspace_uris from conversation_summaries"
+        `select ${columns} from conversation_summaries`
       ], { timeoutMs: SQLITE_TIMEOUT_MS });
       // No rows print nothing.
-      rows = stdout.trim() ? JSON.parse(stdout) as AgySummary[] : [];
+      return stdout.trim() ? JSON.parse(stdout) as Row[] : [];
     } catch {
-      throw new Error("Antigravity's conversations could not be read");
+      throw new Error(errors.unreadable);
     }
-    const kept = await Promise.all(rows.map(async (row) =>
-      CONVERSATION_ID.test(row.conversation_id) && await isFile(path.join(folder, "conversations", `${row.conversation_id}.db`))));
-    return rows.filter((_, index) => kept[index]);
   }
+}
+
+/** agy's rows of the conversations the app lists, by the app's title when it
+ *  has one (2 of its 146 rows here, none of agy's). */
+function listedByApp(rows: readonly AgySummary[], appRows: readonly AppSummary[]): AgySummary[] {
+  const appTitles = new Map(appRows.map((row) => [row.conversation_id, row.title]));
+  return rows.flatMap((row) => {
+    const appTitle = appTitles.get(row.conversation_id);
+    if (appTitle === undefined || !CONVERSATION_ID.test(row.conversation_id)) return [];
+    return [appTitle ? { ...row, title: appTitle } : row];
+  });
 }
 
 /** Her inputs and its responses, as agy recorded them. */
@@ -112,8 +143,7 @@ function threadFound(row: AgySummary): CliThreadFound {
     folder: firstWorkspaceFolder(row.workspace_uris),
     title: oneLine(row.title || row.preview),
     // "2026-01-29 12:47:19.545897+00:00"
-    updatedAt: isoTime(Date.parse(row.last_modified_time.replace(" ", "T"))) ?? new Date(0).toISOString(),
-    automated: false
+    updatedAt: isoTime(Date.parse(row.last_modified_time.replace(" ", "T"))) ?? new Date(0).toISOString()
   };
 }
 

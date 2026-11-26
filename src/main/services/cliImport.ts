@@ -1,7 +1,8 @@
 import { homedir } from "node:os";
-import type { ChatProviderKind, CliImportListRequest, CliImportListResult } from "../../shared/types";
+import type { ChatProviderKind, CliImportListResult } from "../../shared/types";
 import { commandEnvironment } from "./command";
 import { AgyThreads } from "./cliImport/agyThreads";
+import { defaultAppDataDir } from "./cliImport/claudeAppSessions";
 import { ClaudeThreads } from "./cliImport/claudeThreads";
 import { CodexThreads } from "./cliImport/codexThreads";
 import { listCliThreads } from "./cliImport/threadList";
@@ -18,7 +19,7 @@ export class CliImportService {
   constructor(deps: CliImportDependencies) {
     const env = deps.env ?? (() => commandEnvironment());
     this.readers = {
-      "claude-code": new ClaudeThreads(env),
+      "claude-code": new ClaudeThreads(env, deps.appDataDir ?? defaultAppDataDir()),
       "codex-cli": new CodexThreads({ codexExecutable: deps.codexExecutable, env }),
       "gemini-cli": new AgyThreads({ sqliteExecutable: deps.sqliteExecutable, homeDir: deps.homeDir ?? homedir() })
     };
@@ -26,8 +27,8 @@ export class CliImportService {
 
   /** Every CLI's threads, newest first (`conversationId` is left for the
    *  caller, which knows the chats). */
-  list(request: CliImportListRequest): Promise<CliImportListResult> {
-    return listCliThreads(Object.values(this.readers), request);
+  list(): Promise<CliImportListResult> {
+    return listCliThreads(Object.values(this.readers));
   }
 
   readHistory(ref: { kind: ChatProviderKind; sessionId: string }): Promise<CliImportHistory> {

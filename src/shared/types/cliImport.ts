@@ -13,18 +13,17 @@ export interface CliImportThread {
   /** Its working folder, as the CLI recorded it. */
   folder: string;
   folderExists: boolean;
+  /** The project its app lists it under, when that is not `folder` (a
+   *  Claude Code session in one of the repository's worktrees). */
+  project?: string;
+  /** The thread it was started from, when its app shows it under that one
+   *  (Claude's side sessions): that thread's `sessionId`. */
+  parentSessionId?: string;
   title: string;
   updatedAt: string;
-  /** Run by a program, as the CLI itself reports it (Claude Code's SDK
-   *  sessions, Codex's exec and subagent threads): hidden unless asked for. */
-  automated: boolean;
   /** The chat that already holds this thread: it is opened, never imported
    *  again. */
   conversationId?: string;
-}
-
-export interface CliImportListRequest {
-  includeAutomated?: boolean;
 }
 
 export interface CliImportListResult {

@@ -34,7 +34,8 @@ export type CliThreadFound = Omit<CliImportThread, "folderExists" | "conversatio
  *  (a store that is not there, one that could not be read). */
 export interface CliThreadReader {
   readonly kind: ChatProviderKind;
-  list(includeAutomated: boolean): Promise<CliThreadFound[]>;
+  /** The threads its vendor's own app lists. */
+  list(): Promise<CliThreadFound[]>;
   readHistory(sessionId: string): Promise<CliImportHistory>;
 }
 
@@ -49,4 +50,7 @@ export interface CliImportDependencies {
   env?: () => NodeJS.ProcessEnv;
   /** Where Antigravity keeps its data (`~/.gemini`). */
   homeDir?: string;
+  /** Electron's `app.getPath("appData")`: the Claude app's session records
+   *  are under it. */
+  appDataDir?: string;
 }
