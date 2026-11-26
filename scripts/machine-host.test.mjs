@@ -318,7 +318,7 @@ test("the machine's card executors are its chat's: an answer from the User's ser
 test("a member's background work on the machine is reported to the desktop as it changes and again with each hello", async () => {
   const client = stubClient();
   let notify;
-  const live = [{ conversationId: "conv-bg", participantId: "p1", labels: ["long build"] }];
+  const live = [{ conversationId: "conv-bg", participantId: "p1", tasks: [{ label: "long build", startedAt: "2026-11-26T10:00:00.000Z" }] }];
   const host = makeHost(client, { chat: {
     onBackgroundTasksChanged: (listener) => { notify = listener; return () => { notify = undefined; }; },
     localBackgroundTasks: () => live
@@ -327,13 +327,13 @@ test("a member's background work on the machine is reported to the desktop as it
   await settle();
   const backgroundBodies = async () => (await controlBodies(client, host.options.pairing)).filter((body) => body.type === "machine.member.background");
   const snapshots = (await controlBodies(client, host.options.pairing)).filter((body) => body.type === "machine.member.background.snapshot");
-  assert.deepEqual(snapshots.at(-1)?.members, [{ conversationId: "conv-bg", participantId: "p1", labels: ["long build"] }], "the hello is followed by the full list of what is running now");
+  assert.deepEqual(snapshots.at(-1)?.members, [{ conversationId: "conv-bg", participantId: "p1", labels: ["long build"], startedAt: ["2026-11-26T10:00:00.000Z"] }], "the hello is followed by the full list of what is running now, with when each began");
   assert.equal(typeof notify, "function");
-  notify({ conversationId: "conv-bg", participantId: "p1", labels: [] });
+  notify({ conversationId: "conv-bg", participantId: "p1", tasks: [] });
   await host.outbound;
   await settle(50);
   const bodies = await backgroundBodies();
-  assert.deepEqual(bodies.at(-1), { type: "machine.member.background", conversationId: "conv-bg", participantId: "p1", labels: [] });
+  assert.deepEqual(bodies.at(-1), { type: "machine.member.background", conversationId: "conv-bg", participantId: "p1", labels: [], startedAt: [] });
   // A desktop back from a network blip asks; the machine answers with the full list.
   live.length = 0;
   await deliver(host, client, { type: "machine.member.background.request" });

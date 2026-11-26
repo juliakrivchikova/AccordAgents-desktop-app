@@ -191,12 +191,12 @@ test("through the server's room the desktop and its machine greet each other, an
   // Its members' background work, and a next-prompt suggestion.
   const background = [];
   link.onMemberBackgroundTasks((event) => background.push(event));
-  notifyBackground({ conversationId: "chat-1", participantId: "p1", labels: ["long build"] });
+  notifyBackground({ conversationId: "chat-1", participantId: "p1", tasks: [{ label: "long build", startedAt: "2026-11-26T10:00:00.000Z" }] });
   const suggestions = [];
   link.onPromptSuggestion((event) => suggestions.push(event));
   suggest({ conversationId: "chat-1", runId: "turn-1", participantId: "p1", text: "Run the tests next" });
   await waitFor(() => background.some((event) => event.member) && suggestions.length === 1, 5_000, "background and suggestion");
-  assert.deepEqual(background.find((event) => event.member), { machineId: "machine-1", member: { conversationId: "chat-1", participantId: "p1", labels: ["long build"] } });
+  assert.deepEqual(background.find((event) => event.member), { machineId: "machine-1", member: { conversationId: "chat-1", participantId: "p1", tasks: [{ label: "long build", startedAt: "2026-11-26T10:00:00.000Z" }] } });
   assert.deepEqual(suggestions[0], { machineId: "machine-1", conversationId: "chat-1", runId: "turn-1", participantId: "p1", suggestion: "Run the tests next" });
 
   // A picture a member there reads from this desktop.
