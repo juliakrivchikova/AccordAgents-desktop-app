@@ -1,6 +1,6 @@
 import { isRoleOfferedForNewMembers, mainSessionParticipantId } from "../../../../shared/mainSession";
 import type {
-  AgentHealth, ChatAppToolApproval, ChatParticipant, ChatParticipantRequestPermission, ChatProviderKind,
+  AgentHealth, AppSettings, ChatAppToolApproval, ChatParticipant, ChatParticipantRequestPermission, ChatProviderKind,
   ChatRosterAvailableOptions, ChatRosterAvailableProvider, Conversation
 } from "../../../../shared/types";
 import { reasoningEffortOptionsForProvider } from "../../../../shared/reasoningEffort";
@@ -11,7 +11,8 @@ import {
 import { hasChatAppToolCapability, normalizeChatAppToolCapabilities } from "../../../../shared/appTools";
 import { preservedRemoteExecution } from "../../../../shared/chatParticipantHome";
 import { APP_PARTICIPANTS_REQUEST_CHANGE_TOOL, APP_ROLES_REQUEST_CHANGE_TOOL, APP_ROSTER_REQUEST_CHANGE_TOOL } from "../../appMcp";
-import { readinessForProvider, resolveAssistantProviderKind } from "../../../../shared/cliReadiness";
+import { CLI_PROVIDER_SETUP, readinessForProvider, resolveAssistantProviderKind } from "../../../../shared/cliReadiness";
+import { chatSubagentProjectKey, chatSubagentProvidersOf, effectiveSubagentProviders } from "../../../../shared/subagentProviders";
 import { matchingAppToolApprovalPolicy, newAppToolApproval, upsertAppToolApproval } from "../approvals/approvalRecords";
 import { HANDLE_PATTERN } from "../constants";
 import { CHAT_ROSTER_CHANGE_MAX_OPERATIONS } from "./constants";
@@ -146,6 +147,22 @@ export class RosterTools {
     return false;
   }
 
+  /** The chat's sub-agents for the main session to give tasks to (shared/subagentProviders.ts). */
+  private chatSubagentsFor(conversation: Conversation, settings: AppSettings): Pick<ChatRosterAvailableOptions, "chatSubagents"> {
+    const subagents = effectiveSubagentProviders(
+      settings.subagentProvidersByProject?.[chatSubagentProjectKey(conversation) ?? ""],
+      chatSubagentProvidersOf(conversation.metadata)
+    );
+    return subagents ? {
+      chatSubagents: subagents.map((provider) => ({
+        kind: provider.kind,
+        label: CLI_PROVIDER_SETUP[provider.kind].label,
+        model: provider.model,
+        reasoningEffort: provider.reasoningEffort
+      }))
+    } : {};
+  }
+
   async describeRosterOptionsForTool(actor: ChatAppMcpActor): Promise<ChatRosterAvailableOptions> {
     await this.chat.store.waitForQueuedSave(actor.conversationId);
     const conversation = await this.chat.store.requireChat(actor.conversationId);
@@ -206,6 +223,7 @@ export class RosterTools {
         participantDefaults: role.participantDefaults
       })),
       providers,
+      ...this.chatSubagentsFor(conversation, settings),
       agentModes: ["default", "plan", "auto"],
       reasoningEfforts: reasoningEffortOptionsForProvider(defaultKind),
       defaults: {

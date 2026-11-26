@@ -17,7 +17,7 @@ import type {
   SetChatArchivedRequest, SetChatPinnedRequest, SetChatViewRequest, RespondToChatAppToolApprovalRequest,
   RespondToChatChoiceRequest, RespondToChatMentionsRequest, SendChatMessageRequest, StartChatAccordRequest, StartChatAccordResult,
   StartReviewResult, ToggleChatReactionRequest, CloseAccordCardRequest, DismissTurnFinishedNoteRequest,
-  UpdateChatParticipantRuntimeRequest, RemoveChatParticipantRequest
+  UpdateChatParticipantRuntimeRequest, UpdateChatSubagentProvidersRequest, UpdateChatSubagentProvidersResult, RemoveChatParticipantRequest
 } from "../../shared/types";
 import type { ArtifactNoteLinks } from "./artifactClient";
 import type { DeviceEventBlobReference } from "../../shared/deviceEventBlobs";
@@ -330,6 +330,11 @@ export class ChatService {
 
   updateParticipantRuntime(request: UpdateChatParticipantRuntimeRequest, moved?: ParticipantMoveApplied): Promise<Conversation | undefined> {
     return this.modules.members.updateParticipantRuntime(request, moved);
+  }
+
+  /** A change to the chat's sub-agents (its side panel), for this chat or its project. */
+  updateSubagentProviders(request: UpdateChatSubagentProvidersRequest): Promise<UpdateChatSubagentProvidersResult> {
+    return this.modules.members.updateSubagentProviders(request);
   }
 
   removeParticipant(request: RemoveChatParticipantRequest): Promise<Conversation | undefined> {

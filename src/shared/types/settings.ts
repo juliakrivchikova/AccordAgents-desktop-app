@@ -1,3 +1,4 @@
+import type { SubagentProviderEntry } from "./subagentProviders";
 import type { MobileControlSettings } from "../mobilePairing";
 import type { CustomAvatarSummary } from "../avatarStudio";
 import type { CloudRunsSettings } from "./cloudRuns";
@@ -46,6 +47,9 @@ export interface AppSettings {
   assistantProviderKind?: ChatProviderKind;
   /** How a new chat starts besides its CLI (src/shared/newChatDefaults.ts). */
   newChatDefaults?: NewChatDefaults;
+  /** The CLIs a project's chats give tasks to, by the project's folder
+   *  (src/shared/subagentProviders.ts); a chat adds its own layer. */
+  subagentProvidersByProject?: Record<string, SubagentProviderEntry[]>;
   lastSuccessfulChatProviderKind?: ChatProviderKind;
   lastRepoPath?: string;
   repoFileOpenAction?: RepoFileOpenAction;

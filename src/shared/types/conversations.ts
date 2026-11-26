@@ -1,3 +1,4 @@
+import type { ChatSubagentProviders } from "./subagentProviders";
 import type { ChatLastMessageByParticipant, ChatMessage, ChatPromptContextPointers } from "./messages";
 import type { ChatProviderKind } from "./providers";
 import type { Finding } from "./reviews";
@@ -76,6 +77,11 @@ export type ConversationMetadata = Record<string, unknown> & {
    *  message without an addressee goes to. Set when the chat is made and
    *  never changed; a chat without it is an Assistant chat from before. */
   mainSessionParticipantId?: string;
+  /** The chat's own layer over its project's sub-agent providers
+   *  (src/shared/subagentProviders.ts). Set when the chat is made; a chat
+   *  without it predates the list, and its main session may give tasks to any
+   *  ready CLI. */
+  subagentProviders?: ChatSubagentProviders;
   /** The chat's view, switched by the User any number of times and shared
    *  through her server like the pin. Read it through chatViewFor(). */
   chatView?: ChatViewMode;

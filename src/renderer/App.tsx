@@ -61,6 +61,7 @@ import { isCodexActivityApprovalItem } from "../shared/chatActivity";
 import { CHAT_SPLIT_WORKSPACE_MIN_WIDTH } from "./lib/chat-split-sizing";
 import { ChatBackgroundTasksContext } from "./components/chat/chat-roster-status";
 import { UrgentAlertActionsContext } from "./components/chat/urgent-alert-context";
+import { SubagentProvidersContext, type SubagentProvidersActions } from "./components/chat/subagent-providers-context";
 import { restartingMembers } from "../shared/memberRestart";
 import { TerminalPanel } from "./components/terminal/terminal-panel";
 import { useTerminalPanel } from "./components/terminal/use-terminal-panel";
@@ -125,6 +126,16 @@ function App(): JSX.Element {
     void chatActions.forkChatParticipantToNewChat(participantId, { openChat: (conversationId) => openChatRef.current(conversationId) });
   };
   const { openSettingsSection } = navigation;
+  // The side panel's Agents (sub-agent providers): the CLIs found here and the
+  // change, through a ref so the context changes only with what it shows.
+  const updateSubagentsRef = React.useRef(chatActions.updateChatSubagentProviders);
+  updateSubagentsRef.current = chatActions.updateChatSubagentProviders;
+  const subagentActions = React.useMemo<SubagentProvidersActions>(() => ({
+    agents: state.agents,
+    providers: state.settings.providers,
+    update: (scope, change) => updateSubagentsRef.current(scope, change),
+    openSetup: () => openSettingsSection("general")
+  }), [state.agents, state.settings.providers, openSettingsSection]);
   const urgentAlertActions = React.useMemo(() => ({
     openAlertSettings: () => openSettingsSection("alerts"),
     openServerSettings: () => openSettingsSection("aws")
@@ -686,7 +697,9 @@ function App(): JSX.Element {
   return (
     <ChatBackgroundTasksContext.Provider value={view.participantBackgroundTasksById}>
       <UrgentAlertActionsContext.Provider value={urgentAlertActions}>
-        {shell}
+        <SubagentProvidersContext.Provider value={subagentActions}>
+          {shell}
+        </SubagentProvidersContext.Provider>
       </UrgentAlertActionsContext.Provider>
     </ChatBackgroundTasksContext.Provider>
   );

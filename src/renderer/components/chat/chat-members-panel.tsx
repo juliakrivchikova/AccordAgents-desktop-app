@@ -1,13 +1,15 @@
 import { useState, type ReactNode } from "react";
-import { RobotIcon, CaretDownIcon, XIcon } from "@phosphor-icons/react";
+import { ClockCounterClockwiseIcon, CaretDownIcon, XIcon } from "@phosphor-icons/react";
 
 import type { DockedAccord } from "../../../shared/accordProgress";
-import { SESSIONS_REMOVED_MEMBER_DETAIL, sessionsRunningCount, type SessionsMemberActivity, type SessionsMemberRow, type SessionsMemberTask } from "../../../shared/mainSessionView";
-import type { ChatParticipant } from "../../../shared/types";
+import { SESSIONS_REMOVED_MEMBER_DETAIL, type SessionsMemberActivity, type SessionsMemberRow, type SessionsMemberTask } from "../../../shared/mainSessionView";
+import type { ChatParticipant, ChatSubagentProviders, SubagentProviderEntry } from "../../../shared/types";
 import { IconButton } from "../primitives";
 import { ChatAccordRow } from "./chat-accord-dock";
 import { ChatAgentRow, type ChatAgentDetail } from "./chat-agent-row";
 import { ChatProviderMark, ChatProviderMarkSlot } from "./chat-member-mark";
+import { ChatSubagentsSection, type SubagentMainSession } from "./chat-subagents-section";
+import { subagentPanelProviders } from "./subagent-panel";
 import { useMachineList } from "./use-cli-start-defaults";
 import type { SessionsFormerRow } from "./use-chat-sessions-view";
 
@@ -16,6 +18,10 @@ export interface ChatMembersPanelProps {
   accord?: DockedAccord;
   onOpenAccord?: (launchId: string) => void;
   rows: { current: readonly SessionsMemberRow[]; previous: readonly SessionsMemberRow[] };
+  /** The CLIs the main session gives tasks to: its project's list and the
+   *  chat's own layer (none: a chat from before the list); projectScope when
+   *  the chat has a project folder to keep a list for. */
+  subagents?: { project?: readonly SubagentProviderEntry[]; thread?: ChatSubagentProviders; projectScope: boolean; main?: SubagentMainSession };
   /** Members no longer in the chat, whose sessions stay readable. */
   formerRows?: readonly SessionsFormerRow[];
   activity: SessionsMemberActivity;
@@ -48,7 +54,7 @@ export interface ChatMembersPanelProps {
 export function ChatMembersPanel(props: ChatMembersPanelProps): JSX.Element {
   const machines = useMachineList();
   const former = props.formerRows ?? [];
-  const runningCount = sessionsRunningCount(props.rows);
+  const providers = subagentPanelProviders(props.subagents?.project, props.subagents?.thread, props.rows.current);
   const renderRow = (row: SessionsMemberRow): JSX.Element => {
     const { participant, status } = row;
     const runIds = props.runIdsByParticipantId.get(participant.id) ?? [];
@@ -100,31 +106,39 @@ export function ChatMembersPanel(props: ChatMembersPanelProps): JSX.Element {
             <ChatAccordRow launch={props.accord} testId="chat-members-accord" onOpen={() => props.onOpenAccord?.(props.accord!.launchId)} />
           </div>
         )}
-        {props.rows.current.length > 0 && (
-          <div className="chat-side-section" data-testid="chat-members-agents">
-            <h3 className="chat-side-heading">{runningCount > 0 ? `Agents · ${runningCount} running` : "Agents"}</h3>
-            <ul className="chat-agent-list">{props.rows.current.map(renderRow)}</ul>
-          </div>
-        )}
-        <ChatAgentsGroup label="Previous agents" testId="chat-members-previous" count={props.rows.previous.length}>
-          {props.rows.previous.map(renderRow)}
-        </ChatAgentsGroup>
-        <ChatAgentsGroup label="Removed" testId="chat-members-removed" count={former.length}>
-          {former.map((row) => (
-            <ChatAgentRow
-              key={row.member.id}
-              machines={machines}
-              fixedDetail={SESSIONS_REMOVED_MEMBER_DETAIL}
-              row={{
-                id: row.member.id,
-                status: row.status,
-                mark: row.member.kind ? <ChatProviderMark member={{ kind: row.member.kind }} /> : <ChatProviderMarkSlot />,
-                title: row.title,
-                ...(row.status !== "idle" && props.taskDurationMs?.(row) !== undefined ? { durationMs: props.taskDurationMs(row)! } : {}),
-                onOpen: () => props.onOpenMember(row.member.id)
-              }}
-            />
-          ))}
+        <ChatSubagentsSection providers={providers} project={props.subagents?.project} main={props.subagents?.main}
+          legacy={Boolean(props.subagents) && !props.subagents?.thread}
+          projectScope={props.subagents?.projectScope ?? false} renderRow={renderRow} />
+        {/* Sessions that ended and members no longer in the chat, in one quiet group. */}
+        <ChatAgentsGroup label="History" testId="chat-members-history" count={props.rows.previous.length + former.length}>
+          {props.rows.previous.length > 0 && (
+            <div data-testid="chat-members-previous">
+              <div className="chat-subagents-glabel">Earlier</div>
+              <ul className="chat-agent-list">{props.rows.previous.map(renderRow)}</ul>
+            </div>
+          )}
+          {former.length > 0 && (
+            <div data-testid="chat-members-removed">
+              <div className="chat-subagents-glabel">Removed from this thread</div>
+              <ul className="chat-agent-list">
+                {former.map((row) => (
+                  <ChatAgentRow
+                    key={row.member.id}
+                    machines={machines}
+                    fixedDetail={SESSIONS_REMOVED_MEMBER_DETAIL}
+                    row={{
+                      id: row.member.id,
+                      status: row.status,
+                      mark: row.member.kind ? <ChatProviderMark member={{ kind: row.member.kind }} /> : <ChatProviderMarkSlot />,
+                      title: row.title,
+                      ...(row.status !== "idle" && props.taskDurationMs?.(row) !== undefined ? { durationMs: props.taskDurationMs(row)! } : {}),
+                      onOpen: () => props.onOpenMember(row.member.id)
+                    }}
+                  />
+                ))}
+              </ul>
+            </div>
+          )}
         </ChatAgentsGroup>
       </div>
     </section>
@@ -141,12 +155,12 @@ function ChatAgentsGroup(props: { label: string; testId: string; count: number; 
   return (
     <div className="chat-side-section" data-testid={props.testId}>
       <button type="button" className="chat-agents-group-toggle" aria-expanded={open} onClick={() => setOpen((current) => !current)}>
-        <RobotIcon className="chat-agents-group-icon" size={16} aria-hidden="true" />
+        <ClockCounterClockwiseIcon className="chat-agents-group-icon" size={16} aria-hidden="true" />
         <span className="chat-agents-group-label">{props.label}</span>
         {!open && <span className="chat-agents-group-count">{props.count}</span>}
         <CaretDownIcon className={open ? "chat-agents-group-chevron" : "chat-agents-group-chevron is-folded"} size={16} aria-hidden="true" />
       </button>
-      {open && <ul className="chat-agent-list">{props.children}</ul>}
+      {open && props.children}
     </div>
   );
 }

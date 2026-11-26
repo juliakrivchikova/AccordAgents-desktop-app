@@ -5,7 +5,7 @@ import type {
   AddChatParticipantRequest, CompactChatParticipantRequest, RestartChatParticipantRequest, CreateChatConversationRequest,
   DeleteChatConversationRequest, DismissConversationWarningsRequest, RenameChatConversationRequest, SetChatArchivedRequest,
   SetChatPinnedRequest, SetChatViewRequest, ChatViewState, ChatPinState, SendChatMessageRequest, StartChatAccordRequest,
-  UpdateChatParticipantRuntimeRequest, RemoveChatParticipantRequest
+  UpdateChatParticipantRuntimeRequest, UpdateChatSubagentProvidersRequest, RemoveChatParticipantRequest
 } from "../../../shared/types";
 import type { MemoryNote, MemoryNoteIdRequest, MemorySettingsListRequest } from "../../../shared/memory";
 import { emitReviewProgress } from "../chatServices";
@@ -83,6 +83,10 @@ export function registerChatIpc(desktopApp: DesktopApp): void {
 
   ipcMain.handle("chat:update-participant-runtime", async (_event, request: UpdateChatParticipantRuntimeRequest) => {
     return desktopApp.chatService.updateParticipantRuntime(request);
+  });
+
+  ipcMain.handle("chat:update-subagent-providers", async (_event, request: UpdateChatSubagentProvidersRequest) => {
+    return desktopApp.chatService.updateSubagentProviders(request);
   });
 
   ipcMain.handle("chat:remove-participant", async (_event, request: RemoveChatParticipantRequest) => {

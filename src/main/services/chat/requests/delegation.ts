@@ -5,6 +5,8 @@ import type {
   ChatParticipantRequestBatch, ChatParticipantRequestItem, ChatRosterChangeParticipantInput
 } from "../../../../shared/types";
 import { normalizeChatReasoningEffort } from "../../../../shared/reasoningEffort";
+import { CLI_PROVIDER_SETUP } from "../../../../shared/cliReadiness";
+import { chatSubagentProjectKey, chatSubagentProvidersOf, effectiveSubagentProviders } from "../../../../shared/subagentProviders";
 import {
   clampChatAgentAccess, effectiveChatAgentPermissionsForProvider, normalizeChatAgentMode, normalizeChatAgentPermissions
 } from "../../../../shared/agentPermissions";
@@ -94,8 +96,32 @@ export class Delegation {
       ...effectiveChatAgentPermissionsForProvider(caller.kind, callerMode, normalizeChatAgentPermissions(caller.permissions)),
       manageRolesParticipants: manage
     };
-    const kind = input.kind ?? caller.kind;
+    // The chat's sub-agents (its side panel): the provider asked for must be one
+    // of them; none named, the main session's own when it is one, else the first.
+    // A chat from before the list has none: any ready CLI, as before.
+    const subagents = effectiveSubagentProviders(
+      settings.subagentProvidersByProject?.[chatSubagentProjectKey(conversation) ?? ""],
+      chatSubagentProvidersOf(conversation.metadata)
+    );
+    // A Cloud run main session's members run there too, where Antigravity does not.
+    const runnable = subagents?.filter((provider) => !(caller.cloudRun && provider.kind === "gemini-cli"));
+    const subagent = subagents && (input.kind
+      ? subagents.find((provider) => provider.kind === input.kind)
+      : runnable?.find((provider) => provider.kind === caller.kind) ?? runnable?.[0]);
+    if (subagents && !subagent) {
+      return delegationRefusal("provider_not_in_chat", subagents.length === 0
+        ? "This chat has no sub-agents yet. User adds them in the chat's side panel."
+        : `${CLI_PROVIDER_SETUP[input.kind!].label} is not among this chat's sub-agents (${subagents.map((provider) => CLI_PROVIDER_SETUP[provider.kind].label).join(", ")}). Give the task to one of them, or ask User to add it in the chat's side panel.`);
+    }
+    const kind = subagent?.kind ?? input.kind ?? caller.kind;
     const sameProvider = kind === caller.kind;
+    // A sub-agent with a model of its own runs on its CLI's own backend, not on
+    // another vendor the main session's CLI may be bound to; a fork goes there too.
+    const childHostId = sameProvider && !subagent?.model ? caller.hostId : undefined;
+    // A model named without a provider is one of the main session's own CLI's.
+    if (subagents && !input.kind && input.model && !sameProvider) {
+      return delegationRefusal("invalid_request", `Name the provider (kind) for model ${input.model}: this chat's sub-agents send the task to ${CLI_PROVIDER_SETUP[kind].label}, not your own CLI.`);
+    }
     const access = clampChatAgentAccess(kind,
       { agentMode: input.agentMode ?? callerMode, permissions: delegationRequestedPermissions(input.permissions, ceiling) },
       { agentMode: callerMode, permissions: ceiling });
@@ -108,7 +134,7 @@ export class Delegation {
     const start = input.start ?? "clean";
     const callerSession = chatSessions(conversation).find((session) => session.participantId === caller.id);
     if (start === "fork") {
-      const unavailable = this.chat.forks.forkUnavailableReason(caller, callerSession, kind, sameProvider ? caller.hostId : undefined);
+      const unavailable = this.chat.forks.forkUnavailableReason(caller, callerSession, kind, childHostId);
       if (unavailable) {
         return delegationRefusal("fork_unavailable", unavailable);
       }
@@ -117,14 +143,20 @@ export class Delegation {
       permissions.repoRead = ceiling.repoRead;
     }
 
+    const childModel = input.model ?? subagent?.model ?? (sameProvider ? caller.model : undefined);
+    // The main session's effort goes with its own model: another model may lack it.
+    // A chat from before the list keeps the old rule (its own CLI, any model).
+    const inheritsCallerEffort = sameProvider && (!subagents || childModel === caller.model);
     const baseHandle = input.handle ?? delegatedMemberHandleBase(role, kind);
     const item: ChatParticipantInput = {
       handle: uniqueHandle(baseHandle, new Set(chatParticipants(conversation).map((participant) => participant.handle.toLowerCase()))),
       roleConfigId: role.id,
       kind,
-      model: input.model ?? (sameProvider ? caller.model : undefined),
-      reasoningEffort: normalizeChatReasoningEffort(input.reasoningEffort ?? (sameProvider ? caller.reasoningEffort : undefined), kind),
-      hostId: sameProvider ? caller.hostId : undefined,
+      // The provider's model and effort for this chat, then the main session's own.
+      model: childModel,
+      reasoningEffort: normalizeChatReasoningEffort(input.reasoningEffort ?? subagent?.reasoningEffort ??
+        (inheritsCallerEffort ? caller.reasoningEffort : undefined), kind),
+      hostId: childHostId,
       agentMode,
       permissions,
       // Where the main session runs: a cloud main session's members run on

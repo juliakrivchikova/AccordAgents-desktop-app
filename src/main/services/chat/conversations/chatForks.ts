@@ -144,7 +144,9 @@ export class ChatForks {
           warnings: [],
           running: false,
           mainSessionParticipantId: mainSession.id,
-          chatView: DEFAULT_CHAT_VIEW
+          chatView: DEFAULT_CHAT_VIEW,
+          // A new chat: its project's sub-agents, none of its own yet.
+          subagentProviders: { entries: [] }
         }
       };
       rebuildLastMessagesByParticipant(conversation);

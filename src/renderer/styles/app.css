@@ -72,6 +72,7 @@
 @import "./views/chat-sessions/sessions-view.css" layer(components);
 @import "./views/chat-sessions/provider-icons.css" layer(components);
 @import "./views/chat-sessions/side-panel.css" layer(components);
+@import "./views/chat-sessions/subagents.css" layer(components);
 @import "./views/chat-sessions/member-tasks.css" layer(components);
 @import "./views/chat-sessions/accord.css" layer(components);
 @import "./views/chat-sessions/title-menu.css" layer(components);

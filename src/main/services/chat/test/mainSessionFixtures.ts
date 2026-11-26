@@ -12,8 +12,9 @@ import { CHAT_AUTO_WATCH_WAKE_LIMIT_DEFAULT } from "../../../../shared/chatAutoW
 import { EMPTY_MOBILE_CONTROL_SETTINGS } from "../../../../shared/mobilePairing";
 import type {
   AppSettings, ChatAgentPermissions, ChatMessage, ChatParticipant, ChatParticipantRequestBatch, ChatParticipantSession,
-  ChatProviderKind, ChatRoleConfig, Conversation, ParticipantConfig
+  ChatProviderKind, ChatRoleConfig, Conversation, ParticipantConfig, SubagentProviderChange
 } from "../../../../shared/types";
+import { applySubagentProviderChange, subagentProjectKey } from "../../../../shared/subagentProviders";
 
 // The main session of a chat (docs/main-session.md): it gives new members
 // tasks without a card, never with broader rights than its own, can fork its
@@ -131,6 +132,8 @@ export function testService(options: {
   conversation: Conversation;
   run?: (participant: ParticipantConfig, prompt: string, options: any, signal?: AbortSignal) => Promise<any>;
   userSkills?: unknown;
+  /** Settings over the fixture's defaults (a project's sub-agents, say). */
+  settings?: Partial<AppSettings>;
 }) {
   const tempRoot = path.join(tmpdir(), "accordagents-main-session-test");
   const storage = {
@@ -157,6 +160,7 @@ export function testService(options: {
       return [];
     }
   };
+  let subagentProvidersByProject = options.settings?.subagentProvidersByProject;
   const publicSettings = (): AppSettings => ({
     chatCustomAvatars: [],
     roundLimitDefault: 1,
@@ -180,7 +184,9 @@ export function testService(options: {
     chatSavedPrompts: [],
     chatParticipantConfigs: [],
     chatParticipantSeedState: {},
-    cliProviderHosts: []
+    cliProviderHosts: [],
+    ...options.settings,
+    subagentProvidersByProject
   } as unknown as AppSettings);
   const settings = {
     async getPublicSettings() { return publicSettings(); },
@@ -191,7 +197,12 @@ export function testService(options: {
     async recordSuccessfulChatProvider() {},
     async getChatParticipantRequestMaxDepth() { return CHAT_PARTICIPANT_REQUEST_MAX_DEPTH_DEFAULT; },
     async getChatParticipantRequestPromptMaxChars() { return CHAT_PARTICIPANT_REQUEST_PROMPT_MAX_CHARS_DEFAULT; },
-    async saveChatParticipantConfig() { return publicSettings(); }
+    async saveChatParticipantConfig() { return publicSettings(); },
+    async updateProjectSubagentProviders(repoPath: string, change: SubagentProviderChange) {
+      const key = subagentProjectKey(repoPath)!;
+      subagentProvidersByProject = { ...subagentProvidersByProject, [key]: applySubagentProviderChange("project", subagentProvidersByProject?.[key] ?? [], change) };
+      return publicSettings();
+    }
   };
   const runs: RunCall[] = [];
   const cliRunner = {

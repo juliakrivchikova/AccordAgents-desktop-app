@@ -33,6 +33,12 @@ const click = { defaultPrevented: false, preventDefault: noop, stopPropagation: 
 const textOf = (node: ReactTestInstance | string): string =>
   typeof node === "string" ? node : node.children.map(textOf).join("");
 const byTestId = (id: string) => (node: ReactTestInstance): boolean => typeof node.type === "string" && node.props["data-testid"] === id;
+/** Opens every provider row of the side panel's Agents, as a click on each does. */
+const openProviders = (root: ReactTestInstance): void => {
+  for (const toggle of root.findAll(byTestId("chat-subagent-toggle"))) {
+    if (!toggle.props["aria-expanded"]) act(() => toggle.props.onClick());
+  }
+};
 
 const STATUSES = new Map<string, ChatParticipantRosterStatus>([[DREW.id, "running"], [GERA.id, "idle"], [TAYLOR.id, "pending"]]);
 const SETTINGS = { chatRoleConfigs: [], chatSavedPrompts: [], chatParticipantConfigs: [], cliProviderHosts: [] } as unknown as AppSettings;
@@ -82,9 +88,13 @@ test("the side panel lists every session but the main session as T3 Code does: g
     await act(async () => { await new Promise((resolve) => setTimeout(resolve, 0)); });
     const root = renderer!.root;
     const memberRows = () => root.findAll(byTestId("chat-members-row"));
+    // Sessions are folded under their provider (variant B) until its row is opened.
+    assert.equal(memberRows().length, 0, "folded under their providers");
+    openProviders(root);
     assert.deepEqual(memberRows().map((row) => [row.props["data-participant-id"], row.props["data-member-status"]]), [[DREW.id, "running"], [TAYLOR.id, "waiting"]],
-      "the main session is not listed; gera's task is done, so it waits under Previous agents");
-    assert.equal(textOf(root.find(byTestId("chat-members-agents")).find((node) => node.type === "h3")), "Agents · 1 running");
+      "the main session is not listed; gera's task is done, so it waits under History");
+    assert.equal(textOf(root.find(byTestId("chat-members-agents")).find((node) => node.type === "h3")), "Agents");
+    assert.equal(textOf(root.find(byTestId("chat-subagents-running"))), "1 running");
     const drewRow = memberRows()[0]!;
     assert.equal(textOf(drewRow.find((node) => typeof node.props?.className === "string" && node.props.className === "chat-agent-title")), "Task for drew: fix the drew part", "named by its task");
     assert.doesNotMatch(textOf(drewRow), /Opus|opus|Claude Code/, "no model in a row (the User, 2026-11-22): its hover card names it");
@@ -116,19 +126,16 @@ test("the side panel lists every session but the main session as T3 Code does: g
     act(() => drewRow.findAll((node) => node.type === "button" && node.props.className === "chat-agent-row-main")[0]!.props.onClick());
     assert.deepEqual(opened, [DREW.id], "a click opens its session");
 
-    const previous = root.find(byTestId("chat-members-previous"));
-    assert.equal(textOf(previous), "Previous agents1", "folded, with its count");
-    act(() => previous.findAll((node) => node.type === "button")[0]!.props.onClick());
-    assert.deepEqual(memberRows().map((row) => row.props["data-participant-id"]), [DREW.id, TAYLOR.id, GERA.id]);
+    const history = root.find(byTestId("chat-members-history"));
+    assert.equal(textOf(history), "History2", "ended and removed sessions folded in one group, with its count");
+    act(() => history.findAll((node) => node.type === "button")[0]!.props.onClick());
+    assert.deepEqual(memberRows().map((row) => row.props["data-participant-id"]), [DREW.id, TAYLOR.id, GERA.id, "p-gone"]);
     const geraRow = memberRows()[2]!;
     assert.equal(geraRow.props["data-member-status"], "done");
     assert.equal(geraRow.findAll((node) => typeof node.props?.className === "string" && node.props.className.startsWith("chat-agent-dot")).length, 0,
       "an ended session has no dot: its state no longer matters (its card still says it)");
-    assert.equal(textOf(root.find(byTestId("chat-members-previous")).find((node) => node.type === "button" && node.props.className === "chat-agents-group-toggle")), "Previous agents", "the count goes once it is open");
-
-    const removed = root.find(byTestId("chat-members-removed"));
-    assert.equal(textOf(removed), "Removed1", "a session no longer in the chat, folded");
-    act(() => removed.findAll((node) => node.type === "button")[0]!.props.onClick());
+    assert.equal(textOf(root.find(byTestId("chat-members-history")).find((node) => node.type === "button" && node.props.className === "chat-agents-group-toggle")), "History", "the count goes once it is open");
+    assert.match(textOf(root.find(byTestId("chat-members-removed"))), /^Removed from this thread/, "a session no longer in the chat, under its own label");
     const gone = memberRows().find((row) => row.props["data-participant-id"] === "p-gone")!;
     assert.match(textOf(gone), /Old task/);
     assert.equal(gone.findAll((node) => node.props?.["data-provider-kind"] === "gemini-cli").length, 1, "it keeps the glyph its task named");
@@ -163,6 +170,7 @@ test("every row has the same anatomy: a waiting one says how long it worked befo
       </TooltipProvider>
     );
   });
+  openProviders(renderer!.root);
   const times = renderer!.root.findAll(byTestId("chat-agent-time")).map((node) => textOf(node));
   assert.deepEqual(times, ["2m", "4m"], "waiting: from its turn's start to when it began to wait; stopped: its task's time");
   assert.equal(renderer!.root.findAll(byTestId("chat-members-row-stop")).length, 0, "Stop only while it runs: not on one waiting for the User, though its run is live");
@@ -231,9 +239,10 @@ test("with nobody running or waiting, the members panel lists every member as it
   });
   const root = renderer!.root;
   assert.equal(root.findAll(byTestId("chat-members-previous")).length, 0);
+  openProviders(root);
   assert.deepEqual(root.findAll(byTestId("chat-members-row")).map((row) => [row.props["data-participant-id"], row.props["data-member-status"]]),
     [[DREW.id, "done"], [GERA.id, "done"], [TAYLOR.id, "idle"]],
-    "the finished ones listed directly, in the chat's order, with the one that never had a task");
+    "the finished ones listed under their providers, in the chat's order, with the one that never had a task");
   act(() => renderer!.unmount());
 });
 
@@ -416,6 +425,7 @@ test("the side panel has no title and no main session row, says nothing when emp
   assert.doesNotMatch(textOf(panel), /members?/i, "the sessions view never says members");
   assert.doesNotMatch(textOf(panel), /Main session/, "the main session is not listed: its settings are its composer chip");
   assert.equal(renderer!.root.findAll(byTestId("chat-members-main")).length, 0);
+  openProviders(renderer!.root);
   assert.equal(renderer!.root.find(byTestId("chat-members-body")).findAll(byTestId("chat-members-row"))[0]?.props["data-participant-id"], DREW.id, "the delegated sessions first");
   act(() => renderer!.unmount());
 
@@ -428,7 +438,8 @@ test("the side panel has no title and no main session row, says nothing when emp
       </TooltipProvider>
     );
   });
-  assert.equal(textOf(empty!.root.find(byTestId("chat-members-body"))), "", "nothing is said when nothing was delegated");
+  // A thread with no agents says so and offers to add them (variant B, the User, 2026-11-26).
+  assert.match(textOf(empty!.root.find(byTestId("chat-subagents-empty"))), /^No agents yet\./);
   act(() => empty!.unmount());
 
   const session = renderSession({ member: DREW, readOnly: false, settings: <span data-testid="drew-settings" />, chip: <span data-testid="drew-chip" /> });

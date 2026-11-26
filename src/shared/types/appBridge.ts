@@ -37,6 +37,7 @@ import type {
   RestartChatParticipantRequest, SendChatMessageRequest, SetChatArchivedRequest, SetChatPinnedRequest, SetChatViewRequest,
   StartChatAccordRequest, StartChatAccordResult, ToggleChatReactionRequest, UpdateChatParticipantRuntimeRequest
 } from "./chatRequests";
+import type { UpdateChatSubagentProvidersRequest, UpdateChatSubagentProvidersResult } from "./subagentProviders";
 import type { ChatSearchRequest, ChatSearchResponse } from "./chatSearch";
 import type {
   CloudRunsSettingsUpdate, CloudRunWorkerDoctorReport, CloudRunWorkerSettings, CloudRunWorkerSetupProgress,
@@ -229,6 +230,8 @@ export interface AppBridge {
   dismissConversationWarnings(request: DismissConversationWarningsRequest): Promise<Conversation | undefined>;
   addChatParticipant(request: AddChatParticipantRequest): Promise<Conversation | undefined>;
   updateChatParticipantRuntime(request: UpdateChatParticipantRuntimeRequest): Promise<Conversation | undefined>;
+  /** A change to the chat's sub-agents (side panel), for this chat or its project. */
+  updateChatSubagentProviders(request: UpdateChatSubagentProvidersRequest): Promise<UpdateChatSubagentProvidersResult>;
   removeChatParticipant(request: RemoveChatParticipantRequest): Promise<Conversation | undefined>;
   compactChatParticipant(request: CompactChatParticipantRequest): Promise<StartReviewResult>;
   getClaudeChromeSetting(): Promise<ClaudeChromeSetting>;

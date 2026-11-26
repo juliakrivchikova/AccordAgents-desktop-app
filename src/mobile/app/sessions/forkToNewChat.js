@@ -192,7 +192,7 @@ async function forkMemberToNewChat(plan) {
     const create = await createOutboxEvent({
       conversationId: conversationId, kind: "conversation.create", createdAt: createdAt,
       payload: { conversation: { title: title, kind: "chat", createdAt: createdAt, ...(repoPath ? { repoPath: repoPath } : {}),
-        metadata: { participants: [mainSession], ...sessionsFields } } }
+        metadata: { participants: [mainSession], ...sessionsFields, subagentProviders: { entries: [] } } } }
     });
     const introId = createEventId();
     const intro = await createOutboxEvent({

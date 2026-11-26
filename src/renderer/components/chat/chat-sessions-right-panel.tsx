@@ -1,4 +1,5 @@
 import { useCallback, useContext, useEffect, useMemo, useRef, type ComponentProps, type ReactNode } from "react";
+import { chatSubagentProjectKey, chatSubagentProvidersOf } from "../../../shared/subagentProviders";
 
 import type { DockedAccord } from "../../../shared/accordProgress";
 import { memberSessionMessages } from "../../../shared/mainSession";
@@ -167,9 +168,16 @@ export function ChatSessionsRightPanel(props: {
   if (panel?.kind === "members") {
     return (
       <ChatMembersPanel
+        key={conversation.id}
         accord={props.latestAccord}
         onOpenAccord={props.onOpenAccord}
         rows={sessions.memberRows}
+        subagents={{
+          project: settings.subagentProvidersByProject?.[chatSubagentProjectKey(conversation) ?? ""],
+          thread: chatSubagentProvidersOf(conversation.metadata),
+          projectScope: Boolean(chatSubagentProjectKey(conversation)),
+          main: props.participants.find((member) => member.id === conversation.metadata.mainSessionParticipantId)
+        }}
         formerRows={sessions.formerRows}
         activity={sessions.activity}
         runIdsByParticipantId={props.runIdsByParticipantId}

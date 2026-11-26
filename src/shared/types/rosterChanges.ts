@@ -185,6 +185,10 @@ export interface ChatRosterAvailableOptions {
   currentParticipants: ChatRosterCurrentParticipant[];
   roles: ChatRosterAvailableRole[];
   providers: ChatRosterAvailableProvider[];
+  /** The providers this chat gives tasks to with app_chat_delegate_task (its side
+   *  panel), with the model and effort its new members run on; absent for a chat
+   *  from before the list, where any ready provider is used. */
+  chatSubagents?: Array<{ kind: ChatProviderKind; label: string; model?: string; reasoningEffort?: ChatReasoningEffort }>;
   agentModes: ChatAgentMode[];
   reasoningEfforts: ProviderReasoningEffortOption[];
   defaults: {

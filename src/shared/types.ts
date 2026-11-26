@@ -26,6 +26,7 @@ export * from "./types/artifacts";
 export * from "./types/appBridge";
 export * from "./types/phoneInvites";
 export * from "./types/speechToText";
+export * from "./types/subagentProviders";
 export type {
   MachineInstallRecord,
   MachineInstallRequest,

@@ -116,6 +116,9 @@ export class ChatCreation {
           participantSessions: [],
           warnings: [],
           running: false,
+          // Its own layer over the project's sub-agents, empty: the chat gives
+          // tasks to the providers its project has, or to none until added.
+          subagentProviders: { entries: [] },
           // Every new chat opens in the sessions view (the User, 2026-11-22);
           // its header switches it afterwards.
           ...(mainSession ? { mainSessionParticipantId: mainSession.id, chatView: DEFAULT_CHAT_VIEW } : {})

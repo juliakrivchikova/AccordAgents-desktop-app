@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import { LOCAL_MESSAGE_METADATA_KEYS, SHARED_CONVERSATION_METADATA_KEYS } from "../../main/services/chatChanges";
 import type { HubDevice } from "../../shared/hubProtocol";
 import { isChatViewMode, mainSessionMemberOf, mainSessionParticipantId } from "../../shared/mainSession";
+import { chatSubagentProvidersOf } from "../../shared/subagentProviders";
 import {
   hubTurnRunId, isHubArtifactOpKind, type HubArtifactOpKind, type HubConversationFields, type HubOp, type HubTurn
 } from "../../shared/hubOps";
@@ -42,6 +43,12 @@ export function sharedMetadata(metadata: Record<string, unknown>): Record<string
   }
   if (shared.chatView !== undefined && !isChatViewMode(shared.chatView)) {
     delete shared.chatView;
+  }
+  // The chat's sub-agents: only well-formed entries reach a device.
+  if (shared.subagentProviders !== undefined) {
+    const layer = chatSubagentProvidersOf({ subagentProviders: shared.subagentProviders });
+    if (layer) shared.subagentProviders = layer;
+    else delete shared.subagentProviders;
   }
   return shared;
 }

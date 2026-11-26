@@ -1,4 +1,6 @@
 import type {
+  SubagentProviderChange,
+  SubagentProviderScope,
   ChatAppToolApprovalRequest,
   ChatClaudePlanDecision,
   ChatAppToolApprovalScope,
@@ -80,6 +82,8 @@ export interface ChatActions {
   addChatParticipant: () => Promise<void>;
   addSavedChatParticipant: (config: ChatParticipantConfig) => Promise<void>;
   updateChatParticipantRuntime: (participantId: string, patch: ChatParticipantRuntimePatch) => Promise<boolean>;
+  /** A change to the open chat's sub-agents (side panel), for it or its project. */
+  updateChatSubagentProviders: (scope: SubagentProviderScope, change: SubagentProviderChange) => Promise<boolean>;
   removeChatParticipant: (participantId: string) => Promise<void>;
   compactChatParticipant: (participantId: string, options?: ChatRunScopeOptions) => Promise<boolean>;
   restartChatParticipant: (participantId: string, stopBackgroundTasks?: boolean) => Promise<boolean>;
@@ -666,6 +670,28 @@ export function useChatActions(state: AppState, conversationActions: Conversatio
     }
   }
 
+  async function updateChatSubagentProviders(scope: SubagentProviderScope, change: SubagentProviderChange): Promise<boolean> {
+    const conversation = state.conversation;
+    if (!conversation || conversation.kind !== "chat") return false;
+    state.setError(undefined);
+    try {
+      const result = await window.consensus.updateChatSubagentProviders({ conversationId: conversation.id, scope, change });
+      // Only the chat's own layer and the projects' lists: its messages and runs
+      // here, and every other setting, stay as they are.
+      state.setConversation((current) => current?.id === result.conversationId
+        ? { ...current, metadata: { ...current.metadata, subagentProviders: result.subagentProviders } }
+        : current);
+      if (result.subagentProvidersByProject) {
+        const byProject = result.subagentProvidersByProject;
+        state.setSettings((current) => ({ ...current, subagentProvidersByProject: byProject }));
+      }
+      return true;
+    } catch (caught) {
+      state.setError(errorText(caught));
+      return false;
+    }
+  }
+
   async function removeChatParticipant(participantId: string): Promise<void> {
     if (!state.conversation || state.conversation.kind !== "chat") return;
     state.setError(undefined);
@@ -936,7 +962,7 @@ export function useChatActions(state: AppState, conversationActions: Conversatio
   return {
     startChat, renameChatConversation, setChatArchived, setChatPinned, deleteChatConversation, sendChatMessage, respondToChatMentions,
     toggleChatReaction, dismissTurnFinishedNote, respondToChatChoice, addChatParticipant, addSavedChatParticipant,
-    updateChatParticipantRuntime, removeChatParticipant, compactChatParticipant, restartChatParticipant, forkChatParticipantToNewChat, startChatAccord,
+    updateChatParticipantRuntime, updateChatSubagentProviders, removeChatParticipant, compactChatParticipant, restartChatParticipant, forkChatParticipantToNewChat, startChatAccord,
     respondToChatAppToolApproval
   };
 }

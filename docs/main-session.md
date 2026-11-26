@@ -17,6 +17,18 @@ verbatim there). Modelled on T3 Code (`~/reference/t3code`,
   `--resume <id> --fork-session`, Codex app-server `thread/fork`). Antigravity
   has no fork, and a fork cannot cross providers or devices: the tool refuses
   it and the main session starts a clean member with a full brief instead.
+- **It gives tasks only to the chat's sub-agents** (the User, 2026-11-26;
+  `src/shared/subagentProviders.ts`). The side panel's Agents list the CLIs it
+  may use, each with a model and an effort: a project's list in Settings (by
+  the chat's folder) and the thread's own layer over it, a value set in the
+  thread winning over the project's, which wins over the CLI's own default.
+  A task without a provider goes to the main session's own CLI when it is in
+  the list, else to the first one; a provider outside the list is refused
+  (`provider_not_in_chat`), and a new chat with no list says the User adds
+  them. A chat made before the list has none and gives tasks to any ready CLI
+  as before; its first change in the panel gives it a layer that keeps the
+  providers its members already use. A change applies to new tasks; members
+  already at work keep their own model and effort.
 - **The main session is woken only by its own tasks** (the User,
   2026-11-21): when the tasks it gave end. A member's turn that is not its
   task (the User's message in that member's session, a scheduled task's

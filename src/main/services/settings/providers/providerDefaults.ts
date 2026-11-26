@@ -1,5 +1,6 @@
 import { applyNewChatDefaultsUpdate, newChatDefaultsForProvider, normalizeNewChatDefaults } from "../../../../shared/newChatDefaults";
-import type { AppSettings, AgentHealth, ChatProviderKind, NewChatDefaultsUpdate, ProviderSettingsUpdate } from "../../../../shared/types";
+import type { AppSettings, AgentHealth, ChatProviderKind, NewChatDefaultsUpdate, ProviderSettingsUpdate, SubagentProviderChange } from "../../../../shared/types";
+import { applySubagentProviderChange, normalizeSubagentProvidersByProject, subagentProjectKey } from "../../../../shared/subagentProviders";
 import { preferredReadyAssistantProviderKind } from "../../../../shared/cliReadiness";
 import { normalizeChatProviderKind } from "../stored/storedDefaults";
 import type { SettingsModules } from "../modules";
@@ -48,6 +49,27 @@ export class ProviderDefaults {
 
   /** How a new chat starts besides its CLI (Settings → General → New chats,
    *  shared/newChatDefaults.ts). */
+  /** A change to a project's sub-agent providers (the side panel's Project scope). */
+  async updateProjectSubagentProviders(repoPath: string, change: SubagentProviderChange): Promise<AppSettings> {
+    const key = subagentProjectKey(repoPath);
+    if (!key) {
+      throw new Error("This chat has no project folder: change its own sub-agents instead.");
+    }
+    return this.withAssistantProviderMutation(async () => {
+      const stored = await this.settings.settingsStore.readStored();
+      const byProject = normalizeSubagentProvidersByProject(stored.subagentProvidersByProject) ?? {};
+      const next = applySubagentProviderChange("project", byProject[key] ?? [], change);
+      if (next.length > 0) {
+        byProject[key] = next;
+      } else {
+        delete byProject[key];
+      }
+      stored.subagentProvidersByProject = byProject;
+      await this.settings.settingsStore.writeStored(stored);
+      return this.settings.publicSettings.getPublicSettings();
+    });
+  }
+
   async setNewChatDefaults(update: NewChatDefaultsUpdate): Promise<AppSettings> {
     if (!update || typeof update !== "object" || Array.isArray(update)) {
       throw new Error("Invalid new chat settings.");

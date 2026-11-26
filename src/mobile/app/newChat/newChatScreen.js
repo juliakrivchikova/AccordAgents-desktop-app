@@ -276,7 +276,7 @@ async function startNewChat() {
     const create = await createOutboxEvent({
       conversationId: conversationId, kind: "conversation.create", createdAt: createdAt,
       payload: { conversation: { title: title, kind: "chat", createdAt: createdAt, ...(repoPath ? { repoPath: repoPath } : {}),
-        metadata: { participants: participants, ...sessionsFields } } }
+        metadata: { participants: participants, ...sessionsFields, subagentProviders: { entries: [] } } } }
     });
     const introId = createEventId();
     const intro = await createOutboxEvent({
