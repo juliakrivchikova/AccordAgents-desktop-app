@@ -331,6 +331,70 @@ test("a member's session shows its task folded to one line, its messages without
   act(() => renderer!.unmount());
 });
 
+/** A live (not read-only) member's session, as the right panel gives it. */
+function renderLiveSession(extra: Partial<Parameters<typeof ChatMemberSessionPanel>[0]>): ReturnType<typeof create> {
+  const messages = sessionsMessages();
+  const index = buildSessionsViewIndex(messages, MAIN.id);
+  const messageProps = (message: ChatMessage) => ({
+    activityDisclosure: disclosure(), message, conversationId: "chat-sessions", participants: PARTICIPANTS, participantStatusById: STATUSES, busy: false,
+    onApproveMentions: noop, onRejectMentions: noop, onRespondToChoice: noop, onToggleReaction: noop
+  });
+  const sharedNode = document.createElement("textarea");
+  let renderer: ReturnType<typeof create> | undefined;
+  act(() => {
+    renderer = create(
+      <TooltipProvider>
+        <ChatMemberSessionPanel
+          member={DREW} title="Task for drew" detail="Codex CLI" readOnly={false} mainSessionId={MAIN.id} status="running"
+          runIds={["run-drew", "run-drew-queued"]} messages={memberSessionMessages(messages, DREW.id, index)} messageProps={messageProps} appSettings={SETTINGS}
+          conversationId="chat-sessions" draft="" busy={false} hasOlderMessages={false} olderMessagesLoading={false} onLoadOlderMessages={noop}
+          onDraftChange={noop} onSend={async () => true} onStopRuns={noop} onBack={noop} onClose={noop}
+          {...extra}
+        />
+      </TooltipProvider>,
+      { createNodeMock: () => sharedNode }
+    );
+  });
+  return renderer!;
+}
+
+const sessionHead = (root: ReactTestInstance): ReactTestInstance =>
+  root.find((node) => typeof node.type === "string" && typeof node.props.className === "string" && node.props.className.includes("chat-member-session-head"));
+
+test("a running member's session has no Running label, no time and no Stop in its header: Stop is the composer's button and stops the runs the header's did", () => {
+  const stopped: Array<readonly string[]> = [];
+  const renderer = renderLiveSession({ onStopRuns: (runIds) => stopped.push(runIds) });
+  const root = renderer.root;
+  const head = sessionHead(renderer.root);
+  assert.equal(head.findAll((node) => node.props?.["data-work-status"] !== undefined).length, 0, "no status label while it runs");
+  assert.doesNotMatch(textOf(head), /Running/, "nor the word");
+  assert.equal(head.findAll((node) => typeof node.props?.className === "string" && node.props.className.includes("elapsed")).length, 0, "nor its time");
+  assert.equal(root.findAll(byTestId("chat-member-session-stop")).length, 0, "no square Stop in the header");
+  assert.ok(head.findAll(byTestId("chat-member-session-back")).length > 0 && head.findAll((node) => node.props?.label === "Close").length > 0, "Back and Close stay");
+  const composer = root.find((node) => node.props?.testId === "chat-member-composer");
+  assert.equal(composer.props.stop?.label, "Stop Task for drew", "the composer stops what the header stopped, under the header button's name");
+  composer.props.stop.onStop();
+  assert.deepEqual(stopped, [["run-drew", "run-drew-queued"]], "every live run of this member, through the one stop handler");
+  // Stop takes the send button's place, as the main session's.
+  assert.equal(root.findAll(byTestId("chat-composer-stop")).length, 1);
+  act(() => renderer.unmount());
+});
+
+test("a member's composer shows Stop only where the header's button did: with a run live and a stop handler, never without", () => {
+  const idle = renderLiveSession({ status: "done", runIds: [] });
+  assert.equal(idle.root.find((node) => node.props?.testId === "chat-member-composer").props.stop, undefined, "no live run: back to Send");
+  assert.equal(idle.root.findAll(byTestId("chat-composer-stop")).length, 0);
+  act(() => idle.unmount());
+  const noHandler = renderLiveSession({ onStopRuns: undefined });
+  assert.equal(noHandler.root.find((node) => node.props?.testId === "chat-member-composer").props.stop, undefined, "no way to stop: no button");
+  act(() => noHandler.unmount());
+  // It waits for the User with its run still live: Stop stays, and its state is still named.
+  const waiting = renderLiveSession({ status: "waiting" });
+  assert.equal(waiting.root.find((node) => node.props?.testId === "chat-member-composer").props.stop?.label, "Stop Task for drew");
+  assert.equal(sessionHead(waiting.root).findAll((node) => node.props?.["data-work-status"] === "waiting").length, 1, "only Running is gone from the header");
+  act(() => waiting.unmount());
+});
+
 function renderSession(extra: Partial<Parameters<typeof ChatMemberSessionPanel>[0]>): ReturnType<typeof create> {
   const messages = sessionsMessages();
   const index = buildSessionsViewIndex(messages, MAIN.id);
