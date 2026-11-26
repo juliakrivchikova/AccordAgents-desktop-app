@@ -219,7 +219,6 @@ export function ChatSessionsRightPanel(props: {
       focus={panel?.kind === "member" ? panel.focus : undefined}
       mainSessionId={sessions.mainSessionId}
       status={status}
-      runningSince={sessions.activity.runningSince.get(memberId) ?? task?.createdAt}
       runIds={props.runIdsByParticipantId.get(memberId) ?? []}
       messages={messages}
       messageProps={(message) => panelMessageProps(messageContext, message)}

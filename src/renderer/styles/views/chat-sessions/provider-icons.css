@@ -159,14 +159,6 @@
   }
 }
 
-/* Task cards */
-
-.chat-members-row-elapsed {
-  color: var(--app-muted);
-  font-size: 11px;
-  font-variant-numeric: tabular-nums;
-}
-
 /* A member's open choice card */
 
 .chat-sessions-choice {

@@ -1,5 +1,5 @@
 import { memo, useLayoutEffect, useMemo, useRef, useState, type ComponentProps, type ReactNode } from "react";
-import { ArrowLeftIcon, CaretDownIcon, CaretRightIcon, SquareIcon, XIcon } from "@phosphor-icons/react";
+import { ArrowLeftIcon, CaretDownIcon, CaretRightIcon, XIcon } from "@phosphor-icons/react";
 
 import { SESSIONS_REMOVED_MEMBER_DETAIL, firstTextLine, type SessionsWorkStatus } from "../../../shared/mainSessionView";
 import type { AppSettings, ChatImageInput, ChatMessage, ChatParticipant, ChatSkillMention, RepoFileMention } from "../../../shared/types";
@@ -14,7 +14,7 @@ import { useSessionsViewNames } from "./chat-sessions-links";
 import { sessionsMentionText } from "../../../shared/sessionsViewText";
 import { ChatMessageItem } from "./chat-message-item";
 import { followsLatestAfterScroll, isScrollKey, SUBPIXEL_PX } from "./chat-timeline-follow";
-import { ChatElapsed, ChatWorkStatusLabel } from "./chat-task-card";
+import { ChatWorkStatusLabel } from "./chat-task-card";
 
 type ChatMessageItemProps = ComponentProps<typeof ChatMessageItem>;
 
@@ -43,7 +43,7 @@ const USER_SCROLL_INTENT_MS = 900;
  * One member's whole session in the sessions view's right panel: its task
  * folded to one line, its replies, its questions and the main session's
  * answers, the User's messages to it, and a composer that writes to it only.
- * A member no longer in the chat is read-only: no composer, no Stop. Opened
+ * A member no longer in the chat is read-only: no composer, so no Stop. Opened
  * from a task or a mention, it shows the message that was about.
  */
 export function ChatMemberSessionPanel(props: {
@@ -55,7 +55,6 @@ export function ChatMemberSessionPanel(props: {
   focus?: { messageId: string; nonce: number };
   mainSessionId: string;
   status: SessionsWorkStatus;
-  runningSince?: string;
   runIds: readonly string[];
   messages: readonly ChatMessage[];
   messageProps: (message: ChatMessage) => ChatMessageItemProps;
@@ -83,7 +82,12 @@ export function ChatMemberSessionPanel(props: {
   onClose: () => void;
 }): JSX.Element {
   const { member } = props;
-  const since = props.status === "running" ? props.runningSince : undefined;
+  // Stop is in the composer, as the main session's: the button becomes Stop while
+  // a run of this member is live, and stops the runs the header's button did (its
+  // accessible name too, so it is told apart from the main composer's).
+  const stop = props.onStopRuns && props.runIds.length > 0
+    ? { label: `Stop ${props.title}`, onStop: () => props.onStopRuns?.(props.runIds) }
+    : undefined;
   const bodyRef = useRef<HTMLDivElement>(null);
   const stuckRef = useRef(true);
   // The position the User last left, or this panel last wrote: a scroll event
@@ -163,14 +167,11 @@ export function ChatMemberSessionPanel(props: {
             <h2>{props.title}</h2>
             {props.detail && <span className="chat-member-session-provider">{props.detail}</span>}
           </span>
-          {props.status !== "idle" && <ChatWorkStatusLabel status={props.status} />}
-          {since && <ChatElapsed className="chat-members-row-elapsed" since={since} />}
+          {/* No "Running" or its time here (the User, 2026-11-26): that it works shows in the composer's Stop. */}
+          {props.status !== "idle" && props.status !== "running" && <ChatWorkStatusLabel status={props.status} />}
         </div>
         <div className="thread-panel-actions">
           {props.settings}
-          {!props.readOnly && props.onStopRuns && props.runIds.length > 0 && (
-            <IconButton tone="danger" icon={SquareIcon} iconWeight="fill" iconClassName="chat-agent-stop-icon" label={`Stop ${props.title}`} tooltip="Stop" data-testid="chat-member-session-stop" onClick={() => props.onStopRuns?.(props.runIds)} />
-          )}
           <IconButton icon={XIcon} label="Close" tooltip="Close" onClick={props.onClose} />
         </div>
       </header>
@@ -244,6 +245,7 @@ export function ChatMemberSessionPanel(props: {
           onDraftChange={props.onDraftChange}
           onSend={send}
           isRunning={props.busy}
+          stop={stop}
           placeholder={`Message ${props.title}...`}
           sendNow={props.sendNow}
           footerChip={props.chip}
