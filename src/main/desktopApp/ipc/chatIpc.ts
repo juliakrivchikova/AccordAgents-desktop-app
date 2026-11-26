@@ -7,7 +7,7 @@ import type {
   SetChatPinnedRequest, SetChatViewRequest, ChatViewState, ChatPinState, SendChatMessageRequest, StartChatAccordRequest,
   UpdateChatParticipantRuntimeRequest, RemoveChatParticipantRequest
 } from "../../../shared/types";
-import type { MemoryNote, MemoryNoteIdRequest, MemorySettingsListRequest, SemanticSettingsResult, SemanticSettingsView } from "../../../shared/memory";
+import { isUnknownMemoryAction, type MemoryNote, type MemoryNoteIdRequest, type MemorySettingsListRequest, type SemanticSettingsResult, type SemanticSettingsView } from "../../../shared/memory";
 import { emitReviewProgress } from "../chatServices";
 import { listMemoryNotesForSettings } from "../toolWiring";
 import { observeAddedMember } from "../usageSignals";
@@ -200,7 +200,7 @@ export function registerChatIpc(desktopApp: DesktopApp): void {
   ipcMain.handle("semantic-search:settings", async (): Promise<SemanticSettingsResult> => {
     const result = await desktopApp.serverChatLink.memory<SemanticSettingsView>({ action: "semantic-settings" });
     if (result.ok) return { status: "ok", view: result.value };
-    const older = result.error.code === "invalid_request" && /Unknown memory action/.test(result.error.message);
+    const older = isUnknownMemoryAction(result);
     return { status: "unavailable", message: older ? "Your server is older than this app; it searches by meaning once it updates." : result.error.message };
   });
   ipcMain.handle("semantic-search:set-key", (_event, request: { key?: unknown }) =>

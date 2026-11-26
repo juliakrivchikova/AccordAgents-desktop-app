@@ -13,6 +13,9 @@ export interface ChatSearchRequest {
   /** The server's own use: only the chats of this project folder (null:
    *  chats with no project). */
   repoPath?: string | null;
+  /** The server's own use: this chat is left out (the member's own: what
+   *  it holds is in its context already). */
+  excludeConversationId?: string;
 }
 
 export interface ChatSearchHighlightRange {

@@ -1,8 +1,9 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import type { ChatMessage } from "../../shared/types";
 import {
-  MESSAGE_MAX_PASSAGES, MESSAGE_PASSAGE_CHARS, closeness, decodePrint, encodePrint, messagePassages, notePassages, passageRanges, printableMessage,
-  queryPrint, shortenPrint, storedPrint
+  MESSAGE_MAX_PASSAGES, MESSAGE_PASSAGE_CHARS, PrintArena, decodePrint, encodePrint, messagePassages, notePassages, passageRanges, printableText,
+  queryPrint, shortenPrint
 } from "./semanticVectors";
 
 test("text is cut into passages at a line or a space, never inside a character, and covers it all", () => {
@@ -38,19 +39,56 @@ test("a shortened print of one byte per number keeps the closeness of the whole 
   };
   for (const dims of [1536, 512]) {
     const [a, b] = [random(1), random(1.0004)];
-    const kept = storedPrint(decodePrint(encodePrint(shortenPrint(b, dims)), dims)!);
-    assert.ok(Math.abs(closeness(queryPrint(a, dims), kept) - cosine(a, b, dims)) < 0.01);
+    const arena = new PrintArena(dims, 4);
+    const slot = arena.add(decodePrint(encodePrint(shortenPrint(b, dims)), dims)!);
+    assert.ok(Math.abs(arena.closeness(queryPrint(a, dims), slot) - cosine(a, b, dims)) < 0.01);
   }
   assert.equal(decodePrint(encodePrint(shortenPrint(random(2), 512)), 1536), undefined);
-  assert.equal(closeness(queryPrint(random(3), 512), storedPrint(new Int8Array(512))), 0);
+  const arena = new PrintArena(512, 4);
+  assert.equal(arena.closeness(queryPrint(random(3), 512), arena.add(new Int8Array(512))), 0);
 });
 
-test("only a shown message with text is printed: the User's, or a member's finished reply", () => {
-  assert.ok(printableMessage({ role: "user", content: "Deploy it" }));
-  assert.ok(printableMessage({ role: "participant", status: "done", content: "Done." }));
-  assert.ok(!printableMessage({ role: "participant", status: "pending", content: "Working" }));
-  assert.ok(!printableMessage({ role: "participant", status: "error", content: "Failed" }));
-  assert.ok(!printableMessage({ role: "system", content: "Chat started." }));
-  assert.ok(!printableMessage({ role: "user", content: "ok", metadata: { hiddenFromTimeline: true } }));
-  assert.ok(!printableMessage({ role: "user", content: " " }));
+test("prints share big blocks: a freed slot is used again, and a sparse arena copies its live prints into a fresh one", () => {
+  const dims = 8;
+  const arena = new PrintArena(dims, 4);
+  const print = (seed: number) => Int8Array.from({ length: dims }, (_, index) => ((seed * 31 + index * 7) % 200) - 100);
+  const slots = Array.from({ length: 10 }, (_, index) => arena.add(print(index)));
+  assert.equal(arena.size, 10);
+  assert.equal(arena.capacity, 12);
+  const query = queryPrint(Array.from(print(2)), dims);
+  const before = arena.closeness(query, slots[2]);
+  assert.ok(before > 0.99);
+  for (const slot of slots.slice(3)) arena.release(slot);
+  assert.equal(arena.size, 3);
+  assert.equal(arena.add(print(42)), slots[9], "the last freed slot is used first");
+  arena.release(slots[9]);
+  assert.ok(arena.sparse());
+  const fresh = new PrintArena(dims, 4);
+  const moved = slots.slice(0, 3).map((slot) => arena.copyTo(slot, fresh));
+  assert.equal(fresh.size, 3);
+  assert.equal(fresh.capacity, 4);
+  assert.ok(Math.abs(fresh.closeness(query, moved[2]) - before) < 1e-6);
+  assert.ok(!fresh.sparse());
+  // A slot that is no slot (a hole in a print missing a passage) is ignored.
+  fresh.release(undefined as unknown as number);
+  fresh.release(99);
+  assert.equal(fresh.size, 3);
+});
+
+test("only a message the chat shows, with text, is printed: the User's, or a member's finished reply with its posts", () => {
+  const message = (fields: Partial<ChatMessage> & { status?: string }) => ({ role: "user" as ChatMessage["role"], content: "", ...fields });
+  assert.equal(printableText(message({ content: "Deploy it" })), "Deploy it");
+  assert.equal(printableText(message({ role: "participant", status: "done", content: "Done." })), "Done.");
+  assert.equal(printableText(message({ role: "participant", status: "pending", content: "Working" })), undefined);
+  assert.equal(printableText(message({ role: "participant", status: "error", content: "Failed" })), undefined);
+  assert.equal(printableText(message({ role: "system", content: "Chat started." })), undefined);
+  assert.equal(printableText(message({ content: "ok go", metadata: { hiddenFromTimeline: true } as ChatMessage["metadata"] })), undefined);
+  assert.equal(printableText(message({ content: " " })), undefined);
+  // What the chat hides: a member's line waiting for approval, a request written for another member.
+  assert.equal(printableText(message({ role: "participant", status: "done", content: "Waiting for user approval." })), undefined);
+  assert.equal(printableText(message({ content: "Check the deploy", metadata: { participantRequest: { source: "inferred" } } as unknown as ChatMessage["metadata"] })), undefined);
+  // A member's posts during its turn are shown with the reply, and found with it.
+  const posts = [{ id: "p1", content: "Found the cause: the token expired.", createdAt: "2026-11-26T10:00:00.000Z" }];
+  const text = printableText(message({ role: "participant", status: "done", content: "Fixed.", metadata: { interimPosts: posts } as unknown as ChatMessage["metadata"] }));
+  assert.match(text ?? "", /token expired[\s\S]*Fixed\./);
 });

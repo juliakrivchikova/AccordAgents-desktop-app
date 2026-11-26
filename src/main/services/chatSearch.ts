@@ -119,9 +119,12 @@ export class ChatSearchService {
       );
       const sourceSnapshotAt = new Date().toISOString();
       const requesterScope = resolveRequesterScope(snapshots, request.requester);
-      // A member's search of its project's chats: only that project's.
-      const scope = requesterScope && request.repoPath !== undefined
-        ? requesterScope.filter((snapshot) => (snapshot.repoPath || null) === (request.repoPath || null))
+      // A member's search of its project's other chats: only that project's,
+      // its own left out.
+      const scope = requesterScope && (request.repoPath !== undefined || request.excludeConversationId)
+        ? requesterScope.filter((snapshot) =>
+          (request.repoPath === undefined || (snapshot.repoPath || null) === (request.repoPath || null)) &&
+          snapshot.conversationId !== request.excludeConversationId)
         : requesterScope;
       if (!scope) {
         return {
@@ -359,14 +362,17 @@ export function buildAnyWordMatchQuery(value: unknown): string | undefined {
   if (!terms?.length) {
     return undefined;
   }
-  const stems = new Set<string>();
+  // Two-letter words match only themselves (as memoryWordSearch counts
+  // them): "на" is not every word starting with it.
+  const stems = new Map<string, string>();
   for (const term of terms) {
     const letters = [...term];
     const keep = letters.length <= 4 ? letters.length : letters.length === 5 ? 4 : 5;
-    stems.add(letters.slice(0, keep).join(""));
+    const stem = letters.slice(0, keep).join("");
+    stems.set(stem, `"${stem.replaceAll('"', '""')}"${letters.length > 2 ? "*" : ""}`);
     if (stems.size >= MAX_QUERY_TERMS) break;
   }
-  return [...stems].map((stem) => `"${stem.replaceAll('"', '""')}"*`).join(" OR ");
+  return [...stems.values()].join(" OR ");
 }
 
 export function parseChatSearchSnippet(

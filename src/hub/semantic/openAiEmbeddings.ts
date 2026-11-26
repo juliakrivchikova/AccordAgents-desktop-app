@@ -31,29 +31,43 @@ export class OpenAiEmbeddings {
     const timer = setTimeout(() => abort.abort(), timeoutMs);
     const onCancel = () => abort.abort();
     cancel?.addEventListener("abort", onCancel, { once: true });
+    if (cancel?.aborted) abort.abort();
     let response: Response;
+    let body: { data?: Array<{ index?: unknown; embedding?: unknown }>; error?: { message?: unknown; code?: unknown; type?: unknown } } | undefined;
+    // The time limit and the cancel cover the answer's body too: one that
+    // stops half way never holds printing (or the server's closing) up.
     try {
-      response = await this.fetchImpl(`${this.baseUrl}/v1/embeddings`, {
-        method: "POST",
-        headers: { "content-type": "application/json", authorization: `Bearer ${this.key}` },
-        body: JSON.stringify({ model: EMBEDDING_MODEL, input: texts, dimensions: EMBEDDING_DIMS }),
-        signal: abort.signal
-      });
-    } catch (error) {
-      throw new EmbeddingError(abort.signal.aborted ? "OpenAI did not answer in time." : `OpenAI could not be reached (${messageOf(error)}).`, "other");
+      try {
+        response = await this.fetchImpl(`${this.baseUrl}/v1/embeddings`, {
+          method: "POST",
+          headers: { "content-type": "application/json", authorization: `Bearer ${this.key}` },
+          body: JSON.stringify({ model: EMBEDDING_MODEL, input: texts, dimensions: EMBEDDING_DIMS }),
+          signal: abort.signal
+        });
+      } catch (error) {
+        throw new EmbeddingError(abort.signal.aborted ? "OpenAI did not answer in time." : `OpenAI could not be reached (${messageOf(error)}).`, "other");
+      }
+      // Raced with the limit, not left to the connection to give up.
+      body = await Promise.race([
+        response.json().catch(() => undefined) as Promise<typeof body>,
+        new Promise<undefined>((resolve) => {
+          if (abort.signal.aborted) resolve(undefined);
+          abort.signal.addEventListener("abort", () => resolve(undefined), { once: true });
+        })
+      ]);
+      if (abort.signal.aborted) throw new EmbeddingError("OpenAI did not answer in time.", "other");
     } finally {
       clearTimeout(timer);
       cancel?.removeEventListener("abort", onCancel);
     }
-    const body = await response.json().catch(() => undefined) as { data?: Array<{ index?: unknown; embedding?: unknown }>; error?: { message?: unknown } } | undefined;
     if (!response.ok) {
       const said = typeof body?.error?.message === "string" ? body.error.message.slice(0, 200) : `HTTP ${response.status}`;
       // Never repeats the key: OpenAI's message for a wrong key shows its end.
       const reason = said.replace(/sk-[A-Za-z0-9_*-]{4,}/g, "sk-…");
       if (response.status === 401 || response.status === 403) throw new EmbeddingError(`OpenAI refused the key (${reason}).`, "key");
       if (response.status === 429) {
-        const quota = /quota|billing/i.test(reason);
-        if (quota) throw new EmbeddingError(`OpenAI says the account has no credit left (${reason}).`, "key");
+        // No credit left is said by its code; a rate limit's message may name a quota too.
+        if (body?.error?.code === "insufficient_quota" || body?.error?.type === "insufficient_quota") throw new EmbeddingError(`OpenAI says the account has no credit left (${reason}).`, "key");
         throw new EmbeddingError(`OpenAI asked to slow down (${reason}).`, "rate", retryAfter(response.headers.get("retry-after")));
       }
       if (response.status === 400) throw new EmbeddingError(`OpenAI could not print this text (${reason}).`, "input");

@@ -5,7 +5,7 @@ import path from "node:path";
 import test from "node:test";
 
 import type { ChatMessage, ChatParticipant, ChatSearchMessageMatch, ChatSearchResponse, Conversation } from "../../shared/types";
-import { buildChatSearchMatchQuery, ChatSearchService } from "./chatSearch";
+import { buildAnyWordMatchQuery, buildChatSearchMatchQuery, ChatSearchService } from "./chatSearch";
 import { resolveSqliteExecutable } from "./sqliteCli";
 import { StorageService, type ChatSearchConversationSnapshot } from "./storage";
 import type { Sqlite } from "./storage/database/sqlite";
@@ -310,6 +310,31 @@ test("chat search query builder treats FTS syntax as text and prefixes only the 
   assert.equal(buildChatSearchMatchQuery('hello OR "world'), '"hello" AND "OR" AND "world"*');
   assert.equal(buildChatSearchMatchQuery("привет мир"), '"привет" AND "мир"*');
   assert.equal(buildChatSearchMatchQuery("!?!"), undefined);
+});
+
+test("a member's search: any word asked, in its forms, best match first, only in the project's chats", async () => {
+  // Forms by their first letters; two-letter words only as themselves.
+  assert.equal(buildAnyWordMatchQuery("Deploying релизы на deploy"), '"deplo"* OR "релиз"* OR "на"');
+  assert.equal(buildAnyWordMatchQuery("a и ?"), undefined);
+  await withStorage(async (storage) => {
+    const accord = (id: string, text: string) => message(id, "user", text, "2026-01-05T00:00:00.000Z");
+    const project = { ...conversation("p1", "Plans", false, [accord("both", "The deployment of the релиз went out"), accord("one", "Deploy later"), accord("none", "Nothing about it, на")]), repoPath: "/work/accord" };
+    const sibling = { ...conversation("p2", "Releases", false, [accord("form", "Релизы по пятницам")]), repoPath: "/work/accord" };
+    const other = { ...conversation("o1", "Other", false, [accord("other", "deployment релиз deploy")]), repoPath: "/work/other" };
+    const loose = { ...conversation("n1", "No project", false, [accord("loose", "deploy релиз")]) } as Conversation;
+    delete (loose as { repoPath?: string }).repoPath;
+    for (const chat of [project, sibling, other, loose]) await storage.saveConversation(chat);
+    const service = new ChatSearchService(storage);
+    const found = await service.search({ requester: { kind: "user" }, query: "deploying релизы", anyWord: true, repoPath: "/work/accord" });
+    const ids = messageMatches(found).map((match) => match.messageId);
+    // The message with both words first; the other project's never.
+    assert.equal(ids[0], "both");
+    assert.deepEqual([...ids].sort(), ["both", "form", "one"]);
+    const loneProject = messageMatches(await service.search({ requester: { kind: "user" }, query: "deploy", anyWord: true, repoPath: null }));
+    assert.deepEqual(loneProject.map((match) => match.messageId), ["loose"]);
+    // "на" finds itself, not every word starting with it.
+    assert.deepEqual(messageMatches(await service.search({ requester: { kind: "user" }, query: "на", anyWord: true, repoPath: "/work/accord" })).map((match) => match.messageId), ["none"]);
+  });
 });
 
 test("chat search cursor pagination returns every result exactly once and rejects a stale corpus", async () => {

@@ -54,14 +54,15 @@ export const SemanticSearchRow = (): JSX.Element => {
           <div className="gen-row-title">Search by meaning</div>
           <div className="gen-row-desc">
             Members find memory notes and messages of the project’s chats by meaning, in any language, and get the notes that fit each message.
-            Your server keeps your OpenAI API key and uses text-embedding-3-small: about 8 cents once for all your chats, then under a cent a month.
+            Your server keeps your OpenAI API key and sends your memory notes and chat messages to OpenAI (text-embedding-3-small) for this:
+            about 8 cents once for all your chats, then under a cent a month.
           </div>
           {status ? <div className="gen-row-desc mt-1" data-testid="semantic-search-status">{status}</div> : null}
           {view?.keyError ? <div className="gen-row-error" role="alert">OpenAI stopped accepting the key: {view.keyError} Enter a new one.</div> : null}
           {unavailable ? <div className="gen-row-error" role="alert">{unavailable}</div> : null}
           {error ? <div className="gen-row-error" role="alert">{error}</div> : null}
         </div>
-        <div className="gen-row-control">
+        <div className="gen-row-control gap-2">
           {entering ? (
             <form
               className="flex items-center gap-2"
@@ -85,7 +86,9 @@ export const SemanticSearchRow = (): JSX.Element => {
                 Save
               </Button>
             </form>
-          ) : (
+          ) : null}
+          {/* A key OpenAI stopped accepting can be removed too, not only replaced. */}
+          {view?.keySet ? (
             <Button
               variant="outline"
               size="sm"
@@ -95,7 +98,7 @@ export const SemanticSearchRow = (): JSX.Element => {
             >
               Remove key
             </Button>
-          )}
+          ) : null}
         </div>
       </div>
     </>

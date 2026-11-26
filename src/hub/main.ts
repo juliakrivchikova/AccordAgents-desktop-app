@@ -186,6 +186,10 @@ export function composeHub(options: {
       }).catch(() => undefined);
       return;
     }
+    // Search by meaning forgets what is gone, and takes in a chat moved here.
+    if (effect.kind === "conversation.delete") semantic.chatRemoved(entry.conversationId);
+    if (effect.kind === "message.remove") semantic.messageRemoved(entry.conversationId, effect.messageId);
+    if (effect.kind === "chat.import" && effect.last && conversation?.kind === "chat") semantic.chatImported(conversation.id);
     if (!conversation || (effect.kind !== "message.create" && effect.kind !== "message.update")) return;
     const message = effect.message;
     // Printed for search by meaning once it is a finished, shown message.

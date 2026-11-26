@@ -204,6 +204,7 @@ test("members' memory: every member is told how to keep it, a new session's prom
   const prompts: string[] = [];
   const roles: string[] = [];
   const asked: any[] = [];
+  let picksAsked = 0;
   const { service, storage, tempRoot } = testService({
     conversation,
     run: async (runParticipant, prompt, _repoPath, _diffMode, _kind, _signal, options) => {
@@ -216,7 +217,10 @@ test("members' memory: every member is told how to keep it, a new session's prom
   service.setMemoryAccess(() => ({
     async memory(request: any) {
       // No OpenAI key on this server: nothing is picked for a message.
-      if (request.action === "pick") return { ok: true, value: { enabled: false, notes: [] } } as any;
+      if (request.action === "pick") {
+        picksAsked += 1;
+        return { ok: true, value: { enabled: false, notes: [] } } as any;
+      }
       asked.push(request);
       return { ok: true, value: { more: 0, notes: [{
         id: "note-1", kind: "runbook", title: "Release the beta", tags: ["release"], scope: "project", projectPath: "/repo", author: "taylor",
@@ -252,6 +256,8 @@ test("members' memory: every member is told how to keep it, a new session's prom
   await send("memory-run-4", "@codex Fourth task.", 4);
   assert.doesNotMatch(prompts[3], /Long-term memory \(notes members keep/);
   assert.equal(asked.length, 2);
+  // A server that picks nothing (no key) is not asked again for a while.
+  assert.equal(picksAsked, 1);
 });
 
 test("members' memory with search by meaning: the notes that fit come with each message, once per session, instead of the list", async () => {
@@ -272,10 +278,16 @@ test("members' memory with search by meaning: the notes that fit come with each 
     updatedBy: "taylor", version, createdAt: NOW, updatedAt: NOW, awaitingRepository: false
   });
   let version = 1;
+  let picking = true;
   service.setMemoryAccess(() => ({
     async memory(request: any) {
       asked.push(request);
-      if (request.action === "index") return { ok: true, value: { notes: [], more: 7, picks: true, tags: [{ tag: "release", count: 2 }] } } as any;
+      if (request.action === "index") {
+        return request.picks && picking
+          ? { ok: true, value: { notes: [], more: 7, picks: true, tags: [{ tag: "release", count: 2 }] } } as any
+          : { ok: true, value: { notes: [note(version)], more: 6 } } as any;
+      }
+      if (!picking) return { ok: true, value: { enabled: false, notes: [] } } as any;
       // The server picks the release note for a message about releasing,
       // unless the member was given this version of it already.
       const fits = /release|выпуст/i.test(request.text) && !(request.shown ?? []).some((item: any) => item.id === "note-release" && item.version === version);
@@ -313,4 +325,26 @@ test("members' memory with search by meaning: the notes that fit come with each 
   assert.match(prompts[4], /Notes that fit a message come with it/);
   assert.match(prompts[4], /- \[runbook\] Release the beta/);
   assert.deepEqual(asked.filter((request) => request.action === "pick")[4].shown, []);
+
+  // What the session was told is kept with it: a restart of the app does
+  // not forget that its notes come with each message.
+  const stored = (storage.current.metadata.participantSessions as any[]).find((item) => item.participantId === codex.id);
+  assert.equal(stored.memoryNotesPicked, true);
+
+  // The server stops picking (OpenAI not answering): the member, told notes
+  // come with each message, gets the list with this very message, asked as
+  // a list, and no picks are asked for a while.
+  picking = false;
+  await send("picks-run-6", "@codex Release once more.", 6);
+  assert.doesNotMatch(prompts[5], /Memory notes that may fit|Notes that fit a message come with it/);
+  assert.match(prompts[5], /Long-term memory[^\n]*\n- \[runbook\] Release the beta/);
+  const lastIndex = asked.filter((request) => request.action === "index").at(-1);
+  assert.equal(lastIndex.picks, undefined);
+  assert.equal(asked.filter((request) => request.action === "pick").length, 6);
+  // Told the list once: not again while picks stay off.
+  await send("picks-run-7", "@codex Thanks.", 7);
+  assert.doesNotMatch(prompts[6], /Long-term memory/);
+  assert.equal(asked.filter((request) => request.action === "pick").length, 6);
+  const listed = (storage.current.metadata.participantSessions as any[]).find((item) => item.participantId === codex.id);
+  assert.equal(listed.memoryNotesPicked, undefined);
 });

@@ -130,10 +130,14 @@ export class ParticipantTurn {
     // with instructions sent again, and after the context was compacted. It
     // is asked now, while the rest of the turn is prepared (it never fails).
     const memoryKey = memoryIndexKey(conversation.id, participant.id);
-    const memoryIndexIsDue = !isResumingSession || sessionState.instructionsRefreshed || this.chat.memberSessions.memoryIndexDue.has(memoryKey);
+    // Picks off for a while (no key, the server not picking now): a session
+    // told that notes come with each message gets the list instead.
+    const memoryPicksOff = Date.now() < this.chat.memberSessions.memoryPicksOffUntil;
+    const memoryIndexIsDue = !isResumingSession || sessionState.instructionsRefreshed || this.chat.memberSessions.memoryIndexDue.has(memoryKey) ||
+      (memoryPicksOff && Boolean(session.memoryNotesPicked));
     const memoryActor = { conversationId: conversation.id, participantId: participant.id };
     const memoryIndexPending = memoryIndexIsDue
-      ? memoryIndex(memoryAccessNow(this.chat.memberSessions.memoryAccess), memoryActor)
+      ? memoryIndex(memoryAccessNow(this.chat.memberSessions.memoryAccess), memoryActor, undefined, !memoryPicksOff)
       : undefined;
     // The notes that fit this message, by meaning (only with the User's
     // OpenAI key; none for replies coming back). A note given earlier in the
@@ -141,7 +145,7 @@ export class ParticipantTurn {
     // anew starts over.
     if (memoryIndexIsDue) this.chat.memberSessions.memoryPicksShown.delete(memoryKey);
     const shownPicks = this.chat.memberSessions.memoryPicksShown.get(memoryKey);
-    const memoryPicksPending = options.continuation || Date.now() < this.chat.memberSessions.memoryPicksOffUntil ? undefined : memoryPicks(
+    const memoryPicksPending = options.continuation || memoryPicksOff ? undefined : memoryPicks(
       memoryAccessNow(this.chat.memberSessions.memoryAccess), memoryActor, promptTriggerMessage.content,
       [...(shownPicks ?? new Map<string, number>())].map(([id, version]) => ({ id, version }))
     );
@@ -199,8 +203,13 @@ export class ParticipantTurn {
     const usePromptRole = session.roleRuntime === "prompt-fallback";
     const includeRefreshedRoleInstructions = isResumingSession && sessionState.instructionsRefreshed;
     const primaryIncludeRoleInstructions = (usePromptRole && !isResumingSession) || includeRefreshedRoleInstructions;
-    const memoryIndexResult = await memoryIndexPending;
+    let memoryIndexResult = await memoryIndexPending;
     const memoryPicksResult = await memoryPicksPending;
+    // Told (now or before) that notes come with each message, and the server
+    // said it picks none now: the list, in this turn.
+    if (memoryPicksResult?.off && memoryPicksResult.answered && (memoryIndexResult ? memoryIndexResult.picks : session.memoryNotesPicked)) {
+      memoryIndexResult = await memoryIndex(memoryAccessNow(this.chat.memberSessions.memoryAccess), memoryActor, undefined, false);
+    }
     if (memoryPicksResult?.off) this.chat.memberSessions.memoryPicksOffUntil = Date.now() + MEMORY_PICKS_OFF_MS;
     if (memoryPicksResult?.notes.length) {
       const shown = this.chat.memberSessions.memoryPicksShown.get(memoryKey) ?? new Map<string, number>();
@@ -209,7 +218,14 @@ export class ParticipantTurn {
     }
     const memoryIndexBlock = [memoryIndexResult?.text, memoryPicksResult?.text].filter(Boolean).join("\n\n") || undefined;
     // Shown again after a compaction until the server's list was given.
-    if (memoryIndexResult?.delivered) this.chat.memberSessions.memoryIndexDue.delete(memoryIndexKey(conversation.id, participant.id));
+    if (memoryIndexResult?.delivered) {
+      this.chat.memberSessions.memoryIndexDue.delete(memoryKey);
+      if (memoryIndexResult.picks) session.memoryNotesPicked = true;
+      else delete session.memoryNotesPicked;
+    }
+    // Told that notes come with each message, and the server did not answer
+    // for picks: the list goes with the next turn (it waits for nobody now).
+    if (memoryPicksResult?.off && session.memoryNotesPicked) this.chat.memberSessions.memoryIndexDue.add(memoryKey);
     // It moved here with its session: told once where it is now (until a
     // turn of it succeeded, below).
     const moveNoteKey = session.movedHere ? `${conversation.id}:${participant.id}:${session.movedHere.at}` : undefined;

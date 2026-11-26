@@ -233,8 +233,8 @@ export interface MemorySearchValue {
   /** Best match first when words were asked; otherwise the most recently
    *  written, read or confirmed first. */
   notes: MemorySearchHit[];
-  /** "meaning": closest in meaning first (the User's OpenAI key), then notes
-   *  holding a word asked. "any-word": a note with any word asked is found,
+  /** "meaning": the closest in meaning (the User's OpenAI key) and the best
+   *  by the words asked take turns, meaning first. "any-word": a note with any word asked is found,
    *  ranked. Absent from an older server, which finds only notes holding
    *  every word. */
   ranking?: "any-word" | "meaning";
@@ -249,6 +249,10 @@ export interface MemoryShownNote {
 
 /** At most this many notes are picked for one message. */
 export const MEMORY_PICK_MAX = 5;
+/** What of a message notes are picked for (the rest is not looked at). */
+export const MEMORY_PICK_TEXT_MAX_CHARS = 6000;
+/** At most this many notes given already are named with a pick. */
+export const MEMORY_PICK_SHOWN_MAX = 500;
 
 export interface MemoryPickValue {
   /** Whether the server picks by meaning (the User's OpenAI key is set). */
@@ -264,8 +268,6 @@ export const CHAT_SEARCH_MAX_LIMIT = 30;
 export interface ChatSearchHit {
   conversationId: string;
   chatTitle: string;
-  /** The chat the member searches from. */
-  thisChat?: boolean;
   messageId: string;
   /** "User", or the member's handle. */
   author: string;
@@ -276,8 +278,8 @@ export interface ChatSearchHit {
 
 export interface ChatSearchValue {
   hits: ChatSearchHit[];
-  /** "meaning": closest in meaning first, then messages holding a word
-   *  asked; "any-word": messages holding any word asked. */
+  /** "meaning": the closest in meaning and the best by the words asked take
+   *  turns, meaning first; "any-word": messages holding any word asked. */
   ranking: "meaning" | "any-word";
   /** Old messages are still being printed: some are found by words only. */
   catchingUp?: boolean;
@@ -365,6 +367,11 @@ export function isMemoryChangeAction(action: string): boolean {
  *  long for an address), and the OpenAI key (never in an address, which
  *  logs may keep). */
 export const MEMORY_POST_ONLY_ACTIONS = ["pick", "semantic-key"] as const;
+
+/** A server older than this app does not know the action asked. */
+export function isUnknownMemoryAction(result: MemoryResult<unknown>): boolean {
+  return !result.ok && result.error.code === "invalid_request" && /^Unknown memory action/.test(result.error.message);
+}
 
 export function isMemoryPostAction(action: string): boolean {
   return isMemoryChangeAction(action) || (MEMORY_POST_ONLY_ACTIONS as readonly string[]).includes(action);

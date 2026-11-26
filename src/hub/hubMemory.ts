@@ -48,7 +48,7 @@ import { homeDeviceId } from "./hubOps";
 import { candidateAnchors, rankCounted, searchTextOf, searchWords as wordsAsked, snippetOf, wordCounts, type SearchWord } from "./memoryWordSearch";
 import type { HubSemantic, PrintableNote } from "./semantic/hubSemantic";
 import { searchProjectChats } from "./semantic/projectChatSearch";
-import { NOTE_PASSAGE_CHARS, QUERY_MAX_CHARS, passageRanges } from "./semantic/semanticVectors";
+import { NOTE_PASSAGE_CHARS, QUERY_MAX_CHARS, passageRanges, takeTurns } from "./semantic/semanticVectors";
 
 const SCHEMA_SQL = `
   create table if not exists member_memory_notes (
@@ -341,7 +341,9 @@ export class HubMemory {
   private async index(member: MemberContext, picks: boolean): Promise<MemoryResult<MemoryIndexValue>> {
     // Notes that fit come with each message instead (the User, 2026-11-26:
     // 3–5 that fit rather than the same 25 every time).
-    if (picks && this.semantic?.enabled()) {
+    // Only while picks can be made (the key works, every note is printed,
+    // OpenAI answers): otherwise the list, as without the key.
+    if (picks && this.semantic?.ready()) {
       const counted = await this.query<{ total: number }>(`select count(*) as total from member_memory_notes where ${this.visibleSql(member)};`);
       const tags = await this.tagsInUse(member, MEMORY_INDEX_MAX_TAGS);
       return { ok: true, value: { notes: [], more: Number(counted[0]?.total ?? 0), ...(tags.length ? { tags } : {}), picks: true } };
@@ -384,15 +386,14 @@ export class HubMemory {
       this.log("hub.memory.search", { conversationId: member.conversationId, found: rows.length });
       return { ok: true, value: { notes: rows.map(summaryOf), ranking: "any-word" } };
     }
-    const byWords = await this.rankByWords(where, words);
-    // With the User's OpenAI key: closest in meaning first, then the notes
-    // holding a word asked that meaning did not bring (a name, an id).
-    const meaning = this.semantic?.enabled() ? await this.rankByMeaning(request.query as string, where) : undefined;
-    const ordered: Array<{ row: Row; part?: number }> = meaning ? [...meaning] : byWords.map((row) => ({ row }));
-    if (meaning) {
-      const listed = new Set(meaning.map((item) => item.row.id));
-      for (const row of byWords) if (!listed.has(row.id)) ordered.push({ row });
-    }
+    // With the User's OpenAI key: the closest in meaning and the best by
+    // words take turns, meaning first (a name or an id asked is not buried).
+    const [byWords, meaning] = await Promise.all([
+      this.rankByWords(where, words),
+      this.semantic?.enabled() ? this.rankByMeaning(request.query as string, where) : Promise.resolve(undefined)
+    ]);
+    const wordOrder: Array<{ row: Row; part?: number }> = byWords.map((row) => ({ row }));
+    const ordered = meaning?.length ? takeTurns<{ row: Row; part?: number }>(meaning, wordOrder, (item) => item.row.id) : wordOrder;
     const top = ordered.slice(0, limit);
     const bodies = new Map<string, string>();
     if (top.length) {
@@ -400,8 +401,9 @@ export class HubMemory {
       for (const row of read) bodies.set(row.id, row.body);
     }
     const notes: MemorySearchHit[] = top.map((item) => ({ ...summaryOf(item.row), snippet: snippetOf(passageOf(bodies.get(item.row.id) ?? "", item.part), words) }));
-    this.log("hub.memory.search", { conversationId: member.conversationId, found: notes.length, words: words.length, ranking: meaning ? "meaning" : "any-word" });
-    return { ok: true, value: { notes, ranking: meaning ? "meaning" : "any-word" } };
+    const ranking = meaning?.length ? "meaning" : "any-word";
+    this.log("hub.memory.search", { conversationId: member.conversationId, found: notes.length, words: words.length, ranking });
+    return { ok: true, value: { notes, ranking } };
   }
 
   /** The notes holding any word asked, best match first. */
@@ -447,7 +449,9 @@ export class HubMemory {
    * changed since). With no key, or when OpenAI does not answer, none.
    */
   private async pick(member: MemberContext, request: Extract<HubMemoryRequest, { action: "pick" }>): Promise<MemoryResult<MemoryPickValue>> {
-    if (!this.semantic?.enabled()) return { ok: true, value: { enabled: false, notes: [] } };
+    // Not now (no key, notes still printed, OpenAI not answering): said so,
+    // and the member's device gives the list instead for a while.
+    if (!this.semantic?.ready()) return { ok: true, value: { enabled: false, notes: [] } };
     if (typeof request.text !== "string" || request.text.includes("\u0000")) return invalid("Give the message's text to pick notes for.");
     const shown = new Map<string, number>();
     if (request.shown !== undefined) {
@@ -455,10 +459,11 @@ export class HubMemory {
       for (const item of request.shown) if (item && typeof item.id === "string" && Number.isSafeInteger(item.version)) shown.set(item.id, item.version);
     }
     const print = await this.semantic.printQuery(request.text.slice(0, QUERY_MAX_CHARS), PICK_PRINT_TIMEOUT_MS);
-    if (!print) return { ok: true, value: { enabled: true, notes: [] } };
-    const rows = await this.query<Row>(`select ${SUMMARY_COLUMNS} from member_memory_notes where ${this.visibleSql(member)};`);
-    const scores = this.semantic.noteCloseness(print, rows.map((row) => row.id));
-    const ranked = rows.flatMap((row) => {
+    if (!print) return { ok: true, value: { enabled: false, notes: [] } };
+    // Every turn asks: only ids and versions are read for all, summaries for the few picked.
+    const visible = await this.query<{ id: string; version: number }>(`select id, version from member_memory_notes where ${this.visibleSql(member)};`);
+    const scores = this.semantic.noteCloseness(print, visible.map((row) => row.id));
+    const ranked = visible.flatMap((row) => {
       const score = scores.get(row.id)?.score;
       return score === undefined ? [] : [{ row, score }];
     }).sort((left, right) => right.score - left.score);
@@ -466,8 +471,16 @@ export class HubMemory {
     const picked = ranked
       .filter((item) => item.score >= PICK_MIN && item.score >= closest - PICK_GAP && shown.get(item.row.id) !== Number(item.row.version))
       .slice(0, MEMORY_PICK_MAX);
-    this.log("hub.memory.pick", { conversationId: member.conversationId, picked: picked.length, closest: Math.round(closest * 1000) / 1000 });
-    return { ok: true, value: { enabled: true, notes: picked.map((item) => summaryOf(item.row)) } };
+    const rows = picked.length
+      ? await this.query<Row>(`select ${SUMMARY_COLUMNS} from member_memory_notes where id in (${picked.map((item) => quote(item.row.id)).join(", ")}) and ${this.visibleSql(member)};`)
+      : [];
+    const byId = new Map(rows.map((row) => [row.id, row]));
+    const notes = picked.flatMap((item) => {
+      const row = byId.get(item.row.id);
+      return row ? [summaryOf(row)] : [];
+    });
+    this.log("hub.memory.pick", { conversationId: member.conversationId, picked: notes.length, closest: Math.round(closest * 1000) / 1000 });
+    return { ok: true, value: { enabled: true, notes } };
   }
 
   private filters(request: { query?: unknown; tags?: unknown; tag?: unknown; kind?: unknown; scope?: unknown }): { sql: string } | MemoryError {

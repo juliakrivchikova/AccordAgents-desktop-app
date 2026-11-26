@@ -96,12 +96,21 @@ not there yet.
   each message: a line says so (with how many notes the member can see and
   the tags in use), and each turn carries the few notes picked for its
   message. An app that does not add picks (an older desktop or machine
-  runtime) asks without `picks` and still gets the list.
-- `app_chat_search` finds messages in the chats of the member's project (a
-  chat with no project searches chats with no project; the User, 2026-11-26):
-  by meaning when it is on, and by any word asked, in any form, best match
-  first, always (the chats' word index, `ChatSearchService` with `anyWord`
-  and `repoPath`). It returns the chat's title, the author, the time and the
+  runtime) asks without `picks` and still gets the list. The server answers
+  with picks only while it can pick (the key works, every note is printed,
+  OpenAI answers); a pick it cannot make says `enabled: false`, and the app
+  then stops asking for a minute and gives a session told that notes come
+  with each message the list in that same turn (or, when the server did not
+  answer at all, with its next one). What a session was told is kept with it
+  (`ChatParticipantSession.memoryNotesPicked`), so an app restart does not
+  forget it.
+- `app_chat_search` finds messages in the other chats of the member's project
+  (a chat with no project searches the other chats with no project; the
+  User, 2026-11-26: "в других чатах этого проекта"; the member's own chat is
+  in its context): by any word asked, in any form, best match first, always
+  (the chats' word index, `ChatSearchService` with `anyWord`, `repoPath` and
+  `excludeConversationId`), and by meaning when it is on, the two taking
+  turns. With neither answering it says so rather than finding nothing. It returns the chat's title, the author, the time and the
   passage, never whole messages. It goes through the memory route, so the
   server checks the member as for memory.
 
@@ -162,16 +171,30 @@ Decided by the User on 2026-11-26 (same chat document): OpenAI
   finished replies). Long text is cut into passages (notes 1200 characters,
   messages 1500, at most 8 per message), each printed. Notes keep the whole
   print (1536 numbers), messages the first 512; one signed byte per number.
-  On the User's ~21 thousand messages that is about 12 MB of the server's
-  memory. Prints are kept in `semantic_prints` and read into memory once.
+  A message is printed as the chat shows it (`printableText`: what the chat
+  hides is not found; a member's posts during its turn are, with its reply)
+  and read again when found. Prints are kept in `semantic_prints` and read
+  into memory once, side by side in big blocks (`PrintArena`): on the User's
+  ~21 thousand messages about 15 MB of the server's memory, let go when the
+  key is removed or refused.
 - New notes and messages are printed as they come (1.5 s after, in batches);
   the old ones once, in the background, a page at a time, with a pause
   between requests. A restart prints only what changed (a hash of the text).
-  Prints of what is gone (deleted, archived, hidden) are forgotten at the end
-  of that pass.
-- `app_memory_search`: closest in meaning first (closer than 0.15), then the
-  notes holding a word asked that meaning did not bring; `ranking: "meaning"`.
-  The passage is the closest one, cut around the words asked.
+  A message hidden or removed, or a chat deleted, is forgotten at once (even
+  while it is being printed); a chat moved to the server is printed from the
+  database a page at a time once it arrives. A key removed or changed stops
+  the work done for the old one at once (its requests and waits are called
+  off). The whole pass over the User's ~22 thousand messages reads 220 pages
+  of at most about 170 KB (about 3 s of reading on her Mac, 2026-11-26). Prints of anything else gone are forgotten at the end of that pass
+  (only what was printed before it began). A pass the database failed is
+  tried again, later and later, while the key stays the same.
+- `app_memory_search`: the closest in meaning (closer than 0.15) and the best
+  by the words asked take turns, meaning first; `ranking: "meaning"`. On her
+  notes, meaning first then words put the right note in the first five for
+  82% of queries naming an id or a class; taking turns for all of them,
+  keeping the first place of every query asked by meaning (sums of scores and
+  reciprocal ranks lost it for a third). The passage is the closest one, cut
+  around the words asked.
 - Notes for each message (`pick`): only notes at least 0.40 close and within
   0.07 of the closest, at most 5, none the member was given in its session
   already unless changed since (the app keeps that per session; it starts
@@ -180,8 +203,10 @@ Decided by the User on 2026-11-26 (same chat document): OpenAI
   messages: notes came for about one message in five, and none for "ok",
   "done" or "I'm home".
 - OpenAI not answering in time (4 s for a search, 3 s for a pick): the same
-  search by words, and no picks. OpenAI refusing the key (or no credit left):
-  the server stops using it and Settings says why until a new key is given.
+  search by words, and no picks; for 30 s after, nothing waits on OpenAI.
+  OpenAI refusing the key (or no credit left, told by its code): the server
+  stops using it and Settings says why until a new key is given or the key is
+  removed. A refusal of a key replaced meanwhile stops nothing.
 - Measured on her notes (2026-11-26): full prints of passages put the right
   note in the first three for all 37 queries; 512 numbers for 95%. Cost: about
   $0.08 once for all her chats, then under a cent a month.
