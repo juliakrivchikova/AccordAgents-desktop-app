@@ -30,6 +30,7 @@ await build({
     "renderer/components/chat/chat-compaction-approval-card.test.tsx",
     "renderer/components/chat/chat-timeline-layout.test.ts",
     "renderer/components/chat/chat-timeline-scroll.test.tsx",
+    "renderer/components/chat/chat-timeline-follow.test.ts",
     "renderer/components/chat/chat-timeline-topup.test.tsx",
     "renderer/components/chat/chat-sessions-view.test.tsx",
     "renderer/components/chat/chat-sessions-panels.test.tsx",

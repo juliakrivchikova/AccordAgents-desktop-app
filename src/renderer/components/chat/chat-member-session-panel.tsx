@@ -12,6 +12,7 @@ import { ChatProviderMark, renderComposerMemberMark } from "./chat-member-mark";
 import { useSessionsViewNames } from "./chat-sessions-links";
 import { sessionsMentionText } from "../../../shared/sessionsViewText";
 import { ChatMessageItem } from "./chat-message-item";
+import { followsLatestAfterScroll, isScrollKey } from "./chat-timeline-follow";
 import { ChatElapsed, ChatWorkStatusLabel } from "./chat-task-card";
 
 type ChatMessageItemProps = ComponentProps<typeof ChatMessageItem>;
@@ -34,6 +35,8 @@ export interface ChatSessionMember {
 
 const NO_MENTIONS: ChatParticipant[] = [];
 const FOCUS_HIGHLIGHT_MS = 1600;
+// How long after a wheel turn, touch, key or press on the scrollbar a move counts as the User's.
+const USER_SCROLL_INTENT_MS = 900;
 
 /**
  * One member's whole session in the sessions view's right panel: its task
@@ -82,6 +85,15 @@ export function ChatMemberSessionPanel(props: {
   const since = props.status === "running" ? props.runningSince : undefined;
   const bodyRef = useRef<HTMLDivElement>(null);
   const stuckRef = useRef(true);
+  // The position the User last left, or this panel last wrote: a scroll event
+  // moves from it by the User's own move only.
+  const lastScrollTopRef = useRef(0);
+  const lastScrollHeightRef = useRef(0);
+  // Until when a move here is the User's (wheel, touch, keys, the scrollbar), as
+  // in the main timeline; the browser's own scroll anchoring (older messages
+  // landing above) is not her coming back to the end.
+  const userScrollUntilRef = useRef(0);
+  const markUserScroll = (): void => { userScrollUntilRef.current = Date.now() + USER_SCROLL_INTENT_MS; };
   const focusedNonceRef = useRef<number | undefined>();
   const last = props.messages[props.messages.length - 1];
   useLayoutEffect(() => {
@@ -96,13 +108,21 @@ export function ChatMemberSessionPanel(props: {
         focusedNonceRef.current = focus.nonce;
         stuckRef.current = false;
         target.scrollIntoView?.({ block: "center" });
+        lastScrollTopRef.current = body.scrollTop;
         target.classList.add("message-focused");
         window.setTimeout(() => target.classList.remove("message-focused"), FOCUS_HIGHLIGHT_MS);
         return;
       }
     }
-    if (body && stuckRef.current) {
+    // Not while the User is scrolling, as in the main timeline: a message landing
+    // before her first step's scroll event would pin the panel back and erase it.
+    if (body && stuckRef.current && Date.now() > userScrollUntilRef.current) {
       body.scrollTop = body.scrollHeight;
+    }
+    // Older messages landing above move the position by the browser's own scroll
+    // anchoring; recorded here, its scroll event is not taken for the User's.
+    if (body) {
+      lastScrollTopRef.current = body.scrollTop;
     }
   }, [member.id, props.focus?.nonce, props.messages.length, last?.content.length, last?.status]);
 
@@ -148,9 +168,24 @@ export function ChatMemberSessionPanel(props: {
       <div
         className="chat-thread-body chat-member-session-body"
         ref={bodyRef}
+        onWheel={markUserScroll}
+        onTouchMove={markUserScroll}
+        onPointerMove={(event) => { if (event.buttons !== 0) markUserScroll(); }}
+        onKeyDown={(event) => { if (isScrollKey(event.key)) markUserScroll(); }}
+        onPointerDown={(event) => { if (event.target === event.currentTarget) markUserScroll(); }}
         onScroll={(event) => {
           const body = event.currentTarget;
-          stuckRef.current = body.scrollHeight - body.scrollTop - body.clientHeight < 96;
+          const moved = body.scrollTop - lastScrollTopRef.current;
+          const contentShrank = body.scrollHeight < lastScrollHeightRef.current;
+          lastScrollTopRef.current = body.scrollTop;
+          lastScrollHeightRef.current = body.scrollHeight;
+          stuckRef.current = followsLatestAfterScroll({
+            distanceFromBottom: body.scrollHeight - body.scrollTop - body.clientHeight,
+            moved,
+            contentShrank,
+            userScrolling: Date.now() <= userScrollUntilRef.current,
+            following: stuckRef.current
+          });
         }}
       >
         {props.hasOlderMessages && (

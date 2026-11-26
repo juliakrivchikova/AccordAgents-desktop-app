@@ -116,7 +116,9 @@ function firstItemEndingAfter(items: readonly VirtualItem[], offset: number): nu
 export function useAnchoredVirtualItems(
   virtualizer: Virtualizer<HTMLDivElement, Element>,
   timelineRef: RefObject<HTMLDivElement>,
-  isStuckToBottom: () => boolean
+  isStuckToBottom: () => boolean,
+  // Told every position this hook writes, so it is not taken for the User's scroll.
+  onScrollWritten?: (scrollTop: number) => void
 ): VirtualItem[] {
   // The layout last committed to the DOM: what is on screen right now.
   const committedRef = useRef<readonly VirtualItem[]>([]);
@@ -232,6 +234,9 @@ export function useAnchoredVirtualItems(
         virtualizer.scrollOffset = element.scrollTop;
         rerender();
       }
+    }
+    if (pending !== undefined && element) {
+      onScrollWritten?.(element.scrollTop);
     }
   });
   useEffect(() => {

@@ -6,6 +6,7 @@ import { focusRenderedMessage } from "../content/markdown-text";
 import type { ChatTimelineRow } from "./chat-conversation-data";
 import type { ChatMessageFocusRequest } from "./chat-conversation-types";
 import { measureRowAndRemember } from "./chat-timeline-row-clip";
+import { followsLatestAfterScroll, SUBPIXEL_PX } from "./chat-timeline-follow";
 import { useAnchoredVirtualItems, useOlderMessagesTopUp } from "./chat-timeline-scroll";
 import { useChatFocusNavigation } from "./use-chat-focus-navigation";
 import type { ChatThreadSummary } from "./chat-thread-data";
@@ -60,6 +61,13 @@ export function useChatConversationViewport(props: {
   const loadingFocusMessageIdRef = useRef<string | undefined>();
   const stickToBottomRef = useRef(true);
   const [isStuckToBottom, setIsStuckToBottom] = useState(true);
+  // The position the User last left, or the app last wrote: a scroll event moves
+  // from it by the User's own move only.
+  const lastScrollTopRef = useRef(0);
+  const lastScrollHeightRef = useRef(0);
+  const noteScrollWritten = (scrollTop: number): void => {
+    lastScrollTopRef.current = scrollTop;
+  };
   const scrollScheduleIdRef = useRef(0);
   const handledFocusNonceRef = useRef(0);
   const userScrollIntentUntilRef = useRef(0);
@@ -97,7 +105,7 @@ export function useChatConversationViewport(props: {
   const rowsRef = useRef(props.chatTimelineRows);
   rowsRef.current = props.chatTimelineRows;
   // While the User is turning the wheel the view does not snap back to the bottom.
-  const chatVirtualItems = useAnchoredVirtualItems(chatVirtualizer, timelineRef, () => stickToBottomRef.current && !hasRecentUserScrollIntent());
+  const chatVirtualItems = useAnchoredVirtualItems(chatVirtualizer, timelineRef, () => stickToBottomRef.current && !hasRecentUserScrollIntent(), noteScrollWritten);
   // A jump to a message is not interrupted by older pages arriving under it.
   // The sessions view's main timeline (it alone opens messages outside it)
   // shows few of the loaded messages: it stops after two pages added none.
@@ -142,11 +150,27 @@ export function useChatConversationViewport(props: {
     if (!timeline) {
       return;
     }
-    const nextStickToBottom = timeline.scrollHeight - timeline.scrollTop - timeline.clientHeight < 96;
-    if (nextStickToBottom) {
+    const moved = timeline.scrollTop - lastScrollTopRef.current;
+    const contentShrank = timeline.scrollHeight < lastScrollHeightRef.current;
+    lastScrollTopRef.current = timeline.scrollTop;
+    lastScrollHeightRef.current = timeline.scrollHeight;
+    const wasFollowing = stickToBottomRef.current;
+    const follows = followsLatestAfterScroll({
+      distanceFromBottom: timeline.scrollHeight - timeline.scrollTop - timeline.clientHeight,
+      moved,
+      contentShrank,
+      userScrolling: hasRecentUserScrollIntent(),
+      following: stickToBottomRef.current
+    });
+    if (follows) {
       setStickToBottom(true);
-      clearUserScrollIntent();
-    } else if (hasRecentUserScrollIntent() || !stickToBottomRef.current) {
+      // Only coming back to the end ends the User's scroll: a scroll event that moved
+      // nothing (one the app's pin queued) must not, or the rest of her drag or
+      // smooth scroll would no longer count as hers.
+      if (!wasFollowing || moved > SUBPIXEL_PX) {
+        clearUserScrollIntent();
+      }
+    } else {
       detachFromBottom();
     }
     requestOlderMessages();
@@ -157,10 +181,13 @@ export function useChatConversationViewport(props: {
       return;
     }
     clearUserScrollIntent();
-    chatVirtualizer.scrollToIndex(props.chatTimelineRows.length - 1, { align: "end" });
+    // A plain write, not the virtualizer's scrollToIndex: that keeps steering to the
+    // last row for up to five seconds, and pulled the view back down as the answer
+    // grew when the User had scrolled up within a frame of the pin.
     const timeline = timelineRef.current;
     if (timeline) {
       timeline.scrollTop = timeline.scrollHeight;
+      noteScrollWritten(timeline.scrollTop);
     }
   }
 

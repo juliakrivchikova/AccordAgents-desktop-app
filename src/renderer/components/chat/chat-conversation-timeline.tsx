@@ -27,6 +27,7 @@ import type { ChatParticipantRosterStatus } from "./chat-participant-menu";
 import { ChatThinkingRowItem } from "./chat-streaming";
 import { ChatSessionsTimelineRow, type ChatSessionsTimelineContext } from "./chat-sessions-timeline-row";
 import { unmeasuredRowClip } from "./chat-timeline-row-clip";
+import { isScrollKey } from "./chat-timeline-follow";
 import type { ChatActivityDisclosureState } from "./use-chat-activity-disclosure";
 
 type ThreadSummaryMap = Map<string, ChatThreadSummary>;
@@ -92,6 +93,12 @@ export function ChatConversationTimeline(props: {
         }
       }}
       onScroll={props.onScroll}
+      // A drag with the button held (selecting text past the edge) scrolls too.
+      onPointerMove={(event) => {
+        if (event.buttons !== 0) {
+          props.onScrollIntent();
+        }
+      }}
       onTouchMove={props.onScrollIntent}
       onWheel={props.onScrollIntent}
     >
@@ -183,16 +190,6 @@ export function ChatConversationTimeline(props: {
       </div>
     </div>
   );
-}
-
-function isScrollKey(key: string): boolean {
-  return key === "ArrowDown" ||
-    key === "ArrowUp" ||
-    key === "End" ||
-    key === "Home" ||
-    key === "PageDown" ||
-    key === "PageUp" ||
-    key === " ";
 }
 
 function ChatTimelineMessageRow(props: {

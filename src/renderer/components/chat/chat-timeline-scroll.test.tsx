@@ -62,6 +62,7 @@ type HarnessProps = {
   onVirtualizer?: (virtualizer: Virtualizer<HTMLDivElement, Element>) => void;
   initialOffset?: number;
   overscan?: number;
+  onScrollWritten?: (scrollTop: number) => void;
 };
 
 function Harness(props: HarnessProps): JSX.Element {
@@ -88,7 +89,7 @@ function Harness(props: HarnessProps): JSX.Element {
     isScrollingResetDelay: 60_000
   });
   props.onVirtualizer?.(virtualizer);
-  const items = useAnchoredVirtualItems(virtualizer, timelineRef, () => props.stuck);
+  const items = useAnchoredVirtualItems(virtualizer, timelineRef, () => props.stuck, props.onScrollWritten);
   totalRef.current = virtualizer.getTotalSize();
   props.onItems?.(items);
   return (
@@ -365,6 +366,22 @@ test("a chat that opens at its end but fits on screen renders all of its rows", 
   const view = await mount({ rows: rows(0, 6, 40), stuck: true, initialOffset: Number.MAX_SAFE_INTEGER, onItems: (next) => { items = next; } });
   try {
     assert.deepEqual(items.map((item) => item.key), ["m0", "m1", "m2", "m3", "m4", "m5"]);
+  } finally {
+    await view.unmount();
+  }
+});
+
+test("every position the anchoring writes is reported, so a row kept in place is not taken for a scroll down", async () => {
+  const written: number[] = [];
+  const onScrollWritten = (top: number): void => { written.push(top); };
+  const view = await mount({ rows: rows(10, 30, 100), stuck: false, onScrollWritten });
+  try {
+    await view.scrollTo(518);
+    written.length = 0;
+    // An older page lands above: the position moves down by its height to keep m15 in place.
+    await view.rerender({ rows: [...rows(0, 10, 50), ...rows(10, 30, 100)], stuck: false, onScrollWritten });
+    assert.equal(view.timeline().scrollTop, 1018);
+    assert.equal(written.at(-1), 1018, "the shift is the app's, not the User's");
   } finally {
     await view.unmount();
   }
