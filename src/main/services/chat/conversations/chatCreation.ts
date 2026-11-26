@@ -116,8 +116,8 @@ export class ChatCreation {
           participantSessions: [],
           warnings: [],
           running: false,
-          // Its own layer over the project's sub-agents, empty: the chat gives
-          // tasks to the providers its project has, or to none until added.
+          // No changes of its own to its Agents list: the chat gives tasks to
+          // every ready CLI, on Settings' model and effort.
           subagentProviders: { entries: [] },
           // Every new chat opens in the sessions view (the User, 2026-11-22);
           // its header switches it afterwards.

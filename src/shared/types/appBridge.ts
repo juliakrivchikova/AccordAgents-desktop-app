@@ -36,7 +36,7 @@ import type {
   RestartChatParticipantRequest, SendChatMessageRequest, SetChatArchivedRequest, SetChatPinnedRequest, SetChatViewRequest,
   StartChatAccordRequest, StartChatAccordResult, ToggleChatReactionRequest, UpdateChatParticipantRuntimeRequest
 } from "./chatRequests";
-import type { UpdateChatSubagentProvidersRequest, UpdateChatSubagentProvidersResult } from "./subagentProviders";
+import type { SubagentDefaultUpdate, UpdateChatSubagentProvidersRequest, UpdateChatSubagentProvidersResult } from "./subagentProviders";
 import type { ChatSearchRequest, ChatSearchResponse } from "./chatSearch";
 import type { CliImportListResult, CliImportRequest, CliImportResult } from "./cliImport";
 import type {
@@ -158,6 +158,7 @@ export interface AppBridge {
   getSettings(): Promise<AppSettings>;
   setAssistantProviderKind(kind: ChatProviderKind): Promise<AppSettings>;
   setNewChatDefaults(update: NewChatDefaultsUpdate): Promise<AppSettings>;
+  setSubagentDefault(update: SubagentDefaultUpdate): Promise<AppSettings>;
   updateProviderSettings(update: ProviderSettingsUpdate): Promise<AppSettings>;
   saveChatRoleConfig(update: ChatRoleConfigUpdate): Promise<AppSettings>;
   archiveChatRoleConfig(id: string): Promise<AppSettings>;
@@ -234,7 +235,7 @@ export interface AppBridge {
   dismissConversationWarnings(request: DismissConversationWarningsRequest): Promise<Conversation | undefined>;
   addChatParticipant(request: AddChatParticipantRequest): Promise<Conversation | undefined>;
   updateChatParticipantRuntime(request: UpdateChatParticipantRuntimeRequest): Promise<Conversation | undefined>;
-  /** A change to the chat's sub-agents (side panel), for this chat or its project. */
+  /** A change to the chat's Agents list (side panel), for this chat only. */
   updateChatSubagentProviders(request: UpdateChatSubagentProvidersRequest): Promise<UpdateChatSubagentProvidersResult>;
   removeChatParticipant(request: RemoveChatParticipantRequest): Promise<Conversation | undefined>;
   compactChatParticipant(request: CompactChatParticipantRequest): Promise<StartReviewResult>;

@@ -94,6 +94,28 @@ test("Settings → General → New chats: compaction without asking by default, 
   });
 });
 
+test("Settings → General → Agents: each CLI's model and effort, kept across launches; the projects' lists of before are kept in the file but not read", async () => {
+  await withSettings(async (make, file) => {
+    assert.deepEqual((await make().getPublicSettings()).subagentDefaults, [], "unset: every CLI on its own");
+    const codex = await make().setSubagentDefault({ kind: "codex-cli", model: "gpt-6.2-astra", reasoningEffort: "high" });
+    assert.deepEqual(codex.subagentDefaults, [{ kind: "codex-cli", model: "gpt-6.2-astra", reasoningEffort: "high" }]);
+    const claude = await make().setSubagentDefault({ kind: "claude-code", reasoningEffort: "low" });
+    assert.deepEqual(claude.subagentDefaults, [{ kind: "codex-cli", model: "gpt-6.2-astra", reasoningEffort: "high" }, { kind: "claude-code", reasoningEffort: "low" }]);
+    const back = await make().setSubagentDefault({ kind: "codex-cli", model: null, reasoningEffort: null });
+    assert.deepEqual(back.subagentDefaults, [{ kind: "claude-code", reasoningEffort: "low" }], "back to the CLI's own: no entry");
+    assert.deepEqual((await make().getPublicSettings()).subagentDefaults, back.subagentDefaults, "kept across launches");
+    await assert.rejects(make().setSubagentDefault({ kind: "grid" as never, model: "x" }), /Unknown provider/);
+
+    const oldLists = { "/work/app": [{ kind: "codex-cli", model: "gpt-6.2-astra" }] };
+    await writeFile(file, JSON.stringify({ ...JSON.parse(await readFile(file, "utf8")), subagentProvidersByProject: oldLists, subagentDefaults: [{ kind: "nope" }, { kind: "gemini-cli", removed: true }] }));
+    const reread = await make().getPublicSettings();
+    assert.deepEqual(reread.subagentDefaults, [{ kind: "gemini-cli" }], "what is not a CLI's value is dropped");
+    assert.equal((reread as unknown as { subagentProvidersByProject?: unknown }).subagentProvidersByProject, undefined, "not read");
+    await make().setSubagentDefault({ kind: "claude-code", model: "sonnet" });
+    assert.deepEqual(JSON.parse(await readFile(file, "utf8")).subagentProvidersByProject, oldLists, "kept in the file through a save");
+  });
+});
+
 test("a saved member is never given the main session's role", async () => {
   await withSettings(async (make) => {
     await assert.rejects(

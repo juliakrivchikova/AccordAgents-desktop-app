@@ -3,9 +3,9 @@ import { randomUUID } from "node:crypto";
 import { memberSessionMoves, type ChatSessionHandoff } from "../../../../shared/memberSessionMove";
 import type {
   AddChatParticipantRequest, ChatParticipant, ChatParticipantConfig, CliProviderHost, ChatParticipantSession, ChatProviderKind,
-  Conversation, SubagentProviderEntry, UpdateChatParticipantRuntimeRequest, UpdateChatSubagentProvidersRequest, UpdateChatSubagentProvidersResult, RemoveChatParticipantRequest
+  Conversation, UpdateChatParticipantRuntimeRequest, UpdateChatSubagentProvidersRequest, UpdateChatSubagentProvidersResult, RemoveChatParticipantRequest
 } from "../../../../shared/types";
-import { applySubagentProviderChange, chatSubagentProjectKey, chatSubagentProvidersOf } from "../../../../shared/subagentProviders";
+import { applySubagentProviderChange, chatSubagentProvidersOf } from "../../../../shared/subagentProviders";
 import { isChatProviderKind } from "../../../../shared/chatProviders";
 import { normalizeChatReasoningEffort } from "../../../../shared/reasoningEffort";
 import { cliProviderHostDefaultModel } from "../../../../shared/cliProviderHosts";
@@ -41,19 +41,6 @@ export interface ParticipantMoveApplied {
 }
 
 /** The chat's roster: adding, changing and removing members, and keeping them in step with Settings. */
-/** The providers a chat from before the list already gives tasks to, kept in its
- *  own layer when it gets one (those its project has need no entry). */
-function inUseSubagents(conversation: Conversation, project: readonly SubagentProviderEntry[]): SubagentProviderEntry[] {
-  const kinds = new Set<ChatProviderKind>();
-  const mainId = conversation.metadata.mainSessionParticipantId;
-  for (const participant of chatParticipants(conversation)) {
-    if (participant.id !== mainId && !project.some((entry) => entry.kind === participant.kind)) {
-      kinds.add(participant.kind);
-    }
-  }
-  return [...kinds].map((kind) => ({ kind }));
-}
-
 export class ChatMembers {
   /** Members a flow here is about to run, or will resume, before their own
    *  turn is registered in chatRunMeta or shows a reply: removing one
@@ -122,45 +109,27 @@ export class ChatMembers {
     });
   }
 
-  /** A change to the chat's sub-agents (its side panel): to its own layer, or to
-   *  its project's list in Settings. A chat from before the list gets its layer
-   *  at the first change, keeping the providers its members already work on. */
+  /** A change to the chat's Agents list (its side panel): a CLI taken out or
+   *  back, or its own model and effort. It is for this chat only; the list
+   *  itself is every ready CLI on Settings' values (shared/subagentProviders.ts). */
   async updateSubagentProviders(request: UpdateChatSubagentProvidersRequest): Promise<UpdateChatSubagentProvidersResult> {
-    if (!isChatProviderKind(request.change?.kind) || !["add", "remove", "set"].includes(request.change.type) || (request.scope !== "thread" && request.scope !== "project")) {
-      throw new Error("Invalid sub-agent change.");
+    if (!isChatProviderKind(request.change?.kind) || !["add", "remove", "set"].includes(request.change.type)) {
+      throw new Error("Invalid agent change.");
     }
     const read = (await this.chat.store.readStoredChatStateForRefresh(request.conversationId)).stored;
     if (!read || read.kind !== "chat") {
       throw new Error("Chat was not found.");
     }
-    const key = chatSubagentProjectKey(read) ?? "";
-    // The project's list before this change: an old chat's layer keeps the
-    // providers its members use that the project has not got (a Project
-    // Remove must not put back in this chat what it just removed).
-    const projectBefore = (await this.deps.settings.getPublicSettings()).subagentProvidersByProject?.[key] ?? [];
-    const settings = request.scope === "project"
-      ? await this.deps.settings.updateProjectSubagentProviders(key, request.change)
-      : undefined;
     const conversation: Conversation = { ...read, messages: [], metadata: {} };
     const subagentProviders = await this.chat.store.withSavedChat(conversation, async () => {
-      const existing = chatSubagentProvidersOf(conversation.metadata);
-      if (existing && request.scope === "project") {
-        return existing; // Only the project's list changed: the chat is not saved.
-      }
-      // The project's list as it is now, for a layer that sits on it.
-      const project = (await this.deps.settings.getPublicSettings()).subagentProvidersByProject?.[key] ?? [];
-      // Providers the project had or now has need no entry of the chat's own.
-      const own = existing ?? { entries: inUseSubagents(conversation, request.scope === "project" ? [...projectBefore, ...project] : projectBefore) };
-      const entries = request.scope === "thread"
-        ? applySubagentProviderChange("thread", own.entries, request.change, project)
-        : own.entries;
+      const entries = applySubagentProviderChange(chatSubagentProvidersOf(conversation.metadata)?.entries ?? [], request.change);
       // Not activity: the chat keeps its place in the list (CHAT_LIST_ORDER_METADATA_KEYS).
       conversation.metadata = { ...conversation.metadata, subagentProviders: { entries } };
       await this.chat.store.saveConversation(conversation);
       return { entries };
     });
     // Only what changed travels back: a chat's messages can be megabytes.
-    return { conversationId: read.id, subagentProviders, ...(settings ? { subagentProvidersByProject: settings.subagentProvidersByProject ?? {} } : {}) };
+    return { conversationId: read.id, subagentProviders };
   }
 
   async updateParticipantRuntime(request: UpdateChatParticipantRuntimeRequest, moved?: ParticipantMoveApplied): Promise<Conversation | undefined> {

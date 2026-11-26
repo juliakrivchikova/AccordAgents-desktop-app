@@ -4,10 +4,11 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { act, create, type ReactTestInstance } from "react-test-renderer";
-import type { ReactElement } from "react";
+import { act as reactAct, type ReactElement } from "react";
+import { createRoot } from "react-dom/client";
 
 import { TooltipProvider } from "@/components/ui/tooltip";
-import { ACCORD_NEEDS_AGENT_LINE } from "../../../shared/accordCandidates";
+import { ACCORD_NEEDS_AGENT_LINE, ACCORD_NEEDS_AGENT_SETUP_LINE } from "../../../shared/accordCandidates";
 import { parseAccordLaunchCard } from "../../../shared/accordLaunchCard";
 import { accordProgressFromNotes, type DockedAccord } from "../../../shared/accordProgress";
 import type { AppSettings, ChatParticipant, Conversation } from "../../../shared/types";
@@ -191,32 +192,62 @@ test("the members panel lists the chat's latest Accord first, as a row that open
   none.unmount();
 });
 
-test("opened from the Accord button with too few for an Accord, the side panel says what Accord needs and adds a CLI from its Agents list", async () => {
-  const updates: unknown[] = [];
-  const actions: SubagentProvidersActions = {
-    agents: [], providers: [], openSetup: noop,
-    update: async (scope, change) => { updates.push([scope, change]); return true; }
-  };
-  const conversation = { id: "chat-1", messages: [], metadata: { participants: [MAIN], mainSessionParticipantId: MAIN.id, subagentProviders: { entries: [] } } } as unknown as Conversation;
-  const element = (accordNeedsAgent: boolean, chat = conversation): ReactElement => (
-    <SubagentProvidersContext.Provider value={actions}>
-      {rightPanelElement({ kind: "members", addAgent: 1 }, [], undefined, { conversation: chat, participants: [MAIN], accordNeedsAgent })}
-    </SubagentProvidersContext.Provider>
-  );
-  const open = (accordNeedsAgent: boolean): ReturnType<typeof renderIn> => renderIn(true, element(accordNeedsAgent));
-  const panel = open(true);
-  assert.equal(textOf(panel.root.find(byTestId("chat-subagents-note"))), ACCORD_NEEDS_AGENT_LINE);
-  const codex = panel.root.find((node) => node.type === "div" && node.props["data-provider-kind"] === "codex-cli");
-  await act(async () => codex.find(byTestId("chat-subagent-pick-add")).props.onClick());
-  assert.deepEqual(updates, [["thread", { type: "add", kind: "codex-cli" }]]);
-  const added = { ...conversation, metadata: { ...conversation.metadata, subagentProviders: { entries: [{ kind: "codex-cli" }] } } } as unknown as Conversation;
-  panel.update(element(false, added));
-  assert.equal(panel.root.find(byTestId("chat-subagent-add")).props["data-state"], "closed", "the list that added it answered the request: Add does not open again");
-  panel.unmount();
+/** Detection as the app reports it: these CLIs ready, the others not installed. */
+function agentsReady(ready: string[]): SubagentProvidersActions["agents"] {
+  return ["codex-cli", "claude-code", "gemini-cli"].map((kind) => (ready.includes(kind)
+    ? { kind, label: kind, installed: true, detection: "detected", runnable: "ready", authentication: "ready" }
+    : { kind, label: kind, installed: false, detection: "not-detected" })) as unknown as SubagentProvidersActions["agents"];
+}
 
-  const met = open(false);
-  assert.equal(met.root.findAll(byTestId("chat-subagents-note")).length, 0, "once Accord has enough, the line is gone");
-  met.unmount();
+test("opened from the Accord button with too few for an Accord, the side panel says what Accord needs and brings back a CLI this chat took out", async () => {
+  const updates: unknown[] = [];
+  const opened: string[] = [];
+  const actions = (ready: string[]): SubagentProvidersActions => ({
+    agents: agentsReady(ready), providers: [], hosts: [], openSetup: () => opened.push("setup"),
+    update: async (change) => { updates.push(change); return true; }
+  });
+  const chat = (entries: unknown[]): Conversation =>
+    ({ id: "chat-1", messages: [], metadata: { participants: [MAIN], mainSessionParticipantId: MAIN.id, subagentProviders: { entries } } }) as unknown as Conversation;
+  const element = (accordNeedsAgent: boolean, conversation: Conversation, ready = ["codex-cli", "gemini-cli"]): ReactElement => (
+    <TooltipProvider>
+      <ChatSessionsPresentationContext.Provider value>
+        <SubagentProvidersContext.Provider value={actions(ready)}>
+          {rightPanelElement({ kind: "members", addAgent: 1 }, [], undefined, { conversation, participants: [MAIN], accordNeedsAgent })}
+        </SubagentProvidersContext.Provider>
+      </ChatSessionsPresentationContext.Provider>
+    </TooltipProvider>
+  );
+  // In a document: Add opens its list in a popover, which react-test-renderer cannot draw.
+  const container = document.createElement("div");
+  document.body.append(container);
+  const root = createRoot(container);
+  const byId = (id: string): HTMLElement[] => Array.from(document.querySelectorAll<HTMLElement>(`[data-testid="${id}"]`));
+  const render = async (next: ReactElement): Promise<void> => {
+    await reactAct(async () => { root.render(next); await new Promise((resolve) => setTimeout(resolve, 0)); });
+  };
+  try {
+    await render(element(true, chat([{ kind: "codex-cli", removed: true }, { kind: "gemini-cli", removed: true }])));
+    assert.equal(byId("chat-subagents-note")[0]?.textContent, ACCORD_NEEDS_AGENT_LINE, "Add is open with what Accord needs");
+    const codex = document.querySelector<HTMLElement>('[data-testid="chat-subagent-pick"] [data-provider-kind="codex-cli"] [data-testid="chat-subagent-pick-add"]');
+    assert.ok(codex, "the CLIs this chat took out are offered back");
+    await reactAct(async () => { codex.click(); await new Promise((resolve) => setTimeout(resolve, 0)); });
+    assert.deepEqual(updates, [{ type: "add", kind: "codex-cli" }], "back in this chat, nothing else changed");
+    await render(element(false, chat([{ kind: "gemini-cli", removed: true }])));
+    assert.equal(byId("chat-subagent-add")[0]?.getAttribute("data-state"), "closed", "the request was answered: Add does not open again");
+    await render(element(false, chat([])));
+    assert.equal(byId("chat-subagent-add").length, 0, "nothing taken out: no Add");
+    assert.equal(byId("chat-subagents-note").length, 0, "once Accord has enough, the line is gone");
+
+    // Nothing this chat can have back: another CLI has to be set up first.
+    await render(element(true, chat([]), ["codex-cli"]));
+    assert.equal(byId("chat-subagent-add").length, 0);
+    assert.equal(byId("chat-subagents-note")[0]?.textContent, ACCORD_NEEDS_AGENT_SETUP_LINE);
+    await reactAct(async () => { byId("chat-subagents-setup")[0]!.click(); });
+    assert.deepEqual(opened, ["setup"]);
+  } finally {
+    await reactAct(async () => { root.unmount(); });
+    container.remove();
+  }
 });
 
 test("in the sessions view the card names members by model and effort; a submitted draft and the published version open in the document", async (t) => {

@@ -3,13 +3,15 @@ import { ClockCounterClockwiseIcon, CaretDownIcon, XIcon } from "@phosphor-icons
 
 import type { DockedAccord } from "../../../shared/accordProgress";
 import { SESSIONS_REMOVED_MEMBER_DETAIL, type SessionsMemberActivity, type SessionsMemberRow, type SessionsMemberTask } from "../../../shared/mainSessionView";
+import { addableSubagentProviders } from "../../../shared/subagentProviders";
 import type { ChatParticipant, ChatSubagentProviders, SubagentProviderEntry } from "../../../shared/types";
 import { IconButton } from "../primitives";
 import { ChatAccordRow } from "./chat-accord-dock";
 import { ChatAgentRow, type ChatAgentDetail } from "./chat-agent-row";
 import { ChatProviderMark, ChatProviderMarkSlot } from "./chat-member-mark";
 import { ChatSubagentsSection, type SubagentAddRequest, type SubagentMainSession } from "./chat-subagents-section";
-import { subagentPanelProviders } from "./subagent-panel";
+import { subagentPanelProviders, subagentReadiness } from "./subagent-panel";
+import { useSubagentProvidersActions } from "./subagent-providers-context";
 import { useMachineList } from "./use-cli-start-defaults";
 import type { SessionsFormerRow } from "./use-chat-sessions-view";
 
@@ -18,11 +20,10 @@ export interface ChatMembersPanelProps {
   accord?: DockedAccord;
   onOpenAccord?: (launchId: string) => void;
   rows: { current: readonly SessionsMemberRow[]; previous: readonly SessionsMemberRow[] };
-  /** The CLIs the main session gives tasks to: its project's list and the
-   *  chat's own layer (none: a chat from before the list); projectScope when
-   *  the chat has a project folder to keep a list for; add when opened to
-   *  add one (the Accord button). */
-  subagents?: { project?: readonly SubagentProviderEntry[]; thread?: ChatSubagentProviders; projectScope: boolean; main?: SubagentMainSession; add?: SubagentAddRequest };
+  /** The CLIs the main session gives tasks to: every one ready here on
+   *  Settings' model and effort (defaults), with the chat's own changes
+   *  (thread); add when opened from the Accord button. */
+  subagents?: { defaults?: readonly SubagentProviderEntry[]; thread?: ChatSubagentProviders; main?: SubagentMainSession; add?: SubagentAddRequest };
   /** Members no longer in the chat, whose sessions stay readable. */
   formerRows?: readonly SessionsFormerRow[];
   activity: SessionsMemberActivity;
@@ -55,7 +56,12 @@ export interface ChatMembersPanelProps {
 export function ChatMembersPanel(props: ChatMembersPanelProps): JSX.Element {
   const machines = useMachineList();
   const former = props.formerRows ?? [];
-  const providers = subagentPanelProviders(props.subagents?.project, props.subagents?.thread, props.rows.current);
+  const actions = useSubagentProvidersActions();
+  const { ready, checking } = subagentReadiness({
+    agents: actions?.agents ?? [], providers: actions?.providers ?? [], hosts: actions?.hosts ?? [], main: props.subagents?.main, machines
+  });
+  const list = { ready, defaults: props.subagents?.defaults, thread: props.subagents?.thread, cloudRun: Boolean(props.subagents?.main?.cloudRun) };
+  const providers = subagentPanelProviders(list, props.rows.current);
   const renderRow = (row: SessionsMemberRow): JSX.Element => {
     const { participant, status } = row;
     const runIds = props.runIdsByParticipantId.get(participant.id) ?? [];
@@ -107,9 +113,8 @@ export function ChatMembersPanel(props: ChatMembersPanelProps): JSX.Element {
             <ChatAccordRow launch={props.accord} testId="chat-members-accord" onOpen={() => props.onOpenAccord?.(props.accord!.launchId)} />
           </div>
         )}
-        <ChatSubagentsSection providers={providers} project={props.subagents?.project} main={props.subagents?.main}
-          legacy={Boolean(props.subagents) && !props.subagents?.thread} add={props.subagents?.add}
-          projectScope={props.subagents?.projectScope ?? false} renderRow={renderRow} />
+        <ChatSubagentsSection providers={providers} addable={addableSubagentProviders(list)} checking={checking}
+          main={props.subagents?.main} add={props.subagents?.add} renderRow={renderRow} />
         {/* Sessions that ended and members no longer in the chat, in one quiet group. */}
         <ChatAgentsGroup label="History" testId="chat-members-history" count={props.rows.previous.length + former.length}>
           {props.rows.previous.length > 0 && (

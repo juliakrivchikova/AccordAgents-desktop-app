@@ -11,7 +11,7 @@ import type {
   AwsWorkerOperationSnapshot, AwsWorkerSpec, AwsWorkerVolumeExpansion, CloudRunsSettingsUpdate, CloudRunWorkerMode,
   CliProviderHost, CliProviderHostUpdate, ChatParticipantConfigUpdate, ChatPromptContextSettings, ChatProviderKind,
   ChatRoleChangeOperation, ChatRoleConfigUpdate, NewChatDefaultsUpdate, AgentEnvironmentVariable, ProviderSettingsUpdate,
-  RepoFileExternalOpenAction, RepoFileOpenAction, SaveAgentEnvironmentVariableRequest, SubagentProviderChange
+  RepoFileExternalOpenAction, RepoFileOpenAction, SaveAgentEnvironmentVariableRequest, SubagentDefaultUpdate
 } from "../../shared/types";
 import type { ReadCustomAvatarResult, SaveCustomAvatarRequest } from "../../shared/avatarStudio";
 import type { AwsWorkerCredentials } from "./awsWorkerProvisioning";
@@ -66,9 +66,10 @@ export class SettingsService {
     return this.modules.providerDefaults.setNewChatDefaults(update);
   }
 
-  /** A change to a project's sub-agent providers (shared/subagentProviders.ts). */
-  updateProjectSubagentProviders(repoPath: string, change: SubagentProviderChange): Promise<AppSettings> {
-    return this.modules.providerDefaults.updateProjectSubagentProviders(repoPath, change);
+  /** One CLI's model and effort for the agents a chat gives tasks to
+   *  (Settings → General → Agents, shared/subagentProviders.ts). */
+  setSubagentDefault(update: SubagentDefaultUpdate): Promise<AppSettings> {
+    return this.modules.providerDefaults.setSubagentDefault(update);
   }
 
   ensureAssistantProviderDefault(agents: AgentHealth[]): Promise<AppSettings> {

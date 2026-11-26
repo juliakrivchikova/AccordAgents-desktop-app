@@ -3,18 +3,23 @@ import { CaretRightIcon, PlusIcon, PushPinIcon } from "@phosphor-icons/react";
 
 import { Button } from "@/components/ui/button";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
-import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
-import { CLI_PROVIDER_DISPLAY_ORDER, CLI_PROVIDER_SETUP, readinessForProvider } from "../../../shared/cliReadiness";
+import { ACCORD_NEEDS_AGENT_LINE, ACCORD_NEEDS_AGENT_SETUP_LINE } from "../../../shared/accordCandidates";
+import { CLI_PROVIDER_SETUP } from "../../../shared/cliReadiness";
 import type { SessionsMemberRow } from "../../../shared/mainSessionView";
 import { reasoningEffortOptionsForProvider } from "../../../shared/reasoningEffort";
-import type { AgentReadinessState, ChatProviderKind, ChatReasoningEffort, SubagentProviderEntry, SubagentProviderScope } from "../../../shared/types";
+import type { ChatProviderKind, ChatReasoningEffort } from "../../../shared/types";
 
-/** The main session's own CLI and what it runs on: a sub-agent of the same CLI
- *  with nothing set inherits them (delegation.ts). */
+/** The main session's own CLI and what it runs on: an agent of the same CLI
+ *  with nothing set inherits them (delegation.ts); where it runs decides which
+ *  CLIs are ready for its members. */
 export interface SubagentMainSession {
   kind: ChatProviderKind;
   model?: string;
   reasoningEffort?: ChatReasoningEffort;
+  /** An added provider it runs through (Z.ai and the like). */
+  hostId?: string;
+  /** The machine it runs on, if not this computer. */
+  homeMachineId?: string;
   /** A Cloud run main session's members run there too, where Antigravity does not. */
   cloudRun?: unknown;
 }
@@ -25,42 +30,32 @@ import { hasThreadOverride, type SubagentPanelProvider } from "./subagent-panel"
 import { useSubagentProvidersActions } from "./subagent-providers-context";
 import { chipModelLabel, useMemberModelCatalog } from "./chat-member-model-name";
 
-/** The Agents list opened to add one (the Accord button, when Accord needs
- *  one more): its Add open, a new key each time, and what it is for. */
+/** The Agents list opened from the Accord button, when Accord needs one more
+ *  agent: a new key each time. */
 export interface SubagentAddRequest {
   key: number;
-  note?: string;
+  forAccord?: boolean;
 }
 
-/** Said only when the CLI is not ready: a ready one needs no word. */
-const READINESS_TEXT: Record<AgentReadinessState, string | undefined> = {
-  ready: undefined,
-  "could-not-verify": undefined,
-  "sign-in-required": "Sign in needed",
-  "not-detected": "Not installed",
-  "failed-to-run": "Does not start",
-  disabled: "Turned off in Settings",
-  checking: "Checking"
-};
-
 /** The side panel's Agents (variant B, the User, 2026-11-26): a quiet row per
- *  CLI the main session gives tasks to, its model and effort beside it, its
- *  sessions folded under it until the row is opened; Add lists the CLIs found
- *  here. A new thread with none says so and lists them in place. */
+ *  CLI the main session gives tasks to (every CLI ready here, less those this
+ *  chat took out), its model and effort beside it, its sessions folded under
+ *  it until the row is opened. Add brings back a CLI this chat took out, and
+ *  shows only when there is one. */
 export function ChatSubagentsSection(props: {
   providers: SubagentPanelProvider[];
-  /** The project's own list, for Add to say what the project already has. */
-  project?: readonly SubagentProviderEntry[];
+  /** The CLIs this chat took out that it can have back. */
+  addable: readonly ChatProviderKind[];
+  /** The CLIs are still being checked: nothing to say about an empty list yet. */
+  checking: boolean;
   main?: SubagentMainSession;
-  /** A chat from before the list: it may give tasks to any ready CLI until one is added. */
-  legacy?: boolean;
-  projectScope: boolean;
   add?: SubagentAddRequest;
   renderRow: (row: SessionsMemberRow) => JSX.Element;
 }): JSX.Element {
+  const actions = useSubagentProvidersActions();
   const [open, setOpen] = useState<ReadonlySet<ChatProviderKind>>(new Set());
-  // The Accord's request to add an agent that the empty list's own Add list
-  // answered: the header's Add must not open again for it.
+  // The Accord's request to add an agent, once Add was opened for it: Add does
+  // not open again for it when it shows again later.
   const [answered, setAnswered] = useState<number>();
   const running = props.providers.reduce((count, provider) => count + provider.running, 0);
   const toggle = (kind: ChatProviderKind): void => setOpen((current) => {
@@ -68,26 +63,34 @@ export function ChatSubagentsSection(props: {
     if (!next.delete(kind)) next.add(kind);
     return next;
   });
+  const canAdd = props.addable.length > 0;
+  // Accord needs one more agent and none can be added here: one is set up
+  // first. Not said while the CLIs are still being checked.
+  const accordSetup = Boolean(props.add?.forAccord) && !canAdd && !props.checking;
+  // That line answered the request: a CLI taken out afterwards does not open Add by itself.
+  if (accordSetup && props.add && answered !== props.add.key) setAnswered(props.add.key);
+  const empty = props.providers.length === 0 && !props.checking;
   return (
     <div className="chat-side-section" data-testid="chat-members-agents">
       <div className="chat-subagents-head">
         <h3 className="chat-side-heading">Agents</h3>
         {running > 0 && <span className="chat-subagents-running" data-testid="chat-subagents-running"><i aria-hidden />{running} running</span>}
         <span className="grow" />
-        {props.providers.length > 0 && <ChatSubagentAdd key={props.add?.key} providers={props.providers} project={props.project} main={props.main}
-          projectScope={props.projectScope} openAtStart={props.add !== undefined && props.add.key !== answered} note={props.add?.note} />}
+        {canAdd && <ChatSubagentAdd key={props.add?.key} addable={props.addable}
+          openAtStart={Boolean(props.add?.forAccord) && props.add?.key !== answered} note={props.add?.forAccord ? ACCORD_NEEDS_AGENT_LINE : undefined}
+          onClosed={() => setAnswered(props.add?.key)} />}
       </div>
-      {props.providers.length === 0 ? (
+      {(empty || accordSetup) && (
         <div className="chat-subagents-empty" data-testid="chat-subagents-empty">
-          <p className={props.add?.note ? "is-note" : undefined} data-testid={props.add?.note ? "chat-subagents-note" : undefined}>{props.add?.note ?? (props.legacy
-            ? "This chat can give tasks to any ready CLI. Add one to choose which it may use."
-            : "No agents yet. Add the CLIs this chat can give tasks to.")}</p>
-          <SubagentPickList providers={props.providers} project={props.project} main={props.main} projectScope={props.projectScope}
-            onAdded={() => setAnswered(props.add?.key)} />
+          <p className={accordSetup ? "is-note" : undefined} data-testid={accordSetup ? "chat-subagents-note" : undefined}>
+            {accordSetup ? ACCORD_NEEDS_AGENT_SETUP_LINE : canAdd ? "This thread has no agents. Add one back with +." : "No CLI is ready. Set one up in Settings."}
+          </p>
+          {!canAdd && actions && <Button size="xs" variant="ghost" onClick={actions.openSetup} data-testid="chat-subagents-setup">Set up</Button>}
         </div>
-      ) : props.providers.map((provider) => (
+      )}
+      {props.providers.map((provider) => (
         <SubagentRow key={provider.kind} provider={provider} open={open.has(provider.kind)} onToggle={() => toggle(provider.kind)}
-          main={props.main} projectScope={props.projectScope} renderRow={props.renderRow} />
+          main={props.main} renderRow={props.renderRow} />
       ))}
     </div>
   );
@@ -98,7 +101,6 @@ function SubagentRow(props: {
   open: boolean;
   onToggle: () => void;
   main?: SubagentMainSession;
-  projectScope: boolean;
   renderRow: (row: SessionsMemberRow) => JSX.Element;
 }): JSX.Element {
   const { provider } = props;
@@ -112,7 +114,7 @@ function SubagentRow(props: {
           {!props.open && <SubagentCount provider={provider} />}
         </button>
         <SubagentValues provider={provider} main={props.main} />
-        {!provider.offList && <ChatSubagentSettings provider={provider} projectScope={props.projectScope} />}
+        {!provider.offList && <ChatSubagentSettings provider={provider} />}
       </div>
       {props.open && (provider.rows.length > 0
         ? <ul className="chat-agent-list chat-subagent-sessions">{provider.rows.map(props.renderRow)}</ul>
@@ -140,12 +142,13 @@ function SubagentCount(props: { provider: SubagentPanelProvider }): JSX.Element 
 function SubagentValues(props: { provider: SubagentPanelProvider; main?: SubagentMainSession }): JSX.Element {
   const { provider } = props;
   const { catalog } = useMemberModelCatalog({ kind: provider.kind });
-  const inherits = props.main?.kind === provider.kind;
-  const modelId = provider.model ?? (inherits ? props.main?.model : undefined);
+  // As delegation.ts gives them: the main session's model only when nothing
+  // is set for its CLI, its effort only with its own model.
+  const same = props.main?.kind === provider.kind;
+  const modelId = provider.model ?? (same && !provider.reasoningEffort ? props.main?.model : undefined);
   const found = modelId ? catalog?.models.find((item) => item.id === modelId) : undefined;
   const model = found ? chipModelLabel(found) : modelId ?? "Default";
-  // Its effort goes with its own model (delegation.ts): not with another model set here.
-  const inheritsEffort = inherits && (!provider.model || provider.model === props.main?.model);
+  const inheritsEffort = same && modelId === props.main?.model;
   const effortId = provider.reasoningEffort ?? (inheritsEffort ? props.main?.reasoningEffort : undefined);
   const effort = effortId ? reasoningEffortOptionsForProvider(provider.kind).find((item) => item.id === effortId)?.label ?? effortId : undefined;
   return (
@@ -158,77 +161,52 @@ function SubagentValues(props: { provider: SubagentPanelProvider; main?: Subagen
 }
 
 function ChatSubagentAdd(props: {
-  providers: SubagentPanelProvider[];
-  project?: readonly SubagentProviderEntry[];
-  main?: SubagentMainSession;
-  projectScope: boolean;
+  addable: readonly ChatProviderKind[];
   openAtStart: boolean;
   note?: string;
+  onClosed: () => void;
 }): JSX.Element {
   const [open, setOpen] = useState(props.openAtStart);
+  const change = (next: boolean): void => {
+    setOpen(next);
+    if (!next) props.onClosed();
+  };
   return (
-    <Popover open={open} onOpenChange={setOpen}>
+    <Popover open={open} onOpenChange={change}>
       <PopoverTrigger asChild>
         <IconButton icon={PlusIcon} label="Add agent" tooltip="Add agent" data-testid="chat-subagent-add" />
       </PopoverTrigger>
       <PopoverContent align="end" className="chat-subagent-pop w-[300px] gap-0 p-0">
         {props.note && <p className="chat-subagent-pick-note" data-testid="chat-subagents-note">{props.note}</p>}
-        <SubagentPickList providers={props.providers} project={props.project} main={props.main} projectScope={props.projectScope} onAdded={() => setOpen(false)} />
+        <SubagentPickList addable={props.addable} onAdded={() => change(false)} />
       </PopoverContent>
     </Popover>
   );
 }
 
-/** The CLIs to add, with how each stands on this computer (Set up opens
- *  Settings for one that is not ready here; a main session on a machine runs it
- *  there, so Add is never held back); the scope it is added to. */
-function SubagentPickList(props: { providers: SubagentPanelProvider[]; project?: readonly SubagentProviderEntry[]; main?: SubagentMainSession; projectScope: boolean; onAdded?: () => void }): JSX.Element | null {
+/** The CLIs this chat took out that are ready here, to bring back. */
+function SubagentPickList(props: { addable: readonly ChatProviderKind[]; onAdded: () => void }): JSX.Element | null {
   const actions = useSubagentProvidersActions();
-  const [chosenScope, setScope] = useState<SubagentProviderScope>("thread");
   const [busy, setBusy] = useState(false);
-  // A chat with no project folder has only its own list.
-  const scope: SubagentProviderScope = props.projectScope ? chosenScope : "thread";
   if (!actions) {
     return null;
   }
   const add = async (kind: ChatProviderKind): Promise<void> => {
     setBusy(true);
-    const ok = await actions.update(scope, { type: "add", kind });
+    const ok = await actions.update({ type: "add", kind });
     setBusy(false);
-    if (ok) props.onAdded?.();
+    if (ok) props.onAdded();
   };
   return (
     <div className="chat-subagent-pick" data-testid="chat-subagent-pick">
-      {props.projectScope && (
-        <div className="chat-subagent-pick-scope">
-          <span>Add to</span>
-          <Tabs value={scope} onValueChange={(value) => setScope(value as SubagentProviderScope)}>
-            <TabsList className="h-7">
-              <TabsTrigger value="thread" className="px-2 text-ui-12">This thread</TabsTrigger>
-              <TabsTrigger value="project" className="px-2 text-ui-12">Project</TabsTrigger>
-            </TabsList>
-          </Tabs>
-        </div>
-      )}
-      {CLI_PROVIDER_DISPLAY_ORDER.map((kind) => {
-        const readiness = readinessForProvider(kind, [...actions.agents], [...actions.providers]);
-        const addable = readiness === "ready" || readiness === "could-not-verify";
-        // In a Cloud run chat its members run there, where Antigravity does not (this thread only).
-        const unavailable = scope === "thread" && Boolean(props.main?.cloudRun) && kind === "gemini-cli";
+      {props.addable.map((kind) => {
         const label = CLI_PROVIDER_SETUP[kind].label;
-        const note = unavailable ? "Not on Cloud run" : READINESS_TEXT[readiness];
-        const added = scope === "project"
-          ? Boolean(props.project?.some((entry) => entry.kind === kind))
-          : props.providers.some((provider) => provider.kind === kind && !provider.offList);
         return (
           <div className="chat-subagent-pick-row" key={kind} data-provider-kind={kind}>
             <ProviderIcon kind={kind} label={label} className="chat-provider-icon" bare />
             <span className="chat-subagent-pick-name">{label}</span>
-            {note && <span className="chat-subagent-pick-detail">{note}</span>}
             <span className="grow" />
-            {!added && !addable && !unavailable && <Button size="xs" variant="ghost" onClick={actions.openSetup}>Set up</Button>}
-            {added ? <span className="chat-subagent-pick-added">Added</span>
-              : !unavailable && <Button size="xs" variant="ghost" disabled={busy} data-testid="chat-subagent-pick-add" onClick={() => void add(kind)}>Add</Button>}
+            <Button size="xs" variant="ghost" disabled={busy} data-testid="chat-subagent-pick-add" onClick={() => void add(kind)}>Add</Button>
           </div>
         );
       })}

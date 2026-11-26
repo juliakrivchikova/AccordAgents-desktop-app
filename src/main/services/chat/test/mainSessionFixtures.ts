@@ -11,10 +11,9 @@ import {
 import { CHAT_AUTO_WATCH_WAKE_LIMIT_DEFAULT } from "../../../../shared/chatAutoWatch";
 import { EMPTY_MOBILE_CONTROL_SETTINGS } from "../../../../shared/mobilePairing";
 import type {
-  AppSettings, ChatAgentPermissions, ChatMessage, ChatParticipant, ChatParticipantRequestBatch, ChatParticipantSession,
-  ChatProviderKind, ChatRoleConfig, Conversation, ParticipantConfig, SubagentProviderChange
+  AgentHealth, AppSettings, ChatAgentPermissions, ChatMessage, ChatParticipant, ChatParticipantRequestBatch, ChatParticipantSession,
+  ChatProviderKind, ChatRoleConfig, Conversation, ParticipantConfig
 } from "../../../../shared/types";
-import { applySubagentProviderChange, subagentProjectKey } from "../../../../shared/subagentProviders";
 
 // The main session of a chat (docs/main-session.md): it gives new members
 // tasks without a card, never with broader rights than its own, can fork its
@@ -132,8 +131,14 @@ export function testService(options: {
   conversation: Conversation;
   run?: (participant: ParticipantConfig, prompt: string, options: any, signal?: AbortSignal) => Promise<any>;
   userSkills?: unknown;
-  /** Settings over the fixture's defaults (a project's sub-agents, say). */
+  /** Settings over the fixture's defaults (Settings' model and effort for the agents, say). */
   settings?: Partial<AppSettings>;
+  /** The CLIs' readiness here; none: every CLI on in Settings counts as ready. */
+  agents?: AgentHealth[];
+  /** Called each time the CLIs are checked (the User acting meanwhile). */
+  onDetectAgents?: () => void;
+  /** The machines Settings knows. */
+  machines?: unknown[];
 }) {
   const tempRoot = path.join(tmpdir(), "accordagents-main-session-test");
   const storage = {
@@ -164,7 +169,6 @@ export function testService(options: {
       return [];
     }
   };
-  let subagentProvidersByProject = options.settings?.subagentProvidersByProject;
   const publicSettings = (): AppSettings => ({
     chatCustomAvatars: [],
     roundLimitDefault: 1,
@@ -189,28 +193,22 @@ export function testService(options: {
     chatParticipantConfigs: [],
     chatParticipantSeedState: {},
     cliProviderHosts: [],
-    ...options.settings,
-    subagentProvidersByProject
+    ...options.settings
   } as unknown as AppSettings);
   const settings = {
     async getPublicSettings() { return publicSettings(); },
     async ensureAssistantProviderDefault() { return publicSettings(); },
-    async listMachines() { return []; },
+    async listMachines() { return clone(options.machines ?? []); },
     async listMachineInstalls() { return []; },
     async ensureGenericChatParticipantSeeds() { return publicSettings(); },
     async recordSuccessfulChatProvider() {},
     async getChatParticipantRequestMaxDepth() { return CHAT_PARTICIPANT_REQUEST_MAX_DEPTH_DEFAULT; },
     async getChatParticipantRequestPromptMaxChars() { return CHAT_PARTICIPANT_REQUEST_PROMPT_MAX_CHARS_DEFAULT; },
-    async saveChatParticipantConfig() { return publicSettings(); },
-    async updateProjectSubagentProviders(repoPath: string, change: SubagentProviderChange) {
-      const key = subagentProjectKey(repoPath)!;
-      subagentProvidersByProject = { ...subagentProvidersByProject, [key]: applySubagentProviderChange("project", subagentProvidersByProject?.[key] ?? [], change) };
-      return publicSettings();
-    }
+    async saveChatParticipantConfig() { return publicSettings(); }
   };
   const runs: RunCall[] = [];
   const cliRunner = {
-    async detectAgents() { return []; },
+    async detectAgents() { options.onDetectAgents?.(); return clone(options.agents ?? []); },
     async run(participant: ParticipantConfig, prompt: string, _repoPath: unknown, _diffMode: unknown, _kind: unknown, signal: AbortSignal | undefined, runOptions: any) {
       runs.push({ participant, prompt, options: runOptions });
       return options.run

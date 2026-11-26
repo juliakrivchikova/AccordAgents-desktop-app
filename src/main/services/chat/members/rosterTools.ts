@@ -12,11 +12,11 @@ import { hasChatAppToolCapability, normalizeChatAppToolCapabilities } from "../.
 import { preservedRemoteExecution } from "../../../../shared/chatParticipantHome";
 import { APP_PARTICIPANTS_REQUEST_CHANGE_TOOL, APP_ROLES_REQUEST_CHANGE_TOOL, APP_ROSTER_REQUEST_CHANGE_TOOL } from "../../appMcp";
 import { CLI_PROVIDER_SETUP, readinessForProvider, resolveAssistantProviderKind } from "../../../../shared/cliReadiness";
-import { chatSubagentProjectKey, chatSubagentProvidersOf, effectiveSubagentProviders } from "../../../../shared/subagentProviders";
 import { matchingAppToolApprovalPolicy, newAppToolApproval, upsertAppToolApproval } from "../approvals/approvalRecords";
 import { HANDLE_PATTERN } from "../constants";
 import { CHAT_ROSTER_CHANGE_MAX_OPERATIONS } from "./constants";
 import { chatParticipants, delegatedMemberCeiling } from "./identity";
+import { chatSubagentList, readySubagentKinds } from "./subagentList";
 import { markAddedWithoutCard, prepareParticipantRemoval } from "./removalRules";
 import { manageRolesParticipantsResolutionForRole } from "./roleRuntime";
 import {
@@ -147,20 +147,26 @@ export class RosterTools {
     return false;
   }
 
-  /** The chat's sub-agents for the main session to give tasks to (shared/subagentProviders.ts). */
-  private chatSubagentsFor(conversation: Conversation, settings: AppSettings): Pick<ChatRosterAvailableOptions, "chatSubagents"> {
-    const subagents = effectiveSubagentProviders(
-      settings.subagentProvidersByProject?.[chatSubagentProjectKey(conversation) ?? ""],
-      chatSubagentProvidersOf(conversation.metadata)
-    );
-    return subagents ? {
-      chatSubagents: subagents.map((provider) => ({
+  /** The chat's agents for the main session to give tasks to: every CLI ready
+   *  here less those the chat took out, on Settings' model and effort
+   *  (shared/subagentProviders.ts), as app_chat_delegate_task picks them. */
+  private chatSubagentsFor(conversation: Conversation, settings: AppSettings, agents: AgentHealth[] | undefined): Pick<ChatRosterAvailableOptions, "chatSubagents"> {
+    const mainId = mainSessionParticipantId(conversation.metadata);
+    const main = mainId ? chatParticipants(conversation).find((participant) => participant.id === mainId) : undefined;
+    // Only a main session gives tasks (app_chat_delegate_task).
+    if (!main) {
+      return {};
+    }
+    // The CLIs could not be checked: none is known to be ready (a task is refused too).
+    const ready = agents ? readySubagentKinds(agents, settings, main) : [];
+    return {
+      chatSubagents: chatSubagentList(conversation, settings, ready, Boolean(main.cloudRun)).map((provider) => ({
         kind: provider.kind,
         label: CLI_PROVIDER_SETUP[provider.kind].label,
         model: provider.model,
         reasoningEffort: provider.reasoningEffort
       }))
-    } : {};
+    };
   }
 
   async describeRosterOptionsForTool(actor: ChatAppMcpActor): Promise<ChatRosterAvailableOptions> {
@@ -169,7 +175,11 @@ export class RosterTools {
     const participants = chatParticipants(conversation);
     const { requester } = await this.requireParticipantManager(conversation, actor);
 
-    const agents = await this.deps.cliRunner.detectAgents().catch((): AgentHealth[] => []);
+    let detected = true;
+    const agents = await this.deps.cliRunner.detectAgents().catch((): AgentHealth[] => {
+      detected = false;
+      return [];
+    });
     const settings = await this.deps.settings.ensureAssistantProviderDefault(agents);
     const roleById = new Map(settings.chatRoleConfigs.map((role) => [role.id, role]));
     const defaultKind = resolveAssistantProviderKind({
@@ -223,7 +233,7 @@ export class RosterTools {
         participantDefaults: role.participantDefaults
       })),
       providers,
-      ...this.chatSubagentsFor(conversation, settings),
+      ...this.chatSubagentsFor(conversation, settings, detected ? agents : undefined),
       agentModes: ["default", "plan", "auto"],
       reasoningEfforts: reasoningEffortOptionsForProvider(defaultKind),
       defaults: {

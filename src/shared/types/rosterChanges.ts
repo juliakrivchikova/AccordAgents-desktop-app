@@ -186,8 +186,9 @@ export interface ChatRosterAvailableOptions {
   roles: ChatRosterAvailableRole[];
   providers: ChatRosterAvailableProvider[];
   /** The providers this chat gives tasks to with app_chat_delegate_task (its side
-   *  panel), with the model and effort its new members run on; absent for a chat
-   *  from before the list, where any ready provider is used. */
+   *  panel's Agents): every CLI ready where its members run, less those User
+   *  took out of this chat, with the model and effort its new members run on.
+   *  Absent in a chat without a main session. */
   chatSubagents?: Array<{ kind: ChatProviderKind; label: string; model?: string; reasoningEffort?: ChatReasoningEffort }>;
   agentModes: ChatAgentMode[];
   reasoningEfforts: ProviderReasoningEffortOption[];

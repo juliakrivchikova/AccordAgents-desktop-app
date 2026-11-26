@@ -170,9 +170,9 @@
   padding: 0 4px 4px;
 }
 
-/* In the panel the list lines up with the note above it. */
-.chat-subagents-empty .chat-subagent-pick {
-  padding: 0;
+/* Set up stands under the line, at its start, not across the panel. */
+.chat-subagents-empty > button {
+  justify-self: start;
 }
 
 .chat-subagents-empty p {
@@ -246,17 +246,7 @@
   font-size: 13px;
 }
 
-.chat-subagent-pick-scope {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  padding: 0 6px 6px;
-  color: var(--ui-text-3);
-  font-size: 12px;
-}
-
-/* One line, as the Agents rows: icon, name, a word only when it is not
-   ready, the action on the right. */
+/* One line, as the Agents rows: icon, name, Add on the right. */
 .chat-subagent-pick-row {
   display: flex;
   align-items: center;
@@ -280,17 +270,3 @@
   white-space: nowrap;
 }
 
-.chat-subagent-pick-detail {
-  min-width: 0;
-  overflow: hidden;
-  color: var(--ui-warning);
-  font-size: 12px;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.chat-subagent-pick-added {
-  padding: 0 8px;
-  color: var(--ui-text-3);
-  font-size: 12px;
-}

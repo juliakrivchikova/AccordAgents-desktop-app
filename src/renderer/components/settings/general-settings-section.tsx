@@ -6,6 +6,8 @@ import type {
   ChatProviderKind,
   NewChatDefaults,
   NewChatDefaultsUpdate,
+  SubagentDefaultUpdate,
+  SubagentProviderEntry,
   CliProviderHost,
   CliProviderHostUpdate,
   ChatPromptContextSettings,
@@ -36,6 +38,7 @@ import {
   PromptContextControl
 } from "./general-settings-controls";
 import { NewChatDefaultsRows, providerDisplayLabel } from "./new-chat-defaults-rows";
+import { SUBAGENT_DEFAULTS_DESCRIPTION, SubagentDefaultsRows } from "./subagent-defaults-rows";
 
 const SHOW_MACHINES_SETTINGS = false;
 
@@ -54,6 +57,7 @@ export function GeneralSettingsSection(props: {
   agents: AgentHealth[];
   assistantProviderKind?: ChatProviderKind;
   newChatDefaults?: NewChatDefaults;
+  subagentDefaults?: SubagentProviderEntry[];
   repoFileOpenAction?: RepoFileOpenAction;
   repoFileExternalOpenAction?: RepoFileExternalOpenAction;
   betaUpdates: boolean;
@@ -67,6 +71,7 @@ export function GeneralSettingsSection(props: {
   updateProvider: (provider: ProviderSettings, patch: { enabled?: boolean }) => Promise<void>;
   setAssistantProviderKind: (kind: ChatProviderKind) => Promise<void>;
   setNewChatDefaults: (update: NewChatDefaultsUpdate) => Promise<void>;
+  setSubagentDefault: (update: SubagentDefaultUpdate) => Promise<void>;
   setRepoFileOpenPreference: (action: RepoFileOpenAction | null) => Promise<void>;
   setRepoFileExternalOpenPreference: (action: RepoFileExternalOpenAction | null) => Promise<void>;
   setBetaUpdates: (enabled: boolean) => Promise<void>;
@@ -146,6 +151,19 @@ export function GeneralSettingsSection(props: {
             newChatDefaults={props.newChatDefaults}
             setAssistantProviderKind={props.setAssistantProviderKind}
             setNewChatDefaults={props.setNewChatDefaults}
+          />
+        </div>
+      </section>
+
+      <section className="gen-section" data-testid="agents-defaults-section">
+        <h2 className="gen-section-title">Agents</h2>
+        <p className="gen-section-desc">{SUBAGENT_DEFAULTS_DESCRIPTION}</p>
+        <div className="gen-card">
+          <SubagentDefaultsRows
+            providers={props.providers}
+            agents={props.agents}
+            subagentDefaults={props.subagentDefaults}
+            setSubagentDefault={props.setSubagentDefault}
           />
         </div>
       </section>

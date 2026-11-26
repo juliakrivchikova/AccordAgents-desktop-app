@@ -56,6 +56,8 @@ import { CHAT_SPLIT_WORKSPACE_MIN_WIDTH } from "./lib/chat-split-sizing";
 import { ChatBackgroundTasksContext } from "./components/chat/chat-roster-status";
 import { UrgentAlertActionsContext } from "./components/chat/urgent-alert-context";
 import { SubagentProvidersContext, type SubagentProvidersActions } from "./components/chat/subagent-providers-context";
+import { subagentReadiness } from "./components/chat/subagent-panel";
+import { useMachineList } from "./components/chat/use-cli-start-defaults";
 import { restartingMembers } from "../shared/memberRestart";
 import { TerminalPanel } from "./components/terminal/terminal-panel";
 import { useTerminalPanel } from "./components/terminal/use-terminal-panel";
@@ -110,6 +112,8 @@ function App(): JSX.Element {
     void chatActions.forkChatParticipantToNewChat(participantId, { openChat: (conversationId) => openChatRef.current(conversationId) });
   };
   const { openSettingsSection } = navigation;
+  // Machines' CLIs: the Agents of a main session on a machine are those there.
+  const machineList = useMachineList();
   // The side panel's Agents (sub-agent providers): the CLIs found here and the
   // change, through a ref so the context changes only with what it shows.
   const updateSubagentsRef = React.useRef(chatActions.updateChatSubagentProviders);
@@ -117,9 +121,10 @@ function App(): JSX.Element {
   const subagentActions = React.useMemo<SubagentProvidersActions>(() => ({
     agents: state.agents,
     providers: state.settings.providers,
-    update: (scope, change) => updateSubagentsRef.current(scope, change),
+    hosts: state.settings.cliProviderHosts ?? [],
+    update: (change) => updateSubagentsRef.current(change),
     openSetup: () => openSettingsSection("general")
-  }), [state.agents, state.settings.providers, openSettingsSection]);
+  }), [state.agents, state.settings.providers, state.settings.cliProviderHosts, openSettingsSection]);
   const urgentAlertActions = React.useMemo(() => ({
     openAlertSettings: () => openSettingsSection("alerts"),
     openServerSettings: () => openSettingsSection("aws")
@@ -207,7 +212,14 @@ function App(): JSX.Element {
   );
   // In a chat with a main session the CLIs of its Agents list count too: each
   // without a member yet gets one as the Accord starts.
-  const accordAgents = accordChat ? accordCandidates(accordEligibleParticipants, accordChat, state.settings.subagentProvidersByProject).providers : [];
+  // Ready where the main session's members run (subagent-panel.ts), as the side panel lists them.
+  const accordMain = accordChat ? accordEligibleParticipants.find((participant) => participant.id === accordChat.metadata.mainSessionParticipantId) : undefined;
+  const accordReady = subagentReadiness({
+    agents: state.agents, providers: state.settings.providers, hosts: state.settings.cliProviderHosts ?? [], main: accordMain, machines: machineList
+  }).ready;
+  const accordAgents = accordChat
+    ? accordCandidates(accordEligibleParticipants, accordChat, { ready: accordReady, defaults: state.settings.subagentDefaults }).providers
+    : [];
   const accordState = accordChat ? accordLaunch({ members: accordEligibleParticipants, providers: accordAgents }, accordChat) : undefined;
   const accordDisabledReason = !accordState
     ? "Open a chat to start Accord."
@@ -428,6 +440,7 @@ function App(): JSX.Element {
           updateProvider={settingsActions.updateProvider}
           setAssistantProviderKind={settingsActions.setAssistantProviderKind}
           setNewChatDefaults={settingsActions.setNewChatDefaults}
+          setSubagentDefault={settingsActions.setSubagentDefault}
           saveChatRoleConfig={settingsActions.saveChatRoleConfig}
           archiveChatRoleConfig={settingsActions.archiveChatRoleConfig}
           saveChatBehaviorRuleConfig={settingsActions.saveChatBehaviorRuleConfig}

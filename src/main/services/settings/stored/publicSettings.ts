@@ -1,5 +1,5 @@
 import { normalizeNewChatDefaults } from "../../../../shared/newChatDefaults";
-import { normalizeSubagentProvidersByProject } from "../../../../shared/subagentProviders";
+import { normalizeSubagentProviderEntries } from "../../../../shared/subagentProviders";
 import { userDataPath } from "../../../platform";
 import type { AppSettings } from "../../../../shared/types";
 import {
@@ -39,7 +39,7 @@ export class PublicSettings {
       mobileControl: mobileControlSettingsFromEnvironment(process.env),
       assistantProviderKind: normalizeChatProviderKind(stored.assistantProviderKind),
       newChatDefaults: normalizeNewChatDefaults(stored.newChatDefaults),
-      subagentProvidersByProject: normalizeSubagentProvidersByProject(stored.subagentProvidersByProject),
+      subagentDefaults: normalizeSubagentProviderEntries(stored.subagentDefaults, false),
       lastSuccessfulChatProviderKind: normalizeChatProviderKind(stored.lastSuccessfulChatProviderKind),
       lastRepoPath: stored.lastRepoPath,
       repoFileOpenAction: stored.repoFileOpenAction,

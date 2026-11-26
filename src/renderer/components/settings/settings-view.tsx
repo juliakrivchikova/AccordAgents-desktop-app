@@ -8,6 +8,7 @@ import type {
   CliProviderHostUpdate,
   ChatProviderKind,
   NewChatDefaultsUpdate,
+  SubagentDefaultUpdate,
   ChatPromptContextSettings,
   ChatRoleConfigUpdate,
   ChatSavedPromptConfigUpdate,
@@ -43,6 +44,7 @@ export function SettingsView(props: {
   updateProvider: (provider: ProviderSettings, patch: { enabled?: boolean }) => Promise<void>;
   setAssistantProviderKind: (kind: ChatProviderKind) => Promise<void>;
   setNewChatDefaults: (update: NewChatDefaultsUpdate) => Promise<void>;
+  setSubagentDefault: (update: SubagentDefaultUpdate) => Promise<void>;
   saveChatRoleConfig: (update: ChatRoleConfigUpdate) => Promise<void>;
   archiveChatRoleConfig: (id: string) => Promise<void>;
   saveChatBehaviorRuleConfig: (update: ChatBehaviorRuleConfigUpdate) => Promise<void>;
@@ -171,6 +173,7 @@ export function SettingsView(props: {
             agents={props.agents}
             assistantProviderKind={props.settings.assistantProviderKind}
             newChatDefaults={props.settings.newChatDefaults}
+            subagentDefaults={props.settings.subagentDefaults}
             repoFileOpenAction={props.settings.repoFileOpenAction}
             repoFileExternalOpenAction={props.settings.repoFileExternalOpenAction}
             betaUpdates={props.settings.betaUpdates}
@@ -184,6 +187,7 @@ export function SettingsView(props: {
             updateProvider={props.updateProvider}
             setAssistantProviderKind={props.setAssistantProviderKind}
             setNewChatDefaults={props.setNewChatDefaults}
+            setSubagentDefault={props.setSubagentDefault}
             setRepoFileOpenPreference={props.setRepoFileOpenPreference}
             setRepoFileExternalOpenPreference={props.setRepoFileExternalOpenPreference}
             setBetaUpdates={props.setBetaUpdates}

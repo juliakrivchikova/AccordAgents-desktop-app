@@ -1,121 +1,110 @@
 import { isChatProviderKind } from "./chatProviders";
+import { CLI_PROVIDER_DISPLAY_ORDER } from "./cliReadiness";
 import { normalizeChatReasoningEffort } from "./reasoningEffort";
 import type {
   ChatProviderKind,
   ChatReasoningEffort,
   ChatSubagentProviders,
   EffectiveSubagentProvider,
+  SubagentDefaultUpdate,
   SubagentProviderChange,
   SubagentProviderEntry,
-  SubagentProviderScope,
   SubagentValueSource
 } from "./types";
 
-// The CLIs a chat may give tasks to (the side panel's providers): a project's
-// list in Settings, by its folder, and a chat's own layer over it. A value set
-// in the chat wins over the project's, which wins over the CLI's own default.
+// The CLIs a chat may give tasks to (the side panel's Agents, the User,
+// 2026-11-26): every CLI that is ready, each on its model and effort from
+// Settings → General → Agents. A chat may take one out or give it a model and
+// effort of its own; that is for that chat only. A value set in the chat wins
+// over Settings', which wins over the CLI's own default.
 
-/** The key a project's list is kept under: the chat's folder, without a trailing
- *  separator (a root keeps its own). No folder, no project list. */
-export function subagentProjectKey(repoPath: string | undefined): string | undefined {
-  const path = repoPath?.trim();
-  if (!path) {
-    return undefined;
-  }
-  return path.replace(/[\\/]+$/, "") || path.slice(0, 1);
+export interface SubagentListInput {
+  /** The CLIs ready where the chat's members run (readyProviderKinds). */
+  ready: readonly ChatProviderKind[];
+  /** Settings → General → Agents. */
+  defaults?: readonly SubagentProviderEntry[];
+  /** The chat's own changes. */
+  thread?: ChatSubagentProviders;
+  /** A Cloud run main session: its members run there, where Antigravity does not. */
+  cloudRun?: boolean;
 }
 
-/** A chat's project key wherever it runs: on a machine its folder is a local copy,
- *  and the computer's own folder (machineRepository.sourcePath) names the project. */
-export function chatSubagentProjectKey(chat: { repoPath?: string; metadata?: { machineRepository?: unknown } }): string | undefined {
-  const source = (chat.metadata?.machineRepository as { sourcePath?: unknown } | undefined)?.sourcePath;
-  return subagentProjectKey(typeof source === "string" && source.trim() ? source : chat.repoPath);
+/** Whether a CLI can be one of the chat's agents where its members run. */
+function runsThere(kind: ChatProviderKind, input: Pick<SubagentListInput, "ready" | "cloudRun">): boolean {
+  return input.ready.includes(kind) && !(input.cloudRun && kind === "gemini-cli");
 }
 
-/** The providers a chat may give tasks to, with their model and effort; undefined
- *  for a chat from before the list (its main session may use any ready CLI). */
-export function effectiveSubagentProviders(
-  project: readonly SubagentProviderEntry[] | undefined,
-  thread: ChatSubagentProviders | undefined
-): EffectiveSubagentProvider[] | undefined {
-  if (!thread) {
-    return undefined;
-  }
-  const own = new Map(thread.entries.map((entry) => [entry.kind, entry]));
-  const inProject = new Set((project ?? []).map((entry) => entry.kind));
-  const providers: EffectiveSubagentProvider[] = [];
-  for (const base of project ?? []) {
-    const layer = own.get(base.kind);
-    if (!layer?.removed) {
-      providers.push(merged(base.kind, layer, base, false));
-    }
-  }
-  for (const layer of thread.entries) {
-    if (!layer.removed && !inProject.has(layer.kind)) {
-      providers.push(merged(layer.kind, layer, undefined, true));
-    }
-  }
-  return providers;
+/** The chat's Agents list, in the CLIs' display order, with each one's model and effort. */
+export function effectiveSubagentProviders(input: SubagentListInput): EffectiveSubagentProvider[] {
+  const own = new Map((input.thread?.entries ?? []).map((entry) => [entry.kind, entry]));
+  const defaults = new Map((input.defaults ?? []).map((entry) => [entry.kind, entry]));
+  return CLI_PROVIDER_DISPLAY_ORDER
+    .filter((kind) => runsThere(kind, input) && !own.get(kind)?.removed)
+    .map((kind) => merged(kind, own.get(kind), defaults.get(kind)));
 }
 
-function merged(
-  kind: ChatProviderKind,
-  layer: SubagentProviderEntry | undefined,
-  base: SubagentProviderEntry | undefined,
-  addedInThread: boolean
-): EffectiveSubagentProvider {
-  const source = (own: unknown, lower: unknown): SubagentValueSource => own ? "thread" : lower ? "project" : "default";
-  // An effort is chosen for a model: a model of the chat's own does not take the
-  // project's effort (Luna has no Ultra), it starts from its own default.
+/** The CLIs this chat took out that it can have back (ready where its members run). */
+export function addableSubagentProviders(input: Pick<SubagentListInput, "ready" | "thread" | "cloudRun">): ChatProviderKind[] {
+  const removed = new Set((input.thread?.entries ?? []).filter((entry) => entry.removed).map((entry) => entry.kind));
+  return CLI_PROVIDER_DISPLAY_ORDER.filter((kind) => removed.has(kind) && runsThere(kind, input));
+}
+
+/** Whether this chat took the CLI out of its list. */
+export function subagentRemovedInChat(thread: ChatSubagentProviders | undefined, kind: ChatProviderKind): boolean {
+  return Boolean(thread?.entries.some((entry) => entry.kind === kind && entry.removed));
+}
+
+function merged(kind: ChatProviderKind, layer: SubagentProviderEntry | undefined, base: SubagentProviderEntry | undefined): EffectiveSubagentProvider {
+  const source = (own: unknown, lower: unknown): SubagentValueSource => own ? "thread" : lower ? "settings" : "default";
+  // An effort is chosen for a model: a model of the chat's own does not take
+  // Settings' effort (Luna has no Ultra), it starts from its own default.
   const baseEffort = layer?.model ? undefined : base?.reasoningEffort;
   return {
     kind,
     model: layer?.model ?? base?.model,
     modelFrom: source(layer?.model, base?.model),
     reasoningEffort: layer?.reasoningEffort ?? baseEffort,
-    effortFrom: source(layer?.reasoningEffort, baseEffort),
-    addedInThread
+    effortFrom: source(layer?.reasoningEffort, baseEffort)
   };
 }
 
-/** One change at one scope. `entries` is that scope's list (the project's, or the
- *  chat's own layer); `project` is the project's list, which a chat's layer sits on. */
-export function applySubagentProviderChange(
-  scope: SubagentProviderScope,
-  entries: readonly SubagentProviderEntry[],
-  change: SubagentProviderChange,
-  project: readonly SubagentProviderEntry[] = []
-): SubagentProviderEntry[] {
+/** One change to a chat's own changes: only what differs from the list as
+ *  Settings makes it is kept. */
+export function applySubagentProviderChange(entries: readonly SubagentProviderEntry[], change: SubagentProviderChange): SubagentProviderEntry[] {
   const current = entries.find((entry) => entry.kind === change.kind);
   const others = entries.filter((entry) => entry.kind !== change.kind);
-  const replace = (next: SubagentProviderEntry | undefined): SubagentProviderEntry[] => {
-    if (!next) {
-      return others;
-    }
-    // Kept in place: the side panel lists the providers in the order they were added.
-    const index = entries.findIndex((entry) => entry.kind === change.kind);
-    return index < 0 ? [...entries, next] : entries.map((entry, at) => at === index ? next : entry);
-  };
-  if (scope === "project") {
-    if (change.type === "remove") {
-      return others;
-    }
-    return replace(withValues({ kind: change.kind, model: current?.model, reasoningEffort: current?.reasoningEffort }, change));
-  }
-  const inProject = project.some((entry) => entry.kind === change.kind);
   if (change.type === "remove") {
-    return replace(inProject ? { kind: change.kind, removed: true } : undefined);
+    return [...others, { kind: change.kind, removed: true }];
   }
-  const next = withValues({ kind: change.kind, model: current?.model, reasoningEffort: current?.reasoningEffort }, change);
-  // A provider the project already has needs no entry of its own until the chat
-  // changes its model or effort.
-  return replace(inProject && !next.model && !next.reasoningEffort ? undefined : next);
+  if (change.type === "add") {
+    // Back in the list on Settings' values; a CLI that was not out (a second
+    // window's late Add) keeps the values this chat gave it.
+    return current?.removed ? others : [...entries];
+  }
+  const next = withValues({ kind: change.kind, model: current?.model, reasoningEffort: current?.reasoningEffort }, change.model, change.reasoningEffort);
+  return next.model || next.reasoningEffort ? [...others, next] : others;
 }
 
-function withValues(entry: SubagentProviderEntry, change: SubagentProviderChange): SubagentProviderEntry {
+/** One change to Settings → General → Agents: a CLI with nothing set has no entry. */
+export function applySubagentDefaultUpdate(entries: readonly SubagentProviderEntry[], update: SubagentDefaultUpdate): SubagentProviderEntry[] {
+  const current = entries.find((entry) => entry.kind === update.kind);
+  const model = update.model === undefined ? current?.model : update.model ?? undefined;
+  const reasoningEffort = update.reasoningEffort === undefined ? current?.reasoningEffort : update.reasoningEffort ?? undefined;
+  const next = withValues({ kind: update.kind }, model, reasoningEffort);
+  const others = entries.filter((entry) => entry.kind !== update.kind);
+  if (!next.model && !next.reasoningEffort) {
+    return others;
+  }
+  // Kept in place: the file changes no more than the value.
+  const index = entries.findIndex((entry) => entry.kind === update.kind);
+  return index < 0 ? [...entries, next] : entries.map((entry, at) => at === index ? next : entry);
+}
+
+/** Values as they came over IPC: what is not a string is no value. */
+function withValues(entry: SubagentProviderEntry, rawModel: unknown, rawEffort: unknown): SubagentProviderEntry {
   const next: SubagentProviderEntry = { kind: entry.kind };
-  const model = change.type === "set" ? change.model?.trim() : entry.model;
-  const reasoningEffort = change.type === "set" ? normalizeChatReasoningEffort(change.reasoningEffort, entry.kind) : entry.reasoningEffort;
+  const model = typeof rawModel === "string" ? rawModel.trim() : undefined;
+  const reasoningEffort = normalizeChatReasoningEffort(rawEffort, entry.kind);
   if (model) next.model = model;
   if (reasoningEffort) next.reasoningEffort = reasoningEffort;
   return next;
@@ -145,24 +134,10 @@ export function normalizeSubagentProviderEntries(value: unknown, allowRemoved: b
   return entries;
 }
 
-/** A chat's own layer as stored; undefined for a chat from before the list. */
+/** A chat's own changes as stored; undefined when it has none. A chat from
+ *  before 2026-11-26 may hold a CLI it added then ({ kind } alone): that
+ *  changes nothing now, every ready CLI is in the list. */
 export function chatSubagentProvidersOf(metadata: { subagentProviders?: unknown } | undefined): ChatSubagentProviders | undefined {
   const value = metadata?.subagentProviders as { entries?: unknown } | undefined;
   return value && typeof value === "object" ? { entries: normalizeSubagentProviderEntries(value.entries, true) } : undefined;
-}
-
-/** The projects' lists as stored in Settings: a key per project folder; empty lists are dropped. */
-export function normalizeSubagentProvidersByProject(value: unknown): Record<string, SubagentProviderEntry[]> | undefined {
-  if (!value || typeof value !== "object" || Array.isArray(value)) {
-    return undefined;
-  }
-  const byProject: Record<string, SubagentProviderEntry[]> = {};
-  for (const [rawKey, rawEntries] of Object.entries(value)) {
-    const key = subagentProjectKey(rawKey);
-    const entries = normalizeSubagentProviderEntries(rawEntries, false);
-    if (key && entries.length > 0) {
-      byProject[key] = entries;
-    }
-  }
-  return Object.keys(byProject).length > 0 ? byProject : undefined;
 }

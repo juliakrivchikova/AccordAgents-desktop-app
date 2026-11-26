@@ -12,7 +12,7 @@ export const DELEGATION_TOOLS: readonly AppMcpToolContract[] = [
     capability: "participants.delegate",
     desktop: {
       "title": "Delegate a Task to a New Member",
-      "description": "Create a new member of this chat and give it a task in the same call; the app adds it without asking User and starts it at once. Returns at once with status running; the member's reply comes back to you in a fresh turn, so end your turn or continue other work. start \"clean\" (default): a new session that sees nothing but the task, so the task must be a complete brief (goal, context, constraints, what to report back). start \"fork\": a copy of your own CLI session, so the member knows this conversation; possible only for your own provider (Claude Code or Codex) on the same machine. When a fork is not possible the call returns ok false with code fork_unavailable; then start a clean member and put what it needs from this conversation into the task. The member runs on one of this chat's sub-agents (chatSubagents in app_participants_describe_options): the one you name, else yours when it is among them, else the first; with that sub-agent's model and effort for this chat unless you name others. A provider that is not among them returns ok false with code provider_not_in_chat. In a chat without chatSubagents any ready provider is used and the member gets your provider and model unless you name others. It gets your mode and machine, and never broader permissions than yours.",
+      "description": "Create a new member of this chat and give it a task in the same call; the app adds it without asking User and starts it at once. Returns at once with status running; the member's reply comes back to you in a fresh turn, so end your turn or continue other work. start \"clean\" (default): a new session that sees nothing but the task, so the task must be a complete brief (goal, context, constraints, what to report back). start \"fork\": a copy of your own CLI session, so the member knows this conversation; possible only for your own provider (Claude Code or Codex) on the same machine. When a fork is not possible the call returns ok false with code fork_unavailable; then start a clean member and put what it needs from this conversation into the task. The member runs on one of this chat's agents (chatSubagents in app_participants_describe_options: every CLI ready where your members run, less those User took out of this chat): the one you name, else yours when it is among them, else the first; with that agent's model and effort unless you name others. A provider User took out of this chat returns ok false with code provider_not_in_chat; one that is not ready returns provider_unavailable. It gets your mode and machine, and never broader permissions than yours.",
       "inputSchema": {
         "type": "object",
         "additionalProperties": false,
@@ -41,11 +41,11 @@ export const DELEGATION_TOOLS: readonly AppMcpToolContract[] = [
           "kind": {
             "type": "string",
             "enum": ["claude-code", "codex-cli", "gemini-cli"],
-            "description": "Optional CLI provider; one of this chat's sub-agents. Defaults to yours when it is one of them, else the first."
+            "description": "Optional CLI provider; one of this chat's agents (chatSubagents). Defaults to yours when it is one of them, else the first."
           },
           "model": {
             "type": "string",
-            "description": "Optional model id; defaults to the sub-agent's model for this chat, then to yours for your own provider, then to the provider's default."
+            "description": "Optional model id; defaults to the agent's model for this chat, then to yours for your own provider, then to the provider's default."
           },
           "reasoningEffort": {
             "type": "string",

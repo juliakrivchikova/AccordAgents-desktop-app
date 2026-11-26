@@ -47,9 +47,10 @@ export interface AppSettings {
   assistantProviderKind?: ChatProviderKind;
   /** How a new chat starts besides its CLI (src/shared/newChatDefaults.ts). */
   newChatDefaults?: NewChatDefaults;
-  /** The CLIs a project's chats give tasks to, by the project's folder
-   *  (src/shared/subagentProviders.ts); a chat adds its own layer. */
-  subagentProvidersByProject?: Record<string, SubagentProviderEntry[]>;
+  /** Each CLI's model and effort for the agents a chat gives tasks to
+   *  (Settings → General → Agents, src/shared/subagentProviders.ts); a CLI
+   *  with nothing set runs on its own. */
+  subagentDefaults?: SubagentProviderEntry[];
   lastSuccessfulChatProviderKind?: ChatProviderKind;
   lastRepoPath?: string;
   repoFileOpenAction?: RepoFileOpenAction;
