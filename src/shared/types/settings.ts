@@ -24,6 +24,9 @@ export interface AppSettings {
   /** Error, crash and usage reports to the app's Sentry project; on unless
    *  the User turned them off. */
   crashReports: boolean;
+  /** The notice that reports are sent and can be turned off is to be shown:
+   *  once per installation, until it is closed or the choice is made. */
+  crashReportsNotice: boolean;
   cliAgentRunTimeoutMs: number;
   chatParticipantRequestMaxDepth: number;
   chatParticipantRequestPromptMaxChars: number;

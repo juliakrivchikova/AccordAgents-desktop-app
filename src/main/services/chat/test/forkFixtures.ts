@@ -166,6 +166,7 @@ export function testService(options: {
     roundLimitDefault: 1,
     betaUpdates: false,
     crashReports: true,
+    crashReportsNotice: false,
     cliAgentRunTimeoutMs: 24 * 60 * 60_000,
     chatAutoWatchWakeLimit: CHAT_AUTO_WATCH_WAKE_LIMIT_DEFAULT,
     chatParticipantRequestMaxDepth: CHAT_PARTICIPANT_REQUEST_MAX_DEPTH_DEFAULT,

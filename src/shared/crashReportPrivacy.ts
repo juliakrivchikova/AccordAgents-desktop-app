@@ -111,12 +111,22 @@ export interface CrashReportBreadcrumb {
   data?: Record<string, unknown>;
 }
 
+// The SDK's breadcrumbs about the computer rather than the app: sleep and
+// wake, battery, screen lock, displays added or changed, a screen reader or
+// other accessibility tool turned on, the graphics card's details, and a
+// proxy or certificate of the network the computer is on.
+const COMPUTER_EVENT_BREADCRUMB = /^(?:(?:powerMonitor|screen)\.|app\.(?:accessibility-support-changed|gpu-info-update|certificate-error|select-client-certificate|login)$)/;
+
 /** Console output can carry prompts and replies, and the click trail names
- *  chats and members; neither is sent. Network breadcrumbs keep the method
- *  and status, not the address. */
+ *  chats and members; neither is sent. Nor are the computer's own events:
+ *  a report keeps what the app did, not the computer. Network breadcrumbs
+ *  keep the method and status, not the address. */
 export function scrubCrashReportBreadcrumb<T extends CrashReportBreadcrumb>(breadcrumb: T, homeDir = ""): T | null {
   const category = breadcrumb.category ?? "";
   if (category === "console" || category.startsWith("ui.")) {
+    return null;
+  }
+  if (category === "electron" && COMPUTER_EVENT_BREADCRUMB.test(breadcrumb.message ?? "")) {
     return null;
   }
   const scrubbed: CrashReportBreadcrumb = { ...breadcrumb };
@@ -150,8 +160,19 @@ export interface CrashReportEvent {
   breadcrumbs?: CrashReportBreadcrumb[];
   request?: unknown;
   extra?: Record<string, unknown>;
-  user?: { id?: string | number };
+  user?: { id?: string | number; geo?: object };
 }
+
+/** What is kept of the contexts the SDK fills in: the app's version and the
+ *  system's name and version. Everything else in them describes the computer
+ *  or where it is: hardware, memory, screen, time zone, locale, when it was
+ *  started. A context that is not listed is dropped whole. */
+const CRASH_REPORT_CONTEXT_FIELDS: Readonly<Record<string, readonly string[]>> = {
+  app: ["app_name", "app_version"],
+  os: ["name", "version"],
+  // Ids the SDK made up for this report.
+  trace: ["trace_id", "span_id", "parent_span_id"]
+};
 
 /** String values scrubbed, numbers and flags kept, objects passed through. */
 function scrubStringValues(record: Record<string, unknown>, homeDir: string): Record<string, unknown> {
@@ -175,10 +196,12 @@ export function scrubCrashReportEvent<T extends CrashReportEvent>(event: T, home
     scrubbed.tags = scrubStringValues(scrubbed.tags, homeDir);
   }
   if (scrubbed.contexts) {
-    const contexts: Record<string, Record<string, unknown> | undefined> = {};
-    for (const [name, context] of Object.entries(scrubbed.contexts)) {
-      // The trace context is ids the SDK made up; the rest can carry text.
-      contexts[name] = context && name !== "trace" ? scrubStringValues(context, homeDir) : context;
+    const contexts: Record<string, Record<string, unknown>> = {};
+    for (const [name, fields] of Object.entries(CRASH_REPORT_CONTEXT_FIELDS)) {
+      const context = scrubbed.contexts[name];
+      if (!context) continue;
+      const kept = Object.fromEntries(Object.entries(context).filter(([key]) => fields.includes(key)));
+      if (Object.keys(kept).length > 0) contexts[name] = name === "trace" ? kept : scrubStringValues(kept, homeDir);
     }
     scrubbed.contexts = contexts;
   }
@@ -215,11 +238,11 @@ export function scrubCrashReportEvent<T extends CrashReportEvent>(event: T, home
     scrubbed.extra = extra;
   }
   delete scrubbed.request;
-  if (scrubbed.user) {
-    // Only the random install id identifies a user; nothing the SDK or a
-    // renderer adds (IP, name, email) goes with it.
-    scrubbed.user = scrubbed.user.id === undefined ? undefined : { id: scrubbed.user.id };
-  }
+  // Only the random install id identifies a user; nothing the SDK or a
+  // renderer adds (IP, name, email) goes with it. The empty place is not
+  // noise: without one Sentry looks up the city from the connection's IP
+  // address, also when it stores no address.
+  scrubbed.user = { ...(scrubbed.user?.id === undefined ? {} : { id: scrubbed.user.id }), geo: {} };
   return scrubbed as T;
 }
 

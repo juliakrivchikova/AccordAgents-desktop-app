@@ -62,6 +62,7 @@ function settingsServiceWith(initial: { chatParticipantConfigs?: unknown[]; cliP
     roundLimitDefault: stored.roundLimitDefault,
     betaUpdates: false,
     crashReports: true,
+    crashReportsNotice: false,
     cliAgentRunTimeoutMs: stored.cliAgentRunTimeoutMs,
     chatAutoWatchWakeLimit: stored.chatAutoWatchWakeLimit,
     chatParticipantRequestMaxDepth: stored.chatParticipantRequestMaxDepth,

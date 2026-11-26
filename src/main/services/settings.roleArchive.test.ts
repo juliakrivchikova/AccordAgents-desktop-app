@@ -87,6 +87,7 @@ function settingsServiceWith(
     roundLimitDefault: stored.roundLimitDefault,
     betaUpdates: normalizeBetaUpdates(stored.betaUpdates),
     crashReports: true,
+    crashReportsNotice: false,
     cliAgentRunTimeoutMs: stored.cliAgentRunTimeoutMs,
     chatAutoWatchWakeLimit: normalizeChatAutoWatchWakeLimit(stored.chatAutoWatchWakeLimit),
     chatParticipantRequestMaxDepth: stored.chatParticipantRequestMaxDepth,
