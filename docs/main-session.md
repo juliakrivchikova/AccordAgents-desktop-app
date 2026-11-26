@@ -32,9 +32,16 @@ verbatim there). Modelled on T3 Code (`~/reference/t3code`,
   through an added provider with a key; for one on a machine, on that machine
   when it gives a task, and the CLIs the machine said it has installed for the
   panel and an Accord started here; a Cloud run main session's list leaves out
-  Antigravity. With nothing set for the main session's own CLI its agents run
-  on the main session's model and effort; an effort set alone goes with the
-  CLI's own model. A task without a provider goes to the
+  Antigravity. An agent's model and effort come, in this order (the User,
+  2026-11-27, through the main session): (1) the chat's own change in its
+  panel; (2) Settings → General → Agents for that CLI; (3) when General has
+  nothing for it and it is the main session's own CLI, the main session's
+  model and effort; (4) otherwise the CLI's own. So while General is empty
+  nothing changes, and a value set in General wins over the main session's.
+  An effort set alone (in the panel or General) goes with the CLI's own model,
+  which it was chosen for; the main session's effort goes only with its own
+  model (`Delegation.newMemberInput`, the panel's `SubagentValues`).
+  A task without a provider goes to the
   main session's own CLI when it is in the list, else to the first one; a CLI
   the chat took out is refused (`provider_not_in_chat`), one that is not ready
   `provider_unavailable`. A change applies to new tasks; members already at
