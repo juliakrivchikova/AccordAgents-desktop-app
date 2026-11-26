@@ -3,7 +3,7 @@
  * Drives the real Settings → Machines install/upgrade UI over CDP.
  * Usage: node qa-installer-ui.cjs <step> [args]
  * Steps: open, add <name>, setup <machineId> <host> <user> <key> <root>,
- *        run, mirror, state
+ *        provider <option label>, run, mirror, state
  */
 const { attach } = require("../../cdp.cjs");
 const PORT = Number(process.env.QA_PORT || 9236);
@@ -64,13 +64,20 @@ const SCRIPTS = {
   user: (value) => setInput('[data-testid="machine-setup-user"]', value),
   key: (value) => setInput('[data-testid="machine-setup-key"]', value),
   root: (value) => setInput('[data-testid="machine-setup-root"]', value),
-  provider: (value) => `(() => {
+  // The kit select: open it from the keyboard and choose the option with this label.
+  provider: (label) => `(async () => {
     const el = document.querySelector('[data-testid="machine-setup-provider"]');
     if (!el) return { ok: false };
-    const setter = Object.getOwnPropertyDescriptor(window.HTMLSelectElement.prototype, "value").set;
-    setter.call(el, ${JSON.stringify(value)});
-    el.dispatchEvent(new Event("change", { bubbles: true }));
-    return { ok: true, value: el.value };
+    el.focus();
+    el.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
+    await new Promise((resolve) => setTimeout(resolve, 150));
+    const option = [...document.querySelectorAll("[role=option]")].find((item) => item.textContent.trim() === ${JSON.stringify(label)});
+    if (!option) return { ok: false, options: [...document.querySelectorAll("[role=option]")].map((item) => item.textContent.trim()) };
+    // The keyboard, not click(): Radix takes a click only from a non-mouse pointer.
+    option.focus();
+    option.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    return { ok: el.textContent.trim() === ${JSON.stringify(label)}, value: el.textContent.trim() };
   })()`,
   run: () => click('[data-testid="machine-setup-run"]'),
   mirror: () => click('[data-testid="machine-setup-mirror"]'),

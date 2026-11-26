@@ -1,9 +1,9 @@
 import { useEffect, useState } from "react";
-import { CaretDownIcon } from "@phosphor-icons/react";
 import type { ChatProviderKind } from "../../../shared/types";
 import type { MachineRecord } from "../../../shared/machineLink";
 import type { CloudRunPreparationState, CloudRunSelection } from "../../../shared/cloudRunPreparation";
 import { CloudProviderAuth } from "../cloud-provider-auth";
+import { AppSelect } from "../primitives";
 
 export function ParticipantRunLocation(props: {
   kind: ChatProviderKind;
@@ -18,6 +18,8 @@ export function ParticipantRunLocation(props: {
   /** The sessions view names nobody: "Moving to …". */
   anonymous?: boolean;
   hideLabel?: boolean;
+  /** Placement of the select where it stands (a form row stretches it). */
+  selectClassName?: string;
   onChange: (patch: { homeMachineId?: string; cloudRun?: CloudRunSelection; remoteExecution: "local" }) => unknown;
 }): JSX.Element {
   const [machines, setMachines] = useState<MachineRecord[]>([]);
@@ -97,14 +99,11 @@ export function ParticipantRunLocation(props: {
     <div className="participant-run-location">
       <div className="chat-rt-toggleline">
         {!props.hideLabel && <span className="chat-rt-toggle-label">Run on:</span>}
-        <span className={`chat-rt-ghost${props.disabled || props.locked ? " is-disabled" : ""}`} title={props.locked ? lockedReason : undefined}>
-          <span className="chat-rt-ghost-val">{options.find(option => option.value === selected)?.label}</span>
-          <CaretDownIcon size={11} aria-hidden />
-          <select className="chat-rt-ghost-native" aria-label="Run on" value={selected}
-            disabled={props.disabled || props.locked || (moving ? true : undefined)} onChange={event => select(event.currentTarget.value)}>
-            {options.map(option => <option key={option.value} value={option.value}>{option.label}</option>)}
-          </select>
-        </span>
+        {/* The kit select, as every other choice of a value; why it is locked
+            is said under it. */}
+        <AppSelect variant="ghost" className={props.selectClassName} value={selected} options={options}
+          placeholder="Run on" ariaLabel="Run on" testId="participant-run-on"
+          disabled={props.disabled || props.locked || Boolean(moving)} onValueChange={select} />
       </div>
       {selectionError && <p role="alert" className="text-destructive text-xs">{selectionError}</p>}
       {props.locked && <p className="text-muted-foreground text-xs">{lockedReason}</p>}

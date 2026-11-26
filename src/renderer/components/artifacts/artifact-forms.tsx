@@ -6,6 +6,7 @@ import { ARTIFACT_USER_MEMBER } from "../../../shared/types";
 import type { ArtifactDraftView, ArtifactSummary } from "../../../shared/types";
 import { MarkdownText } from "../content/markdown-text";
 import { ResizableTextarea } from "../primitives";
+import { AppSelect } from "../primitives";
 
 export interface ArtifactCreateValues {
   name: string;
@@ -313,16 +314,16 @@ export function AccessArtifactForm(props: {
       <div className="aap-fields">
         <label>
           <span>Owner</span>
-          <select
+          <AppSelect
+            className="w-full"
             value={selectedOwnerMember}
             disabled={locked}
-            data-testid="artifact-access-owner"
-            onChange={(event) => setOwner(event.currentTarget.value)}
-          >
-            {accessRows.map((member) => (
-              <option key={member} value={member}>{artifactMemberLabel(member)}</option>
-            ))}
-          </select>
+            testId="artifact-access-owner"
+            placeholder="Owner"
+            ariaLabel="Owner"
+            options={accessRows.map((member) => ({ value: member, label: artifactMemberLabel(member) }))}
+            onValueChange={setOwner}
+          />
         </label>
         <label>
           <span>Labels</span>

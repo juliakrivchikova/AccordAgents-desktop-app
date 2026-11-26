@@ -113,15 +113,23 @@ export function ArtifactsPanel(props: {
         closeAccess();
       }
     };
+    // Only a scroll that moves its button leaves the form misplaced; the owner
+    // list scrolling inside itself does not.
+    const onScroll = (event: Event): void => {
+      const button = accessButtonRef.current;
+      if (!button || (event.target instanceof Node && event.target.contains(button))) {
+        closeAccess();
+      }
+    };
     document.addEventListener("mousedown", onMouseDown);
     document.addEventListener("keydown", onKeyDown);
     window.addEventListener("resize", closeAccess);
-    window.addEventListener("scroll", closeAccess, true);
+    window.addEventListener("scroll", onScroll, true);
     return () => {
       document.removeEventListener("mousedown", onMouseDown);
       document.removeEventListener("keydown", onKeyDown);
       window.removeEventListener("resize", closeAccess);
-      window.removeEventListener("scroll", closeAccess, true);
+      window.removeEventListener("scroll", onScroll, true);
     };
   }, [accessOpen, panelResize.panelRef]);
   useEffect(() => {

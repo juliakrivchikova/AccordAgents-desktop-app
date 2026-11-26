@@ -197,11 +197,22 @@ export async function mount(options: {
     await act(async () => { element.dispatchEvent(new Event(element instanceof HTMLSelectElement ? "change" : "input", { bubbles: true })); });
     await settle();
   };
+  /** Opens a kit select and picks the option whose text starts with this
+   *  label, as the keyboard does (Radix opens and selects on Enter). */
+  const choose = async (trigger: HTMLElement | null, label: string): Promise<void> => {
+    assert.ok(trigger, "missing select");
+    await act(async () => { trigger.focus(); trigger.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true })); });
+    await settle();
+    const option = [...document.querySelectorAll<HTMLElement>("[role=option]")].find((item) => item.textContent?.trim().startsWith(label));
+    assert.ok(option, `"${label}" is offered`);
+    await act(async () => { option.focus(); option.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true })); });
+    await settle();
+  };
   const tick = async (t: { mock: { timers: { tick: (ms: number) => void } } }, ms: number): Promise<void> => {
     await act(async () => { t.mock.timers.tick(ms); });
     await settle();
   };
-  return { bridge, find, button, click, type, settle, deleted, remount, tick, setStatus: (next: AwsWorkerStatus) => { status = next; } };
+  return { bridge, find, button, click, type, choose, settle, deleted, remount, tick, setStatus: (next: AwsWorkerStatus) => { status = next; } };
 }
 
 export async function unmount(): Promise<void> {

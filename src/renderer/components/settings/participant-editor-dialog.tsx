@@ -213,6 +213,7 @@ export function ParticipantEditorDialog(props: {
             {chatProviderSupportsCloudRun(draft.kind) && (
               <ChatParticipantSpecRow label="Run on">
                 <ParticipantRunLocation kind={draft.kind} homeMachineId={draft.homeMachineId} cloudRun={draft.cloudRun} hideLabel
+                  selectClassName="-mx-2 -my-1 h-auto w-full justify-between px-2 py-1 font-medium text-ui-text [&>svg]:size-3.5"
                   unassigned={chatParticipantHomeIsUnassigned(draft)} disabled={saving}
                   onChange={patchDraft} />
               </ChatParticipantSpecRow>

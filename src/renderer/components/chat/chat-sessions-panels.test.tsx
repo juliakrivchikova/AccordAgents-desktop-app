@@ -1,5 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { act as domAct, type ReactElement } from "react";
+import { createRoot } from "react-dom/client";
 import { act, create, type ReactTestInstance } from "react-test-renderer";
 
 import { TooltipProvider } from "@/components/ui/tooltip";
@@ -588,6 +590,29 @@ async function renderPicker(value: Parameters<typeof ChatMemberComposerControls>
   return { root: renderer!.root, done: () => { act(() => renderer!.unmount()); host.consensus = previous; } };
 }
 
+/** Mounts into the jsdom document with react-dom: the kit select (Radix)
+ *  renders its list in a portal, which react-test-renderer cannot hold. */
+async function mountDom(element: ReactElement): Promise<{ host: HTMLElement; done: () => Promise<void> }> {
+  const host = document.createElement("div");
+  document.body.append(host);
+  const root = createRoot(host);
+  await domAct(async () => { root.render(element); await new Promise((resolve) => setTimeout(resolve, 0)); });
+  return { host, done: async () => { await domAct(async () => { root.unmount(); }); host.remove(); } };
+}
+
+const byTestIdInDom = <T extends HTMLElement>(id: string): T | null => document.querySelector<T>(`[data-testid="${id}"]`);
+
+/** Opens a kit select and picks the option with this text, as the keyboard
+ *  does (Radix opens and selects on Enter). */
+async function chooseInDom(trigger: HTMLElement, label: string): Promise<void> {
+  await domAct(async () => { trigger.focus(); trigger.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true })); });
+  await domAct(async () => { await new Promise((resolve) => setTimeout(resolve, 10)); });
+  const option = [...document.querySelectorAll<HTMLElement>("[role=option]")].find((item) => item.textContent?.trim() === label);
+  assert.ok(option, `"${label}" is offered`);
+  await domAct(async () => { option.focus(); option.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true })); });
+  await domAct(async () => { await new Promise((resolve) => setTimeout(resolve, 10)); });
+}
+
 test("the controls save only an explicit choice: an effort the model lacks reads as Default without a save, and Default really resets", async () => {
   const patches: ChatModelAccessPatch[] = [];
   const view = await renderPicker({ ...DREW, model: "gpt-5.5-mini", reasoningEffort: "xhigh", agentMode: "default", permissions: { ...defaultChatAgentPermissions(), cliApprovals: true } },
@@ -638,22 +663,19 @@ test("after a CLI mode was chosen in the picker, a classic toggle ends it: what 
   const accept = applyChatAccessOptionById("claude-code", "acceptEdits", { ...defaultChatAgentPermissions(), shell: { enabled: true, rules: [] }, webAccess: true });
   const member = { ...TAYLOR, kind: "claude-code", agentMode: accept.agentMode, permissions: accept.permissions } as ChatParticipant;
   const patches: Array<Partial<ChatParticipant>> = [];
-  let renderer: ReturnType<typeof create> | undefined;
-  act(() => {
-    renderer = create(<TooltipProvider><ParticipantRuntimeControls participant={member} disabled={false} runLocationLocked={false}
-      onUpdate={(_id, patch) => { patches.push(patch); }} /></TooltipProvider>);
-  });
+  const controls = await mountDom(<TooltipProvider><ParticipantRuntimeControls participant={member} disabled={false} runLocationLocked={false}
+    onUpdate={(_id, patch) => { patches.push(patch); }} /></TooltipProvider>);
   try {
     for (const label of ["Run Shell", "Edit Files", "Access Web"]) {
-      const chip = renderer!.root.findAll((node) => node.type === "button" && typeof node.props.className === "string" &&
-        node.props.className.includes("chat-rt-perm-chip") && textOf(node) === label)[0]!;
-      act(() => chip.props.onClick());
+      const chip = [...controls.host.querySelectorAll<HTMLButtonElement>("button.chat-rt-perm-chip")].find((button) => button.textContent?.trim() === label)!;
+      assert.ok(chip, `the ${label} chip`);
+      await domAct(async () => { chip.click(); });
       const saved = patches.at(-1)!.permissions!;
       assert.equal(saved.cliApprovals, undefined, `${label} off: Claude Code no longer asks and gets approved`);
     }
     assert.equal(patches.at(-1)!.permissions!.webAccess, false);
   } finally {
-    act(() => renderer!.unmount());
+    await controls.done();
   }
   const view = await renderPicker({ ...member, permissions: patches.at(-1)!.permissions! }, () => undefined);
   try {
@@ -675,24 +697,29 @@ test("Runs on waits for the save: Cloud run prepares its machine only after the 
     prepareCloudRun: async (request: unknown) => { prepared.push(request); }
   };
   const answers: Array<(saved: boolean) => void> = [];
-  const view = await renderPicker({ ...DREW, kind: "claude-code", permissions: { ...defaultChatAgentPermissions(), cliApprovals: true } },
-    () => new Promise<boolean>((resolve) => { answers.push(resolve); }), { runsOn: { moves: true } }, bridge);
+  const host = window as unknown as { consensus?: unknown };
+  const previous = host.consensus;
+  resetMemberModelCatalogs();
+  host.consensus = { listProviderModels: async () => CODEX_CATALOG, ...bridge };
+  const view = await mountDom(<TooltipProvider><ChatMemberComposerControls value={{ ...DREW, kind: "claude-code", permissions: { ...defaultChatAgentPermissions(), cliApprovals: true } }}
+    onChange={() => new Promise<boolean>((resolve) => { answers.push(resolve); })} runsOn={{ moves: true }} /></TooltipProvider>);
   try {
-    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 0)); });
-    assert.equal(textOf(view.root.find(byTestId("chat-model-runs-on"))), "Local", "once a machine exists, where it runs is a control of its own");
-    await openMenu(view.root, "chat-model-runs-on");
-    const select = () => view.root.find((node) => node.type === "select" && node.props["aria-label"] === "Run on");
-    await act(async () => { select().props.onChange({ currentTarget: { value: "machine:m-cloud" } }); });
-    assert.match(textOf(view.root), /Moving to Cloud box with its session/, "the move is shown while it is saved, naming nobody");
-    assert.equal(select().props.disabled, true, "no second move meanwhile");
-    await act(async () => { answers[0]!(false); await new Promise((resolve) => setTimeout(resolve, 0)); });
+    await domAct(async () => { await new Promise((resolve) => setTimeout(resolve, 0)); });
+    assert.equal(byTestIdInDom("chat-model-runs-on")?.textContent, "Local", "once a machine exists, where it runs is a control of its own");
+    await domAct(async () => { byTestIdInDom("chat-model-runs-on")!.click(); });
+    const select = () => byTestIdInDom<HTMLButtonElement>("participant-run-on")!;
+    await chooseInDom(select(), "Cloud box · i-1");
+    assert.match(document.body.textContent ?? "", /Moving to Cloud box with its session/, "the move is shown while it is saved, naming nobody");
+    assert.equal(select().disabled, true, "no second move meanwhile");
+    await domAct(async () => { answers[0]!(false); await new Promise((resolve) => setTimeout(resolve, 0)); });
     assert.deepEqual(prepared, [], "a failed save prepares nothing");
-    assert.doesNotMatch(textOf(view.root), /Moving/);
-    await act(async () => { select().props.onChange({ currentTarget: { value: "machine:m-cloud" } }); });
-    await act(async () => { answers[1]!(true); await new Promise((resolve) => setTimeout(resolve, 0)); });
+    assert.doesNotMatch(document.body.textContent ?? "", /Moving/);
+    await chooseInDom(select(), "Cloud box · i-1");
+    await domAct(async () => { answers[1]!(true); await new Promise((resolve) => setTimeout(resolve, 0)); });
     assert.equal(prepared.length, 1, "prepared once the save worked");
   } finally {
-    view.done();
+    await view.done();
+    host.consensus = previous;
   }
 });
 

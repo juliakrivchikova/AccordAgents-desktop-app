@@ -287,6 +287,9 @@
 
 .chat-rt-toggleline {
   align-self: flex-start;
+  /* A long Run on value ends in an ellipsis inside a narrow menu. */
+  max-width: 100%;
+  min-width: 0;
 }
 
 .chat-rt-toggleinline {

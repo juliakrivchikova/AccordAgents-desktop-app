@@ -6,6 +6,7 @@ import { isMachineInstallTerminalPhase, type MachineInstallRecord, type MachineI
 import { MACHINE_INSTALL_PHASE_ORDER, machineInstallPhaseLabel } from "../../../shared/machineInstall";
 import { CloudProviderAuth } from "../cloud-provider-auth";
 import { Spinner } from "@/components/ui/spinner";
+import { AppSelect } from "../primitives";
 
 /**
  * Installing and upgrading the runtime on a machine, from Settings.
@@ -123,17 +124,20 @@ export function MachineSetupPanel(props: {
         </div>
         <div className="machine-setup-field">
           <Label htmlFor={`machine-provider-${machineId}`}>Provider to sign in</Label>
-          <select
+          <AppSelect
             id={`machine-provider-${machineId}`}
-            className="machine-setup-select"
-            data-testid="machine-setup-provider"
+            className="w-full min-w-0"
+            testId="machine-setup-provider"
             value={requiredProvider}
-            onChange={(event) => setRequiredProvider(event.target.value as "" | "codex-cli" | "claude-code")}
-          >
-            <option value="">Do not check</option>
-            <option value="codex-cli">Codex CLI</option>
-            <option value="claude-code">Claude Code</option>
-          </select>
+            placeholder="Do not check"
+            ariaLabel="Provider to sign in"
+            options={[
+              { value: "", label: "Do not check" },
+              { value: "codex-cli", label: "Codex CLI" },
+              { value: "claude-code", label: "Claude Code" }
+            ]}
+            onValueChange={(value) => setRequiredProvider(value as "" | "codex-cli" | "claude-code")}
+          />
         </div>
         <div className="machine-setup-field">
           <Label htmlFor={`machine-root-${machineId}`}>Install directory (optional)</Label>

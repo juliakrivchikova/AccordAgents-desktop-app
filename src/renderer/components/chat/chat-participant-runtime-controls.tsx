@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { CaretDownIcon, FileTextIcon, GlobeIcon, PencilSimpleIcon, TerminalIcon } from "@phosphor-icons/react";
+import { FileTextIcon, GlobeIcon, PencilSimpleIcon, TerminalIcon } from "@phosphor-icons/react";
 import type { Icon as PhosphorIcon } from "@phosphor-icons/react";
 
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
@@ -33,6 +33,7 @@ import {
 } from "./chat-participant-drafts";
 import { chatParticipantHomeIsUnassigned } from "../../../shared/chatParticipantHome";
 import { ParticipantRunLocation } from "./participant-run-location";
+import { AppSelect } from "../primitives";
 
 const REASONING_DEFAULT_VALUE = "__default__";
 const MODEL_DEFAULT_VALUE = "__default_model__";
@@ -265,23 +266,22 @@ function GhostSelect(props: {
   tooltip?: string;
 }): JSX.Element {
   const selected = props.options.find((option) => option.value === props.value);
-  const label = props.displayLabel ?? selected?.label ?? props.options[0]?.label ?? "";
+  // The kit select in its inline (ghost) form: the same list as every other
+  // choice of a value, not the system menu.
   const control = (
-    <span className={`chat-rt-ghost${props.muted ? " is-muted" : ""}${props.disabled ? " is-disabled" : ""}`}>
-      {props.prefix && <span className="chat-rt-ghost-prefix">{props.prefix}</span>}
-      <span className="chat-rt-ghost-val">{label}</span>
-      <CaretDownIcon size={11} aria-hidden />
-      <select
-        className="chat-rt-ghost-native"
+    <span className="inline-flex min-w-0 max-w-full">
+      <AppSelect
+        variant="ghost"
+        className={props.muted ? "text-ui-text-3" : undefined}
         value={props.value}
+        options={props.options}
+        placeholder={props.ariaLabel}
+        ariaLabel={props.ariaLabel}
         disabled={props.disabled}
-        aria-label={props.ariaLabel}
-        onChange={(event) => props.onChange(event.currentTarget.value)}
-      >
-        {props.options.map((option) => (
-          <option value={option.value} key={option.value}>{option.label}</option>
-        ))}
-      </select>
+        prefix={props.prefix}
+        valueLabel={props.displayLabel ?? (selected ? undefined : props.options[0]?.label)}
+        onValueChange={props.onChange}
+      />
     </span>
   );
   // Always wrapped: a tooltip that appears later (a failed model lookup) must

@@ -104,7 +104,7 @@ test("changing the type replaces the instance at the same disk size, after sayin
   await ui.click(ui.find("aws-instance-type-change"));
   assert.match(ui.find("aws-type-dialog")?.textContent ?? "", /sign-ins on it are lost/);
   assert.equal(ui.find<HTMLButtonElement>("aws-type-apply")?.disabled, true, "the current type changes nothing");
-  await ui.type(document.querySelector<HTMLSelectElement>('[aria-label="Instance type"]'), "t3.medium");
+  await ui.choose(document.querySelector<HTMLElement>('[aria-label="Instance type"]'), "t3.medium");
   await ui.click(ui.find("aws-type-apply"));
   const request = ui.bridge.calls.startAwsWorker?.[0]?.[0] as AwsWorkerStartRequest;
   assert.equal(request.resolution, "recreate");

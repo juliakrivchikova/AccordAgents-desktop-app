@@ -757,3 +757,9 @@
     grid-template-columns: minmax(82px, 0.8fr) minmax(0, 1.2fr);
   }
 }
+
+/* Run on reads like the rows around it (the value, then the caret at the
+   right edge of the row): its line takes the whole cell. */
+.participants-editor-dialog .participant-run-location .chat-rt-toggleline {
+  display: flex;
+}

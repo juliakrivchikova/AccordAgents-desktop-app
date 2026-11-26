@@ -197,7 +197,7 @@ test("access popover restores owner, signer, label updates and rolls back failed
   });
 
   act(() => {
-    renderer.root.findByProps({ "data-testid": "artifact-access-owner" }).props.onChange({ currentTarget: { value: "taylor" } });
+    renderer.root.findByProps({ testId: "artifact-access-owner" }).props.onValueChange("taylor");
     renderer.root.findByProps({ "data-testid": "artifact-access-labels" }).props.onChange({ currentTarget: { value: "plan, qa" } });
   });
   await act(async () => {
@@ -229,7 +229,7 @@ test("access toggles do not commit unsaved owner or label edits", async () => {
   />);
 
   act(() => {
-    renderer.root.findByProps({ "data-testid": "artifact-access-owner" }).props.onChange({ currentTarget: { value: "taylor" } });
+    renderer.root.findByProps({ testId: "artifact-access-owner" }).props.onValueChange("taylor");
     renderer.root.findByProps({ "data-testid": "artifact-access-labels" }).props.onChange({ currentTarget: { value: "plan, qa" } });
   });
   await act(async () => {

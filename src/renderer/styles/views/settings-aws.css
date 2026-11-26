@@ -128,25 +128,6 @@
   width: 160px;
 }
 
-.gen-aws-dialog .gen-aws-select {
-  position: relative;
-  display: block;
-}
-
-.gen-aws-dialog .gen-aws-select .gen-input {
-  appearance: none;
-  padding-right: 34px;
-}
-
-.gen-aws-dialog .gen-aws-select svg {
-  position: absolute;
-  top: 50%;
-  right: 11px;
-  color: var(--app-muted);
-  pointer-events: none;
-  transform: translateY(-50%);
-}
-
 /* The one-time code of a provider sign-in, large enough to read and type. */
 .gen-aws-dialog .gen-aws-code {
   display: flex;

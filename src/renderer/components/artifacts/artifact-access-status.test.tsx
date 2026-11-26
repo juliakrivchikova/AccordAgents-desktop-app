@@ -76,8 +76,9 @@ test("draft authors who left the chat keep their status but cannot be given acce
   assert.equal(flatText(root.findByProps({ "data-testid": "artifact-access-status-gera" })), "Draft submitted");
   assert.equal(root.findByProps({ "data-testid": "artifact-access-write-gera" }).props.disabled, true);
   assert.equal(root.findAllByProps({ "data-testid": "artifact-access-sign-gera" }).length, 0);
-  const ownerOptions = root.findByProps({ "data-testid": "artifact-access-owner" }).findAllByType("option").map((option) => option.props.value);
-  assert.ok(!ownerOptions.includes("gera"));
+  const ownerOptions = root.findByProps({ testId: "artifact-access-owner" }).props.options.map((option: { value: string }) => option.value);
+  assert.ok(ownerOptions.includes("owner"), "a member of the chat can own it");
+  assert.ok(!ownerOptions.includes("gera"), "a former member cannot");
   renderer.unmount();
 });
 

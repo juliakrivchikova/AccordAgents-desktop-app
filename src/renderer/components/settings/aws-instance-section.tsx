@@ -1,5 +1,4 @@
 import { useEffect, useRef, useState } from "react";
-import { CaretDownIcon } from "@phosphor-icons/react";
 import { Button } from "@/components/ui/button";
 import { AWS_WORKER_INSTANCE_TYPE_OPTIONS } from "../../../shared/cloudRuns";
 import type { AwsWorkerOperationSnapshot } from "../../../shared/types";
@@ -7,6 +6,7 @@ import { AwsCommandBox, AwsConfirmDialog, AwsDialog, AwsWaiting } from "./aws-di
 import { Row } from "./aws-row";
 import { ADMIN_COMMAND_TEXT, AwsPasteField, CONFIRM_TEXT, instanceTypeSpecs } from "./aws-shared";
 import type { AwsWorkerControl } from "./use-aws-worker-control";
+import { AppSelect } from "../primitives";
 
 const ACCESS_RECHECK_MS = 15_000;
 /** While AWS keeps not answering, the page checks access again this often. */
@@ -107,14 +107,14 @@ function AwsTypeDialog(props: { open: boolean; control: AwsWorkerControl; onClos
     >
       <label className="gen-aws-field">
         <span>Type</span>
-        <span className="gen-aws-select">
-          <select className="gen-input" aria-label="Instance type" value={type} onChange={(event) => setType(event.target.value)}>
-            {AWS_WORKER_INSTANCE_TYPE_OPTIONS.map((option) => (
-              <option key={option} value={option}>{option} · {instanceTypeSpecs(option)}{option === current ? " (now)" : ""}</option>
-            ))}
-          </select>
-          <CaretDownIcon size={14} aria-hidden />
-        </span>
+        <AppSelect
+          className="w-full"
+          value={type}
+          placeholder="Instance type"
+          ariaLabel="Instance type"
+          options={AWS_WORKER_INSTANCE_TYPE_OPTIONS.map((option) => ({ value: option, label: `${option} · ${instanceTypeSpecs(option)}${option === current ? " (now)" : ""}` }))}
+          onValueChange={setType}
+        />
       </label>
     </AwsDialog>
   );

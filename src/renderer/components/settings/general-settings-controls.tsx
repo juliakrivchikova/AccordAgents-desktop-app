@@ -1,7 +1,6 @@
 // The number and context controls of Settings → General, each with its own
 // Save (moved out of general-settings-section.tsx to keep it readable).
 import { useEffect, useState } from "react";
-import { CaretDownIcon } from "@phosphor-icons/react";
 
 import type {
   ChatPromptContextMode,
@@ -23,6 +22,7 @@ import {
   CHAT_PROMPT_CONTEXT_LIMIT_MAX,
   normalizeChatPromptContextSettings
 } from "../../../shared/chatPromptContext";
+import { AppSelect } from "../primitives";
 
 export const PARTICIPANT_REQUEST_DEPTH_HELP = "Limits transitive member-to-member request nesting, not repeated rounds by the same requester.";
 export const PARTICIPANT_REQUEST_PROMPT_MAX_HELP = "Maximum characters accepted for each member request prompt. Longer prompts are rejected, not truncated.";
@@ -144,20 +144,18 @@ function PromptContextScopeControl(props: {
   const latest = props.mode === "latest_unseen";
   return (
     <div className="gen-timeout prompt-context-scope">
-      <label className="prompt-context-select-wrap">
-        <span className="sr-only">{props.label} prompt context mode</span>
-        <select
-          className="prompt-context-select"
-          value={props.mode}
-          onChange={(event) => props.onModeChange(event.target.value as ChatPromptContextMode)}
-          aria-label={`${props.label} prompt context mode`}
-        >
-          <option value="off">{props.label}: Off</option>
-          <option value="all_unseen">{props.label}: All unseen</option>
-          <option value="latest_unseen">{props.label}: Latest unseen</option>
-        </select>
-        <CaretDownIcon aria-hidden="true" size={14} />
-      </label>
+      <AppSelect
+        size="sm"
+        value={props.mode}
+        placeholder={`${props.label}: Off`}
+        ariaLabel={`${props.label} prompt context mode`}
+        options={[
+          { value: "off", label: `${props.label}: Off` },
+          { value: "all_unseen", label: `${props.label}: All unseen` },
+          { value: "latest_unseen", label: `${props.label}: Latest unseen` }
+        ]}
+        onValueChange={(value) => props.onModeChange(value as ChatPromptContextMode)}
+      />
       <div className="gen-timeout-field">
         <input
           className="gen-timeout-input"
