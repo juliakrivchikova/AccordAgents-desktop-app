@@ -1,0 +1,1025 @@
+<!doctype html>
+<html lang="ru" data-theme="light">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Side panel variants</title>
+<style>
+  @font-face { font-family: "Inter"; font-weight: 100 900; font-display: block; src: url(%%FONT_LATIN%%) format("woff2"); unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+2000-206F, U+2190-21FF, U+2212, U+2215, U+2318; }
+  @font-face { font-family: "Inter"; font-weight: 100 900; font-display: block; src: url(%%FONT_CYR%%) format("woff2"); unicode-range: U+0301, U+0400-045F, U+0490-0491, U+04B0-04B1, U+2116; }
+  .ph { display: inline-flex; flex: none; }
+  .ph svg { display: block; }
+  /* The app's tokens (src/renderer/styles/app-theme.css). */
+  html[data-theme="light"] {
+    color-scheme: light;
+    --ui-bg: #ffffff; --ui-bg-subtle: #f3f3f5; --ui-bg-muted: #eaeaed; --ui-bg-sidebar: #f7f7f8; --ui-bg-elevated: #ffffff;
+    --ui-border-subtle: #eeeef1; --ui-border: #e4e4e8; --ui-border-strong: #d0d0d6;
+    --ui-text: #18181b; --ui-text-2: #4f4f58; --ui-text-3: #6c6c75; --ui-text-disabled: #b6b6bd;
+    --ui-primary: #7357d0; --ui-primary-hover: #6447c4; --ui-primary-fg: #ffffff; --ui-select-fg: #5a3fb8;
+    --ui-row-hover: rgba(115, 87, 208, 0.06); --ui-row-active: rgba(115, 87, 208, 0.12);
+    --ui-focus-ring: #7357d0;
+    --ui-link: #6447c4; --ui-success: #15803d; --ui-warning: #b45309; --ui-danger: #dc2626;
+    --ui-warning-dot: #f59e0b;
+    --ui-tooltip-bg: #18181b; --ui-tooltip-fg: #fafafa;
+    --ui-shadow-sm: 0 1px 2px rgba(16, 16, 20, 0.05);
+    --ui-shadow-md: 0 0 0 1px var(--ui-border), 0 8px 24px -6px rgba(16, 16, 20, 0.14);
+    --ui-shadow-lg: 0 0 0 1px var(--ui-border), 0 24px 48px -12px rgba(16, 16, 20, 0.24);
+    --brand-anthropic: #d97757;
+    --provider-codex-top: #b1a7ff; --provider-codex-mid: #7a9dff; --provider-codex-bottom: #3941ff;
+    --page: #e9e9ec;
+  }
+  html[data-theme="dark"] {
+    color-scheme: dark;
+    --ui-bg: #121214; --ui-bg-subtle: #1c1c20; --ui-bg-muted: #26262b; --ui-bg-sidebar: #0d0d0f; --ui-bg-elevated: #1b1b1f;
+    --ui-border-subtle: #1f1f23; --ui-border: #29292e; --ui-border-strong: #3a3a41;
+    --ui-text: #ececef; --ui-text-2: #b0b0b9; --ui-text-3: #8c8c96; --ui-text-disabled: #4d4d55;
+    --ui-primary: #7357d0; --ui-primary-hover: #6447c4; --ui-primary-fg: #ffffff; --ui-select-fg: #c7b9ff;
+    --ui-row-hover: rgba(143, 120, 232, 0.08); --ui-row-active: rgba(143, 120, 232, 0.16);
+    --ui-focus-ring: #8f78e8;
+    --ui-link: #a996f2; --ui-success: #4ade80; --ui-warning: #fbbf24; --ui-danger: #f87171;
+    --ui-warning-dot: #f59e0b;
+    --ui-tooltip-bg: #ececef; --ui-tooltip-fg: #121214;
+    --ui-shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.4);
+    --ui-shadow-md: 0 0 0 1px var(--ui-border), 0 10px 28px -6px rgba(0, 0, 0, 0.6);
+    --ui-shadow-lg: 0 0 0 1px var(--ui-border), 0 28px 56px -12px rgba(0, 0, 0, 0.7);
+    --brand-anthropic: #e8896b;
+    --provider-codex-top: #b1a7ff; --provider-codex-mid: #7a9dff; --provider-codex-bottom: #3941ff;
+    --page: #050506;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; padding: 20px 24px 32px; min-width: 1230px; background: var(--page); color: var(--ui-text); font: 13px/20px "Inter", -apple-system, BlinkMacSystemFont, sans-serif; -webkit-font-smoothing: antialiased; }
+  button { font: inherit; color: inherit; }
+  button:focus-visible, select:focus-visible { outline: none; box-shadow: 0 0 0 2px var(--ui-focus-ring); }
+
+  /* Top bar: variant, state, theme. */
+  .bar { display: flex; align-items: center; gap: 16px; width: 1180px; margin: 0 auto 14px; }
+  .bar h1 { margin: 0 auto 0 0; font-size: 15px; font-weight: 600; }
+  .bar .group { display: inline-flex; gap: 2px; padding: 2px; border-radius: 8px; background: var(--ui-bg); box-shadow: 0 0 0 1px var(--ui-border); }
+  .bar .group button { height: 24px; padding: 0 9px; border: 0; border-radius: 6px; background: transparent; color: var(--ui-text-2); cursor: pointer; }
+  .bar .group button:hover { background: var(--ui-row-hover); color: var(--ui-text); }
+  .bar .group button[aria-pressed="true"] { background: var(--ui-row-active); color: var(--ui-select-fg); font-weight: 500; }
+  .stage { width: 1180px; margin: 0 auto; }
+  .variant-head { display: flex; align-items: baseline; gap: 10px; margin: 0 0 8px; }
+  .variant-head b { font-size: 14px; font-weight: 600; }
+  .variant-head span { color: var(--ui-text-3); }
+  .notes { margin: 12px 0 0; padding: 0 0 0 18px; color: var(--ui-text-2); max-width: 900px; }
+  .notes li { margin: 2px 0; }
+  .notes.common { color: var(--ui-text-3); margin-top: 10px; }
+  .notes-title { margin: 16px 0 0; color: var(--ui-text-3); font-size: 12px; font-weight: 500; }
+
+  /* Window: gray frame, sidebar stub, inset workspace (the approved shell). */
+  .window { display: grid; grid-template-columns: 232px 1fr; height: 660px; border-radius: 12px; background: var(--ui-bg-sidebar); box-shadow: 0 0 0 1px var(--ui-border), 0 20px 40px -20px rgba(0, 0, 0, .25); overflow: hidden; }
+  .side { display: flex; flex-direction: column; gap: 2px; padding: 0 8px; font-size: 13px; color: var(--ui-text); min-width: 0; }
+  .lights { display: flex; align-items: center; gap: 8px; height: 46px; padding-left: 8px; }
+  .lights i { width: 12px; height: 12px; border-radius: 50%; display: inline-block; }
+  .lights i:nth-child(1) { background: #ff5f57; } .lights i:nth-child(2) { background: #febc2e; } .lights i:nth-child(3) { background: #28c840; }
+  .lights .ph { margin-left: 26px; font-size: 16px; color: var(--ui-text-2); }
+  .side .search { display: flex; align-items: center; gap: 8px; height: 28px; padding: 0 8px; border: 1px solid var(--ui-border-subtle); border-radius: 8px; background: var(--ui-bg); color: var(--ui-text-3); margin-bottom: 6px; }
+  .side .search kbd { margin-left: auto; font: 11px/16px "Inter"; color: var(--ui-text-3); border: 1px solid var(--ui-border); border-radius: 4px; padding: 0 4px; }
+  .side .row { display: flex; align-items: center; gap: 8px; height: 28px; padding: 0 8px; border-radius: 8px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .side .row.on { background: var(--ui-row-active); color: var(--ui-select-fg); }
+  .side .label { margin: 10px 8px 2px; color: var(--ui-text-3); font-size: 12px; }
+  .ws { position: relative; display: grid; grid-template-columns: minmax(0, 1fr) 336px; margin: 5px 5px 5px 0; border: 1px solid var(--ui-border); border-radius: 12px; background: var(--ui-bg); box-shadow: var(--ui-shadow-sm); overflow: hidden; min-width: 0; }
+
+  /* Chat column: a stub of the timeline and the composer. */
+  .main { display: flex; flex-direction: column; min-width: 0; min-height: 0; }
+  .ws-head { display: flex; align-items: center; gap: 8px; height: 34px; padding: 0 12px 0 16px; flex: none; }
+  .ws-head .title { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .ws-head .grow { flex: 1; }
+  .timeline { flex: 1; min-height: 0; display: flex; flex-direction: column; gap: 14px; width: min(100%, 640px); margin: 0 auto; padding: 20px 24px 12px; overflow: hidden; }
+  .msg-user { align-self: flex-end; max-width: 78%; padding: 8px 12px; border-radius: 12px; background: var(--ui-bg-subtle); font-size: 14px; line-height: 22px; }
+  .msg-agent { font-size: 14px; line-height: 22px; color: var(--ui-text); }
+  .msg-agent p { margin: 0 0 8px; }
+  .deleg { display: grid; gap: 4px; margin: 2px 0 0; }
+  .deleg div { display: flex; align-items: center; gap: 8px; color: var(--ui-text-2); font-size: 13px; line-height: 20px; }
+  .deleg .who { color: var(--ui-text); font-weight: 500; }
+  .working { display: flex; align-items: center; gap: 8px; color: var(--ui-text-3); }
+  .star { width: 14px; height: 14px; color: var(--ui-link); }
+  .star line { stroke: currentColor; stroke-width: 3.2; stroke-linecap: round; }
+  .dock { padding: 0 24px 16px; display: flex; justify-content: center; }
+  .composer { width: min(100%, 640px); border: 1px solid var(--ui-border); border-radius: 12px; background: var(--ui-bg); box-shadow: var(--ui-shadow-sm); }
+  .composer .field { padding: 12px 14px 4px; min-height: 52px; color: var(--ui-text-3); font-size: 14px; line-height: 22px; }
+  .composer .tools { display: flex; align-items: center; gap: 2px; padding: 6px 8px 8px; }
+  .composer .grow { flex: 1; }
+  .ghost { display: inline-flex; align-items: center; gap: 6px; height: 28px; padding: 0 8px; border-radius: 8px; color: var(--ui-text-2); font-size: 12px; font-weight: 500; white-space: nowrap; }
+  .ghost .caret { font-size: 12px; color: var(--ui-text-3); }
+  .send { display: inline-grid; place-items: center; width: 28px; height: 28px; border-radius: 50%; background: var(--ui-bg-muted); color: var(--ui-text-3); flex: none; }
+  .send .ph { font-size: 14px; }
+  .icon-plain { display: inline-grid; place-items: center; width: 28px; height: 28px; color: var(--ui-text-2); }
+  .icon-plain .ph { font-size: 16px; }
+
+  /* Provider marks: Codex's gradient glyph, Antigravity's logo, Claude's asterisk in its brand color. */
+  .pmark { display: inline-flex; width: var(--s, 16px); height: var(--s, 16px); flex: none; }
+  .pmark svg { width: 100%; height: 100%; }
+  .pm-ag { background: url(%%IMG_AG%%) center / contain no-repeat; }
+  .pm-claude { background: var(--brand-anthropic); -webkit-mask: url(%%IMG_CLAUDE%%) center / contain no-repeat; mask: url(%%IMG_CLAUDE%%) center / contain no-repeat; }
+
+  /* Side panel shell (T3 Code's: no title, only Close). */
+  .panel { position: relative; display: flex; flex-direction: column; min-height: 0; min-width: 0; border-left: 1px solid var(--ui-border-subtle); background: var(--ui-bg); }
+  .panel-head { display: flex; align-items: center; justify-content: flex-end; height: 34px; padding: 0 8px; flex: none; }
+  .panel-body { flex: 1; min-height: 0; overflow-y: auto; padding: 0 8px 16px; }
+  .sec { display: grid; gap: 2px; padding: 2px 0 10px; }
+  .sec, .prov, .slist, .cards, .pick, .card-body { grid-template-columns: minmax(0, 1fr); }
+  .card-body { display: grid; }
+  .sec + .sec { border-top: 1px solid var(--ui-border-subtle); padding-top: 8px; }
+  .shead { display: flex; align-items: center; gap: 10px; height: 28px; padding: 0 2px 0 10px; color: var(--ui-text-3); font-size: 11px; font-weight: 500; user-select: none; }
+  .shead .grow { flex: 1; }
+  .hs { display: inline-flex; align-items: center; gap: 5px; font-variant-numeric: tabular-nums; }
+  .hs i { width: 6px; height: 6px; border-radius: 50%; background: currentColor; }
+  .hs.is-run { color: var(--ui-link); }
+  .hs.is-run i { animation: pulse 1.4s ease-in-out infinite; }
+  .hs.is-wait { color: var(--ui-warning); }
+  .hs.is-wait i { background: var(--ui-warning-dot); }
+  @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: .35; } }
+
+  .ibtn { display: inline-grid; place-items: center; width: 28px; height: 28px; padding: 0; border: 0; border-radius: 8px; background: transparent; color: var(--ui-text-2); cursor: pointer; flex: none; }
+  .ibtn.xs { width: 24px; height: 24px; }
+  .ibtn.xxs { width: 22px; height: 22px; color: var(--ui-text-3); }
+  .ibtn:hover, .ibtn[aria-expanded="true"] { background: var(--ui-row-hover); color: var(--ui-text); }
+  .ibtn .ph { font-size: 16px; }
+  .ibtn.xs .ph { font-size: 14px; }
+  .ibtn.xxs .ph { font-size: 12px; }
+
+  .btn { display: inline-flex; align-items: center; justify-content: center; gap: 6px; height: 28px; padding: 0 10px; border: 1px solid var(--ui-border); border-radius: 8px; background: var(--ui-bg); color: var(--ui-text); font-size: 13px; font-weight: 500; white-space: nowrap; cursor: pointer; flex: none; }
+  .btn:hover { background: var(--ui-row-hover); }
+  .btn .ph { font-size: 14px; }
+  .btn.sm { height: 24px; padding: 0 8px; font-size: 12px; }
+  .btn.primary { border-color: transparent; background: var(--ui-primary); color: var(--ui-primary-fg); }
+  .btn.primary:hover { background: var(--ui-primary-hover); }
+  .btn.quiet { border-color: transparent; background: transparent; color: var(--ui-text-2); }
+  .btn.quiet:hover { background: var(--ui-row-hover); color: var(--ui-text); }
+  .btn.danger { border-color: transparent; background: transparent; color: var(--ui-danger); }
+  .btn.danger:hover { background: var(--ui-row-hover); }
+  .btn:disabled { cursor: default; opacity: .45; }
+  .btn:disabled:hover { background: var(--ui-bg); }
+  .btn.primary:disabled:hover { background: var(--ui-primary); }
+  .btn.quiet:disabled:hover, .btn.danger:disabled:hover { background: transparent; }
+
+  .seg { display: inline-flex; gap: 2px; padding: 2px; border-radius: 8px; background: var(--ui-bg-subtle); }
+  .seg button { height: 22px; padding: 0 8px; border: 0; border-radius: 6px; background: transparent; color: var(--ui-text-2); font-size: 12px; cursor: pointer; white-space: nowrap; }
+  .seg button[aria-pressed="true"] { background: var(--ui-bg); color: var(--ui-text); font-weight: 500; box-shadow: var(--ui-shadow-sm), 0 0 0 1px var(--ui-border-subtle); }
+
+  /* A provider row: disclosure on the left part, its settings on the right. */
+  .prov { display: grid; gap: 2px; }
+  .prow { position: relative; display: flex; align-items: center; gap: 2px; height: 32px; padding-right: 4px; border-radius: 8px; }
+  .prow:hover, .prow:focus-within { background: var(--ui-row-hover); }
+  .ptoggle { display: flex; flex: 1 1 auto; align-items: center; min-width: 0; height: 100%; padding: 0 4px 0 6px; border: 0; border-radius: 8px; background: transparent; text-align: left; cursor: pointer; }
+  .ptoggle .caret { font-size: 12px; color: var(--ui-text-3); margin-right: 6px; transition: transform 120ms cubic-bezier(0.2, 0, 0, 1); }
+  .prov.is-open .ptoggle .caret { transform: rotate(90deg); }
+  .ptoggle .pmark { margin-right: 8px; }
+  .pname { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 500; }
+  .pcount { display: inline-flex; align-items: center; gap: 4px; margin-left: 8px; color: var(--ui-link); font-size: 11px; font-weight: 500; font-variant-numeric: tabular-nums; flex: none; }
+  .pcount i { width: 6px; height: 6px; border-radius: 50%; background: currentColor; animation: pulse 1.4s ease-in-out infinite; }
+  .pcount.is-wait { color: var(--ui-warning); }
+  .pcount.is-wait i { background: var(--ui-warning-dot); animation: none; }
+
+  /* Model and effort as the composer's chips (variant A and C). */
+  .chip { display: inline-flex; align-items: center; min-width: 0; height: 24px; max-width: 118px; padding: 0 6px; border: 0; border-radius: 8px; background: transparent; color: var(--ui-text-3); font-size: 12px; white-space: nowrap; cursor: pointer; flex: 0 1 auto; }
+  .chip span { overflow: hidden; text-overflow: ellipsis; }
+  .chip:hover, .chip[aria-expanded="true"] { background: var(--ui-row-hover); color: var(--ui-text); }
+  .chip.is-set { color: var(--ui-text); font-weight: 500; }
+
+  /* Sessions under a provider: the row of today's Agents list. */
+  .slist { display: grid; gap: 2px; margin: 0; padding: 0; list-style: none; }
+  .srow { position: relative; display: flex; align-items: center; height: 30px; border-radius: 8px; }
+  .srow:hover, .srow:focus-within { background: var(--ui-row-hover); }
+  .srow.is-open { background: var(--ui-row-active); }
+  .srow.is-open .stitle { color: var(--ui-select-fg); }
+  .smain { display: flex; flex: 1; align-items: center; gap: 8px; min-width: 0; height: 100%; padding: 0 10px 0 var(--indent, 24px); border: 0; border-radius: 8px; background: transparent; text-align: left; cursor: pointer; }
+  .sslot { position: relative; display: inline-grid; place-items: center; width: 16px; height: 16px; flex: none; }
+  .sdot { width: 7px; height: 7px; border-radius: 50%; }
+  .sdot.is-running { background: var(--ui-link); animation: pulse 1.4s ease-in-out infinite; }
+  .sdot.is-waiting { background: var(--ui-warning-dot); }
+  .sslot .pmark + .sdot { position: absolute; right: -3px; bottom: -3px; width: 9px; height: 9px; border: 2px solid var(--ui-bg); }
+  .stitle { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .srow.is-earlier .stitle, .srow.is-removed .stitle { color: var(--ui-text-2); }
+  .stime { min-width: 22px; color: var(--ui-text-3); font-size: 11px; font-variant-numeric: tabular-nums; text-align: right; white-space: nowrap; }
+  .stime.is-wait { color: var(--ui-warning); font-weight: 500; }
+  .stime.is-failed { color: var(--ui-danger); }
+  .ibtn.sstop { position: absolute; top: 50%; right: 4px; transform: translateY(-50%); opacity: 0; pointer-events: none; color: var(--ui-danger); }
+  .sstop.ibtn:hover { color: var(--ui-danger); }
+  .srow:hover .sstop, .srow:focus-within .sstop { opacity: 1; pointer-events: auto; }
+  .srow.has-stop:hover .stime, .srow.has-stop:focus-within .stime { visibility: hidden; }
+  .sempty { margin: 0; padding: 4px 10px 6px var(--indent-text, 48px); color: var(--ui-text-3); font-size: 12px; line-height: 18px; }
+
+  /* A folded group inside a provider ("Earlier") or of the panel ("Removed", "History"). */
+  .subtoggle { display: flex; align-items: center; gap: 8px; width: 100%; height: 28px; padding: 0 10px 0 var(--indent, 24px); border: 0; border-radius: 8px; background: transparent; color: var(--ui-text-3); font-size: 12px; text-align: left; cursor: pointer; }
+  .subtoggle:hover { background: var(--ui-row-hover); color: var(--ui-text-2); }
+  .subtoggle .sslot .ph { font-size: 13px; }
+  .subtoggle .count { font-size: 11px; font-variant-numeric: tabular-nums; }
+  .subtoggle .caret { font-size: 11px; transition: transform 120ms cubic-bezier(0.2, 0, 0, 1); }
+  .subtoggle[aria-expanded="true"] .caret { transform: rotate(90deg); }
+  .gtoggle { display: flex; align-items: center; gap: 10px; width: 100%; height: 32px; padding: 0 10px; border: 0; border-radius: 8px; background: transparent; font-weight: 500; text-align: left; cursor: pointer; }
+  .gtoggle:hover { background: var(--ui-row-hover); }
+  .gtoggle .ph { font-size: 16px; color: var(--ui-text-3); }
+  .gtoggle .label { flex: 1; }
+  .gtoggle .count { color: var(--ui-text-3); font-size: 11px; font-weight: 400; }
+  .gtoggle .chev { font-size: 14px; transition: transform 120ms cubic-bezier(0.2, 0, 0, 1); transform: rotate(-90deg); }
+  .gtoggle[aria-expanded="true"] .chev { transform: none; }
+  .glabel { padding: 6px 10px 2px; color: var(--ui-text-3); font-size: 11px; font-weight: 500; }
+
+  /* The empty state (variant A). */
+  .empty { display: grid; gap: 6px; justify-items: start; padding: 4px 10px 6px; }
+  .empty .ph { font-size: 16px; color: var(--ui-text-3); }
+  .empty b { font-weight: 500; }
+  .empty p { margin: 0; color: var(--ui-text-3); font-size: 12px; line-height: 18px; }
+  .empty .btn { margin-top: 4px; }
+
+  /* The list of CLIs to add: in a popover (A, B) or in the panel (B empty, C). */
+  .pick { display: grid; gap: 1px; }
+  .pick-label { padding: 6px 8px 3px; color: var(--ui-text-3); font-size: 11px; font-weight: 500; }
+  .pick-row { display: flex; align-items: center; gap: 10px; min-height: 44px; padding: 4px 6px 4px 8px; border-radius: 8px; }
+  .pick-copy { display: grid; flex: 1; min-width: 0; line-height: 18px; }
+  .pick-name { font-weight: 500; }
+  .pick-detail { display: flex; gap: 6px; color: var(--ui-text-3); font-size: 12px; white-space: nowrap; overflow: hidden; }
+  .pick-detail.is-off { color: var(--ui-warning); }
+  .pick-added { color: var(--ui-text-3); font-size: 12px; padding: 0 8px; }
+
+  /* Menus: the composer's menu (composer-menu.tsx), laid over the page. */
+  .menu { position: absolute; z-index: 50; display: grid; gap: 2px; width: max-content; min-width: 220px; max-width: 320px; padding: 4px; border: 1px solid var(--ui-border); border-radius: 12px; background: var(--ui-bg-elevated); color: var(--ui-text); box-shadow: var(--ui-shadow-lg); }
+  .menu[hidden] { display: none; }
+  .menu-top { display: flex; align-items: center; gap: 8px; padding: 4px 4px 6px; border-bottom: 1px solid var(--ui-border-subtle); }
+  .menu-top .lbl { color: var(--ui-text-3); font-size: 12px; padding-left: 4px; }
+  .menu-sec { display: grid; gap: 1px; padding: 2px 0 4px; }
+  .menu-label { padding: 4px 8px 3px; color: var(--ui-text-3); font-size: 11px; font-weight: 500; }
+  .mi { display: flex; align-items: flex-start; gap: 8px; width: 100%; min-height: 28px; padding: 5px 8px; border: 0; border-radius: 8px; background: transparent; text-align: left; cursor: pointer; }
+  .mi:hover, .mi:focus-visible { background: var(--ui-row-hover); box-shadow: none; }
+  .mi-copy { display: grid; gap: 1px; flex: 1; min-width: 0; }
+  .mi-detail { color: var(--ui-text-3); font-size: 12px; line-height: 1.35; }
+  .mi-check { display: inline-flex; width: 14px; padding-top: 3px; flex: none; color: var(--ui-text); }
+  .menu-note { margin: 0; padding: 4px 8px 4px; border-top: 1px solid var(--ui-border-subtle); color: var(--ui-text-3); font-size: 12px; line-height: 17px; }
+  .menu-note code { font: 11px/16px ui-monospace, "SF Mono", Menlo, monospace; color: var(--ui-text-2); }
+
+  /* Variant B: one settings popover with explicit Apply. */
+  .pop { width: 300px; max-width: 300px; padding: 0; gap: 0; }
+  .pop-head { display: flex; align-items: center; gap: 8px; padding: 10px 12px 8px; font-weight: 600; }
+  .pop-body { display: grid; gap: 8px; padding: 0 12px 12px; }
+  .fld { display: grid; grid-template-columns: 52px 1fr; align-items: center; gap: 8px; }
+  .fld > span { color: var(--ui-text-2); font-size: 12px; }
+  .sel { position: relative; display: flex; }
+  .sel select { width: 100%; height: 28px; padding: 0 26px 0 8px; border: 1px solid var(--ui-border); border-radius: 8px; background: var(--ui-bg); color: var(--ui-text); font: inherit; font-size: 13px; appearance: none; -webkit-appearance: none; cursor: pointer; }
+  .sel select:hover { border-color: var(--ui-border-strong); }
+  .sel .ph { position: absolute; right: 8px; top: 8px; font-size: 12px; color: var(--ui-text-3); pointer-events: none; }
+  .pop-note { margin: 0; color: var(--ui-text-3); font-size: 12px; line-height: 17px; }
+  .pop-foot { display: flex; align-items: center; gap: 6px; padding: 8px 12px; border-top: 1px solid var(--ui-border-subtle); }
+  .pop-foot .grow { flex: 1; }
+  .pvals { display: flex; align-items: center; gap: 6px; min-width: 0; padding-left: 6px; color: var(--ui-text-3); font-size: 12px; white-space: nowrap; }
+  .pvals .v { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+  .pvals .v.e { flex: none; }
+  .pvals .v.is-set { color: var(--ui-text); font-weight: 500; }
+  .pvals .ph { font-size: 12px; color: var(--ui-text-3); }
+  .pset { opacity: 0; }
+  .prow:hover .pset, .prow:focus-within .pset, .pset[aria-expanded="true"] { opacity: 1; }
+
+  /* Variant C: a small card per provider. */
+  .cards { display: grid; gap: 6px; }
+  .card { border: 1px solid var(--ui-border); border-radius: 8px; background: var(--ui-bg); }
+  .card-head { display: flex; align-items: center; gap: 8px; width: 100%; height: 32px; padding: 0 8px 0 10px; border: 0; border-radius: 7px 7px 0 0; background: transparent; text-align: left; cursor: pointer; }
+  .card-head:hover { background: var(--ui-row-hover); }
+  .card-head .grow { flex: 1; }
+  .card-head .chev { font-size: 12px; color: var(--ui-text-3); transition: transform 120ms cubic-bezier(0.2, 0, 0, 1); transform: rotate(-90deg); }
+  .card.is-open .card-head .chev { transform: none; }
+  .card-head .hs { font-size: 11px; font-weight: 500; }
+  .strip { display: flex; align-items: center; gap: 2px; height: 30px; padding: 0 6px 4px 28px; }
+  .strip .grow { flex: 1; }
+  .strip .src { padding: 0 2px 0 6px; color: var(--ui-text-3); font-size: 11px; white-space: nowrap; }
+  .strip .src.is-set { color: var(--ui-text-2); font-weight: 500; }
+  .card-body { padding: 4px 4px 4px; border-top: 1px solid var(--ui-border-subtle); }
+  .addrow { display: flex; align-items: center; gap: 8px; width: 100%; height: 30px; padding: 0 10px; border: 0; border-radius: 8px; background: transparent; color: var(--ui-text-2); text-align: left; cursor: pointer; }
+  .addrow:hover { background: var(--ui-row-hover); color: var(--ui-text); }
+  .addrow .ph { font-size: 14px; }
+  .add-card { padding: 4px; }
+  .add-card .menu-top { border-bottom: 0; padding: 4px 4px 2px; }
+  .add-intro { margin: 0; padding: 6px 8px 2px; color: var(--ui-text-3); font-size: 12px; line-height: 18px; }
+  .add-foot { display: flex; justify-content: flex-end; padding: 2px 2px 2px; }
+
+  .tip { position: absolute; z-index: 60; padding: 4px 8px; border-radius: 6px; background: var(--ui-tooltip-bg); color: var(--ui-tooltip-fg); font-size: 12px; line-height: 16px; white-space: nowrap; pointer-events: none; }
+  .tip[hidden] { display: none; }
+  .toast { position: absolute; left: 50%; bottom: 16px; transform: translateX(-50%); padding: 6px 12px; border-radius: 8px; background: var(--ui-tooltip-bg); color: var(--ui-tooltip-fg); font-size: 12px; white-space: nowrap; z-index: 5; }
+  .toast[hidden] { display: none; }
+
+  @media (prefers-reduced-motion: reduce) {
+    .hs.is-run i, .pcount i, .sdot.is-running { animation: none; }
+  }
+</style>
+</head>
+<body>
+<div class="bar">
+  <h1>Side panel: агенты по провайдерам</h1>
+  <div class="group" role="group" aria-label="Variant">
+    <button type="button" data-variant="A" aria-pressed="true">A. Чипы в строке</button>
+    <button type="button" data-variant="B" aria-pressed="false">B. Тихие строки</button>
+    <button type="button" data-variant="C" aria-pressed="false">C. Карточки</button>
+  </div>
+  <div class="group" role="group" aria-label="State">
+    <button type="button" data-scenario="new" aria-pressed="false">New user</button>
+    <button type="button" data-scenario="two" aria-pressed="true">Two providers</button>
+    <button type="button" data-scenario="busy" aria-pressed="false">Three providers busy</button>
+  </div>
+  <div class="group" role="group" aria-label="Theme">
+    <button type="button" data-theme-set="light" aria-pressed="true">Светлая</button>
+    <button type="button" data-theme-set="dark" aria-pressed="false">Тёмная</button>
+  </div>
+</div>
+
+<div class="stage">
+  <div class="variant-head"><b id="variant-title"></b><span id="variant-sub"></span></div>
+  <div class="window">
+    <aside class="side">
+      <div class="lights"><i></i><i></i><i></i>%%ICON:SidebarSimple%%</div>
+      <div class="search">%%ICON:MagnifyingGlass%%Search chats<kbd>⌘K</kbd></div>
+      <div class="row">%%ICON:NotePencil%%New chat</div>
+      <div class="row">%%ICON:Bell%%Activity</div>
+      <div class="label">Recents</div>
+      <div class="row on" id="side-current">Раздача задач агентам</div>
+      <div class="row">Проверка Enter после исправления</div>
+      <div class="row">Приветствие и начало разговора</div>
+      <div class="label">Projects</div>
+      <div class="row">%%ICON:Folder%%my-app</div>
+      <div class="row">%%ICON:Folder%%ai-consensus</div>
+    </aside>
+    <div class="ws">
+      <div class="main">
+        <div class="ws-head"><span class="title" id="chat-title"></span><span class="grow"></span></div>
+        <div class="timeline" id="timeline"></div>
+        <div class="dock">
+          <div class="composer">
+            <div class="field">Ask anything. @ mentions an agent, / runs a command</div>
+            <div class="tools">
+              <span class="icon-plain">%%ICON:Plus%%</span>
+              <span class="grow"></span>
+              <span class="ghost" id="composer-model"></span>
+              <span class="ghost">Extra High<span class="caret">%%ICON:CaretDown%%</span></span>
+              <span class="ghost">Ask for approval<span class="caret">%%ICON:CaretDown%%</span></span>
+              <span class="send">%%ICON:ArrowUp_bold%%</span>
+            </div>
+          </div>
+        </div>
+      </div>
+      <section class="panel" aria-label="Side panel">
+        <header class="panel-head"><button type="button" class="ibtn" data-tip="Close" aria-label="Close">%%ICON:X%%</button></header>
+        <div class="panel-body" id="panel-body"></div>
+        <div class="toast" id="toast" role="status" hidden></div>
+      </section>
+    </div>
+  </div>
+  <ul class="notes" id="notes"></ul>
+  <p class="notes-title">Общее для всех вариантов</p>
+  <ul class="notes common">
+    <li>Сессии под провайдером те же строки, что сейчас в Agents: точка у работающей, живое время, Stop при наведении, клик открывает сессию.</li>
+    <li>Свёрнутый провайдер показывает число активных сессий: фиолетовая точка, жёлтая, если кто-то ждёт ответа.</li>
+    <li>Откуда значение: Settings, затем проект, затем тред; тред сильнее. Default в меню всегда называет, что именно унаследовано и откуда.</li>
+    <li>Antigravity: effort выбирает вариант модели (<code>gemini-4-neon-high</code>), как его называет agy; модель без такого уровня сбрасывает effort к Default, как в композере.</li>
+  </ul>
+</div>
+
+<div class="menu" id="menu" role="menu" hidden></div>
+<div class="tip" id="tip" role="tooltip" hidden></div>
+
+<script>
+const ICONS = %%ICONS%%;
+const ic = (name) => `<span class="ph"><svg xmlns="http://www.w3.org/2000/svg" width="1em" height="1em" fill="currentColor" viewBox="0 0 256 256" aria-hidden="true">${ICONS[name]}</svg></span>`;
+const CODEX_PATH = "M8.086.457a6.105 6.105 0 013.046-.415c1.333.153 2.521.72 3.564 1.7a.117.117 0 00.107.029c1.408-.346 2.762-.224 4.061.366l.063.03.154.076c1.357.703 2.33 1.77 2.918 3.198.278.679.418 1.388.421 2.126a5.655 5.655 0 01-.18 1.631.167.167 0 00.04.155 5.982 5.982 0 011.578 2.891c.385 1.901-.01 3.615-1.183 5.14l-.182.22a6.063 6.063 0 01-2.934 1.851.162.162 0 00-.108.102c-.255.736-.511 1.364-.987 1.992-1.199 1.582-2.962 2.462-4.948 2.451-1.583-.008-2.986-.587-4.21-1.736a.145.145 0 00-.14-.032c-.518.167-1.04.191-1.604.185a5.924 5.924 0 01-2.595-.622 6.058 6.058 0 01-2.146-1.781c-.203-.269-.404-.522-.551-.821a7.74 7.74 0 01-.495-1.283 6.11 6.11 0 01-.017-3.064.166.166 0 00.008-.074.115.115 0 00-.037-.064 5.958 5.958 0 01-1.38-2.202 5.196 5.196 0 01-.333-1.589 6.915 6.915 0 01.188-2.132c.45-1.484 1.309-2.648 2.577-3.493.282-.188.55-.334.802-.438.286-.12.573-.22.861-.304a.129.129 0 00.087-.087A6.016 6.016 0 015.635 2.31C6.315 1.464 7.132.846 8.086.457zm-.804 7.85a.848.848 0 00-1.473.842l1.694 2.965-1.688 2.848a.849.849 0 001.46.864l1.94-3.272a.849.849 0 00.007-.854l-1.94-3.393zm5.446 6.24a.849.849 0 000 1.695h4.848a.849.849 0 000-1.696h-4.848z";
+let gradientSeq = 0;
+function mark(kind, size = 16) {
+  if (kind === "codex") {
+    const id = `codex-g${++gradientSeq}`;
+    return `<span class="pmark" style="--s:${size}px" role="img" aria-label="Codex"><svg viewBox="0 0 24 24" aria-hidden="true"><defs><linearGradient id="${id}" x1="12" x2="12" y1="0" y2="24" gradientUnits="userSpaceOnUse"><stop style="stop-color:var(--provider-codex-top)"/><stop offset=".5" style="stop-color:var(--provider-codex-mid)"/><stop offset="1" style="stop-color:var(--provider-codex-bottom)"/></linearGradient></defs><path fill="url(#${id})" fill-rule="evenodd" clip-rule="evenodd" d="${CODEX_PATH}"/></svg></span>`;
+  }
+  return `<span class="pmark ${kind === "antigravity" ? "pm-ag" : "pm-claude"}" style="--s:${size}px" role="img" aria-label="${PROVIDERS[kind].name}"></span>`;
+}
+
+/* ---------- Providers, as their CLIs name models and efforts ---------- */
+const EFFORT = { minimal: "Minimal", low: "Low", medium: "Medium", high: "High", xhigh: "Extra High", max: "Max" };
+const PROVIDERS = {
+  codex: {
+    name: "Codex", handle: "codex", settings: { model: "gpt-6.2-astra", effort: "xhigh" },
+    models: [
+      { id: "gpt-6.2-astra", label: "GPT-6.2-Astra", detail: "Frontier model for long agentic coding", efforts: ["minimal", "low", "medium", "high", "xhigh", "max"] },
+      { id: "gpt-6-luna", label: "GPT-6-Luna", detail: "Faster and cheaper for everyday tasks", efforts: ["minimal", "low", "medium", "high", "xhigh"] },
+      { id: "gpt-5.6-luna", label: "GPT-5.6-Luna", detail: "Previous generation", efforts: ["low", "medium", "high", "xhigh"] }
+    ]
+  },
+  antigravity: {
+    name: "Antigravity", handle: "antigravity", settings: { model: "gemini-4-neon", effort: "high" },
+    models: [
+      { id: "gemini-4-neon", label: "Gemini 4 Neon", detail: "Most capable Gemini for agentic work", efforts: ["low", "medium", "high", "xhigh"] },
+      { id: "gemini-4-carbon", label: "Gemini 4 Carbon", detail: "Balanced speed and depth", efforts: ["low", "medium", "high"] },
+      { id: "gemini-4-argon", label: "Gemini 4 Argon", detail: "Lighter, for quick edits", efforts: ["low", "medium", "high"] },
+      { id: "gemini-3.8-flash", label: "Gemini 3.8 Flash", detail: "Fastest, for small tasks", efforts: ["low", "medium", "high"] }
+    ]
+  },
+  claude: {
+    name: "Claude Code", handle: "claude", settings: { model: "opus-5.5", effort: "high" },
+    models: [
+      { id: "opus-5.5", label: "Opus 5.5", detail: "Most capable for complex work", efforts: ["low", "medium", "high", "xhigh", "max"] },
+      { id: "sonnet-5", label: "Sonnet 5", detail: "Fast and capable for everyday tasks", efforts: ["low", "medium", "high", "xhigh", "max"] },
+      { id: "haiku-4.5", label: "Haiku 4.5", detail: "Fastest for quick answers", efforts: ["low", "medium", "high"] }
+    ]
+  }
+};
+const KINDS = ["codex", "antigravity", "claude"];
+const PROJECT = "my-app";
+
+/* ---------- The three states ---------- */
+function makeData(name) {
+  const now = Date.now();
+  const s = (title, st, sec) => st === "running" ? { title, st, since: now - sec * 1000 } : { title, st, sec };
+  const member = (kind, extra) => ({ kind, thread: {}, open: false, earlierOpen: false, sessions: [], earlier: [], ...extra });
+  if (name === "new") {
+    return {
+      title: "Разбор release.sh", ready: { codex: "ready", antigravity: "Not installed", claude: "ready" },
+      members: [], removed: [], project: {}, ui: {},
+      user: "Объясни, что делает scripts/release.sh, и предложи, как ускорить сборку.",
+      reply: ["Скрипт собирает приложение, подписывает DMG и выкладывает обновление. Дольше всего идёт нотаризация.", "В этом треде нет агентов, поэтому работаю один. Добавьте агента справа, и я смогу отдавать части работы параллельно."],
+      deleg: [], working: undefined
+    };
+  }
+  if (name === "two") {
+    return {
+      title: "Раздача задач агентам", ready: { codex: "ready", antigravity: "ready", claude: "Not signed in" },
+      members: [
+        member("codex", { open: true,
+          sessions: [s("Выполнить команду touch", "running", 118), s("Цвета из заметок", "done", 9)],
+          earlier: [s("Аудит зависимостей", "done", 724), s("Проверка интерфейса с двумя участниками", "failed", 184)] }),
+        member("antigravity", {
+          sessions: [s("Краткий пересказ README", "done", 15)],
+          earlier: [s("Сводка по логам сборки", "done", 41)] })
+      ],
+      removed: [{ kind: "claude", ...s("Проверка Enter после исправления", "done", 252) }],
+      project: {}, ui: {},
+      user: "Перескажи README, вытащи цвета из заметок и выполни touch test.txt",
+      reply: ["Раздал задачи:"],
+      deleg: [["antigravity", "Краткий пересказ README"], ["codex", "Цвета из заметок"], ["codex", "Выполнить команду touch"]],
+      working: now - 131 * 1000
+    };
+  }
+  return {
+    title: "Миграция и тесты загрузки", ready: { codex: "ready", antigravity: "ready", claude: "ready" },
+    members: [
+      member("codex", { open: true,
+        sessions: [s("Починить тест загрузки", "running", 48), s("Выполнить команду touch", "running", 131), s("Цвета из заметок", "done", 9)],
+        earlier: [s("Аудит зависимостей", "done", 724), s("Проверка интерфейса с двумя участниками", "failed", 184)] }),
+      member("antigravity", { open: true,
+        sessions: [s("Краткий пересказ README", "running", 15), { title: "Записать сводку в docs", st: "waiting", sec: 64 }],
+        earlier: [s("Сводка по логам сборки", "done", 41)] }),
+      member("claude", { thread: { effort: "max" },
+        sessions: [s("Ревью плана миграции", "running", 192), s("Переименовать хук useSessions", "done", 71)],
+        earlier: [] })
+    ],
+    removed: [],
+    project: { codex: { effort: "high" } }, ui: {},
+    user: "Почини тест загрузки, отревьюй план миграции и пусть Antigravity запишет сводку в docs",
+    reply: ["Раздал задачи трём агентам:"],
+    deleg: [["codex", "Починить тест загрузки"], ["claude", "Ревью плана миграции"], ["antigravity", "Записать сводку в docs"]],
+    working: now - 205 * 1000
+  };
+}
+
+/* ---------- Values: Settings, then project, then thread ---------- */
+const S = { variant: "A", scenario: "two", openSession: null };
+let D = makeData(S.scenario);
+const memberOf = (kind) => D.members.find((m) => m.kind === kind);
+const modelOf = (kind, id) => PROVIDERS[kind].models.find((m) => m.id === id) ?? PROVIDERS[kind].models[0];
+const levelOf = (kind, scope) => scope === "thread" ? memberOf(kind).thread : (D.project[kind] ??= {});
+function inherited(kind, scope, key) {
+  if (scope === "thread" && D.project[kind]?.[key]) return { v: D.project[kind][key], from: "project" };
+  return { v: PROVIDERS[kind].settings[key], from: "Settings" };
+}
+const valueAt = (kind, scope, key) => levelOf(kind, scope)[key] ?? inherited(kind, scope, key).v;
+function effortAt(kind, scope) {
+  const efforts = modelOf(kind, valueAt(kind, scope, "model")).efforts;
+  const e = valueAt(kind, scope, "effort");
+  return efforts.includes(e) ? e : efforts.includes("high") ? "high" : efforts[efforts.length - 1];
+}
+const shown = (m) => ({ model: modelOf(m.kind, valueAt(m.kind, "thread", "model")).label, effort: EFFORT[effortAt(m.kind, "thread")] });
+const isSet = (m, key) => Boolean(m.thread[key]);
+const hasOverride = (m) => isSet(m, "model") || isSet(m, "effort");
+function sourceOf(m) {
+  if (hasOverride(m)) return "thread";
+  const p = D.project[m.kind];
+  return p && (p.model || p.effort) ? "project" : "settings";
+}
+
+/* ---------- Small pieces ---------- */
+const esc = (t) => String(t).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+function compact(ms) {
+  const sec = Math.max(0, Math.floor(ms / 1000));
+  if (sec < 60) return `${sec}s`;
+  const min = Math.floor(sec / 60);
+  if (min < 60) return `${min}m`;
+  if (min >= 600) return `${Math.floor(min / 60)}h`;
+  return `${Math.floor(min / 6) / 10}h`;
+}
+const elapsedOf = (s) => s.st === "running" ? Date.now() - s.since : s.sec * 1000;
+const activeOf = (m) => ({ running: m.sessions.filter((s) => s.st === "running").length, waiting: m.sessions.filter((s) => s.st === "waiting").length });
+function totals() {
+  return D.members.reduce((acc, m) => { const a = activeOf(m); acc.running += a.running; acc.waiting += a.waiting; return acc; }, { running: 0, waiting: 0 });
+}
+function headStatus(t = totals()) {
+  return `${t.running ? `<span class="hs is-run"><i></i>${t.running} running</span>` : ""}${t.waiting ? `<span class="hs is-wait"><i></i>${t.waiting} waiting</span>` : ""}`;
+}
+function countOf(m) {
+  const a = activeOf(m);
+  const n = a.running + a.waiting;
+  if (!n) return "";
+  const words = [a.running ? `${a.running} running` : "", a.waiting ? `${a.waiting} waiting for you` : ""].filter(Boolean).join(", ");
+  return `<span class="pcount${a.waiting ? " is-wait" : ""}" data-tip="${words}" aria-label="${words}"><i></i>${n}</span>`;
+}
+function sessionRow(s, opts) {
+  const key = opts.key;
+  const stop = s.st === "running" && opts.stoppable;
+  const dot = s.st === "running" || s.st === "waiting" ? `<i class="sdot is-${s.st}"></i>` : "";
+  const time = s.st === "waiting"
+    ? `<span class="stime is-wait">Waiting</span>`
+    : `<span class="stime${s.st === "failed" ? " is-failed" : ""}"${s.st === "running" ? ` data-since="${s.since}"` : ""}>${compact(elapsedOf(s))}</span>`;
+  const cls = ["srow", stop ? "has-stop" : "", opts.earlier ? "is-earlier" : "", opts.removed ? "is-removed" : "", S.openSession === key ? "is-open" : ""].filter(Boolean).join(" ");
+  const label = `${s.title}${s.st === "running" ? ", running" : s.st === "waiting" ? ", waiting for you" : s.st === "failed" ? ", failed" : ""}`;
+  return `<li class="${cls}"${opts.indent ? ` style="--indent:${opts.indent}px"` : ""}>
+    <button type="button" class="smain" data-action="open-session" data-key="${key}" aria-label="${esc(label)}">
+      <span class="sslot">${opts.mark ? mark(opts.mark, 15) : ""}${dot}</span>
+      <span class="stitle">${esc(s.title)}</span>${time}
+    </button>
+    ${stop ? `<button type="button" class="ibtn xxs sstop" data-action="stop" data-key="${key}" data-tip="Stop" aria-label="Stop ${esc(s.title)}">${ic("Square_fill")}</button>` : ""}
+  </li>`;
+}
+function sessionsOf(m, indent, textIndent, withEarlier = true) {
+  const rows = m.sessions.map((s, i) => sessionRow(s, { key: `${m.kind}:s:${i}`, stoppable: true, indent }));
+  let html = rows.length
+    ? `<ul class="slist">${rows.join("")}</ul>`
+    : `<p class="sempty" style="--indent-text:${textIndent}px">No sessions yet. Mention @${PROVIDERS[m.kind].handle} or let the main session hand it a task.</p>`;
+  if (withEarlier && m.earlier.length) {
+    html += `<button type="button" class="subtoggle" style="--indent:${indent}px" data-action="earlier" data-k="${m.kind}" aria-expanded="${m.earlierOpen}">
+      <span class="sslot">${ic("ClockCounterClockwise")}</span><span>Earlier</span>${m.earlierOpen ? "" : `<span class="count">${m.earlier.length}</span>`}<span class="caret">${ic("CaretRight")}</span></button>`;
+    if (m.earlierOpen) html += `<ul class="slist">${m.earlier.map((s, i) => sessionRow(s, { key: `${m.kind}:e:${i}`, earlier: true, indent })).join("")}</ul>`;
+  }
+  return html;
+}
+function removedGroup(label, icon) {
+  if (!D.removed.length) return "";
+  const open = D.ui.removedOpen;
+  return `<div class="sec">
+    <button type="button" class="gtoggle" data-action="group" data-g="removedOpen" aria-expanded="${Boolean(open)}">${ic(icon)}<span class="label">${label}</span>${open ? "" : `<span class="count">${D.removed.length}</span>`}<span class="chev">${ic("CaretDown")}</span></button>
+    ${open ? `<ul class="slist">${D.removed.map((s, i) => sessionRow(s, { key: `removed:${i}`, removed: true, mark: s.kind, indent: 10 })).join("")}</ul>` : ""}
+  </div>`;
+}
+function pickList() {
+  const row = (k) => {
+    const state = D.ready[k];
+    const added = Boolean(memberOf(k));
+    const right = state !== "ready"
+      ? `<button type="button" class="btn sm" data-action="setup" data-p="${k}">Set up</button>`
+      : added ? `<span class="pick-added">Added</span>`
+        : `<button type="button" class="btn sm" data-action="add-provider" data-p="${k}">Add</button>`;
+    const p = PROVIDERS[k];
+    const detail = state === "ready"
+      ? `<span class="pick-detail"><span>${modelOf(k, valueAt0(k, "model")).label}</span><span>${EFFORT[valueAt0(k, "effort")]}</span></span>`
+      : `<span class="pick-detail is-off">${state}</span>`;
+    return `<div class="pick-row">${mark(k, 18)}<div class="pick-copy"><span class="pick-name">${p.name}</span>${detail}</div>${right}</div>`;
+  };
+  const ready = KINDS.filter((k) => D.ready[k] === "ready");
+  const setup = KINDS.filter((k) => D.ready[k] !== "ready");
+  return `<div class="pick">
+    ${ready.length ? `<div class="pick-label">Signed in</div>${ready.map(row).join("")}` : ""}
+    ${setup.length ? `<div class="pick-label">Needs setup</div>${setup.map(row).join("")}` : ""}
+  </div>`;
+}
+// What a provider starts with before it is in the thread: the project's choice, else Settings.
+const valueAt0 = (k, key) => D.project[k]?.[key] ?? PROVIDERS[k].settings[key];
+const seg = (value, options, action) => `<div class="seg" role="group">${options.map(([v, label]) => `<button type="button" data-action="${action}" data-v="${v}" aria-pressed="${value === v}">${label}</button>`).join("")}</div>`;
+
+/* ---------- Variant A: rows with the composer's chips ---------- */
+function renderA() {
+  if (!D.members.length) {
+    return `<div class="sec">
+      <div class="shead"><span>Agents</span></div>
+      <div class="empty">
+        ${ic("UsersThree")}
+        <b>No agents in this thread</b>
+        <p>The main session hands tasks to agents. Each runs in its own CLI with the model and effort you pick.</p>
+        <button type="button" class="btn" data-action="add" data-anchor="empty-add">${ic("Plus")}Add agent</button>
+      </div>
+    </div>`;
+  }
+  const rows = D.members.map((m) => {
+    const v = shown(m);
+    return `<div class="prov${m.open ? " is-open" : ""}">
+      <div class="prow">
+        <button type="button" class="ptoggle" data-action="toggle" data-k="${m.kind}" aria-expanded="${m.open}">
+          <span class="caret">${ic("CaretRight")}</span>${mark(m.kind)}<span class="pname">${PROVIDERS[m.kind].name}</span>${m.open ? "" : countOf(m)}
+        </button>
+        <button type="button" class="chip${isSet(m, "model") ? " is-set" : ""}" data-action="chip" data-k="${m.kind}" data-f="model" data-anchor="chip-${m.kind}-model" aria-haspopup="menu" aria-label="Model: ${esc(v.model)}"><span>${v.model}</span></button>
+        <button type="button" class="chip${isSet(m, "effort") ? " is-set" : ""}" data-action="chip" data-k="${m.kind}" data-f="effort" data-anchor="chip-${m.kind}-effort" aria-haspopup="menu" aria-label="Effort: ${esc(v.effort)}"><span>${v.effort}</span></button>
+        ${hasOverride(m) ? `<button type="button" class="ibtn xxs" data-action="reset" data-k="${m.kind}" data-tip="Set for this thread. Back to default" aria-label="Back to default">${ic("ArrowCounterClockwise")}</button>` : ""}
+      </div>
+      ${m.open ? sessionsOf(m, 24, 48) : ""}
+    </div>`;
+  }).join("");
+  return `<div class="sec">
+    <div class="shead"><span>Agents</span>${headStatus()}<span class="grow"></span>
+      <button type="button" class="ibtn xs" data-action="add" data-anchor="head-add" data-tip="Add agent" aria-label="Add agent" aria-haspopup="menu">${ic("Plus")}</button></div>
+    ${rows}
+  </div>${removedGroup("Removed", "Trash")}`;
+}
+
+/* ---------- Variant B: quiet rows, one settings popover with Apply ---------- */
+function renderB() {
+  if (!D.members.length) {
+    return `<div class="sec">
+      <div class="shead"><span>Agents</span></div>
+      <p class="add-intro" style="padding-top:0">No agents yet. Add the CLIs the main session can hand tasks to; model and effort start from Settings.</p>
+      ${pickList()}
+    </div>`;
+  }
+  const rows = D.members.map((m) => {
+    const v = shown(m);
+    const pin = hasOverride(m) ? `<span data-tip="Set for this thread">${ic("PushPin")}</span>` : "";
+    return `<div class="prov${m.open ? " is-open" : ""}">
+      <div class="prow">
+        <button type="button" class="ptoggle" data-action="toggle" data-k="${m.kind}" aria-expanded="${m.open}">
+          <span class="caret">${ic("CaretRight")}</span>${mark(m.kind)}<span class="pname">${PROVIDERS[m.kind].name}</span>${m.open ? "" : countOf(m)}
+        </button>
+        <span class="pvals">${pin}<span class="v${isSet(m, "model") ? " is-set" : ""}">${v.model}</span><span class="v e${isSet(m, "effort") ? " is-set" : ""}">${v.effort}</span></span>
+        <button type="button" class="ibtn xs pset" data-action="settings" data-k="${m.kind}" data-anchor="set-${m.kind}" data-tip="Model and effort" aria-label="${PROVIDERS[m.kind].name} settings" aria-haspopup="dialog">${ic("SlidersHorizontal")}</button>
+      </div>
+      ${m.open ? sessionsOf(m, 24, 48, false) : ""}
+    </div>`;
+  }).join("");
+  const earlierCount = D.members.reduce((n, m) => n + m.earlier.length, 0);
+  const historyCount = earlierCount + D.removed.length;
+  let history = "";
+  if (historyCount) {
+    const open = D.ui.historyOpen;
+    history = `<div class="sec">
+      <button type="button" class="gtoggle" data-action="group" data-g="historyOpen" aria-expanded="${Boolean(open)}">${ic("ClockCounterClockwise")}<span class="label">History</span>${open ? "" : `<span class="count">${historyCount}</span>`}<span class="chev">${ic("CaretDown")}</span></button>
+      ${open ? `${earlierCount ? `<div class="glabel">Earlier</div><ul class="slist">${D.members.flatMap((m) => m.earlier.map((s, i) => sessionRow(s, { key: `${m.kind}:e:${i}`, earlier: true, mark: m.kind, indent: 10 }))).join("")}</ul>` : ""}
+        ${D.removed.length ? `<div class="glabel">Removed from this thread</div><ul class="slist">${D.removed.map((s, i) => sessionRow(s, { key: `removed:${i}`, removed: true, mark: s.kind, indent: 10 })).join("")}</ul>` : ""}` : ""}
+    </div>`;
+  }
+  return `<div class="sec">
+    <div class="shead"><span>Agents</span>${headStatus()}<span class="grow"></span>
+      <button type="button" class="ibtn xs" data-action="add" data-anchor="head-add" data-tip="Add agent" aria-label="Add agent" aria-haspopup="menu">${ic("Plus")}</button></div>
+    ${rows}
+  </div>${history}`;
+}
+
+/* ---------- Variant C: a card per provider ---------- */
+function renderC() {
+  const addCard = (intro) => `<div class="card add-card">
+      ${intro ? `<p class="add-intro">${intro}</p>` : ""}
+      <div class="menu-top"><span class="lbl">Add to</span>${seg(D.ui.addScope ?? "thread", [["thread", "This thread"], ["project", "Project"]], "add-scope")}</div>
+      ${pickList()}
+      ${D.members.length ? `<div class="add-foot"><button type="button" class="btn sm quiet" data-action="add" >Done</button></div>` : ""}
+    </div>`;
+  if (!D.members.length) {
+    return `<div class="sec">
+      <div class="shead"><span>Agents</span></div>
+      ${addCard("No agents in this thread. Add the CLIs the main session can hand tasks to.")}
+    </div>`;
+  }
+  const cards = D.members.map((m) => {
+    const v = shown(m);
+    const a = activeOf(m);
+    const src = sourceOf(m);
+    const srcText = src === "thread" ? "This thread" : src === "project" ? "From project" : "From Settings";
+    return `<div class="card${m.open ? " is-open" : ""}">
+      <button type="button" class="card-head" data-action="toggle" data-k="${m.kind}" aria-expanded="${m.open}">
+        ${mark(m.kind)}<span class="pname">${PROVIDERS[m.kind].name}</span><span class="grow"></span>
+        ${headStatus(a)}<span class="chev">${ic("CaretDown")}</span>
+      </button>
+      <div class="strip">
+        <button type="button" class="chip${isSet(m, "model") ? " is-set" : ""}" data-action="chip" data-k="${m.kind}" data-f="model" data-anchor="chip-${m.kind}-model" aria-haspopup="menu" aria-label="Model: ${esc(v.model)}"><span>${v.model}</span></button>
+        <button type="button" class="chip${isSet(m, "effort") ? " is-set" : ""}" data-action="chip" data-k="${m.kind}" data-f="effort" data-anchor="chip-${m.kind}-effort" aria-haspopup="menu" aria-label="Effort: ${esc(v.effort)}"><span>${v.effort}</span></button>
+        <span class="grow"></span>
+        <span class="src${src === "thread" ? " is-set" : ""}">${srcText}</span>
+        ${src === "thread" ? `<button type="button" class="ibtn xxs" data-action="reset" data-k="${m.kind}" data-tip="Back to default" aria-label="Back to default">${ic("ArrowCounterClockwise")}</button>` : ""}
+      </div>
+      ${m.open ? `<div class="card-body">${sessionsOf(m, 6, 30)}</div>` : ""}
+    </div>`;
+  }).join("");
+  const removed = D.removed.length ? removedGroup("Removed", "Trash") : "";
+  return `<div class="sec">
+    <div class="shead"><span>Agents</span>${headStatus()}</div>
+    <div class="cards">${cards}
+      ${D.ui.addOpen ? addCard("") : `<button type="button" class="addrow" data-action="add">${ic("Plus")}Add agent</button>`}
+    </div>
+  </div>${removed}`;
+}
+
+/* ---------- Menus ---------- */
+const menuEl = document.getElementById("menu");
+let menu = null; // { type: "chip" | "settings" | "add", anchor, kind, field, scope, draft }
+function anchorEl() { return menu && document.querySelector(`[data-anchor="${menu.anchor}"]`); }
+function openMenu(next) {
+  closeMenu();
+  menu = next;
+  drawMenu();
+  anchorEl()?.setAttribute("aria-expanded", "true");
+  (menuEl.querySelector(".mi[aria-checked='true']") ?? menuEl.querySelector(".mi, select, .pick-row .btn, button"))?.focus({ preventScroll: true });
+}
+function closeMenu() {
+  if (!menu) return;
+  anchorEl()?.setAttribute("aria-expanded", "false");
+  menu = null;
+  menuEl.hidden = true;
+  menuEl.innerHTML = "";
+}
+function drawMenu() {
+  if (!menu) return;
+  menuEl.className = menu.type === "settings" ? "menu pop" : "menu";
+  menuEl.setAttribute("role", menu.type === "settings" ? "dialog" : "menu");
+  menuEl.innerHTML = menu.type === "chip" ? chipMenu() : menu.type === "settings" ? settingsPopover() : addMenu();
+  menuEl.hidden = false;
+  placeMenu();
+}
+function placeMenu() {
+  const a = anchorEl();
+  if (!a) return closeMenu();
+  const r = a.getBoundingClientRect();
+  const w = menuEl.offsetWidth, h = menuEl.offsetHeight;
+  let left = r.right - w;
+  left = Math.max(8, Math.min(left, innerWidth - 8 - w));
+  let top = r.bottom + 6;
+  if (top + h > innerHeight - 8 && r.top - 6 - h > 8) top = r.top - 6 - h;
+  menuEl.style.left = `${left + scrollX}px`;
+  menuEl.style.top = `${top + scrollY}px`;
+}
+function menuItem({ label, detail, selected, v }) {
+  return `<button type="button" class="mi" role="menuitemradio" aria-checked="${selected}" data-action="pick" data-v="${v}">
+    <span class="mi-copy"><span>${label}</span>${detail ? `<span class="mi-detail">${detail}</span>` : ""}</span>
+    <span class="mi-check">${selected ? ic("Check") : ""}</span></button>`;
+}
+function chipMenu() {
+  const { kind, field, scope } = menu;
+  const lvl = levelOf(kind, scope);
+  const inh = inherited(kind, scope, field);
+  const top = `<div class="menu-top"><span class="lbl">Change for</span>${seg(scope, [["thread", "This thread"], ["project", "Project"]], "scope")}</div>`;
+  let items;
+  if (field === "model") {
+    items = [menuItem({ label: "Default", detail: `${modelOf(kind, inh.v).label}, from ${inh.from}`, selected: !lvl.model, v: "" }),
+      ...PROVIDERS[kind].models.map((md) => menuItem({ label: md.label, detail: md.detail, selected: lvl.model === md.id, v: md.id }))];
+  } else {
+    const md = modelOf(kind, valueAt(kind, scope, "model"));
+    items = [menuItem({ label: "Default", detail: `${EFFORT[inh.v]}, from ${inh.from}`, selected: !lvl.effort, v: "" }),
+      ...md.efforts.map((e) => menuItem({ label: EFFORT[e], selected: lvl.effort === e, v: e }))];
+  }
+  const label = `${field === "model" ? "Model" : "Effort"} of ${PROVIDERS[kind].name}`;
+  let note = scope === "project"
+    ? `Every thread in ${PROJECT} without its own choice.`
+    : "Only this thread. New turns use it.";
+  if (field === "effort" && kind === "antigravity") note += ` Runs <code>${valueAt(kind, scope, "model")}-${effortAt(kind, scope)}</code>.`;
+  return `${top}<div class="menu-sec" role="group" aria-label="${label}"><div class="menu-label">${label}</div>${items.join("")}</div><p class="menu-note">${note}</p>`;
+}
+function settingsPopover() {
+  const { kind, scope, draft } = menu;
+  const m = memberOf(kind);
+  const inhM = inherited(kind, scope, "model"), inhE = inherited(kind, scope, "effort");
+  const md = modelOf(kind, draft.model ?? inhM.v);
+  const saved = levelOf(kind, scope);
+  const dirty = (draft.model ?? "") !== (saved.model ?? "") || (draft.effort ?? "") !== (saved.effort ?? "");
+  const any = Boolean(draft.model || draft.effort);
+  const option = (v, label, sel) => `<option value="${v}"${sel ? " selected" : ""}>${label}</option>`;
+  const models = [option("", `Default (${modelOf(kind, inhM.v).label})`, !draft.model), ...PROVIDERS[kind].models.map((x) => option(x.id, x.label, draft.model === x.id))].join("");
+  const efforts = [option("", `Default (${EFFORT[md.efforts.includes(inhE.v) ? inhE.v : "high"]})`, !draft.effort), ...md.efforts.map((e) => option(e, EFFORT[e], draft.effort === e))].join("");
+  const a = activeOf(m);
+  const busy = a.running + a.waiting > 0;
+  const note = scope === "thread"
+    ? `Default is what ${inhM.from === "project" || inhE.from === "project" ? `project ${PROJECT}` : "Settings"} sets. Applies from its next turn.${busy ? " Remove works once its sessions end." : ""}`
+    : `For every thread in ${PROJECT} without its own choice. Default is Settings.`;
+  return `<div class="pop-head">${mark(kind)}<span>${PROVIDERS[kind].name}</span></div>
+    <div class="pop-body">
+      ${seg(scope, [["thread", "This thread"], ["project", `Project ${PROJECT}`]], "scope")}
+      <label class="fld"><span>Model</span><span class="sel"><select data-field="model">${models}</select>${ic("CaretDown")}</span></label>
+      <label class="fld"><span>Effort</span><span class="sel"><select data-field="effort">${efforts}</select>${ic("CaretDown")}</span></label>
+      <p class="pop-note">${note}</p>
+    </div>
+    <div class="pop-foot">
+      ${scope === "thread" ? `<button type="button" class="btn sm danger" data-action="remove" ${busy ? "disabled" : ""}>Remove</button>` : ""}
+      <span class="grow"></span>
+      <button type="button" class="btn sm" data-action="pop-reset" ${any ? "" : "disabled"}>Reset</button>
+      <button type="button" class="btn sm primary" data-action="pop-apply" ${dirty ? "" : "disabled"}>Apply</button>
+    </div>`;
+}
+function addMenu() {
+  return `<div class="menu-top"><span class="lbl">Add to</span>${seg(menu.scope, [["thread", "This thread"], ["project", "Project"]], "scope")}</div>
+    ${pickList()}
+    <p class="menu-note">${menu.scope === "project" ? `Every thread in ${PROJECT} gets it. ` : ""}Model and effort start from ${menu.scope === "project" ? "Settings" : "the project, else Settings"}; change them on its row.</p>`;
+}
+
+/* ---------- Render ---------- */
+const NOTES = {
+  A: {
+    title: "A. Чипы в строке", sub: "строка провайдера как в T3, модель и effort это чипы композера",
+    lines: [
+      "Одна строка на провайдера: знак, имя, справа модель и effort. Это те же чипы и те же меню, что под композером, поэтому учить нечего.",
+      "Выбор применяется сразу. В шапке меню переключатель «This thread / Project»; пункт Default возвращает к значению проекта или Settings и называет его.",
+      "Своё значение треда: текст чипа ярче, рядом кнопка сброса. Прошлые сессии внутри провайдера (Earlier), удалённые одной группой внизу.",
+      "Цена: на строке три цели клика рядом с зоной раскрытия; длинное имя модели в 336px обрезается."
+    ]
+  },
+  B: {
+    title: "B. Тихие строки", sub: "модель и effort просто текст, настройки в одном окне с Apply",
+    lines: [
+      "Строка читается как виджет T3: модель и effort серым текстом, булавка значит «задано для этого треда».",
+      "Настройки за кнопкой, она видна при наведении: одно окно с «This thread / Project», двумя списками и явными Reset и Apply; там же Remove.",
+      "Прошлые сессии и удалённые агенты в одной тихой группе History внизу, поэтому раскрытый провайдер короче.",
+      "Новому пользователю список CLI показан прямо в панели, без лишнего клика.",
+      "Цена: на один клик больше, и без наведения не видно, что настройку можно менять."
+    ]
+  },
+  C: {
+    title: "C. Карточки", sub: "у каждого провайдера своя карточка, настройки всегда на виду",
+    lines: [
+      "Каждый провайдер маленькая карточка, как виджет T3: в шапке имя и статус, под ней всегда видны чипы модели и effort и откуда значение (From Settings, From project, This thread).",
+      "Добавление прямо в панели: строка Add agent раскрывает список CLI на месте, без всплывающего окна.",
+      "Earlier внутри карточки, удалённые одной группой внизу.",
+      "Цена: самая высокая панель, 64px на свёрнутого провайдера; при трёх и больше провайдерах сессии уходят ниже."
+    ]
+  }
+};
+function timelineHTML() {
+  const deleg = D.deleg.length ? `<div class="deleg">${D.deleg.map(([k, t]) => `<div>${mark(k, 14)}<span class="who">@${PROVIDERS[k].handle}</span><span>${esc(t)}</span></div>`).join("")}</div>` : "";
+  const working = D.working ? `<div class="working"><svg class="star" viewBox="0 0 24 24" aria-hidden="true">${[0, 60, 120, 180, 240, 300].map((a, i) => `<g transform="rotate(${a} 12 12)"><line x1="12" y1="${i % 2 ? 6.5 : 3.5}" x2="12" y2="10"/></g>`).join("")}</svg>Working for <span data-since="${D.working}">${compact(Date.now() - D.working)}</span></div>` : "";
+  return `<div class="msg-user">${esc(D.user)}</div><div class="msg-agent">${D.reply.map((p) => `<p>${esc(p)}</p>`).join("")}${deleg}</div>${working}`;
+}
+function render() {
+  closeMenu();
+  gradientSeq = 0;
+  const note = NOTES[S.variant];
+  document.getElementById("variant-title").textContent = note.title;
+  document.getElementById("variant-sub").textContent = note.sub;
+  document.getElementById("notes").innerHTML = note.lines.map((l) => `<li>${esc(l)}</li>`).join("");
+  document.getElementById("chat-title").textContent = D.title;
+  document.getElementById("side-current").textContent = D.title;
+  document.getElementById("timeline").innerHTML = timelineHTML();
+  document.getElementById("composer-model").innerHTML = `${mark("codex", 14)}GPT-6.2-Astra<span class="caret">${ic("CaretDown")}</span>`;
+  document.getElementById("panel-body").innerHTML = S.variant === "A" ? renderA() : S.variant === "B" ? renderB() : renderC();
+}
+function tick() {
+  document.querySelectorAll("[data-since]").forEach((el) => { el.textContent = compact(Date.now() - Number(el.dataset.since)); });
+}
+let toastTimer = 0;
+function toast(text) {
+  const el = document.getElementById("toast");
+  el.textContent = text;
+  el.hidden = false;
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => { el.hidden = true; }, 2600);
+}
+
+/* ---------- Actions ---------- */
+function sessionByKey(key) {
+  const [kind, list, i] = key.split(":");
+  if (kind === "removed") return D.removed[Number(list)];
+  const m = memberOf(kind);
+  return m && (list === "s" ? m.sessions : m.earlier)[Number(i)];
+}
+function addProvider(kind) {
+  if (memberOf(kind)) return;
+  D.members.push({ kind, thread: {}, open: false, earlierOpen: false, sessions: [], earlier: [] });
+  D.members.sort((a, b) => KINDS.indexOf(a.kind) - KINDS.indexOf(b.kind));
+}
+function pick(v) {
+  const { kind, field, scope } = menu;
+  const lvl = levelOf(kind, scope);
+  if (v) lvl[field] = v; else delete lvl[field];
+  if (field === "model" && lvl.effort && !modelOf(kind, valueAt(kind, scope, "model")).efforts.includes(lvl.effort)) delete lvl.effort;
+  render();
+}
+document.addEventListener("click", (event) => {
+  const bar = event.target.closest("[data-variant], [data-scenario], [data-theme-set]");
+  if (bar) {
+    if (bar.dataset.variant) S.variant = bar.dataset.variant;
+    if (bar.dataset.scenario) { S.scenario = bar.dataset.scenario; D = makeData(S.scenario); S.openSession = null; }
+    if (bar.dataset.themeSet) document.documentElement.dataset.theme = bar.dataset.themeSet;
+    for (const attr of ["variant", "scenario", "themeSet"]) {
+      if (!bar.dataset[attr]) continue;
+      document.querySelectorAll(`[data-${attr === "themeSet" ? "theme-set" : attr}]`).forEach((b) => b.setAttribute("aria-pressed", String(b === bar)));
+    }
+    render();
+    return;
+  }
+  const el = event.target.closest("[data-action]");
+  if (!el) return;
+  const k = el.dataset.k;
+  switch (el.dataset.action) {
+    case "toggle": { const m = memberOf(k); m.open = !m.open; render(); break; }
+    case "earlier": { const m = memberOf(k); m.earlierOpen = !m.earlierOpen; render(); break; }
+    case "group": D.ui[el.dataset.g] = !D.ui[el.dataset.g]; render(); break;
+    case "chip": {
+      const same = menu && menu.anchor === el.dataset.anchor;
+      if (same) { closeMenu(); break; }
+      openMenu({ type: "chip", anchor: el.dataset.anchor, kind: k, field: el.dataset.f, scope: "thread" });
+      break;
+    }
+    case "settings": {
+      if (menu && menu.anchor === el.dataset.anchor) { closeMenu(); break; }
+      const m = memberOf(k);
+      openMenu({ type: "settings", anchor: el.dataset.anchor, kind: k, scope: "thread", draft: { ...m.thread } });
+      break;
+    }
+    case "scope": {
+      menu.scope = el.dataset.v;
+      if (menu.type === "settings") menu.draft = { ...levelOf(menu.kind, menu.scope) };
+      drawMenu();
+      break;
+    }
+    case "pick": pick(el.dataset.v); break;
+    case "reset": memberOf(k).thread = {}; render(); break;
+    case "add": {
+      if (S.variant === "C") { D.ui.addOpen = !D.ui.addOpen; render(); break; }
+      if (menu && menu.anchor === el.dataset.anchor) { closeMenu(); break; }
+      openMenu({ type: "add", anchor: el.dataset.anchor, scope: "thread" });
+      break;
+    }
+    case "add-scope": D.ui.addScope = el.dataset.v; render(); break;
+    case "add-provider": {
+      addProvider(el.dataset.p);
+      const scope = menu?.scope ?? D.ui.addScope ?? "thread";
+      toast(`${PROVIDERS[el.dataset.p].name} added to ${scope === "project" ? `every thread in ${PROJECT}` : "this thread"}`);
+      if (S.variant === "C" && D.members.length) D.ui.addOpen = KINDS.some((x) => D.ready[x] === "ready" && !memberOf(x)) && D.ui.addOpen;
+      render();
+      break;
+    }
+    case "setup": toast(`Opens Local CLI setup in Settings for ${PROVIDERS[el.dataset.p].name}`); break;
+    case "stop": {
+      const s = sessionByKey(el.dataset.key);
+      if (s && s.st === "running") { s.sec = Math.round((Date.now() - s.since) / 1000); s.st = "done"; delete s.since; }
+      render();
+      break;
+    }
+    case "open-session": S.openSession = S.openSession === el.dataset.key ? null : el.dataset.key; render(); break;
+    case "pop-reset": menu.draft = {}; drawMenu(); break;
+    case "pop-apply": {
+      const lvl = levelOf(menu.kind, menu.scope);
+      delete lvl.model; delete lvl.effort;
+      Object.assign(lvl, Object.fromEntries(Object.entries(menu.draft).filter(([, v]) => v)));
+      render();
+      break;
+    }
+    case "remove": {
+      const m = memberOf(menu.kind);
+      D.removed.push(...[...m.sessions, ...m.earlier].map((s) => ({ kind: m.kind, ...s })));
+      D.members = D.members.filter((x) => x !== m);
+      toast(`${PROVIDERS[m.kind].name} removed; its sessions stay in History`);
+      render();
+      break;
+    }
+  }
+});
+menuEl.addEventListener("change", (event) => {
+  const field = event.target.dataset.field;
+  if (!field || !menu) return;
+  if (event.target.value) menu.draft[field] = event.target.value; else delete menu.draft[field];
+  if (field === "model") {
+    const md = modelOf(menu.kind, menu.draft.model ?? inherited(menu.kind, menu.scope, "model").v);
+    if (menu.draft.effort && !md.efforts.includes(menu.draft.effort)) delete menu.draft.effort;
+  }
+  drawMenu();
+  menuEl.querySelector(`[data-field="${field}"]`)?.focus();
+});
+document.addEventListener("mousedown", (event) => {
+  if (!menu) return;
+  if (menuEl.contains(event.target) || anchorEl()?.contains(event.target)) return;
+  closeMenu();
+});
+document.addEventListener("keydown", (event) => {
+  if (event.key === "Escape" && menu) { const a = anchorEl(); closeMenu(); a?.focus(); return; }
+  if (menu && menu.type !== "settings" && (event.key === "ArrowDown" || event.key === "ArrowUp") && menuEl.contains(document.activeElement)) {
+    const items = [...menuEl.querySelectorAll(".mi, .seg button, .pick-row .btn")];
+    const i = items.indexOf(document.activeElement);
+    const next = items[(i + (event.key === "ArrowDown" ? 1 : -1) + items.length) % items.length];
+    next?.focus();
+    event.preventDefault();
+  }
+});
+addEventListener("resize", () => menu && placeMenu());
+addEventListener("scroll", () => menu && placeMenu(), true);
+
+/* Tooltips: the kit's delay, never the native title. */
+const tipEl = document.getElementById("tip");
+let tipTimer = 0;
+document.addEventListener("mouseover", (event) => {
+  const el = event.target.closest("[data-tip]");
+  clearTimeout(tipTimer);
+  tipEl.hidden = true;
+  if (!el) return;
+  tipTimer = setTimeout(() => {
+    if (!el.isConnected) return;
+    tipEl.textContent = el.dataset.tip;
+    tipEl.hidden = false;
+    const r = el.getBoundingClientRect();
+    const w = tipEl.offsetWidth, h = tipEl.offsetHeight;
+    const left = Math.max(8, Math.min(r.left + r.width / 2 - w / 2, innerWidth - 8 - w));
+    const top = r.top - h - 6 > 8 ? r.top - h - 6 : r.bottom + 6;
+    tipEl.style.left = `${left + scrollX}px`;
+    tipEl.style.top = `${top + scrollY}px`;
+  }, 600);
+});
+document.addEventListener("mousedown", () => { clearTimeout(tipTimer); tipEl.hidden = true; });
+
+render();
+setInterval(tick, 1000);
+</script>
+</body>
+</html>
