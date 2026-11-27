@@ -278,7 +278,8 @@ CLIs remember in members' memory too, one note per entry
   server archiving a stale status is no one's change, so a later change of
   the entry brings it back. A note with the same title a member wrote is
   kept, and the entry follows it without changing it; a note the User
-  deleted in Settings is not made again, by this device or another; a file
+  deleted in Settings, or a member archived, is not made again, by this
+  device or another; a file
   that went away deletes nothing. The first time a device sends an entry to
   a new server it names the note the entry filled on the one before
   (`knownNoteId`; notes move with their ids): a moved note is taken up again,

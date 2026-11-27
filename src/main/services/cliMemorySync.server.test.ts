@@ -13,7 +13,7 @@ import type { ChatParticipant, Conversation } from "../../shared/types";
 import { HubMemory } from "../../hub/hubMemory";
 import { HubOps } from "../../hub/hubOps";
 import { HubServer } from "../../hub/hubServer";
-import { APP_MEMORY_READ_TOOL, APP_MEMORY_SEARCH_TOOL, APP_MEMORY_WRITE_TOOL } from "./appMcp";
+import { APP_MEMORY_ARCHIVE_TOOL, APP_MEMORY_READ_TOOL, APP_MEMORY_SEARCH_TOOL, APP_MEMORY_WRITE_TOOL } from "./appMcp";
 import { ChatService } from "./chat";
 import { chatParts } from "./chat/test/chatParts";
 import { ChatSearchService } from "./chatSearch";
@@ -410,6 +410,17 @@ test("the server: no phone, no machine without members, and a status it archived
   await put(path.join(accordFolder(machineHome, "-srv-copies-accord"), "release.md"), status.replace("Open: QA.", "Open: QA and release."));
   assert.deepEqual((await machine.syncNow()).outcomes, { updated: 1 });
   assert.equal((await note("Release status")).archivedAt, undefined);
+});
+
+test("a note a member archived is not made again when another device sends its entry", async (t) => {
+  const { desktopHome, machineHome, desktopSync, machineSync, notes, note, tool } = await setup(t);
+  const entry = "---\nname: Old workaround\ntype: reference\n---\nNo longer needed.\n";
+  await put(path.join(accordFolder(desktopHome), "old.md"), entry);
+  assert.deepEqual((await desktopSync().syncNow()).outcomes, { created: 1 });
+  ok(await tool("desktop", CHAT_A, taylor, APP_MEMORY_ARCHIVE_TOOL, { noteId: (await note("Old workaround")).id }));
+  await put(path.join(accordFolder(machineHome, "-srv-copies-accord"), "old.md"), entry);
+  assert.deepEqual((await machineSync().syncNow()).outcomes, { kept: 1 });
+  assert.equal((await notes()).length, 0);
 });
 
 async function ensure(dir: string): Promise<string> {

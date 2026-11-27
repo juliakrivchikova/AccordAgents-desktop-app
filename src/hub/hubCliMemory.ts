@@ -149,7 +149,8 @@ export class HubCliMemory {
       const found = await this.sameEntry(placed, identity);
       if (found) {
         noteId = found.id;
-        outcome = found.deleted ? { outcome: "deleted", reason: "The User deleted the note of this entry." } : { outcome: "unchanged" };
+        outcome = found.deleted ? { outcome: "deleted", reason: "The User deleted the note of this entry." }
+          : found.archivedBy ? { outcome: "kept", reason: `@${found.archivedBy} archived the note of this entry.` } : { outcome: "unchanged" };
       } else {
         const titled = await this.titled(placed, undefined);
         if (titled && !(titled.author === placed.author && titled.updatedBy === placed.author)) {
@@ -187,11 +188,15 @@ export class HubCliMemory {
    * before the notes moved to this server: one the sync wrote with exactly
    * this content. Or the note of this entry the User deleted (not made again).
    */
-  private async sameEntry(placed: Placed, identity: string): Promise<{ id: string; deleted?: boolean } | undefined> {
-    const tracked = await this.deps.query<{ noteId: string; live: string | null }>(`select c.note_id as noteId, n.id as live from member_memory_cli_notes c
+  private async sameEntry(placed: Placed, identity: string): Promise<{ id: string; deleted?: boolean; archivedBy?: string } | undefined> {
+    const tracked = await this.deps.query<{ noteId: string; live: string | null; archivedAt: string | null; updatedBy: string | null }>(`select c.note_id as noteId,
+      n.id as live, n.archived_at as archivedAt, n.updated_by as updatedBy from member_memory_cli_notes c
       left join member_memory_notes n on n.id = c.note_id where c.identity_key = ${quote(identity)};`);
     const deleted = tracked.find((row) => !row.live);
     if (deleted) return { id: deleted.noteId, deleted: true };
+    // A member archived it (it no longer holds): not made again either.
+    const archived = tracked.find((row) => row.archivedAt && row.updatedBy !== "server");
+    if (archived) return { id: archived.noteId, archivedBy: archived.updatedBy ?? undefined };
     const candidates = await this.deps.query<Row & { tracked: string | null }>(`select ${SUMMARY_COLUMNS}, body, c.note_id as tracked
       from member_memory_notes n left join member_memory_cli_notes c on c.note_id = n.id
       where n.scope = ${quote(placed.scope)} and n.scope_key = ${quote(placed.scopeKey)} and n.author = ${quote(placed.author)}
