@@ -780,35 +780,6 @@ test("by words, the chat's own notes come first at similar scores; a global note
   assert.deepEqual(await search("release deployed bot"), ["Bot release", "Beta release"]);
 });
 
-test("past 150 notes a session's list keeps all of its chat's own and the global ones most relevant to the chat, and says how many are left out", async (t) => {
-  const semantic = new SemanticStub();
-  const { tool, desktopLink, clock } = await setup(t, { semantic });
-  let second = 0;
-  const write = async (title: string, scope: string) => {
-    // One second apart: the later written, the more recently active.
-    clock.now = new Date(Date.parse("2026-11-04T09:00:00.000Z") + (second += 1) * 1000);
-    return ok<MemoryNote>(await tool("desktop", CHAT_A, taylor, APP_MEMORY_WRITE_TOOL, { kind: "article", title, body: "x", scope }));
-  };
-  for (let index = 0; index < 152; index += 1) await write(`Global ${index}`, "global");
-  const own = [await write("Our project", "project"), await write("Our chat", "chat"), await write("Our role", "role")];
-  // Global 3 and Global 7 fit the chat best by meaning.
-  semantic.closeness.set("Global 3", 0.6).set("Global 7", 0.5);
-  const index = ok<MemoryIndexValue>(await desktopLink.memory({ action: "index", conversationId: CHAT_A, participantId: taylor.id, full: true, picks: true, text: "Plans\nrelease" }));
-  assert.equal(index.notes.length, 150);
-  assert.equal(index.more, 155 - 150);
-  assert.deepEqual(new Set(index.notes.slice(0, 3).map((note) => note.id)), new Set(own.map((note) => note.id)));
-  assert.deepEqual(index.notes.slice(3, 5).map((note) => note.title), ["Global 3", "Global 7"]);
-  assert.equal(index.picks, true);
-  const block = await memoryIndexBlock(desktopLink, { conversationId: CHAT_A, participantId: taylor.id });
-  assert.match(block, /- 5 more are left out of this list; app_memory_search finds them\./);
-  // Without meaning (no text asked): the most recently active globals fill the rest.
-  const plain = ok<MemoryIndexValue>(await desktopLink.memory({ action: "index", conversationId: CHAT_A, participantId: taylor.id, full: true }));
-  assert.equal(plain.notes[3].title, "Global 151");
-  // An older app asking without `full` while notes are picked: no list, as before.
-  const older = ok<MemoryIndexValue>(await desktopLink.memory({ action: "index", conversationId: CHAT_A, participantId: taylor.id, picks: true }));
-  assert.deepEqual([older.notes.length, older.more, older.picks], [0, 155, true]);
-});
-
 test("the list stays a bounded part of a session's first message, counted in bytes", async () => {
   const long = Array.from({ length: 400 }, (_, index) => ({
     id: `note-${index}`, kind: "article", title: `${"Длинный заголовок ".repeat(8)}${index}`, tags: [], scope: "project", author: "taylor",
@@ -833,21 +804,56 @@ test("a current server with no note to list and picks on says there are none; a 
   assert.equal(own.requestId, "mine-1");
 });
 
-test("past 150 of the chat's own notes the User's preferences are still listed, first; other global notes wait for search", async (t) => {
+test("a session's list holds every note in order: the User's preferences, the chat's own, global, then notes copied from the CLIs' memory", async (t) => {
   const { tool, desktopLink, clock } = await setup(t);
   let second = 0;
   const write = async (title: string, scope: string, tags: string[] = []) => {
     clock.now = new Date(Date.parse("2026-11-04T09:00:00.000Z") + (second += 1) * 1000);
     return ok<MemoryNote>(await tool("desktop", CHAT_A, taylor, APP_MEMORY_WRITE_TOOL, { kind: "article", title, body: "x", scope, tags }));
   };
-  const preference = await write("Reply in Russian, short", "global", ["preference"]);
-  const ownPreference = await write("This project: commit messages in English", "project", ["preference"]);
-  await write("Some global fact", "global");
-  for (let index = 0; index < 151; index += 1) await write(`Project note ${index}`, "project");
+  await write("CLI global", "global", ["cli-memory"]);
+  await write("CLI project", "project", ["cli-memory"]);
+  await write("CLI preference", "global", ["cli-memory", "preference"]);
+  await write("Members' global", "global");
+  await write("Members' project", "project");
+  await write("Members' chat", "chat");
+  await write("Project preference", "project", ["preference"]);
+  await write("Global preference", "global", ["preference"]);
   const index = ok<MemoryIndexValue>(await desktopLink.memory({ action: "index", conversationId: CHAT_A, participantId: taylor.id, full: true }));
-  const ids = index.notes.map((note) => note.id);
-  assert.deepEqual(new Set(ids.slice(0, 2)), new Set([preference.id, ownPreference.id]));
-  assert.equal(index.notes.length, 153);
-  assert.ok(!index.notes.some((note) => note.title === "Some global fact"));
-  assert.equal(index.more, 1);
+  // Each group by activity, the most recent first.
+  assert.deepEqual(index.notes.map((note) => note.title), [
+    "Global preference", "Project preference", "Members' chat", "Members' project", "Members' global", "CLI project", "CLI preference", "CLI global"
+  ]);
+  assert.equal(index.more, 0);
+});
+
+test("a large project and many notes copied from the CLIs never push the User's preferences out of a session's list: only its end is cut, by bytes", async (t) => {
+  const { tool, desktopLink, clock } = await setup(t);
+  let second = 0;
+  const write = async (title: string, scope: string, tags: string[] = []) => {
+    clock.now = new Date(Date.parse("2026-11-04T09:00:00.000Z") + (second += 1) * 1000);
+    return ok<MemoryNote>(await tool("desktop", CHAT_A, taylor, APP_MEMORY_WRITE_TOOL, { kind: "article", title, body: "x", scope, tags }));
+  };
+  const long = (label: string) => `${label} ${"long title words ".repeat(8)}`.slice(0, 150);
+  // As on the User's server with the CLI memory sync: 18 preferences among
+  // her global notes, a large project, and a hundred notes from the CLIs.
+  for (let index = 0; index < 18; index += 1) await write(long(`Preference ${index}`), "global", ["preference"]);
+  await write(long("Global fact"), "global");
+  for (let index = 0; index < 72; index += 1) await write(long(`Project note ${index}`), "project");
+  for (let index = 0; index < 50; index += 1) await write(long(`CLI project ${index}`), "project", ["cli-memory"]);
+  for (let index = 0; index < 53; index += 1) await write(long(`CLI global ${index}`), "global", ["cli-memory"]);
+  const index = ok<MemoryIndexValue>(await desktopLink.memory({ action: "index", conversationId: CHAT_A, participantId: taylor.id, full: true }));
+  const titles = index.notes.map((note) => note.title);
+  assert.equal(titles.filter((title) => title.startsWith("Preference ")).length, 18);
+  assert.ok(titles.slice(0, 18).every((title) => title.startsWith("Preference ")));
+  assert.equal(titles.filter((title) => title.startsWith("Project note ")).length, 72);
+  assert.ok(titles.some((title) => title.startsWith("Global fact ")));
+  // Past 32 KB the end is cut: notes copied from the CLIs, the global ones first.
+  assert.ok(index.more > 0, String(index.more));
+  assert.equal(index.notes.length + index.more, 194);
+  assert.ok(!titles.some((title) => title.startsWith("CLI global ")) || titles.filter((title) => title.startsWith("CLI project ")).length === 50);
+  const block = await memoryIndexBlock(desktopLink, { conversationId: CHAT_A, participantId: taylor.id });
+  assert.ok(Buffer.byteLength(block) < 34 * 1024, String(Buffer.byteLength(block)));
+  assert.match(block, new RegExp(`- ${index.more} more ${index.more === 1 ? "is" : "are"} left out of this list; app_memory_search finds them\\.`));
+  assert.match(block, /Every note you can see, one per line[^\n]*\n- \[article\] Preference 17/);
 });

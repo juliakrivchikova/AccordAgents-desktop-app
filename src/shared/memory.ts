@@ -27,16 +27,11 @@ export const MEMORY_SEARCH_MAX_LIMIT = 100;
 /** A task status nobody updated for this long is archived by the server. */
 export const MEMORY_STATUS_STALE_DAYS = 30;
 /** A session starts with every note its member sees, one line each (the
- *  User, 2026-11-27). Past this many, it gets the User's preferences first,
- *  then all of its chat's own notes (project, role, chat) and the global
- *  ones most relevant to the chat, and is told how many are left out. */
-export const MEMORY_INDEX_MAX_NOTES = 150;
-/** At most this many of the chat's own notes are listed all the same (a
- *  bound on a session's first message; a project far past it is unlikely). */
-export const MEMORY_INDEX_NEAR_MAX = 300;
-/** Past MEMORY_INDEX_MAX_NOTES the User's preferences (tag `preference`)
- *  are listed first, at most this many (the User, 2026-11-27: they are few). */
-export const MEMORY_INDEX_PREFERENCES_MAX = 50;
+ *  User, 2026-11-27: a full index), in this order: the User's preferences
+ *  (tag `preference`), members' notes of the chat's own project, role and
+ *  chat, members' global notes, then notes copied from the CLIs' own memory
+ *  (tag `cli-memory`; the project's first). Only the bytes below bound it:
+ *  past them the list is cut from the end and says how many are left out. */
 /** At most this many bytes (UTF-8) of the list go into a session's first
  *  message (a Gemini member gets its message as one command-line argument,
  *  128 KB at most on Linux). */
@@ -153,11 +148,9 @@ export type MemoryResult<T> = { ok: true; value: T } | { ok: false; error: Memor
 export type HubMemoryRequest =
   // `picks`: the asking app adds notes picked by meaning to each message
   // (memoryPicks). `full`: every note the member sees (an app asking
-  // without it gets the 25 most relevant, or none while notes are picked).
-  // `text`: the message the session starts with (and the chat's title), to
-  // tell the global notes most relevant to the chat when not all fit. An
-  // older server ignores `full` and `text`.
-  | ({ action: "index"; picks?: boolean; full?: boolean; text?: string } & MemoryMemberRef)
+  // without it gets the 25 most relevant, or none while notes are picked;
+  // an older server ignores it).
+  | ({ action: "index"; picks?: boolean; full?: boolean } & MemoryMemberRef)
   | ({ action: "tags" } & MemoryMemberRef)
   | ({ action: "search" } & MemoryMemberRef & MemorySearchQuery)
   | ({ action: "read"; noteId: string } & MemoryMemberRef)
@@ -222,9 +215,9 @@ export interface MemoryOwnerListQuery {
 }
 
 export interface MemoryIndexValue {
-  /** Every note the member sees, its chat's own first (see
-   *  MEMORY_INDEX_MAX_NOTES); empty from an older server that picks notes
-   *  for each message instead (`picks`). */
+  /** Every note the member sees, in the order and within the bytes of
+   *  MEMORY_INDEX_MAX_BYTES; empty from an older server that picks notes for
+   *  each message instead (`picks`). */
   notes: MemoryNoteSummary[];
   /** How many visible notes there are beyond the ones listed. */
   more: number;
@@ -232,8 +225,8 @@ export interface MemoryIndexValue {
   tags?: MemoryTagCount[];
   /** Search by meaning is on: notes that fit come with each message. */
   picks?: boolean;
-  /** Every note the member sees was asked for (`full`) and given, past
-   *  MEMORY_INDEX_MAX_NOTES as described there; absent from an older server. */
+  /** Every note the member sees was asked for (`full`) and given, as
+   *  MEMORY_INDEX_MAX_BYTES describes; absent from an older server. */
   full?: boolean;
 }
 
@@ -430,9 +423,14 @@ export function isMemoryPostAction(action: string): boolean {
   return isMemoryChangeAction(action) || (MEMORY_POST_ONLY_ACTIONS as readonly string[]).includes(action);
 }
 
-/** Whether a request goes as POST: a change, a post-only action, or the
- *  list carrying a message's text (every server takes any action as POST;
- *  a GET of a list without text still works on every server). */
-export function memoryRequestIsPost(request: { action: string; text?: unknown }): boolean {
-  return isMemoryPostAction(request.action) || (request.action === "index" && typeof request.text === "string");
+/** One note in the list a session starts with: kind, title, scope, id
+ *  (the server and the app count and write it alike). */
+export function memoryIndexLine(note: Pick<MemoryNoteSummary, "id" | "kind" | "title" | "scope" | "awaitingRepository">): string {
+  const where = note.scope === "project" ? "project" : note.scope === "role" ? "your role" : note.scope === "chat" ? "this chat" : "global";
+  return `- [${oneLineText(note.kind, 20)}] ${oneLineText(note.title, 160)} (${where}${note.awaitingRepository ? ", waits for the repository" : ""} · ${note.id})`;
+}
+
+function oneLineText(text: string, max: number): string {
+  const flat = text.replace(/\s+/g, " ").trim();
+  return flat.length > max ? `${flat.slice(0, max - 1)}…` : flat;
 }

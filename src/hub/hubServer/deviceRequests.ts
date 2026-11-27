@@ -5,7 +5,7 @@ import {
 import { isPlanUsageProvider, normalizePlanUsageSnapshot } from "../../shared/planUsage";
 import type { HubOps } from "../hubOps";
 import type { HubMemory } from "../hubMemory";
-import { memoryRequestIsPost } from "../../shared/memory";
+import { isMemoryPostAction } from "../../shared/memory";
 import {
   HUB_ARTIFACT_PATH, HUB_ARTIFACTS_PATH, HUB_CARDS_PATH, HUB_CHAT_PATH, HUB_CHATS_PATH, HUB_FEED_PATH, HUB_OPS_PATH,
   HUB_TURNS_PATH, type HubCardsResponse, type HubFeedGone, type HubLiveSettings, type HubMachineSettings,
@@ -88,11 +88,9 @@ export class DeviceRequests {
     if (request.method === "GET") {
       const text = url.searchParams.get("request") ?? "";
       try { parsed = JSON.parse(text) as unknown; } catch { throw new HubRequestError(400, "Invalid memory request."); }
-      const asked = parsed as { action?: unknown; text?: unknown } | undefined;
+      const action = (parsed as { action?: unknown } | undefined)?.action;
       // A key or a message's text never comes in an address (logs keep those).
-      if (typeof asked?.action !== "string" || memoryRequestIsPost({ action: asked.action, text: asked.text })) {
-        throw new HubRequestError(400, "A change to memory is a POST.");
-      }
+      if (typeof action !== "string" || isMemoryPostAction(action)) throw new HubRequestError(400, "A change to memory is a POST.");
     } else if (request.method === "POST") {
       parsed = parseJson(body);
     } else {

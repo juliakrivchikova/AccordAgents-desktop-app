@@ -1,6 +1,6 @@
 import { HUB_ALERTS_PATH, type HubAlertRequest, type HubAlertResult } from "../../shared/urgentAlerts";
 import { BLOB_FRAGMENT_MAX_BYTES, isDeviceEventBlobReference, type DeviceEventBlobReference } from "../../shared/deviceEventBlobs";
-import { HUB_MEMORY_PATH, memoryRequestIsPost, type HubMemoryRequest, type MemoryResult } from "../../shared/memory";
+import { HUB_MEMORY_PATH, isMemoryPostAction, type HubMemoryRequest, type MemoryResult } from "../../shared/memory";
 import {
   HUB_MEMBER_RULES_PATH, HUB_PLAN_USAGE_PATH, HUB_PLAN_USAGE_REFRESH_PATH, HUB_PROGRESS_PATH, hubBlobFragmentPath, hubWebSocketUrl,
   type HubComposerCatalog, type HubDevice, type HubHealth, type HubMachineWakeRequest, type HubMemberRules, type HubPhoneInvite,
@@ -267,7 +267,7 @@ export class HubClient {
   /** Members' memory: a read goes as GET, a change (or a message's text, or
    *  the OpenAI key) as POST (HubMemory). */
   memory<T>(request: HubMemoryRequest, cancel?: AbortSignal): Promise<MemoryResult<T>> {
-    if (memoryRequestIsPost(request)) {
+    if (isMemoryPostAction(request.action)) {
       return this.request<MemoryResult<T>>("POST", HUB_MEMORY_PATH, JSON.stringify(request), "application/json", REQUEST_TIMEOUT_MS, cancel);
     }
     return this.request<MemoryResult<T>>("GET", `${HUB_MEMORY_PATH}?${new URLSearchParams({ request: JSON.stringify(request) }).toString()}`,

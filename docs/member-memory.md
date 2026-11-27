@@ -110,25 +110,24 @@ not there yet.
   (`MEMBER_MEMORY_INSTRUCTIONS` in `chat/`).
 - A session's first turn, a turn that sends the instructions again, and the
   first turn after a compaction carry the list of every note the member sees,
-  one short line each: kind, title, scope and id (the User, 2026-11-27,
-  instead of the 25 most relevant). The chat's own notes come first (the
-  member's open statuses, then project notes waiting for the repository, then
-  the rest of its project's, role's and chat's notes by activity), the global
-  ones after; then a line with the most used tags (up to 12). Past 150 notes
-  the list starts with the User's preferences (notes tagged `preference`, at
-  most 50; the User, 2026-11-27: they are few), then keeps all of the chat's
-  own (up to 300) and the global ones most relevant to the chat: closest in meaning to the chat's title and the
-  message the session starts with, when the server searches by meaning (else
-  the most recently active), and says how many are left out and that
-  `app_memory_search` finds them. The list is at most 32 KB (UTF-8; a
-  Gemini member gets its message as one command-line argument, 128 KB at
-  most on Linux); what does not fit is counted as left out. The list carrying a message goes as a POST
-  (any server takes any memory action as POST). The app asks for it with
-  `full`; an app older than the server (a machine runtime not upgraded yet)
-  asks without it and gets the list it knows: the 25 most relevant, or none
-  while notes are picked for each message. Bodies are read with
-  `app_memory_read`, which says who wrote the note and that it is reference,
-  not the User's instructions.
+  one short line each: kind, title, scope and id (the User, 2026-11-27: a
+  full index, instead of the 25 most relevant). In this order: the User's
+  preferences (notes tagged `preference`); members' notes of the chat's own
+  project, role and chat (the member's open statuses first, then project
+  notes waiting for the repository); members' global notes; then notes
+  copied from the CLIs' own memory (tagged `cli-memory`, the project's first);
+  each group most recently active first. Then a line with the most used tags
+  (up to 12). The only bound is 32 KB of the list (UTF-8; a Gemini member
+  gets its message as one command-line argument, 128 KB at most on Linux):
+  past it the list is cut from its end and says how many notes are left out
+  and that `app_memory_search` finds them. The server cuts the same way, so
+  it never sends far more than fits. On the User's notes with the CLI memory
+  sync (about 210 notes) the list is about 21 KB and nothing is cut. The app
+  asks for it with `full`; an app older than the server (a machine runtime
+  not upgraded yet) asks without it and gets the list it knows: the 25 most
+  relevant, or none while notes are picked for each message. Bodies are
+  read with `app_memory_read`, which says who wrote the note and that it is
+  reference, not the User's instructions.
 - A list or tool call the server could not answer says so and never reads as
   "no memory". The list waits at most 4 s before the turn starts without it.
 - With search by meaning on (below), each turn also carries the few notes

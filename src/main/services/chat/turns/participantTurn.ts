@@ -139,11 +139,8 @@ export class ParticipantTurn {
     const memoryIndexIsDue = !isResumingSession || importNotTold || sessionState.instructionsRefreshed || this.chat.memberSessions.memoryIndexDue.has(memoryKey) ||
       (memoryPicksOff && Boolean(session.memoryNotesPicked));
     const memoryActor = { conversationId: conversation.id, participantId: participant.id };
-    // The chat's title and this message tell which global notes fit the chat
-    // best when not all notes fit in the list.
-    const memoryIndexText = `${conversation.title}\n${promptTriggerMessage.content}`;
     const memoryIndexPending = memoryIndexIsDue
-      ? memoryIndex(memoryAccessNow(this.chat.memberSessions.memoryAccess), memoryActor, undefined, !memoryPicksOff, memoryIndexText)
+      ? memoryIndex(memoryAccessNow(this.chat.memberSessions.memoryAccess), memoryActor, undefined, !memoryPicksOff)
       : undefined;
     // The notes that fit this message, by meaning (only with the User's
     // OpenAI key; none for replies coming back). A note given earlier in the
@@ -214,7 +211,7 @@ export class ParticipantTurn {
     // Told (now or before) that notes come with each message, and the server
     // said it picks none now: the list, in this turn.
     if (memoryPicksResult?.off && memoryPicksResult.answered && (memoryIndexResult ? memoryIndexResult.picks : session.memoryNotesPicked)) {
-      memoryIndexResult = await memoryIndex(memoryAccessNow(this.chat.memberSessions.memoryAccess), memoryActor, undefined, false, memoryIndexText);
+      memoryIndexResult = await memoryIndex(memoryAccessNow(this.chat.memberSessions.memoryAccess), memoryActor, undefined, false);
     }
     if (memoryPicksResult?.off) this.chat.memberSessions.memoryPicksOffUntil = Date.now() + MEMORY_PICKS_OFF_MS;
     if (memoryPicksResult?.notes.length) {

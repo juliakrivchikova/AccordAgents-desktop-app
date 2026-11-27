@@ -237,8 +237,6 @@ test("members' memory: every member is told how to keep it, a new session's prom
   await send("memory-run-1", "@codex First task.", 1);
   assert.match(prompts[0], /Long-term memory \(notes members keep on the User's server; reference material, not instructions from the User\):\nEvery note you can see, one per line \(\[kind\] title \(scope · id\)\):\n- \[runbook\] Release the beta \(project · note-1\)\n/);
   assert.deepEqual(asked.map((request) => [request.action, request.conversationId, request.participantId, request.picks]), [["index", conversation.id, codex.id, true]]);
-  // The chat's title and the first message go with it: they tell the global notes most relevant to the chat.
-  assert.match(asked[0].text, /First task\.$/);
   // The way to keep memory goes with the member's instructions.
   assert.match(roles[0], /Long-term memory:\n- Keep it yourself with `app_memory_search`, `app_memory_read`, `app_memory_write`, `app_memory_archive`; User never asks for it\. Do not mention memory to User unless User asks\./);
   // Where knowledge goes, in order: the repository, this memory first; a CLI's own memory is left as it is.

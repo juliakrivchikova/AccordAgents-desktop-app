@@ -6,10 +6,8 @@ import type { ChatParticipant, Conversation } from "../shared/types";
 import {
   MEMORY_BODY_MAX_BYTES,
   MEMORY_EXPORT_PAGE,
-  MEMORY_INDEX_MAX_NOTES,
+  MEMORY_INDEX_MAX_BYTES,
   MEMORY_INDEX_MAX_TAGS,
-  MEMORY_INDEX_NEAR_MAX,
-  MEMORY_INDEX_PREFERENCES_MAX,
   MEMORY_LIST_MAX,
   MEMORY_LIVE_NOTES_MAX,
   MEMORY_PICK_MAX,
@@ -26,6 +24,7 @@ import {
   MEMORY_TITLE_MAX_CHARS,
   isMemoryNoteKind,
   isMemoryScope,
+  memoryIndexLine,
   memoryProjectName,
   memoryProjectsNamed,
   memoryTitleKey,
@@ -126,6 +125,9 @@ const SEARCH_MEANING_MIN = 0.15;
 const PICK_PRINT_TIMEOUT_MS = 3_000;
 const SEARCH_PRINT_TIMEOUT_MS = 4_000;
 const REQUEST_ID = /^[A-Za-z0-9._:-]{1,128}$/;
+/** Notes copied from a CLI's own memory (the CLI memory sync) carry it:
+ *  they come last in the list a session starts with. */
+const CLI_MEMORY_TAG = "cli-memory";
 /** The list apps before 2026-11-27 ask for (shortIndex). */
 const SHORT_INDEX_MAX_NOTES = 25;
 const SHORT_INDEX_STALE_DAYS = 60;
@@ -350,35 +352,40 @@ export class HubMemory {
   }
 
   /**
-   * The list a session starts with (the User, 2026-11-27): every note the
-   * member sees, its chat's own first (its open statuses, then project notes
-   * waiting for the repository, then the rest by activity), the global ones
-   * after. Past MEMORY_INDEX_MAX_NOTES: all of the chat's own and the global
-   * ones most relevant to the chat (by meaning to the message the session
-   * starts with, when the server can tell; else the most recently active),
-   * with how many are left out. Only summaries are read, never bodies.
+   * The list a session starts with (the User, 2026-11-27: a full index):
+   * every note the member sees, in the order of MEMORY_INDEX_MAX_BYTES (her
+   * preferences; members' notes of the chat's own project, role and chat,
+   * its open statuses first, then those waiting for the repository; members'
+   * global notes; notes copied from the CLIs' memory, the project's first;
+   * each by activity), cut from the end only past those bytes. Only
+   * summaries are read, never bodies.
    */
-  private async index(member: MemberContext, request: { picks?: unknown; text?: unknown; full?: unknown }): Promise<MemoryResult<MemoryIndexValue>> {
+  private async index(member: MemberContext, request: { picks?: unknown; full?: unknown }): Promise<MemoryResult<MemoryIndexValue>> {
     // An app older than the server (a machine runtime not upgraded yet) asks
     // without `full` and gets the list it knows how to show.
     if (request.full !== true) return this.shortIndex(member, request.picks === true);
     const picks = request.picks === true && Boolean(this.semantic?.ready());
     const activity = "max(updated_at, coalesce(verified_at, ''), coalesce(last_read_at, ''))";
-    const rank = `case when kind = 'status' and author = ${quote(member.handle)} and scope <> 'global' then 0
-      when awaiting_repository = 1 and scope = 'project' then 1 when scope <> 'global' then 2 else 3 end`;
+    const rank = `case when kind = 'status' and author = ${quote(member.handle)} then 0 when awaiting_repository = 1 then 1 else 2 end`;
     const rows = await this.query<Row>(`select ${SUMMARY_COLUMNS} from member_memory_notes where ${this.visibleSql(member)}
       order by ${rank}, ${activity} desc, id;`);
-    let notes = rows;
-    if (rows.length > MEMORY_INDEX_MAX_NOTES) {
-      // The User's preferences always, ahead of the rest (the User,
-      // 2026-11-27: they are few), then all of the chat's own, then the
-      // global notes most relevant to the chat while there is room.
-      const preferences = rows.filter((row) => parseTags(row.tagsJson).includes("preference")).slice(0, MEMORY_INDEX_PREFERENCES_MAX);
-      const listed = new Set(preferences.map((row) => row.id));
-      const near = rows.filter((row) => isNear(row) && !listed.has(row.id)).slice(0, MEMORY_INDEX_NEAR_MAX);
-      const room = Math.max(0, MEMORY_INDEX_MAX_NOTES - preferences.length - near.length);
-      const global = rows.filter((row) => !isNear(row) && !listed.has(row.id));
-      notes = [...preferences, ...near, ...(room ? (await this.mostRelevant(global, request.text, picks)).slice(0, room) : [])];
+    const group = (row: Row): number => {
+      const tags = parseTags(row.tagsJson);
+      if (tags.includes(CLI_MEMORY_TAG)) return isNear(row) ? 3 : 4;
+      if (tags.includes("preference")) return 0;
+      return isNear(row) ? 1 : 2;
+    };
+    const ordered = rows.map((row, index) => ({ row, index, group: group(row) }))
+      .sort((left, right) => left.group - right.group || left.index - right.index)
+      .map((entry) => entry.row);
+    // Cut as the app writes it, so a server never sends far more than fits.
+    const notes: Row[] = [];
+    let bytes = 0;
+    for (const row of ordered) {
+      const size = Buffer.byteLength(memoryIndexLine(summaryOf(row))) + 1;
+      if (bytes + size > MEMORY_INDEX_MAX_BYTES) break;
+      notes.push(row);
+      bytes += size;
     }
     const tags = await this.tagsInUse(member, MEMORY_INDEX_MAX_TAGS);
     return { ok: true, value: { notes: notes.map(summaryOf), more: rows.length - notes.length, ...(tags.length ? { tags } : {}), ...(picks ? { picks: true } : {}), full: true } };
@@ -400,18 +407,6 @@ export class HubMemory {
     const rows = await this.query<Row>(`select ${SUMMARY_COLUMNS} from member_memory_notes where ${this.visibleSql(member)}
       and (${rank} < 2 or ${activity} >= ${quote(cutoff)}) order by ${rank}, ${activity} desc limit ${SHORT_INDEX_MAX_NOTES};`);
     return { ok: true, value: { notes: rows.map(summaryOf), more: Math.max(0, total - rows.length), ...(tags.length ? { tags } : {}) } };
-  }
-
-  /** Global notes by meaning to a session's first message when the server
-   *  can tell (OpenAI answers in time), else as they came (most active first). */
-  private async mostRelevant(rows: Row[], text: unknown, canPick: boolean): Promise<Row[]> {
-    if (!canPick || typeof text !== "string" || !text.trim() || text.includes("\u0000") || !this.semantic) return rows;
-    const print = await this.semantic.printQuery(text.slice(0, QUERY_MAX_CHARS), PICK_PRINT_TIMEOUT_MS);
-    if (!print) return rows;
-    const scores = this.semantic.noteCloseness(print, rows.map((row) => row.id));
-    return rows.map((row, index) => ({ row, index, score: scores.get(row.id)?.score ?? -1 }))
-      .sort((left, right) => right.score - left.score || left.index - right.index)
-      .map((entry) => entry.row);
   }
 
   /** The tags on the notes a member sees (not archived), most used first:
