@@ -35,8 +35,9 @@ interface HeldTurn {
   /** A request from another member that may go out with the ones waiting
    *  next to it (takeCombinableTurns). */
   combinable?: { trigger: ChatMessage; chars: number };
-  /** Taken into the turn of the request before it: its reply answers it. */
-  combinedInto?: Promise<ChatMessage[]>;
+  /** Taken into the turn of the request before it: its reply answers it
+   *  (`stopped`: that reply was stopped before the member started). */
+  combinedInto?: Promise<CombinedReply>;
   /** Ends its wait once it is taken into another turn. */
   wake?: () => void;
 }
@@ -81,14 +82,26 @@ interface SerializedTurnOptions {
   combinedTriggers?: ChatMessage[];
 }
 
+/** What the turn a request went out in ended with: its messages (none: it
+ *  did not run), or `stopped` when the User stopped it before the member
+ *  started. */
+type CombinedReply = ChatMessage[] | "stopped";
+
 /** A request taken into another's turn that did not answer it. */
 class NotAnsweredTogether extends Error {}
 
+/** A request taken into another's turn that the User stopped before the
+ *  member started: it ends stopped with it, as a Stop of that reply ends
+ *  every request it answers. */
+export class CombinedTurnStopped extends Error {
+  constructor() { super("Chat run cancelled."); }
+}
+
 /** The reply of the turn a request went out with, or a Stop of its own run first. */
-async function abortableReply(reply: Promise<ChatMessage[]>, signal: AbortSignal): Promise<ChatMessage[]> {
-  let messages: ChatMessage[] = [];
-  await abortableWait(reply.then((value) => { messages = value; }), signal);
-  return messages;
+async function abortableReply(reply: Promise<CombinedReply>, signal: AbortSignal): Promise<CombinedReply> {
+  let ended: CombinedReply = [];
+  await abortableWait(reply.then((value) => { ended = value; }), signal);
+  return ended;
 }
 
 /** The order of one member's turns, and where each runs. */
@@ -163,7 +176,7 @@ export class TurnQueue {
     // The requests that go out with this one, and the end of this turn for
     // them (its reply, or none when it did not run).
     let combinedTriggers = options.combinedTriggers ?? [];
-    let settleCombined: ((messages: ChatMessage[]) => void) | undefined;
+    let settleCombined: ((ended: CombinedReply) => void) | undefined;
     let answered: ChatMessage[] | undefined;
     const runKey = `${conversation.id}:${participant.id}`;
     // A request delivered now to a member here: a CLI that cannot take it in
@@ -193,6 +206,7 @@ export class TurnQueue {
         // for that turn).
         reservation.release();
         const messages = await abortableReply(combinedInto, turnController.signal);
+        if (messages === "stopped") throw new CombinedTurnStopped();
         if (!messages[0]?.metadata?.combinedRequestMessageIds?.includes(triggerMessage.id)) throw new NotAnsweredTogether();
         this.answeredTogether.add(runId);
         return messages;
@@ -200,7 +214,7 @@ export class TurnQueue {
       setOf(this.runningTurnRuns, runKey).add(runId);
       runningHere = true;
       if (options.combine && !options.combinedTriggers) {
-        const result = new Promise<ChatMessage[]>((resolve) => { settleCombined = resolve; });
+        const result = new Promise<CombinedReply>((resolve) => { settleCombined = resolve; });
         combinedTriggers = this.takeCombinableTurns(reservation, conversation.id, participant.id, result, options.combine.maxChars);
         if (combinedTriggers.length === 0) settleCombined = undefined;
       }
@@ -256,6 +270,9 @@ export class TurnQueue {
         try {
           messages = await this.chat.participantTurn.runParticipantTurn(conversation, participant, triggerMessage, runId, turnController.signal, progress, {
             ...options,
+            // What its reply asks of other members counts from the deepest
+            // request it answers (the limit on how deep requests go).
+            participantRequestDepth: Math.max(options.participantRequestDepth ?? 0, ...combinedTriggers.map((message) => message.metadata?.participantRequest?.depth ?? 0)),
             turnSegmentId,
             combinedTriggers,
             queuedInCli: Boolean(reservation.behindMemberTurn),
@@ -293,8 +310,11 @@ export class TurnQueue {
       answered = messages;
       return messages;
     } finally {
-      // The requests that went out with it get its reply (none: they run on their own).
-      settleCombined?.(answered ?? []);
+      // The requests that went out with it get its reply; stopped by the
+      // User before it gave one, they end stopped with it; otherwise (it did
+      // not run) they run on their own.
+      const stoppedByUser = Boolean(turnController?.signal.aborted) && !this.chat.activeRuns.sentNowRunIds.has(runId);
+      settleCombined?.(stoppedByUser && !answered?.length ? "stopped" : answered ?? []);
       if (runningHere) {
         this.runningTurnRuns.get(runKey)?.delete(runId);
         if (this.runningTurnRuns.get(runKey)?.size === 0) this.runningTurnRuns.delete(runKey);
@@ -467,7 +487,7 @@ export class TurnQueue {
    *  COMBINED_REQUESTS_MAX, and only while all their text stays within
    *  `maxChars` (one request's limit: Antigravity gets its prompt as an
    *  argument). Each taken turn's wait ends; its reply is `result`'s. */
-  takeCombinableTurns(reservation: ParticipantTurnReservation, conversationId: string, participantId: string, result: Promise<ChatMessage[]>, maxChars: number): ChatMessage[] {
+  takeCombinableTurns(reservation: ParticipantTurnReservation, conversationId: string, participantId: string, result: Promise<CombinedReply>, maxChars: number): ChatMessage[] {
     const lead = this.heldOf.get(reservation);
     if (!lead?.combinable) return [];
     const key = `${conversationId}:${participantId}`;
@@ -489,7 +509,7 @@ export class TurnQueue {
   }
 
   /** The reply of the turn this one was taken into, if it was. */
-  combinedInto(reservation: ParticipantTurnReservation): Promise<ChatMessage[]> | undefined {
+  combinedInto(reservation: ParticipantTurnReservation): Promise<CombinedReply> | undefined {
     return this.heldOf.get(reservation)?.combinedInto;
   }
 

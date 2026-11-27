@@ -248,3 +248,35 @@ test("requests answered together by a member that compacts itself on the way get
   }
   await waitFor(() => chat.storage.current.metadata.running === false, 8_000);
 });
+
+test("a request that went out with another ends when that one's item ends, wherever it ends: an approval's resume included, reading both replies", async () => {
+  const records = await import("./chat/requests/requestRecords");
+  const now = new Date().toISOString();
+  const item = (extra: Record<string, unknown> = {}) => ({ targetParticipantId: "far", targetHandle: "far", prompt: "q", status: "running", createdAt: now, updatedAt: now, ...extra });
+  const batch = (id: string, extra: Record<string, unknown> = {}) => ({ id, requesterParticipantId: "one", requesterHandle: "one", status: "running", source: "mcp",
+    resumeRequester: true, depth: 0, createdAt: now, updatedAt: now, items: [item(extra)] });
+  const conversation: any = { id: "c", messages: [
+    { id: "lead", role: "participant", content: "", createdAt: now, status: "done", metadata: { participantRequest: batch("b-lead") } },
+    { id: "taken", role: "participant", content: "", createdAt: now, status: "done", metadata: { participantRequest: batch("b-taken", { answeredWith: { requestMessageId: "lead", replyMessageId: "turn-reply" } }) } }
+  ] };
+  const target: any = { id: "far", handle: "far" };
+  records.applyPermissionResumeToParticipantRequest(conversation, "lead", "b-lead", target, [{ id: "after-approval", status: "done" } as any]);
+  const taken = conversation.messages[1].metadata.participantRequest;
+  assert.equal(taken.items[0].status, "answered");
+  assert.equal(taken.items[0].replyMessageId, "after-approval");
+  assert.deepEqual(taken.items[0].earlierReplyMessageIds, ["turn-reply"], "it reads the reply of the turn it went out in too");
+  assert.equal(taken.status, "answered");
+});
+
+test("a Stop of the reply before the member's machine started ends every request that went out with it; none starts again on its own", async () => {
+  const { service, link, turnRequests, requestMessage } = await machineMemberAskedThrice();
+  const lead = turnRequests()[1];
+  assert.equal(service.cancelRun(lead.runId.replace(/^turn-/, "")), true);
+  await fixtures.waitFor(() => link.ops.some((op) => op.kind === "turn.stop" && op.runId === lead.runId), 5_000);
+  // The server ends the turn nobody took.
+  await service.applyServerEntries([fixtures.fromServer(lead.conversationId, "desktop-device", { kind: "turn.stop",
+    turn: { runId: lead.runId, conversationId: lead.conversationId, messageId: lead.messageId, participantId: lead.participantId, state: "stopped" } })]);
+  await fixtures.waitFor(() => requestMessage("three").metadata!.participantRequest!.items[0].status === "interrupted", 5_000);
+  await new Promise((resolve) => setTimeout(resolve, 100));
+  assert.equal(turnRequests().length, 2, "no turn of its own for the third");
+});

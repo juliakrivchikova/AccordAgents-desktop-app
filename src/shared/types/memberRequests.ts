@@ -54,6 +54,11 @@ export interface ChatParticipantRequestItem {
   /** What it wrote before, when it compacted its context in between and went
    *  on (replyMessageId is the last of them). */
   earlierReplyMessageIds?: string[];
+  /** It went out with another request in one turn of its target (TurnQueue
+   *  takeCombinableTurns): it ends as that request's item for the same
+   *  target ends, with its reply (updateParticipantRequestBatch);
+   *  `replyMessageId` is the reply of that turn, which it reads as well. */
+  answeredWith?: { requestMessageId: string; replyMessageId?: string };
   createdAt: string;
   updatedAt: string;
   error?: string;

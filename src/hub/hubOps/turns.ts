@@ -140,10 +140,15 @@ export class Turns {
           if (typeof asked === "object") askGrant = store.useGrantsSql(op.conversationId, [asked.grant], acceptedAt);
         }
       }
+      // Requests that go out with this one in the member's turn (the
+      // asking device put them together): each a request to this member,
+      // and from a machine only one its own member may ask without the
+      // User's approval. One left out runs on its own, asked as any is.
+      const request = op.request && "combined" in op.request ? withCombinedAllowed(op.request, conversation, op.participantId, op.messageId, device) : op.request;
       return place_({ runId: op.runId, conversationId: op.conversationId, messageId: op.messageId, participantId: op.participantId,
         state: "requested", requestedAt: acceptedAt, requestedBy: device.deviceId,
         ...(op.pendingMessageId ? { pendingMessageId: op.pendingMessageId } : {}),
-        ...(op.request ? { request: op.request } : {}) }, undefined, askGrant);
+        ...(request ? { request } : {}) }, undefined, askGrant);
     }
 
     // turn.claim: only where the member runs (Д4), once (Д5).
@@ -173,4 +178,24 @@ export class Turns {
   async claimedTurns(device: HubDevice): Promise<HubTurn[]> {
     return this.deps.storage.hubOps().claimedBy(device.deviceId);
   }
+}
+
+/** A turn's request with only the requests that may go out with its own
+ *  (`combined`, TurnQueue takeCombinableTurns on the asking device): each a
+ *  request in this chat to this member, other than the turn's own; from a
+ *  machine, only one of its own members' requests that member may ask
+ *  without the User's approval (one her approval lets run is asked on its
+ *  own, which uses that approval). */
+function withCombinedAllowed(request: Record<string, unknown>, conversation: Conversation, participantId: string, messageId: string, device: HubDevice): Record<string, unknown> {
+  const { combined, ...rest } = request;
+  const members = Array.isArray(conversation.metadata?.participants) ? conversation.metadata.participants as Array<{ id?: unknown; homeMachineId?: string }> : [];
+  const allowed = (Array.isArray(combined) ? combined : []).filter((id): id is string => {
+    if (typeof id !== "string" || id === messageId) return false;
+    const message = conversation.messages.find((item) => item.id === id);
+    if (!message?.metadata?.participantRequest?.items?.some((item) => item.targetParticipantId === participantId)) return false;
+    if (device.role !== "machine") return true;
+    return message.role === "participant" && runsOnMachine(members.find((item) => item?.id === message.participantId), device.machineId) &&
+      !askNeedsApproval(conversation, message);
+  });
+  return allowed.length > 0 ? { ...rest, combined: allowed } : rest;
 }

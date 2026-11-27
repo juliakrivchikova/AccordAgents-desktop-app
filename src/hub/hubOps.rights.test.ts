@@ -334,3 +334,27 @@ test("a machine's member starts an Accord with the app tool: its facilitator els
   assert.equal(status(await ask()).status, "accepted", "switch on: the facilitator runs, as the app runs it");
   assert.equal(status(await ask()).status, "rejected", "once per launch");
 });
+
+test("requests a machine sends out together in one turn of a member elsewhere are only ones its own members may ask without her approval", async (t) => {
+  const h = await hub(t);
+  const chat = id("chat");
+  const free = { id: "p-free", handle: "free", label: "Free", roleConfigId: "r", homeMachineId: "machine-1", permissions: { requestParticipants: "allow" } };
+  const asks = { id: "p-asks", handle: "asks", label: "Asks", roleConfigId: "r", homeMachineId: "machine-1", permissions: { requestParticipants: "ask" } };
+  const desk = { id: "p-desk", handle: "desk", label: "Desk", roleConfigId: "r" };
+  await h.write(h.owner, { opId: id("op"), kind: "conversation.create", conversationId: chat,
+    conversation: { title: "Plans", kind: "chat", createdAt: new Date().toISOString(), metadata: { participants: [desk, free, asks] } } } as HubOp);
+  const request = (messageId: string, participantId: string, target = "p-desk") => ({ ...reply(messageId, participantId, "done", "a question"),
+    metadata: { participantRequest: { id: `b-${messageId}`, requesterParticipantId: participantId, items: [{ targetParticipantId: target, prompt: "a question", status: "running" }] } } }) as ChatMessage;
+  for (const message of [request("r-1", "p-free"), request("r-2", "p-free"), request("r-3", "p-asks"), request("r-4", "p-free", "p-free")]) {
+    await h.write(h.machine, { opId: id("op"), kind: "message.create", conversationId: chat, message });
+  }
+  await h.write(h.owner, { opId: id("op"), kind: "message.create", conversationId: chat, message: userMessage("u-user", "her words") });
+  const asked = await h.write(h.machine, { opId: id("op"), kind: "turn.request", conversationId: chat, runId: `turn-${id("x")}`, messageId: "r-1", participantId: "p-desk",
+    request: { kind: "turn", combined: ["r-2", "r-3", "r-4", "u-user", "r-1", "missing"] } } as HubOp);
+  assert.equal(asked.body.results[0].status, "accepted");
+  assert.deepEqual((asked.body.results[0] as { turn?: { request?: { combined?: string[] } } }).turn?.request?.combined, ["r-2"],
+    "not one needing her approval, one to another member, her words, the turn's own or one that is not there");
+  const none = await h.write(h.machine, { opId: id("op"), kind: "turn.request", conversationId: chat, runId: `turn-${id("x")}`, messageId: "r-2", participantId: "p-desk",
+    request: { kind: "turn", combined: ["r-3"] } } as HubOp);
+  assert.equal((none.body.results[0] as { turn?: { request?: Record<string, unknown> } }).turn?.request?.combined, undefined);
+});
