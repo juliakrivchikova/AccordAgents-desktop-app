@@ -217,3 +217,34 @@ test("a machine asked for a turn with requests that go out together prompts its 
   const reply = chat.replies().find((message) => message.content === "Answered both.");
   assert.deepEqual(reply.metadata.combinedRequestMessageIds, ["req-2"]);
 });
+
+test("requests answered together by a member that compacts itself on the way get the reply it goes on to, each requester reading it", async () => {
+  const askers = ["asker1", "asker2"].map((id) => chatParticipant({ id, handle: id, ...ASKS }));
+  let releaseBusy!: () => void;
+  const busy = new Promise<void>((resolve) => { releaseBusy = resolve; });
+  const asked: Record<string, any> = {};
+  const chat = selfCompactingChat({
+    participant: { permissions: normalizeChatAgentPermissions({ ...defaultChatAgentPermissions(), requestCompaction: "allow" }) },
+    others: askers,
+    turn: async ({ participantId, actor, service, call }) => {
+      if (participantId.startsWith("asker")) {
+        if (call === 1) asked[participantId] = await service.requestParticipantsFromTool(actor, { requests: [{ target: "admin", prompt: `Question from ${participantId}` }] });
+        return call === 1 ? "Asked admin." : "Thanks.";
+      }
+      if (call === 1) { await busy; return "Busy work done."; }
+      if (call === 2) { await service.requestSelfCompactionFromTool(actor, { instructions: "Answer both." }); return "Looked into both."; }
+      return "Answered both after compacting.";
+    }
+  });
+  await chat.service.sendMessage({ conversationId: chat.conversation.id, runId: "user-run", content: "@admin do the long task" });
+  await waitFor(() => adminPrompts(chat).length === 1, 5_000);
+  for (const asker of ["asker1", "asker2"]) await ask(chat, asked, asker);
+  releaseBusy();
+  await waitFor(() => ["asker1", "asker2"].every((asker) => chat.prompts.filter((item) => item.participantId === asker).length === 2), 10_000);
+  const final = chat.replies().find((message) => message.content === "Answered both after compacting.");
+  for (const asker of ["asker1", "asker2"]) {
+    assert.equal(itemFor(chat, asker).replyMessageId, final.id, asker);
+    assert.match(chat.prompts.filter((item) => item.participantId === asker)[1].prompt, /Answered both after compacting\./, `${asker} reads the answer`);
+  }
+  await waitFor(() => chat.storage.current.metadata.running === false, 8_000);
+});

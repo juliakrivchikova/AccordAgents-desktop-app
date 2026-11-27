@@ -658,8 +658,11 @@ export class ParticipantRequests {
         }
         const lead = itemOf(reply?.metadata?.sourceMessageId);
         // Its request gone (removed with its message): the reply answers it.
+        // What the member wrote before a compaction of its own goes with it
+        // (the requester reads it, as it reads the reply).
         const outcome = lead
-          ? (isOpenParticipantRequestStatus(lead.status) ? undefined : { status: lead.status, replyMessageId: lead.replyMessageId, error: lead.error })
+          ? (isOpenParticipantRequestStatus(lead.status) ? undefined
+            : { status: lead.status, replyMessageId: lead.replyMessageId, error: lead.error, earlierReplyMessageIds: lead.earlierReplyMessageIds })
           : { status: reply?.status === "error" ? "failed" as const : "answered" as const, replyMessageId: reply?.id, error: reply?.status === "error" ? reply.content : undefined };
         if (!outcome) return;
         const now = new Date().toISOString();
