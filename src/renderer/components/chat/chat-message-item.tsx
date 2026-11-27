@@ -66,6 +66,7 @@ import { WorkedRow } from "./chat-worked-row";
 import { ChatWaitingMessageActions } from "./chat-waiting-message";
 import { ChatDelegationRows, ChatWorkedFold } from "./chat-delegation-fold";
 import { ChatSessionsFinishedActivity, ChatSessionsRunningReply, sessionsReplyHasActivity } from "./chat-sessions-activity";
+import { shownLiveProgress, shownMemberActions, useChatMemberActionsShown } from "./chat-member-actions";
 import { mainSessionMemberOf, sessionsCompactionLineOf, withoutLeadingMention } from "../../../shared/mainSession";
 import type { SessionsTaskEntry } from "../../../shared/mainSessionView";
 import { ChatAppToolApprovalList } from "./chat-app-tool-approvals";
@@ -162,6 +163,10 @@ export const ChatMessageItem = memo(function ChatMessageItem(props: {
   const sessionsNames = useSessionsViewNames();
   const appText = useSessionsViewText();
   const nameOf = useSessionsViewLabel();
+  // Settings → General → Show members’ actions: off, the reply is drawn as
+  // if it had none (its words, cards and running state stay).
+  const actionsShown = useChatMemberActionsShown();
+  const liveProgress = shownLiveProgress(props.liveProgress, actionsShown);
   const urgentAlert = urgentAlertOfMessage(message);
   if (urgentAlert) {
     return <ChatUrgentAlertCard message={message} alert={urgentAlert} participant={props.participants?.find((item) => item.id === message.participantId)} />;
@@ -202,23 +207,23 @@ export const ChatMessageItem = memo(function ChatMessageItem(props: {
     : message.role === "participant" && message.status === "error"
       ? sessionsViewReplyText(rawDisplayContent, message.participantLabel ?? props.participants?.find((item) => item.id === message.participantId)?.handle, sessionsNames)
       : rawDisplayContent;
-  const streamedRemoteRunStatus = props.liveProgress?.remoteRunStatus ?? message.metadata?.remoteRunStatus;
+  const streamedRemoteRunStatus = liveProgress?.remoteRunStatus ?? message.metadata?.remoteRunStatus;
   const streamedContent = remoteRunStreamingContent({
     isStreaming,
     appMessageSource: message.metadata?.appMessageSource,
     remoteRunStatus: streamedRemoteRunStatus,
-    livePartialContent: props.liveProgress?.partialContent,
+    livePartialContent: liveProgress?.partialContent,
     displayContent
   });
   // A reply that waited in the queue works from when its own turn began.
   const streamingStartedAt = remoteRunStreamingStartedAt(message.metadata?.turnStartedAt ?? message.createdAt, streamedRemoteRunStatus);
-  const streamedActivity = props.liveProgress?.activity;
+  const streamedActivity = liveProgress?.activity;
   const streamedActivityEvents = remoteRunStreamingActivityEvents({
     isStreaming,
     appMessageSource: message.metadata?.appMessageSource,
     remoteRunStatus: streamedRemoteRunStatus,
-    liveActivityEvents: props.liveProgress?.activityEvents,
-    persistedActivityEvents: message.metadata?.activityEvents
+    liveActivityEvents: liveProgress?.activityEvents,
+    persistedActivityEvents: shownMemberActions(message.metadata?.activityEvents, actionsShown)
   });
   const participant = message.participantId
     ? props.participants?.find((item) => item.id === message.participantId)
@@ -241,11 +246,11 @@ export const ChatMessageItem = memo(function ChatMessageItem(props: {
   const { posts: interimPosts, all: allImageAttachments, own: imageAttachments } = chatReplyPictures(message);
   const allPendingIds = pending.map((mention) => mention.targetParticipantId);
   const processingTranscript = message.metadata?.processingTranscript;
-  const activityEvents = message.metadata?.activityEvents ?? [];
+  const activityEvents = shownMemberActions(message.metadata?.activityEvents, actionsShown) ?? [];
   const processingTranscriptView = !isStreaming && processingTranscript ? chatProcessingTranscriptView(processingTranscript.content, displayContent, {
     retainedStart: processingTranscript.retainedStart,
     truncated: processingTranscript.truncated,
-    omittedActivityEventCount: processingTranscript.omittedActivityEventCount
+    omittedActivityEventCount: actionsShown ? processingTranscript.omittedActivityEventCount : undefined
   }) : undefined;
   // Queued here (queuedBehind) or, for a member on a machine, by its own word (turnQueued), as on the phone.
   const queuedBehind = isStreaming ? message.metadata?.queuedBehind ?? (message.metadata?.turnQueued ? { handle: participant?.handle ?? "" } : undefined) : undefined;
@@ -472,7 +477,7 @@ export const ChatMessageItem = memo(function ChatMessageItem(props: {
               <ChatSessionsRunningReply
                 since={queuedBehind ? undefined : streamingStartedAt}
                 content={streamedContent}
-                activityEvents={props.liveProgress?.activityEvents ?? (streamedActivityEvents.length > 0 ? streamedActivityEvents : activityEvents)}
+                activityEvents={liveProgress?.activityEvents ?? (streamedActivityEvents.length > 0 ? streamedActivityEvents : activityEvents)}
                 statusLabel={streamedRemoteRunStatus?.label}
                 posts={interimPosts}
                 attachments={allImageAttachments}

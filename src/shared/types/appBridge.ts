@@ -96,6 +96,7 @@ export interface AppBridge {
   onFlushFileEdits(callback: (requestId: string) => void): () => void;
   fileEditsFlushed(requestId: string): void;
   setBetaUpdates(enabled: boolean): Promise<AppSettings>;
+  setChatShowMemberActions(shown: boolean): Promise<AppSettings>;
   /** Off takes effect at once; on applies from the next launch. */
   setCrashReports(enabled: boolean): Promise<AppSettings>;
   dismissCrashReportsNotice(): Promise<AppSettings>;

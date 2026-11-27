@@ -679,6 +679,7 @@ function settings(): AppSettings {
   return {
     roundLimitDefault: 2,
     betaUpdates: false,
+    chatShowMemberActions: true,
     crashReports: true,
     crashReportsNotice: false,
     cliAgentRunTimeoutMs: 86_400_000,

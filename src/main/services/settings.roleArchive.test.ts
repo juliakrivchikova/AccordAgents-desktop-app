@@ -86,6 +86,7 @@ function settingsServiceWith(
     chatCustomAvatars: [],
     roundLimitDefault: stored.roundLimitDefault,
     betaUpdates: normalizeBetaUpdates(stored.betaUpdates),
+    chatShowMemberActions: true,
     crashReports: true,
     crashReportsNotice: false,
     cliAgentRunTimeoutMs: stored.cliAgentRunTimeoutMs,

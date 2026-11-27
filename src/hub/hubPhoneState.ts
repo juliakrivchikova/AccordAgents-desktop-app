@@ -94,8 +94,9 @@ export function liveTimelineEvents(conversation: Conversation, runs: ReviewProgr
     const progress = runId ? byRun.get(runId) : undefined;
     const agent = progress?.agentProgress;
     const partial = agent?.partialContent?.trim();
-    const content = (partial ? partial.slice(-LIVE_TEXT_TAIL_CHARS) : undefined) ||
-      agent?.remoteRunStatus?.label?.trim() || agent?.activity?.trim() ||
+    const runStatus = agent?.remoteRunStatus?.label?.trim();
+    const stepInProgress = !partial && !runStatus ? agent?.activity?.trim() : undefined;
+    const content = (partial ? partial.slice(-LIVE_TEXT_TAIL_CHARS) : undefined) || runStatus || stepInProgress ||
       (message.participantLabel ? `${message.participantLabel} is running...` : "Running...");
     const mobileEventId = typeof message.metadata?.mobileEventId === "string" ? message.metadata.mobileEventId : undefined;
     const sourceMessageId = typeof message.metadata?.sourceMessageId === "string" && message.metadata.sourceMessageId ? message.metadata.sourceMessageId : undefined;
@@ -123,6 +124,9 @@ export function liveTimelineEvents(conversation: Conversation, runs: ReviewProgr
       // progress), not words of the reply: the sessions view shows it as a
       // step, not as the reply's text.
       ...(!partial ? { liveStatus: true } : {}),
+      // That text is the step in progress: a phone hides it with members'
+      // actions (Settings → General → Show members’ actions).
+      ...(stepInProgress ? { liveActivity: true } : {}),
       // Queued behind the member's turn before it, or when its own run began.
       ...phoneTurnTiming(message, agent?.remoteRunStatus ?? message.metadata?.remoteRunStatus),
       status: "pending",

@@ -277,9 +277,10 @@ test("a machine's live progress shows as the pending row with the turn it is, th
   const frame = encodeMachineProgress(undefined, progress, { conversationId: "chat-1", streamId: "stream-1", sequence: 1 });
   assert.equal((await h.call(machine, "POST", "/v1/progress", { frames: [frame] })).status, 200, "a machine posts its members' progress");
   await h.settle();
-  const live = await client.getJson<{ events: Array<{ id: string; content: string; status: string; runId: string; participantId?: string; sourceMessageId?: string }> }>("/v1/phone/progress", { conversationId: "chat-1" });
+  const live = await client.getJson<{ events: Array<{ id: string; content: string; status: string; runId: string; participantId?: string; sourceMessageId?: string; liveActivity?: boolean }> }>("/v1/phone/progress", { conversationId: "chat-1" });
   assert.deepEqual(live.events.map((event) => [event.id, event.content, event.status, event.runId, event.participantId, event.sourceMessageId]),
     [["bubble-1", "Half of the answer", "pending", runId, machineMember.id, asked.id]], "with what a Stop names its turn by");
+  assert.equal(live.events[0]?.liveActivity, undefined, "words of the reply are not a step");
   // The phone is looking (its wait for news is open): not rung.
   const changes = await client.getJson<{ instance: string; seq: number }>("/v1/phone/changes", { instance: "none", after: 0 });
   const waiting = client.getJson("/v1/phone/changes", { instance: changes.instance, after: changes.seq, waitMs: 3000 }, { timeoutMs: 10_000 });
@@ -293,6 +294,37 @@ test("a machine's live progress shows as the pending row with the turn it is, th
   assert.deepEqual(after.events, [], "a settled reply has no live row");
   const notices = await client.getJson<{ notices: Array<{ kind: string; body: string }> }>("/v1/phone/notices");
   assert.deepEqual(notices.notices.map((notice) => [notice.kind, notice.body]), [["reply", "@box replied."]], "a notice names who, not what");
+});
+
+test("the computer's Show members' actions reaches the phone with every changes answer, and changing it ends a phone's wait at once", async (t) => {
+  const h = await hub(t);
+  const { client } = await pairPhone(h);
+  const catalog = (display?: { showMemberActions: boolean }) => ({ catalog: { version: 1, publishedAt: new Date().toISOString(), roles: {}, prompts: [], skills: [], avatars: {}, ...(display ? { display } : {}) } });
+  type Changes = { instance: string; seq: number; conversationIds?: string[]; display?: { showMemberActions: boolean } };
+  const before = await client.getJson<Changes>("/v1/phone/changes", { instance: "none", after: 0 });
+  assert.equal(before.display, undefined, "no catalog yet: the phone keeps its own");
+  assert.equal((await h.call(h.owner, "PUT", "/v1/catalog", catalog({ showMemberActions: false }))).status, 200);
+  await h.settle();
+  const off = await client.getJson<Changes>("/v1/phone/changes", { instance: "none", after: 0 });
+  assert.deepEqual(off.display, { showMemberActions: false });
+  const started = Date.now();
+  const waiting = client.getJson<Changes>("/v1/phone/changes", { instance: off.instance, after: off.seq, waitMs: 20_000 }, { timeoutMs: 30_000 });
+  await new Promise((resolve) => setTimeout(resolve, 100));
+  assert.equal((await h.call(h.owner, "PUT", "/v1/catalog", catalog({ showMemberActions: true }))).status, 200);
+  const woken = await waiting;
+  assert.ok(Date.now() - started < 5_000, "answered at once, not at the end of its wait");
+  assert.deepEqual(woken.display, { showMemberActions: true });
+  assert.deepEqual(woken.conversationIds, [], "no chat changed");
+  // Published again unchanged (another setting was saved): a wait goes on.
+  const still = client.getJson<Changes>("/v1/phone/changes", { instance: woken.instance, after: woken.seq, waitMs: 1_500 }, { timeoutMs: 10_000 });
+  const again = Date.now();
+  assert.equal((await h.call(h.owner, "PUT", "/v1/catalog", catalog({ showMemberActions: true }))).status, 200);
+  await still;
+  assert.ok(Date.now() - again >= 1_000, "an unchanged setting is no news");
+  // A computer from before publishes none: the phone is told nothing.
+  assert.equal((await h.call(h.owner, "PUT", "/v1/catalog", catalog())).status, 200);
+  await h.settle();
+  assert.equal((await client.getJson<Changes>("/v1/phone/changes", { instance: "none", after: 0 })).display, undefined);
 });
 
 test("a picture the phone puts on the server is read back by its message, and a custom avatar from the catalog", async (t) => {
@@ -466,11 +498,12 @@ test("a running reply's steps reach the phone as the sessions view's short rows,
     agentProgress: { participantId: localMember.id, participantLabel: "@mac", state: "running", messageId: "bubble-steps", activity: "Reading file", activityEvents: steps } } as ReviewProgress;
   const frame = encodeMachineProgress(undefined, progress, { conversationId: "chat-s", streamId: "stream-steps", sequence: 1 });
   assert.equal((await h.call(h.owner, "POST", "/v1/progress", { frames: [frame] })).status, 200);
-  const live = await client.getJson<{ events: Array<{ id: string; content: string; liveStatus?: boolean; activity?: Array<{ kind: string; text: string }>; activityMore?: number }> }>(
+  const live = await client.getJson<{ events: Array<{ id: string; content: string; liveStatus?: boolean; liveActivity?: boolean; activity?: Array<{ kind: string; text: string }>; activityMore?: number }> }>(
     "/v1/phone/progress", { conversationId: "chat-s" });
   const [event] = live.events;
   assert.equal(event?.content, "Reading file");
   assert.equal(event?.liveStatus, true, "its text is where the run stands, not words of the reply");
+  assert.equal(event?.liveActivity, true, "and that text is the step in progress, which a phone hides with members' actions");
   assert.equal(event?.activity?.length, 12, "the newest steps only");
   assert.equal(event?.activityMore, 4);
   assert.deepEqual(event?.activity?.[0], { kind: "shell", text: "npm test 3" }, "the command's first line");

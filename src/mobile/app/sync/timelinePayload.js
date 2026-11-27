@@ -316,6 +316,8 @@ export async function handleRelayTimelinePayload(payload, fallbackConversationId
       // live text is where the run stands rather than words of the reply.
       ...activity,
       ...(role === "participant" && status === "pending" && event.liveStatus === true ? { liveStatus: true } : {}),
+      // That live text names the step in progress (hidden with members' actions).
+      ...(role === "participant" && status === "pending" && event.liveActivity === true ? { liveActivity: true } : {}),
       // Waiting behind its member's turn before it, or when its own run
       // began: its "Queued", and where its "Working for …" counts from.
       ...(role === "participant" && status === "pending" && event.queued === true ? { queued: true } : {}),

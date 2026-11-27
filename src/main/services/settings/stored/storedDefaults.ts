@@ -21,7 +21,7 @@ import { hubSettingField, isStoredHubPhoneInvite } from "../machines/hubSetting"
 import { isRelayRemovalFailure, isRelayRemovalPending, isRelayRemovalRecord } from "../machines/relayRemovalRecords";
 import { normalizeMachineInstalls, normalizeMachines } from "../machines/storedMachines";
 import { normalizeParticipantConfigs, normalizeSeedState } from "../members/storedMembers";
-import { mergeRepoFileOpenSettings, normalizeBetaUpdates } from "../preferences/storedPreferences";
+import { mergeRepoFileOpenSettings, normalizeBetaUpdates, normalizeChatShowMemberActions } from "../preferences/storedPreferences";
 import { canonicalProviderLabel, DEFAULT_PROVIDER_KINDS, DEFAULT_PROVIDERS } from "../providers/defaultProviders";
 import { normalizedCliProviderHosts } from "../providers/storedHosts";
 import { mergeDefaultRoles, shouldMigrateWorkflowManagerParticipantManagement } from "../roles/storedRoles";
@@ -44,6 +44,7 @@ export function mergeDefaults(settings: StoredSettings): StoredSettings {
     settingsVersion: 1,
     roundLimitDefault: defaultRoundLimit(settings),
     betaUpdates: normalizeBetaUpdates(settings.betaUpdates),
+    ...(normalizeChatShowMemberActions(settings.chatShowMemberActions) ? {} : { chatShowMemberActions: false }),
     cliAgentRunTimeoutMs: normalizeCliAgentRunTimeoutMs(settings.cliAgentRunTimeoutMs),
     chatParticipantRequestMaxDepth: normalizeChatParticipantRequestMaxDepth(settings.chatParticipantRequestMaxDepth),
     chatParticipantRequestPromptMaxChars: normalizeChatParticipantRequestPromptMaxChars(settings.chatParticipantRequestPromptMaxChars),

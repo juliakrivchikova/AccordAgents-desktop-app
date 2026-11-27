@@ -176,6 +176,7 @@ const bridge: AppBridge = {
   },
   fileEditsFlushed: (requestId) => ipcRenderer.send("files:flush-done", requestId),
   setBetaUpdates: (enabled: boolean) => ipcRenderer.invoke("settings:set-beta-updates", enabled),
+  setChatShowMemberActions: (shown: boolean) => ipcRenderer.invoke("settings:set-chat-show-member-actions", shown),
   setCrashReports: (enabled: boolean) => ipcRenderer.invoke("settings:set-crash-reports", enabled),
   dismissCrashReportsNotice: () => ipcRenderer.invoke("settings:dismiss-crash-reports-notice"),
   crashReportsActive: process.argv.includes(CRASH_REPORTS_ACTIVE_ARG),

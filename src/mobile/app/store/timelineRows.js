@@ -144,7 +144,8 @@ function sameTimelineEntryContent(left, right) {
     Boolean(left.stopped) === Boolean(right.stopped) &&
     // A running reply's steps, and what its Worked for opens to.
     activitySignature(left) === activitySignature(right) &&
-    Boolean(left.liveStatus) === Boolean(right.liveStatus);
+    Boolean(left.liveStatus) === Boolean(right.liveStatus) &&
+    Boolean(left.liveActivity) === Boolean(right.liveActivity);
 }
 
 function sameMobileEvent(left, right) {

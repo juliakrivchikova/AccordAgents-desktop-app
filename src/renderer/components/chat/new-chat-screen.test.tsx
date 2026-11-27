@@ -25,6 +25,7 @@ import { EMPTY_MOBILE_CONTROL_SETTINGS } from "../../../shared/mobilePairing";
 const SETTINGS: AppSettings = {
   roundLimitDefault: 2,
   betaUpdates: false,
+  chatShowMemberActions: true,
   crashReports: true,
   crashReportsNotice: false,
   cliAgentRunTimeoutMs: 86_400_000,

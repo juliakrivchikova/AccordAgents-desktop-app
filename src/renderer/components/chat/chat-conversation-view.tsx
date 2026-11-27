@@ -51,6 +51,7 @@ import { ChatConversationTimeline } from "./chat-conversation-timeline";
 import type { ChatConversationViewProps } from "./chat-conversation-types";
 import { useChatConversationViewport } from "./use-chat-conversation-viewport";
 import { useChatActivityDisclosure } from "./use-chat-activity-disclosure";
+import { ChatMemberActionsContext } from "./chat-member-actions";
 import { useChatLocalFileOpen } from "./use-chat-local-file-open";
 import { useSubmittingIdSet } from "./use-submitting-id-set";
 import { useStableChatMessageActions } from "./use-stable-chat-message-actions";
@@ -451,6 +452,7 @@ export function ChatConversationView(props: ChatConversationViewProps): JSX.Elem
   ) : null);
 
   return (
+    <ChatMemberActionsContext.Provider value={props.settings.chatShowMemberActions !== false}>
     <ChatSessionsPresentationContext.Provider value={Boolean(sessions)}><ChatSessionsLinksContext.Provider value={sessionsChrome.links}><ChatSessionsNamesContext.Provider value={sessionsNames}>
     <MentionDirectoryContext.Provider value={mentionDirectory}>
     <MessageLinkContext.Provider value={viewport.focusChatMessage}>
@@ -585,6 +587,7 @@ export function ChatConversationView(props: ChatConversationViewProps): JSX.Elem
     </MessageLinkContext.Provider>
     </MentionDirectoryContext.Provider>
     </ChatSessionsNamesContext.Provider></ChatSessionsLinksContext.Provider></ChatSessionsPresentationContext.Provider>
+    </ChatMemberActionsContext.Provider>
   );
 }
 

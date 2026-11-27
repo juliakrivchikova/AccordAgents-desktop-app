@@ -6,7 +6,7 @@ import { CHAT_DELIVERY_POLICY_OPTIONS, resolveChatDeliveryTargets } from "../sha
 import { matchingChatSavedPrompts } from "../shared/chatSavedPrompts";
 import { COMPACT_COMMAND_DESCRIPTION, GOAL_COMMAND_DESCRIPTION } from "../shared/slashSuggestions";
 import { isDeviceEventBlobReference, type DeviceEventBlobReference } from "../shared/deviceEventBlobs";
-import type { HubComposerCatalog, HubDevice, HubPhoneForkSource, HubPhoneScope } from "../shared/hubProtocol";
+import type { HubComposerCatalog, HubDevice, HubPhoneDisplay, HubPhoneForkSource, HubPhoneScope } from "../shared/hubProtocol";
 import { mainSessionParticipantId } from "../shared/mainSession";
 import type { HubCard } from "../shared/hubOps";
 import { controlCardFromChoiceMessage, controlCardFromHubCard, type MobileControlCard } from "../shared/mobileControlCards";
@@ -81,6 +81,12 @@ export class HubChangeFeed {
 
   current(): number {
     return this.seq;
+  }
+
+  /** Wakes every waiting changes request without news of a chat, to look
+   *  again at what else it answers with (the phone's display settings). */
+  wakeWaiters(): void {
+    for (const wake of [...this.waiters]) wake();
   }
 
   /** The position of a chat's last change this instance can vouch for: a
@@ -177,6 +183,10 @@ export class HubPhoneApi {
   private readonly openedCache = new Map<string, { stamp: number; limit: number; opened: ConversationOpenResult }>();
   private readonly farMessageCache = new Map<string, { stamp: number; messages: Map<string, ChatMessage | undefined> }>();
   private catalogCache?: { at: number; catalog: HubComposerCatalog | undefined };
+  /** The display settings last published, and how many times they changed:
+   *  a waiting changes request answers when they do. */
+  private displayStamp?: string;
+  private displayVersion = 0;
 
   constructor(private readonly options: HubPhoneOptions) {}
 
@@ -192,6 +202,22 @@ export class HubPhoneApi {
     this.catalogCache = undefined;
     this.listCache.clear();
     this.rowCache.clear();
+    // A phone waiting for news learns a changed display setting at once,
+    // not with its next chat change.
+    void this.phoneDisplay().then((display) => {
+      const stamp = JSON.stringify(display ?? null);
+      if (stamp === this.displayStamp) return;
+      this.displayStamp = stamp;
+      this.displayVersion += 1;
+      this.options.feed.wakeWaiters();
+    }, () => undefined);
+  }
+
+  /** How the phone draws chats, from the catalog the owner desktop published
+   *  (HubComposerCatalog.display); none from a desktop from before. */
+  private async phoneDisplay(): Promise<HubPhoneDisplay | undefined> {
+    const display = (await this.catalog())?.display;
+    return display && typeof display.showMemberActions === "boolean" ? { showMemberActions: display.showMemberActions } : undefined;
   }
 
   /** Answers one phone request; the status is returned for the server's log. */
@@ -667,7 +693,14 @@ export class HubPhoneApi {
     const instance = query.get("instance") ?? "";
     const after = Number(query.get("after") ?? "");
     const waitMs = Math.max(0, Math.min(CHANGES_WAIT_MAX_MS, Number(query.get("waitMs") ?? CHANGES_WAIT_MAX_MS) || 0));
-    const reset = () => ({ status: 200, body: { ok: true, instance: feed.instance, seq: feed.current(), reset: true } });
+    // Every answer says how the phone draws chats (HubPhoneDisplay), as
+    // the catalog says when it is sent; a change ends the wait.
+    const displayVersionAtStart = this.displayVersion;
+    const shown = async () => {
+      const display = await this.phoneDisplay().catch(() => undefined);
+      return display ? { display } : {};
+    };
+    const reset = async () => ({ status: 200, body: { ok: true, instance: feed.instance, seq: feed.current(), reset: true, ...await shown() } });
     if (instance !== feed.instance || !Number.isSafeInteger(after) || after < 0) return reset();
     const mine = (ids: string[]) => ids.filter((id) => scopeCovers(scope, id));
     let news = feed.since(after);
@@ -677,7 +710,7 @@ export class HubPhoneApi {
       const waiting = this.waitersByDevice.get(deviceId) ?? 0;
       // Too many waiting: answered at once, and told when to ask again.
       if (feed.waiting() >= WAITERS_MAX || waiting >= WAITERS_PER_DEVICE_MAX) {
-        return { status: 200, body: { ok: true, instance: feed.instance, seq: after, conversationIds: [], retryAfterMs: 5_000 } };
+        return { status: 200, body: { ok: true, instance: feed.instance, seq: after, conversationIds: [], retryAfterMs: 5_000, ...await shown() } };
       }
       this.waitersByDevice.set(deviceId, waiting + 1);
       try {
@@ -688,7 +721,8 @@ export class HubPhoneApi {
         let seen = after;
         // Another chat's change is no news to a pairing for one chat (and
         // must not tell it when the User is busy elsewhere): it waits on.
-        while (!goneNow && conversationIds.length === 0 && Date.now() < deadline) {
+        // Changed display settings are news to every phone.
+        while (!goneNow && conversationIds.length === 0 && Date.now() < deadline && this.displayVersion === displayVersionAtStart) {
           await feed.wait(seen, deadline - Date.now(), gone);
           news = feed.since(after);
           if (news.reset) return reset();
@@ -703,7 +737,7 @@ export class HubPhoneApi {
         if (this.lastWaitEndedAt.size > 1_000) this.lastWaitEndedAt.clear();
       }
     }
-    return { status: 200, body: { ok: true, instance: feed.instance, seq: feed.current(), conversationIds } };
+    return { status: 200, body: { ok: true, instance: feed.instance, seq: feed.current(), conversationIds, ...await shown() } };
   }
 }
 

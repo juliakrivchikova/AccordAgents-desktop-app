@@ -4,6 +4,7 @@ import { serverPairing } from "../pairing/hubPairing.js";
 import { handleRelayChatListPayload } from "./chatListPayload.js";
 import { markHubNoticesSeen, SERVER_CHANGES_WAIT_MS, serverPhoneGet, serverReadsState } from "./serverReads.js";
 import { settleHeldTurnsBeyondPage } from "./settledTurns.js";
+import { noteServerDisplay } from "../chat/memberActions.js";
 import { handleRelayTimelinePayload } from "./timelinePayload.js";
 
 async function requestChatListFromServer() {
@@ -79,9 +80,14 @@ export function startServerChanges() {
         const first = !serverChanges.instance;
         const reset = answer.reset === true;
         serverChanges = { instance: answer.instance, seq: answer.seq };
-        if (first) continue;
+        // The computer's Settings changed how replies are drawn: the open
+        // screen is drawn again at once.
+        const redraw = noteServerDisplay(answer.display);
         const changed = Array.isArray(answer.conversationIds) ? answer.conversationIds : [];
-        if (!reset && changed.length === 0) continue;
+        if (first || (!reset && changed.length === 0)) {
+          if (redraw) await render();
+          continue;
+        }
         const openConversationId = selectedConversationId();
         void markHubNoticesSeen();
         await requestChatListFromServer().catch(function () { return []; });

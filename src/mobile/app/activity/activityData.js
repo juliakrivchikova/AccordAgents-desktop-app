@@ -13,6 +13,7 @@ import { loadPairing } from "../pairing/pairing.js";
 import { ACTIVITY_CACHE_MAX_AGE_MS, ACTIVITY_CLEARED_KEY, CHAT_LIST_REFRESH_MIN_MS, SVG_NS } from "../shell/home.js";
 import { requestToPromise } from "../store/database.js";
 import { isPlaceholderTimelineContent, timelineGeneration, withTimeline } from "../store/timelineRows.js";
+import { memberActionsShown } from "../chat/memberActions.js";
 import { loadListActivitySeen, withListActivity } from "../sync/chatListPayload.js";
 import { requestChatListViaRelay } from "../sync/serverChanges.js";
 import { displayedMessageText } from "../text/messageText.js";
@@ -73,7 +74,8 @@ function listRecentTimelineEntries(sinceIso, keepChars) {
         runId: row.runId,
         mobileEventId: row.mobileEventId,
         threadRootId: row.threadRootId,
-        content: typeof row.content === "string" ? row.content.slice(0, keepChars) : ""
+        // The step in progress is not previewed while members' actions are hidden.
+        content: typeof row.content === "string" && !(row.liveActivity && !memberActionsShown()) ? row.content.slice(0, keepChars) : ""
       });
     }
     return kept;
