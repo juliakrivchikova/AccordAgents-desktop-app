@@ -82,13 +82,19 @@ workflow in the running Electron app or installed PWA with the relevant services
 Report which checks ran and any verification gaps. When a change grows a payload,
 check its size on representative data and the limits at its destination.
 
-Every change is verified end to end before it ships. Whoever releases checks,
-in the running Electron app (and the installed PWA for phone changes) built from
-the commit being released, every change in the release whose author did not
-report an end-to-end check, small ones included: five focused fixes checked only
-by tests get five end-to-end checks from the releaser. A change without a report
-of its checks counts as not verified end to end. The `release-beta` skill lists
-the steps.
+Every change is verified end to end and reviewed before it ships. Whoever
+pushes a commit without either says so in its message with these exact trailer
+lines (one or both):
+
+    QA: not verified end to end
+    Review: not reviewed
+
+Whoever releases finds those commits (`git log <last released tag>..HEAD
+--grep='^QA: not verified end to end' --grep='^Review: not reviewed'`) and does
+what each one lacks, small ones included: reviews its diff, and checks it in the
+running Electron app (and the installed PWA for phone changes) built from the
+commit being released. Five focused fixes pushed without QA get five end-to-end
+checks from the releaser. The `release-beta` skill lists the steps.
 
 ## Commit & Pull Request Guidelines
 

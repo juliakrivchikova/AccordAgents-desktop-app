@@ -22,9 +22,9 @@ Betas have no Windows build: Windows ships only with stable releases, signed on 
   `git merge-base --is-ancestor origin/main origin/beta` succeeds.
 - The approved commit has already passed the targeted tests its changes require; the workflow runs
   typecheck and the packaging checks, not the test suites.
-- Every change in the release has been verified end to end before the run starts, by its author or
-  by you (step 1). A change whose author reported no end-to-end check, small fixes and direct pushes
-  included, gets one from you on the commit being released.
+- Every change in the release has been verified end to end and reviewed before the run starts, by its
+  author or by you (step 1). A commit marked `QA: not verified end to end` or `Review: not reviewed`,
+  small fixes and direct pushes included, gets what it lacks from you on the commit being released.
 - Start one run per release and never re-run a run that pushed its version bump (see Recovery).
 - Do not report success from typecheck, signing, notarization, or update-feed checks alone. They do not
   prove the packaged app can resolve runtime modules.
@@ -37,12 +37,13 @@ Merge the approved feature branches into `beta` (`--no-ff`, from a clean checkou
 `beta` to origin. The run releases exactly the commit `beta` pointed to when it was started; if `beta`
 moves before the bump, the run stops without using a version and you start a new one.
 
-Before you push `beta`, list every change the merged commit ships (`git log --first-parent <last
-released tag>..HEAD`, and the commits inside each merge, direct pushes to `beta` included) and, for
-each, whether its author reported an end-to-end check. Verify every change without one end to end
-yourself, in the app built from that merged commit (and the installed PWA against it for phone
-changes), as `CLAUDE.md` requires: several small fixes each get their own check. Push `beta` and start
-the release only after they pass; a failure goes back to the change, not onto `beta`.
+Before you push `beta`, find every commit the merged commit ships that was pushed without end-to-end
+QA or without review: `git log <last released tag>..HEAD --grep='^QA: not verified end to end'
+--grep='^Review: not reviewed'` (merged branches and direct pushes to `beta` included), plus any change
+whose author's report says the same. Do what each one lacks, as `CLAUDE.md` requires: review its diff,
+and verify it end to end in the app built from that merged commit (and the installed PWA against it
+for phone changes); several small fixes each get their own check. Push `beta` and start the release
+only after they pass; a failure goes back to the change, not onto `beta`.
 
 ## 2. Start the release
 
@@ -87,8 +88,8 @@ Read the run (`gh run view <run-id> --log` for details) and report:
 
 - Released version and tag, and the GitHub Release URL
 - Run URL and the final `origin/beta` commit (the bump commit)
-- The changes you verified end to end before the run (step 1), and any that could not be checked
-  live, with the reason
+- The commits you reviewed or verified end to end before the run (step 1), and any that could not be
+  checked live, with the reason
 - Result of the published-download step, and the screenshots in the `release-evidence` artifact
 - Phone app: the `ASSET_VERSION` the `Phone app` job reports `mobile.accordagents.com` now serves
 - Update feed: offered, or the warning if it still lags (the release is published; re-probe the feed,
