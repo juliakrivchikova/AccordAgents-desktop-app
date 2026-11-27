@@ -28,14 +28,20 @@
   flex: 0 0 auto;
 }
 
+/* At the narrowest density the folder and branch give the model room
+   for its shortened name as well as the usage ring. */
+.chat-composer-controls:has(.is-shortened),
+.chat-composer-controls > .chat-model-chip:has(.is-shortened) {
+  min-width: min-content;
+}
+
 .chat-composer-controls > .chat-model-chip:has(.is-shortened) {
   flex: 0 1 auto;
-  min-width: 0;
   overflow: hidden;
 }
 
 .chat-composer-control-text.is-model.is-shortened {
-  min-width: 6ch;
+  width: 6ch;
 }
 
 .chat-model-chip.is-icon {
@@ -54,7 +60,7 @@
   overflow: hidden;
 }
 
-.chat-composer-controls[aria-disabled="true"] .chat-model-chip {
+.chat-composer-controls[data-disabled="true"] .chat-model-chip {
   opacity: 0.6;
 }
 

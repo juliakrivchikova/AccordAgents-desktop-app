@@ -4,7 +4,8 @@ import {
   DISMISSED_WARNINGS_STORAGE_KEY,
   LAST_VIEWED_AT_STORAGE_KEY,
   SETTINGS_SIDEBAR_WIDTH_STORAGE_KEY,
-  SIDEBAR_COLLAPSED_STORAGE_KEY
+  SIDEBAR_COLLAPSED_STORAGE_KEY,
+  SIDEBAR_SECTIONS_STORAGE_KEY
 } from "./constants";
 import {
   type AccordLauncherPreferences,
@@ -16,6 +17,12 @@ import {
   persistAppSidebarWidth,
   readInitialAppSidebarWidths as readInitialAppSidebarWidthsFromStorage
 } from "../lib/sidebar-width-storage";
+import {
+  DEFAULT_SIDEBAR_SECTIONS,
+  type SidebarSections,
+  parseSidebarSections,
+  serializeSidebarSections
+} from "../lib/sidebar-sections-storage";
 
 export type { AccordLauncherPreferences } from "../../shared/accordLauncherPreferences";
 
@@ -116,4 +123,20 @@ export function persistChatSidebarWidth(width: number): void {
 
 export function persistSettingsSidebarWidth(width: number): void {
   persistAppSidebarWidth(window.localStorage, SETTINGS_SIDEBAR_WIDTH_STORAGE_KEY, width);
+}
+
+export function readSidebarSections(): SidebarSections {
+  try {
+    return parseSidebarSections(window.localStorage.getItem(SIDEBAR_SECTIONS_STORAGE_KEY));
+  } catch {
+    return DEFAULT_SIDEBAR_SECTIONS;
+  }
+}
+
+export function persistSidebarSections(sections: SidebarSections): void {
+  try {
+    window.localStorage.setItem(SIDEBAR_SECTIONS_STORAGE_KEY, serializeSidebarSections(sections));
+  } catch {
+    // Local storage persistence is best-effort.
+  }
 }

@@ -113,7 +113,7 @@ export function ChatMembersPanel(props: ChatMembersPanelProps): JSX.Element {
             <ChatAccordRow launch={props.accord} testId="chat-members-accord" onOpen={() => props.onOpenAccord?.(props.accord!.launchId)} />
           </div>
         )}
-        <ChatSubagentsSection providers={providers} addable={addableSubagentProviders(list)} checking={checking}
+        <ChatSubagentsSection machines={machines} providers={providers} addable={addableSubagentProviders(list)} checking={checking}
           main={props.subagents?.main} add={props.subagents?.add} renderRow={renderRow} />
         {/* Sessions that ended and members no longer in the chat, in one quiet group. */}
         <ChatAgentsGroup label="History" testId="chat-members-history" count={props.rows.previous.length + former.length}>

@@ -5,30 +5,22 @@ import { Button } from "@/components/ui/button";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { ACCORD_NEEDS_AGENT_LINE, ACCORD_NEEDS_AGENT_SETUP_LINE } from "../../../shared/accordCandidates";
 import { CLI_PROVIDER_SETUP } from "../../../shared/cliReadiness";
+import type { MachineListResult } from "../../../shared/machineLink";
 import type { SessionsMemberRow } from "../../../shared/mainSessionView";
 import { reasoningEffortOptionsForProvider } from "../../../shared/reasoningEffort";
-import type { ChatProviderKind, ChatReasoningEffort } from "../../../shared/types";
+import type { ChatParticipant, ChatProviderKind } from "../../../shared/types";
 
-/** The main session's own CLI and what it runs on: an agent of the same CLI
- *  with nothing set inherits them (delegation.ts); where it runs decides which
- *  CLIs are ready for its members. */
-export interface SubagentMainSession {
-  kind: ChatProviderKind;
-  model?: string;
-  reasoningEffort?: ChatReasoningEffort;
-  /** An added provider it runs through (Z.ai and the like). */
-  hostId?: string;
-  /** The machine it runs on, if not this computer. */
-  homeMachineId?: string;
-  /** A Cloud run main session's members run there too, where Antigravity does not. */
-  cloudRun?: unknown;
-}
 import { IconButton } from "../primitives";
 import { ChatSubagentSettings } from "./chat-subagent-settings";
 import { ProviderIcon } from "./provider-icon";
 import { hasThreadOverride, type SubagentPanelProvider } from "./subagent-panel";
 import { useSubagentProvidersActions } from "./subagent-providers-context";
 import { chipModelLabel, useMemberModelCatalog } from "./chat-member-model-name";
+
+import { defaultModelOf } from "./chat-model-access-picker";
+import { MemberPlanUsageRing } from "./plan-usage/plan-usage-ring";
+
+export type SubagentMainSession = Pick<ChatParticipant, "kind" | "model" | "reasoningEffort" | "hostId" | "homeMachineId" | "cloudRun">;
 
 /** The Agents list opened from the Accord button, when Accord needs one more
  *  agent: a new key each time. */
@@ -49,6 +41,7 @@ export function ChatSubagentsSection(props: {
   /** The CLIs are still being checked: nothing to say about an empty list yet. */
   checking: boolean;
   main?: SubagentMainSession;
+  machines: MachineListResult;
   add?: SubagentAddRequest;
   renderRow: (row: SessionsMemberRow) => JSX.Element;
 }): JSX.Element {
@@ -90,7 +83,7 @@ export function ChatSubagentsSection(props: {
       )}
       {props.providers.map((provider) => (
         <SubagentRow key={provider.kind} provider={provider} open={open.has(provider.kind)} onToggle={() => toggle(provider.kind)}
-          main={props.main} renderRow={props.renderRow} />
+          main={props.main} machines={props.machines} renderRow={props.renderRow} />
       ))}
     </div>
   );
@@ -101,6 +94,7 @@ function SubagentRow(props: {
   open: boolean;
   onToggle: () => void;
   main?: SubagentMainSession;
+  machines: MachineListResult;
   renderRow: (row: SessionsMemberRow) => JSX.Element;
 }): JSX.Element {
   const { provider } = props;
@@ -113,7 +107,7 @@ function SubagentRow(props: {
           <span className="chat-subagent-name">{provider.label}</span>
           {!props.open && <SubagentCount provider={provider} />}
         </button>
-        <SubagentValues provider={provider} main={props.main} />
+        <SubagentValues provider={provider} main={props.main} machines={props.machines} />
         {!provider.offList && <ChatSubagentSettings provider={provider} />}
       </div>
       {props.open && (provider.rows.length > 0
@@ -139,24 +133,34 @@ function SubagentCount(props: { provider: SubagentPanelProvider }): JSX.Element 
 /** Its model and effort as quiet text, a pin when this thread set them. With
  *  nothing set, what its members will run on: the main session's own model and
  *  effort for the same CLI, else the CLI's default. */
-function SubagentValues(props: { provider: SubagentPanelProvider; main?: SubagentMainSession }): JSX.Element {
+function SubagentValues(props: { provider: SubagentPanelProvider; main?: SubagentMainSession; machines: MachineListResult }): JSX.Element {
   const { provider } = props;
   const { catalog } = useMemberModelCatalog({ kind: provider.kind });
   // As delegation.ts gives them: the main session's model only when nothing
   // is set for its CLI, its effort only with its own model.
   const same = props.main?.kind === provider.kind;
   const modelId = provider.model ?? (same && !provider.reasoningEffort ? props.main?.model : undefined);
+  const account = {
+    kind: provider.kind,
+    model: modelId,
+    hostId: same && !provider.model ? props.main?.hostId : undefined,
+    homeMachineId: props.main?.homeMachineId,
+    cloudRun: props.main?.cloudRun
+  };
   const found = modelId ? catalog?.models.find((item) => item.id === modelId) : undefined;
   const model = found ? chipModelLabel(found) : modelId ?? "Default";
   const inheritsEffort = same && modelId === props.main?.model;
   const effortId = provider.reasoningEffort ?? (inheritsEffort ? props.main?.reasoningEffort : undefined);
   const effort = effortId ? reasoningEffortOptionsForProvider(provider.kind).find((item) => item.id === effortId)?.label ?? effortId : undefined;
   return (
-    <span className="chat-subagent-values" data-testid="chat-subagent-values">
-      {hasThreadOverride(provider) && <PushPinIcon size={12} aria-label="Set for this thread" />}
-      <span className={provider.model ? "is-set" : undefined}>{model}</span>
-      {effort && <span className={provider.reasoningEffort ? "is-set" : undefined}>{effort}</span>}
-    </span>
+    <>
+      <MemberPlanUsageRing participant={account} hoverSide="left" machines={props.machines} defaultModel={defaultModelOf(catalog, catalog?.startDefaults?.model)?.id} />
+      <span className="chat-subagent-values" data-testid="chat-subagent-values">
+        {hasThreadOverride(provider) && <PushPinIcon size={12} aria-label="Set for this thread" />}
+        <span className={provider.model ? "is-set" : undefined}>{model}</span>
+        {effort && <span className={provider.reasoningEffort ? "is-set" : undefined}>{effort}</span>}
+      </span>
+    </>
   );
 }
 

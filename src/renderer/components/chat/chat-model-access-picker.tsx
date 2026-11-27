@@ -6,7 +6,7 @@ import { savedModelId } from "../../../shared/geminiModels";
 import { mainSessionProviderKey, type MainSessionProviderOption } from "../../../shared/mainSessionProviders";
 import type { CloudRunSelection } from "../../../shared/cloudRunPreparation";
 import type { MachineRecord } from "../../../shared/machineLink";
-import type { ChatParticipant, ProviderModel, ProviderModelCatalog, ProviderReasoningEffortOption } from "../../../shared/types";
+import type { AgentContextUsage, ChatParticipant, ProviderModel, ProviderModelCatalog, ProviderReasoningEffortOption } from "../../../shared/types";
 import { codexModesUnavailableReason, codexPlanModeOn, liveModeChangeReaches, selectedChatAccessOption } from "../../../shared/chatAccessModes";
 import { ChatProviderMark } from "./chat-member-mark";
 import { chipModelLabel, memberDefaultModelName, memberModelName, useMemberModelCatalog } from "./chat-member-model-name";
@@ -15,6 +15,7 @@ import { ComposerMenu, ComposerMenuDisclosure, ComposerMenuItem, ComposerMenuNot
 import { ChatAccessControl, ChatCodexPlanToggle, ComposerControlIcon, iconTriggerProps, modeChangesWhileTurnRuns, TURN_RUNNING_NOTE } from "./chat-access-controls";
 import { machineIdOf, machineOf, useCliStartDefaults, useMachineList } from "./use-cli-start-defaults";
 import { COMPOSER_DENSITY, useComposerDensity } from "./use-composer-density";
+import { MemberPlanUsageRing } from "./plan-usage/plan-usage-ring";
 import { ParticipantRunLocation } from "./participant-run-location";
 
 /** What the composer's controls show and change of a member: its provider
@@ -46,6 +47,7 @@ export interface ChatModelAccessAction {
  */
 export function ChatMemberComposerControls(props: {
   value: ChatModelAccessValue;
+  contextUsage?: AgentContextUsage;
   providers?: readonly MainSessionProviderOption[];
   onProviderChange?: (option: MainSessionProviderOption) => void;
   /** Saves one choice; what it returns (a save's promise, false when it
@@ -112,7 +114,8 @@ export function ChatMemberComposerControls(props: {
   const runsOnIcon = density >= COMPOSER_DENSITY.runsOnIcon;
 
   return (
-    <div ref={rowRef} className="chat-composer-controls" data-testid={prefix} data-density={density} aria-disabled={props.disabled || undefined}>
+    <div ref={rowRef} className="chat-composer-controls" data-testid={prefix} data-density={density} data-disabled={props.disabled || undefined}>
+      <MemberPlanUsageRing participant={value} machines={machineList} defaultModel={defaultModel?.id} contextUsage={props.contextUsage} />
       <ComposerMenu
         testId={`${prefix}-model`}
         title={`Model: ${modelName}`}
