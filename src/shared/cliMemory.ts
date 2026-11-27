@@ -54,6 +54,11 @@ export interface CliMemoryEntry {
   /** The User's project the entry belongs to (as her chats name it); absent
    *  for an entry that belongs to no project the app knows: a global note. */
   projectPath?: string;
+  /** The note this entry filled on the server this device was linked to
+   *  before (notes move to a new server with their ids): sent the first
+   *  time to a new server, so a moved note is found again and one the User
+   *  deleted is not made again. */
+  knownNoteId?: string;
 }
 
 /** What became of one entry on the server. */

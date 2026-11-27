@@ -47,7 +47,7 @@ import {
 import { homeDeviceId } from "./hubOps";
 import { HubCliMemory } from "./hubCliMemory";
 import { BUMP_SQL, SEQ_SQL, SUMMARY_COLUMNS, noteOf, parseTags, quote, searchText, summaryOf, type Row } from "./memoryRows";
-import { candidateAnchors, rankCounted, searchTextOf, searchWords as wordsAsked, snippetOf, wordCounts, type SearchWord } from "./memoryWordSearch";
+import { candidateAnchors, rankCounted, searchWords as wordsAsked, snippetOf, wordCounts, type SearchWord } from "./memoryWordSearch";
 import type { HubSemantic, PrintableNote } from "./semantic/hubSemantic";
 import { searchProjectChats } from "./semantic/projectChatSearch";
 import { NOTE_PASSAGE_CHARS, QUERY_MAX_CHARS, passageRanges, takeTurns } from "./semantic/semanticVectors";
@@ -167,16 +167,17 @@ export class HubMemory {
       now: () => this.now(),
       log: (event, payload) => this.log(event, payload),
       noteChanged: (note) => this.semantic?.noteChanged(note),
-      machineHostsProject: (device, projectPath) => this.machineHostsProject(device, projectPath)
+      machineHosts: (device, projectPath) => this.machineHosts(device, projectPath)
     });
   }
 
-  /** Whether a cloud machine hosts a member in a chat of this project (the
-   *  chats' members only: a chat's body can be large). */
-  private async machineHostsProject(device: HubDevice, projectPath: string): Promise<boolean> {
+  /** Whether a cloud machine hosts a member in a chat of this project, or
+   *  in any chat without one (the chats' members only: a chat's body can be
+   *  large). */
+  private async machineHosts(device: HubDevice, projectPath: string | undefined): Promise<boolean> {
     if (device.role !== "machine" || !device.machineId) return false;
     const rows = await this.query<{ participantsJson: string | null }>(`select json_extract(coalesce(nullif(body_json, ''), payload_json), '$.metadata.participants') as participantsJson
-      from conversations where kind = 'chat' and repo_path = ${quote(projectPath)};`);
+      from conversations where kind = 'chat' and ${projectPath === undefined ? `instr(coalesce(nullif(body_json, ''), payload_json), ${quote(JSON.stringify(device.machineId))}) > 0` : `repo_path = ${quote(projectPath)}`};`);
     return rows.some((row) => {
       try {
         const participants = JSON.parse(row.participantsJson ?? "[]") as unknown;
@@ -835,8 +836,6 @@ function requestHash(request: object): string {
     .map((field) => [field, (request as Record<string, unknown>)[field] ?? null]);
   return createHash("sha256").update(JSON.stringify(asked)).digest("hex").slice(0, 32);
 }
-
-
 
 /** The passage of a body a print was made from (the whole body when none). */
 function passageOf(body: string, part: number | undefined): string {

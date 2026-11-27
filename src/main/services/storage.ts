@@ -138,6 +138,10 @@ export class StorageService {
     return this.modules.conversationReads.conversationRepoPath(id);
   }
 
+  chatProjectPaths(): Promise<string[]> {
+    return this.modules.conversationReads.chatProjectPaths();
+  }
+
   /** Whether a chat is stored here (and holds one message), without reading
    *  a conversation that can be thousands of messages long. */
   conversationPresence(id: string, messageId?: string): Promise<{ kind: Conversation["kind"]; hasMessage: boolean } | undefined> {

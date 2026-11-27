@@ -77,6 +77,20 @@ test("lines that look like secrets are left out; ordinary words about keys stay"
   assert.equal(lineHoldsSecret("Authorization: Bearer abc.def-123"), true);
   assert.equal(lineHoldsSecret("aws AKIAABCDEFGHIJKLMNOP"), true);
   assert.equal(lineHoldsSecret("ghp_abcdefghijklmnopqrstuvwxyz"), true);
+  // Written as variables, in JSON and YAML: the key word ends a longer name.
+  for (const line of [
+    "DB_PASSWORD=hunter22", "PGPASSWORD=s3cretpw", "MY_SECRET_KEY=abc123xyz", "export GH_TOKEN=abcd1234efgh5678",
+    "AWS_SECRET_ACCESS_KEY=wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY", "CLOUDFLARE_API_TOKEN=qwertyuiopasdfghjklzxcvbnm",
+    "\"password\": \"hunter22\"", "\"api_key\": \"abcd1234wxyz\"", "api key: abcd1234wxyz", "  password: correcthorse9",
+    "postgres://admin:S3cretPass@db.internal:5432/app", "SENTRY_AUTH_TOKEN=sntrys_abcdefghijklmnopqrstuvwxyz0123",
+    "npm_abcdefghijklmnopqrstuvwxyz0123", "https://hooks.slack.com/services/T000/B000/XXXX"
+  ]) assert.equal(lineHoldsSecret(line), true, line);
+  for (const line of [
+    "max_tokens: 4096", "MAX_TOKEN=4096", "PASSWORD_MIN_LENGTH=12", "PWD=/Users/me/projects/accord",
+    "merged at 6dc75a5e9a1b2c3d4e5f60718293a4b5c6d7e8f9 into beta"
+  ]) assert.equal(lineHoldsSecret(line), false, line);
+  // Long hex that is not named as a commit stays a secret.
+  assert.equal(lineHoldsSecret("hub key 6dc75a5e9a1b2c3d4e5f60718293a4b5c6d7e8f9"), true);
   assert.equal(lineHoldsSecret("The key is entered in Settings; the token goes to her server."), false);
   assert.equal(lineHoldsSecret("Token: the per-run one"), false);
   assert.equal(lineHoldsSecret("merged to beta 6dc75a5e, id 9a164578-838b-4b14-b945-07a110366ce0"), false);
@@ -100,13 +114,7 @@ test("Claude folders map to the User's projects, a worktree's to its repository'
   const roots: Record<string, string> = { "/work/accord/.worktrees/x": "/work/accord", "/work/tool": "/work/tool" };
   let asked = 0;
   const folders = new ProjectFolders(async (dir) => { asked += 1; return roots[dir]; });
-  const projects = projectsOfChats([
-    { kind: "chat", repoPath: "/work/accord/.worktrees/x" },
-    { kind: "chat", repoPath: "/work/tool/" },
-    { kind: "chat", repoPath: "/work/tool/" },
-    { kind: "code-review", repoPath: "/work/legacy" },
-    { kind: "chat" }
-  ]);
+  const projects = projectsOfChats(["/work/accord/.worktrees/x", "/work/tool/", "/work/tool/", "  "]);
   assert.deepEqual(projects, [
     { projectPath: "/work/accord/.worktrees/x", localPath: "/work/accord/.worktrees/x" },
     { projectPath: "/work/tool/", localPath: "/work/tool" }
@@ -121,10 +129,7 @@ test("Claude folders map to the User's projects, a worktree's to its repository'
   assert.equal(folders.projectFor(projects, "/work/toolbox"), undefined);
 
   // A cloud machine: the copies the computer published, and chats without one.
-  assert.deepEqual(projectsOfMachine({ "/work/accord": "/home/u/copies/accord" }, [
-    { kind: "chat", repoPath: "/home/u/copies/accord" },
-    { kind: "chat", repoPath: "/work/same-folder" }
-  ]), [
+  assert.deepEqual(projectsOfMachine({ "/work/accord": "/home/u/copies/accord" }, ["/home/u/copies/accord", "/work/same-folder"]), [
     { projectPath: "/work/accord", localPath: "/home/u/copies/accord" },
     { projectPath: "/work/same-folder", localPath: "/work/same-folder" }
   ]);

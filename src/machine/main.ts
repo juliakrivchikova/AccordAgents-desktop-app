@@ -515,7 +515,7 @@ export async function startMachine(args: MachineArgs): Promise<() => Promise<voi
     serverId: () => serverChatLink.serverId(),
     database: () => storageService.sqlExecutor(),
     env: async () => ({ ...commandEnvironment(), ...(await settingsService.getManualAgentEnvironment()).env }),
-    projects: async () => projectsOfMachine(publishedProjects, await storageService.listConversations()),
+    projects: async () => projectsOfMachine(publishedProjects, await storageService.chatProjectPaths()),
     homeOverride: process.env.ACCORDAGENTS_CLI_MEMORY_HOME,
     log
   });
@@ -532,6 +532,7 @@ export async function startMachine(args: MachineArgs): Promise<() => Promise<voi
       await settingsService.importMachineSettingsSnapshot(document.settings);
       chatService.setMachineProjects(document.projects);
       publishedProjects = { ...document.projects };
+      cliMemorySync.projectsChanged();
     },
     onImported: async () => {
       cliAgentRunner.setRunTimeoutMs(await settingsService.getCliAgentRunTimeoutMs());
@@ -637,8 +638,9 @@ export async function startMachine(args: MachineArgs): Promise<() => Promise<voi
     await machineSettings.refresh("start");
     machineSettings.start();
     if (stopping) return;
+    // It waits for the link itself, and runs whether or not the link starts now.
+    cliMemorySync.start();
     await serverChatLink.start();
-    if (!stopping) cliMemorySync.start();
     // Its members' decided removals a restart left waiting (Д2: made here).
     void chatService.resumeQueuedMemberRemovals().catch((error) => log("machine.member-removal.resume-error", { message: error instanceof Error ? error.message : String(error) }));
   })().catch((error) => log("machine.server.link-error", { message: error instanceof Error ? error.message : String(error) }));

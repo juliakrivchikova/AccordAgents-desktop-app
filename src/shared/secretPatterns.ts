@@ -19,15 +19,37 @@ export const SECRET_TOKEN_PATTERNS: readonly RegExp[] = [
 
 // One pattern per shape, without the global flag (`test` keeps no place).
 const TOKEN_TESTS = SECRET_TOKEN_PATTERNS.map((pattern) => new RegExp(pattern.source, pattern.flags.replace("g", "")));
-// "PASSWORD=hunter2", "api_key: abcd1234…", "Authorization: Bearer …": a
-// value with a digit, or a long one. "Token: the per-run one" stays.
-const ASSIGNED_TEST = new RegExp(`\\b(?:${SECRET_KEY_WORDS})\\s*[:=]\\s*(?:bearer\\s+)?["']?(?=[^\\s"',;]*\\d|[^\\s"',;]{16,})[^\\s"',;]{6,}`, "i");
+// More shapes a line is left out for (crash reports keep their own list).
+const MORE_TOKEN_TESTS: readonly RegExp[] = [
+  /\bnpm_[A-Za-z0-9]{20,}/,
+  /\bsntrys_[A-Za-z0-9_=+/-]{20,}/,
+  /\bya29\.[A-Za-z0-9_-]{20,}/,
+  /\bhooks\.slack\.com\/services\/[A-Za-z0-9/]+/,
+  // A password in an address: postgres://admin:S3cret@host
+  /[a-z][a-z0-9+.-]*:\/\/[^\s/:@]+:[^\s/@]+@/i
+];
+// A key word ending a longer name too ("OPENAI_API_KEY", "PGPASSWORD",
+// "MY_SECRET_KEY",
+// `"api_key"`), then what is assigned: a value with a digit, or a long one,
+// and not a path. "Token: the per-run one", "max_tokens: 4096" and
+// "PWD=/Users/me/project" stay.
+const KEY_NAME = `(?<![A-Za-z0-9])[A-Za-z0-9_]*?(?:${SECRET_KEY_WORDS}|api\\s+key|[_-]key)`;
+const ASSIGNED_TEST = new RegExp(`${KEY_NAME}["']?\\s*[:=]\\s*(?:bearer\\s+)?["']?(?![/~.])(?=[^\\s"',;]*\\d|[^\\s"',;]{16,})[^\\s"',;]{6,}`, "i");
+// A full git commit id (40 or 64 hex digits) named as one is not a secret.
+const LONG_HEX = /\b[0-9a-f]{32,}\b/gi;
+const GIT_WORDS = /\b(?:commit|commits|merged?|sha|sha1|sha256|rev|revision|tag|tagged|cherry-picked|HEAD|branch)\b/i;
 const PEM_BEGIN = /-----BEGIN [A-Z0-9 ]*(?:PRIVATE KEY|CERTIFICATE)[A-Z0-9 ]*-----/;
 const PEM_END = /-----END [A-Z0-9 ]*(?:PRIVATE KEY|CERTIFICATE)[A-Z0-9 ]*-----/;
 
 /** Whether one line holds what looks like a secret. */
 export function lineHoldsSecret(line: string): boolean {
-  return ASSIGNED_TEST.test(line) || TOKEN_TESTS.some((pattern) => pattern.test(line));
+  if (ASSIGNED_TEST.test(line) || MORE_TOKEN_TESTS.some((pattern) => pattern.test(line))) return true;
+  const shaped = TOKEN_TESTS.filter((pattern) => pattern.test(line));
+  if (!shaped.length) return false;
+  // Only long hex, every run a commit id, on a line about git: kept.
+  const hexOnly = shaped.length === 1 && shaped[0] === TOKEN_TESTS[TOKEN_TESTS.length - 1];
+  const runs = line.match(LONG_HEX) ?? [];
+  return !(hexOnly && runs.length > 0 && runs.every((run) => run.length === 40 || run.length === 64) && GIT_WORDS.test(line));
 }
 
 /**

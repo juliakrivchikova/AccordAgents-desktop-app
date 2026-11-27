@@ -63,13 +63,15 @@ export interface HubCliMemoryDependencies {
   log(event: string, payload: Record<string, unknown>): void;
   /** A note created or changed (printed again for search by meaning). */
   noteChanged(note: { id: string; title: string; tags: string[]; body: string }): void;
-  /** Whether a cloud machine hosts a member in a chat of this project. */
-  machineHostsProject(device: HubDevice, projectPath: string): Promise<boolean>;
+  /** Whether a cloud machine hosts a member in a chat of this project (in
+   *  any chat, without one). */
+  machineHosts(device: HubDevice, projectPath: string | undefined): Promise<boolean>;
 }
 
 /** An entry as the server keeps it: checked, its place decided. */
 interface Placed {
   provider: CliMemoryProvider;
+  knownNoteId?: string;
   file: string;
   name: string;
   kind: MemoryNoteKind;
@@ -130,39 +132,41 @@ export class HubCliMemory {
     const placed = await this.place(device, named, projects);
     if (typeof placed === "string") return { ...echo, outcome: "refused", reason: placed };
     const sourceKey = digest([placed.provider, device.deviceId, placed.file]);
-    const identity = digest([placed.provider, placed.scope, placed.scopeKey, placed.name]);
+    const identity = identityOf(placed);
     const hash = digest([placed.kind, placed.scope, placed.scopeKey, placed.title, placed.body, JSON.stringify(placed.tags), placed.source]);
     const known = (await this.deps.query<{ noteId: string | null; contentHash: string }>(`select note_id as noteId, content_hash as contentHash
       from member_memory_cli_sources where source_key = ${quote(sourceKey)};`))[0];
     if (known?.noteId && known.contentHash === hash) return { ...echo, outcome: "unchanged", noteId: known.noteId };
-    // The note this entry filled before; or the one the same entry fills
-    // from another device (or filled before it moved to another place).
-    let noteId = known?.noteId ?? (await this.deps.query<{ noteId: string }>(`select c.note_id as noteId from member_memory_cli_notes c
-      join member_memory_notes n on n.id = c.note_id where c.identity_key = ${quote(identity)} order by n.created_at limit 1;`))[0]?.noteId;
+    let noteId = known?.noteId ?? undefined;
     let outcome: { outcome: CliMemorySyncOutcome; reason?: string };
-    if (noteId) {
-      outcome = await this.applyTo(noteId, placed, identity, device);
+    const moved = noteId ? undefined : await this.movedNote(placed, identity, device);
+    if (moved) {
+      noteId = moved.id;
+      outcome = moved.deleted ? { outcome: "deleted", reason: "The User deleted the note of this entry." } : await this.applyTo(moved.id, placed, device);
+    } else if (noteId) {
+      outcome = await this.applyTo(noteId, placed, device);
     } else {
-      const titled = (await this.deps.query<Row>(`select ${SUMMARY_COLUMNS} from member_memory_notes where archived_at is null
-        and kind = ${quote(placed.kind)} and scope = ${quote(placed.scope)} and scope_key = ${quote(placed.scopeKey)}
-        and title_key = ${quote(memoryTitleKey(placed.title))} limit 1;`))[0];
-      if (titled && titled.author === placed.author && titled.updatedBy === placed.author) {
-        // The sync's own note from before (a server the notes moved to keeps
-        // no record of what filled them): it is the sync's to keep up to date.
-        noteId = titled.id;
-        await this.deps.run(`insert or replace into member_memory_cli_notes(note_id, identity_key, synced_version)
-          values (${quote(titled.id)}, ${quote(identity)}, ${Number(titled.version)});`);
-        outcome = await this.applyTo(titled.id, placed, identity, device);
-      } else if (titled) {
-        // A member wrote this already: theirs is kept, this entry follows it.
-        noteId = titled.id;
-        outcome = { outcome: "kept", reason: `@${titled.author} keeps a note with this title.` };
+      const found = await this.sameEntry(placed, identity);
+      if (found) {
+        noteId = found.id;
+        outcome = found.deleted ? { outcome: "deleted", reason: "The User deleted the note of this entry." } : { outcome: "unchanged" };
       } else {
-        const created = await this.create(placed, identity, device);
-        if ("reason" in created) outcome = { outcome: "refused", reason: created.reason };
-        else {
-          noteId = created.id;
-          outcome = { outcome: "created" };
+        const titled = await this.titled(placed, undefined);
+        if (titled && !(titled.author === placed.author && titled.updatedBy === placed.author)) {
+          // A member wrote this already: theirs is kept, this entry follows it.
+          noteId = titled.id;
+          outcome = { outcome: "kept", reason: `@${titled.author} keeps a note with this title.` };
+        } else {
+          // Another device's entry of this name says something else: this
+          // one is its own note, named after this device (never one
+          // device's memory written over another's).
+          const own = titled ? { ...placed, title: withDevice(placed.title, device) } : placed;
+          const created = titled && await this.titled(own, undefined) ? { reason: "Another note here has this title." } : await this.create(own, identity, device);
+          if ("reason" in created) outcome = { outcome: "refused", reason: created.reason };
+          else {
+            noteId = created.id;
+            outcome = { outcome: "created" };
+          }
         }
       }
     }
@@ -176,6 +180,65 @@ export class HubCliMemory {
       this.deps.log("hub.memory.cli-entry-not-applied", { deviceId: device.deviceId, provider: placed.provider, outcome: outcome.outcome, noteId, reason: outcome.reason });
     }
     return { ...echo, outcome: outcome.outcome, ...(noteId && outcome.outcome !== "refused" ? { noteId } : {}), ...(outcome.reason ? { reason: outcome.reason } : {}) };
+  }
+
+  /**
+   * The note this very entry already fills, from another device or from
+   * before the notes moved to this server: one the sync wrote with exactly
+   * this content. Or the note of this entry the User deleted (not made again).
+   */
+  private async sameEntry(placed: Placed, identity: string): Promise<{ id: string; deleted?: boolean } | undefined> {
+    const tracked = await this.deps.query<{ noteId: string; live: string | null }>(`select c.note_id as noteId, n.id as live from member_memory_cli_notes c
+      left join member_memory_notes n on n.id = c.note_id where c.identity_key = ${quote(identity)};`);
+    const deleted = tracked.find((row) => !row.live);
+    if (deleted) return { id: deleted.noteId, deleted: true };
+    const candidates = await this.deps.query<Row & { tracked: string | null }>(`select ${SUMMARY_COLUMNS}, body, c.note_id as tracked
+      from member_memory_notes n left join member_memory_cli_notes c on c.note_id = n.id
+      where n.scope = ${quote(placed.scope)} and n.scope_key = ${quote(placed.scopeKey)} and n.author = ${quote(placed.author)}
+      and ((n.archived_at is null and n.updated_by = ${quote(placed.author)})
+        or (c.note_id is not null and n.archived_at is not null and n.updated_by = 'server' and n.kind = 'status'))
+      and (c.identity_key = ${quote(identity)} or (c.note_id is null and n.title_key = ${quote(memoryTitleKey(placed.title))}))
+      order by n.created_at limit 20;`);
+    const same = candidates.find((row) => row.kind === placed.kind && row.title === placed.title && (row.body ?? "") === placed.body &&
+      JSON.stringify(parseTags(row.tagsJson)) === JSON.stringify(placed.tags));
+    if (!same) return undefined;
+    await this.deps.run(same.tracked
+      ? `update member_memory_cli_notes set identity_key = ${quote(identity)} where note_id = ${quote(same.id)};`
+      : `insert or replace into member_memory_cli_notes(note_id, identity_key, synced_version) values (${quote(same.id)}, ${quote(identity)}, ${Number(same.version)});`);
+    return { id: same.id };
+  }
+
+  /**
+   * The note this entry filled on the server the device was linked to
+   * before (`knownNoteId`; notes move with their ids): taken up again when
+   * only the sync wrote it, in the same place. Deleted on this server, or —
+   * for the computer, which moved every note there before it sends anything
+   * — never moved here: the User deleted it, so it is not made again.
+   */
+  private async movedNote(placed: Placed, identity: string, device: HubDevice): Promise<{ id: string; deleted?: boolean } | undefined> {
+    const id = placed.knownNoteId;
+    if (!id) return undefined;
+    const row = (await this.deps.query<Row & { tracked: string | null }>(`select ${SUMMARY_COLUMNS}, c.note_id as tracked from member_memory_notes n
+      left join member_memory_cli_notes c on c.note_id = n.id where n.id = ${quote(id)};`))[0];
+    if (row) {
+      if (row.author !== placed.author || row.scope !== placed.scope || row.scopeKey !== placed.scopeKey) return undefined;
+      if (!row.tracked && row.updatedBy === placed.author) {
+        await this.deps.run(`insert or replace into member_memory_cli_notes(note_id, identity_key, synced_version) values (${quote(id)}, ${quote(identity)}, ${Number(row.version)});`);
+      }
+      return { id };
+    }
+    const gone = (await this.deps.query<{ id: string }>(`select id from member_memory_deleted where id = ${quote(id)};`))[0];
+    if (!gone && device.role !== "owner") return undefined;
+    // Kept as a mark: the same entry from another device is not made again either.
+    await this.deps.run(`insert or ignore into member_memory_cli_notes(note_id, identity_key, synced_version) values (${quote(id)}, ${quote(identity)}, 0);`);
+    return { id, deleted: true };
+  }
+
+  /** A live note with this title, kind and place (another than `exceptId`). */
+  private async titled(placed: Pick<Placed, "kind" | "scope" | "scopeKey" | "title">, exceptId: string | undefined): Promise<Row | undefined> {
+    return (await this.deps.query<Row>(`select ${SUMMARY_COLUMNS} from member_memory_notes where archived_at is null
+      and kind = ${quote(placed.kind)} and scope = ${quote(placed.scope)} and scope_key = ${quote(placed.scopeKey)}
+      and title_key = ${quote(memoryTitleKey(placed.title))}${exceptId ? ` and id <> ${quote(exceptId)}` : ""} limit 1;`))[0];
   }
 
   /** The entry checked as strictly as a member's write, and its place. */
@@ -200,20 +263,22 @@ export class HubCliMemory {
     if (item.projectPath !== undefined) {
       const projectPath = typeof item.projectPath === "string" ? item.projectPath.trim() : "";
       if (!projectPath || projectPath.includes("\u0000") || projectPath.length > 4096) return "The project is not a folder path.";
-      // The computer names its own projects; a cloud machine only those it
-      // hosts a member of, as its members could write there themselves.
-      if (device.role !== "owner") {
-        if (!projects.has(projectPath)) projects.set(projectPath, await this.deps.machineHostsProject(device, projectPath));
-        if (!projects.get(projectPath)) return "This machine hosts no member in a chat of that project.";
-      }
       scope = "project";
       scopeKey = projectPath;
+    }
+    // The computer names its own projects; a cloud machine only what its
+    // members could write themselves: a project it hosts a member of, and
+    // a global note only while it hosts a member at all.
+    if (device.role !== "owner") {
+      if (!projects.has(scopeKey)) projects.set(scopeKey, await this.deps.machineHosts(device, scope === "project" ? scopeKey : undefined));
+      if (!projects.get(scopeKey)) return scope === "project" ? "This machine hosts no member in a chat of that project." : "This machine hosts no member in any chat.";
     }
     // A task status is never for every chat (as for members' notes).
     const kind = item.kind === "status" && scope === "global" ? "article" : item.kind;
     const source = `${CLI_MEMORY_LABELS[cli]} memory: ${file} on ${device.name || device.deviceId}`;
+    const knownNoteId = typeof item.knownNoteId === "string" && /^[A-Za-z0-9-]{8,64}$/.test(item.knownNoteId) ? item.knownNoteId : undefined;
     return {
-      provider: cli, file, name, kind, scope, scopeKey, title, body, tags,
+      provider: cli, ...(knownNoteId ? { knownNoteId } : {}), file, name, kind, scope, scopeKey, title, body, tags,
       source: [...source].length > MEMORY_SOURCE_MAX_CHARS ? `${[...source].slice(0, MEMORY_SOURCE_MAX_CHARS - 1).join("")}…` : source,
       author: CLI_MEMORY_AUTHORS[cli]
     };
@@ -237,7 +302,7 @@ export class HubCliMemory {
 
   /** The entry as it is now, into the note it fills, unless a member or the
    *  User changed that note since the sync last wrote it. */
-  private async applyTo(noteId: string, placed: Placed, identity: string, device: HubDevice): Promise<{ outcome: CliMemorySyncOutcome; reason?: string }> {
+  private async applyTo(noteId: string, entry: Placed, device: HubDevice): Promise<{ outcome: CliMemorySyncOutcome; reason?: string }> {
     const row = (await this.deps.query<Row>(`select ${SUMMARY_COLUMNS}, body from member_memory_notes where id = ${quote(noteId)};`))[0];
     if (!row) return { outcome: "deleted", reason: "The User deleted this note." };
     const synced = (await this.deps.query<{ version: number }>(`select synced_version as version from member_memory_cli_notes where note_id = ${quote(noteId)};`))[0];
@@ -247,15 +312,17 @@ export class HubCliMemory {
     if (!untouched) {
       return { outcome: "kept", reason: synced ? `@${row.updatedBy} changed this note since; it is kept as it is.` : `@${row.author} keeps a note with this title.` };
     }
+    // An entry filed under a project stays there: its project's last chat
+    // going away is no reason to show it in every chat.
+    const placed: Placed = row.scope === "project" && entry.scope === "global" ? { ...entry, scope: "project", scopeKey: row.scopeKey } : entry;
+    const identity = identityOf(placed);
     const same = row.kind === placed.kind && row.scope === placed.scope && row.scopeKey === placed.scopeKey && row.title === placed.title &&
       (row.body ?? "") === placed.body && JSON.stringify(parseTags(row.tagsJson)) === JSON.stringify(placed.tags) && !row.archivedAt;
     if (same) {
       await this.deps.run(`update member_memory_cli_notes set identity_key = ${quote(identity)} where note_id = ${quote(noteId)};`);
       return { outcome: "unchanged" };
     }
-    const taken = (await this.deps.query<{ id: string; author: string }>(`select id, author from member_memory_notes where archived_at is null
-      and kind = ${quote(placed.kind)} and scope = ${quote(placed.scope)} and scope_key = ${quote(placed.scopeKey)}
-      and title_key = ${quote(memoryTitleKey(placed.title))} and id <> ${quote(noteId)} limit 1;`))[0];
+    const taken = await this.titled(placed, noteId);
     if (taken) return { outcome: "refused", reason: `Another note here has this title (id ${taken.id}).` };
     const now = this.deps.now().toISOString();
     await this.deps.run(`${BUMP_SQL} update member_memory_notes set kind = ${quote(placed.kind)}, title = ${quote(placed.title)},
@@ -268,6 +335,20 @@ export class HubCliMemory {
     this.deps.noteChanged({ id: noteId, title: placed.title, tags: placed.tags, body: placed.body });
     return { outcome: "updated" };
   }
+}
+
+/** The provider, the place and the entry's name in its store: the same
+ *  entry on two devices. */
+function identityOf(placed: Pick<Placed, "provider" | "scope" | "scopeKey" | "name">): string {
+  return digest([placed.provider, placed.scope, placed.scopeKey, placed.name]);
+}
+
+/** A title with the device's name, under the title's limit. */
+function withDevice(title: string, device: HubDevice): string {
+  const tail = ` (${(device.name || "another device").replace(/\s+/g, " ").trim().slice(0, 40)})`;
+  const room = MEMORY_TITLE_MAX_CHARS - [...tail].length;
+  const chars = [...title];
+  return `${chars.length > room ? `${chars.slice(0, room - 1).join("")}…` : title}${tail}`;
 }
 
 function digest(parts: string[]): string {

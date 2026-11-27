@@ -51,7 +51,7 @@ export function createServerChat(desktopApp: DesktopApp): void {
     serverId: () => desktopApp.serverChatLink.serverId(),
     database: () => desktopApp.storageService.sqlExecutor(),
     env: async () => ({ ...commandEnvironment(), ...(await desktopApp.settingsService.getManualAgentEnvironment()).env }),
-    projects: async () => projectsOfChats(await desktopApp.storageService.listConversations()),
+    projects: async () => projectsOfChats(await desktopApp.storageService.chatProjectPaths()),
     homeOverride: process.env.ACCORDAGENTS_CLI_MEMORY_HOME,
     log: (event, payload) => { void desktopApp.debugLogService.write(event, payload); }
   });
@@ -124,6 +124,9 @@ export function createServerChat(desktopApp: DesktopApp): void {
 export async function restartServerChatLink(desktopApp: DesktopApp): Promise<void> {
   await desktopApp.serverChatLink.stop();
   desktopApp.serverChatLinkStarted = true;
+  // Also when the link first starts here (after the server's program was
+  // updated before the window opened); it waits for the link itself.
+  desktopApp.cliMemorySync.start();
   await desktopApp.serverChatLink.start();
 }
 

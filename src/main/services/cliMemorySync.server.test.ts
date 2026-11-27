@@ -7,6 +7,7 @@ import test from "node:test";
 import { defaultChatAgentPermissions, normalizeChatAgentPermissions } from "../../shared/agentPermissions";
 import type { CliMemorySyncValue } from "../../shared/cliMemory";
 import type { HubChatPage } from "../../shared/hubOps";
+import type { HubDevice } from "../../shared/hubProtocol";
 import type { HubMemoryRequest, MemoryNote, MemoryOwnerListValue, MemoryResult, MemorySearchValue } from "../../shared/memory";
 import type { ChatParticipant, Conversation } from "../../shared/types";
 import { HubMemory } from "../../hub/hubMemory";
@@ -95,7 +96,8 @@ async function setup(t: test.TestContext) {
   await hubStorage.hub().replaceRoster([{ deviceId: machineIdentity.originId, publicKeyDerBase64: machineIdentity.publicKeyDerBase64, role: "machine", name: "Box",
     machineId: "box", addedAt: "" }], new Date().toISOString());
   const hubLog: Array<{ event: string; payload: Record<string, unknown> }> = [];
-  const memory = new HubMemory(hubStorage, (event, payload) => { hubLog.push({ event, payload }); trace("hub", event, payload); });
+  const clock = { now: new Date("2026-11-27T09:00:00.000Z") };
+  const memory = new HubMemory(hubStorage, (event, payload) => { hubLog.push({ event, payload }); trace("hub", event, payload); }, () => clock.now);
   const server = new HubServer({ hubId: "hub-test", version: "test", storage: hubStorage, search: new ChatSearchService(hubStorage), vapidPublicKey: "BPUB",
     ops: new HubOps(hubStorage, (event, payload) => trace("hub", event, payload)), memory });
   const http = await server.listenHttp(0, "127.0.0.1");
@@ -134,6 +136,8 @@ async function setup(t: test.TestContext) {
   for (const id of [CHAT_A, CHAT_C]) await until(() => page(id), (current) => Boolean(current.messages?.length));
   await machineLink.start();
   await until(async () => (await machineLink.status())?.ready, (ready) => ready === true);
+  // A pass looks only once both links name their server.
+  for (const link of [desktopLink, machineLink]) await until(() => link.serverId().catch(() => undefined), (id) => Boolean(id));
 
   const desktopHome = path.join(dir, "desktop-home");
   const machineHome = path.join(dir, "machine-home");
@@ -145,11 +149,11 @@ async function setup(t: test.TestContext) {
     }
   });
   /** The sync as the app builds it (a new one plays a restart of the app). */
-  const desktopSync = () => {
+  const desktopSync = (options: Partial<ConstructorParameters<typeof CliMemorySync>[0]> = {}) => {
     const sync = new CliMemorySync({
       access: () => counted(desktopLink, "desktop"), serverId: () => desktopLink.serverId(), database: () => desktopStorage.sqlExecutor(),
-      env: async () => ({}), projects: async () => projectsOfChats(await desktopStorage.listConversations()), homeOverride: desktopHome,
-      folders: new ProjectFolders(async () => undefined), log: (event, payload) => trace("desktop", event, payload)
+      env: async () => ({}), projects: async () => projectsOfChats(await desktopStorage.chatProjectPaths()), homeOverride: desktopHome,
+      folders: new ProjectFolders(async () => undefined), log: (event, payload) => trace("desktop", event, payload), ...options
     });
     syncs.push(sync);
     return sync;
@@ -171,7 +175,7 @@ async function setup(t: test.TestContext) {
     assert.ok(found, `no note titled ${title}: ${(await notes()).map((item) => item.title).join(" | ")}`);
     return ok<MemoryNote>(await desktopLink.memory({ action: "owner-read", noteId: found.id }));
   };
-  return { desktopHome, machineHome, desktopSync, machineSync, requests, tool, notes, note, desktopLink, hubLog };
+  return { desktopHome, machineHome, desktopSync, machineSync, requests, tool, notes, note, desktopLink, machineLink, hubLog, memory, clock, counted, hubStorage };
 }
 
 const accordFolder = (home: string, folder = "-work-accord") => path.join(home, ".claude", "projects", folder, "memory");
@@ -250,8 +254,8 @@ test("a note a member changed, wrote first, or the User deleted is never overwri
   ok(await desktopLink.memory({ action: "delete", noteId: gone.id }));
 
   await put(path.join(memory, "one.md"), "---\nname: Ask one question at a time\ntype: feedback\n---\nThe CLI's, changed.\n");
-  await put(path.join(memory, "edit.md"), "---\nname: Edited by a member\ntype: reference\n---\nv2\n");
-  await put(path.join(memory, "gone.md"), "---\nname: Deleted by the User\ntype: reference\n---\nv2\n");
+  await put(path.join(memory, "edit.md"), "---\nname: Edited by a member\ntype: reference\n---\nv2, changed\n");
+  await put(path.join(memory, "gone.md"), "---\nname: Deleted by the User\ntype: reference\n---\nv2, changed\n");
   assert.deepEqual((await sync.syncNow()).outcomes, { kept: 2, deleted: 1 });
   assert.equal((await note("Ask one question at a time")).body, "Mine.");
   const after = await note("Edited by a member");
@@ -297,3 +301,118 @@ test("the server refuses bad entries and too many at once, and keeps a status of
   const tooMany = await send(Array.from({ length: 101 }, () => base));
   assert.equal(tooMany.ok, false);
 });
+
+test("a note the User deleted is not made again by another device, nor when the notes move to another server", async (t) => {
+  const { desktopHome, machineHome, desktopSync, machineSync, notes, note, desktopLink, hubStorage } = await setup(t);
+  const entry = "---\nname: Deploy steps\ntype: reference\n---\nStep one.\n";
+  await put(path.join(accordFolder(desktopHome), "deploy.md"), entry);
+  await put(path.join(accordFolder(desktopHome), "keep.md"), "---\nname: Kept note\ntype: reference\n---\nStays.\n");
+  // The sync names its server: "A", then "B" plays a new server the notes moved to.
+  const server = { id: "A" };
+  const first = desktopSync({ serverId: async () => server.id });
+  assert.deepEqual((await first.syncNow()).outcomes, { created: 2 });
+  const deploy = await note("Deploy steps");
+  ok(await desktopLink.memory({ action: "delete", noteId: deploy.id }));
+  // A machine with the same entry: the deleted note is not made again.
+  await put(path.join(accordFolder(machineHome, "-srv-copies-accord"), "deploy.md"), entry);
+  assert.deepEqual((await machineSync().syncNow()).outcomes, { deleted: 1 });
+  // On "B" this device has sent nothing yet: every entry goes with the note it
+  // filled before. A new server holds the moved notes and nothing else: no
+  // record of what filled them, and no mark of the note deleted before.
+  server.id = "B";
+  await hubStorage.sqlExecutor().runSql("delete from member_memory_cli_sources; delete from member_memory_cli_notes; delete from member_memory_deleted;");
+  const kept = await note("Kept note");
+  assert.deepEqual((await desktopSync({ serverId: async () => server.id }).syncNow()).outcomes, { unchanged: 1, deleted: 1 });
+  assert.deepEqual((await notes()).map((item) => item.id), [kept.id]);
+  // The computer naming a note this server never had (deleted before the move): not made again.
+  const moved = ok<CliMemorySyncValue>(await desktopLink.memory({ action: "cli-sync", entries: [{ provider: "claude-code", file: "~/x/memory/old.md", name: "old.md",
+    kind: "article", title: "Deleted before the move", body: "b", tags: [], projectPath: "/work/accord", knownNoteId: "0d0d0d0d-0000-4000-8000-000000000000" }] }));
+  assert.equal(moved.results[0].outcome, "deleted");
+  assert.equal((await notes()).length, 1);
+});
+
+test("a pass sends in pages under the server's limit, stops between pages, and runs once at a time", async (t) => {
+  const { desktopHome, desktopSync, desktopLink, notes, counted } = await setup(t);
+  const memory = accordFolder(desktopHome);
+  // 13 entries of about 15 KB: two requests under 180 KB each.
+  for (let index = 0; index < 13; index += 1) {
+    await writeFile(path.join(await ensure(memory), `big-${String(index).padStart(2, "0")}.md`), `---\nname: Big ${index}\ntype: reference\n---\n${"line of memory text\n".repeat(790)}`);
+  }
+  let calls = 0;
+  let release: () => void = () => undefined;
+  const gate = new Promise<void>((resolve) => { release = resolve; });
+  const access: MemoryServerAccess = { memory: async (request: HubMemoryRequest, cancel?: AbortSignal) => {
+    calls += 1;
+    if (calls === 1) await gate;
+    return counted(desktopLink, "desktop").memory(request, cancel);
+  } };
+  const sync = desktopSync({ access: () => access, firstLookMs: 3_600_000, intervalMs: 3_600_000 });
+  sync.start();
+  const pass = sync.syncNow();
+  assert.equal(sync.syncNow(), pass, "a second look joins the one under way");
+  await until(async () => calls, (value) => value === 1);
+  await sync.stop();
+  release();
+  const stopped = await pass;
+  assert.deepEqual([calls, stopped.sent], [1, 0], "nothing more is sent or recorded after the stop");
+  // After a restart: everything, in two requests; the page the server took before is not made twice.
+  calls = 2;
+  const again = await desktopSync({ access: () => access }).syncNow();
+  assert.equal(again.sent, 13);
+  assert.equal(calls, 4);
+  assert.equal((await notes()).length, 13);
+});
+
+test("two entries with one title are two notes; an entry filed under a project stays there", async (t) => {
+  const { desktopHome, desktopSync, notes, note, desktopLink } = await setup(t);
+  const memory = accordFolder(desktopHome);
+  await put(path.join(memory, "a.md"), "---\nname: Project status\ntype: reference\n---\nA says this.\n");
+  await put(path.join(memory, "b.md"), "---\nname: Project status\ntype: reference\n---\nB says that.\n");
+  const sync = desktopSync();
+  assert.deepEqual((await sync.syncNow()).outcomes, { created: 2 });
+  assert.deepEqual((await notes()).map((item) => item.title).sort(), ["Project status", "Project status (Desktop)"]);
+  await put(path.join(memory, "a.md"), "---\nname: Project status\ntype: reference\n---\nA says this, changed.\n");
+  assert.deepEqual((await sync.syncNow()).outcomes, { updated: 1 });
+  assert.equal((await note("Project status")).body, "A says this, changed.");
+  assert.equal((await note("Project status (Desktop)")).body, "B says that.");
+
+  // The project's chats gone, the same entry comes without a project: its note keeps the project.
+  const send = (projectPath?: string) => desktopLink.memory<CliMemorySyncValue>({ action: "cli-sync", entries: [{ provider: "codex", file: "~/.codex/memories/MEMORY.md#Group",
+    name: "MEMORY.md#Group", kind: "runbook", title: "Group", body: "How.", tags: [], ...(projectPath ? { projectPath } : {}) }] });
+  assert.equal(ok<CliMemorySyncValue>(await send("/work/accord")).results[0].outcome, "created");
+  assert.equal(ok<CliMemorySyncValue>(await send()).results[0].outcome, "unchanged");
+  assert.deepEqual([(await note("Group")).scope, (await note("Group")).projectPath], ["project", "/work/accord"]);
+});
+
+test("the server: no phone, no machine without members, and a status it archived is not doubled", async (t) => {
+  const { desktopHome, machineHome, desktopSync, machineSync, memory, clock, tool, notes, note } = await setup(t);
+  const device = (role: HubDevice["role"], machineId?: string): HubDevice => ({ deviceId: `device-${role}-${machineId ?? ""}`, publicKeyDerBase64: "", role, name: "X", addedAt: "", ...(machineId ? { machineId } : {}) });
+  const entry = { provider: "claude-code", file: "f.md", name: "f.md", kind: "article", title: "From nowhere", body: "b", tags: [] };
+  const phone = await memory.handle(device("phone"), { action: "cli-sync", entries: [entry] });
+  assert.equal(!phone.ok && phone.error.code, "access_denied");
+  const idle = ok<CliMemorySyncValue>(await memory.handle(device("machine", "idle"), { action: "cli-sync", entries: [entry] }));
+  assert.deepEqual([idle.results[0].outcome, idle.results[0].reason], ["refused", "This machine hosts no member in any chat."]);
+  const box = ok<CliMemorySyncValue>(await memory.handle(device("machine", "box"), { action: "cli-sync", entries: [entry, { ...entry, file: "g.md", name: "g.md", projectPath: "/work/other" }] }));
+  assert.deepEqual(box.results.map((result) => result.outcome), ["created", "refused"], "a global note while it hosts a member; not a project it hosts none of");
+
+  const status = "---\nname: Release status\ndescription: branch x, merged\ntype: project\n---\nOpen: QA.\n";
+  await put(path.join(accordFolder(desktopHome), "release.md"), status);
+  assert.deepEqual((await desktopSync().syncNow()).outcomes, { created: 1 });
+  // A month later the server archives the status nobody updated.
+  clock.now = new Date(clock.now.getTime() + 31 * 24 * 60 * 60_000);
+  ok(await tool("desktop", CHAT_A, taylor, APP_MEMORY_SEARCH_TOOL, { query: "release" }));
+  assert.ok((await notes()).every((item) => item.title !== "Release status"), "archived");
+  // The machine's first send of the same entry: one note, still archived.
+  await put(path.join(accordFolder(machineHome, "-srv-copies-accord"), "release.md"), status);
+  const machine = machineSync();
+  assert.deepEqual((await machine.syncNow()).outcomes, { unchanged: 1 });
+  // A later change of the entry brings it back.
+  await put(path.join(accordFolder(machineHome, "-srv-copies-accord"), "release.md"), status.replace("Open: QA.", "Open: QA and release."));
+  assert.deepEqual((await machine.syncNow()).outcomes, { updated: 1 });
+  assert.equal((await note("Release status")).archivedAt, undefined);
+});
+
+async function ensure(dir: string): Promise<string> {
+  await mkdir(dir, { recursive: true });
+  return dir;
+}

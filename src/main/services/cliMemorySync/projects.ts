@@ -69,13 +69,13 @@ export class ProjectFolders {
 
 /** The projects of the chats this device keeps, each as its chats name it
  *  (the scope members' project notes are kept under). */
-export function projectsOfChats(chats: ReadonlyArray<{ kind: string; repoPath?: string }>): DeviceProject[] {
+export function projectsOfChats(repoPaths: readonly string[]): DeviceProject[] {
   const seen = new Set<string>();
   const projects: DeviceProject[] = [];
-  for (const chat of chats) {
-    if (chat.kind !== "chat" || typeof chat.repoPath !== "string" || !chat.repoPath.trim() || seen.has(chat.repoPath)) continue;
-    seen.add(chat.repoPath);
-    projects.push({ projectPath: chat.repoPath, localPath: chat.repoPath.trim().replace(/[\\/]+$/g, "") || chat.repoPath.trim() });
+  for (const repoPath of repoPaths) {
+    if (typeof repoPath !== "string" || !repoPath.trim() || seen.has(repoPath)) continue;
+    seen.add(repoPath);
+    projects.push({ projectPath: repoPath, localPath: repoPath.trim().replace(/[\\/]+$/g, "") || repoPath.trim() });
   }
   return projects;
 }
@@ -83,12 +83,12 @@ export function projectsOfChats(chats: ReadonlyArray<{ kind: string; repoPath?: 
 /** A cloud machine's projects: the copies the computer published for it
  *  (her path → the copy here), and the chats here whose project is not a
  *  copy (the computer's own path, where the machine has the same folder). */
-export function projectsOfMachine(published: Record<string, string>, chats: ReadonlyArray<{ kind: string; repoPath?: string }>): DeviceProject[] {
+export function projectsOfMachine(published: Record<string, string>, repoPaths: readonly string[]): DeviceProject[] {
   const projects: DeviceProject[] = Object.entries(published)
     .filter(([projectPath, localPath]) => projectPath.trim() && localPath.trim())
     .map(([projectPath, localPath]) => ({ projectPath, localPath }));
   const copies = new Set(Object.values(published));
-  for (const project of projectsOfChats(chats)) {
+  for (const project of projectsOfChats(repoPaths)) {
     if (!copies.has(project.projectPath) && !projects.some((known) => known.projectPath === project.projectPath)) projects.push(project);
   }
   return projects;

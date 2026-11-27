@@ -249,13 +249,17 @@ CLIs remember in members' memory too, one note per entry
   folder is the project whose folder, or whose repository's folder, gives
   that name. A Codex task group belongs to the project holding the folder its
   `applies_to: cwd=` names. On a cloud machine the projects are the copies
-  the computer published for it; the server takes a machine's project note
-  only for a project in which that machine hosts a member (its members could
-  write there themselves), and refuses the entry otherwise.
+  the computer published for it (read again when its settings arrive). An
+  entry once filed under a project stays there, even when the project's last
+  chat goes away. The server holds a machine to what its members could write
+  themselves: a project note only for a project in which it hosts a member,
+  a global note only while it hosts a member at all; it refuses the entry
+  otherwise.
 - **When:** every 30 s the device looks at the stores (a stat per file; a
   folder whose files did not change is not read again; the User's projects
   are read again every 5 minutes) and sends what is new or changed since it
-  last sent it to this server, at most 100 entries and 180 KB a request. What
+  last sent it to this server, at most 100 entries and 180 KB a request
+  (Codex's handbook may be up to 8 MB, a Claude Code memory file 1 MB). What
   was sent is kept per server in the device's database
   (`cli_memory_sync_state`), so a restart sends nothing that did not change
   and a new server gets everything once. Measured on the User's Mac
@@ -264,33 +268,53 @@ CLIs remember in members' memory too, one note per entry
 - **The server** keeps which file of which device fills which note
   (`member_memory_cli_sources`, keyed by provider, device and file) and the
   version the sync last wrote each note at (`member_memory_cli_notes`). The
-  same entry from another device (the same provider, place and entry name)
-  fills the same note. A changed entry changes its note unless a member or
+  same entry from another device (the same provider, place and entry name,
+  and the same text) fills the same note; an entry of the same name that
+  says something else is its own note, its title followed by the device's
+  name ("Reply in Russian (Box)"), so one device's memory never overwrites
+  another's. A changed entry changes its note unless a member or
   the User changed that note since (then it is kept as it is and the server
   logs `hub.memory.cli-entry-not-applied`; notes keep no revisions); the
   server archiving a stale status is no one's change, so a later change of
   the entry brings it back. A note with the same title a member wrote is
   kept, and the entry follows it without changing it; a note the User
-  deleted in Settings is not made again; a file that went away deletes
-  nothing. A note moved to another server is taken up again by its title (a
-  note only the sync ever wrote). Everything goes through the User's server;
-  an older server refuses the request, and the device asks again an hour
-  later.
+  deleted in Settings is not made again, by this device or another; a file
+  that went away deletes nothing. The first time a device sends an entry to
+  a new server it names the note the entry filled on the one before
+  (`knownNoteId`; notes move with their ids): a moved note is taken up again,
+  and a note the computer names that never reached the new server (the User
+  deleted it before the move) is marked deleted there and not made again. A
+  status the server archived is linked, not doubled, when another device
+  sends the same entry. Everything goes through the User's server; an older
+  server refuses the request, and the device asks that server again an hour
+  later (another server at once).
 - **Secrets:** a line that looks like it holds a key, a token or a password
-  (the patterns crash reports use, `src/shared/secretPatterns.ts`), and a
-  private key block, is left out of the note; the device logs how many lines
-  were left out of which file (`cli-memory.secret-lines-left-out`). A body
-  over 16 KB is cut at a line and says where the rest is.
+  (the shapes crash reports know, plus assignments to a name ending in a
+  key word — `OPENAI_API_KEY=…`, `PGPASSWORD=…`, `"api_key": "…"` — a
+  password in an address and a few more token shapes;
+  `src/shared/secretPatterns.ts`), and a private key block, is left out of
+  the note; a title that looks so gives way to the entry's file name. The
+  device logs how many lines were left out of which file
+  (`cli-memory.secret-lines-left-out`). A full git commit id on a line about
+  git stays. A secret written in plain words ("the password is …") is not
+  recognised. A body over 16 KB is cut at a line and says where the rest is.
+  A link (symlink) in a memory folder is never followed, so an agent cannot
+  point one at a file it may not read itself.
 - **QA:** `ACCORDAGENTS_CLI_MEMORY_HOME=<folder>` makes the desktop or machine
   read `<folder>/.claude` and `<folder>/.codex` instead, so a test instance
   reads a copy and not the User's own memory.
-- **Known limits:** a Claude Code folder name over 200 characters (the CLI
+- **Known limits:** a machine that syncs before the computer has moved the
+  notes to a new server can make a note the move then brings a second copy
+  of. A Claude Code folder name over 200 characters (the CLI
   shortens it with a hash of its own) and an `autoMemoryDirectory` the User
   set in Claude Code's settings are not followed; their memories are not
   read. A project the app knows under two folder names that both have
-  memory files with the same file name fills one note from both. A note
-  imported once stays in the session-start list of members without search by
-  meaning like any recently written note.
+  memory files with the same file name gives the second its own note named
+  after the device. A note imported once stays in the session-start list of
+  members without search by meaning like any recently written note. A
+  renamed entry is a new note; the old one stays until a member archives it.
+  With search by meaning on, these notes are printed by OpenAI like every
+  other note.
 
 ## Keeping it tidy without the User
 

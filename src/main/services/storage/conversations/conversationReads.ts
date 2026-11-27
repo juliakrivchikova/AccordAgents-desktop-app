@@ -113,6 +113,16 @@ export class ConversationReads {
     return typeof row.repoPath === "string" && row.repoPath.trim() ? { repoPath: row.repoPath } : {};
   }
 
+  /** The project folders of the chats kept here, each as its chats name it
+   *  (one row per folder; no chat is read). */
+  async chatProjectPaths(): Promise<string[]> {
+    await this.storage.schema.init();
+    const rows = await this.storage.sqlite.queryJson<{ repoPath: string }>(
+      "select distinct repo_path as repoPath from conversations where kind = 'chat' and coalesce(trim(repo_path), '') <> '';"
+    );
+    return rows.map((row) => row.repoPath).filter((repoPath): repoPath is string => typeof repoPath === "string");
+  }
+
   /** Whether a chat is stored here (and holds one message), without reading
    *  a conversation that can be thousands of messages long. */
   async conversationPresence(id: string, messageId?: string): Promise<{ kind: Conversation["kind"]; hasMessage: boolean } | undefined> {

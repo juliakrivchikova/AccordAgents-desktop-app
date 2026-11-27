@@ -57,8 +57,10 @@ export function noteBody(text: string, file: string): { body: string; dropped: n
   // A single line longer than the limit: cut inside it, never inside a character.
   if (!kept.length) {
     let cut = "";
+    let bytes = 0;
     for (const char of body) {
-      if (Buffer.byteLength(cut + char) > room) break;
+      bytes += Buffer.byteLength(char);
+      if (bytes > room) break;
       cut += char;
     }
     kept.push(cut);
