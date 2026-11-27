@@ -9,7 +9,8 @@ import { PARTICIPANT_REQUEST_INTERRUPTED_BEFORE_COMPLETION, PARTICIPANT_REQUEST_
 import {
   GENERIC_ROLE, mainActor, mainSession, mainSessionChat, member, NOW, permissions, resumesOf, sessionRecord, testService, waitFor
 } from "./chat/test/mainSessionFixtures";
-import { ownRequestsAnswering, requestAnsweredByTurn } from "./chat/requests/ownRequests";
+import { messagesById, ownRequestsAnswering, permissionCardAnswering, requestAnsweredByTurn } from "./chat/requests/ownRequests";
+import { permissionApprovalResumeRunId } from "./chat/approvals/approvalRecords";
 import { markParticipantRequestAutoResumeFailed } from "./chat/requests/requestRecords";
 
 // A member that asks the main session (or anyone) something while it works
@@ -698,4 +699,56 @@ test("a permission card raised in the turn the member was resumed in keeps the t
   assert.equal(replyText(storage.current, item.replyMessageId), "FINAL: the site is up.");
   assert.equal(workerTurns(), 3);
   assert.equal(resumesOf(runs, "main-id").length, 1);
+});
+
+test("a quit while the member's question waits on the User's card leaves the card to her, as after any finished turn; approved at the next start, the reply after the resume settles the task", async () => {
+  const first = scenario({ workerPermissions: { requestParticipants: "ask" }, worker: asksMainThenAnswers });
+  await first.service.requestParticipantsFromTool(mainActor(undefined, { turnSegmentId: "t", runId: "r" }), { requests: [{ target: "worker", prompt: "Pick." }] });
+  const pendingCard = (conversation: Conversation) => (conversation.metadata.pendingAppToolApprovals as any[] | undefined)
+    ?.find((approval) => approval.requesterParticipantId === "worker-id" && approval.status === "pending");
+  await waitFor(() => Boolean(pendingCard(first.storage.current)) &&
+    first.storage.current.messages.some((message: ChatMessage) => message.participantId === "worker-id" && message.status === "done"));
+  await settle();
+  assert.equal(itemOf(first.storage.current, "main-id")!.status, "running");
+  first.service.beginQuit();
+  await first.service.endTurnsForQuit();
+  await settle();
+  assert.ok(pendingCard(first.storage.current), "the quit leaves the card open");
+  assert.equal(itemOf(first.storage.current, "worker-id")!.status, "pending_approval");
+  const stored = structuredClone(first.storage.current) as Conversation;
+  endProcess(first.service);
+
+  const next = testService({
+    conversation: stored,
+    run: async (participant, prompt) => participant.id === "worker-id"
+      ? (assert.match(prompt, /Auto-resumed @worker/), ok(participant, "FINAL: blue (approved after restart)"))
+      : ok(participant, prompt.includes("Which color") ? "blue" : "Noted.")
+  });
+  await chatParts(next.service).store.requireChat("conversation-1");
+  await settle();
+  assert.equal(itemOf(next.storage.current, "main-id")!.status, "running", "still waits at the next start");
+  await next.service.respondToAppToolApproval({ conversationId: "conversation-1", approvalId: pendingCard(next.storage.current)!.id, approve: true, scope: "once" });
+  await waitFor(() => Boolean(requestBy(next.storage.current, "main-id")?.batch.autoResumeMessageId), 4000);
+  await settle();
+  const item = itemOf(next.storage.current, "main-id")!;
+  assert.equal(item.status, "answered");
+  assert.equal(replyText(next.storage.current, item.replyMessageId), "FINAL: blue (approved after restart)");
+  assert.equal(resumesOf(next.runs, "main-id").filter((run) => run.prompt.includes("Auto-resumed @main after member request.\nTarget replies")).length, 1);
+});
+
+test("an approved permission card holds the task only until its resumed turn begins, or a minute at most", () => {
+  const conversation = machineMemberChat({ items: "answered", status: "completed" });
+  const at = Date.now();
+  conversation.metadata.pendingAppToolApprovals = [{
+    id: "card", conversationId: "conversation-1", requesterParticipantId: "remote-id", requesterHandle: "remote", requesterRoleConfigId: GENERIC_ROLE.id,
+    toolName: "app_permissions_request_change", capability: "permissions.request", status: "approved", request: { kind: "portable", permissions: ["webAccess"] },
+    summary: "Grant @remote web access", createdAt: new Date(at).toISOString(), updatedAt: new Date(at).toISOString(),
+    resumeContext: { runId: "remote-run-1", triggerMessageId: "task", participantRequestBatchId: "task-batch" }
+  }] as any;
+  const byId = messagesById(conversation);
+  assert.equal(permissionCardAnswering(conversation, "remote-id", "task", byId, at + 30_000), true, "approved, its turn not begun");
+  assert.equal(permissionCardAnswering(conversation, "remote-id", "task", byId, at + 61_000), false, "its turn never began");
+  conversation.messages.push({ id: "resumed", role: "participant", participantId: "remote-id", content: "", createdAt: new Date(at).toISOString(), status: "pending",
+    metadata: { sourceMessageId: "task", runId: permissionApprovalResumeRunId("card") } } as ChatMessage);
+  assert.equal(permissionCardAnswering(conversation, "remote-id", "task", messagesById(conversation), at + 30_000), false, "its turn began: that reply holds it now");
 });

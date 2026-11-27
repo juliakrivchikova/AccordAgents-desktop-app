@@ -587,9 +587,20 @@ export class ParticipantRequests {
         // resume after its own requests; the last reply is its answer. Its
         // run stays live meanwhile: the member's Stop ends the request.
         const earlier: ChatMessage[] = [];
-        const through = continues && reply
-          ? await answerThroughOwnWork(this.chat, conversation.id, requestMessageId, target.id, reply, [], targetController.signal)
-          : undefined;
+        // Its own compaction goes on in this run. A wait on its own requests
+        // runs in a run of its own, begun before this one ends: this turn is
+        // over, and its cards (its own requests' cards among them) stay
+        // with it, so a quit meanwhile leaves them to the User as it does
+        // after any finished turn.
+        const endTurnRun = async (): Promise<void> => {
+          if (targetRunBegun && targetRunId) await this.chat.activeRuns.endChatRun(conversation, targetRunId);
+          targetRunBegun = false;
+          if (targetRunId && targetController) this.chat.activeRuns.unregisterTargetRun(targetRunId, targetController);
+        };
+        const through = !continues || !reply ? undefined
+          : reply.metadata?.selfCompaction
+            ? await answerThroughOwnWork(this.chat, conversation.id, requestMessageId, target.id, reply, [], targetController.signal)
+            : await this.answerWithLiveRun(conversation, requestMessageId, target, reply, [], { parentSignal: targetController.signal, onLive: endTurnRun });
         if (through?.kind === "answer") {
           reply = through.reply;
           earlier.push(...through.earlier);
@@ -719,17 +730,29 @@ export class ParticipantRequests {
     requestMessageId: string,
     target: ChatParticipant,
     first: ChatMessage,
-    earlier: readonly ChatMessage[]
+    earlier: readonly ChatMessage[],
+    options: {
+      /** Stopping it (an inline requester's Stop, a Stop that came in the
+       *  turn before) stops this wait too. */
+      parentSignal?: AbortSignal;
+      /** Called once this run is live (the turn before ends its run then). */
+      onLive?: () => Promise<void>;
+    } = {}
   ): Promise<OwnWorkAnswer> {
     const runId = randomUUID();
     const controller = new AbortController();
+    const abort = (): void => controller.abort();
+    if (options.parentSignal?.aborted) controller.abort();
+    else options.parentSignal?.addEventListener("abort", abort, { once: true });
     this.chat.activeRuns.registerTargetRun(runId, controller, { conversationId: conversation.id, participantId: target.id, participantHandle: target.handle });
     let begun = false;
     try {
       await this.chat.activeRuns.beginChatRun(conversation, runId);
       begun = true;
+      await options.onLive?.();
       return await answerThroughOwnWork(this.chat, conversation.id, requestMessageId, target.id, first, earlier, controller.signal);
     } finally {
+      options.parentSignal?.removeEventListener("abort", abort);
       if (begun) await this.chat.activeRuns.endChatRun(conversation, runId);
       this.chat.activeRuns.unregisterTargetRun(runId, controller);
     }
