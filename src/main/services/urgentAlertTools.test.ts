@@ -248,6 +248,35 @@ test("a raise that timed out did land: Got it here before the next try still clo
   outbox.stop();
 });
 
+test("Got it here, and the server's card that arrives says it never left the app either: it is closed there too, so her Got it stands", async () => {
+  const s = server([unreachable]);
+  const c = cards();
+  const k = store();
+  const outbox = new UrgentAlertOutbox({ access: () => s.access, store: k.store, cards: c.host, log: () => undefined, retryMs: 60_000 });
+  const result = await outbox.raise(actor, { message: "Production is down", requestId: "req-1" }) as { value: UrgentAlertRaised };
+  await outbox.close({ alertId: result.value.alertId });
+  await outbox.serverCardArrived(actor.conversationId, cardId("req-1"), serverView("not_set_up", "server-alert-8"));
+  assert.deepEqual(s.closes(), [{ action: "close", alertId: "server-alert-8" }]);
+  outbox.stop();
+});
+
+test("Got it folds the card at once even when the server's alert cannot be closed now; the close is tried again later", async () => {
+  const k = store();
+  const c = cards();
+  const first = new UrgentAlertOutbox({ access: () => server([unreachable]).access, store: k.store, cards: c.host, log: () => undefined, retryMs: 60_000 });
+  const result = await first.raise(actor, { message: "Production is down", requestId: "req-1" }) as { value: UrgentAlertRaised };
+  first.stop();
+  const s = server([raisedFor("req-1")], [() => new Promise(() => undefined)]);
+  const second = new UrgentAlertOutbox({ access: () => s.access, store: k.store, cards: c.host, log: () => undefined, retryMs: 60_000, raiseTimeoutMs: 60_000 });
+  await second.retryDue();
+  const started = Date.now();
+  const closed = await second.close({ alertId: result.value.alertId });
+  assert.ok(Date.now() - started < 1_000, "not held by the server");
+  assert.ok(closed && "handled" in closed && closed.handled.ok);
+  assert.deepEqual(kept(k.box).map((item) => item.stage), ["closed"], "kept until the server confirms");
+  second.stop();
+});
+
 test("Got it after a restart on a card the server took meanwhile (its card not arrived yet) closes the server's alert", async () => {
   const k = store();
   const c = cards();
@@ -262,8 +291,8 @@ test("Got it after a restart on a card the server took meanwhile (its card not a
   const third = new UrgentAlertOutbox({ access: () => s.access, store: k.store, cards: c.host, log: () => undefined, retryMs: 60_000 });
   const closed = await third.close({ alertId: result.value.alertId });
   assert.ok(closed && "handled" in closed && closed.handled.ok);
+  await until(() => kept(k.box).length === 0);
   assert.deepEqual(s.closes(), [{ action: "close", alertId: "server-alert-1" }]);
-  assert.deepEqual(kept(k.box), []);
   third.stop();
 });
 

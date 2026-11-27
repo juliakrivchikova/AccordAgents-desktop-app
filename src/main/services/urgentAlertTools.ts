@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import {
-  URGENT_ALERT_ACKNOWLEDGEABLE_STATES, URGENT_ALERT_MESSAGE_MAX_CHARS, URGENT_ALERT_SERVER_TOO_OLD, URGENT_ALERT_UNSENT_ID_PREFIX,
+  URGENT_ALERT_MESSAGE_MAX_CHARS, URGENT_ALERT_SERVER_TOO_OLD, URGENT_ALERT_UNSENT_ID_PREFIX,
   type HubAlertRequest, type HubAlertResult, type UrgentAlertError, type UrgentAlertRaised, type UrgentAlertView
 } from "../../shared/urgentAlerts";
 import { urgentAlertCardMessageId, urgentAlertUnsentId } from "./urgentAlertCardIds";
@@ -200,7 +200,11 @@ export class UrgentAlertOutbox {
     });
     const conversationId = entry?.conversationId ?? request.conversationId;
     const messageId = entry?.messageId ?? request.messageId;
-    if (entry?.serverAlertId) await this.closeOnServer(keyOf(entry));
+    // The server's alert (it took this one meanwhile) is closed there in the
+    // background, tried again until it confirms: the card folds at once.
+    if (entry?.serverAlertId) {
+      void this.closeOnServer(keyOf(entry)).catch((error: unknown) => this.options.log("urgent-alert.outbox.close-failed", { message: messageOf(error) }));
+    }
     this.options.log("urgent-alert.outbox.closed-here", { alertId: request.alertId, kept: Boolean(entry), server: Boolean(entry?.serverAlertId) });
     if (!conversationId || !messageId || !this.options.cards) return { handled: failure("invalid_request", "Which alert's card?") };
     const view = await this.options.cards.update(conversationId, messageId, (alert) => ({
@@ -226,8 +230,9 @@ export class UrgentAlertOutbox {
       const current = await this.load();
       const found = current.find((item) => item.conversationId === conversationId && item.messageId === messageId);
       if (!found) return undefined;
-      // She pressed Got it here first: the server's alert is closed too.
-      if (found.stage === "closed" && URGENT_ALERT_ACKNOWLEDGEABLE_STATES.includes(alert.state) && !alert.closedAt) {
+      // She pressed Got it here first: the server's alert is closed too,
+      // whatever its state (one that never left the app folds as well).
+      if (found.stage === "closed" && !alert.closedAt) {
         const next: PendingAlert = { ...found, serverAlertId: alert.id };
         await this.save(current.map((item) => item === found ? next : item));
         return next;

@@ -84,6 +84,19 @@ test("the main timeline holds the User's messages to the main session, its own m
   assert.equal(isMainSessionTaskMessage(messages[4]!, index), false, "a member's question to the main session is not");
 });
 
+test("an urgent alert's card from any member stands on the main timeline and stays in its member's session", () => {
+  const alert = { id: "a1", state: "waiting" as const, createdAt: at(10), calls: [], phone: true, callMode: "keypad" as const };
+  const card = message("drew-alert", "participant", 10, { participantId: "p-drew", content: "Prod is down", metadata: { serverWriter: "server", urgentAlert: alert } });
+  const unsent = message("gera-alert", "participant", 11, { participantId: "p-gera", content: "DB is full",
+    metadata: { serverPlaceholder: true, urgentAlert: { ...alert, id: "unsent-1", state: "unsent" as const, unsent: { reason: "unreachable" as const, retrying: true } } } });
+  const forged = message("taylor-fake", "participant", 12, { participantId: "p-taylor", content: "Pay now", metadata: { urgentAlert: alert } });
+  const messages = [...chat(), card, unsent, forged];
+  const index = buildSessionsViewIndex(messages, "p-main");
+  assert.deepEqual(mainTimelineMessages(messages, index).map((entry) => entry.id), ["intro", "ask", "main-1", "tasks", "drew-alert", "gera-alert"]);
+  assert.ok(memberSessionMessages(messages, "p-drew", index).some((entry) => entry.id === "drew-alert"), "still in the member's session");
+  assert.ok(memberSessionMessages(messages, "p-gera", index).some((entry) => entry.id === "gera-alert"));
+});
+
 test("a member's session holds its task, its replies, its questions with the main session's answers and the User's messages to it", () => {
   const messages = chat();
   const index = buildSessionsViewIndex(messages, "p-main");

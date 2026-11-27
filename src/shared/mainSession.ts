@@ -28,6 +28,7 @@ import type {
   ConversationMetadata
 } from "./types";
 import { turnFinishedNoteOf } from "./turnFinishedNoteSource";
+import { urgentAlertOfMessage } from "./urgentAlerts";
 
 export const MAIN_SESSION_ROLE_ID = "main-session";
 export const MAIN_SESSION_HANDLE = "main";
@@ -300,9 +301,17 @@ export function isSessionsHiddenTurnFinishedNote(message: Pick<ChatMessage, "rol
   return turnFinishedNoteOf(message) !== undefined;
 }
 
+/** An urgent alert's card stands on the main timeline of the sessions view
+ *  whichever member raised it, and stays in that member's session too: the
+ *  card must reach her in any case, and what she has to see is on the main
+ *  timeline (the User, 2026-11-27). The desktop and the phone use this. */
+export function isMainTimelineAlertCard(message: ChatMessage): boolean {
+  return urgentAlertOfMessage(message) !== undefined;
+}
+
 /** The messages on the main timeline of the sessions view, in order. */
 export function mainTimelineMessages(messages: readonly ChatMessage[], index: SessionsViewIndex): ChatMessage[] {
-  return messages.filter((message) => sessionsViewLane(message, index).kind === "main" && !isSessionsHiddenTurnFinishedNote(message));
+  return messages.filter((message) => (sessionsViewLane(message, index).kind === "main" || isMainTimelineAlertCard(message)) && !isSessionsHiddenTurnFinishedNote(message));
 }
 
 /** Where each of the main session's tasks is shown on the main timeline of
