@@ -173,8 +173,6 @@
   --app-danger-soft: #fff0ef;
   --app-danger-border: #f2c0bb;
   /* An urgent alert's card header: a saturated red, the same in both themes. */
-  --app-urgent: #dc2626;
-  --app-urgent-fg: #ffffff;
   --app-avatar-bg: #f8fbff;
   --app-avatar-border: #cbd5e1;
   --app-avatar-shadow: 0 1px 2px rgba(15, 23, 42, 0.08);
@@ -450,8 +448,6 @@
   --app-danger: #ff8b7e;
   --app-danger-soft: #421f1d;
   --app-danger-border: #823c35;
-  --app-urgent: #dc2626;
-  --app-urgent-fg: #ffffff;
   --app-avatar-bg: #1b202b;
   --app-avatar-border: #3a4353;
   --app-avatar-shadow: 0 1px 2px rgba(0, 0, 0, 0.28);

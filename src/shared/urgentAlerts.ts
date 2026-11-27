@@ -233,10 +233,11 @@ export function maskedPhoneNumber(number: string): string {
 
 // --- what a card says (the computer and the phone show the same words) ---
 //
-// The card the User approved on 2026-11-15 (five reviews, mockup "Urgent
-// alert · new card", header variant 5A): the red header always, the member's
-// message, then one status band that answers "what now, and when does my
-// phone ring", with what happened before in one grey line under it.
+// The card the User approved on 2026-11-27 (docs/design/urgent-alert,
+// variant 1): the member's message, then one status line that answers "what
+// now, and when does my phone ring", with what happened before in one grey
+// line under it. Words are separated by commas, parentheses and periods,
+// never by middle dots (the User's writing rule).
 
 export function urgentAlertClock(iso: string | undefined): string {
   if (!iso) return "";
@@ -253,8 +254,10 @@ export function urgentAlertCountdown(ms: number): string {
 /** The status band: its main line (`lead`, then the countdown in bold when a
  *  call is due, then `tail`), a grey line under it, and what the band offers. */
 export interface UrgentAlertStatus {
-  /** "now": it waits for her; "done": she reacted; "bad": it never reached her. */
-  tone: "now" | "done" | "bad";
+  /** "now": it waits for her; "done": she reacted; "bad": nobody answered the
+   *  calls; "off": it never left the app (alerts not set up, or Telegram
+   *  refused it and no phone is connected). */
+  tone: "now" | "done" | "bad" | "off";
   icon: "clock" | "ringing" | "sent" | "missed" | "check" | "off" | "failed";
   lead: string;
   /** The next call's moment and the time left until it, while it is ahead. */
@@ -277,10 +280,10 @@ export function urgentAlertStatus(alert: UrgentAlertView, requester: string, now
   const telegramSent = Boolean(alert.telegram?.sentAt);
   switch (alert.state) {
     case "not_set_up":
-      return { tone: "bad", icon: "off", lead: "Not sent outside the app",
+      return { tone: "off", icon: "off", lead: "Not sent outside the app",
         detail: `Alerts aren't set up, so ${requester} could reach you only here.`, action: "set-up" };
     case "failed":
-      return { tone: "bad", icon: "failed", lead: "Not sent outside the app",
+      return { tone: "off", icon: "failed", lead: "Not sent outside the app",
         detail: `Telegram didn't take it${alert.telegram?.error ? ` (${alert.telegram.error})` : ""} and no phone is connected.`, action: "set-up" };
     case "acknowledged": {
       const at = urgentAlertClock(alert.ackedAt);
@@ -292,13 +295,13 @@ export function urgentAlertStatus(alert: UrgentAlertView, requester: string, now
       const before = alert.ackSource === "call" ? calls.slice(0, -1) : calls;
       const history = [...historyParts(alert, before)];
       if (alert.phone && calls.length === 0) history.push("No call was made");
-      return { tone: "done", icon: "check", lead: `Got it · ${by}${at ? ` at ${at}` : ""}`, detail: joined(history) };
+      return { tone: "done", icon: "check", lead: `Got it, ${by}${at ? ` at ${at}` : ""}`, detail: joined(history) };
     }
     case "unanswered": {
       // A call Twilio refused or reported failed never got through.
       const through = calls.filter((call) => !call.error && call.status !== "failed").length;
-      const lead = through === 0 ? "Couldn't call you · no more calls"
-        : `Nobody answered ${through === 1 ? "the call" : `${through} calls`} · no more calls`;
+      const lead = through === 0 ? "Couldn't call you, no more calls"
+        : `Nobody answered ${through === 1 ? "the call" : `${through} calls`}, no more calls`;
       return { tone: "bad", icon: "missed", lead, detail: joined(historyParts(alert, calls)), action: "got-it" };
     }
     case "waiting":
@@ -320,18 +323,18 @@ export function urgentAlertStatus(alert: UrgentAlertView, requester: string, now
           : "Got it here stops the call.", action: "got-it" };
     }
     return { tone: "now", icon: "clock", lead: "Calling again in ", countdown,
-      tail: ` · call ${calls.length + 1} of ${URGENT_ALERT_CALL_ATTEMPTS}`, detail: joined(historyParts(alert, calls)), action: "got-it" };
+      tail: ` (call ${calls.length + 1} of ${URGENT_ALERT_CALL_ATTEMPTS})`, detail: joined(historyParts(alert, calls)), action: "got-it" };
   }
   const press = alert.callMode === "keypad" ? "Answer and press 1, or press Got it here." : "Answer it, or press Got it here.";
   if (ringing) {
-    return { tone: "now", icon: "ringing", lead: `Calling you now · call ${Math.min(ringing.attempt, URGENT_ALERT_CALL_ATTEMPTS)} of ${URGENT_ALERT_CALL_ATTEMPTS}`,
+    return { tone: "now", icon: "ringing", lead: `Calling you now (call ${Math.min(ringing.attempt, URGENT_ALERT_CALL_ATTEMPTS)} of ${URGENT_ALERT_CALL_ATTEMPTS})`,
       detail: press, action: "got-it" };
   }
   if (alert.phone) {
     // Its moment came and her server has not placed it yet: say only that,
     // never that it rings (a server that stalled would leave it so).
     const attempt = Math.min(calls.length + 1, URGENT_ALERT_CALL_ATTEMPTS);
-    return { tone: "now", icon: "ringing", lead: `Placing the call · call ${attempt} of ${URGENT_ALERT_CALL_ATTEMPTS}`, detail: press, action: "got-it" };
+    return { tone: "now", icon: "ringing", lead: `Placing the call (call ${attempt} of ${URGENT_ALERT_CALL_ATTEMPTS})`, detail: press, action: "got-it" };
   }
   // No phone: Telegram is all there is.
   return { tone: "now", icon: "sent", lead: telegramSent ? "Sent to Telegram" : "Waiting for Got it",
@@ -399,7 +402,7 @@ function callOutcome(call: UrgentAlertCall, alert: UrgentAlertView): string {
 }
 
 function joined(parts: string[]): string | undefined {
-  return parts.length ? parts.join(" · ") : undefined;
+  return parts.length ? `${parts.join(". ")}.` : undefined;
 }
 
 /** A message that is an urgent alert's card: written by the User's server

@@ -1,33 +1,24 @@
-import { BellSlashIcon, BellRingingIcon, CaretDownIcon, CheckCircleIcon, ClockIcon, PhoneCallIcon, PhoneXIcon, PaperPlaneTiltIcon, WarningIcon, XIcon } from "@phosphor-icons/react";
-import type { Icon as PhosphorIcon } from "@phosphor-icons/react";
+import { BellRingingIcon, CaretDownIcon, XIcon } from "@phosphor-icons/react";
 import { useContext, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { Button } from "@/components/ui/button";
 import {
-  urgentAlertAwaitsGotIt, urgentAlertFailureText, urgentAlertOutcome, urgentAlertStatus, type UrgentAlertStatus, type UrgentAlertView
+  urgentAlertAwaitsGotIt, urgentAlertFailureText, urgentAlertOutcome, urgentAlertStatus, type UrgentAlertView
 } from "../../../shared/urgentAlerts";
 import type { ChatMessage, ChatParticipant } from "../../../shared/types";
+import { IconButton } from "../primitives";
 import { ChatMessageWhen } from "./chat-streaming";
 import { UrgentAlertActionsContext } from "./urgent-alert-context";
 import { useSessionsViewLabel, useSessionsViewText } from "./chat-sessions-links";
 
-const STATUS_ICONS: Record<UrgentAlertStatus["icon"], PhosphorIcon> = {
-  clock: ClockIcon,
-  ringing: PhoneCallIcon,
-  sent: PaperPlaneTiltIcon,
-  missed: PhoneXIcon,
-  check: CheckCircleIcon,
-  off: BellSlashIcon,
-  failed: WarningIcon
-};
-
 /**
- * An urgent alert a member raised, as the User approved it on 2026-11-15
- * (mockup "Urgent alert · new card", variant 5A): the red header whatever its
- * state, the member and the time, the message, then one status band that says
- * what happens now — when the phone rings, or how it ended — with what
+ * An urgent alert a member raised, as the User approved it on 2026-11-27
+ * (docs/design/urgent-alert, variant 1): a plain kit card with a red border
+ * and bell while it waits for her, a head line (Urgent alert, who, when), the
+ * message, then one status line that says what happens now (when the phone
+ * rings, or how it ended) as a small dot and colored words, with what
  * happened before in one grey line.
  *
- * While the alert waits for her the band offers Got it and the header has no
+ * While the alert waits for her the status offers Got it and the head has no
  * cross; Got it here folds the card into one line. After Got it in Telegram
  * or on the call it stays open with the outcome and a cross that folds it.
  */
@@ -130,7 +121,7 @@ export function ChatUrgentAlertCard(props: {
           <BellRingingIcon className="chat-urgent-alert-folded-bell" size={14} aria-hidden="true" />
           <span className="sr-only">Urgent alert: </span>
           <span className="chat-urgent-alert-folded-preview">{message.content}</span>
-          <span className="chat-urgent-alert-folded-outcome">{requesterName ? `${requesterName} · ` : ""}{outcome.text}</span>
+          <span className="chat-urgent-alert-folded-outcome">{requesterName ? `${requesterName}, ` : ""}{outcome.text}</span>
           <CaretDownIcon className="chat-urgent-alert-folded-chevron" size={14} aria-hidden="true" />
         </button>
       </article>
@@ -138,37 +129,36 @@ export function ChatUrgentAlertCard(props: {
   }
 
   const status = urgentAlertStatus(alert, requester, now);
-  const StatusIcon = STATUS_ICONS[status.icon];
   const folds = Boolean(alert.closedAt) && !awaiting;
   return (
     <article ref={card} data-message-id={message.id} className="chat-urgent-alert" aria-label={appText(`Urgent alert from ${requester}`)}>
-      <div className="chat-urgent-alert-panel">
+      <div className={`chat-urgent-alert-panel is-${status.tone}${awaiting ? " is-awaiting" : ""}`}>
         <div className="chat-urgent-alert-head">
-          <BellRingingIcon className="chat-urgent-alert-bell" size={18} aria-hidden="true" />
+          <BellRingingIcon className="chat-urgent-alert-bell" size={16} aria-hidden="true" />
           <span className="chat-urgent-alert-title">Urgent alert</span>
+          {/* Who and when, in the card's head (the User, 2026-11-13; placed by variant 1). */}
+          {requesterName && <span className="chat-urgent-alert-from">from {requesterName}</span>}
+          <span className="chat-urgent-alert-when"><ChatMessageWhen createdAt={message.createdAt} /></span>
           {!awaiting && (
-            <button
-              type="button"
+            <IconButton
+              size="xs"
+              icon={XIcon}
               className="chat-urgent-alert-close"
-              aria-label={folds ? "Fold alert" : "Close alert"}
+              label={folds ? "Fold alert" : "Close alert"}
+              tooltip={folds ? "Fold" : "Close"}
               aria-expanded={folds ? true : undefined}
-              title={folds ? "Fold" : "Close"}
               disabled={closing}
               onClick={() => {
                 if (!folds) return void close();
                 rememberFocus();
                 setExpanded(false);
               }}
-            >
-              <XIcon size={18} aria-hidden="true" />
-            </button>
+            />
           )}
         </div>
-        {/* Who and when, inside the card above the message (the User, 2026-11-13). */}
-        <div className="chat-urgent-alert-from">{requesterName ? `${requesterName} · ` : ""}<ChatMessageWhen createdAt={message.createdAt} /></div>
         <div className="chat-urgent-alert-text">{message.content}</div>
-        <div className={`chat-urgent-alert-status is-${status.tone}`}>
-          <StatusIcon className="chat-urgent-alert-status-icon" size={16} aria-hidden="true" />
+        <div className="chat-urgent-alert-status">
+          <span className="chat-urgent-alert-status-dot" aria-hidden="true" />
           <div className="chat-urgent-alert-status-words">
             <div className="chat-urgent-alert-status-main">
               {status.lead}
@@ -179,12 +169,12 @@ export function ChatUrgentAlertCard(props: {
             {error && <div className="chat-urgent-alert-error" role="alert">{urgentAlertFailureText(alert, error)}</div>}
           </div>
           {status.action === "got-it" && (
-            <Button type="button" className={ACTION_CLASSES} disabled={closing} onClick={() => void close()}>
+            <Button type="button" size="sm" disabled={closing} onClick={() => void close()}>
               Got it
             </Button>
           )}
           {status.action === "set-up" && actions && (
-            <Button type="button" className={ACTION_CLASSES} onClick={() => actions.openAlertSettings()}>
+            <Button type="button" size="sm" variant="outline" onClick={() => actions.openAlertSettings()}>
               Set up alerts
             </Button>
           )}
@@ -193,8 +183,3 @@ export function ChatUrgentAlertCard(props: {
     </article>
   );
 }
-
-/** The band's button: the app's primary button, a little wider and bolder;
- *  while Got it is on its way it stays a dimmed primary, not a grey ghost on
- *  the band's grey. */
-const ACTION_CLASSES = "px-[15px] font-semibold disabled:border-[var(--app-primary)] disabled:bg-primary disabled:text-primary-foreground disabled:opacity-50";
