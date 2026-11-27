@@ -17,7 +17,7 @@ import { UrgentAlertActionsContext } from "../chat/urgent-alert-context";
 import { TelegramConnectDialog } from "./alerts-connect-dialogs";
 import { alertRequest, useSettingsWatch } from "./alerts-shared";
 import { PhoneConnectDialog } from "./alerts-phone-dialog";
-import { AlertsBandPlaceholder, AlertsChannelRow, AlertsFlow, AlertsStatusBand } from "./alerts-settings-parts";
+import { AlertsBandPlaceholder, AlertsCallContactRow, AlertsChannelRow, AlertsFlow, AlertsStatusBand } from "./alerts-settings-parts";
 import { AwsConfirmDialog } from "./aws-dialog";
 import { Spinner } from "@/components/ui/spinner";
 import { Delayed } from "@/components/ui/delayed";
@@ -216,6 +216,7 @@ export function AlertsSettingsSection(): JSX.Element {
                 { label: "Remove", danger: true, onSelect: () => { setConfirmError(undefined); setConfirm("remove-phone"); } }
               ] : undefined}
             />
+            {phone?.from ? <AlertsCallContactRow /> : null}
           </div>
         </section>
       </> : null}

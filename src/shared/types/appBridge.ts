@@ -266,6 +266,9 @@ export interface AppBridge {
   /** Urgent alerts on the User's server: Settings → Alerts, and closing an
    *  alert's card (shared/urgentAlerts.ts). */
   urgentAlertRequest(request: import("../urgentAlerts").UrgentAlertUserRequest): Promise<import("../urgentAlerts").HubAlertResult<unknown>>;
+  /** Settings → Alerts → Add to contacts: opens a contact card for the number
+   *  alert calls come from (shared/alertCallContact.ts) with the system. */
+  openAlertCallContact(): Promise<import("../alertCallContact").OpenAlertCallContactResult>;
   getHubSetupCommand(request: import("../hubSetup").HubSetupCommandRequest): Promise<import("../hubSetup").HubSetupCommandResult>;
   installHub(request: import("../hubSetup").HubInstallRequest): Promise<import("../hubSetup").HubSetupState>;
   onHubSetupProgress(callback: (state: import("../hubSetup").HubSetupState) => void): () => void;

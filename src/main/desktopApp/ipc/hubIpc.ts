@@ -1,5 +1,7 @@
-import { URGENT_ALERT_USER_ACTIONS, type UrgentAlertUserRequest } from "../../../shared/urgentAlerts";
+import { URGENT_ALERT_USER_ACTIONS, type UrgentAlertSettingsView, type UrgentAlertUserRequest } from "../../../shared/urgentAlerts";
 import { ipcMain } from "electron";
+import { hostPlatform } from "../../platform";
+import { openAlertCallContact } from "../alertCallContact";
 import { publishHubRoster } from "../hubRoster";
 import { createPhoneInvite } from "../phoneInvites";
 import type { DesktopApp } from "../desktopApp";
@@ -29,6 +31,11 @@ export function registerHubIpc(desktopApp: DesktopApp): void {
     desktopApp.usageMilestones?.observeUrgentAlertRequest(action, result);
     return result;
   });
+
+  ipcMain.handle("alerts:open-call-contact", () => openAlertCallContact({
+    settings: () => desktopApp.serverChatLink.alerts<UrgentAlertSettingsView>({ action: "settings" }),
+    openPath: (target) => hostPlatform().openPath(target)
+  }));
 
   ipcMain.handle("hub:setup-command", async (_event, request: import("../../../shared/hubSetup").HubSetupCommandRequest) => {
     const region = typeof request?.region === "string" ? request.region.trim() : "";

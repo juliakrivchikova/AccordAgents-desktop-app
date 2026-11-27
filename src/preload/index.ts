@@ -317,6 +317,7 @@ const bridge: AppBridge = {
   revokePhoneInvite: (request: { inviteId: string }) => ipcRenderer.invoke("mobile:revoke-phone-invite", request),
   getHubSetupState: () => ipcRenderer.invoke("hub:setup-state"),
   urgentAlertRequest: (request) => ipcRenderer.invoke("alerts:request", request),
+  openAlertCallContact: () => ipcRenderer.invoke("alerts:open-call-contact"),
   getHubSetupCommand: (request: HubSetupCommandRequest) => ipcRenderer.invoke("hub:setup-command", request),
   installHub: (request: HubInstallRequest) => ipcRenderer.invoke("hub:install", request),
   onHubSetupProgress: (callback: (state: HubSetupState) => void) => {

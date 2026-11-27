@@ -235,6 +235,17 @@
   color: var(--app-text-secondary);
 }
 
+/* Add to contacts belongs to the Phone call row above it: no divider, its
+   text lines up with that row's. */
+.settings-view .alerts-subrow {
+  padding-top: 0;
+}
+
+.settings-view .alerts-tile-space {
+  flex: none;
+  width: 36px;
+}
+
 .settings-view .alerts-row .gen-row-desc {
   max-width: none;
   margin-top: 1px;

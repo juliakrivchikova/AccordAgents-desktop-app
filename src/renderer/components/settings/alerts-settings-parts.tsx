@@ -1,5 +1,6 @@
 import { WarningIcon, BellIcon, BellSlashIcon, CheckCircleIcon, MoonIcon, DotsThreeIcon, DeviceMobileIcon, PaperPlaneTiltIcon, HardDrivesIcon } from "@phosphor-icons/react";
 import { useRef, useState, type ReactNode } from "react";
+import { ALERT_CALL_CONTACT_HINT } from "../../../shared/alertCallContact";
 import { Button } from "@/components/ui/button";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import {
@@ -198,3 +199,34 @@ export function AlertsChannelRow(props: {
     </div>
   );
 }
+
+/** Under the Phone call row once calls have a number to come from: Add to
+ *  contacts opens a contact card for that number with the system, which shows
+ *  it before saving (Mia's brief, approved by the User, 2026-11-27). */
+export const AlertsCallContactRow = (): JSX.Element => {
+  const [opening, setOpening] = useState(false);
+  const [error, setError] = useState<string | undefined>();
+  const open = async () => {
+    setOpening(true);
+    setError(undefined);
+    const result = await window.consensus.openAlertCallContact().catch((failure: unknown) => ({
+      ok: false as const, message: failure instanceof Error ? failure.message : String(failure)
+    }));
+    setOpening(false);
+    if (!result.ok) setError(result.message);
+  };
+  return (
+    <div className="gen-row alerts-row alerts-subrow" data-testid="alerts-call-contact">
+      <span className="alerts-tile-space" aria-hidden />
+      <div className="gen-row-text">
+        <div className="gen-row-desc">{ALERT_CALL_CONTACT_HINT}</div>
+        {error ? <div className="gen-row-desc alerts-line-error" role="alert">{error}</div> : null}
+      </div>
+      <div className="alerts-actions">
+        <Button type="button" variant="outline" size="sm" disabled={opening} data-testid="alerts-call-contact-add" onClick={() => void open()}>
+          {opening ? <Delayed><Spinner size={13} /></Delayed> : null}Add to contacts
+        </Button>
+      </div>
+    </div>
+  );
+};
