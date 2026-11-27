@@ -13,8 +13,17 @@ import { participantRequestResumeDepth } from "../requests/requestRecords";
 import { createChatMessage } from "../store/messages";
 import { emitChatRunFailure } from "../turns/replyMessages";
 import type { ChatModules } from "../modules";
+import type { ParticipantTurnReservation } from "../types";
 import type { ChatDependencies } from "../dependencies";
 import { isSelfCompactionRequest } from "../approvals/approvalRecords";
+
+/** The turn a member goes on in after its compaction answers the request its
+ *  asking turn answered (the User's next message waits for it), or follows
+ *  (her next message joins it as it joins a turn of her own). */
+function goOnTurnMode(conversation: Conversation, participantId: string, resume: SelfCompactionResume): "exclusive" | "following" {
+  const asksIn = selfCompactionRequestMessage(conversation, resume)?.metadata?.participantRequest;
+  return asksIn?.items.some((item) => item.targetParticipantId === participantId) === true ? "exclusive" : "following";
+}
 
 /** The turn a member goes on with after its own compaction. */
 export class SelfCompactionResumes {
@@ -29,6 +38,9 @@ export class SelfCompactionResumes {
   readonly selfCompactionResumes = new Map<string, { card: boolean }>();
   /** When the User last stopped something of a member's here. */
   private readonly memberStoppedAt = new Map<string, number>();
+  /** The turn each member goes on in after its own compaction, held from when
+   *  it asked (holdGoOnTurn), by its resume key. */
+  private readonly heldGoOnTurns = new Map<string, ParticipantTurnReservation>();
   /** How the work of replies that asked stands, as last said here: carried by
    *  every later save of the chat, so a reply whose own end is saved after it
    *  (with "waiting") has it too. */
@@ -42,6 +54,21 @@ export class SelfCompactionResumes {
     >,
     private readonly deps: Pick<ChatDependencies, "debugLogs" | "onReviewProgress">
   ) {}
+
+  /** The turn a member goes on in after the compaction it asked for takes its
+   *  place when it asks, right behind the compaction (TurnQueue `next`): it
+   *  starts as soon as the compaction ends, before the turns that waited. */
+  holdGoOnTurn(conversation: Conversation, participantId: string, resume: SelfCompactionResume): void {
+    const key = selfCompactionResumeKey(conversation.id, participantId, resume.runId);
+    if (this.heldGoOnTurns.has(key)) return;
+    this.heldGoOnTurns.set(key, this.chat.turnQueue.reserveParticipantTurn(conversation.id, participantId, goOnTurnMode(conversation, participantId, resume), { priority: "next", userFirst: true }));
+  }
+
+  private takeGoOnTurn(key: string): ParticipantTurnReservation | undefined {
+    const held = this.heldGoOnTurns.get(key);
+    this.heldGoOnTurns.delete(key);
+    return held;
+  }
 
   openSelfCompactionResume(conversationId: string, participantId: string, runId: string, card: boolean): void {
     this.selfCompactionResumes.set(selfCompactionResumeKey(conversationId, participantId, runId), { card });
@@ -111,6 +138,8 @@ export class SelfCompactionResumes {
     error?: string
   ): Promise<void> {
     this.selfCompactionResumes.delete(selfCompactionResumeKey(conversationId, participantId, runId));
+    // Its place behind the compaction is given up: what waits runs.
+    this.takeGoOnTurn(selfCompactionResumeKey(conversationId, participantId, runId))?.release();
     void this.deps.debugLogs.write("chat.self-compaction.not-resumed", { conversationId, participantId, askingRunId: runId, reason, ...(error ? { message: error } : {}) });
     await this.markSelfCompaction(conversationId, participantId, runId, { state: "ended", reason, ...(error ? { error } : {}) }).catch((markError) => {
       void this.deps.debugLogs.write("chat.self-compaction.mark-error", { conversationId, participantId, message: markError instanceof Error ? markError.message : String(markError) });
@@ -122,7 +151,8 @@ export class SelfCompactionResumes {
   continueFromCompactionCard(conversationId: string, approval: ChatAppToolApproval, end: SelfCompactionEnd): void {
     const asked = selfCompactionResumeFrom(approval.resumeContext);
     if (!asked) return;
-    const resume: SelfCompactionResume = { ...asked, since: new Date().toISOString() };
+    const workDone = isSelfCompactionRequest(approval.request) && approval.request.workDone === true;
+    const resume: SelfCompactionResume = { ...asked, since: new Date().toISOString(), ...(workDone ? { workDone: true } : {}) };
     const instructions = isSelfCompactionRequest(approval.request) ? approval.request.instructions : undefined;
     void this.continueAfterSelfCompaction(conversationId, approval.requesterParticipantId, resume, end, instructions, approval.createdAt);
   }
@@ -173,14 +203,20 @@ export class SelfCompactionResumes {
     cardRaisedAt: string | undefined
   ): Promise<NonNullable<ChatSelfCompactionMark["reason"]> | undefined> {
     const progress = this.deps.onReviewProgress;
-    // Behind the turn that asked (a card can be answered while it still runs)
-    // and whatever the User sent meanwhile. Her next message joins it as it
-    // joins a turn of her own, unless it answers another member's request,
-    // as the turn it goes on from did.
+    const key = selfCompactionResumeKey(conversationId, participantId, resume.runId);
+    // It said its work is done: nothing to go on with; what waits runs next.
+    if (resume.workDone) {
+      this.takeGoOnTurn(key)?.release();
+      void this.deps.debugLogs.write("chat.self-compaction.work-done", { conversationId, participantId, askingRunId: resume.runId, end: end.kind });
+      return "not-continued";
+    }
+    // Right behind the compaction, held since it was asked (holdGoOnTurn):
+    // before the turns that waited for the member. Her next message joins it
+    // as it joins a turn of her own, unless it answers another member's
+    // request, as the turn it goes on from did.
     const before = this.chat.store.lastSavedSnapshots.get(conversationId)?.snapshot ?? await this.chat.store.requireChat(conversationId);
-    const asksIn = selfCompactionRequestMessage(before, resume)?.metadata?.participantRequest;
-    const answersRequest = asksIn?.items.some((item) => item.targetParticipantId === participantId) === true;
-    const reservation = this.chat.turnQueue.reserveParticipantTurn(conversationId, participantId, answersRequest ? "exclusive" : "following");
+    const reservation = this.takeGoOnTurn(key)
+      ?? this.chat.turnQueue.reserveParticipantTurn(conversationId, participantId, goOnTurnMode(before, participantId, resume), { priority: "next", userFirst: true });
     let handedOff = false;
     try {
       await reservation.wait();

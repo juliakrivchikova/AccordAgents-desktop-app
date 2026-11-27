@@ -15,6 +15,9 @@ export interface SelfCompactionResume {
   /** When it was asked, or the User answered its card: what she stopped of
    *  the member's after that leaves its work to her. */
   since?: string;
+  /** It said its work is done (app_chat_request_compaction `workDone`): no
+   *  turn to go on in after the compaction. */
+  workDone?: boolean;
 }
 
 const SELF_COMPACTION_MARK_ORDER: ReadonlyArray<ChatSelfCompactionMark["state"]> = ["card", "waiting", "ended", "resumed"];
@@ -58,5 +61,8 @@ export function selfCompactionResumeFrom(value: unknown): SelfCompactionResume |
   const triggerMessageId = text(record.triggerMessageId);
   const participantRequestBatchId = text(record.participantRequestBatchId);
   const since = text(record.since);
-  return { runId, ...(triggerMessageId ? { triggerMessageId } : {}), ...(participantRequestBatchId ? { participantRequestBatchId } : {}), ...(since ? { since } : {}) };
+  return {
+    runId, ...(triggerMessageId ? { triggerMessageId } : {}), ...(participantRequestBatchId ? { participantRequestBatchId } : {}), ...(since ? { since } : {}),
+    ...(record.workDone === true ? { workDone: true } : {})
+  };
 }

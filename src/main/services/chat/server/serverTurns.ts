@@ -243,8 +243,13 @@ export class ServerTurns {
         // The main session's compaction of a member holds the member's turns
         // from before it is taken: the work it gives that member a moment
         // later runs after it (app_chat_compact_participant).
-        const heldEarly = request.kind === "compaction" && typeof request.requestedByParticipantId === "string"
-          ? this.chat.turnQueue.reserveParticipantTurn(chat.id, participant.id) : undefined;
+        // A member's own compaction asked here holds its place from when it
+        // asked: right after the reply that asked, before what waited
+        // (startQueuedSelfCompaction).
+        const heldEarly = request.kind === "compaction"
+          ? this.chat.selfCompaction.takeHeldCompactionTurn(turn.runId)
+            ?? (typeof request.requestedByParticipantId === "string" ? this.chat.turnQueue.reserveParticipantTurn(chat.id, participant.id, "exclusive", { operation: true }) : undefined)
+          : undefined;
         // Taken on the server first, like any turn (Д5); a Stop from any
         // device reaches it by its run id.
         let claimed: Awaited<ReturnType<ServerTurns["claimServerTurnHere"]>>;

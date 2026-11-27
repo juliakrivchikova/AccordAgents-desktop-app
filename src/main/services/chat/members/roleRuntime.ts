@@ -266,6 +266,11 @@ export function manageRolesParticipantsResolutionForRole(
  *  reserveParticipantTurn), wherever it runs. A native goal runs in a process
  *  of its own on the member's session, so it stays exclusive. */
 export function participantTurnMode(participant: ChatParticipant, triggerMessage: ChatMessage): "exclusive" | "shared" {
+  // A request asked with `deliver: "now"` goes into a Claude Code member's
+  // live CLI as a message typed there mid-turn does (TurnQueue `live`).
+  if (participant.kind === "claude-code" && deliversNow(triggerMessage)) {
+    return "shared";
+  }
   // Only the User's own messages: a request from another member, a resume
   // after an approval or a continuation is not something the User types
   // into the CLI, and it still waits for the member's running turn.
@@ -273,4 +278,20 @@ export function participantTurnMode(participant: ChatParticipant, triggerMessage
     return "exclusive";
   }
   return triggerMessage.metadata?.nativeCommand?.name === "goal" ? "exclusive" : "shared";
+}
+
+/** A member request asked with `deliver: "now"` (app_chat_request_participants):
+ *  the member takes it at once, even in the middle of a turn. */
+export function deliversNow(triggerMessage: ChatMessage): boolean {
+  return triggerMessage.metadata?.participantRequest?.deliver === "now";
+}
+
+/** How a busy member takes a message delivered now, as its dedicated CLI
+ *  takes one typed mid-turn: Claude Code into its running turn (its queue
+ *  hands it to the running step at the next tool result, and its send-now
+ *  makes that happen now); a CLI that cannot take a message in the middle of
+ *  a turn (Antigravity runs a process per turn) has the turn cut as Stop cuts
+ *  it, and goes on with the message at once in the same session. */
+export function memberDeliveryWay(participant: Pick<ChatParticipant, "kind">): "into-running-turn" | "interrupt-and-restart" {
+  return participant.kind === "claude-code" ? "into-running-turn" : "interrupt-and-restart";
 }

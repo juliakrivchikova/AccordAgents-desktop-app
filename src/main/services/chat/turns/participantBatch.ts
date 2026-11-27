@@ -148,7 +148,7 @@ export class ParticipantBatch {
             return;
           }
         }
-        const turnReservation = this.chat.turnQueue.reserveParticipantTurn(conversation.id, participant.id, participantTurnMode(participant, triggerMessage));
+        const turnReservation = this.chat.turnQueue.reserveTurnFor(conversation, participant, triggerMessage);
         // Its CLI holds a message sent while the member works (behindMemberTurn)
         // where the CLI runs: a member on a machine says so on its own bubble
         // (turnQueued), which replaces this one; a local mark here would stay.

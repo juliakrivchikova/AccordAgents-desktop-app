@@ -17,7 +17,7 @@ export const GENERIC_PARTICIPANT_ROLE_ID = "generic-participant";
 
 export const PARTICIPANT_REQUEST_STOPPED_BY_USER = "Stopped by User.";
 /** A request whose reply was cut short for a message the User sent now. */
-export const PARTICIPANT_REQUEST_CUT_BY_SEND_NOW = "Interrupted before it finished: the User sent the member a message now.";
+export const PARTICIPANT_REQUEST_CUT_BY_SEND_NOW = "Interrupted before it finished: the member was sent a message to take now (by the User, or a request delivered now).";
 
 /** Why a request the app lost track of (a restart, a run gone) ended. */
 export const PARTICIPANT_REQUEST_INTERRUPTED_BEFORE_COMPLETION = "Request was interrupted before completion.";

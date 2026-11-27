@@ -252,7 +252,7 @@ export class ApprovalDecisions {
         });
       });
       const resume = selfCompactionResumeFrom(approval.resumeContext);
-      this.chat.selfCompaction.startQueuedSelfCompaction(conversation.id, requester, approval.request, runId, resume && { ...resume, since: now });
+      this.chat.selfCompaction.startQueuedSelfCompaction(conversation, requester, approval.request, runId, resume && { ...resume, since: now });
       return conversation;
     }
 

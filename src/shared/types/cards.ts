@@ -190,6 +190,9 @@ export type ChatAppToolApprovalRequest =
 export interface ChatSelfCompactionRequest {
   type: "self_compaction";
   instructions?: string;
+  /** The member said its work is done: after the compaction it is not
+   *  called again to go on, and what waits for it runs next. */
+  workDone?: boolean;
   /** The member's context indicator (AgentContextUsage.percentage) when it
    *  asked: the card's meter, the same on the desktop and the phone. Set by
    *  the app, never taken from the member's arguments; absent when the

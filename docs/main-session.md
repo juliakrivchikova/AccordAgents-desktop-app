@@ -126,6 +126,22 @@ verbatim there). Modelled on T3 Code (`~/reference/t3code`,
   from the main session's `app_chat_start_accord` launch, not from an
   "@x /accord" in its reply. The classic view of the same chat keeps reading
   such a mention as a request, as before.
+- **A request can reach a busy member now** (the User, 2026-11-27):
+  `app_chat_request_participants` with `deliver: "now"` gives it to the
+  member at once, the way its CLI takes a message typed mid-turn, and the
+  reply still goes back to the requester. A Claude Code member gets it in its
+  live CLI (TurnQueue `live`): once the message is in the CLI's queue the app
+  sends the CLI's own send-now for it (`RunCancel.deliverNow`), so the running
+  step takes it at its next tool result or is cut for it. A member whose CLI
+  cannot take a message in the middle of a turn (Antigravity runs a process
+  per turn) has its running turn cut as Send now cuts it (it keeps what it
+  wrote, its run settles, a request it answered ends interrupted) and goes on
+  with the request at once in the same session (`next`). Either way the
+  request goes before the work already waiting for the member, which runs
+  after it; a compaction, restart or move of the member runs first. A member
+  on a machine gets the same there (its device orders its turns). The tool's
+  result says per target which way it went (`delivery`: `started`,
+  `into-running-turn`, `interrupted-and-restarted`, `after-operation`).
 - **The Chat Assistant and the Workflow Manager role are not in new chats.**
   Chats made before stay exactly as they are (with their Assistant).
 

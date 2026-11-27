@@ -15,6 +15,7 @@ import { hasPendingPermissionApprovalForParticipantTurn } from "../approvals/app
 import { participantForMentionHandle } from "../choices/mentions";
 import { PARTICIPANT_REQUEST_CUT_BY_SEND_NOW, PARTICIPANT_REQUEST_INTERRUPTED_BEFORE_COMPLETION, PARTICIPANT_REQUEST_STOPPED_BY_USER } from "../constants";
 import { chatParticipants, participantForRun } from "../members/identity";
+import { memberDeliveryWay } from "../members/roleRuntime";
 import {
   awaitParticipantRequestRunner, formatParticipantRequestMessage, isOpenParticipantRequestStatus, normalizeParticipantRequest,
   participantRequestBatchForTool, participantRequestFailedToolResult, participantRequestLimitError, participantRequestSummary,
@@ -34,7 +35,7 @@ export class ParticipantRequests {
     private readonly chat: Pick<
       ChatModules,
       | "activeRuns" | "appQuit" | "chatHistory" | "host" | "pendingReplies" | "requestRecovery" | "requesterResumes"
-      | "selfCompaction" | "store" | "turnQueue"
+      | "selfCompaction" | "serverTurns" | "store" | "turnQueue"
     >,
     private readonly deps: Pick<ChatDependencies, "debugLogs" | "onReviewProgress" | "settings">
   ) {}
@@ -87,13 +88,16 @@ export class ParticipantRequests {
     if (failure) {
       return failure;
     }
+    // Which way each busy target takes it, as things stand when it is asked.
+    const delivery = prepared.batch.deliver === "now" ? this.deliveryOf(conversation, prepared.batch) : undefined;
+    const withDelivery = (extra: Record<string, unknown>): Record<string, unknown> => delivery ? { ...extra, delivery } : extra;
 
     const hasRunningTargets = prepared.batch.items.some((item) => item.status === "running");
     if (!hasRunningTargets) {
-      return participantRequestToolResult(conversation, prepared.requestMessage.id, {
+      return participantRequestToolResult(conversation, prepared.requestMessage.id, withDelivery({
         status: prepared.batch.status,
         approvalRequired: pendingTargets.length > 0
-      });
+      }));
     }
 
     const requesterProgress = actor.runId ? this.chat.activeRuns.runProgressCallbacks.get(actor.runId) : undefined;
@@ -123,7 +127,7 @@ export class ParticipantRequests {
     if (result.timedOut) {
       this.resumeRequesterWhenRunnerSettles(conversation.id, prepared.requestMessage.id, runner, requesterProgress);
       const latest = await this.chat.store.requireChat(conversation.id);
-      return participantRequestToolResult(latest, prepared.requestMessage.id, { status: "running", approvalRequired: false });
+      return participantRequestToolResult(latest, prepared.requestMessage.id, withDelivery({ status: "running", approvalRequired: false }));
     }
 
     const latest = await this.chat.store.requireChat(conversation.id);
@@ -151,7 +155,37 @@ export class ParticipantRequests {
       await this.chat.store.saveConversation(latest);
       return { status, approvalRequired };
     });
-    return participantRequestToolResult(latest, prepared.requestMessage.id, finished);
+    return participantRequestToolResult(latest, prepared.requestMessage.id, withDelivery(finished));
+  }
+
+  /** What a request asked with `deliver: "now"` does with each target it
+   *  runs now: the requester is told which way it went. A target whose turn
+   *  waits for the User's approval is delivered once she approves it. */
+  private deliveryOf(conversation: Conversation, batch: ChatParticipantRequestBatch): Array<{ target: string; way: string; note: string }> {
+    const participants = chatParticipants(conversation);
+    return batch.items.filter((item) => item.status === "running").flatMap((item) => {
+      const target = participants.find((participant) => participant.id === item.targetParticipantId);
+      if (!target) return [];
+      const activity = this.chat.turnQueue.memberActivity(conversation.id, target.id);
+      const busyElsewhere = !this.chat.host.runsHere(target) && [...this.chat.serverTurns.serverTurnStates.values()].some((turn) =>
+        turn.conversationId === conversation.id && turn.participantId === target.id && turn.state === "claimed");
+      const handle = `@${target.handle}`;
+      if (activity.running === "operation") {
+        return [{ target: handle, way: "after-operation", note: `${handle} is being compacted, restarted or moved: it takes the request as soon as that ends, before anything else waiting for it.` }];
+      }
+      if (activity.running === "none" && !busyElsewhere) {
+        return [{ target: handle, way: "started", note: `${handle} was not working: it starts on the request now.` }];
+      }
+      if (memberDeliveryWay(target) === "into-running-turn") {
+        return [{ target: handle, way: "into-running-turn", note: `${handle} is working: the request goes into its running turn now, as a message typed into Claude Code mid-turn (it takes it at its next tool result, or its step is cut for it).` }];
+      }
+      const cli = target.kind === "gemini-cli" ? "Antigravity" : target.kind === "codex-cli" ? "Codex" : "its CLI";
+      return [{
+        target: handle,
+        way: "interrupted-and-restarted",
+        note: `${handle} is working, and ${cli} cannot take a message in the middle of a turn: its running turn is interrupted (what it wrote stays, as after a Stop) and it goes on at once in the same session with this request. Work that was waiting for it runs after.`
+      }];
+    });
   }
 
   async participantRequestStatusForTool(actor: ChatAppMcpActor, rawRequest: unknown): Promise<Record<string, unknown>> {
@@ -196,7 +230,7 @@ export class ParticipantRequests {
   async prepareParticipantRequest(
     conversation: Conversation,
     requester: ChatParticipant,
-    normalized: { requests: ChatParticipantRequestInput[]; timeoutMs: number; resumeRequester: boolean },
+    normalized: { requests: ChatParticipantRequestInput[]; timeoutMs: number; resumeRequester: boolean; deliver?: "now" },
     actor: ChatAppMcpActor,
     source: "mcp" | "inferred"
   ): Promise<PreparedParticipantRequest> {
@@ -277,6 +311,7 @@ export class ParticipantRequests {
       updatedAt: now,
       triggerMessageId: actor.triggerMessageId,
       ...(actor.turnSegmentId ? { requesterTurnSegmentId: actor.turnSegmentId } : {}),
+      ...(source === "mcp" && normalized.deliver === "now" ? { deliver: "now" as const } : {}),
       items
     };
     const requestMetadata: ChatMessageMetadata = {
@@ -517,7 +552,7 @@ export class ParticipantRequests {
           content: reply ? [...earlier, reply].map((message) => chatMessageMemberText(message)).filter(Boolean).join("\n\n") : undefined,
           error: reply?.status === "error" ? reply.content
             // Cut short for a message the User sent now: what it wrote is not its answer.
-            : reply?.metadata?.turnContinues === true ? `@${target.handle} was interrupted before it finished: the User sent it a message now.` : undefined
+            : reply?.metadata?.turnContinues === true ? `@${target.handle} was interrupted before it finished: it was sent a message to take now (by the User, or a request delivered now).` : undefined
         });
       } catch (error) {
         // A Stop that lands before any reply exists (the member still waits

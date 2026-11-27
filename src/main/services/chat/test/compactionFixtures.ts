@@ -68,7 +68,7 @@ export function fromServer(deviceId: string, effect: HubOpEffect): HubFeedEntry 
 export function selfCompactingChat(options: {
   participant?: Partial<ChatParticipant>;
   others?: ChatParticipant[];
-  turn: (context: { prompt: string; participantId: string; actor: any; service: ChatService; call: number }) => Promise<string>;
+  turn: (context: { prompt: string; participantId: string; actor: any; service: ChatService; call: number; signal?: AbortSignal; options: Record<string, unknown> }) => Promise<string>;
   compactSession?: (signal: AbortSignal | undefined) => Promise<Record<string, unknown>>;
 }) {
   const participant = chatParticipant(options.participant);
@@ -90,12 +90,12 @@ export function selfCompactingChat(options: {
       order.push(`compact ${runParticipant.id}`);
       return options.compactSession ? await options.compactSession(signal) : { participant: runParticipant, ok: true, sessionId: `session-${runParticipant.id}` };
     },
-    run: async (runParticipant, prompt) => {
+    run: async (runParticipant, prompt, _repoPath, _diffMode, _kind, signal, runOptions) => {
       prompts.push({ participantId: runParticipant.id, prompt });
       order.push(`turn ${runParticipant.id}`);
       const content = await options.turn({
         prompt, participantId: runParticipant.id, actor: { ...grants.get(runParticipant.id), capabilities: ["compaction.request", "participants.request"] },
-        service: made.service, call: prompts.filter((item) => item.participantId === runParticipant.id).length
+        service: made.service, call: prompts.filter((item) => item.participantId === runParticipant.id).length, signal, options: runOptions
       });
       return { participant: runParticipant, ok: true, content, durationMs: 1, sessionId: `session-${runParticipant.id}` };
     }

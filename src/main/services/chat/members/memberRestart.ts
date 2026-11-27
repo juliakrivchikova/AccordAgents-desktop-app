@@ -92,7 +92,7 @@ export class MemberRestart {
     if (!member) throw new Error("Chat member was not found.");
     const busy = new Error(`@${member.handle} is busy. Restart it when it is done.`);
     if (this.chat.members.memberAnswersNow(conversation, participantId)) throw busy;
-    const reservation = this.chat.turnQueue.reserveParticipantTurn(conversationId, participantId, "exclusive");
+    const reservation = this.chat.turnQueue.reserveParticipantTurn(conversationId, participantId, "exclusive", { operation: true });
     try {
       await reservation.wait();
       // A reply its CLI started on its own (a background task finished) is

@@ -23,15 +23,24 @@ import { PARTICIPANT_REQUEST_INTERRUPTED_BEFORE_COMPLETION, PARTICIPANT_REQUEST_
 import { chatParticipants, participantForRun } from "../members/identity";
 import { rollupParticipantRequestStatus, updateParticipantRequestBatch } from "../requests/requestRecords";
 import { createChatMessage } from "../store/messages";
-import type { ChatAppMcpActor } from "../types";
+import type { ChatAppMcpActor, ParticipantTurnReservation } from "../types";
+
+/** The server turn of a member's own compaction asked on a machine. */
+function serverCompactionRunId(runId: string): string {
+  return runId.startsWith("turn-") ? runId : `turn-${runId}`;
+}
 import type { ChatModules } from "../modules";
 import type { ChatDependencies } from "../dependencies";
 
 /** What a member that asked to compact its own context does next, in the
  *  tool's answer: end its reply; the app calls it again. */
-const SELF_COMPACTION_QUEUED_NEXT = "Say in this reply what is done and what comes next, then end it: the compaction runs right after, and the app calls you again to go on. Nobody has to call you.";
+const SELF_COMPACTION_QUEUED_NEXT = "End your reply now: say in a line or two what is done and what comes next, and make no more tool calls. The compaction runs as soon as this reply ends, before anything waiting for you, and then the app calls you again to go on. Nobody has to call you.";
 
-const SELF_COMPACTION_CARD_NEXT = "Say in this reply what is done and what comes next, then end it. Once User answers the card the app calls you again to go on, with your context compacted, or as it is if she declines.";
+const SELF_COMPACTION_QUEUED_DONE = "End your reply now: say in a line or two what is done, and make no more tool calls. The compaction runs as soon as this reply ends, before anything waiting for you. You said your work is done, so the app does not call you again to go on; requests waiting for you come next.";
+
+const SELF_COMPACTION_CARD_NEXT = "End your reply now: say in a line or two what is done and what comes next, and make no more tool calls. Once User answers the card the app calls you again to go on, with your context compacted, or as it is if she declines.";
+
+const SELF_COMPACTION_CARD_DONE = "End your reply now: say in a line or two what is done, and make no more tool calls. The compaction runs once User approves the card. You said your work is done, so the app does not call you again to go on; requests waiting for you come next.";
 
 /** How long the turn a member goes on in waits for the reply that asked to be
  *  written as ended (its turn is over by then). */
@@ -56,6 +65,9 @@ export class SelfCompaction {
   readonly observedCompactionTurns = new Map<string, HubTurn>();
   /** Turns members would have gone on in, stopped before they began. */
   readonly selfCompactionsCancelled = new Set<string>();
+  /** Members' own compactions asked on this machine, holding their place
+   *  until this machine takes their turn on the server, by that turn's id. */
+  private readonly heldCompactionTurns = new Map<string, ParticipantTurnReservation>();
   /** The same for members that run on another device: their turn is stopped
    *  whenever the server tells of it. */
   readonly remoteSelfCompactionsStopped = new Set<string>();
@@ -64,7 +76,7 @@ export class SelfCompaction {
     private readonly chat: Pick<
       ChatModules,
       | "activeRuns" | "appQuit" | "compaction" | "contextMeter" | "host" | "participantBatch" | "runCancel"
-      | "selfCompactionResumes" | "serverLink" | "serverTurns" | "store"
+      | "selfCompactionResumes" | "serverLink" | "serverTurns" | "store" | "turnQueue"
     >,
     private readonly deps: Pick<ChatDependencies, "debugLogs" | "onReviewProgress" | "storage">
   ) {}
@@ -92,7 +104,8 @@ export class SelfCompaction {
     const resume = selfCompactionResumeFrom({
       ...actor,
       triggerMessageId: actor.triggerMessageId ?? (actor.runId ? repliesOfRun(conversation, requester.id, actor.runId)[0]?.id : undefined),
-      since: new Date().toISOString()
+      since: new Date().toISOString(),
+      workDone: request.workDone === true
     });
     // The card's meter: the member's context as it stands now. It asks in
     // the middle of its turn, so its session log (written as it goes) is
@@ -147,7 +160,7 @@ export class SelfCompaction {
           status: "pending_user_approval",
           approvalId: approval.id,
           summary,
-          ...(resume?.triggerMessageId ? { next: SELF_COMPACTION_CARD_NEXT } : {})
+          ...(resume?.triggerMessageId ? { next: request.workDone ? SELF_COMPACTION_CARD_DONE : SELF_COMPACTION_CARD_NEXT } : {})
         };
       }
       recordSelfCompactionRequested(conversation, requesterNow.id, new Date().toISOString());
@@ -160,13 +173,13 @@ export class SelfCompaction {
     }
 
     const runId = randomUUID();
-    this.startQueuedSelfCompaction(conversation.id, compactingRequester, request, runId, resume);
+    this.startQueuedSelfCompaction(conversation, compactingRequester, request, runId, resume);
     return {
       ok: true,
       status: "queued",
       runId,
       summary,
-      ...(resume ? { next: SELF_COMPACTION_QUEUED_NEXT } : {})
+      ...(resume ? { next: request.workDone ? SELF_COMPACTION_QUEUED_DONE : SELF_COMPACTION_QUEUED_NEXT } : {})
     };
   }
 
@@ -249,23 +262,33 @@ export class SelfCompaction {
   }
 
   startQueuedSelfCompaction(
-    conversationId: string,
+    conversation: Conversation,
     participant: ChatParticipant,
     request: ChatSelfCompactionRequest,
     runId: string,
-    resume: SelfCompactionResume | undefined
+    asked: SelfCompactionResume | undefined
   ): void {
+    const conversationId = conversation.id;
+    const resume = asked && request.workDone ? { ...asked, workDone: true } : asked;
     // Known from here on: the asking reply says so as it ends, or (a card
     // answered after it) says now that it no longer waits for the User.
     if (resume) {
       this.chat.selfCompactionResumes.openSelfCompactionResume(conversationId, participant.id, resume.runId, false);
       void this.chat.selfCompactionResumes.markSelfCompaction(conversationId, participant.id, resume.runId, { state: "waiting" }).catch(() => undefined);
     }
+    // Its place is taken now: right after what the member runs (the reply
+    // that asks), before every turn already waiting for it, and the turn it
+    // goes on in right after the compaction (TurnQueue `next`).
+    const held = this.chat.turnQueue.reserveParticipantTurn(conversationId, participant.id, "exclusive", { operation: true, priority: "next" });
+    if (resume && !resume.workDone) this.chat.selfCompactionResumes.holdGoOnTurn(conversation, participant.id, resume);
     // A member on a machine asked for it there: it is a turn of that member
     // on the User's server, which this machine takes and runs like any other
     // (startServerTurn), and every other device sees and can stop.
     if (this.chat.host.machineRuntime && this.chat.serverLink.current) {
+      const serverRunId = serverCompactionRunId(runId);
+      this.heldCompactionTurns.set(serverRunId, held);
       void this.requestServerSelfCompaction(conversationId, participant, request, runId, resume).catch(async (error) => {
+        this.takeHeldCompactionTurn(serverRunId)?.release();
         const message = error instanceof Error ? error.message : String(error);
         await this.deps.debugLogs.write("chat.self-compaction.request-error", { conversationId, participantId: participant.id, runId, message });
         await this.recordSelfCompactionFailure(conversationId, participant, runId, request.instructions, message);
@@ -273,7 +296,15 @@ export class SelfCompaction {
       });
       return;
     }
-    this.runQueuedSelfCompaction(conversationId, participant, request, runId, resume);
+    this.runQueuedSelfCompaction(conversationId, participant, request, runId, resume, held);
+  }
+
+  /** A member's own compaction on a machine holds its place from when it
+   *  asked until the machine takes the compaction's turn (startServerTurn). */
+  takeHeldCompactionTurn(serverRunId: string): ParticipantTurnReservation | undefined {
+    const held = this.heldCompactionTurns.get(serverRunId);
+    this.heldCompactionTurns.delete(serverRunId);
+    return held;
   }
 
   /** Machine side: a member's own compaction, asked on the server. */
@@ -290,13 +321,17 @@ export class SelfCompaction {
     const conversation = await this.chat.store.requireChat(conversationId);
     const anchor = compactionAnchor(conversation, {});
     if (!anchor) throw new Error("Nothing in this chat has reached your server yet");
-    const serverRunId = runId.startsWith("turn-") ? runId : `turn-${runId}`;
+    const serverRunId = serverCompactionRunId(runId);
     const opId = newOpId();
     await link.enqueue([{ opId, kind: "turn.request", conversationId, runId: serverRunId, messageId: anchor.id, participantId: participant.id,
       request: { kind: "compaction", triggeredBy: "agent", ...(request.instructions ? { instructions: request.instructions } : {}), ...(resume ? { resume: { ...resume } } : {}) } }]);
     const answer = await link.opAnswered(opId);
     if (answer.status === "rejected") throw new Error(answer.reason);
     void this.deps.debugLogs.write("chat.self-compaction.requested", { conversationId, participantId: participant.id, runId: serverRunId });
+    // Ended before this machine took it (a Stop): its place is given up.
+    void this.chat.serverTurns.waitForServerTurn(serverRunId, (turn) => turn.state === "finished" || turn.state === "stopped")
+      .then(() => this.takeHeldCompactionTurn(serverRunId)?.release())
+      .catch(() => undefined);
     if (resume) {
       // Stopped before this machine took it: nobody goes on from it.
       void this.chat.serverTurns.waitForServerTurn(serverRunId, (turn) => turn.state === "finished" || turn.state === "stopped").then((turn) => {
@@ -373,7 +408,8 @@ export class SelfCompaction {
     participant: ChatParticipant,
     request: ChatSelfCompactionRequest,
     runId: string,
-    resume: SelfCompactionResume | undefined
+    resume: SelfCompactionResume | undefined,
+    held: ParticipantTurnReservation
   ): void {
     const backgroundController = this.chat.participantBatch.registerBackgroundRunController(runId, undefined);
     let end: SelfCompactionEnd = { kind: "failed" };
@@ -383,7 +419,7 @@ export class SelfCompaction {
       instructions: request.instructions,
       triggeredBy: "agent",
       runId
-    }, backgroundController.signal, this.deps.onReviewProgress, (ended) => { end = ended; }).catch(async (error) => {
+    }, backgroundController.signal, this.deps.onReviewProgress, (ended) => { end = ended; }, undefined, held).catch(async (error) => {
       const message = error instanceof Error ? error.message : String(error);
       end = { kind: "failed", reason: message };
       await this.deps.debugLogs.write("chat.self-compaction.run.error", {

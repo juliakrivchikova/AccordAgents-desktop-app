@@ -76,6 +76,10 @@ export interface ChatParticipantRequestBatch {
    *  `turnId`: the main-session turn that gave it; the tasks of one turn
    *  resume the main session once, when all of them have ended. */
   delegation?: { start: "clean" | "fork"; turnId?: string };
+  /** Asked with `deliver: "now"`: a busy target takes it at once, as a
+   *  message typed into its CLI mid-turn (into its running turn, or its
+   *  running turn is cut and it goes on with it in the same session). */
+  deliver?: "now";
   items: ChatParticipantRequestItem[];
   error?: string;
 }

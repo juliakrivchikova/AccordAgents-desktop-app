@@ -82,11 +82,15 @@ export function normalizeParticipantRequest(raw: unknown): {
   requests: ChatParticipantRequestInput[];
   timeoutMs: number;
   resumeRequester: boolean;
+  deliver?: "now";
 } {
   if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
     throw new Error("Member request must be an object.");
   }
-  const record = raw as { requests?: unknown; timeoutMs?: unknown; resumeRequester?: unknown };
+  const record = raw as { requests?: unknown; timeoutMs?: unknown; resumeRequester?: unknown; deliver?: unknown };
+  if (record.deliver !== undefined && record.deliver !== "queue" && record.deliver !== "now") {
+    throw new Error("deliver is \"queue\" or \"now\".");
+  }
   if (!Array.isArray(record.requests) || record.requests.length === 0) {
     throw new Error("Member request needs at least one target.");
   }
@@ -121,7 +125,8 @@ export function normalizeParticipantRequest(raw: unknown): {
       CHAT_PARTICIPANT_REQUEST_WAIT_DEFAULT_MS,
       CHAT_PARTICIPANT_REQUEST_WAIT_MAX_MS
     ),
-    resumeRequester: typeof record.resumeRequester === "boolean" ? record.resumeRequester : true
+    resumeRequester: typeof record.resumeRequester === "boolean" ? record.resumeRequester : true,
+    ...(record.deliver === "now" ? { deliver: "now" as const } : {})
   };
 }
 

@@ -54,6 +54,11 @@ export const MEMBER_REQUEST_TOOLS: readonly AppMcpToolContract[] = [
           "resumeRequester": {
             "type": "boolean",
             "description": "Defaults to true: the call returns at once and replies arrive in a fresh requester turn. Set false to wait for completed replies inline."
+          },
+          "deliver": {
+            "type": "string",
+            "enum": ["queue", "now"],
+            "description": "Defaults to queue: a busy target takes the request after the work it already has. now: it takes it at once, the way its CLI takes a message typed mid-turn. Claude Code gets it in its running turn at the next tool result (its own send-now). A CLI that cannot take a message mid-turn has its running turn interrupted (what it wrote stays) and goes on with this request at once in the same session. Work already waiting runs after it. The reply still comes back to you; the result's delivery says which way it went."
           }
         },
         "required": [
@@ -75,7 +80,7 @@ export const MEMBER_REQUEST_TOOLS: readonly AppMcpToolContract[] = [
     capability: "compaction.request",
     desktop: {
       "title": "Request Context Compaction",
-      "description": "Compact your own context: it runs right after your current reply ends, and then the app calls you again to go on with your work, so nobody has to call you. Good moments: before a new task, before the next stage of a big task, whenever most of your context is no longer needed. End your reply after a queued or pending_user_approval result. The app validates permission, active-session status, duplicate requests, and cooldown. instructions name what the summary must keep.",
+      "description": "Compact your own context: your current reply ends with this call, the compaction runs right after it, before anything waiting for you, and then the app calls you again to go on with your work, so nobody has to call you. Good moments: before a new task, before the next stage of a big task, whenever most of your context is no longer needed. After a queued or pending_user_approval result, end your reply at once: no more tool calls. The app validates permission, active-session status, duplicate requests, and cooldown. instructions name what the summary must keep.",
       "inputSchema": {
         "type": "object",
         "additionalProperties": false,
@@ -83,6 +88,10 @@ export const MEMBER_REQUEST_TOOLS: readonly AppMcpToolContract[] = [
           "instructions": {
             "type": "string",
             "description": "What the summary must keep for the work that comes next: the goal and the User's decisions, where things stand, the next step."
+          },
+          "workDone": {
+            "type": "boolean",
+            "description": "true when your work is done and nothing is left to go on with: you are not called again after the compaction; requests waiting for you run next."
           }
         }
       },

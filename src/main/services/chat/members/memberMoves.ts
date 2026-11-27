@@ -109,7 +109,7 @@ export class MemberMoves {
     };
     refuseBusy(conversation);
     const releaseGate = this.openMemberMoveGate(conversation.id, member.id);
-    const reservation = this.chat.turnQueue.reserveParticipantTurn(conversation.id, member.id, "exclusive");
+    const reservation = this.chat.turnQueue.reserveParticipantTurn(conversation.id, member.id, "exclusive", { operation: true });
     let moved: Conversation | undefined;
     // A machine that handed the session over holds the member's turns for
     // the move; a move that then fails tells it to let them go.
@@ -378,7 +378,7 @@ export class MemberMoves {
   private async exportSessionHere(chat: Conversation, participant: ChatParticipant, signal: AbortSignal): Promise<Omit<MemberSessionExportReport, "runId" | "participantId">> {
     if (this.chat.members.memberAnswersNow(chat, participant.id)) return { reason: "busy" };
     if ((this.chat.backgroundTasks.memberBackgroundTasks.get(chat.id)?.get(participant.id)?.tasks.length ?? 0) > 0) return { reason: "background" };
-    const reservation = this.chat.turnQueue.reserveParticipantTurn(chat.id, participant.id, "exclusive");
+    const reservation = this.chat.turnQueue.reserveParticipantTurn(chat.id, participant.id, "exclusive", { operation: true });
     try {
       await reservation.wait();
       if (signal.aborted) return { reason: "failed" };

@@ -112,7 +112,8 @@ export class SelfResumedTurns {
       return;
     }
     const { conversation, participant, origin, pendingMessage } = ingest;
-    const reservation = this.chat.turnQueue.reserveParticipantTurn(conversationId, participantId, "shared");
+    // Its CLI runs it already: it counts as running at once.
+    const reservation = this.chat.turnQueue.reserveParticipantTurn(conversationId, participantId, "shared", { startsNow: true });
     const progressSink = this.chat.pendingReplies.createAgentProgressSink(runId, progress, participant, pendingMessage.id);
     const unregisterRunProgressCallback = this.chat.activeRuns.registerRunProgressCallback(runId, progress);
     const session = chatSessions(conversation).find((candidate) => candidate.participantId === participantId);

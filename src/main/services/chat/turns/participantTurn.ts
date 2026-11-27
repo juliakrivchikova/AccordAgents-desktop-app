@@ -96,6 +96,9 @@ export class ParticipantTurn {
        *  (ParticipantTurnReservation.behindMemberTurn): the reply stays
        *  queued until the CLI starts it. */
       queuedInCli?: boolean;
+      /** Its message is in the member's Claude Code CLI (a request delivered
+       *  now gets the CLI's send-now from here). */
+      onCliMessageWritten?: () => void;
     }
   ): Promise<ChatMessage[]> {
     this.chat.host.assertOwnsParticipant(participant);
@@ -595,7 +598,12 @@ export class ParticipantTurn {
           onSelfResumedTurn: (turn) => this.chat.selfResumedTurns.handleSelfResumedTurn(conversation.id, participant.id, turn),
           onBackgroundTasksChanged: (tasks, environmentPending) => this.chat.backgroundTasks.handleBackgroundTasksChanged(conversation.id, participant.id, tasks, environmentPending),
           onReplyStarted: grantAtReplyStart || sharedClaudeTurn ? onReplyStarted : undefined,
-          onMessageWritten: options.writeGate?.markWritten,
+          onMessageWritten: options.writeGate || options.onCliMessageWritten
+            ? () => {
+                options.writeGate?.markWritten();
+                options.onCliMessageWritten?.();
+              }
+            : undefined,
           onPromptSuggestion: (text) => this.chat.promptSuggestions.receiveMemberPromptSuggestion({
             conversationId: conversation.id,
             participantId: participant.id,

@@ -77,13 +77,14 @@ export function normalizeCompactInstructions(value: string | undefined): string 
 
 export function normalizeSelfCompactionRequest(value: unknown): ChatSelfCompactionRequest {
   const record = value && typeof value === "object" && !Array.isArray(value)
-    ? value as { instructions?: unknown }
+    ? value as { instructions?: unknown; workDone?: unknown }
     : {};
   return {
     type: "self_compaction",
     instructions: normalizeCompactInstructions(
       typeof record.instructions === "string" ? record.instructions : undefined
-    )
+    ),
+    ...(record.workDone === true ? { workDone: true } : {})
   };
 }
 

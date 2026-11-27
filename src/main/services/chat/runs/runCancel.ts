@@ -18,7 +18,7 @@ export class RunCancel {
     private readonly chat: Pick<
       ChatModules,
       | "activeRuns" | "approvalDecisions" | "autoWatch" | "host" | "runOwners" | "selfCompactionResumes" | "serverLink"
-      | "serverTurns" | "store" | "titles"
+      | "serverTurns" | "store" | "titles" | "turnQueue"
     >,
     private readonly deps: Pick<ChatDependencies, "cliRunner" | "debugLogs" | "storage">
   ) {}
@@ -90,6 +90,41 @@ export class RunCancel {
     if (!stillWanted() || !waits()) return;
     this.chat.activeRuns.sentNowRunIds.add(targetRunId);
     this.cancelRun(targetRunId);
+  }
+
+  /**
+   * A request asked with `deliver: "now"` (app_chat_request_participants)
+   * reaches the member here now, as a message typed into its CLI mid-turn
+   * does. `into-running-turn`, once the message is in the Claude Code CLI's
+   * queue: the CLI's own send-now, so the running step takes it at its next
+   * tool result or is cut for it (a Claude Code without send-now hands it over
+   * at the next tool result anyway). `interrupt-and-restart`: the member's
+   * running turn is cut as Send now cuts it (it keeps what it wrote and ends
+   * as a turn that goes on, never "stopped by user"), and the request runs
+   * next in the same session (TurnQueue `next`).
+   */
+  async deliverNow(conversationId: string, participantId: string, waitingRunId: string, way: "into-running-turn" | "interrupt-and-restart"): Promise<void> {
+    if (way === "into-running-turn") {
+      // Asked as the message is written: it is in the CLI's queue now, unless
+      // the CLI had nothing running and started it at once ("not_at_cli",
+      // "unsupported": nothing to do).
+      const runner = this.deps.cliRunner as Partial<Pick<CliAgentRunner, "memberClaudeSendNow">>;
+      const outcome: ClaudeSendNowOutcome = runner.memberClaudeSendNow
+        ? await runner.memberClaudeSendNow.call(this.deps.cliRunner, conversationId, participantId, waitingRunId, undefined).catch(() => "unsupported" as const)
+        : "unsupported";
+      void this.deps.debugLogs.write("chat.deliver-now", { conversationId, participantId, runId: waitingRunId, way, outcome });
+      return;
+    }
+    const cut: string[] = [];
+    for (const runId of this.chat.turnQueue.runningTurnRunIds(conversationId, participantId)) {
+      if (runId === waitingRunId) continue;
+      const controllers = this.chat.activeRuns.chatRunControllers.get(runId);
+      if (!controllers || [...controllers].every((controller) => controller.signal.aborted)) continue;
+      this.chat.activeRuns.sentNowRunIds.add(runId);
+      this.cancelRun(runId);
+      cut.push(runId);
+    }
+    void this.deps.debugLogs.write("chat.deliver-now", { conversationId, participantId, runId: waitingRunId, way, cutRunIds: cut });
   }
 
   cancelRun(runId: string): boolean {

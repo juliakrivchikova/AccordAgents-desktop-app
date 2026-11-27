@@ -106,7 +106,9 @@ test("requestSelfCompactionFromTool queues behind the current participant turn a
       }
     });
     chatParts(service).chatHistory.ensureHistoryFiles = async () => tempRoot;
+    // The member's turn that asks runs (its wait is over).
     const activeTurn = chatParts(service).turnQueue.reserveParticipantTurn(conversation.id, participant.id);
+    await activeTurn.wait();
 
     const result = await service.requestSelfCompactionFromTool(selfCompactionActor(participant), {
       instructions: "Preserve the implementation decisions."

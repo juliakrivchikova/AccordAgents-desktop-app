@@ -159,7 +159,7 @@ export class Compaction {
     emitProgress(runId, progress, "initial", `Compacting @${ingest.participant.handle}.`, {
       participantLabel: `@${ingest.participant.handle}`
     });
-    const reservation = heldTurns ?? this.chat.turnQueue.reserveParticipantTurn(ingest.conversation.id, ingest.participant.id);
+    const reservation = heldTurns ?? this.chat.turnQueue.reserveParticipantTurn(ingest.conversation.id, ingest.participant.id, "exclusive", { operation: true });
     onQueued?.();
     try {
       await reservation.wait();
