@@ -252,6 +252,8 @@ test("members' memory: every member is told how to keep it, a new session's prom
   assert.match(roles[0], /scope project for repository work, so whoever releases it sees it/);
   // A note about one project is never global.
   assert.match(roles[0], /knowledge about one project is never global: file it under that project, naming it with `project`/);
+  // A global note of the member's project, a copy from a CLI's memory too, is moved there.
+  assert.match(roles[0], /move a global note you see that belongs to your project \(one copied from a CLI's memory, tag `cli-memory`, too\) there the same way\./);
 
   await send("memory-run-2", "@codex Second task.", 2);
   assert.doesNotMatch(prompts[1], /Long-term memory \(notes members keep/);

@@ -31,7 +31,9 @@ Decided by the User on 2026-11-04 (chat design "Память участнико�
   of a move whose answer was lost is answered as done though the member no
   longer sees the note. Members are told (tool description and
   `MEMBER_MEMORY_INSTRUCTIONS`) that knowledge about one project is never
-  global. A server older than the app ignores `project` and keeps the note
+  global, and that a global note they see that belongs to the project they
+  work in (one copied from a CLI's memory, tag `cli-memory`, too) is moved
+  there the same way (the User, 2026-11-27). A server older than the app ignores `project` and keeps the note
   under the chat's project; the tool says so.
 - Title, Markdown body (16 KB at most), up to 12 tags, optional source, author,
   last writer, version, created / updated / last confirmed, archived.
