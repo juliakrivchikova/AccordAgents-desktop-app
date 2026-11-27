@@ -190,12 +190,17 @@
   animation: chat-rt-blink 1.6s ease-in-out infinite;
 }
 
-/* The pending dot alone, as a hover and focus target for its card (new
-   environment variables waiting): a few pixels of room around it. */
+/* New environment variables waiting: Settings → Environment's key in the
+   pending status colour, no dot, no motion, no background; a few pixels of
+   room around it as a hover and focus target for its card. */
 .chat-environment-pending {
-  padding: 4px;
-  margin: -4px;
-  border-radius: 50%;
+  display: inline-flex;
+  align-items: center;
+  flex: 0 0 auto;
+  padding: 3px;
+  margin: -3px;
+  border-radius: var(--ui-radius-8);
+  color: var(--app-warning);
   cursor: default;
 }
 

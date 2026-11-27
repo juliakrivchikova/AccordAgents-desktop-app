@@ -39,7 +39,7 @@ test("a background task in the hover card says how long it runs, and only \"runn
   assert.equal(render(<ChatBackgroundTaskRow task={{ label: "Watch the build output" }} />), "Watch the build outputrunning");
 });
 
-test("new environment variables waiting: the pending dot after the background tasks line, only for that member, explaining in its card", () => {
+test("new environment variables waiting: the Environment key after the background tasks line, only for that member, explaining in its card", () => {
   const tasks = [{ label: "Serve the docs preview" }];
   let renderer: ReturnType<typeof create> | undefined;
   const tree = (pending: ReadonlySet<string>): JSX.Element => (
@@ -52,7 +52,7 @@ test("new environment variables waiting: the pending dot after the background ta
   act(() => { renderer = create(tree(new Set(["main"]))); });
   const dot = renderer!.root.findAll((node) => node.props["data-testid"] === "chat-environment-pending" && typeof node.type === "string");
   assert.equal(dot.length, 1);
-  assert.equal(dot[0]!.props.className, "chat-rt-status is-pending chat-environment-pending", "the pending status dot itself, no colour of its own");
+  assert.equal(dot[0]!.props.className, "chat-environment-pending", "the key in the pending colour (styles), no dot of its own");
   assert.equal(dot[0]!.props.tabIndex, 0, "reachable from the keyboard");
   assert.equal(dot[0]!.props["aria-label"], ENVIRONMENT_PENDING_TITLE);
   act(() => { renderer!.update(tree(new Set(["someone-else"]))); });

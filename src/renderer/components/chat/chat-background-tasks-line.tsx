@@ -4,7 +4,7 @@ import { Spinner } from "@/components/ui/spinner";
 import { sessionsCompactDuration } from "../../../shared/mainSessionView";
 import type { ChatBackgroundTask } from "../../../shared/types";
 import { backgroundTasksStatusLabel, ChatBackgroundTasksContext } from "./chat-roster-status";
-import { ChatEnvironmentPendingContext, ChatEnvironmentPendingDot } from "./chat-environment-pending";
+import { ChatEnvironmentPendingContext, ChatEnvironmentPendingKey } from "./chat-environment-pending";
 import { useStreamingElapsedSeconds } from "./chat-streaming";
 
 interface ChatBackgroundTasksLineProps {
@@ -51,7 +51,7 @@ export const ChatBackgroundTasksLine = ({ participantId }: ChatBackgroundTasksLi
       {environmentPending && (
         <>
           <span className="chat-background-tasks-sep" aria-hidden>·</span>
-          <ChatEnvironmentPendingDot participantId={participantId} taskCount={tasks.length} />
+          <ChatEnvironmentPendingKey participantId={participantId} taskCount={tasks.length} />
         </>
       )}
     </div>

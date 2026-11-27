@@ -1,6 +1,6 @@
 import { useContext, type ReactNode } from "react";
 import { HoverCard } from "radix-ui";
-import { SquareIcon } from "@phosphor-icons/react";
+import { KeyIcon, SquareIcon } from "@phosphor-icons/react";
 
 import { SESSIONS_WORK_STATUS_LABELS, sessionsCompactDuration, type SessionsWorkStatus } from "../../../shared/mainSessionView";
 import type { MachineListResult } from "../../../shared/machineLink";
@@ -65,10 +65,10 @@ function RowMeta(props: { row: ChatAgentRowData; environmentPending: boolean }):
   return (
     <span className="chat-agent-meta">
       {/* New environment variables wait for its background tasks: the
-          pending dot, explained in the row's card. */}
+          Environment key in the pending colour, explained in the row's card. */}
       {props.environmentPending && (
-        <span className="chat-rt-status is-pending" data-testid="chat-environment-pending" aria-hidden="true">
-          <span className="chat-rt-status-dot" />
+        <span className="chat-environment-pending" data-testid="chat-environment-pending" aria-hidden="true">
+          <KeyIcon size={12} />
         </span>
       )}
       {time !== undefined && <span className="chat-agent-time" data-testid="chat-agent-time">{time}</span>}
@@ -103,7 +103,7 @@ export function ChatAgentCard(props: { row: ChatAgentRowData; detail: string; ba
       {props.environmentPending && (
         <span className="chat-agent-card-env" data-testid="chat-environment-pending-card">
           <span className="chat-agent-card-env-title">
-            <span className="chat-rt-status is-pending" aria-hidden="true"><span className="chat-rt-status-dot" /></span>
+            <span className="chat-environment-pending" aria-hidden="true"><KeyIcon size={12} /></span>
             {ENVIRONMENT_PENDING_TITLE}
           </span>
           <span className="chat-agent-card-line">{environmentPendingText(props.backgroundTasks)}</span>
