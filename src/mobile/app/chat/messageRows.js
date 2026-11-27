@@ -6,6 +6,7 @@ import { controlCardSignature, syncPendingCards } from "../cards/tailCards.js";
 import { artifactNoteCardElement, artifactNoteCardForEntry } from "./artifactNotes.js";
 import { setOpenThreadRootId } from "./chatScroll.js";
 import { finishedNoteCardElement, finishedNoteOfEntry } from "./finishedNoteCard.js";
+import { classicLineOnly, classicThinking, syncLiveSteps } from "./liveSteps.js";
 import { render } from "./render.js";
 import { applyStreamableState } from "./streamView.js";
 import { urgentAlertCardElement, urgentAlertOfEntry } from "./urgentAlerts.js";
@@ -18,7 +19,7 @@ import { conversationMembers } from "../members/mentions.js";
 import { OUTBOX_REFUSED, OUTBOX_SUPERSEDED } from "../outbox/hubOutbox.js";
 import { serverOwesEntry, stopRequestedRunIds, stopRunFromPhone } from "../outbox/sending.js";
 import { appendSessionsSpecial, sessionsDelegationsElement, sessionsSpecialSignature } from "../sessions/sessionsCards.js";
-import { openWorkedFolds, sessionsRules, sessionsStateState } from "../sessions/sessionsState.js";
+import { openLiveSteps, openWorkedFolds, sessionsRules, sessionsStateState } from "../sessions/sessionsState.js";
 import {
   compactElapsed, formatWorked, isSessionsRunningEntry, providerLogoElement, sessionsRunningText, sessionsWorkedElement,
   sessionsWorkedSignature, syncSessionsWorked, syncSessionsWorking
@@ -48,7 +49,11 @@ export function messageRowSignature(entry) {
     // whether it is open).
     activity: sessionsView && activitySignature(entry)
       ? activitySignature(entry) + (openWorkedFolds.has(entry.rowKey || entry.id) ? ":open" : "") : undefined,
-    liveStatus: sessionsView && entry.liveStatus ? true : undefined,
+    liveStatus: entry.liveStatus ? true : undefined,
+    // A running reply's live step line, in either view: its steps and
+    // whether it is open (liveSteps.js).
+    liveSteps: entry.status === "Running" && !sessionsView && activitySignature(entry) ? activitySignature(entry) : undefined,
+    liveOpen: entry.status === "Running" && openLiveSteps.has(entry.rowKey || entry.id) ? true : undefined,
     waiting: sessionsView ? waitingSignature(entry) : undefined,
     startedAt: sessionsView ? entry.startedAt : undefined,
     sessions: sessionsView ? sessionsSpecialSignature(entry) : undefined,
@@ -459,7 +464,10 @@ function createMessageRow(entry) {
     if (isSessionsRunningEntry(entry)) {
       // No "Thinking" word: its "Working for …" and its steps say it.
       renderMessageContentIfChanged(content, sessionsRunningText(entry), entry.author);
-    } else if (isThinkingEntry(entry)) {
+    } else if (classicLineOnly(entry)) {
+      // Its live step line says what it is doing (liveSteps.js).
+      renderMessageContentIfChanged(content, "", entry.author);
+    } else if (isThinkingEntry(entry) || classicThinking(entry)) {
       renderThinkingInto(content, entry);
     } else {
       renderMessageContentIfChanged(content, entryShownContent(entry), entry.author);
@@ -480,6 +488,7 @@ function createMessageRow(entry) {
     // its final text (shared/interimPosts.ts).
     syncInterimPosts(copy, content, entry);
     syncSessionsWorking(copy, meta, entry);
+    syncLiveSteps(copy, meta, entry);
     renderAttachmentsInto(attachmentsNodeFor(copy), entry);
     syncAnsweredCards(copy, entry);
     syncPendingCards(copy, entry);
@@ -630,16 +639,18 @@ export function updateMessageRow(item, entry) {
     syncMessageStopButton(meta, entry);
     // A running row drawn again in place (its posts came) keeps "Thinking"
     // as a new row draws it, not the placeholder sentence.
-    if (isThinkingEntry(entry) && !isSessionsRunningEntry(entry)) {
+    if ((isThinkingEntry(entry) || classicThinking(entry)) && !isSessionsRunningEntry(entry) && !classicLineOnly(entry)) {
       delete content.dataset.markdownRaw;
       delete content.dataset.markdownSource;
       renderThinkingInto(content, entry);
     } else {
       delete content.dataset.thinking;
-      renderMessageContentIfChanged(content, isSessionsRunningEntry(entry) ? sessionsRunningText(entry) : entryShownContent(entry), entry.author);
+      renderMessageContentIfChanged(content, isSessionsRunningEntry(entry) ? sessionsRunningText(entry)
+        : classicLineOnly(entry) ? "" : entryShownContent(entry), entry.author);
     }
     if (content.parentElement) syncInterimPosts(content.parentElement, content, entry);
     if (content.parentElement) syncSessionsWorking(content.parentElement, meta, entry);
+    if (content.parentElement) syncLiveSteps(content.parentElement, meta, entry);
     // Its "Worked for …" (and the tasks its turn gave): a reply that
     // finished on screen gets it as a new row has it.
     if (content.parentElement) syncSessionsWorked(content.parentElement, meta, content, entry);

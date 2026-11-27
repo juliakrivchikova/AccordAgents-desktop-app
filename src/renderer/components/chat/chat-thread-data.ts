@@ -16,38 +16,36 @@ const SHOW_CHAT_SYSTEM_MESSAGES = import.meta.env.VITE_ACCORD_AGENTS_SHOW_SYSTEM
  *  note of an Accord's document is one: its steps are on the Accord's card or
  *  in the document (accordProgress.ts). So is a finished reply with nothing
  *  in it (shared/turnContinues.ts). */
-export function isChatMessageHiddenInChat(conversation: Pick<Conversation, "messages">, message: Conversation["messages"][number], actionsShown = true): boolean {
+export function isChatMessageHiddenInChat(conversation: Pick<Conversation, "messages">, message: Conversation["messages"][number]): boolean {
   return chatMessageHiddenFromTimeline(conversation, message, { showSystemMessages: SHOW_CHAT_SYSTEM_MESSAGES }) ||
     (message.role === "system" && accordFoldedMessageIds(conversation.messages).has(message.id)) ||
     // An Accord closed on two devices at once: its first line is the one.
     (message.role === "system" && isRepeatedAccordClosedLine(conversation.messages, message)) ||
     // Kept when a thread starts at it: nothing else opens that thread.
-    // With members' actions hidden, a reply of steps alone is empty too.
-    (isEmptyFinishedReply(message, actionsShown) && !conversation.messages.some((reply) => reply.metadata?.chatThreadRootId === message.id && reply.id !== message.id));
+    (isEmptyFinishedReply(message) && !conversation.messages.some((reply) => reply.metadata?.chatThreadRootId === message.id && reply.id !== message.id));
 }
 
 /** A message the sessions view draws no row for: what the chat hides, except
  *  the line a finished compaction left, which stays in that member's session
  *  there (sessionsCompactionLineOf). */
-export function isChatMessageHiddenInSessions(conversation: Pick<Conversation, "messages">, message: Conversation["messages"][number], actionsShown = true): boolean {
+export function isChatMessageHiddenInSessions(conversation: Pick<Conversation, "messages">, message: Conversation["messages"][number]): boolean {
   if (sessionsCompactionLineOf(message) && message.metadata?.hiddenFromTimeline !== true) return false;
-  return isChatMessageHiddenInChat(conversation, message, actionsShown);
+  return isChatMessageHiddenInChat(conversation, message);
 }
 
 /** A message drawn as a row of the chat's main timeline: shown, and not a thread reply. */
 export function isChatTopLevelMessage(
   conversation: Pick<Conversation, "messages">,
   message: Conversation["messages"][number],
-  participantRequestReplyRoots = chatParticipantRequestReplyRootMap(conversation),
-  actionsShown = true
+  participantRequestReplyRoots = chatParticipantRequestReplyRootMap(conversation)
 ): boolean {
-  return !isChatMessageHiddenInChat(conversation, message, actionsShown) &&
+  return !isChatMessageHiddenInChat(conversation, message) &&
     !chatMessageVisualThreadRootId(conversation, message, participantRequestReplyRoots);
 }
 
-export function chatTopLevelMessages(conversation: Conversation, actionsShown = true): Conversation["messages"] {
+export function chatTopLevelMessages(conversation: Conversation): Conversation["messages"] {
   const participantRequestReplyRoots = chatParticipantRequestReplyRootMap(conversation);
-  return conversation.messages.filter((message) => isChatTopLevelMessage(conversation, message, participantRequestReplyRoots, actionsShown));
+  return conversation.messages.filter((message) => isChatTopLevelMessage(conversation, message, participantRequestReplyRoots));
 }
 
 /** A thread under a message: every row the thread shows (`replies`), and
@@ -60,11 +58,11 @@ export interface ChatThreadSummary {
   latestReplyAt?: string;
 }
 
-export function chatThreadSummaryMap(conversation: Conversation, actionsShown = true): Map<string, ChatThreadSummary> {
+export function chatThreadSummaryMap(conversation: Conversation): Map<string, ChatThreadSummary> {
   const summaries = new Map<string, ChatThreadSummary>();
   const participantRequestReplyRoots = chatParticipantRequestReplyRootMap(conversation);
   for (const message of conversation.messages) {
-    if (isChatMessageHiddenInChat(conversation, message, actionsShown)) {
+    if (isChatMessageHiddenInChat(conversation, message)) {
       continue;
     }
     const rootId = chatMessageVisualThreadRootId(conversation, message, participantRequestReplyRoots);

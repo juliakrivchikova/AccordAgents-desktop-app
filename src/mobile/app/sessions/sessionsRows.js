@@ -53,10 +53,13 @@ export function sessionsMainRows(state) {
       const continued = Boolean(row.turnContinues) && !live;
       base.delegations = {
         key: key, live: live, continued: continued, open: live || continued || openWorkedFolds.has(key),
+        // A part its turn went on from: its steps folded into "N steps ›".
+        ...(continued && openWorkedFolds.has(key) ? { stepsOpen: true } : {}),
         workedMs: typeof row.workedMs === "number" ? row.workedMs : undefined,
         // A finished turn's steps, which its fold opens to with its tasks
         // (while it runs they are under its "Working for …").
-        ...(!live && Array.isArray(row.activity) && row.activity.length ? { activity: row.activity, activityMore: row.activityMore || 0 } : {}),
+        ...(!live && Array.isArray(row.activity) && row.activity.length
+          ? { activity: row.activity, activityMore: row.activityMore || 0, ...(row.activitySteps ? { activitySteps: row.activitySteps } : {}) } : {}),
         summary: shared.sessionsDelegationSummary(tasks.reduce(function (count, task) {
           return count + (task.metadata.participantRequest ? task.metadata.participantRequest.items.length : 0);
         }, 0)),

@@ -52,8 +52,6 @@ export interface StoredSettings {
   settingsVersion?: number;
   roundLimitDefault: number;
   betaUpdates?: boolean;
-  /** False: members' actions are not listed in their replies. */
-  chatShowMemberActions?: boolean;
   cliAgentRunTimeoutMs?: number;
   chatParticipantRequestMaxDepth?: number;
   chatParticipantRequestPromptMaxChars?: number;

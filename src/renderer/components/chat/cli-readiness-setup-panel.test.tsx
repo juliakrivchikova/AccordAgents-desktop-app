@@ -18,7 +18,6 @@ const SETTINGS: AppSettings = {
   roundLimitDefault: 2,
 chatCustomAvatars: [],
   betaUpdates: false,
-  chatShowMemberActions: true,
   crashReports: true,
   crashReportsNotice: false,
   cliAgentRunTimeoutMs: 86_400_000,

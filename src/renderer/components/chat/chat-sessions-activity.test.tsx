@@ -1,130 +1,23 @@
 // A running reply of the sessions view (the User, 2026-11-21), T3 Code's turn
-// in progress: "Working for 4s" over a hairline, one quiet row per step by
-// kind, the newest shimmering; its words and posts in order between the rows;
-// once done, its Worked for opens to the same rows. The classic view keeps
-// its own running reply.
+// in progress: "Working for 4s" over a hairline, then its steps folded into
+// one live line naming the step in progress, shimmering, which opens to one
+// quiet row per step by kind (the User, 2026-11-27); its words and posts in
+// order; once done, its Worked for opens to the same rows.
 import assert from "node:assert/strict";
 import test from "node:test";
 import { act, create, type ReactTestInstance, type ReactTestRenderer } from "react-test-renderer";
 
 import { TooltipProvider } from "@/components/ui/tooltip";
-import type { ChatAgentActivityEvent, ChatMessage, Conversation } from "../../../shared/types";
+import type { ChatAgentActivityEvent, ChatMessage } from "../../../shared/types";
 import { ChatMessageItem } from "./chat-message-item";
-import { ChatSessionsPresentationContext } from "./chat-member-mark";
-import type { ChatParticipantRosterStatus } from "./chat-roster-status";
-import { ChatSessionsTimelineRow } from "./chat-sessions-timeline-row";
-import { newestActivityBlocks, sameActivityRow } from "./chat-sessions-activity";
+import { newestActivityBlocks } from "./chat-activity-rows";
 import { ChatWaitingMessageActions } from "./chat-waiting-message";
-import { chatInlineTranscriptParts } from "../../../shared/processingTranscript";
-import { useChatSessionsView, type ChatSessionsView } from "./use-chat-sessions-view";
 import { chatTopLevelMessages } from "./chat-thread-data";
-import { DREW, GERA, MAIN, PARTICIPANTS, TAYLOR, chatMessage, disclosure, sessionsConversation, sessionsMessages } from "./chat-sessions-fixtures.test";
+import { MAIN, PARTICIPANTS, chatMessage, disclosure, sessionsConversation, sessionsMessages } from "./chat-sessions-fixtures.test";
 
-const noop = (): void => undefined;
-const textOf = (node: ReactTestInstance | string): string =>
-  typeof node === "string" ? node : node.children.map(textOf).join("");
-const hasClass = (name: string) => (node: ReactTestInstance): boolean =>
-  typeof node.type === "string" && typeof node.props.className === "string" && node.props.className.split(/\s+/).includes(name);
+import { WORK_ROWS, activity, hasClass, itemProps, liveLineOf, manySteps, noop, pressLiveLine, renderSessionsRow, rowsOf, sessionsOf, textOf, workEvents } from "./chat-sessions-activity-fixtures.test";
 
-/** The main session on Codex: its steps are a row each (a Claude Code
- *  member's are folded, below). */
-const CODEX_MAIN = PARTICIPANTS.map((item) => item.id === MAIN.id ? { ...item, kind: "codex-cli" as const } : item);
-
-const STATUSES = new Map<string, ChatParticipantRosterStatus>([[DREW.id, "running"], [GERA.id, "idle"], [TAYLOR.id, "pending"]]);
-
-function sessionsOf(conversation: Conversation): ChatSessionsView {
-  let result: ChatSessionsView | undefined;
-  function Harness(): null {
-    result = useChatSessionsView({
-      conversation,
-      view: "sessions",
-      participants: conversation.metadata.participants as typeof PARTICIPANTS,
-      participantStatusById: STATUSES
-    });
-    return null;
-  }
-  const renderer = create(<Harness />);
-  renderer.unmount();
-  return result!;
-}
-
-function itemProps(message: ChatMessage, extra: Partial<Parameters<typeof ChatMessageItem>[0]> = {}): Parameters<typeof ChatMessageItem>[0] {
-  return {
-    activityDisclosure: disclosure(),
-    message,
-    conversationId: "chat-sessions",
-    participants: CODEX_MAIN,
-    participantStatusById: STATUSES,
-    busy: false,
-    onOpenThread: noop,
-    onApproveMentions: noop,
-    onRejectMentions: noop,
-    onRespondToChoice: noop,
-    onToggleReaction: noop,
-    ...extra
-  };
-}
-
-function renderSessionsRow(message: ChatMessage, sessions: ChatSessionsView, extra: Partial<Parameters<typeof ChatMessageItem>[0]> = {}): ReactTestInstance {
-  let renderer: ReturnType<typeof create> | undefined;
-  act(() => {
-    renderer = create(
-      <TooltipProvider>
-        <ChatSessionsPresentationContext.Provider value>
-          <ChatSessionsTimelineRow itemProps={itemProps(message, extra)} context={{ sessions, onOpenMember: noop, onOpenTask: noop }} />
-        </ChatSessionsPresentationContext.Provider>
-      </TooltipProvider>
-    );
-  });
-  return renderer!.root;
-}
-
-const activity = (id: string, kind: ChatAgentActivityEvent["kind"], label: string, afterContentLength: number, detail?: string): ChatAgentActivityEvent =>
-  ({ id, sequence: Number(id.replace(/\D/g, "")) || 1, kind, label, createdAt: new Date().toISOString(), afterContentLength, ...(detail ? { detail } : {}) });
-
-/** A turn as T3 Code's work log shows it: thinking, a search, a command, a read, an edit, another tool. */
-function workEvents(): ChatAgentActivityEvent[] {
-  return [
-    activity("a1", "status", "Thinking", 0, "I need the current exchange rate, so I'll run a standard web search."),
-    activity("a2", "web", "Using web search", 0, "EUR to USD exchange rate today"),
-    activity("a3", "command", "Running command", 0, "npm test -- --grep login\nsecond line"),
-    activity("a4", "tool", "Reading file", 0, "src/login.ts"),
-    activity("a5", "file-edit", "Updating files", 0, "src/login.css"),
-    activity("a6", "tool", "Using mcp__accord_agents__app_chat_get_context", 0)
-  ];
-}
-
-const rowsOf = (root: ReactTestInstance): string[][] => root.findAll((node) => typeof node.type === "string" && node.props["data-testid"] === "chat-sessions-activity-row")
-  .map((node) => [node.props["data-activity-kind"], textOf(node), node.props.className.includes("is-current") ? "current" : ""]);
-
-const WORK_ROWS = [
-  ["thinking", "I need the current exchange rate, so I'll run a standard web search."],
-  ["web", "EUR to USD exchange rate today"],
-  ["shell", "npm test -- --grep login"],
-  ["read", "src/login.ts"],
-  ["edit", "src/login.css"],
-  ["tool", "Using mcp__accord_agents__app_chat_get_context"]
-];
-
-test("a running reply of the sessions view: Working for over a hairline, one quiet row per step by kind, the newest shimmering; no Running label, no Thinking word, no boxed groups, no controls of its own", () => {
-  const sessions = sessionsOf(sessionsConversation());
-  const running = chatMessage("main-run", "participant", 12, { participantId: MAIN.id, status: "pending", content: "", metadata: { runId: "run-main" } });
-  const root = renderSessionsRow(running, sessions, { liveProgress: { participantLabel: "main", state: "running" as const, partialContent: "", activityEvents: workEvents() }, onStopRun: noop } as Partial<Parameters<typeof ChatMessageItem>[0]>);
-  assert.match(textOf(root.find((node) => node.props?.["data-testid"] === "chat-sessions-working")), /^Working for \d+(s|m \d+s|h \d+m)$/);
-  assert.deepEqual(rowsOf(root), WORK_ROWS.map((row, index) => [...row, index === WORK_ROWS.length - 1 ? "current" : ""]));
-  const text = textOf(root);
-  assert.doesNotMatch(text, /Running|Thinking\b|commands?\b/, "no status label, no placeholder word, no group summary");
-  assert.equal(root.findAll(hasClass("chat-inline-activity-group")).length, 0, "no boxed groups");
-  assert.equal(root.findAll(hasClass("message-actions")).length, 0, "no stop or copy on the running reply: the composer stops it (also with text typed, Stop beside Send)");
-  assert.equal(root.findAll((node) => node.props?.label === "Stop response" || node.props?.label === "Copy message").length, 0);
-
-  // Before its first step it is the header alone: no "Thinking".
-  const fresh = renderSessionsRow({ ...running, id: "main-fresh" }, sessions);
-  assert.equal(rowsOf(fresh).length, 0);
-  assert.doesNotMatch(textOf(fresh), /Thinking/);
-});
-
-test("a running reply keeps its words and its posts in order between the rows, and its turn's tasks after them", () => {
+test("a running reply keeps its words and its posts in order under its live line, and its turn's tasks after them", () => {
   const messages = sessionsMessages().map((message) => message.id === "main-1" ? { ...message, status: "pending" as const, content: "" } : message);
   const sessions = sessionsOf(sessionsConversation({}, messages));
   const reply = messages.find((message) => message.id === "main-1")!;
@@ -134,11 +27,11 @@ test("a running reply keeps its words and its posts in order between the rows, a
   const root = renderSessionsRow(posted, sessions, { liveProgress: { participantLabel: "main", state: "running" as const, partialContent: content, activityEvents: events } } as Partial<Parameters<typeof ChatMessageItem>[0]>);
   const running = root.find((node) => node.props?.["data-testid"] === "chat-sessions-running");
   const order = running.findAll((node) => typeof node.type === "string" && (
-    node.props["data-testid"] === "chat-sessions-activity-row" || hasClass("chat-sessions-activity-words")(node) || hasClass("chat-interim-post")(node) ||
-    node.props["data-testid"] === "chat-delegation-row"))
-    .map((node) => node.props["data-testid"] === "chat-sessions-activity-row" ? `row:${textOf(node)}`
+    node.props["data-testid"] === "chat-live-step" || node.props["data-testid"] === "chat-sessions-activity-row" || hasClass("chat-sessions-activity-words")(node) ||
+    hasClass("chat-interim-post")(node) || node.props["data-testid"] === "chat-delegation-row"))
+    .map((node) => node.props["data-testid"] === "chat-live-step" ? `live:${textOf(node)}` : node.props["data-testid"] === "chat-sessions-activity-row" ? `row:${textOf(node)}`
       : node.props["data-testid"] === "chat-delegation-row" ? "task" : hasClass("chat-interim-post")(node) ? `post:${textOf(node)}` : `words:${textOf(node)}`);
-  assert.deepEqual(order, ["row:src/login.ts", "words:Checking the login form.", "post:Tests started.", "row:npm test", "words:The form is fine.", "task", "task"]);
+  assert.deepEqual(order, ["live:npm test", "words:Checking the login form.", "post:Tests started.", "words:The form is fine.", "task", "task"]);
 });
 
 test("a finished reply of the sessions view folds the same rows into its Worked for; the classic view keeps its pill and its stream", () => {
@@ -171,7 +64,7 @@ test("a finished reply of the sessions view folds the same rows into its Worked 
   act(() => renderer!.unmount());
 });
 
-test("a part of a turn the User's next message joined keeps its steps open with no Worked for of its own; with nothing in it, it is not drawn", () => {
+test("a part of a turn the User's next message joined folds its steps into 'N steps' with no Worked for of its own; with nothing in it, it is not drawn", () => {
   const sessions = sessionsOf(sessionsConversation());
   const part = chatMessage("main-part", "participant", 14, {
     participantId: MAIN.id, content: "Checking the rate first.", metadata: { turnContinues: true, activityEvents: workEvents() }
@@ -179,7 +72,13 @@ test("a part of a turn the User's next message joined keeps its steps open with 
   const root = renderSessionsRow(part, sessions);
   assert.equal(root.findAll((node) => node.props?.["data-testid"] === "chat-worked-fold").length, 0, "no Worked for: the turn's one is on its last part");
   assert.equal(root.findAll((node) => typeof node.type === "string" && node.props["data-testid"] === "chat-turn-continues").length, 1);
-  assert.deepEqual(rowsOf(root), WORK_ROWS.map((row) => [...row, ""]), "its steps stay open, as in the CLI's transcript");
+  const fold = root.find((node) => node.type === "button" && node.props["data-testid"] === "chat-steps-fold");
+  assert.equal(textOf(fold), "6 steps");
+  assert.equal(rowsOf(root).length, 0, "its steps folded into one quiet line");
+  act(() => fold.props.onClick());
+  assert.deepEqual(rowsOf(root), WORK_ROWS.map((row) => [...row, ""]), "pressed, its steps");
+  act(() => fold.props.onClick());
+  assert.equal(rowsOf(root).length, 0, "pressed again, folded");
   assert.match(textOf(root), /Checking the rate first\./);
   const empty = chatMessage("main-empty", "participant", 15, { participantId: MAIN.id, content: "", metadata: { turnContinues: true } } as Partial<ChatMessage>);
   let renderer: ReturnType<typeof create> | undefined;
@@ -194,7 +93,7 @@ test("a part of a turn the User's next message joined keeps its steps open with 
   assert.equal(chatTopLevelMessages(conversation).some((message) => message.id === "main-empty"), false, "no row in the classic view");
 });
 
-test("the classic view's part of a turn her next message joined shows its steps open, and Show full stream still opens and closes its full stream", () => {
+test("the classic view's part of a turn her next message joined folds its steps into 'N steps', and Show full stream still opens and closes its full stream", () => {
   const part = chatMessage("main-part", "participant", 14, {
     participantId: MAIN.id, content: "Checking the rate first.",
     metadata: { turnContinues: true, activityEvents: workEvents(), processingTranscript: { content: "Let me look at the atlas.\n\nChecking the rate first." } }
@@ -210,7 +109,12 @@ test("the classic view's part of a turn her next message joined shows its steps 
   };
   const closed = render();
   assert.equal(closed.root.findAll(hasClass("chat-worked")).length, 0, "no Worked for of its own");
-  assert.equal(closed.root.findAll(hasClass("chat-inline-transcript")).length > 0, true, "its steps and words, open");
+  assert.equal(closed.root.findAll(hasClass("chat-inline-transcript")).length, 0, "its steps folded");
+  assert.match(textOf(closed.root), /Checking the rate first\./, "its words stay");
+  const steps = closed.root.find((node) => node.type === "button" && node.props["data-testid"] === "chat-steps-fold");
+  assert.equal(textOf(steps), "6 steps");
+  act(() => steps.props.onClick());
+  assert.equal(closed.root.findAll(hasClass("chat-inline-transcript")).length > 0, true, "pressed, its steps between its words");
   assert.doesNotMatch(textOf(closed.root), /Let me look at the atlas\./, "the full stream stays closed until asked");
   const show = closed.root.find((node) => node.props?.label === "Show full stream" && typeof node.props.onClick === "function");
   assert.equal(show.props.pressed, false);
@@ -226,21 +130,7 @@ test("the classic view's part of a turn her next message joined shows its steps 
   closedAgain.unmount();
 });
 
-test("the classic view's running reply is as it was: its status line and its stop control", () => {
-  const running = chatMessage("main-run", "participant", 12, { participantId: MAIN.id, status: "pending", content: "", metadata: { runId: "run-main" } });
-  let renderer: ReturnType<typeof create> | undefined;
-  act(() => {
-    renderer = create(<TooltipProvider><ChatMessageItem {...itemProps(running, { liveProgress: { participantLabel: "main", state: "running" as const, partialContent: "", activityEvents: workEvents() }, onStopRun: noop } as Partial<Parameters<typeof ChatMessageItem>[0]>)} /></TooltipProvider>);
-  });
-  const root = renderer!.root;
-  assert.equal(textOf(root.find(hasClass("chat-rt-status"))), "Running");
-  assert.equal(root.findAll((node) => node.props?.label === "Stop response").length > 0, true);
-  assert.equal(rowsOf(root).length, 0);
-  assert.equal(root.findAll((node) => node.props?.["data-testid"] === "chat-sessions-working").length, 0);
-  act(() => renderer!.unmount());
-});
-
-test("a Claude Code member's steps are one line as its CLI folds them: the step it is at, then how many of each; pressed, their rows", () => {
+test("a Claude Code member's live line names the step it is at; opened, its steps are folded as its CLI folds them: how many of each; pressed, their rows", () => {
   const sessions = sessionsOf(sessionsConversation());
   const steps = [
     activity("a1", "tool", "accord_agents - app_artifact_read (MCP)", 0),
@@ -255,8 +145,13 @@ test("a Claude Code member's steps are one line as its CLI folds them: the step 
   const running = chatMessage("main-claude", "participant", 12, { participantId: MAIN.id, status: "pending", content: "", metadata: { runId: "run-claude" } });
   const live = (count: number) => renderSessionsRow(running, sessions, { participants: PARTICIPANTS,
     liveProgress: { participantLabel: "main", state: "running" as const, partialContent: "", activityEvents: steps.slice(0, count) } } as Partial<Parameters<typeof ChatMessageItem>[0]>);
-  assert.deepEqual(lines(live(2)), ["fold current: Listing the old chat's artifacts"]);
-  assert.deepEqual(lines(live(5)), ["fold: Read 1 file, called accord_agents, ran 1 shell command", "row: Update(/tmp/known-issues.md)", "fold current: Running the affected tests"]);
+  assert.deepEqual(liveLineOf(live(2)).slice(0, 2), ["shell", "Listing the old chat's artifacts"], "the live line: the step it is at");
+  const five = live(5);
+  assert.deepEqual(liveLineOf(five).slice(0, 2), ["shell", "Running the affected tests"]);
+  assert.deepEqual(lines(five), []);
+  pressLiveLine(five);
+  assert.deepEqual(lines(five), ["fold: Read 1 file, called accord_agents, ran 1 shell command", "row: Update(/tmp/known-issues.md)", "fold: Ran 1 shell command"],
+    "opened, its steps as its CLI folds them");
 
   const done = chatMessage("main-claude-done", "participant", 14, { participantId: MAIN.id, content: "Done.", metadata: { workedMs: 4_000, activityEvents: steps } } as Partial<ChatMessage>);
   const root = renderSessionsRow(done, sessions, { participants: PARTICIPANTS, activityDisclosure: { ...disclosure(), expandedProcessingTranscriptMessageIds: new Set(["main-claude-done"]) } });
@@ -297,31 +192,6 @@ test("a message its member has not taken yet is sent now or taken back from the 
   assert.equal(row(running).findAll((node) => node.props?.["data-testid"] === "chat-waiting-message").length, 0);
 });
 
-/** A long turn: `count` steps, each a command. */
-function manySteps(count: number): ChatAgentActivityEvent[] {
-  return Array.from({ length: count }, (_, index) => activity(`s${index + 1}`, "command", "Running command", 0, `step ${index + 1}`));
-}
-
-test("a long running turn draws only its newest 50 steps under a muted 'N earlier steps', and each step is drawn again only when it changed", () => {
-  const sessions = sessionsOf(sessionsConversation());
-  const running = chatMessage("main-long", "participant", 12, { participantId: MAIN.id, status: "pending", content: "", metadata: { runId: "run-long" } });
-  const events = manySteps(180);
-  const root = renderSessionsRow(running, sessions, { liveProgress: { participantLabel: "main", state: "running" as const, partialContent: "", activityEvents: events } } as Partial<Parameters<typeof ChatMessageItem>[0]>);
-  const rows = rowsOf(root);
-  assert.equal(rows.length, 50, "the newest 50");
-  assert.equal(rows[0]![1], "step 131");
-  assert.deepEqual(rows.at(-1), ["shell", "step 180", "current"]);
-  const earlier = root.find((node) => typeof node.type === "string" && node.props?.["data-testid"] === "chat-sessions-activity-earlier");
-  assert.equal(textOf(earlier), "130 earlier steps");
-  assert.notEqual(earlier.type, "button", "not opened while it runs");
-
-  // The same step handed again as a new object (a streamed update) is not a change.
-  assert.equal(sameActivityRow(events[3]!, { ...events[3]! }), true);
-  assert.equal(sameActivityRow(events[3]!, { ...events[3]!, detail: "other" }), false);
-  const parts = chatInlineTranscriptParts("", events);
-  assert.equal(parts.filter((part) => part.kind === "activity").every((part, index) => part.kind === "activity" && part.event === events[index]), true,
-    "an event whose place does not move keeps its own object, so its row is not drawn again");
-});
 
 test("a finished long turn's fold opens to its newest 50 steps, and 'N earlier steps' opens the rest", () => {
   const sessions = sessionsOf(sessionsConversation());
@@ -370,6 +240,7 @@ test("folded steps are cut by the lines they are drawn as: a fold is one, and wh
   const running = chatMessage("main-claude-long", "participant", 12, { participantId: MAIN.id, status: "pending", content: "", metadata: { runId: "run-claude-long" } });
   const root = renderSessionsRow(running, sessions, { participants: [{ ...MAIN, kind: "claude-code" }],
     liveProgress: { participantLabel: "main", state: "running" as const, partialContent: "", activityEvents: long } } as Partial<Parameters<typeof ChatMessageItem>[0]>);
+  pressLiveLine(root);
   const earlier = root.find((node) => typeof node.type === "string" && node.props?.["data-testid"] === "chat-sessions-activity-earlier");
   assert.equal(textOf(earlier), "70 earlier steps", "a long turn still draws its newest 50 lines");
 });

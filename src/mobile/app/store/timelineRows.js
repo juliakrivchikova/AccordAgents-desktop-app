@@ -144,8 +144,7 @@ function sameTimelineEntryContent(left, right) {
     Boolean(left.stopped) === Boolean(right.stopped) &&
     // A running reply's steps, and what its Worked for opens to.
     activitySignature(left) === activitySignature(right) &&
-    Boolean(left.liveStatus) === Boolean(right.liveStatus) &&
-    Boolean(left.liveActivity) === Boolean(right.liveActivity);
+    Boolean(left.liveStatus) === Boolean(right.liveStatus);
 }
 
 function sameMobileEvent(left, right) {
@@ -251,8 +250,9 @@ export function putTimelineEntryDeduped(entry, options) {
         // reconnect.
         if (current.status !== "pending") return 0;
         if (isScaffoldingEntry(entry) && !isPlaceholderTimelineContent(current.content)) {
-          // With what it is: the step in progress stays hidden with members' actions.
-          entry = { ...entry, content: current.content, ...(current.liveActivity ? { liveActivity: true } : {}) };
+          // With what that text is: where the run stands (its step), not
+          // words of the reply, drawn on its live line only.
+          entry = { ...entry, content: current.content, ...(current.liveStatus ? { liveStatus: true } : {}) };
         }
         // Live progress does not repeat the snapshot's visual thread metadata.
         entry = { ...entry, createdAt: current.createdAt, threadRootId: entry.threadRootId || current.threadRootId };
@@ -315,7 +315,10 @@ export function putTimelineEntryDeduped(entry, options) {
           // Nor one without the reply's steps (a live copy from a server
           // before it carried them).
           ...(Array.isArray(stored.activity) && !Array.isArray(entry.activity)
-            ? { activity: stored.activity, ...(stored.activityMore ? { activityMore: stored.activityMore } : {}) } : {})
+            ? {
+              activity: stored.activity, ...(stored.activityMore ? { activityMore: stored.activityMore } : {}),
+              ...(stored.activitySteps ? { activitySteps: stored.activitySteps } : {}), ...(stored.activityLiveSummary ? { activityLiveSummary: stored.activityLiveSummary } : {})
+            } : {})
         };
         // Nor one that holds fewer of the reply's posts (a live copy from a
         // server before it carried them, a page read before the newest
@@ -464,12 +467,6 @@ export function deletePendingTimelineEntriesForRun(conversationId, runId, mobile
 // placeholder-sentence rows qualify; real pending text is never touched,
 // which is what the reverted age guard got wrong.
 const PLACEHOLDER_CORPSE_AGE_MS = 30 * 60 * 1000;
-
-/** The placeholder text of a running reply that has written nothing yet, as
- *  the server writes it (hubPhoneState.ts liveTimelineEvents). */
-export function placeholderTimelineContent(participantLabel) {
-  return participantLabel ? participantLabel + " is running..." : "Running...";
-}
 
 export function isPlaceholderTimelineContent(content) {
   const text = (content || "").trim();

@@ -640,7 +640,7 @@ test("the phone's chat list says which chats have a main session and the view ea
   }
 });
 
-test("a reply's step rows travel to the phone only for a chat in the sessions view; a classic chat's reply carries none", () => {
+test("a reply's step rows travel to the phone for a chat in the sessions view, and for a running reply in either view; a classic chat's finished reply carries none", () => {
   const steps = [
     { id: "s1", sequence: 1, kind: "command" as const, label: "Running command", detail: "npm test", createdAt: "2026-11-20T10:03:00Z" },
     { id: "s2", sequence: 2, kind: "tool" as const, label: "Reading file", detail: "src/a.ts", createdAt: "2026-11-20T10:03:10Z" }
@@ -653,12 +653,31 @@ test("a reply's step rows travel to the phone only for a chat in the sessions vi
     return conversation;
   };
   const rowsOf = (conversation: Conversation) => timelineEventsFromSnapshot(conversation).find((event) => event.id === "worked");
-  assert.deepEqual(rowsOf(withReply({ chatView: "sessions" }))?.activity, [{ kind: "status", folded: true, text: "Read 1 file, ran 1 shell command" }], "folded as Claude Code folds them");
+  const folded = rowsOf(withReply({ chatView: "sessions" }));
+  assert.deepEqual(folded?.activity, [{ kind: "status", folded: true, text: "Read 1 file, ran 1 shell command" }], "folded as Claude Code folds them");
+  assert.equal(folded?.activitySteps, 2, "with how many steps the folded row stands for (its part's \"N steps\")");
   const codex = (requestConversation("Task", 1).metadata.participants as Array<{ id: string }>).map((item) => item.id === "main" ? { ...item, kind: "codex-cli" } : item);
-  assert.deepEqual(rowsOf(withReply({ chatView: "sessions", participants: codex }))?.activity, [{ kind: "shell", text: "npm test" }, { kind: "read", text: "src/a.ts" }]);
+  const rowEach = rowsOf(withReply({ chatView: "sessions", participants: codex }));
+  assert.deepEqual(rowEach?.activity, [{ kind: "shell", text: "npm test" }, { kind: "read", text: "src/a.ts" }]);
+  assert.equal(rowEach?.activitySteps, undefined, "a row each: the rows are the count");
   const classic = rowsOf(withReply({ chatView: "classic" }));
   assert.equal(classic?.activity, undefined, "the classic view shows no step rows");
   assert.equal(classic?.activityMore, undefined);
+  // Running, its one live line opens to its steps in the classic view too
+  // (the User, 2026-11-27): the step it is at, with that step's kind.
+  const runningClassic = withReply({ chatView: "classic" });
+  const reply = runningClassic.messages.at(-1)!;
+  reply.status = "pending";
+  assert.deepEqual(rowsOf(runningClassic)?.activity, [{ kind: "read", folded: true, text: "src/a.ts" }], "the live fold names the step it is at");
+  assert.equal(rowsOf(runningClassic)?.activityLiveSummary, "Read 1 file, ran 1 shell command", "and what it came to so far travels beside it, for the opened list");
+  assert.equal(folded?.activityLiveSummary, undefined, "a finished reply's fold says it in its row");
+  // A notice about the run after its steps (a background task finishing) is
+  // not the step in progress: the fold before it still names its step.
+  reply.metadata = { ...reply.metadata, activityEvents: [...steps,
+    { id: "n1", sequence: 3, kind: "status" as const, label: "Background task finished: tests", createdAt: "2026-11-20T10:03:20Z" }] };
+  const noticed = rowsOf(runningClassic);
+  assert.deepEqual(noticed?.activity?.map((row) => [row.text, row.notice ?? false]), [["src/a.ts", false], ["Background task finished: tests", true]]);
+  assert.equal(noticed?.activityLiveSummary, "Read 1 file, ran 1 shell command");
   const old = rowsOf(withReply({ mainSessionParticipantId: undefined, participants: [{ id: "admin", handle: "admin", kind: "claude-code", roleConfigId: "administrator" }] }));
   assert.equal(old?.activity, undefined, "a chat without a main session is always classic");
 });

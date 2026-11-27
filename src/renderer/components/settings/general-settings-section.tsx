@@ -20,7 +20,6 @@ import type {
 import { BetaUpdatesRow } from "./beta-updates-row";
 import { SpeechToTextRow } from "./speech-to-text-row";
 import { SemanticSearchRow } from "./semantic-search-row";
-import { MemberActionsRow } from "./member-actions-row";
 import { ClaudeChromeRow } from "./claude-chrome-row";
 import { DevicePairingSection } from "./device-pairing-section";
 import { HubServerSection } from "./hub-server-section";
@@ -62,7 +61,6 @@ export function GeneralSettingsSection(props: {
   repoFileOpenAction?: RepoFileOpenAction;
   repoFileExternalOpenAction?: RepoFileExternalOpenAction;
   betaUpdates: boolean;
-  chatShowMemberActions: boolean;
   crashReports: boolean;
   cliAgentRunTimeoutMs: number;
   chatParticipantRequestMaxDepth: number;
@@ -77,7 +75,6 @@ export function GeneralSettingsSection(props: {
   setRepoFileOpenPreference: (action: RepoFileOpenAction | null) => Promise<void>;
   setRepoFileExternalOpenPreference: (action: RepoFileExternalOpenAction | null) => Promise<void>;
   setBetaUpdates: (enabled: boolean) => Promise<void>;
-  setChatShowMemberActions: (shown: boolean) => Promise<void>;
   setCrashReports: (enabled: boolean) => Promise<void>;
   setCliAgentRunTimeoutMs: (timeoutMs: number) => Promise<void>;
   setChatParticipantRequestMaxDepth: (maxDepth: number) => Promise<void>;
@@ -200,7 +197,6 @@ export function GeneralSettingsSection(props: {
               }}
             />
           </div>
-          <MemberActionsRow shown={props.chatShowMemberActions} onChange={props.setChatShowMemberActions} />
           <SpeechToTextRow />
           <SemanticSearchRow />
           <BetaUpdatesRow enabled={props.betaUpdates} onChange={props.setBetaUpdates} />

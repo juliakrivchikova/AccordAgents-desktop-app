@@ -86,31 +86,45 @@ export function sessionsActivityRow(event: Pick<ChatAgentActivityEvent, "kind" |
 
 type PhoneActivityEvent = Pick<ChatAgentActivityEvent, "kind" | "label" | "detail" | "status">;
 
-/** A step's row; a notice about the run itself is marked, as the phone still
- *  shows it while members' actions are hidden. */
+/** A step's row; a notice about the run itself is marked: the phone keeps it
+ *  in view under a running reply's one live step line (the User, 2026-11-27). */
 function phoneActivityRow(event: PhoneActivityEvent): PhoneActivityRow {
   const row = sessionsActivityRow(event);
   return chatActivityStandsAlone(event) ? { ...row, notice: true } : row;
 }
 
+/** The index of the newest block of steps: a notice about the run that came
+ *  after them (a background task finishing) is not the step in progress. */
+function newestStepBlock(blocks: ReturnType<typeof claudeStepBlocks>): number {
+  for (let index = blocks.length - 1; index >= 0; index -= 1) {
+    const block = blocks[index]!;
+    if (block.fold || !chatActivityStandsAlone(block.event)) return index;
+  }
+  return -1;
+}
+
 /** A Claude Code member's steps, folded; the newest fold says the step it is
- *  at while the reply is being written. */
+ *  at while the reply is being written, with that step's kind (the live
+ *  line's icon). */
 function foldedPhoneRows(events: readonly PhoneActivityEvent[], live: boolean): PhoneActivityRow[] {
   const blocks = claudeStepBlocks(events);
+  const current = live ? newestStepBlock(blocks) : -1;
   return blocks.map((block, index): PhoneActivityRow => {
     if (!block.fold) return phoneActivityRow(block.event);
-    const newest = block.events[block.events.length - 1]!;
-    return { kind: "status", folded: true, text: live && index === blocks.length - 1 ? sessionsActivityRow(newest).text : claudeStepSummary(block.events) };
+    if (index === current) return { ...sessionsActivityRow(block.events[block.events.length - 1]!), folded: true };
+    return { kind: "status", folded: true, text: claudeStepSummary(block.events) };
   });
 }
 
-/** A reply's newest rows as the phone gets them, and how many earlier ones
- *  were left out. `claude`: its member runs on Claude Code. `live`: it is
- *  being written. */
+/** A reply's newest rows as the phone gets them, how many earlier ones were
+ *  left out, and how many steps they all stand for where that differs (a
+ *  folded row is several): the "N steps" a turn's part folds into says it,
+ *  as the computer's does. `claude`: its member runs on Claude Code. `live`:
+ *  it is being written. */
 export function phoneSessionsActivity(
   events: readonly PhoneActivityEvent[] | undefined,
   options: { claude?: boolean; live?: boolean } = {}
-): { activity: PhoneActivityRow[]; activityMore?: number } | undefined {
+): { activity: PhoneActivityRow[]; activityMore?: number; activitySteps?: number; activityLiveSummary?: string } | undefined {
   if (!Array.isArray(events) || events.length === 0) return undefined;
   const all: PhoneActivityRow[] = options.claude ? foldedPhoneRows(events, options.live === true) : events.map(phoneActivityRow);
   const rows = all.filter((row) => row.text);
@@ -120,7 +134,15 @@ export function phoneSessionsActivity(
     text: row.text.length > PHONE_ACTIVITY_ROW_CHARS ? `${row.text.slice(0, PHONE_ACTIVITY_ROW_CHARS - 1).trimEnd()}…` : row.text
   }));
   const more = rows.length - kept.length;
-  return more > 0 ? { activity: kept, activityMore: more } : { activity: kept };
+  const steps = events.length !== rows.length ? { activitySteps: events.length } : {};
+  // While it runs, its newest fold names the step in progress (the live
+  // line, and the current row of a phone app from before); what that fold
+  // came to so far is sent beside it, for the opened list.
+  const blocks = options.claude && options.live ? claudeStepBlocks(events) : [];
+  const lastBlock = blocks[newestStepBlock(blocks)];
+  const summary = lastBlock?.fold ? claudeStepSummary(lastBlock.events) : "";
+  const live = summary ? { activityLiveSummary: summary.length > PHONE_ACTIVITY_ROW_CHARS ? `${summary.slice(0, PHONE_ACTIVITY_ROW_CHARS - 1).trimEnd()}…` : summary } : {};
+  return more > 0 ? { activity: kept, activityMore: more, ...steps, ...live } : { activity: kept, ...steps, ...live };
 }
 
 /** Whether a reply's member runs on Claude Code (its steps are folded). */

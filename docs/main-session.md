@@ -540,17 +540,23 @@ switch is disabled.
   - a reply still being written reads as T3 Code's turn in progress (the
     User, 2026-11-21), on the desktop and the phone, on the main timeline
     and in a member's session: a quiet "Working for 4s" (live) over a
-    hairline, then one muted line per step with an outline icon by its kind
-    and what it is about (`sessionsActivityRow`, from the activity events
-    the run already reports): thinking (brain), web search (globe), shell
-    (terminal), file read (file), edit (pencil), any other tool (wrench);
-    the newest one shimmers (still for reduced motion). A Claude Code
-    member's reads, searches, listings, shell commands and MCP calls in a
-    row are folded into one line, as its CLI folds them (the User,
-    2026-11-25; `claudeStepFold.ts`): the step it is at while they run,
-    then how many of each ("Read 2 files, called accord_agents 4 times, ran
-    3 shell commands"); on the desktop the line opens to their rows. Edits,
-    new files, fetches, web searches and subagents stay rows of their own.
+    hairline, then its steps folded into one live line (the User,
+    2026-11-27; `chat-live-steps.tsx`, the phone's `liveSteps.js`): the step
+    it is at, in the words that step's row has, shimmering (still for
+    reduced motion), the newest step replacing it. Pressed, the line opens
+    to every step so far, which keeps growing while open; pressed again, it
+    folds. Opened, each step is one muted row with an outline icon by its
+    kind and what it is about (`sessionsActivityRow`, from the activity
+    events the run already reports): thinking (brain), web search (globe),
+    shell (terminal), file read (file), edit (pencil), any other tool
+    (wrench). The classic view does the same: the line sits at the top of
+    the running reply, in place of "Thinking", and stays while the text
+    streams. A Claude Code member's reads, searches, listings, shell
+    commands and MCP calls in a row are folded into one row there, as its
+    CLI folds them (the User, 2026-11-25; `claudeStepFold.ts`): how many of
+    each ("Read 2 files, called accord_agents 4 times, ran 3 shell
+    commands"); on the desktop it opens to their rows. Edits, new files,
+    fetches, web searches and subagents stay rows of their own.
     A step says what
     the member's own CLI says for it (`cliToolActivity.ts`, 2026-11-22: "Using
     Bash" told the User nothing): Claude Code's "Running <description in its
@@ -571,9 +577,11 @@ switch is disabled.
     A message the User sends while a Claude member works waits until its
     CLI hands it to the running step at the next tool result; from then its
     reply is the turn's one "Working for", counted
-    from the start of the step it joined, as the CLI's one spinner is. The member's words and its posts
-    stay its words, in order between the rows; its turn's tasks follow as
-    their rows. No status label, no "Thinking" word, no grouped boxes, no
+    from the start of the step it joined, as the CLI's one spinner is. The member's words, its posts
+    and its notices about the run itself (a stalled provider, a re-sign-in,
+    a background task running or finished: `chatActivityStandsAlone`) stay
+    in the reply in order, never folded into the line; its turn's tasks
+    follow as their rows. No status label, no "Thinking" word, no grouped boxes, no
     Stop or copy on a running reply (the composer stops it, also with
     text typed; a member's session head stops the member). A reply that
     has not started has no row (the User, 2026-11-25: as Claude does, no
@@ -591,15 +599,23 @@ switch is disabled.
     so its background agents keep running, as with Esc in the CLI (since
     2.1.329 a plain interrupt from a client ends them). In the
     composer Enter sends and waits, Cmd or Ctrl with Enter sends now, and
-    Enter with nothing typed sends what already waits. A long turn
-    draws its newest 50 steps (a folded line is one) under a muted "N
-    earlier steps" (a finished fold opens them); a reply that waited in the queue counts its
+    Enter with nothing typed sends what already waits. A long turn's
+    opened line draws its newest 50 steps (a folded row is one) under a
+    muted "N earlier steps", which opens them, as a finished fold does; a reply that waited in the queue counts its
     "Working for" from its own turn's start (`turnStartedAt`). A run on a
     machine shows where it stands ("Preparing the workspace") as its
     current step until its first own step. The phone gets a reply's newest 12 steps, each one
     line of at most 120 characters, with how many earlier ones there were
     (`phoneSessionsActivity`; the live copy marks text that is only where
-    the run stands, `liveStatus`);
+    the run stands, `liveStatus`), for a running reply in either view and a
+    finished one in this view. A running Claude Code reply's newest fold
+    names the step it is at (a notice after it, such as a background task
+    finishing, does not count), with what that fold came to so far beside
+    it (`activityLiveSummary`) for the opened list; a finished part of a
+    turn that folds into "N steps" gets how many steps its rows stand for
+    (`activitySteps`). On her biggest chat in this view (576 messages) these
+    add 2.3 KB to a 649 KB page; a chat in the classic view gets no rows for
+    its finished replies;
   - every finished reply says how long it worked T3 Code's quiet way,
     on the main timeline and in a member's session: muted "Worked for 44s"
     and a chevron, no pill; the chevron opens, in place, the same rows its

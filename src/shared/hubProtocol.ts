@@ -339,15 +339,13 @@ export interface HubComposerCatalog {
   avatars: Record<string, { mimeType: string; blob: { type: "device.event.blob"; blobHash: string; byteLength: number; fragments: number } }>;
   /** What the phone's New chat offers, as the computer's does. */
   newChat?: HubNewChatOptions;
-  /** How the phone draws chats, as the computer's Settings say; a computer
-   *  from before sends none, and the phone keeps what it last had. */
-  display?: HubPhoneDisplay;
 }
 
-/** The computer's Settings that the phone draws chats by: the server hands
- *  them to the phone with every answer to GET /v1/phone/changes. */
+/** What a phone app of 1.11.12-beta.3 draws chats by, from every answer to
+ *  GET /v1/phone/changes: it hid members' steps while `showMemberActions` was
+ *  false. The switch is gone (the User, 2026-11-27); the server always says
+ *  true so such an app shows them again. */
 export interface HubPhoneDisplay {
-  /** Settings → General → Show members’ actions (the User, 2026-11-27). */
   showMemberActions: boolean;
 }
 

@@ -208,7 +208,7 @@ export class RequestRouter {
         const avatars = Object.values((parsed.catalog as { avatars?: Record<string, { blob?: unknown }> }).avatars ?? {})
           .map((entry) => entry?.blob).filter(isDeviceEventBlobReference).map((blob) => blob.blobHash);
         await this.deps.options.storage.deviceEventBlobs().pinOnly(avatars, "catalog");
-        this.deps.options.onCatalogChanged?.(parsed.catalog);
+        this.deps.options.onCatalogChanged?.();
         return json(response, 200, { ok: true });
       }
       if (url.pathname === HUB_MEMBER_RULES_PATH && request.method === "PUT") {

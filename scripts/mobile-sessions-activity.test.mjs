@@ -1,13 +1,15 @@
 /**
  * A running reply of the sessions view on the phone (the User, 2026-11-21),
  * through the real PWA against a real hub: T3 Code's turn in progress, a
- * quiet "Working for 4s" over a hairline, then one muted row per step with
- * an outline icon by its kind (thinking, web search, shell, file read, edit,
- * other tools) saying what it is about, the newest shimmering; no Running
- * label, no "Thinking" word, no Stop on the reply (the composer's button is
- * Stop); its posts stay its words. Live steps arrive with its progress. Once
- * done, its "Worked for …" opens to the same rows. The classic view is as
- * it was.
+ * quiet "Working for 4s" over a hairline, then its steps folded into one
+ * live line naming the step in progress, shimmering, which a tap opens to
+ * one muted row per step with an outline icon by its kind (thinking, web
+ * search, shell, file read, edit, other tools) and folds again (the User,
+ * 2026-11-27); no Running label, no "Thinking" word, no Stop on the reply
+ * (the composer's button is Stop). Live steps arrive with its progress. Once
+ * done, its "Worked for …" opens to the same rows; a part of a turn her next
+ * message joined folds them into "N steps". The classic view's running reply
+ * has the same live line in place of "Thinking".
  *
  * Desktop Chrome, not the installed phone: supporting evidence for the phone
  * check, not a stand-in for it.
@@ -34,7 +36,7 @@ const CODEX_MAIN = { ...MAIN, kind: "codex-cli" };
 
 /** A turn as T3 Code's work log shows it. */
 const WORK = [
-  step(1, "status", "Thinking", "I need the current exchange rate, so I'll run a standard web search."),
+  step(1, "tool", "Thinking", "I need the current exchange rate, so I'll run a standard web search."),
   step(2, "web", "Using web search", "EUR to USD exchange rate today"),
   // In the member's CLI's own words (cliToolActivity.ts); the others are
   // stored rows in the app's old words, which show their detail.
@@ -65,9 +67,12 @@ function messages() {
   ];
 }
 
-const rowsOf = (selector) => `[...${selector}.querySelectorAll(".sessions-activity-row")].map((node) => [node.dataset.activityKind, node.textContent, node.classList.contains("is-current") ? "current" : ""])`;
+const rowsOf = (selector) => `[...${selector}.querySelectorAll(".sessions-activity-row:not(.live-step)")].map((node) => [node.dataset.activityKind, node.textContent, node.classList.contains("is-current") ? "current" : ""])`;
+const stepRows = (selector) => `${selector}.querySelectorAll(".sessions-activity-row:not(.live-step)").length`;
+const liveLineOf = (selector) => `(() => { const line = ${selector}.querySelector(".live-step");
+  return line ? [line.dataset.activityKind, line.textContent, line.classList.contains("is-current") ? "current" : "", line.getAttribute("aria-expanded")] : []; })()`;
 
-test("a running reply on the phone: Working for, one row per step, the newest shimmering; finished, its Worked for opens to the same rows", { timeout: 240_000 }, async (t) => {
+test("a running reply on the phone: Working for, one shimmering live line naming the step in progress, which a tap opens to every step; finished, its Worked for opens to the same rows", { timeout: 240_000 }, async (t) => {
   const hub = await startMobileHub();
   const site = await serveMobileShell({ port: 8395, hubOrigins: [hub.base] });
   const profile = await tempProfile("aa-mobile-sessions-activity-");
@@ -123,15 +128,63 @@ test("a running reply on the phone: Working for, one row per step, the newest sh
     if (await app.evaluate(`${row("r1")}.__kept === true`)) break;
   }
   await hub.progress("conv-work", "run-main", "", { participantLabel: "@main", agentProgress: { activity: "Using mcp__accord_agents__app_chat_get_context", activityEvents: WORK } });
-  await app.waitFor(`${row("r1")}.querySelectorAll(".sessions-activity-row").length === 6`, "the live steps");
-  assert.deepEqual(await app.evaluate(rowsOf(row("r1"))), WORK_ROWS.map((entry, index) => [...entry, index === WORK_ROWS.length - 1 ? "current" : ""]));
+  await app.waitFor(`Boolean(${row("r1")}.querySelector(".live-step"))`, "the live line");
+  assert.deepEqual(await app.evaluate(liveLineOf(row("r1"))), ["tool", "accord_agents - app_chat_get_context (MCP)", "current", "false"], "one line: the step in progress");
+  assert.equal(await app.evaluate(stepRows(row("r1"))), 0, "no row per step");
   const live = await app.evaluate(`(() => { const node = ${row("r1")};
-    const current = node.querySelector(".sessions-activity-row.is-current .sessions-activity-text");
+    const current = node.querySelector(".live-step .sessions-activity-text");
     return { kept: node.__kept === true, words: node.querySelector(".message-copy > .message-content:not(.message-interim-post)").textContent.trim(),
-      icons: [...node.querySelectorAll(".sessions-activity-row svg")].length, shimmer: getComputedStyle(current).animationName,
+      icon: node.querySelectorAll(".live-step svg.sessions-activity-icon").length, shimmer: getComputedStyle(current).animationName,
       groups: node.querySelectorAll(".chat-inline-activity-group, .thinking-label").length }; })()`);
-  assert.deepEqual(live, { kept: true, words: "", icons: 6, shimmer: "thinking-transfusion", groups: 0 },
-    "kept in place; the step in progress is a step, not the reply's words; an outline icon per row; the newest shimmers; no boxed groups");
+  assert.deepEqual(live, { kept: true, words: "", icon: 1, shimmer: "thinking-transfusion", groups: 0 },
+    "kept in place; the step in progress is the line, not the reply's words; its kind's outline icon; it shimmers; no boxed groups");
+  // A tap opens it to every step so far, which keeps growing while open.
+  await app.evaluate(`${row("r1")}.querySelector(".live-step").click()`);
+  await app.waitFor(`${stepRows(row("r1"))} === 6`, "the live line open");
+  assert.deepEqual(await app.evaluate(rowsOf(row("r1"))), WORK_ROWS.map((entry) => [...entry, ""]));
+  assert.equal(await app.evaluate(liveLineOf(row("r1")) + "[3]"), "true");
+  const MORE = [...WORK, step(7, "command", "Running npm run build", "npm run build")];
+  await hub.progress("conv-work", "run-main", "", { participantLabel: "@main", agentProgress: { activity: "Running npm run build", activityEvents: MORE } });
+  await app.waitFor(`${stepRows(row("r1"))} === 7`, "the open list grows");
+  assert.deepEqual(await app.evaluate(liveLineOf(row("r1"))), ["shell", "Running npm run build", "current", "true"], "the newest step replaces the line");
+  await app.evaluate(`${row("r1")}.querySelector(".live-step").click()`);
+  await app.waitFor(`${stepRows(row("r1"))} === 0`, "a tap folds it again");
+
+  // --- the classic view: the same live line in place of Thinking -----------
+  await app.evaluate(`document.getElementById("chat-members-toggle").click()`);
+  await app.waitFor(`Boolean(document.querySelector('#chat-title-menu [data-title-view="classic"]'))`, "the title's menu");
+  await app.evaluate(`document.querySelector('#chat-title-menu [data-title-view="classic"]').click()`);
+  await app.waitFor(`document.querySelectorAll("#message-list .message-row.is-sessions").length === 0 && Boolean(${row("r1")}?.querySelector(".live-step"))`, "the classic timeline's live line");
+  const classic = await app.evaluate(`(() => { const node = ${row("r1")};
+    return { line: node.querySelector(".live-step").textContent, thinking: node.querySelectorAll(".thinking-label").length,
+      words: node.querySelector(".message-copy > .message-content:not(.message-interim-post)").textContent.trim(),
+      status: node.querySelector(".message-status").textContent }; })()`);
+  assert.deepEqual(classic, { line: "Running npm run build", thinking: 0, words: "", status: "Running" }, "the line says what it is doing, once");
+  await app.evaluate(`${row("r1")}.querySelector(".live-step").click()`);
+  await app.waitFor(`${stepRows(row("r1"))} === 7`, "the classic live line open");
+  await app.evaluate(`${row("r1")}.querySelector(".live-step").click()`);
+  await app.waitFor(`${stepRows(row("r1"))} === 0`, "and folded");
+  // The chat changes meanwhile: its page's copy of the running reply (the
+  // placeholder, no live mark) must not turn the step on the line into the
+  // reply's words as well, not even until the next live copy.
+  await app.evaluate(`(() => { window.__doubled = false; const node = ${row("r1")};
+    window.__sampler = setInterval(() => { const words = node.isConnected ? node : ${row("r1")};
+      const text = words?.querySelector(".message-copy > .message-content:not(.message-interim-post)")?.textContent || "";
+      if (text.includes("npm run build")) window.__doubled = true; }, 25); })()`);
+  await hub.addMessages("conv-work", [{ id: "u-aside", role: "user", content: "Noted.", status: "done", createdAt: at(0.1), metadata: { deliveryTargets: [] } }]);
+  await app.waitFor(`Boolean(${row("u-aside")})`, "the chat's page with the change");
+  await new Promise((resolve) => setTimeout(resolve, 3_000));
+  assert.equal(await app.evaluate(`(() => { clearInterval(window.__sampler); return window.__doubled; })()`), false, "the step is never the reply's words too");
+  assert.equal(await app.evaluate(`${row("r1")}.querySelector(".live-step")?.textContent`), "Running npm run build");
+  // Only a notice about the run so far: Thinking, and the notice once.
+  const STALLED = "@main has produced no provider output for 5 minutes.";
+  await hub.progress("conv-work", "run-main", "", { participantLabel: "@main", agentProgress: { activity: STALLED, activityEvents: [step(30, "status", STALLED)] } });
+  await app.waitFor(`!${row("r1")}.querySelector(".live-step") && Boolean(${row("r1")}.querySelector(".thinking-label"))`, "Thinking with only a notice");
+  assert.equal(await app.evaluate(`${row("r1")}.innerText.split(${JSON.stringify(STALLED)}).length - 1`), 1, "the notice once, as its row");
+  await hub.progress("conv-work", "run-main", "", { participantLabel: "@main", agentProgress: { activity: "Running npm run build", activityEvents: MORE } });
+  await app.waitFor(`Boolean(${row("r1")}.querySelector(".live-step"))`, "the steps again");
+  await app.evaluate(`document.querySelector('#chat-view-switch [data-view="sessions"]').click()`);
+  await app.waitFor(`Boolean(${row("r1")}?.querySelector(".sessions-working")) && document.querySelectorAll("#message-list .message-row.is-sessions").length > 0`, "the sessions view again");
 
   // --- its words, then done: the Worked for opens to the same rows
   await hub.progress("conv-work", "run-main", "The login form is fixed.", { participantLabel: "@main", agentProgress: { activityEvents: WORK } });
@@ -151,19 +204,42 @@ test("a running reply on the phone: Working for, one row per step, the newest sh
   await app.waitFor(`${row("r0")}.querySelectorAll(".sessions-activity-row").length === 6`, "the earlier reply's fold");
   assert.equal(await app.evaluate(`${row("r0")}.querySelector(".sessions-worked-toggle").textContent`), "Worked for 4s");
 
-  // --- a part of a turn her next message joined: steps open, no Worked for --
+  // --- a part of a turn her next message joined: "N steps", no Worked for --
+  await app.evaluate(`${row("r0")}.querySelector(".sessions-worked-toggle").click()`);
+  await app.waitFor(`${row("r0")}.querySelectorAll(".sessions-activity-row").length === 0`, "the earlier reply's fold closed again");
   await hub.updateMessages("conv-work", [{ ...messages()[1], metadata: { sourceMessageId: "u0", turnContinues: true, activityEvents: WORK } }]);
   await app.waitFor(`${row("r0")}.querySelector(".sessions-worked.is-continued") !== null`, "the earlier reply as a part its turn went on from");
   const part = await app.evaluate(`(() => { const node = ${row("r0")};
-    return { toggle: node.querySelectorAll(".sessions-worked-toggle").length, rows: node.querySelectorAll(".sessions-activity-row").length,
+    return { toggle: node.querySelector(".sessions-worked-toggle")?.textContent || "", rows: node.querySelectorAll(".sessions-activity-row").length,
       text: node.querySelector(".message-copy > .message-content")?.textContent || "" }; })()`);
-  assert.deepEqual(part, { toggle: 0, rows: 6, text: "The rate is 1.08." }, "its steps open, no Worked for of its own (the turn's is on its last part)");
+  assert.deepEqual(part, { toggle: "6 steps", rows: 0, text: "The rate is 1.08." }, "its steps folded into one quiet line, no Worked for of its own (the turn's is on its last part)");
+  await app.evaluate(`${row("r0")}.querySelector(".sessions-worked-toggle").click()`);
+  await app.waitFor(`${row("r0")}.querySelectorAll(".sessions-activity-row").length === 6`, "a tap opens its steps");
 
-  // --- such a part with no words of its own: its steps still show ----------
+  // --- such a part with no words of its own: its steps still fold ----------
   await hub.addMessages("conv-work", [{ id: "r0b", role: "participant", participantId: MAIN.id, participantLabel: "@main", content: "", status: "done", createdAt: at(28.5),
     metadata: { runId: "run-r0b", sourceMessageId: "u0", turnContinues: true, activityEvents: WORK } }]);
   await app.waitFor(`Boolean(${row("r0b")}?.querySelector(".sessions-worked.is-continued"))`, "a part with steps and no words");
-  assert.equal(await app.evaluate(`${row("r0b")}.querySelectorAll(".sessions-activity-row").length`), 6, "its steps, open");
+  assert.equal(await app.evaluate(`${row("r0b")}.querySelector(".sessions-worked-toggle").textContent`), "6 steps", "its steps, folded");
+
+  // --- such a part that gave tasks: its steps fold, its tasks stay in view -
+  const task = { targetParticipantId: "p-olga", targetHandle: "olga", prompt: "Summarise the report", status: "running", createdAt: at(27.5), updatedAt: at(27.5) };
+  await hub.addMessages("conv-work", [
+    { id: "u4", role: "user", content: "Read the report too", status: "done", createdAt: at(28), metadata: { deliveryTargets: [MAIN.id] } },
+    { id: "r4", role: "participant", participantId: MAIN.id, participantLabel: "@main", content: "Asked for a summary.", status: "done", createdAt: at(27.8),
+      metadata: { runId: "run-r4", sourceMessageId: "u4", turnContinues: true, activityEvents: WORK } },
+    { id: "rq4", role: "participant", participantId: MAIN.id, participantLabel: "@main", content: "@olga Summarise the report", status: "done", createdAt: at(27.5),
+      metadata: { sourceMessageId: "u4", participantRequest: { id: "batch-rq4", requesterParticipantId: MAIN.id, requesterHandle: "main", source: "mcp", resumeRequester: true,
+        status: "running", depth: 1, createdAt: at(27.5), updatedAt: at(27.5), triggerMessageId: "u4", items: [task] } } }
+  ]);
+  await app.waitFor(`Boolean(${row("r4")}?.querySelector(".sessions-delegation"))`, "the part with its task");
+  const withTasks = await app.evaluate(`(() => { const node = ${row("r4")};
+    return { toggle: node.querySelector(".sessions-worked-toggle")?.textContent || "", rows: node.querySelectorAll(".sessions-activity-row").length,
+      tasks: node.querySelectorAll(".sessions-delegation").length }; })()`);
+  assert.deepEqual(withTasks, { toggle: "6 steps", rows: 0, tasks: 1 }, "its steps folded as on the computer, its task in view");
+  await app.evaluate(`${row("r4")}.querySelector(".sessions-worked-toggle").click()`);
+  await app.waitFor(`${row("r4")}.querySelectorAll(".sessions-activity-row").length === 6`, "a tap opens its steps");
+  assert.equal(await app.evaluate(`${row("r4")}.querySelectorAll(".sessions-delegation").length`), 1, "its task still there");
 });
 
 async function waitForOp(hub, matches, timeoutMs = 15_000) {

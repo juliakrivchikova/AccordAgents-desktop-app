@@ -2,9 +2,10 @@ import { accordDockElement, closeAccordScreen } from "../accord/accordDock.js";
 import { lineIcon } from "../activity/activityData.js";
 import { syncPendingCards } from "../cards/tailCards.js";
 import { mobileSharedRules } from "../members/avatars.js";
+import { sessionsActivityElement } from "./activityRows.js";
 import {
-  formatWorkedMs, providerLogoElement, sessionsActivityElement, sessionsDelegationRowElement, sessionsElapsedElement,
-  sessionsStatusElement, sessionsStopButton
+  formatWorkedMs, providerLogoElement, sessionsDelegationRowElement, sessionsElapsedElement, sessionsStatusElement, sessionsStopButton,
+  stepsCountLabel, stepsFoldToggle
 } from "./sessionsStatus.js";
 import { renderMessageContentIfChanged } from "../text/messageText.js";
 
@@ -46,8 +47,13 @@ export function sessionsDelegationsElement(delegations) {
     summary.append(lineIcon(HAMMER_ICON_PATHS, 14), text);
     const body = document.createElement("div");
     body.className = "sessions-worked-body";
-    // A finished turn's steps first, as they came, then its tasks.
-    if (!delegations.live && Array.isArray(delegations.activity) && delegations.activity.length) body.append(sessionsActivityElement(delegations, false));
+    // A finished turn's steps first, as they came, then its tasks; a part
+    // its turn went on from folds them into "N steps ›" (the User,
+    // 2026-11-27), its tasks stay in view.
+    if (!delegations.live && Array.isArray(delegations.activity) && delegations.activity.length) {
+      if (delegations.continued) body.append(stepsFoldToggle(delegations.key, stepsCountLabel(delegations), delegations.stepsOpen === true));
+      if (!delegations.continued || delegations.stepsOpen) body.append(sessionsActivityElement(delegations, false));
+    }
     body.append(summary, ...rows);
     wrap.append(body);
   }

@@ -1,6 +1,7 @@
 /* A reply's work in the sessions view (chat-sessions-activity.tsx), T3
-   Code's way: "Working for 4s" over a hairline, then one quiet line per step,
-   an outline icon and muted text, the newest shimmering while it runs. */
+   Code's way: "Working for 4s" over a hairline, then its steps folded into one
+   live line, the step in progress shimmering, which opens to one quiet row
+   per step, an outline icon and muted text (the User, 2026-11-27). */
 
 .chat-sessions-working {
   padding: 2px 0 7px;
@@ -86,6 +87,58 @@
     -webkit-text-fill-color: currentColor;
     animation: none;
   }
+}
+
+/* A running reply's steps folded into one live line (chat-live-steps.tsx,
+   either view; the User, 2026-11-27): the step in progress, shimmering as
+   .is-current, which opens to every step so far and folds again. */
+.chat-live-steps {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.message-content > .chat-live-steps {
+  margin-bottom: 6px;
+}
+
+button.chat-live-step {
+  width: fit-content;
+  max-width: 100%;
+  padding: 0;
+  border: 0;
+  background: none;
+  text-align: left;
+  cursor: pointer;
+}
+
+button.chat-live-step:focus-visible {
+  border-radius: 8px;
+  outline: 2px solid var(--ui-focus-ring);
+}
+
+.chat-live-step-caret {
+  flex: 0 0 auto;
+  color: var(--app-muted);
+  transition: transform var(--ui-duration-fast) var(--ui-ease-out);
+}
+
+button.chat-live-step:hover .chat-live-step-caret,
+button.chat-live-step:hover .chat-sessions-activity-icon {
+  color: var(--app-text-strong);
+}
+
+.chat-live-step[aria-expanded="true"] .chat-live-step-caret {
+  transform: rotate(90deg);
+}
+
+.chat-live-steps-rows {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+  padding-left: 14px;
 }
 
 /* Steps folded into one line, as Claude Code folds them: muted words that

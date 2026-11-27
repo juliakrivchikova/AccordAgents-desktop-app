@@ -165,7 +165,6 @@ export function testService(options: {
     chatCustomAvatars: [],
     roundLimitDefault: 1,
     betaUpdates: false,
-    chatShowMemberActions: true,
     crashReports: true,
     crashReportsNotice: false,
     cliAgentRunTimeoutMs: 24 * 60 * 60_000,

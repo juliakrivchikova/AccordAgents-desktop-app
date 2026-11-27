@@ -7,7 +7,7 @@ import { normalizeChatAutoWatchWakeLimit } from "../../../../shared/chatAutoWatc
 import { normalizeChatPromptContextSettings } from "../../../../shared/chatPromptContext";
 import { normalizeCliAgentRunTimeoutMs } from "../../../../shared/cliAgentRunSettings";
 import { markCrashReportsNoticeSeen, writeCrashReportsChoice } from "../../crashReportPreferences";
-import { normalizeBetaUpdates, normalizeChatShowMemberActions, normalizeRepoFileExternalOpenAction, normalizeRepoFileOpenAction } from "./storedPreferences";
+import { normalizeBetaUpdates, normalizeRepoFileExternalOpenAction, normalizeRepoFileOpenAction } from "./storedPreferences";
 import type { SettingsModules } from "../modules";
 
 /** Preferences of the app itself. */
@@ -59,14 +59,6 @@ export class AppPreferences {
   async setBetaUpdates(enabled: boolean): Promise<AppSettings> {
     const stored = await this.settings.settingsStore.readStored();
     stored.betaUpdates = normalizeBetaUpdates(enabled);
-    await this.settings.settingsStore.writeStored(stored);
-    return this.settings.publicSettings.getPublicSettings();
-  }
-
-  /** Stored only when off: a settings file without it shows them. */
-  async setChatShowMemberActions(shown: boolean): Promise<AppSettings> {
-    const stored = await this.settings.settingsStore.readStored();
-    stored.chatShowMemberActions = normalizeChatShowMemberActions(shown) ? undefined : false;
     await this.settings.settingsStore.writeStored(stored);
     return this.settings.publicSettings.getPublicSettings();
   }

@@ -27,7 +27,6 @@ export interface SettingsActions {
   setRepoFileOpenPreference: (action: RepoFileOpenAction | null) => Promise<void>;
   setRepoFileExternalOpenPreference: (action: RepoFileExternalOpenAction | null) => Promise<void>;
   setBetaUpdates: (enabled: boolean) => Promise<void>;
-  setChatShowMemberActions: (shown: boolean) => Promise<void>;
   setCrashReports: (enabled: boolean) => Promise<void>;
   dismissCrashReportsNotice: () => Promise<void>;
   setCliAgentRunTimeoutMs: (timeoutMs: number) => Promise<void>;
@@ -101,10 +100,6 @@ export function useSettingsActions(state: AppState): SettingsActions {
 
   async function setBetaUpdates(enabled: boolean): Promise<void> {
     await updateSettings(() => window.consensus.setBetaUpdates(enabled));
-  }
-
-  async function setChatShowMemberActions(shown: boolean): Promise<void> {
-    await updateSettings(() => window.consensus.setChatShowMemberActions(shown));
   }
 
   async function setCrashReports(enabled: boolean): Promise<void> {
@@ -278,7 +273,6 @@ export function useSettingsActions(state: AppState): SettingsActions {
     setRepoFileOpenPreference,
     setRepoFileExternalOpenPreference,
     setBetaUpdates,
-    setChatShowMemberActions,
     setCrashReports,
     dismissCrashReportsNotice,
     setCliAgentRunTimeoutMs,

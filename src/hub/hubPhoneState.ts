@@ -6,9 +6,7 @@ import type { ChatAppToolApproval, ChatMessage, ChatParticipant, Conversation, R
 import type { HubNotice } from "../main/services/hubStorage";
 import type { StorageService } from "../main/services/storage";
 import { mobileInterimPosts, phoneTurnTiming, timelineAttachmentsFromMessage } from "../main/services/mobileTimeline";
-import { chatViewFor } from "../shared/mainSession";
 import { isClaudeMember, phoneSessionsActivity } from "../shared/sessionsActivity";
-import { chatActivityStandsAlone } from "../shared/processingTranscript";
 
 /**
  * What the hub works out for the phone, so that the phone needs no other
@@ -87,7 +85,6 @@ export class HubProgress {
  *  and the progress the desktop and the machines report. */
 export function liveTimelineEvents(conversation: Conversation, runs: ReviewProgress[]): Array<Record<string, unknown>> {
   const byRun = new Map(runs.map((progress) => [progress.runId, progress]));
-  const sessionsView = chatViewFor(conversation.metadata) === "sessions";
   const events: Array<Record<string, unknown>> = [];
   for (const message of conversation.messages) {
     if (message.role !== "participant" || message.status !== "pending") continue;
@@ -95,14 +92,8 @@ export function liveTimelineEvents(conversation: Conversation, runs: ReviewProgr
     const progress = runId ? byRun.get(runId) : undefined;
     const agent = progress?.agentProgress;
     const partial = agent?.partialContent?.trim();
-    const runStatus = agent?.remoteRunStatus?.label?.trim();
-    // The step in progress, unless it is a notice about the run itself (a
-    // stalled provider, a failed background task), which always shows.
-    const newest = agent?.activityEvents?.[agent.activityEvents.length - 1];
-    const notice = Boolean(newest && chatActivityStandsAlone(newest) && newest.label.trim() === agent?.activity?.trim());
-    const activityText = !partial && !runStatus ? agent?.activity?.trim() : undefined;
-    const stepInProgress = notice ? undefined : activityText;
-    const content = (partial ? partial.slice(-LIVE_TEXT_TAIL_CHARS) : undefined) || runStatus || activityText ||
+    const content = (partial ? partial.slice(-LIVE_TEXT_TAIL_CHARS) : undefined) ||
+      agent?.remoteRunStatus?.label?.trim() || agent?.activity?.trim() ||
       (message.participantLabel ? `${message.participantLabel} is running...` : "Running...");
     const mobileEventId = typeof message.metadata?.mobileEventId === "string" ? message.metadata.mobileEventId : undefined;
     const sourceMessageId = typeof message.metadata?.sourceMessageId === "string" && message.metadata.sourceMessageId ? message.metadata.sourceMessageId : undefined;
@@ -111,10 +102,11 @@ export function liveTimelineEvents(conversation: Conversation, runs: ReviewProgr
     // copy without them took them off the phone's row until the next page.
     const interimPosts = mobileInterimPosts(message);
     const attachments = interimPosts.length > 0 ? timelineAttachmentsFromMessage(message) : [];
-    // Its steps so far, as the sessions view's rows show them (short); a
-    // classic chat shows none.
-    const activity = sessionsView ? phoneSessionsActivity(agent?.activityEvents ?? message.metadata?.activityEvents,
-      { claude: isClaudeMember(conversation.metadata.participants, message.participantId), live: true }) : undefined;
+    // Its steps so far, as their rows show them (short): the one live line
+    // naming the step in progress opens to them, in either view (the User,
+    // 2026-11-27).
+    const activity = phoneSessionsActivity(agent?.activityEvents ?? message.metadata?.activityEvents,
+      { claude: isClaudeMember(conversation.metadata.participants, message.participantId), live: true });
     events.push({
       id: message.id,
       role: "participant",
@@ -130,9 +122,6 @@ export function liveTimelineEvents(conversation: Conversation, runs: ReviewProgr
       // progress), not words of the reply: the sessions view shows it as a
       // step, not as the reply's text.
       ...(!partial ? { liveStatus: true } : {}),
-      // That text is the step in progress: a phone hides it with members'
-      // actions (Settings → General → Show members’ actions).
-      ...(stepInProgress ? { liveActivity: true } : {}),
       // Queued behind the member's turn before it, or when its own run began.
       ...phoneTurnTiming(message, agent?.remoteRunStatus ?? message.metadata?.remoteRunStatus),
       status: "pending",

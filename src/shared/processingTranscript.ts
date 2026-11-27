@@ -52,9 +52,10 @@ export function chatInlineTranscriptBlocks(parts: ChatInlineTranscriptPart[]): C
   return blocks;
 }
 
-/** A notice about the run itself rather than a step of the member's: shown
- *  as its own row, and still shown while members' actions are hidden
- *  (Settings → General → Show members’ actions). */
+/** A notice about the run itself rather than a step of the member's (a
+ *  stalled provider, a re-sign-in, a background task running or finished):
+ *  shown as its own row where it came, never folded into a running reply's
+ *  one live step line (the User, 2026-11-27). */
 export function chatActivityStandsAlone(event: Pick<ChatAgentActivityEvent, "kind" | "status">): boolean {
   return event.kind === "status" || (event.kind === "approval" && event.status === "failed");
 }

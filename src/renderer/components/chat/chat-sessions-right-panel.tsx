@@ -26,7 +26,6 @@ import type { ChatMessageItem } from "./chat-message-item";
 import type { ChatParticipantRosterStatus } from "./chat-roster-status";
 import { isWaitingReply, waitingMessages } from "../../../shared/waitingMessages";
 import { isChatMessageHiddenInSessions } from "./chat-thread-data";
-import { useChatMemberActionsShown } from "./chat-member-actions";
 import { composerSendNow } from "./chat-waiting-message";
 import type { ChatRightPanelState } from "./use-chat-right-panel";
 import type { ChatSessionsView } from "./use-chat-sessions-view";
@@ -122,16 +121,15 @@ export function ChatSessionsRightPanel(props: {
   const { rightPanel, sessions, conversation, messageContext } = props;
   const settings = messageContext.settings;
   const accordLines = useContext(AccordLinesContext);
-  const actionsShown = useChatMemberActionsShown();
   const panel = rightPanel.panel;
   const memberId = panel?.kind === "member" ? panel.participantId : undefined;
   const participant = memberId ? props.participants.find((candidate) => candidate.id === memberId) : undefined;
   const former = memberId && !participant ? sessions.formerRows.find((row) => row.member.id === memberId) : undefined;
   const messages = useMemo(
     () => memberId
-      ? memberSessionMessages(conversation.messages, memberId, sessions.index).filter((message) => !isChatMessageHiddenInSessions(conversation, message, actionsShown) && !isWaitingReply(message))
+      ? memberSessionMessages(conversation.messages, memberId, sessions.index).filter((message) => !isChatMessageHiddenInSessions(conversation, message) && !isWaitingReply(message))
       : [],
-    [actionsShown, conversation.messages, memberId, sessions.index]
+    [conversation.messages, memberId, sessions.index]
   );
   const waiting = useMemo(() => memberId ? waitingMessages(conversation.messages, memberId) : undefined, [conversation.messages, memberId]);
   const ownCount = useMemo(() => messages.filter((message) => message.participantId === memberId).length, [messages, memberId]);

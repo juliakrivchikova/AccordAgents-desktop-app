@@ -201,6 +201,11 @@ export interface MobileTimelineEvent {
    *  were besides. */
   activity?: PhoneActivityRow[];
   activityMore?: number;
+  /** How many steps those rows stand for, where that differs from their count. */
+  activitySteps?: number;
+  /** A running Claude Code reply: what its newest fold came to so far (that
+   *  row names the step in progress). */
+  activityLiveSummary?: string;
 }
 
 export interface MobileInterimPost {
@@ -296,7 +301,7 @@ export function phoneActivityEvents(conversation: Conversation, now = Date.now()
     // posts made during the turn (the chat's page carries them), and no
     // Accord launch mark or working time.
     const { attachments: _attachments, participantRequest: _request, addressees: _addressees, interimPosts: _posts, accordLaunchByMainSession: _launch, workedMs: _worked, turnContinues: _continues,
-      activity: _activity, activityMore: _activityMore, ...event } =
+      activity: _activity, activityMore: _activityMore, activitySteps: _activitySteps, activityLiveSummary: _activityLiveSummary, ...event } =
       timelineEventFromMessage(message, message.id, conversation, threadRoots);
     const short = { ...event, content: event.content.slice(0, PHONE_ACTIVITY_CONTENT_CHARS) };
     // Messages are oldest first: a later one of the same run or member wins.
@@ -428,7 +433,9 @@ function timelineEventFromMessage(
   const addressees = message.role === "user" ? chatMessageAddressees(message).slice(0, PHONE_ADDRESSEES_MAX) : [];
   const request = message.role === "participant" && !hidden ? mobileTaskBatch(message.metadata?.participantRequest) : undefined;
   const interimPosts = message.role === "participant" && !hidden ? mobileInterimPosts(message) : [];
-  const activity = message.role === "participant" && !hidden && !midTurn && showsSteps
+  // A running reply's steps in either view: its one live line opens to them
+  // (the User, 2026-11-27).
+  const activity = message.role === "participant" && !hidden && !midTurn && (showsSteps || message.status === "pending")
     ? phoneSessionsActivity(message.metadata?.activityEvents, {
         claude: isClaudeMember(conversation!.metadata.participants, message.participantId), live: message.status === "pending"
       }) : undefined;

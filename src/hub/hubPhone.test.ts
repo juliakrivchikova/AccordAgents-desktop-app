@@ -215,10 +215,9 @@ test("a machine's live progress shows as the pending row with the turn it is, th
   const frame = encodeMachineProgress(undefined, progress, { conversationId: "chat-1", streamId: "stream-1", sequence: 1 });
   assert.equal((await h.call(machine, "POST", "/v1/progress", { frames: [frame] })).status, 200, "a machine posts its members' progress");
   await h.settle();
-  const live = await client.getJson<{ events: Array<{ id: string; content: string; status: string; runId: string; participantId?: string; sourceMessageId?: string; liveActivity?: boolean }> }>("/v1/phone/progress", { conversationId: "chat-1" });
+  const live = await client.getJson<{ events: Array<{ id: string; content: string; status: string; runId: string; participantId?: string; sourceMessageId?: string }> }>("/v1/phone/progress", { conversationId: "chat-1" });
   assert.deepEqual(live.events.map((event) => [event.id, event.content, event.status, event.runId, event.participantId, event.sourceMessageId]),
     [["bubble-1", "Half of the answer", "pending", runId, machineMember.id, asked.id]], "with what a Stop names its turn by");
-  assert.equal(live.events[0]?.liveActivity, undefined, "words of the reply are not a step");
   // The phone is looking (its wait for news is open): not rung.
   const changes = await client.getJson<{ instance: string; seq: number }>("/v1/phone/changes", { instance: "none", after: 0 });
   const waiting = client.getJson("/v1/phone/changes", { instance: changes.instance, after: changes.seq, waitMs: 3000 }, { timeoutMs: 10_000 });
@@ -405,21 +404,20 @@ test("a running reply's steps reach the phone as the sessions view's short rows,
     agentProgress: { participantId: localMember.id, participantLabel: "@mac", state: "running", messageId: "bubble-steps", activity: "Reading file", activityEvents: steps } } as ReviewProgress;
   const frame = encodeMachineProgress(undefined, progress, { conversationId: "chat-s", streamId: "stream-steps", sequence: 1 });
   assert.equal((await h.call(h.owner, "POST", "/v1/progress", { frames: [frame] })).status, 200);
-  const live = await client.getJson<{ events: Array<{ id: string; content: string; liveStatus?: boolean; liveActivity?: boolean; activity?: Array<{ kind: string; text: string }>; activityMore?: number }> }>(
+  const live = await client.getJson<{ events: Array<{ id: string; content: string; liveStatus?: boolean; activity?: Array<{ kind: string; text: string }>; activityMore?: number }> }>(
     "/v1/phone/progress", { conversationId: "chat-s" });
   const [event] = live.events;
   assert.equal(event?.content, "Reading file");
   assert.equal(event?.liveStatus, true, "its text is where the run stands, not words of the reply");
-  assert.equal(event?.liveActivity, true, "and that text is the step in progress, which a phone hides with members' actions");
-  // A notice about the run in progress is no step: never hidden.
+  // A notice about the run in progress is marked: it stays in view under the
+  // one live line, which names the step in progress.
   const stalled = { id: "n1", sequence: 30, kind: "status" as const, label: "@mac has produced no provider output for 5 minutes.", createdAt: at };
   const noticeFrame = encodeMachineProgress(progress, { ...progress, agentProgress: { ...progress.agentProgress!, activity: stalled.label, activityEvents: [...steps, stalled] } },
     { conversationId: "chat-s", streamId: "stream-steps", sequence: 2 });
   assert.equal((await h.call(h.owner, "POST", "/v1/progress", { frames: [noticeFrame] })).status, 200);
-  const noticed = (await client.getJson<{ events: Array<{ content: string; liveActivity?: boolean; activity?: Array<{ text: string; notice?: boolean }> }> }>(
+  const noticed = (await client.getJson<{ events: Array<{ content: string; activity?: Array<{ text: string; notice?: boolean }> }> }>(
     "/v1/phone/progress", { conversationId: "chat-s" })).events[0];
   assert.equal(noticed?.content, stalled.label);
-  assert.equal(noticed?.liveActivity, undefined, "a notice in progress is not marked as a step");
   assert.deepEqual(noticed?.activity?.filter((row) => row.notice).map((row) => row.text), [stalled.label], "and its row is marked as a notice");
   assert.equal(event?.activity?.length, 12, "the newest steps only");
   assert.equal(event?.activityMore, 4);
@@ -430,8 +428,8 @@ test("a running reply's steps reach the phone as the sessions view's short rows,
   assert.ok(last.text.endsWith("…"));
   assert.ok(JSON.stringify(event).length < 4_000, "a reply that ran many tools stays small on the wire");
 
-  // A classic chat's running reply carries no step rows: its phone, as its
-  // desktop, shows none.
+  // A classic chat's running reply carries its step rows too: its one live
+  // line opens to them, as the sessions view's does (the User, 2026-11-27).
   const classicRun = "turn-run-classic-1";
   const classicPending: ChatMessage = { ...pending, id: "bubble-classic", metadata: { runId: classicRun } as ChatMessage["metadata"] };
   await write(h.owner, { opId: opId(), kind: "message.create", conversationId: "chat-1", message: classicPending });
@@ -441,8 +439,8 @@ test("a running reply's steps reach the phone as the sessions view's short rows,
   const classicLive = await client.getJson<{ events: Array<{ id: string; activity?: unknown; activityMore?: number }> }>("/v1/phone/progress", { conversationId: "chat-1" });
   const classicEvent = classicLive.events.find((item) => item.id === "bubble-classic");
   assert.ok(classicEvent, "the classic chat's running reply is there");
-  assert.equal(classicEvent.activity, undefined, "no step rows in a classic chat");
-  assert.equal(classicEvent.activityMore, undefined);
+  assert.equal((classicEvent.activity as unknown[] | undefined)?.length, 12, "the newest step rows, as in the sessions view");
+  assert.equal(classicEvent.activityMore, 4);
 });
 
 test("a queued running reply reaches the phone as queued, and a machine's run with the time its own run began", async (t) => {

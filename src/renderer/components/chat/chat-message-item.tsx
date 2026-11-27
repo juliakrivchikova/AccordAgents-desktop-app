@@ -66,7 +66,7 @@ import { WorkedRow } from "./chat-worked-row";
 import { ChatWaitingMessageActions } from "./chat-waiting-message";
 import { ChatDelegationRows, ChatWorkedFold } from "./chat-delegation-fold";
 import { ChatSessionsFinishedActivity, ChatSessionsRunningReply, sessionsReplyHasActivity } from "./chat-sessions-activity";
-import { shownLiveProgress, shownMemberActions, useChatMemberActionsShown } from "./chat-member-actions";
+import { ChatStepsFold } from "./chat-live-steps";
 import { mainSessionMemberOf, sessionsCompactionLineOf, withoutLeadingMention } from "../../../shared/mainSession";
 import type { SessionsTaskEntry } from "../../../shared/mainSessionView";
 import { ChatAppToolApprovalList } from "./chat-app-tool-approvals";
@@ -163,10 +163,6 @@ export const ChatMessageItem = memo(function ChatMessageItem(props: {
   const sessionsNames = useSessionsViewNames();
   const appText = useSessionsViewText();
   const nameOf = useSessionsViewLabel();
-  // Settings → General → Show members’ actions: off, the reply is drawn as
-  // if it had none (its words, cards and running state stay).
-  const actionsShown = useChatMemberActionsShown();
-  const liveProgress = shownLiveProgress(props.liveProgress, actionsShown);
   const urgentAlert = urgentAlertOfMessage(message);
   if (urgentAlert) {
     return <ChatUrgentAlertCard message={message} alert={urgentAlert} participant={props.participants?.find((item) => item.id === message.participantId)} />;
@@ -207,23 +203,23 @@ export const ChatMessageItem = memo(function ChatMessageItem(props: {
     : message.role === "participant" && message.status === "error"
       ? sessionsViewReplyText(rawDisplayContent, message.participantLabel ?? props.participants?.find((item) => item.id === message.participantId)?.handle, sessionsNames)
       : rawDisplayContent;
-  const streamedRemoteRunStatus = liveProgress?.remoteRunStatus ?? message.metadata?.remoteRunStatus;
+  const streamedRemoteRunStatus = props.liveProgress?.remoteRunStatus ?? message.metadata?.remoteRunStatus;
   const streamedContent = remoteRunStreamingContent({
     isStreaming,
     appMessageSource: message.metadata?.appMessageSource,
     remoteRunStatus: streamedRemoteRunStatus,
-    livePartialContent: liveProgress?.partialContent,
+    livePartialContent: props.liveProgress?.partialContent,
     displayContent
   });
   // A reply that waited in the queue works from when its own turn began.
   const streamingStartedAt = remoteRunStreamingStartedAt(message.metadata?.turnStartedAt ?? message.createdAt, streamedRemoteRunStatus);
-  const streamedActivity = liveProgress?.activity;
+  const streamedActivity = props.liveProgress?.activity;
   const streamedActivityEvents = remoteRunStreamingActivityEvents({
     isStreaming,
     appMessageSource: message.metadata?.appMessageSource,
     remoteRunStatus: streamedRemoteRunStatus,
-    liveActivityEvents: liveProgress?.activityEvents,
-    persistedActivityEvents: shownMemberActions(message.metadata?.activityEvents, actionsShown)
+    liveActivityEvents: props.liveProgress?.activityEvents,
+    persistedActivityEvents: message.metadata?.activityEvents
   });
   const participant = message.participantId
     ? props.participants?.find((item) => item.id === message.participantId)
@@ -246,11 +242,11 @@ export const ChatMessageItem = memo(function ChatMessageItem(props: {
   const { posts: interimPosts, all: allImageAttachments, own: imageAttachments } = chatReplyPictures(message);
   const allPendingIds = pending.map((mention) => mention.targetParticipantId);
   const processingTranscript = message.metadata?.processingTranscript;
-  const activityEvents = shownMemberActions(message.metadata?.activityEvents, actionsShown) ?? [];
+  const activityEvents = message.metadata?.activityEvents ?? [];
   const processingTranscriptView = !isStreaming && processingTranscript ? chatProcessingTranscriptView(processingTranscript.content, displayContent, {
     retainedStart: processingTranscript.retainedStart,
     truncated: processingTranscript.truncated,
-    omittedActivityEventCount: actionsShown ? processingTranscript.omittedActivityEventCount : undefined
+    omittedActivityEventCount: processingTranscript.omittedActivityEventCount
   }) : undefined;
   // Queued here (queuedBehind) or, for a member on a machine, by its own word (turnQueued), as on the phone.
   const queuedBehind = isStreaming ? message.metadata?.queuedBehind ?? (message.metadata?.turnQueued ? { handle: participant?.handle ?? "" } : undefined) : undefined;
@@ -308,11 +304,11 @@ export const ChatMessageItem = memo(function ChatMessageItem(props: {
   const sessionsFoldActivity = props.presentation === "sessions" && !isStreaming && sessionsReplyHasActivity(activityEvents, sessionsFoldView)
     ? <ChatSessionsFinishedActivity view={sessionsFoldView} activityEvents={activityEvents} foldSteps={foldSteps} />
     : undefined;
-  // A part of a turn the User's next message joined (turnContinues): as in
-  // the CLI's transcript its steps stay open with no "Worked for" of its own,
-  // and a part with nothing in it is not drawn at all.
+  // A part of a turn the User's next message joined (turnContinues): no
+  // "Worked for" of its own, its steps folded into "N steps ›" (the User,
+  // 2026-11-27), and a part with nothing in it is not drawn at all.
   const continued = message.role === "participant" && message.status === "done" && message.metadata?.turnContinues === true;
-  if (isEmptyFinishedReply(message, actionsShown) && !props.sessionsWork?.length && !props.replyCount) return null;
+  if (isEmptyFinishedReply(message) && !props.sessionsWork?.length && !props.replyCount) return null;
 
   async function copyMessage(): Promise<void> {
     if (!canCopy) {
@@ -461,9 +457,10 @@ export const ChatMessageItem = memo(function ChatMessageItem(props: {
             authorMark={props.authorMark}
             inThread={props.inThread}
           />
-          {/* One quiet "Worked for …" for every reply of the sessions view (a part its turn went on from: its steps, open). */}
+          {/* One quiet "Worked for …" for every reply of the sessions view (a part its turn went on from: "N steps ›", and its tasks). */}
           {sessions && continued ? (sessionsFoldActivity || props.sessionsWork?.length ? (
-            <div className="chat-turn-continues" data-testid="chat-turn-continues">{sessionsFoldActivity}
+            <div className="chat-turn-continues" data-testid="chat-turn-continues">
+              {sessionsFoldActivity && <ChatStepsFold count={activityEvents.length}>{sessionsFoldActivity}</ChatStepsFold>}
               {props.sessionsWork?.length ? <ChatDelegationRows entries={props.sessionsWork} participants={props.participants} onOpenTask={props.onOpenTask} /> : null}</div>) : null)
           : (props.sessionsWork?.length || (sessions && (showWorkedRow || sessionsFoldActivity))) && !isStreaming
             ? <ChatWorkedFold workedMs={workedMs ?? undefined} entries={props.sessionsWork ?? NO_SESSIONS_WORK} participants={props.participants} onOpenTask={props.onOpenTask}
@@ -477,7 +474,7 @@ export const ChatMessageItem = memo(function ChatMessageItem(props: {
               <ChatSessionsRunningReply
                 since={queuedBehind ? undefined : streamingStartedAt}
                 content={streamedContent}
-                activityEvents={liveProgress?.activityEvents ?? (streamedActivityEvents.length > 0 ? streamedActivityEvents : activityEvents)}
+                activityEvents={props.liveProgress?.activityEvents ?? (streamedActivityEvents.length > 0 ? streamedActivityEvents : activityEvents)}
                 statusLabel={streamedRemoteRunStatus?.label}
                 posts={interimPosts}
                 attachments={allImageAttachments}
@@ -495,6 +492,7 @@ export const ChatMessageItem = memo(function ChatMessageItem(props: {
                 conversationId={props.conversationId}
                 posts={interimPosts}
                 attachments={allImageAttachments}
+                foldSteps={foldSteps}
               />
             ) : (
               <>
@@ -508,8 +506,10 @@ export const ChatMessageItem = memo(function ChatMessageItem(props: {
                 ) : accordLaunch ? (
                   <ChatAccordLaunchCard card={accordLaunch} participants={props.participants} />
                 ) : continued && !sessions && activityEvents.length > 0 ? (
-                  // The classic view's part its turn went on from: its steps and words, open.
-                  <ChatInlineTranscript activityDisclosure={props.activityDisclosure} content={displayContent} activityEvents={activityEvents} />
+                  // The classic view's part its turn went on from: "N steps ›", which opens to its steps between its words.
+                  <ChatStepsFold count={activityEvents.length} folded={<MarkdownText content={displayContent} />}>
+                    <ChatInlineTranscript activityDisclosure={props.activityDisclosure} content={displayContent} activityEvents={activityEvents} />
+                  </ChatStepsFold>
                 ) : (
                   <MarkdownText
                     content={displayContent}

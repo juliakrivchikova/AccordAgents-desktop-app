@@ -83,12 +83,6 @@ export class HubChangeFeed {
     return this.seq;
   }
 
-  /** Wakes every waiting changes request without news of a chat, to look
-   *  again at what else it answers with (the phone's display settings). */
-  wakeWaiters(): void {
-    for (const wake of [...this.waiters]) wake();
-  }
-
   /** The position of a chat's last change this instance can vouch for: a
    *  chat it no longer remembers may have changed as late as the floor. */
   lastChange(conversationId: string): number {
@@ -167,6 +161,12 @@ const COMPOSER_TARGET_WINDOW = 200;
 /** A phone counts as looking at its app while its wait for news is open, and
  *  this long after it ended (the app asks again at once while it is open). */
 const PHONE_ACTIVE_GRACE_MS = 8_000;
+/** What every changes answer tells a phone app of 1.11.12-beta.3, which had
+ *  Settings → General → Show members’ actions: show them (the switch is gone,
+ *  steps always fold into one live line; the User, 2026-11-27). Can go, with
+ *  HubPhoneDisplay and the `shown=0` answer, once no paired phone can still
+ *  run that app (the phone app updates itself on its next launch). */
+const LEGACY_PHONE_DISPLAY: HubPhoneDisplay = Object.freeze({ showMemberActions: true });
 
 export class HubPhoneApi {
   private listCache = new Map<string, { seq: number; chats: MobileChatListItem[] }>();
@@ -183,13 +183,6 @@ export class HubPhoneApi {
   private readonly openedCache = new Map<string, { stamp: number; limit: number; opened: ConversationOpenResult }>();
   private readonly farMessageCache = new Map<string, { stamp: number; messages: Map<string, ChatMessage | undefined> }>();
   private catalogCache?: { at: number; catalog: HubComposerCatalog | undefined };
-  /** The display settings last published (kept in memory: a changes
-   *  request reads no storage), whether they are known yet, and how many times
-   *  they changed: a waiting changes request answers when they do. */
-  private display?: HubPhoneDisplay;
-  private displayKnown = false;
-  private displayLoad?: Promise<void>;
-  private displayVersion = 0;
   /** Counts catalog publications: a read older than the last one is not cached. */
   private catalogGeneration = 0;
 
@@ -202,39 +195,12 @@ export class HubPhoneApi {
     return ended !== undefined && now - ended < PHONE_ACTIVE_GRACE_MS;
   }
 
-  /** The catalog was published again (`catalog`: what was published). */
-  catalogChanged(catalog?: unknown): void {
+  /** The catalog was published again. */
+  catalogChanged(): void {
     this.catalogGeneration += 1;
     this.catalogCache = undefined;
     this.listCache.clear();
     this.rowCache.clear();
-    const next = displayOfCatalog(catalog);
-    const changed = !this.displayKnown || JSON.stringify(next ?? null) !== JSON.stringify(this.display ?? null);
-    this.display = next;
-    this.displayKnown = true;
-    // A phone waiting for news learns a changed display setting at once,
-    // not with its next chat change.
-    if (changed) {
-      this.displayVersion += 1;
-      this.options.feed.wakeWaiters();
-    }
-  }
-
-  /** How the phone draws chats, as the catalog the owner desktop published
-   *  says (HubComposerCatalog.display); read from storage once, after a
-   *  restart, and kept from each publication after that. */
-  private async phoneDisplay(): Promise<HubPhoneDisplay | undefined> {
-    if (!this.displayKnown) {
-      this.displayLoad ??= this.catalog().then((catalog) => {
-        // A publication while this was read is newer than what it read.
-        if (!this.displayKnown) {
-          this.display = displayOfCatalog(catalog);
-          this.displayKnown = true;
-        }
-      }).finally(() => { this.displayLoad = undefined; });
-      await this.displayLoad;
-    }
-    return this.display;
   }
 
   /** Answers one phone request; the status is returned for the server's log. */
@@ -294,7 +260,7 @@ export class HubPhoneApi {
     const value = stored?.value as HubComposerCatalog | undefined;
     const catalog = value && value.version === 1 ? value : undefined;
     // A read begun before a new catalog was published does not stand for
-    // it: kept, every phone was told the old display settings for 30 s.
+    // it: kept, every phone was offered the old catalog for 30 s.
     if (generation === this.catalogGeneration) this.catalogCache = { at: Date.now(), catalog };
     return catalog;
   }
@@ -713,20 +679,12 @@ export class HubPhoneApi {
     const instance = query.get("instance") ?? "";
     const after = Number(query.get("after") ?? "");
     const waitMs = Math.max(0, Math.min(CHANGES_WAIT_MAX_MS, Number(query.get("waitMs") ?? CHANGES_WAIT_MAX_MS) || 0));
-    // Every answer says how the phone draws chats (HubPhoneDisplay), as
-    // the catalog says when it is sent; a change ends the wait.
-    const displayVersionAtStart = this.displayVersion;
-    const displayNow = await this.phoneDisplay().catch(() => undefined);
-    const shown = async () => {
-      const display = (await this.phoneDisplay().catch(() => undefined)) ?? displayNow;
-      return display ? { display } : {};
-    };
-    const reset = async () => ({ status: 200, body: { ok: true, instance: feed.instance, seq: feed.current(), reset: true, ...await shown() } });
-    // The phone says which display settings it draws by ("1"/"0"); one that
-    // differs from the catalog's (an answer read just before a publication)
-    // is answered at once rather than after a wait for news.
-    const phoneShows = query.get("shown");
-    const behind = (phoneShows === "1" || phoneShows === "0") && displayNow !== undefined && (displayNow.showMemberActions ? "1" : "0") !== phoneShows;
+    // A phone app of 1.11.12-beta.3 hides members' steps while the last
+    // answer it had said so (HubPhoneDisplay): every answer says to show
+    // them, and one that still hides them ("shown=0") is answered at once.
+    const display = LEGACY_PHONE_DISPLAY;
+    const reset = () => ({ status: 200, body: { ok: true, instance: feed.instance, seq: feed.current(), reset: true, display } });
+    const behind = query.get("shown") === "0";
     if (instance !== feed.instance || !Number.isSafeInteger(after) || after < 0) return reset();
     const mine = (ids: string[]) => ids.filter((id) => scopeCovers(scope, id));
     let news = feed.since(after);
@@ -736,7 +694,7 @@ export class HubPhoneApi {
       const waiting = this.waitersByDevice.get(deviceId) ?? 0;
       // Too many waiting: answered at once, and told when to ask again.
       if (feed.waiting() >= WAITERS_MAX || waiting >= WAITERS_PER_DEVICE_MAX) {
-        return { status: 200, body: { ok: true, instance: feed.instance, seq: after, conversationIds: [], retryAfterMs: 5_000, ...await shown() } };
+        return { status: 200, body: { ok: true, instance: feed.instance, seq: after, conversationIds: [], retryAfterMs: 5_000, display } };
       }
       this.waitersByDevice.set(deviceId, waiting + 1);
       try {
@@ -747,8 +705,7 @@ export class HubPhoneApi {
         let seen = after;
         // Another chat's change is no news to a pairing for one chat (and
         // must not tell it when the User is busy elsewhere): it waits on.
-        // Changed display settings are news to every phone.
-        while (!goneNow && conversationIds.length === 0 && Date.now() < deadline && this.displayVersion === displayVersionAtStart) {
+        while (!goneNow && conversationIds.length === 0 && Date.now() < deadline) {
           await feed.wait(seen, deadline - Date.now(), gone);
           news = feed.since(after);
           if (news.reset) return reset();
@@ -763,7 +720,7 @@ export class HubPhoneApi {
         if (this.lastWaitEndedAt.size > 1_000) this.lastWaitEndedAt.clear();
       }
     }
-    return { status: 200, body: { ok: true, instance: feed.instance, seq: feed.current(), conversationIds, ...await shown() } };
+    return { status: 200, body: { ok: true, instance: feed.instance, seq: feed.current(), conversationIds, display } };
   }
 }
 
@@ -828,13 +785,4 @@ function send(request: IncomingMessage, response: ServerResponse, answer: Answer
   }
   response.writeHead(answer.status, { ...headers, "content-length": Buffer.byteLength(text) });
   response.end(text);
-}
-
-/** The display settings a catalog carries: a catalog from a computer from
- *  before has none, and the phone then shows members' actions, as the CLIs
- *  do; with no catalog at all the phone keeps what it has. */
-function displayOfCatalog(catalog: unknown): HubPhoneDisplay | undefined {
-  if (!catalog || typeof catalog !== "object" || (catalog as { version?: unknown }).version !== 1) return undefined;
-  const display = (catalog as HubComposerCatalog).display;
-  return { showMemberActions: display && typeof display.showMemberActions === "boolean" ? display.showMemberActions : true };
 }

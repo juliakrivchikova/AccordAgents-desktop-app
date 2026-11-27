@@ -3,6 +3,7 @@ import { Fragment, memo, useMemo } from "react";
 import { MarkdownText } from "../content/markdown-text";
 import { ChatImageAttachmentStrip } from "./chat-image-attachments";
 import { ChatInlineTranscript, StreamingMessageContent } from "./chat-streaming";
+import { ChatLiveSteps, chatActivityNotices, chatLiveStepOf } from "./chat-live-steps";
 import type { ChatActivityDisclosureState } from "./use-chat-activity-disclosure";
 import { chatMessageImageAttachments } from "./chat-message-metadata";
 import { chatInterimPostAttachmentIds, chatInterimPostsOf, splitLiveContentAtInterimPosts } from "../../../shared/interimPosts";
@@ -73,9 +74,11 @@ export function ChatInterimPostList(props: {
 }
 
 /**
- * A running reply: its streamed text and activity with its posts in the
- * places they were made, then the part still being written. Without posts it
- * is the streaming view as it always was.
+ * A running reply of the classic view: its steps folded into one live line
+ * naming the step in progress, which opens to them all (ChatLiveSteps; the
+ * User, 2026-11-27), then its streamed text, with its notices about the run
+ * and its posts in the places they were made, then the part still being
+ * written. Without posts it is the streaming view as it always was.
  */
 export const StreamingContentWithInterimPosts = memo(function StreamingContentWithInterimPosts(props: {
   activityDisclosure: ChatActivityDisclosureState;
@@ -86,40 +89,51 @@ export const StreamingContentWithInterimPosts = memo(function StreamingContentWi
   conversationId: string;
   posts: ChatInterimPost[];
   attachments: ChatImageAttachment[];
+  /** A Claude Code member: its opened steps fold as its CLI folds them. */
+  foldSteps?: boolean;
 }): JSX.Element {
-  const { content, activityEvents, posts } = props;
+  const { content, posts } = props;
+  const events = props.activityEvents ?? NO_EVENTS;
   const split = useMemo(
-    () => posts.length > 0 ? splitLiveContentAtInterimPosts(content ?? "", activityEvents ?? [], posts) : undefined,
-    [content, activityEvents, posts]
+    () => posts.length > 0 ? splitLiveContentAtInterimPosts(content ?? "", events, posts) : undefined,
+    [content, events, posts]
   );
-  if (!split) {
-    return (
-      <StreamingMessageContent
-        activityDisclosure={props.activityDisclosure}
-        content={content}
-        activity={props.activity}
-        activityEvents={activityEvents}
-        statusLabel={props.statusLabel}
-      />
-    );
-  }
+  // Without a step yet, the step the progress names (a CLI that reports no
+  // events) is the live line, unless it only says where the run stands.
+  const activity = events.length === 0 && props.activity && props.activity !== (props.statusLabel || "Thinking") ? props.activity : undefined;
+  const stepShown = Boolean(chatLiveStepOf(events, activity));
   return (
-    <div className="chat-interim-stream">
-      {split.parts.map((part) => (
-        <Fragment key={part.post.id}>
-          {(part.content.trim() || part.activityEvents.length > 0) && (
-            <ChatInlineTranscript activityDisclosure={props.activityDisclosure} content={part.content} activityEvents={part.activityEvents} />
-          )}
-          <ChatInterimPostBlock conversationId={props.conversationId} post={part.post} attachments={props.attachments} />
-        </Fragment>
-      ))}
-      <StreamingMessageContent
-        activityDisclosure={props.activityDisclosure}
-        content={split.tail.content}
-        activity={props.activity}
-        activityEvents={split.tail.activityEvents}
-        statusLabel={props.statusLabel}
-      />
-    </div>
+    <>
+      <ChatLiveSteps events={events} fallback={activity} foldSteps={props.foldSteps} />
+      {split ? (
+        <div className="chat-interim-stream">
+          {split.parts.map((part) => (
+            <Fragment key={part.post.id}>
+              {(part.content.trim() || chatActivityNotices(part.activityEvents).length > 0) && (
+                <ChatInlineTranscript activityDisclosure={props.activityDisclosure} content={part.content} activityEvents={chatActivityNotices(part.activityEvents)} />
+              )}
+              <ChatInterimPostBlock conversationId={props.conversationId} post={part.post} attachments={props.attachments} />
+            </Fragment>
+          ))}
+          <StreamingMessageContent
+            activityDisclosure={props.activityDisclosure}
+            content={split.tail.content}
+            activityEvents={chatActivityNotices(split.tail.activityEvents)}
+            statusLabel={props.statusLabel}
+            stepShown={stepShown}
+          />
+        </div>
+      ) : (
+        <StreamingMessageContent
+          activityDisclosure={props.activityDisclosure}
+          content={content}
+          activityEvents={chatActivityNotices(events)}
+          statusLabel={props.statusLabel}
+          stepShown={stepShown}
+        />
+      )}
+    </>
   );
 });
+
+const NO_EVENTS: ChatAgentActivityEvent[] = [];

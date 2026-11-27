@@ -262,30 +262,6 @@ test("beta updates persist through settings reload", async () => {
   assert.equal((await reloaded.getPublicSettings()).betaUpdates, true);
 });
 
-test("members' actions are shown by default, and turning them off persists through a reload until turned on again", async () => {
-  const dir = await mkdtemp(path.join(tmpdir(), "accordagents-settings-member-actions-"));
-  const settingsPath = path.join(dir, "settings.json");
-  const open = () => {
-    const service = settingsWithoutFile();
-    settingsDependencies(service).settingsPath = settingsPath;
-    settingsParts(service).settingsStore.storedWriteQueue = Promise.resolve();
-    return service;
-  };
-  const service = open();
-  await settingsParts(service).settingsStore.writeStored(mergeDefaults({ settingsVersion: 1, roundLimitDefault: 1, providers: [] }));
-  assert.equal((await open().getPublicSettings()).chatShowMemberActions, true, "a settings file from before shows them");
-
-  assert.equal((await service.setChatShowMemberActions(false)).chatShowMemberActions, false);
-  assert.equal((await open().getPublicSettings()).chatShowMemberActions, false, "off survives a restart");
-  assert.equal(JSON.parse(await readFile(settingsPath, "utf8")).chatShowMemberActions, false);
-  assert.equal(mergeDefaults({ settingsVersion: 1, roundLimitDefault: 1, providers: [], chatShowMemberActions: false }).chatShowMemberActions, false,
-    "kept when settings are read again (and imported by a machine)");
-
-  assert.equal((await open().setChatShowMemberActions(true)).chatShowMemberActions, true);
-  assert.equal("chatShowMemberActions" in JSON.parse(await readFile(settingsPath, "utf8")), false, "on is the default: nothing stored");
-  assert.equal((await open().getPublicSettings()).chatShowMemberActions, true);
-});
-
 test("last successful chat provider persists idempotently", async () => {
   const { service, stored, writeCount } = settingsServiceWithStoredSettings();
 

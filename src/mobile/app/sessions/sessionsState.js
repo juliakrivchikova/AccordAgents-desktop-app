@@ -61,6 +61,9 @@ export const openTaskFolds = new Set();
 // Finished replies whose "Worked for …" was opened to its tasks, by row.
 export const openWorkedFolds = new Set();
 
+// Running replies whose live step line was opened to every step, by row.
+export const openLiveSteps = new Set();
+
 export function sessionsRules() {
   const shared = mobileSharedRules();
   return shared && typeof shared.sessionsViewLane === "function" && typeof shared.chatViewFor === "function" &&

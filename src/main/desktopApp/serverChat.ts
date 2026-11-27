@@ -83,7 +83,6 @@ export function createServerChat(desktopApp: DesktopApp): void {
       desktopApp.lastNewChatOptions = newChat;
       return {
         ...(newChat ? { newChat } : {}),
-        display: { showMemberActions: settings.chatShowMemberActions !== false },
         roles: Object.fromEntries(settings.chatRoleConfigs.map((role) => [role.id,
           role.id === "generic-participant" && role.label === "Generic Participant" ? "Generic Member" : role.label])),
         prompts: (settings.chatSavedPrompts ?? []).slice(0, 200).map((prompt) => ({ id: prompt.id, label: prompt.label, trigger: prompt.trigger, body: prompt.body.slice(0, 20_000) })),

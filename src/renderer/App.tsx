@@ -445,7 +445,6 @@ function App(): JSX.Element {
           setRepoFileOpenPreference={settingsActions.setRepoFileOpenPreference}
           setRepoFileExternalOpenPreference={settingsActions.setRepoFileExternalOpenPreference}
           setBetaUpdates={settingsActions.setBetaUpdates}
-          setChatShowMemberActions={settingsActions.setChatShowMemberActions}
           setCrashReports={settingsActions.setCrashReports}
           setCliAgentRunTimeoutMs={settingsActions.setCliAgentRunTimeoutMs}
           setChatParticipantRequestMaxDepth={settingsActions.setChatParticipantRequestMaxDepth}

@@ -6,7 +6,7 @@ import { closeUrgentAlert, toggleUrgentAlert } from "./urgentAlerts.js";
 import { selectedConversationId } from "../chats/openChat.js";
 import { stopRunFromPhone } from "../outbox/sending.js";
 import { stopMembersFromPhone } from "../sessions/sessionsRows.js";
-import { openMemberSession, openTaskFolds, openWorkedFolds, sessionsStateState } from "../sessions/sessionsState.js";
+import { openLiveSteps, openMemberSession, openTaskFolds, openWorkedFolds, sessionsStateState } from "../sessions/sessionsState.js";
 import { isPlaceholderTimelineContent } from "../store/timelineRows.js";
 import { dismissFinishedNote, openFinishedNoteTarget } from "../sync/finishedNotes.js";
 import { displayedMessageText } from "../text/messageText.js";
@@ -117,6 +117,14 @@ export function wireStreamView() {
     const memberOpen = event.target.closest("[data-open-member]");
     if (memberOpen) {
       openMemberSession(memberOpen.dataset.openMember, memberOpen.dataset.focusMessage || undefined);
+      return;
+    }
+    const liveSteps = event.target.closest("[data-live-steps]");
+    if (liveSteps) {
+      const key = liveSteps.dataset.liveSteps;
+      if (openLiveSteps.has(key)) openLiveSteps.delete(key);
+      else openLiveSteps.add(key);
+      void render();
       return;
     }
     const workedFold = event.target.closest("[data-worked-fold]");

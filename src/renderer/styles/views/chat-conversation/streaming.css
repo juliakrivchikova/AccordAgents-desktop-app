@@ -7,16 +7,6 @@
   }
 }
 
-.chat-thinking-activity {
-  max-width: min(720px, 100%);
-  overflow: hidden;
-  color: var(--app-muted-subtle);
-  font-size: 13px;
-  line-height: 1.4;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
 .streaming-message-content {
   display: grid;
   gap: 8px;

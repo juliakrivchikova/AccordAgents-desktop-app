@@ -1,5 +1,7 @@
 import { lineIcon } from "../activity/activityData.js";
 import { nowIso } from "../base/bytes.js";
+import { liveStepsElement, liveStepsSignature } from "../chat/liveSteps.js";
+import { sessionsActivityElement } from "./activityRows.js";
 import { isThinkingEntry } from "../chat/messageRows.js";
 import { memberKindLabel } from "../members/membersSheet.js";
 import { sessionsDelegationsElement } from "./sessionsCards.js";
@@ -178,37 +180,25 @@ export function sessionsWorkedSignature(entry) {
   if (entry.delegations || entry.status !== "Done") return "";
   const steps = activitySignature(entry);
   if (typeof entry.workedMs !== "number" && !steps) return "";
-  if (entry.turnContinues) return "continued:" + steps;
+  if (entry.turnContinues) return "continued:" + steps + (openWorkedFolds.has(entry.rowKey || entry.id) ? ":open" : "");
   return "worked:" + (typeof entry.workedMs === "number" ? entry.workedMs : "") +
     (steps ? ":" + steps + (openWorkedFolds.has(entry.rowKey || entry.id) ? ":open" : "") : "");
 }
 
 // --- a running reply's work (T3 Code's turn in progress) --------------------
 // The sessions view's running reply (the User, 2026-11-21), as on the
-// desktop: a quiet "Working for 4s" over a hairline, then one row per step,
-// an outline icon by its kind and what it is about in muted text, the
-// newest shimmering. No status label, no "Thinking" word, no Stop on the
-// reply (the composer's button stops it). Once done, its "Worked for …"
-// opens to the same rows.
+// desktop: a quiet "Working for 4s" over a hairline, then its steps folded
+// into one live line naming the step in progress, shimmering, which opens to
+// one row per step, an outline icon by its kind and what it is about in
+// muted text (liveSteps.js; the User, 2026-11-27). No status label, no
+// "Thinking" word, no Stop on the reply (the composer's button stops it).
+// Once done, its "Worked for …" opens to the same rows.
 
 /** A reply of the sessions view still being written. */
 export function isSessionsRunningEntry(entry) {
   return Boolean(entry) && entry.presentation === "sessions" && entry.author === "agent" && entry.status === "Running" && !entry.scaffolding;
 }
 
-// Outline icons by step (lucide's brain, globe, terminal, file-text, pencil,
-// wrench and activity), the desktop's own.
-const SESSIONS_ACTIVITY_ICONS = {
-  thinking: ["M12 5a3 3 0 1 0-5.997.125 4 4 0 0 0-2.526 5.77 4 4 0 0 0 .556 6.588A4 4 0 1 0 12 18Z", "M12 5a3 3 0 1 1 5.997.125 4 4 0 0 1 2.526 5.77 4 4 0 0 1-.556 6.588A4 4 0 1 1 12 18Z",
-    "M15 13a4.5 4.5 0 0 1-3-4 4.5 4.5 0 0 1-3 4", "M17.599 6.5a3 3 0 0 0 .399-1.375", "M6.003 5.125A3 3 0 0 0 6.401 6.5", "M3.477 10.896a4 4 0 0 1 .585-.396",
-    "M19.938 10.5a4 4 0 0 1 .585.396", "M6 18a4 4 0 0 1-1.967-.516", "M19.967 17.484A4 4 0 0 1 18 18"],
-  web: ["M12 2a10 10 0 1 0 0 20a10 10 0 1 0 0-20", "M12 2a14.5 14.5 0 0 0 0 20 14.5 14.5 0 0 0 0-20", "M2 12h20"],
-  shell: ["m4 17 6-6-6-6", "M12 19h8"],
-  read: ["M15 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7Z", "M14 2v4a2 2 0 0 0 2 2h4", "M10 9H8", "M16 13H8", "M16 17H8"],
-  edit: ["M21.174 6.812a1 1 0 0 0-3.986-3.987L3.842 16.174a2 2 0 0 0-.5.83l-1.321 4.352a.5.5 0 0 0 .623.622l4.353-1.32a2 2 0 0 0 .83-.497z", "m15 5 4 4"],
-  tool: ["M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z"],
-  status: ["M22 12h-2.48a2 2 0 0 0-1.93 1.46l-2.35 8.36a.25.25 0 0 1-.48 0L9.24 2.18a.25.25 0 0 0-.48 0l-2.35 8.36A2 2 0 0 1 4.49 12H2"]
-};
 
 /** A running reply's own words so far: none while its text is only the
  *  placeholder or where the run stands (shown as a step instead). */
@@ -224,39 +214,9 @@ function sessionsRunningStatus(entry) {
   return /^(thinking|running)\b/i.test(text) ? "" : text;
 }
 
-/** A reply's steps, one row each; while `live`, the newest is the current one. */
-export function sessionsActivityElement(entry, live) {
-  const list = document.createElement("div");
-  list.className = "sessions-activity";
-  const rows = Array.isArray(entry.activity) ? entry.activity : [];
-  if (entry.activityMore > 0) {
-    const more = document.createElement("div");
-    more.className = "sessions-activity-more";
-    more.textContent = entry.activityMore === 1 ? "1 earlier step" : entry.activityMore + " earlier steps";
-    list.append(more);
-  }
-  rows.forEach(function (row, index) {
-    const line = document.createElement("div");
-    line.className = "sessions-activity-row is-" + row.kind + (row.folded ? " is-folded" : "") + (live && index === rows.length - 1 ? " is-current" : "");
-    line.dataset.activityKind = row.kind;
-    // Steps folded into one line, as Claude Code folds them, are words alone.
-    if (!row.folded) {
-      const icon = lineIcon(SESSIONS_ACTIVITY_ICONS[row.kind] || SESSIONS_ACTIVITY_ICONS.tool, 14);
-      icon.setAttribute("stroke-width", "1.75");
-      icon.classList.add("sessions-activity-icon");
-      line.append(icon);
-    }
-    const text = document.createElement("span");
-    text.className = "sessions-activity-text";
-    text.textContent = row.text;
-    line.append(text);
-    list.append(line);
-  });
-  return list;
-}
 
 /** "Working for 4s" (ticking, startThinkingClock) over a hairline, then
- *  the reply's steps so far. */
+ *  the reply's live step line (or where the run stands) and its notices. */
 function sessionsWorkingElement(entry) {
   const wrap = document.createElement("div");
   wrap.className = "sessions-working";
@@ -267,9 +227,8 @@ function sessionsWorkingElement(entry) {
   // when the reply was queued, as on the desktop.
   head.append(document.createTextNode("Working for "), sessionsElapsedElement(entry.startedAt || entry.createdAt || nowIso()));
   wrap.append(head);
-  const status = sessionsRunningStatus(entry);
-  if (Array.isArray(entry.activity) && entry.activity.length) wrap.append(sessionsActivityElement(entry, true));
-  else if (status) wrap.append(sessionsActivityElement({ activity: [{ kind: "status", text: status }] }, true));
+  const steps = liveStepsElement(entry, sessionsRunningStatus(entry));
+  if (steps) wrap.append(steps);
   return wrap;
 }
 
@@ -282,7 +241,7 @@ export function syncSessionsWorking(copy, meta, entry) {
     existing?.remove();
     return;
   }
-  const signature = (entry.startedAt || entry.createdAt || "") + "|" + activitySignature(entry) + "|" + sessionsRunningStatus(entry);
+  const signature = (entry.startedAt || entry.createdAt || "") + "|" + liveStepsSignature(entry, sessionsRunningStatus(entry));
   let node = existing;
   if (!node || node.dataset.workingSignature !== signature) {
     node = sessionsWorkingElement(entry);
@@ -333,16 +292,10 @@ export function syncSessionsWorked(copy, meta, content, entry) {
 export function sessionsWorkedElement(entry) {
   const steps = Array.isArray(entry.activity) && entry.activity.length > 0;
   if (entry.presentation === "sessions" && !entry.delegations && entry.status === "Done" && entry.turnContinues) {
-    // A part its turn went on from (her next message joined it): its steps
-    // open, with no "Worked for" of its own, as in the CLI's transcript.
+    // A part its turn went on from (her next message joined it): no "Worked
+    // for" of its own; its steps fold into "N steps ›" (the User, 2026-11-27).
     if (!steps) return undefined;
-    const open = document.createElement("div");
-    open.className = "sessions-worked is-open is-continued";
-    const body = document.createElement("div");
-    body.className = "sessions-worked-body";
-    body.append(sessionsActivityElement(entry, false));
-    open.append(body);
-    return open;
+    return foldElement(entry, stepsCountLabel(entry), "is-continued");
   }
   if (entry.presentation !== "sessions" || entry.delegations || entry.status !== "Done" || (typeof entry.workedMs !== "number" && !steps)) return undefined;
   const label = typeof entry.workedMs === "number" ? "Worked for " + formatWorkedMs(entry.workedMs) : "Worked";
@@ -356,9 +309,18 @@ export function sessionsWorkedElement(entry) {
     return wrap;
   }
   // Its steps: the fold opens to the rows its turn showed while it ran.
-  const key = entry.rowKey || entry.id;
-  const open = openWorkedFolds.has(key);
-  wrap.className = "sessions-worked" + (open ? " is-open" : "");
+  return foldElement(entry, label, "");
+}
+
+/** "N steps": how many steps a part of a turn folds (a folded row stands
+ *  for several; the server counts them where it does). */
+export function stepsCountLabel(entry) {
+  const count = entry.activitySteps || (Array.isArray(entry.activity) ? entry.activity.length : 0) + (entry.activityMore || 0);
+  return count === 1 ? "1 step" : count + " steps";
+}
+
+/** A fold's toggle: its label and a chevron (openWorkedFolds by `key`). */
+export function stepsFoldToggle(key, label, open) {
   const toggle = document.createElement("button");
   toggle.type = "button";
   toggle.className = "sessions-worked-toggle";
@@ -367,7 +329,16 @@ export function sessionsWorkedElement(entry) {
   const text = document.createElement("span");
   text.textContent = label;
   toggle.append(text, lineIcon([open ? "m6 9 6 6 6-6" : "m9 18 6-6-6-6"], 14));
-  wrap.append(toggle);
+  return toggle;
+}
+
+/** A fold of a reply's steps: its label and a chevron, opening to its rows. */
+function foldElement(entry, label, className) {
+  const wrap = document.createElement("div");
+  const key = entry.rowKey || entry.id;
+  const open = openWorkedFolds.has(key);
+  wrap.className = "sessions-worked" + (className ? " " + className : "") + (open ? " is-open" : "");
+  wrap.append(stepsFoldToggle(key, label, open));
   if (open) {
     const body = document.createElement("div");
     body.className = "sessions-worked-body";

@@ -22,10 +22,6 @@ export interface ChatPromptContextSettings {
 export interface AppSettings {
   roundLimitDefault: number;
   betaUpdates: boolean;
-  /** Members' actions (their tool calls and commands) are listed inside
-   *  their replies, on the computer and the phone; off shows only what they
-   *  write (Settings → General, the User, 2026-11-27). */
-  chatShowMemberActions: boolean;
   /** Error, crash and usage reports to the app's Sentry project; on unless
    *  the User turned them off. */
   crashReports: boolean;

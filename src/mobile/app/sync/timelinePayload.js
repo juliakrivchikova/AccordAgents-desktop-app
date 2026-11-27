@@ -67,12 +67,16 @@ function activityOfEvent(event) {
   });
   if (activity.length === 0) return {};
   const more = Number.isFinite(event.activityMore) && event.activityMore > 0 ? Math.floor(event.activityMore) : 0;
-  return more > 0 ? { activity: activity, activityMore: more } : { activity: activity };
+  // How many steps the rows stand for (a folded row is several).
+  const steps = Number.isFinite(event.activitySteps) && event.activitySteps > 0 ? { activitySteps: Math.floor(event.activitySteps) } : {};
+  // A running Claude Code reply: what its newest fold came to so far.
+  if (typeof event.activityLiveSummary === "string" && event.activityLiveSummary.trim()) steps.activityLiveSummary = event.activityLiveSummary.slice(0, 200);
+  return more > 0 ? { activity: activity, activityMore: more, ...steps } : { activity: activity, ...steps };
 }
 
 export function activitySignature(entry) {
   return entry && Array.isArray(entry.activity) && entry.activity.length
-    ? JSON.stringify([entry.activity, entry.activityMore || 0])
+    ? JSON.stringify([entry.activity, entry.activityMore || 0, entry.activitySteps || 0, entry.activityLiveSummary || ""])
     : "";
 }
 
@@ -318,8 +322,6 @@ export async function handleRelayTimelinePayload(payload, fallbackConversationId
       // live text is where the run stands rather than words of the reply.
       ...activity,
       ...(role === "participant" && status === "pending" && event.liveStatus === true ? { liveStatus: true } : {}),
-      // That live text names the step in progress (hidden with members' actions).
-      ...(role === "participant" && status === "pending" && event.liveActivity === true ? { liveActivity: true } : {}),
       // Waiting behind its member's turn before it, or when its own run
       // began: its "Queued", and where its "Working for …" counts from.
       ...(role === "participant" && status === "pending" && event.queued === true ? { queued: true } : {}),

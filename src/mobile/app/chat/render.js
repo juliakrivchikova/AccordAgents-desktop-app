@@ -10,7 +10,6 @@ import {
   scrollToLatestWhenSettled, setJumpToLatestVisible, setOpenStreamRunId, setOpenThreadRootId, threadSurface
 } from "./chatScroll.js";
 import { renderLoadEarlier } from "./loadEarlier.js";
-import { memberActionsShown, shownActivity, shownLiveContent } from "./memberActions.js";
 import { messageRowSignature, reconcileMessageRows, routedRows } from "./messageRows.js";
 import { renderStreamView } from "./streamView.js";
 import { renderChatList } from "../chats/chatListView.js";
@@ -231,7 +230,6 @@ export async function render(connectionStatus) {
     const messageId = entry.role === "you" ? (entry.messageId || entry.sourceId) : undefined;
     if (messageId && ownIds.has(messageId)) serverCopies.set(messageId, entry);
   }
-  const actionsShown = memberActionsShown();
   const visibleTimelineEntries = dedupeTimelineEntries(timelineEntries.filter(function (entry) {
     return !(entry.role === "you" && serverCopies.has(entry.messageId || entry.sourceId));
   }));
@@ -312,7 +310,7 @@ export async function render(connectionStatus) {
       scaffolding: isScaffoldingEntry(entry) && !entry.participantLabel,
       // Scaffolding stands for a message, not a run that can be stopped.
       cancellable: !isScaffoldingEntry(entry),
-      content: shownLiveContent(entry, actionsShown),
+      content: entry.content,
       // Stopped, as the computer names a reply a Stop or a quit ended.
       status: entry.role === "you" ? "Sent" : entry.status === "error" ? (entry.stopped ? "Stopped" : "Error") : entry.status === "done" ? "Done" : "Running",
       // What a Stop names the member's turn on the server by.
@@ -325,9 +323,10 @@ export async function render(connectionStatus) {
       ...(entry.accordLaunchByMainSession ? { accordLaunchByMainSession: true } : {}),
       ...(typeof entry.workedMs === "number" ? { workedMs: entry.workedMs } : {}),
       ...(entry.turnContinues ? { turnContinues: true } : {}),
-      // Its steps; only its notices about the run while the computer's
-      // Settings hide members' actions.
-      ...shownActivity(entry, actionsShown),
+      ...(Array.isArray(entry.activity) && entry.activity.length ? { activity: entry.activity } : {}),
+      ...(entry.activityMore ? { activityMore: entry.activityMore } : {}),
+      ...(entry.activitySteps ? { activitySteps: entry.activitySteps } : {}),
+      ...(entry.activityLiveSummary && entry.status === "pending" ? { activityLiveSummary: entry.activityLiveSummary } : {}),
       ...(entry.liveStatus && entry.status === "pending" ? { liveStatus: true } : {}),
       // Waiting behind the member's turn before it: "Queued", and its
       // "Working for …" starts once its own turn does (startedAt), as on

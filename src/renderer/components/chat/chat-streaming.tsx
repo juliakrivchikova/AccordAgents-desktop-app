@@ -14,17 +14,19 @@ import {
 import { activityGroupKey, ChatInlineActivityEvent, ChatInlineActivityGroup } from "./chat-inline-activity";
 import type { ChatThinkingRow } from "./chat-conversation-progress";
 import type { ChatActivityDisclosureState } from "./use-chat-activity-disclosure";
-import { useChatMemberActionsShown } from "./chat-member-actions";
+import { ChatLiveSteps } from "./chat-live-steps";
+
+const NO_EVENTS: ChatAgentActivityEvent[] = [];
 
 export const ChatThinkingRowItem = memo(function ChatThinkingRowItem({ row }: { row: ChatThinkingRow }): JSX.Element {
-  const actionsShown = useChatMemberActionsShown();
   return (
     <div className="chat-thinking-row" aria-live="polite">
       <div className="chat-thinking-primary">
         <strong>{row.participantLabel}</strong>
         <span className="streaming-status-label">Thinking</span>
       </div>
-      {actionsShown && row.activity && <div className="chat-thinking-activity">{row.activity}</div>}
+      {/* Its steps folded into the one live line, as in a running reply (the User, 2026-11-27). */}
+      <ChatLiveSteps events={row.activityEvents ?? NO_EVENTS} fallback={row.activity && !/^thinking\b/i.test(row.activity) ? row.activity : undefined} />
     </div>
   );
 });
@@ -35,13 +37,16 @@ export const StreamingMessageContent = memo(function StreamingMessageContent(pro
   activity?: string;
   activityEvents?: ChatAgentActivityEvent[];
   statusLabel?: string;
+  /** The reply's live step line is above (ChatLiveSteps): it says what the
+   *  member is doing, so no status line here. */
+  stepShown?: boolean;
 }): JSX.Element {
   const hasContent = Boolean(props.content?.trim());
   const statusLabel = props.statusLabel || "Thinking";
-  const activity = props.activity && props.activity !== statusLabel ? props.activity : undefined;
+  const activity = props.activity && props.activity !== statusLabel && !props.stepShown ? props.activity : undefined;
   // Once the member is writing, its text and live command line show the work, so the status line
   // goes. The reply's running time is in the message header, next to the member's status.
-  const showStatus = !hasContent;
+  const showStatus = !hasContent && !props.stepShown;
   return (
     <div className="streaming-message-content" aria-live="polite">
       {showStatus && (

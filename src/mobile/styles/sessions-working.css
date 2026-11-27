@@ -69,6 +69,60 @@
   margin-bottom: 4px;
 }
 
+/* A running reply's steps folded into one live line, in either view
+   (liveSteps.js; the User, 2026-11-27): the step in progress, shimmering as
+   .is-current, which a tap opens to every step so far and folds again. */
+.live-steps {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.message-copy > .live-steps {
+  margin: 2px 0 4px;
+}
+
+/* A finger-sized target (44px) around a 24px line, without moving it. */
+button.live-step {
+  width: fit-content;
+  max-width: 100%;
+  min-height: 44px;
+  padding: 10px 0;
+  margin: -10px 0;
+  border: 0;
+  background: none;
+  text-align: left;
+  cursor: pointer;
+  -webkit-tap-highlight-color: transparent;
+}
+
+button.live-step:focus-visible {
+  border-radius: 8px;
+  outline: 2px solid var(--fg1);
+  outline-offset: -8px;
+}
+
+.live-step-caret {
+  flex: 0 0 auto;
+  color: var(--mut);
+  transition: transform 120ms ease-out;
+}
+
+.live-step[aria-expanded="true"] .live-step-caret {
+  transform: rotate(90deg);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .live-step-caret {
+    transition: none;
+  }
+}
+
+.live-steps-rows {
+  padding-left: 14px;
+}
+
 /* The side panel's rows, the computer's anatomy (the User, 2026-11-22): the
    provider's glyph with a dot while it runs (fading in and out, the desktop's
    pulse; still for reduced motion) or waits for the User, none once it ended; the task on one

@@ -13,7 +13,6 @@ import { loadPairing } from "../pairing/pairing.js";
 import { ACTIVITY_CACHE_MAX_AGE_MS, ACTIVITY_CLEARED_KEY, CHAT_LIST_REFRESH_MIN_MS, SVG_NS } from "../shell/home.js";
 import { requestToPromise } from "../store/database.js";
 import { isPlaceholderTimelineContent, timelineGeneration, withTimeline } from "../store/timelineRows.js";
-import { memberActionsShown } from "../chat/memberActions.js";
 import { loadListActivitySeen, withListActivity } from "../sync/chatListPayload.js";
 import { requestChatListViaRelay } from "../sync/serverChanges.js";
 import { displayedMessageText } from "../text/messageText.js";
@@ -74,8 +73,7 @@ function listRecentTimelineEntries(sinceIso, keepChars) {
         runId: row.runId,
         mobileEventId: row.mobileEventId,
         threadRootId: row.threadRootId,
-        content: typeof row.content === "string" ? row.content.slice(0, keepChars) : "",
-        ...(row.liveActivity ? { liveActivity: true } : {})
+        content: typeof row.content === "string" ? row.content.slice(0, keepChars) : ""
       });
     }
     return kept;
@@ -174,18 +172,14 @@ export async function loadActivity(options) {
     localStorage.getItem(CHAT_LIST_AT_KEY),
     localStorage.getItem(LIST_ACTIVITY_SEEN_KEY),
     JSON.stringify(Array.from(stops)),
-    String(Math.floor(now / 60_000)),
-    memberActionsShown() ? "actions" : "no-actions"
+    String(Math.floor(now / 60_000))
   ];
   if (activityDataState.activityMemo && activityDataState.activityMemo.source === source && activityDataState.activityMemo.inputs.length === inputs.length &&
     activityDataState.activityMemo.inputs.every(function (value, index) { return value === inputs[index]; })) {
     return activityDataState.activityMemo.activity;
   }
   const activity = activityApi.buildActivity({
-    // The step in progress is not previewed while members' actions are hidden.
-    entries: withListActivity(memberActionsShown() ? source.entries : source.entries.map(function (entry) {
-      return entry.liveActivity ? { ...entry, content: "" } : entry;
-    }), loadChats(), loadListActivitySeen()),
+    entries: withListActivity(source.entries, loadChats(), loadListActivitySeen()),
     cardsByConversation: loadControlCards(),
     chats: loadChats(),
     unreadConversationIds: loadUnreadConversationIds(),

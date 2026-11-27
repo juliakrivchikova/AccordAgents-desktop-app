@@ -23,8 +23,8 @@
   cursor: default;
 }
 
-/* A part of a turn the User's next message joined: its steps and tasks
-   stay open, with no "Worked for" of its own (as in the CLI's transcript). */
+/* A part of a turn the User's next message joined: no "Worked for" of its
+   own; its steps fold into "N steps ›" (the User, 2026-11-27), its tasks stay. */
 .chat-turn-continues {
   display: grid;
   gap: 2px;

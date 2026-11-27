@@ -58,7 +58,6 @@ export function SettingsView(props: {
   setRepoFileOpenPreference: (action: RepoFileOpenAction | null) => Promise<void>;
   setRepoFileExternalOpenPreference: (action: RepoFileExternalOpenAction | null) => Promise<void>;
   setBetaUpdates: (enabled: boolean) => Promise<void>;
-  setChatShowMemberActions: (shown: boolean) => Promise<void>;
   setCrashReports: (enabled: boolean) => Promise<void>;
   setCliAgentRunTimeoutMs: (timeoutMs: number) => Promise<void>;
   setChatParticipantRequestMaxDepth: (maxDepth: number) => Promise<void>;
@@ -178,7 +177,6 @@ export function SettingsView(props: {
             repoFileOpenAction={props.settings.repoFileOpenAction}
             repoFileExternalOpenAction={props.settings.repoFileExternalOpenAction}
             betaUpdates={props.settings.betaUpdates}
-            chatShowMemberActions={props.settings.chatShowMemberActions}
             crashReports={props.settings.crashReports}
             cliAgentRunTimeoutMs={props.settings.cliAgentRunTimeoutMs}
             chatParticipantRequestMaxDepth={props.settings.chatParticipantRequestMaxDepth}
@@ -193,7 +191,6 @@ export function SettingsView(props: {
             setRepoFileOpenPreference={props.setRepoFileOpenPreference}
             setRepoFileExternalOpenPreference={props.setRepoFileExternalOpenPreference}
             setBetaUpdates={props.setBetaUpdates}
-            setChatShowMemberActions={props.setChatShowMemberActions}
             setCrashReports={props.setCrashReports}
             setCliAgentRunTimeoutMs={props.setCliAgentRunTimeoutMs}
             setChatParticipantRequestMaxDepth={props.setChatParticipantRequestMaxDepth}

@@ -22,7 +22,7 @@ export interface HubServerOptions {
   /** The phone's reads: chat list, pages and changes from the server's copy. */
   phone?: HubPhoneApi;
   /** The owner published the composer catalog. */
-  onCatalogChanged?: (catalog: unknown) => void;
+  onCatalogChanged?: () => void;
   /** The owner's members' live progress (kept in memory, never stored). */
   onProgress?: (frames: MachineProgressFrame[]) => void;
   /** The chats as the server owns them: operations, the feed, chat pages. */
