@@ -384,10 +384,10 @@ export function useChatActions(state: AppState, conversationActions: Conversatio
     }
   }
 
-  /** Renames the open chat, members running or not. Only the chat's name is
-   *  taken from the answer, never its messages: an open chat keeps what it
-   *  shows, a member's live reply included (the save's own update brings the
-   *  rest, as for the pin). */
+  /** Renames the open chat, members running or not. The answer is only the
+   *  chat's name, never its messages: an open chat keeps what it shows, a
+   *  member's live reply included (the save's own update brings the rest, as
+   *  for the pin). */
   async function renameChatConversation(title: string): Promise<boolean> {
     if (!state.conversation || state.conversation.kind !== "chat") return false;
     const conversationId = state.conversation.id;

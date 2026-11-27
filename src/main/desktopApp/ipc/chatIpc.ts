@@ -4,7 +4,7 @@ import { ipcMain } from "electron";
 import type {
   AddChatParticipantRequest, CompactChatParticipantRequest, RestartChatParticipantRequest, CreateChatConversationRequest,
   DeleteChatConversationRequest, DismissConversationWarningsRequest, RenameChatConversationRequest, SetChatArchivedRequest,
-  SetChatPinnedRequest, SetChatViewRequest, ChatViewState, ChatPinState, SendChatMessageRequest, StartChatAccordRequest,
+  SetChatPinnedRequest, SetChatViewRequest, ChatViewState, ChatPinState, ChatTitleState, SendChatMessageRequest, StartChatAccordRequest,
   UpdateChatParticipantRuntimeRequest, UpdateChatSubagentProvidersRequest, RemoveChatParticipantRequest
 } from "../../../shared/types";
 import { isUnknownMemoryAction, type MemoryNote, type MemoryNoteIdRequest, type MemorySettingsListRequest, type SemanticSettingsResult, type SemanticSettingsView } from "../../../shared/memory";
@@ -44,8 +44,9 @@ export function registerChatIpc(desktopApp: DesktopApp): void {
     }
   });
 
-  ipcMain.handle("chat:rename", async (_event, request: RenameChatConversationRequest) => {
-    return desktopApp.chatService.renameConversation(request);
+  ipcMain.handle("chat:rename", async (_event, request: RenameChatConversationRequest): Promise<ChatTitleState | undefined> => {
+    const saved = await desktopApp.chatService.renameConversation(request);
+    return saved ? { conversationId: saved.id, title: saved.title } : undefined;
   });
 
   ipcMain.handle("chat:set-archived", async (_event, request: SetChatArchivedRequest) => {

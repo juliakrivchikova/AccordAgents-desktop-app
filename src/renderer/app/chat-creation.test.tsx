@@ -232,6 +232,35 @@ test("a card answer that lands while its chat is still open updates that chat", 
   await act(async () => { h.renderer.unmount(); });
 });
 
+test("a rename while the chat's member is answering changes only the open chat's name; its live reply stays", async () => {
+  globalThis.requestAnimationFrame ??= (callback) => setTimeout(() => callback(0), 0) as unknown as number;
+  const h = await harness();
+  const live: Conversation = { ...conversation(), id: "chat-a", title: "Old name",
+    metadata: { running: true, activeRunIds: ["run-1"], participants: [] },
+    messages: [{ id: "reply-1", role: "participant", participantId: "member-1", content: "Half of an answer", status: "pending",
+      createdAt: "2026-09-13T00:00:01.000Z", metadata: { runId: "run-1" } }] };
+  const renamed: Array<{ conversationId: string; title: string }> = [];
+  Object.assign(window.consensus, {
+    openConversation: async () => ({ conversation: live }),
+    renameChatConversation: async (request: { conversationId: string; title: string }) => {
+      renamed.push(request);
+      return { conversationId: request.conversationId, title: "New name" };
+    }
+  });
+  await act(async () => { await h.navigation().openConversation("chat-a"); });
+  const before = h.state().conversation!;
+  let ok = false;
+  await act(async () => { ok = await h.actions().renameChatConversation("New name"); });
+  assert.equal(ok, true);
+  assert.deepEqual(renamed, [{ conversationId: "chat-a", title: "New name" }]);
+  const after = h.state().conversation!;
+  assert.equal(after.title, "New name");
+  assert.equal(after.messages, before.messages, "the live reply is left as shown");
+  assert.equal(after.metadata, before.metadata, "and so is the run state");
+  assert.equal(h.state().error, undefined);
+  await act(async () => { h.renderer.unmount(); });
+});
+
 test("a chat opened from the sidebar while the new chat is being created stays on screen", async () => {
   globalThis.requestAnimationFrame ??= (callback) => setTimeout(() => callback(0), 0) as unknown as number;
   const h = await harness();

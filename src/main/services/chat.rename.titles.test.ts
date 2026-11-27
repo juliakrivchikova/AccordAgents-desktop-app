@@ -345,6 +345,32 @@ test("renameConversation rejects non-chat conversations", async () => {
   );
 });
 
+test("renameConversation of a chat that is not there answers nothing, saves nothing and writes no history", async () => {
+  const conversation = chatConversation({ title: "Kept" });
+  const { service, storage, snapshots, historyWrites } = testService([conversation]);
+
+  const saved = await service.renameConversation({ conversationId: "no-such-chat", title: "New title" });
+
+  assert.equal(saved, undefined);
+  assert.equal(await storage.getConversation("no-such-chat"), undefined);
+  assert.equal(snapshots.length, 0);
+  assert.deepEqual(historyWrites, []);
+  assert.equal((await storage.getConversation(conversation.id))?.title, "Kept");
+});
+
+test("renameConversation of a chat deleted meanwhile refuses and does not bring it back", async () => {
+  const conversation = chatConversation({ title: "Doomed", metadata: { archived: true } });
+  const { service, storage, historyWrites } = testService([conversation]);
+  assert.equal(await service.deleteConversation({ conversationId: conversation.id }), true);
+
+  await assert.rejects(
+    () => service.renameConversation({ conversationId: conversation.id, title: "New title" }),
+    /permanently deleted/
+  );
+  assert.equal(await storage.getConversation(conversation.id), undefined);
+  assert.deepEqual(historyWrites, []);
+});
+
 test("renameConversation renames a chat while its members are running", async () => {
   const conversation = chatConversation({
     title: "Running chat",

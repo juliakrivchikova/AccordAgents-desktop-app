@@ -93,7 +93,8 @@ export class ChatStore {
   /** As withSavedChat, for a change the User asks of a conversation that may
    *  be gone (`fn` gets undefined) or not a chat: it is read once, as saved,
    *  inside its mutation queue, from memory while this process's last save
-   *  still owns it (readStoredChatStateForRefresh). */
+   *  still owns it (readStoredChatStateForRefresh). Its messages are the
+   *  saved ones, not copies: replace a message, never edit it in place. */
   withSavedConversation<T>(conversationId: string, fn: (conversation: Conversation | undefined) => Promise<T>): Promise<T> {
     const conversation = { id: conversationId } as Conversation;
     return this.withChatMutation(conversation, async () => {

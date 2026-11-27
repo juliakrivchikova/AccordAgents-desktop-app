@@ -29,7 +29,7 @@ import type {
   SetAwsAutoStopRequest
 } from "./awsWorker";
 import type {
-  AddChatParticipantRequest, ChatPinState, ChatViewState, CloseAccordCardRequest, CompactChatParticipantRequest,
+  AddChatParticipantRequest, ChatPinState, ChatTitleState, ChatViewState, CloseAccordCardRequest, CompactChatParticipantRequest,
   CreateChatConversationRequest, DeleteChatConversationRequest, DismissConversationWarningsRequest,
   DismissTurnFinishedNoteRequest, ReadChatAttachmentRequest, ReadChatAttachmentResult, RemoveChatParticipantRequest,
   RenameChatConversationRequest, RespondToChatAppToolApprovalRequest, RespondToChatChoiceRequest, RespondToChatMentionsRequest,
@@ -229,7 +229,7 @@ export interface AppBridge {
   saveDecisionResolutions(conversationId: string, resolutions: Record<string, boolean>): Promise<Conversation | undefined>;
   savePlanItemReview(request: PlanItemReviewRequest): Promise<Conversation | undefined>;
   createChatConversation(request: CreateChatConversationRequest): Promise<StartReviewResult>;
-  renameChatConversation(request: RenameChatConversationRequest): Promise<Conversation | undefined>;
+  renameChatConversation(request: RenameChatConversationRequest): Promise<ChatTitleState | undefined>;
   setChatArchived(request: SetChatArchivedRequest): Promise<Conversation | undefined>;
   setChatPinned(request: SetChatPinnedRequest): Promise<ChatPinState | undefined>;
   setChatView(request: SetChatViewRequest): Promise<ChatViewState | undefined>;

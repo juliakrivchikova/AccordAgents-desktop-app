@@ -27,7 +27,9 @@ export class ChatList {
    *  written (ChatTitles.setChatTitleFromTool), so nothing a running turn
    *  saved is overwritten; a turn's older copy saved later keeps the new name
    *  (mergeStoredChatTitle, mergeStoredChatMetadata). It reaches the User's
-   *  server, the phone and the cloud machines with the save, as any rename. */
+   *  server, the phone and the cloud machines with the save, as any rename.
+   *  The chat returned shares its messages with the saved copy: read it,
+   *  never edit it (the window gets only the name, chat:rename). */
   async renameConversation(request: RenameChatConversationRequest): Promise<Conversation | undefined> {
     const title = normalizeChatTitle(request.title);
     let renamed: Conversation | undefined;
