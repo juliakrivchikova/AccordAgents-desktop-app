@@ -63,18 +63,18 @@ test("Pinned lists pinned chats in the order they were pinned, never an archived
   assert.deepEqual(pinnedChatSummaries(summaries).map((summary) => summary.id), ["early-pin", "late-pin"]);
 });
 
-test("Projects keep their places while their chats work: a project where it first appeared, its chats newest-created first", () => {
+test("Projects keep their places and list their most recently active chats first", () => {
   const at = (day: number): string => `2026-11-${String(day).padStart(2, "0")}T10:00:00.000Z`;
   const summaries = [
-    listed("a-old", at(20), { repoPath: "/a", createdAt: at(1) }),
     listed("a-new", at(5), { repoPath: "/a", createdAt: at(4) }),
+    listed("a-old", at(20), { repoPath: "/a", createdAt: at(1) }),
     listed("b-first", at(25), { repoPath: "/b", createdAt: at(2), archived: true }),
     listed("b-working", at(26), { repoPath: "/b", createdAt: at(10) }),
     listed("c-new-project", at(3), { repoPath: "/c", createdAt: at(3) })
   ];
   const groups = buildProjectSessionGroups(summaries);
   assert.deepEqual(groups.map((group) => group.repoPath), ["/a", "/b", "/c"], "by first appearance, the archived chat still holding /b's place");
-  assert.deepEqual(groups[0]!.sessions.map((summary) => summary.id), ["a-new", "a-old"], "the chat at work stays below a newer one");
+  assert.deepEqual(groups[0]!.sessions.map((summary) => summary.id), ["a-old", "a-new"], "an older chat with newer activity comes first");
 });
 
 test("Recents lists the newest chats of every project, pinned ones included, at most ten", () => {

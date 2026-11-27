@@ -7,11 +7,8 @@ import { normalizeProjectPath, projectLabelForPath } from "../../shared/newChat"
 
 export { normalizeProjectPath };
 
-/** The Projects list keeps its places; only Recents ranks chats by activity
- *  (the User, 2026-11-27). A project stays where it first appeared, a new one
- *  below the others (as a newly pinned chat), and an archived chat still holds
- *  its project's place. A project's chats are listed newest-created first, so
- *  a chat at work does not move. */
+/** Projects stay in order of first appearance, including archived chats.
+ *  Within each project, the most recently updated chat comes first. */
 export function buildProjectSessionGroups(summaries: ConversationSummary[]): ProjectSessionGroup[] {
   const groups = new Map<string, ProjectSessionGroup>();
   const firstCreated = new Map<string, number>();
@@ -41,7 +38,7 @@ export function buildProjectSessionGroups(summaries: ConversationSummary[]): Pro
   return [...groups.values()]
     .map((group) => ({
       ...group,
-      sessions: [...group.sessions].sort(compareByCreation)
+      sessions: [...group.sessions].sort(compareConversationSummaries)
     }))
     .sort((left, right) => {
       if (left.isNoProject !== right.isNoProject) {
@@ -50,11 +47,6 @@ export function buildProjectSessionGroups(summaries: ConversationSummary[]): Pro
       const timeDelta = (firstCreated.get(left.key) ?? 0) - (firstCreated.get(right.key) ?? 0);
       return timeDelta || left.label.localeCompare(right.label) || left.key.localeCompare(right.key);
     });
-}
-
-function compareByCreation(left: ConversationSummary, right: ConversationSummary): number {
-  const timeDelta = conversationTimeValue(right.createdAt) - conversationTimeValue(left.createdAt);
-  return timeDelta || left.title.localeCompare(right.title) || left.id.localeCompare(right.id);
 }
 
 /** How many chats Recents lists, as Claude's does. */
@@ -103,7 +95,7 @@ export function projectChatSummaries(summaries: ConversationSummary[], repoPath:
   const projectPath = normalizeProjectPath(repoPath);
   if (!projectPath) return [];
   const group = buildProjectSessionGroups(summaries).find((item) => item.repoPath === projectPath);
-  return group ? group.sessions.filter((summary) => summary.kind === "chat").sort(compareConversationSummaries).slice(0, limit) : [];
+  return group ? group.sessions.filter((summary) => summary.kind === "chat").slice(0, limit) : [];
 }
 
 export function compareConversationSummaries(left: ConversationSummary, right: ConversationSummary): number {
