@@ -4,6 +4,7 @@ import { CHAT_PROMPT_SUGGESTION_LOCAL_SOURCE } from "../../chatPromptSuggestions
 import { agentContextUsageByParticipant } from "../compaction/contextUsage";
 import { chatParticipants } from "../members/identity";
 import { deliversNow, memberDeliveryWay, participantTurnMode } from "../members/roleRuntime";
+import { mainSessionParticipantId } from "../../../../shared/mainSession";
 import { turnSegmentKey } from "../requests/delegationGroups";
 import { turnShown } from "../runs/runOwnerRecords";
 import { chainParticipantTurn, offersPromptSuggestionAfter, waitForParticipantTurnReservation } from "./turnOrder";
@@ -104,7 +105,7 @@ export class TurnQueue {
     // the middle of a turn has its running turn cut now, and this turn runs
     // next; Claude Code gets the CLI's send-now once the message is in its
     // queue (onCliMessageWritten below).
-    const delivery = this.deliveryPriority(participant, triggerMessage);
+    const delivery = this.deliveryPriority(participant, triggerMessage, conversation);
     if (delivery === "next") {
       void this.chat.runCancel.deliverNow(conversation.id, participant.id, runId, "interrupt-and-restart").catch(() => undefined);
     }
@@ -368,7 +369,7 @@ export class TurnQueue {
    *  a turn delivered now goes before the waiting ones (deliveryPriority). */
   reserveTurnFor(conversation: Conversation, participant: ChatParticipant, triggerMessage: ChatMessage): ParticipantTurnReservation {
     const mode = participantTurnMode(participant, triggerMessage);
-    const priority = this.deliveryPriority(participant, triggerMessage);
+    const priority = this.deliveryPriority(participant, triggerMessage, conversation);
     return this.reserveParticipantTurn(conversation.id, participant.id, mode, {
       ...(priority ? { priority } : {}),
       ...(triggerMessage.role === "user" ? { byUser: true } : {}),
@@ -382,8 +383,8 @@ export class TurnQueue {
    *  member's live CLI (a Claude Code member takes it mid-turn), next after
    *  its running turn (which is cut for it), or, for a member on another
    *  device, as that device orders it. */
-  deliveryPriority(participant: ChatParticipant, triggerMessage: ChatMessage): TurnPriority | undefined {
-    if (!deliversNow(triggerMessage, participant.id)) return undefined;
+  deliveryPriority(participant: ChatParticipant, triggerMessage: ChatMessage, conversation?: Conversation): TurnPriority | undefined {
+    if (!deliversNow(triggerMessage, participant.id, conversation ? mainSessionParticipantId(conversation.metadata) ?? "" : undefined)) return undefined;
     if (!this.chat.host.runsHere(participant)) return "elsewhere";
     return memberDeliveryWay(participant) === "into-running-turn" ? "live" : "next";
   }

@@ -282,8 +282,12 @@ export function participantTurnMode(participant: ChatParticipant, triggerMessage
 
 /** A member request asked with `deliver: "now"` (app_chat_request_participants):
  *  the member takes it at once, even in the middle of a turn. */
-export function deliversNow(triggerMessage: ChatMessage, participantId: string): boolean {
-  return triggerMessage.metadata?.participantRequest?.items.some((item) => item.targetParticipantId === participantId && item.deliver === "now") === true;
+export function deliversNow(triggerMessage: ChatMessage, participantId: string, mainSessionId?: string): boolean {
+  const batch = triggerMessage.metadata?.participantRequest;
+  // Only the chat's main session delivers now, checked again where the turn
+  // runs (a copy from another device included).
+  if (mainSessionId !== undefined && batch?.requesterParticipantId !== mainSessionId) return false;
+  return batch?.items.some((item) => item.targetParticipantId === participantId && item.deliver === "now") === true;
 }
 
 /** How a busy member takes a message delivered now, as its dedicated CLI
@@ -294,6 +298,8 @@ export function deliversNow(triggerMessage: ChatMessage, participantId: string):
  *  the middle of a turn (Antigravity runs a process per turn) has the turn
  *  cut as Stop cuts it, and goes on with the message at once in the same
  *  session. */
-export function memberDeliveryWay(participant: Pick<ChatParticipant, "kind">): "into-running-turn" | "interrupt-and-restart" {
+export type DeliveryWay = "into-running-turn" | "interrupt-and-restart";
+
+export function memberDeliveryWay(participant: Pick<ChatParticipant, "kind">): DeliveryWay {
   return participant.kind === "claude-code" || participant.kind === "codex-cli" ? "into-running-turn" : "interrupt-and-restart";
 }

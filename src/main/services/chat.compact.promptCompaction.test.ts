@@ -1,7 +1,8 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { defaultChatAgentPermissions, normalizeChatAgentPermissions } from "../../shared/agentPermissions";
-import { chatParticipant, selfCompactingChat, waitFor } from "./chat/test/compactionFixtures";
+import { chatParts } from "./chat/test/chatParts";
+import { acceptedMessage, chatParticipant, fakeServerLink, selfCompactingChat, waitFor } from "./chat/test/compactionFixtures";
 
 const ALLOWED = { permissions: normalizeChatAgentPermissions({ ...defaultChatAgentPermissions(), requestCompaction: "allow" }) };
 const ASKS = { permissions: normalizeChatAgentPermissions({ ...defaultChatAgentPermissions(), requestParticipants: "allow" }) };
@@ -106,4 +107,49 @@ test("a request answered by a member that compacts with its work done is answere
   assert.equal(item.replyMessageId, chat.replies().find((message) => message.content === "Finished it.").id);
   assert.deepEqual(chat.order.filter((entry) => entry.endsWith("codex-admin")), ["turn codex-admin", "compact codex-admin"]);
   await waitFor(() => chat.storage.current.metadata.running === false, 5_000);
+});
+
+test("on a card: a member that says its work is done is not called again once User approves, and its tool result says so", async () => {
+  let asked: any;
+  const chat = selfCompactingChat({
+    turn: async ({ actor, service, call }) => {
+      if (call === 1) asked = await service.requestSelfCompactionFromTool(actor, { workDone: true });
+      return call === 1 ? "All done." : "Went on.";
+    }
+  });
+  await chat.service.sendMessage({ conversationId: chat.conversation.id, runId: "user-run", content: "@admin finish" });
+  await waitFor(() => asked !== undefined && chat.approvals().length === 1, 5_000);
+  assert.equal(asked.status, "pending_user_approval");
+  assert.equal(asked.afterCompaction, "not-called-again");
+  assert.match(asked.next, /The compaction runs once User approves the card\. You said your work is done/);
+  await waitFor(() => chat.storage.current.metadata.running === false, 5_000);
+  await chat.service.respondToAppToolApproval({ conversationId: chat.conversation.id, approvalId: chat.approvals()[0].id, approve: true, scope: "once" });
+  await waitFor(() => chat.debugEvents.some(({ event }) => event === "chat.self-compaction.work-done"), 5_000);
+  await waitFor(() => chat.storage.current.metadata.running === false, 5_000);
+  assert.deepEqual(chat.order, ["turn codex-admin", "compact codex-admin"]);
+});
+
+test("on a machine, a member's own compaction stopped before the machine took it gives its place in the line back", async () => {
+  const participant = chatParticipant({ homeMachineId: "box", ...ALLOWED });
+  const chat = selfCompactingChat({ participant, turn: async () => "unused" });
+  const parts = chatParts(chat.service);
+  chat.service.setHostMachineId("box");
+  parts.host.machineRuntime = true;
+  const link = fakeServerLink("machine-device");
+  chat.service.setServerLink(link);
+  chat.storage.current.messages.push(acceptedMessage());
+  const conversation = await parts.store.requireChat(chat.conversation.id);
+  parts.selfCompaction.startQueuedSelfCompaction(conversation, chat.participant, { type: "self_compaction" }, "run-asked-here", undefined);
+  assert.equal(parts.selfCompaction.heldCompactionTurns.size, 1);
+  // A turn of the member asked meanwhile waits for the compaction's place.
+  const waiting = parts.turnQueue.reserveParticipantTurn(conversation.id, chat.participant.id);
+  let started = false;
+  void waiting.wait().then(() => { started = true; });
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  assert.equal(started, false);
+  await waitFor(() => link.ops.some((op) => op.kind === "turn.request" && op.runId === "turn-run-asked-here"), 2_000);
+  parts.serverTurns.noteServerTurn({ runId: "turn-run-asked-here", conversationId: conversation.id, messageId: "anchor", participantId: chat.participant.id, state: "stopped" });
+  await waitFor(() => started, 2_000);
+  assert.equal(parts.selfCompaction.heldCompactionTurns.size, 0);
+  waiting.release();
 });

@@ -12,6 +12,7 @@ const DELIVER_NOW_RETRY_MS = 500;
 import type { ChatMessage, Conversation } from "../../../../shared/types";
 import { readActiveRunIds, withParticipantCompactionsForRunRemoved } from "../../../../shared/chatRunState";
 import { chatParticipants } from "../members/identity";
+import type { DeliveryWay } from "../members/roleRuntime";
 import { chatRunId, markStoredParticipantRunStoppedByUser } from "./runOwnerRecords";
 import type { ChatModules } from "../modules";
 import type { ChatDependencies } from "../dependencies";
@@ -107,7 +108,7 @@ export class RunCancel {
    * as a turn that goes on, never "stopped by user"), and the request runs
    * next in the same session (TurnQueue `next`).
    */
-  async deliverNow(conversationId: string, participantId: string, waitingRunId: string, way: "into-running-turn" | "steered" | "interrupt-and-restart"): Promise<void> {
+  async deliverNow(conversationId: string, participantId: string, waitingRunId: string, way: DeliveryWay | "steered"): Promise<void> {
     // Codex took it into its running turn itself (its steer): only said.
     if (way === "steered") {
       void this.deps.debugLogs.write("chat.deliver-now", { conversationId, participantId, runId: waitingRunId, way });
@@ -124,7 +125,8 @@ export class RunCancel {
         : Promise.resolve("unsupported" as const);
       let outcome = await ask();
       let tries = 1;
-      for (; outcome === "unsupported" && tries < DELIVER_NOW_TRIES && this.chat.activeRuns.chatRunControllers.has(waitingRunId); tries += 1) {
+      const waits = (): boolean => [...(this.chat.activeRuns.chatRunControllers.get(waitingRunId) ?? [])].some((controller) => !controller.signal.aborted);
+      for (; outcome === "unsupported" && tries < DELIVER_NOW_TRIES && waits(); tries += 1) {
         await new Promise((resolve) => setTimeout(resolve, DELIVER_NOW_RETRY_MS));
         outcome = await ask();
       }

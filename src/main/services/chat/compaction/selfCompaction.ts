@@ -24,11 +24,6 @@ import { chatParticipants, participantForRun } from "../members/identity";
 import { rollupParticipantRequestStatus, updateParticipantRequestBatch } from "../requests/requestRecords";
 import { createChatMessage } from "../store/messages";
 import type { ChatAppMcpActor, ParticipantTurnReservation } from "../types";
-
-/** The server turn of a member's own compaction asked on a machine. */
-function serverCompactionRunId(runId: string): string {
-  return runId.startsWith("turn-") ? runId : `turn-${runId}`;
-}
 import type { ChatModules } from "../modules";
 import type { ChatDependencies } from "../dependencies";
 
@@ -41,6 +36,11 @@ const SELF_COMPACTION_QUEUED_DONE = "End your reply now: say in a line or two wh
 const SELF_COMPACTION_CARD_NEXT = "End your reply now: say in a line or two what is done and what comes next, and make no more tool calls. Once User answers the card the app calls you again to go on, with your context compacted, or as it is if she declines.";
 
 const SELF_COMPACTION_CARD_DONE = "End your reply now: say in a line or two what is done, and make no more tool calls. The compaction runs once User approves the card. You said your work is done, so the app does not call you again to go on; requests waiting for you come next.";
+
+/** The server turn of a member's own compaction asked on a machine. */
+function serverCompactionRunId(runId: string): string {
+  return runId.startsWith("turn-") ? runId : `turn-${runId}`;
+}
 
 /** How long the turn a member goes on in waits for the reply that asked to be
  *  written as ended (its turn is over by then). */
