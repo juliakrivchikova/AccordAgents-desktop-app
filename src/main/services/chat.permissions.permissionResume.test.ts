@@ -141,7 +141,7 @@ test("permission resume attaches resumed participant-request reply to the origin
 
   assert.equal(runs.length, 1);
   // The request again (a new session: its access is in its instructions).
-  assert.match(runs[0].prompt, /\n\n<<<REQUEST ([0-9a-f]{8}) from @codex>>>\nRun git diff\.\n<<<END REQUEST \1>>>$/, runs[0].prompt);
+  assert.match(runs[0].prompt, /\n\n<<<REQUEST ([0-9a-f]{8}) from @codex>>>\nRun git diff\.\n<<<END REQUEST \1>>>(\n\n<<<APP \1>>>\nCompaction: when a big stage of this work is finished, (ask to )?compact your context before the next one, as your Compaction instructions say\.\n<<<END APP \1>>>)?$/, runs[0].prompt);
   assert.match(String(runs[0].options.role?.instructions), /allow prefix "git diff"/);
   assert.equal(runs[0].options.permissions.shell.enabled, true);
   assert.deepEqual(runs[0].options.permissions.shell.rules, [{ action: "allow", match: "prefix", pattern: "git diff" }]);
