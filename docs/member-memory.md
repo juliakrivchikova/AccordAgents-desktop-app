@@ -231,7 +231,13 @@ CLIs remember in members' memory too, one note per entry
   to be merged are what Codex itself merges into those two, so they are not
   read. The folders are the ones members' CLIs use: the members' environment
   (Settings → Environment included) decides `CLAUDE_CONFIG_DIR` and
-  `CODEX_HOME`. The files are only read, never written.
+  `CODEX_HOME`. The CLIs' own memory is never touched (the User,
+  2026-11-27): it is only read — no file or folder is created, changed,
+  moved or deleted, `MEMORY.md` and Codex's files are never rewritten, and
+  nothing about how Claude Code or Codex keep memory changes, so working with
+  a CLI directly finds everything as before. A test compares every file and
+  folder of both devices' stores (content, size, times, mode) before and
+  after syncing (`cliMemorySync.server.test.ts`).
 - **Kind and scope:** a Claude Code `feedback` or `user` memory is an article
   tagged `preference`; `project` is a status when it says where work stands
   (a branch, merged, released, in progress), otherwise an article;

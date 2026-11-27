@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
-import { mkdir, mkdtemp, rm, unlink, writeFile } from "node:fs/promises";
+import { createHash } from "node:crypto";
+import { lstat, mkdir, mkdtemp, readdir, readFile, readlink, rm, symlink, unlink, writeFile } from "node:fs/promises";
 import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -422,6 +423,67 @@ test("a note a member archived is not made again when another device sends its e
   assert.deepEqual((await machineSync().syncNow()).outcomes, { kept: 1 });
   assert.equal((await notes()).length, 0);
 });
+
+test("the CLIs' own memory is only read: every file and folder is byte-identical and untouched after syncing", async (t) => {
+  const { desktopHome, machineHome, desktopSync, machineSync, tool, note, desktopLink } = await setup(t);
+  const claude = accordFolder(desktopHome);
+  await put(path.join(claude, "MEMORY.md"), "- [Reply in Russian](reply.md) — short\n- [Gone](gone.md) — x\n");
+  await put(path.join(claude, "reply.md"), "---\nname: reply\ndescription: The User writes Russian.\nmetadata:\n  type: feedback\n---\nShort replies.\nDB_PASSWORD=hunter22\n");
+  await put(path.join(claude, "gone.md"), "---\nname: Gone\ntype: reference\n---\nTo be deleted on the server.\n");
+  await put(path.join(claude, "edited.md"), "---\nname: Edited on the server\ntype: reference\n---\nv1\n");
+  await put(path.join(desktopHome, "outside.md"), "---\nname: Outside\ntype: reference\n---\nnot in the store\n");
+  await symlink(path.join(desktopHome, "outside.md"), path.join(claude, "link.md"));
+  await put(path.join(desktopHome, ".claude", "projects", "-Users-x-other", "memory", "global.md"), "---\nname: Global one\ntype: user\n---\nAbout the User.\n");
+  await put(path.join(desktopHome, ".claude", "projects", "-work-accord", "session.jsonl"), "{\"not\":\"memory\"}\n");
+  const codex = path.join(desktopHome, ".codex", "memories");
+  await put(path.join(codex, "MEMORY.md"), "# Task Group: Accord QA\nscope: qa\napplies_to: cwd=/work/accord; reuse_rule=x\n");
+  await put(path.join(codex, "memory_summary.md"), "v1\n\n## User Profile\n\nExact.\n");
+  await put(path.join(codex, "raw_memories.md"), "# Raw Memories\n");
+  await put(path.join(codex, "rollout_summaries", "one.md"), "summary\n");
+  await put(path.join(codex, ".git", "HEAD"), "ref: refs/heads/main\n");
+  await put(path.join(accordFolder(machineHome, "-srv-copies-accord"), "reply.md"), "---\nname: reply\ndescription: The User writes Russian.\nmetadata:\n  type: feedback\n---\nShort replies.\nDB_PASSWORD=hunter22\n");
+  await put(path.join(accordFolder(machineHome, "-srv-copies-accord"), "machine.md"), "---\nname: Machine only\ntype: reference\n---\nhere\n");
+  // Writes made before the look settle (folder times included).
+  await new Promise((resolve) => setTimeout(resolve, 50));
+  const before = [await snapshot(desktopHome), await snapshot(machineHome)];
+
+  // Everything the sync does: first sends, changes on the server (a
+  // member's edit, the User's delete), a restart, a new server, the machine.
+  const server = { id: "A" };
+  assert.deepEqual((await desktopSync({ serverId: async () => server.id }).syncNow()).outcomes, { created: 6 });
+  const edited = await note("Edited on the server");
+  ok(await tool("desktop", CHAT_A, taylor, APP_MEMORY_WRITE_TOOL, { noteId: edited.id, baseVersion: edited.version, body: "Changed by taylor." }));
+  ok(await desktopLink.memory({ action: "delete", noteId: (await note("Gone")).id }));
+  assert.equal((await desktopSync({ serverId: async () => server.id }).syncNow()).sent, 0);
+  server.id = "B";
+  assert.equal((await desktopSync({ serverId: async () => server.id }).syncNow()).sent, 6);
+  const machine = machineSync();
+  await machine.syncNow();
+  await machine.syncNow();
+
+  assert.deepEqual([await snapshot(desktopHome), await snapshot(machineHome)], before, "the stores are exactly as they were");
+});
+
+/** Every file, folder and link under a folder: what it holds and when it
+ *  last changed (any write, move, delete, new file or change of mode shows). */
+async function snapshot(root: string): Promise<Record<string, string>> {
+  const out: Record<string, string> = {};
+  const walk = async (dir: string): Promise<void> => {
+    for (const name of (await readdir(dir)).sort()) {
+      const file = path.join(dir, name);
+      const info = await lstat(file);
+      const key = path.relative(root, file);
+      const marks = `${info.mode}:${info.size}:${info.mtimeMs}:${info.ctimeMs}`;
+      if (info.isSymbolicLink()) out[key] = `link ${await readlink(file)} ${marks}`;
+      else if (info.isDirectory()) {
+        out[key] = `dir ${marks}`;
+        await walk(file);
+      } else out[key] = `file ${createHash("sha256").update(await readFile(file)).digest("hex")} ${marks}`;
+    }
+  };
+  await walk(root);
+  return out;
+}
 
 async function ensure(dir: string): Promise<string> {
   await mkdir(dir, { recursive: true });
