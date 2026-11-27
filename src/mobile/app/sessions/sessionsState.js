@@ -248,6 +248,10 @@ function sessionsMessageOf(row) {
       // (shared sessionsViewLane), worded by its CLI.
       ...(role === "system" && row.compaction ? { compaction: { ...row.compaction, outcome: "completed" } } : {}),
       ...(row.accordLaunchByMainSession ? { accordLaunchByMainSession: true } : {}),
+      // An urgent alert's card (the phone gets one only as the server wrote
+      // it): on the main timeline whichever member raised it (shared
+      // isMainTimelineAlertCard), as on the computer.
+      ...(role === "participant" && row.urgentAlert && typeof row.urgentAlert.id === "string" ? { serverWriter: "server", urgentAlert: row.urgentAlert } : {}),
       ...(typeof row.workedMs === "number" ? { workedMs: row.workedMs } : {}),
       // A reply waiting behind its member's turn, and when a reply's own
       // turn began: which reply runs, and from when (sessionsMemberActivity).
