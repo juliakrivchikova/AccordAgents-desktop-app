@@ -12,8 +12,10 @@ Own the change end to end. Do not replace implementation with planning or delega
 ## Small changes
 
 For a small, isolated change, implement the fix and run the focused test or
-reproduction and any cheap checks that directly apply. Report the result.
-Start a server, browser or benchmark for a small change only when the User asks.
+reproduction and any cheap checks that directly apply. Report the result, and
+say plainly when it was not verified end to end: whoever releases it checks it
+end to end before it ships. Start a server, browser or benchmark for a small
+change only when the User asks.
 
 For broader changes, use the workflow below.
 

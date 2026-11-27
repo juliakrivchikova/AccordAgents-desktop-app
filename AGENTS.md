@@ -82,6 +82,14 @@ workflow in the running Electron app or installed PWA with the relevant services
 Report which checks ran and any verification gaps. When a change grows a payload,
 check its size on representative data and the limits at its destination.
 
+Every change is verified end to end before it ships. Whoever releases checks,
+in the running Electron app (and the installed PWA for phone changes) built from
+the commit being released, every change in the release whose author did not
+report an end-to-end check, small ones included: five focused fixes checked only
+by tests get five end-to-end checks from the releaser. A change without a report
+of its checks counts as not verified end to end. The `release-beta` skill lists
+the steps.
+
 ## Commit & Pull Request Guidelines
 
 Existing commits use short, imperative summaries such as `Add Makefile for app commands` and `Compare selected branches in diff mode`. Follow that style: describe the user-visible or technical change in one sentence.
