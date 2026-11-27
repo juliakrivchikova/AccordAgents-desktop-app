@@ -3,18 +3,20 @@ import { HoverCard } from "radix-ui";
 import { ProgressRing } from "@/components/ui/progress-ring";
 import { formatContextUsageLabel } from "../../../../shared/agentContext";
 import { savedModelId } from "../../../../shared/geminiModels";
+import type { MachineListResult } from "../../../../shared/machineLink";
 import { memberPlanUsage, planUsageHeadlineText } from "../../../../shared/planUsage";
 import type { AgentContextUsage, ChatParticipant, PlanUsageRefreshRequest, PlanUsageRefreshResult } from "../../../../shared/types";
-import { useMemberModelCatalog } from "../chat-member-model-name";
-import { defaultModelOf } from "../chat-model-access-picker";
 import { ComposerMenu } from "../composer-menu";
-import { machineIdOf, machineOf, useCliStartDefaults, useMachineList } from "../use-cli-start-defaults";
+import { cliStartDefaultsOf, machineIdOf, machineOf } from "../use-cli-start-defaults";
 import { PlanUsageCard } from "./plan-usage-card";
 import { PLAN_USAGE_KIT_TONE, PlanUsageDetail } from "./plan-usage-detail";
 import { refreshPlanUsage, usePlanUsageView } from "./use-plan-usage";
 
 interface MemberPlanUsageRingProps {
   participant: Pick<ChatParticipant, "kind" | "model" | "hostId" | "hostLabel" | "hostVendor" | "homeMachineId" | "cloudRun">;
+  machines: MachineListResult;
+  defaultModel?: string;
+  hoverSide?: "top" | "left";
   contextUsage?: AgentContextUsage;
 }
 
@@ -27,26 +29,18 @@ interface MemberPlanUsageRingProps {
  * local one's. No ring for a member without plan limits (an added provider,
  * an API key).
  */
-export const MemberPlanUsageRing = ({ participant, contextUsage }: MemberPlanUsageRingProps): JSX.Element | null => {
+export const MemberPlanUsageRing = ({ participant, machines, defaultModel, contextUsage, hoverSide = "top" }: MemberPlanUsageRingProps): JSX.Element | null => {
   const view = usePlanUsageView();
-  const machines = useMachineList();
   const [hoverOpen, setHoverOpen] = useState(false);
   const [menuOpen, setMenuOpen] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
   const [readFailed, setReadFailed] = useState<PlanUsageRefreshResult["failed"]>();
   const [openedAt, setOpenedAt] = useState(() => Date.now());
-  // The model it runs, resolved as its model picker resolves it: its own, else
-  // the one its CLI starts in where it runs (a machine's as that machine says
-  // it, which this computer's list may not have), else this computer's
-  // default. The windows and the Codex bucket that count for it follow it.
-  const { catalog } = useMemberModelCatalog(participant);
-  const start = useCliStartDefaults(participant, machines);
   const onMachine = Boolean(participant.homeMachineId || participant.cloudRun);
-  const startModel = participant.hostId ? undefined : start?.model;
-  const model = savedModelId(participant.kind, participant.model)
-    ?? (onMachine && startModel ? startModel : defaultModelOf(catalog, startModel)?.id);
   const machineId = onMachine ? machineIdOf(participant, machines) : undefined;
   const snapshots = onMachine ? (machineId ? view.machines[machineId]?.snapshots : undefined) : view.local;
+  const machineModel = onMachine ? cliStartDefaultsOf(participant, undefined, machines)?.model : undefined;
+  const model = savedModelId(participant.kind, participant.model) ?? machineModel ?? defaultModel;
   const usage = memberPlanUsage({ ...participant, model }, snapshots);
   if (usage.state === "none") return null;
 
@@ -114,7 +108,7 @@ export const MemberPlanUsageRing = ({ participant, contextUsage }: MemberPlanUsa
         </span>
       </HoverCard.Trigger>
       <HoverCard.Portal>
-        <HoverCard.Content side="top" align="end" sideOffset={8} collisionPadding={8} className="chat-agent-card plan-usage-card"
+        <HoverCard.Content side={hoverSide} align={hoverSide === "left" ? "center" : "end"} sideOffset={8} collisionPadding={8} className="chat-agent-card plan-usage-card"
           data-testid="chat-plan-usage-card">
           <PlanUsageCard usage={usage} contextLabel={contextLabel} now={openedAt} />
         </HoverCard.Content>

@@ -44,6 +44,7 @@ export const DEFAULT_SETTINGS: AppSettings = {
 };
 
 export const SIDEBAR_COLLAPSED_STORAGE_KEY = "accordagents.sidebarCollapsed";
+export const SIDEBAR_SECTIONS_STORAGE_KEY = "accordagents.sidebarSections.v1";
 export const LEGACY_SIDEBAR_WIDTH_STORAGE_KEY = "accordagents.sidebarWidth";
 export const CHAT_SIDEBAR_WIDTH_STORAGE_KEY = "accordagents.chatSidebarWidth.v2";
 export const SETTINGS_SIDEBAR_WIDTH_STORAGE_KEY = "accordagents.settingsSidebarWidth.v2";

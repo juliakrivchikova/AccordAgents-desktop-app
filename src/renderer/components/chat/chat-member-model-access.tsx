@@ -4,7 +4,7 @@ import { DotsThreeIcon } from "@phosphor-icons/react";
 import { canRestartParticipant, memberProcessRestartable } from "../../../shared/chatParticipantStatus";
 import { FORK_TO_NEW_CHAT_DETAIL, FORK_TO_NEW_CHAT_LABEL } from "../../../shared/forkToNewChat";
 import type { MemberRestartInProgress } from "../../../shared/memberRestart";
-import type { ChatParticipant } from "../../../shared/types";
+import type { AgentContextUsage, ChatParticipant } from "../../../shared/types";
 import { ChatMemberComposerControls, type ChatModelAccessAction, type ChatModelAccessPatch } from "./chat-model-access-picker";
 import { backgroundTasksStatusLabel, ChatBackgroundTasksContext, type ChatParticipantRosterStatus } from "./chat-roster-status";
 import { ComposerMenu, ComposerMenuItem, ComposerMenuSection } from "./composer-menu";
@@ -23,6 +23,7 @@ export type ChatMemberRuntimePatch = Partial<Pick<ChatParticipant,
  */
 export function ChatMemberComposerSettings(props: {
   participant: ChatParticipant;
+  contextUsage?: AgentContextUsage;
   /** Its own turn or compaction runs: its settings wait, as a CLI's apply to
    *  its next turn, but for its permission mode where its CLI takes one
    *  while it works (modeChangesWhileTurnRuns). */
@@ -64,6 +65,7 @@ export function ChatMemberComposerSettings(props: {
   return (
     <ChatMemberComposerControls
       value={value}
+      contextUsage={props.contextUsage}
       onChange={change}
       disabled={props.working}
       runsOn={{ locked: props.runLocationLocked, moves: props.runLocationMoves }}

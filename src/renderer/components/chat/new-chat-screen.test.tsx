@@ -371,6 +371,11 @@ test("a new chat that opens in the sessions view has no members picker: the comp
   assert.equal(renderer.root.findAll(hasClass("new-chat-participant-trigger")).length, 0, "no members picker");
   assert.doesNotMatch(textOf(renderer.root), /members?/i, "no member wording");
   assert.doesNotMatch(textOf(renderer.root), /@drew/, "no saved member, handle or avatar");
+  const usage = rowsOf(renderer.root, "chat-plan-usage")[0];
+  assert.ok(usage, "plan usage is available before sending the first message");
+  await click(usage);
+  assert.match(textOf(rowsOf(renderer.root, "chat-plan-usage-detail")[0]), /Codex/);
+  await click(usage);
   const chip = control(renderer.root, "model");
   assert.equal(textOf(chip), "GPT-5.5", "the CLI's default model by name");
   assert.equal(textOf(control(renderer.root, "effort")), "High", "the effort, a control of its own");
@@ -436,7 +441,11 @@ test("New chat's controls start from Settings → General → New chats; another
   installModelBridge();
   installWindowBridge({
     listProviderModels: async (kind: string) => CATALOGS[kind],
-    listMachines: async () => ({ machines: [{ id: "m-1", name: "Studio" }], status: [] })
+    listMachines: async () => ({ machines: [{ id: "m-1", name: "Studio" }], status: [] }),
+    getPlanUsage: async () => ({
+      local: [{ provider: "codex-cli", hasPlanLimits: false }],
+      machines: { "m-1": { snapshots: [{ provider: "codex-cli", plan: "Studio account", hasPlanLimits: true, windows: [], facts: [], observedAt: new Date().toISOString() }] } }
+    })
   });
   const settings: AppSettings = { ...SETTINGS, assistantProviderKind: "codex-cli",
     newChatDefaults: { kind: "codex-cli", model: "gpt-5.5-mini", reasoningEffort: "low", access: "auto-review", homeMachineId: "m-1", compactWithoutAsking: true } };
@@ -446,6 +455,8 @@ test("New chat's controls start from Settings → General → New chats; another
   assert.equal(textOf(control(renderer.root, "effort")), "Low");
   assert.equal(textOf(control(renderer.root, "mode")), "Approve for me", "Codex's own name for the mode");
   assert.equal(textOf(control(renderer.root, "runs-on")), "Studio", "the machine Settings names");
+  await click(rowsOf(renderer.root, "chat-plan-usage")[0]);
+  assert.match(textOf(rowsOf(renderer.root, "chat-plan-usage-detail")[0]), /Studio account/);
   renderer.unmount();
 
   // The chip chose Claude Code for this chat: its own model and mode; where

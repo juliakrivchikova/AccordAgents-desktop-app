@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import test from "node:test";
+import test, { beforeEach } from "node:test";
 import { act as domAct } from "react";
 import { createRoot } from "react-dom/client";
 import { act, create, type ReactTestInstance, type ReactTestRenderer } from "react-test-renderer";
@@ -12,8 +12,17 @@ import {
   useChatSearchShortcut,
   type ShortcutKeyEvent
 } from "../../app/chat-search-shortcut";
-import { Sidebar, type SidebarProps } from "./sidebar";
+import { SIDEBAR_SECTIONS_STORAGE_KEY } from "../../app/constants";
+import { DEFAULT_SIDEBAR_SECTIONS, parseSidebarSections } from "../../lib/sidebar-sections-storage";
+import { Sidebar, type ProjectSessionGroup, type SidebarProps } from "./sidebar";
 import { sidebarSessionMark } from "./sidebar-session-row";
+import { reloadSidebarSections } from "./sidebar-sections";
+
+// The folds outlive a sidebar and are saved, so each case starts as a first launch.
+beforeEach(() => {
+  window.localStorage.removeItem(SIDEBAR_SECTIONS_STORAGE_KEY);
+  reloadSidebarSections();
+});
 
 function key(overrides: Partial<ShortcutKeyEvent>): ShortcutKeyEvent {
   return { key: "k", code: "KeyK", metaKey: false, ctrlKey: false, altKey: false, shiftKey: false, ...overrides };
@@ -142,6 +151,79 @@ test("Pinned and Recents come before the projects, and Pinned only when a chat i
   assert.equal(none.root.findAllByProps({ "data-testid": "pinned-group" }).length, 0);
 });
 
+test("what the User folded stays folded through Settings and the next launch", () => {
+  const webChats = Array.from({ length: 7 }, (_, index) => summary(`web-${index}`, `Web ${index}`));
+  const props: Partial<SidebarProps> = {
+    recentSessions: [summary("web-0", "Web 0")],
+    archivedSessions: [summary("old", "Old")],
+    projectGroups: [
+      { key: "web", label: "shop-web", repoPath: "/tmp/shop-web", sessions: webChats },
+      { key: "api", label: "shop-api", repoPath: "/tmp/shop-api", sessions: [summary("api-0", "Api 0")] }
+    ]
+  };
+  const expectFolds = (renderer: ReactTestRenderer): void => {
+    assert.equal(inProject(renderer, "api", "project-toggle").props["aria-expanded"], false);
+    assert.deepEqual(rowsIn(renderer, "project"), webChats.map((chat) => chat.id), "shop-web keeps all its chats shown, shop-api stays folded");
+    assert.deepEqual(rowsIn(renderer, "recent"), []);
+    assert.deepEqual(rowsIn(renderer, "archived"), ["old"]);
+  };
+
+  const before = renderSidebar(props);
+  act(() => inProject(before, "api", "project-toggle").props.onClick());
+  act(() => inProject(before, "web", "project-show-more").props.onClick());
+  act(() => byTestId(before, "recents-group-toggle").props.onClick());
+  act(() => byTestId(before, "archived-toggle").props.onClick());
+  // Opening Settings unmounts the chats sidebar; coming back mounts a new one.
+  act(() => before.unmount());
+  const afterSettings = renderSidebar(props);
+  expectFolds(afterSettings);
+
+  act(() => afterSettings.unmount());
+  // A new launch knows only what was saved.
+  reloadSidebarSections();
+  const reopened = renderSidebar(props);
+  expectFolds(reopened);
+  act(() => inProject(reopened, "web", "project-show-less").props.onClick());
+  act(() => reopened.unmount());
+  reloadSidebarSections();
+  assert.deepEqual(rowsIn(renderSidebar(props), "project"), webChats.slice(0, 5).map((chat) => chat.id));
+});
+
+test("a project that goes away leaves the other projects' folds alone", () => {
+  const webChats = Array.from({ length: 7 }, (_, index) => summary(`web-${index}`, `Web ${index}`));
+  const groups: ProjectSessionGroup[] = [
+    { key: "web", label: "shop-web", repoPath: "/tmp/shop-web", sessions: webChats },
+    { key: "api", label: "shop-api", repoPath: "/tmp/shop-api", sessions: [summary("api-0", "Api 0")] },
+    { key: "docs", label: "shop-docs", repoPath: "/tmp/shop-docs", sessions: [summary("docs-0", "Docs 0")] }
+  ];
+  const withoutApi = groups.filter((group) => group.key !== "api");
+  const expectFolds = (renderer: ReactTestRenderer): void => {
+    assert.equal(inProject(renderer, "docs", "project-toggle").props["aria-expanded"], false);
+    assert.deepEqual(rowsIn(renderer, "project"), webChats.map((chat) => chat.id));
+  };
+
+  const renderer = renderSidebar({ projectGroups: groups });
+  act(() => inProject(renderer, "api", "project-toggle").props.onClick());
+  act(() => inProject(renderer, "docs", "project-toggle").props.onClick());
+  act(() => inProject(renderer, "web", "project-show-more").props.onClick());
+  act(() => renderer.update(sidebarElement({ projectGroups: withoutApi })));
+  expectFolds(renderer);
+
+  act(() => renderer.unmount());
+  reloadSidebarSections();
+  expectFolds(renderSidebar({ projectGroups: withoutApi }));
+});
+
+test("a damaged saved sidebar falls back, part by part, to how a new window shows it", () => {
+  assert.deepEqual(parseSidebarSections(null), DEFAULT_SIDEBAR_SECTIONS);
+  assert.deepEqual(parseSidebarSections("{"), DEFAULT_SIDEBAR_SECTIONS);
+  assert.deepEqual(parseSidebarSections("[\"/tmp/shop-web\"]"), DEFAULT_SIDEBAR_SECTIONS);
+  assert.deepEqual(
+    parseSidebarSections(JSON.stringify({ collapsedProjectKeys: ["/tmp/shop-web", 3], recentsCollapsed: true, archivedCollapsed: "no" })),
+    { ...DEFAULT_SIDEBAR_SECTIONS, collapsedProjectKeys: new Set(["/tmp/shop-web"]), recentsCollapsed: true }
+  );
+});
+
 test("a chat row shows one mark: work, else a waiting question, else something new, else none", () => {
   assert.equal(sidebarSessionMark({ working: true, waitingChoice: true, unread: true }), "working");
   assert.equal(sidebarSessionMark({ working: false, waitingChoice: true, unread: true }), "waiting");
@@ -162,29 +244,45 @@ test("a chat row shows one mark: work, else a waiting question, else something n
   assert.equal(row("asks").findAll((node) => node.props["data-testid"] === "session-waiting-mark").length, 1);
 });
 
+function sidebarElement(overrides: Partial<SidebarProps>): JSX.Element {
+  return (
+    <Sidebar
+      projectGroups={[{
+        key: "repo",
+        label: "shop-web",
+        repoPath: "/tmp/shop-web",
+        sessions: [summary("chat-1", "Checkout retry flow")]
+      }]}
+      macShortcuts
+      onOpenSearch={() => undefined}
+      onOpenSettings={() => undefined}
+      onSelect={() => undefined}
+      onNewSession={() => undefined}
+      onNewProjectSession={() => undefined}
+      {...overrides}
+    />
+  );
+}
+
 function renderSidebar(overrides: Partial<SidebarProps>): ReactTestRenderer {
   let renderer: ReactTestRenderer | undefined;
   act(() => {
-    renderer = create(
-      <Sidebar
-        projectGroups={[{
-          key: "repo",
-          label: "shop-web",
-          repoPath: "/tmp/shop-web",
-          sessions: [summary("chat-1", "Checkout retry flow")]
-        }]}
-        macShortcuts
-        onOpenSearch={() => undefined}
-        onOpenSettings={() => undefined}
-        onSelect={() => undefined}
-        onNewSession={() => undefined}
-        onNewProjectSession={() => undefined}
-        {...overrides}
-      />
-    );
+    renderer = create(sidebarElement(overrides));
   });
   assert.ok(renderer);
   return renderer;
+}
+
+function inProject(renderer: ReactTestRenderer, key: string, testId: string): ReactTestInstance {
+  return renderer.root
+    .find((node) => node.props["data-testid"] === "project-group" && node.props["data-project-key"] === key)
+    .find((node) => typeof node.type === "string" && node.props["data-testid"] === testId);
+}
+
+function rowsIn(renderer: ReactTestRenderer, section: string): string[] {
+  return renderer.root
+    .findAll((node) => typeof node.type === "string" && node.props["data-testid"] === "project-session" && node.props["data-section"] === section)
+    .map((node) => node.props["data-conversation-id"] as string);
 }
 
 function byTestId(renderer: ReactTestRenderer, testId: string): ReactTestInstance {

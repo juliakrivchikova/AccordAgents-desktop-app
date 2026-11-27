@@ -51,6 +51,37 @@ const SETTINGS = { chatRoleConfigs: [], chatSavedPrompts: [], chatParticipantCon
   get: (_target, name) => (String(name).startsWith("on") ? () => noop : async () => undefined)
 });
 
+test("provider rings follow the main session's machine and skip its inherited custom host", async () => {
+  const host = window as unknown as { consensus: unknown };
+  const bridge = host.consensus;
+  const snapshot = { provider: "codex-cli", hasPlanLimits: true, observedAt: new Date().toISOString(), windows: [], facts: [] };
+  host.consensus = {
+    listMachines: async () => ({ machines: [{ id: "studio", name: "Studio", lastHello: {
+      providers: [{ kind: "codex-cli", installed: true }, { kind: "claude-code", installed: true }]
+    } }], status: [] }),
+    getPlanUsage: async () => ({
+      local: [{ ...snapshot, plan: "Laptop account" }],
+      machines: { studio: { snapshots: [{ ...snapshot, plan: "Studio account" }] } }
+    })
+  };
+  let renderer: ReturnType<typeof create> | undefined;
+  try {
+    await act(async () => {
+      renderer = create(<TooltipProvider><ChatMembersPanel rows={{ current: [], previous: [] }}
+        subagents={{ main: { kind: "claude-code", hostId: "custom", homeMachineId: "studio" } }}
+        activity={sessionsMemberActivity([])} runIdsByParticipantId={new Map()} memberTitle={() => ""} onOpenMember={noop} onClose={noop} /></TooltipProvider>);
+    });
+    const rows = renderer!.root.findAll(byTestId("chat-subagent"));
+    const row = (kind: string) => rows.find((item) => item.props["data-provider-kind"] === kind)!;
+    assert.equal(row("claude-code").findAll(byTestId("chat-plan-usage")).length, 0);
+    act(() => row("codex-cli").find(byTestId("chat-plan-usage")).props.onClick());
+    assert.match(textOf(row("codex-cli").find(byTestId("chat-plan-usage-detail"))), /Studio account/);
+  } finally {
+    act(() => renderer?.unmount());
+    host.consensus = bridge;
+  }
+});
+
 test("the side panel lists every session but the main session as T3 Code does: glyph and state dot, task title, model name and time, Stop per row only", async () => {
   const messages = sessionsMessages();
   // drew runs on Claude Code's "opus": the row names the model as the CLI's list does.
@@ -515,6 +546,14 @@ test("the side panel has no title and no main session row, says nothing when emp
   };
   const listed = agentsPanel(["claude-code", "codex-cli"]);
   assert.deepEqual(listed.root.findAll(byTestId("chat-subagent")).map((row) => row.props["data-provider-kind"]), ["claude-code", "codex-cli"]);
+  for (const row of listed.root.findAll(byTestId("chat-subagent"))) {
+    const ring = row.find(byTestId("chat-plan-usage"));
+    act(() => ring.props.onClick());
+    const detail = row.find(byTestId("chat-plan-usage-detail"));
+    assert.match(textOf(detail), row.props["data-provider-kind"] === "claude-code" ? /Claude Code usage/ : /Codex usage/);
+    assert.equal(row.find(byTestId("chat-subagent-toggle")).props["aria-expanded"], false);
+    act(() => ring.props.onClick());
+  }
   assert.equal(listed.root.findAll(byTestId("chat-subagent-add")).length, 0, "nothing to add");
   assert.equal(listed.root.findAll(byTestId("chat-subagents-empty")).length, 0);
   act(() => listed.unmount());
@@ -552,7 +591,7 @@ test("a member's settings in the sessions view: separate quiet controls (model, 
     });
     const root = renderer!.root;
     assert.deepEqual(root.findAll((node) => node.type === "button" && node.props["aria-haspopup"] === "menu").map((node) => node.props["data-testid"]),
-      ["chat-model-model", "chat-model-effort", "chat-model-mode"], "three separate controls, each opening its own menu");
+      ["chat-plan-usage", "chat-model-model", "chat-model-effort", "chat-model-mode"], "usage and settings each open their own menu");
     assert.equal(root.findAll(byTestId("chat-model-runs-on")).length, 0, "where it runs only once a machine exists");
     assert.equal(textOf(root.find(byTestId("chat-model-mode"))), "Read Only", "the preset it is in, by Codex's name");
     assert.equal(root.findAll(byTestId("chat-model-model-menu")).length, 0, "menus are closed");

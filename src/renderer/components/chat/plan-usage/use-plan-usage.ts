@@ -23,13 +23,17 @@ function subscribe(listener: () => void): () => void {
   if (!stopListening) {
     let changed = false;
     // Component tests mount composers without the whole bridge.
-    const bridge = window.consensus as Partial<typeof window.consensus> | undefined;
-    stopListening = bridge?.onPlanUsageChanged?.((next) => {
+    const bridge = globalThis.window?.consensus;
+    const off = bridge?.onPlanUsageChanged?.((next) => {
       changed = true;
       publish(next);
-    }) ?? (() => undefined);
+    });
+    stopListening = () => {
+      changed = true;
+      off?.();
+    };
     void bridge?.getPlanUsage?.().then((view) => {
-      if (!changed) publish(view);
+      if (view && !changed) publish(view);
     }).catch(() => undefined);
   }
   return () => {
@@ -42,14 +46,14 @@ function subscribe(listener: () => void): () => void {
 }
 
 export function usePlanUsageView(): PlanUsageView {
-  return useSyncExternalStore(subscribe, () => current);
+  return useSyncExternalStore(subscribe, () => current, () => EMPTY_PLAN_USAGE_VIEW);
 }
 
 /** Asks for a fresh read (a card opened, Refresh); the answer arrives as a
  *  change. Resolves when the read ended, whatever it found, saying why a
  *  machine's could not be read. */
 export async function refreshPlanUsage(request: PlanUsageRefreshRequest): Promise<PlanUsageRefreshResult["failed"]> {
-  const bridge = window.consensus as Partial<typeof window.consensus> | undefined;
+  const bridge = globalThis.window?.consensus;
   const result = await bridge?.refreshPlanUsage?.(request).catch(() => undefined);
   if (result?.view) publish(result.view);
   return result ? result.failed : request.machineId ? "server-unreachable" : undefined;

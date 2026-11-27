@@ -11,6 +11,7 @@ import type { ConversationSummary } from "../../../shared/types";
 import { SidebarSessionRow } from "./sidebar-session-row";
 import { openCliImport } from "../cli-import/cli-import-store";
 import { SidebarNavItem } from "./sidebar-nav-item";
+import { updateSidebarSections, useSidebarSections, withKeyToggled } from "./sidebar-sections";
 import { chatSearchShortcutAria, chatSearchShortcutLabel } from "../../app/chat-search-shortcut";
 import { isMacPlatform } from "../../lib/platform";
 
@@ -76,28 +77,16 @@ export const Sidebar = ({
   onToggleSidebar,
   footerActions
 }: SidebarProps): JSX.Element => {
-  const [collapsedProjectKeys, setCollapsedProjectKeys] = useState<Set<string>>(new Set());
-  const [pinnedCollapsed, setPinnedCollapsed] = useState(false);
-  const [recentsCollapsed, setRecentsCollapsed] = useState(false);
-  const [expandedProjectKeys, setExpandedProjectKeys] = useState<Set<string>>(new Set());
-  const [archivedCollapsed, setArchivedCollapsed] = useState(true);
+  const { collapsedProjectKeys, expandedProjectKeys, pinnedCollapsed, recentsCollapsed, archivedCollapsed } = useSidebarSections();
   const [deleteTarget, setDeleteTarget] = useState<ConversationSummary>();
   const [deletePending, setDeletePending] = useState(false);
 
   function toggleProject(key: string): void {
-    setCollapsedProjectKeys((current) => {
-      const next = new Set(current);
-      if (next.has(key)) {
-        next.delete(key);
-      } else {
-        next.add(key);
-      }
-      return next;
-    });
+    updateSidebarSections((sections) => ({ collapsedProjectKeys: withKeyToggled(sections.collapsedProjectKeys, key) }));
   }
 
-  function showMoreSessions(key: string): void {
-    setExpandedProjectKeys((current) => new Set(current).add(key));
+  function toggleAllSessions(key: string): void {
+    updateSidebarSections((sections) => ({ expandedProjectKeys: withKeyToggled(sections.expandedProjectKeys, key) }));
   }
 
   /** One chat's row: the same chat may be listed under Pinned, Recents and
@@ -171,12 +160,12 @@ export const Sidebar = ({
       <ScrollArea className="min-h-0 min-w-0 flex-1 px-2 pb-2">
         <div className="flex min-w-0 flex-col gap-1 pt-1">
           {pinnedSessions.length > 0 && (
-            <SidebarSection label="Pinned" testId="pinned-group" open={!pinnedCollapsed} onOpenChange={(open) => setPinnedCollapsed(!open)}>
+            <SidebarSection label="Pinned" testId="pinned-group" open={!pinnedCollapsed} onOpenChange={(open) => updateSidebarSections(() => ({ pinnedCollapsed: !open }))}>
               {pinnedSessions.map((summary) => renderSessionRow(summary, "pinned"))}
             </SidebarSection>
           )}
           {recentSessions.length > 0 && (
-            <SidebarSection label="Recents" testId="recents-group" open={!recentsCollapsed} onOpenChange={(open) => setRecentsCollapsed(!open)}>
+            <SidebarSection label="Recents" testId="recents-group" open={!recentsCollapsed} onOpenChange={(open) => updateSidebarSections(() => ({ recentsCollapsed: !open }))}>
               {recentSessions.map((summary) => renderSessionRow(summary, "recent"))}
             </SidebarSection>
           )}
@@ -204,7 +193,7 @@ export const Sidebar = ({
               const collapsed = collapsedProjectKeys.has(group.key);
               const expanded = expandedProjectKeys.has(group.key);
               const visibleSessions = expanded ? group.sessions : group.sessions.slice(0, INITIAL_PROJECT_SESSION_LIMIT);
-              const hiddenCount = group.sessions.length - visibleSessions.length;
+              const extraCount = group.sessions.length - INITIAL_PROJECT_SESSION_LIMIT;
               return (
                 // The project's row and its chats' rows keep the same 1px gap
                 // between them, so two highlighted rows never touch.
@@ -230,14 +219,15 @@ export const Sidebar = ({
                     {!collapsed && (
                       <div className={GROUP_BODY}>
                         {visibleSessions.map((summary) => renderSessionRow(summary, "project"))}
-                        {hiddenCount > 0 && (
+                        {extraCount > 0 && (
                           <button
                             type="button"
-                            onClick={() => showMoreSessions(group.key)}
-                            data-testid="project-show-more"
+                            onClick={() => toggleAllSessions(group.key)}
+                            aria-expanded={expanded}
+                            data-testid={expanded ? "project-show-less" : "project-show-more"}
                             className={cn(ROW, "pl-7 text-ui-12 text-ui-text-3 hover:text-ui-text-2")}
                           >
-                            Show {hiddenCount} more
+                            {expanded ? "Show less" : `Show ${extraCount} more`}
                           </button>
                         )}
                       </div>
@@ -249,7 +239,7 @@ export const Sidebar = ({
 
           {archivedSessions.length > 0 && (
             <section className="mt-1 min-w-0" data-testid="archived-group">
-                  <button type="button" onClick={() => setArchivedCollapsed((current) => !current)} aria-expanded={!archivedCollapsed} data-testid="archived-toggle" className={SECTION_TOGGLE}>
+                  <button type="button" onClick={() => updateSidebarSections((sections) => ({ archivedCollapsed: !sections.archivedCollapsed }))} aria-expanded={!archivedCollapsed} data-testid="archived-toggle" className={SECTION_TOGGLE}>
                     <span className="min-w-0 flex-1 truncate">Archived</span>
                     <CaretRightIcon className={cn(CARET, !archivedCollapsed && "rotate-90")} aria-hidden />
                     <span className="tabular-nums text-ui-11 font-normal">{archivedSessions.length}</span>

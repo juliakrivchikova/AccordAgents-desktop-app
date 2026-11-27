@@ -4,7 +4,6 @@ import { memberSessionMoves } from "../../shared/memberSessionMove";
 import { restartingMembers } from "../../shared/memberRestart";
 import { ChatMemberActionsMenu, ChatMemberComposerSettings, memberSettingsActions } from "../components/chat/chat-member-model-access";
 import { chatContextUsageByParticipant } from "../components/chat/chat-message-metadata";
-import { MemberPlanUsageRing } from "../components/chat/plan-usage/plan-usage-ring";
 import type { MainSessionActions } from "../components/chat/chat-view-switch";
 import type { useAppViewModel } from "./use-app-view-model";
 import type { ChatActions } from "./use-chat-actions";
@@ -47,19 +46,16 @@ export function sessionsMemberSettings(input: {
       if (!conversation || !participant) return null;
       const status = view.participantStatusById.get(memberId);
       const hasRun = view.participantHasRunById.get(memberId) === true;
-      // Its plan usage ring left of its model (the User, 2026-11-27).
       return (
-        <>
-          <MemberPlanUsageRing participant={participant} contextUsage={chatContextUsageByParticipant(conversation).get(memberId)} />
-          <ChatMemberComposerSettings
-            participant={participant}
-            working={status === "running" || status === "compacting"}
-            runLocationLocked={hasRun && !memberSessionMoves(participant)}
-            runLocationMoves={hasRun && memberSessionMoves(participant)}
-            mainSession={mainId && mainId !== memberId ? memberOf(mainId) : undefined}
-            onUpdate={(participantId, patch) => chatActions.updateChatParticipantRuntime(participantId, patch)}
-          />
-        </>
+        <ChatMemberComposerSettings
+          participant={participant}
+          contextUsage={chatContextUsageByParticipant(conversation).get(memberId)}
+          working={status === "running" || status === "compacting"}
+          runLocationLocked={hasRun && !memberSessionMoves(participant)}
+          runLocationMoves={hasRun && memberSessionMoves(participant)}
+          mainSession={mainId && mainId !== memberId ? memberOf(mainId) : undefined}
+          onUpdate={(participantId, patch) => chatActions.updateChatParticipantRuntime(participantId, patch)}
+        />
       );
     },
     actions: (memberId) => {
