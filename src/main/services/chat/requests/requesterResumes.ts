@@ -315,8 +315,11 @@ export class RequesterResumes {
       this.chat.participantRequests.startDeferredParticipantRequestRunners(conversation.id, participantRequestsToRun);
       await this.chat.chatHistory.ensureHistoryFiles(conversation);
     } catch (error) {
+      // Stopped while it waited its turn (TurnQueue: "Chat run cancelled."):
+      // a request waiting on this requester's answer ends stopped.
+      const stopped = error instanceof Error && error.message === "Chat run cancelled.";
       for (const requestMessageId of requestMessageIds) {
-        markParticipantRequestAutoResumeFailed(conversation, requestMessageId, error);
+        markParticipantRequestAutoResumeFailed(conversation, requestMessageId, error, stopped);
       }
       emitChatRunFailure(resumeRunId, progress, error);
       throw error;

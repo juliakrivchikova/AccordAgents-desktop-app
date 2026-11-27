@@ -1,7 +1,6 @@
 import type { ChatMessage, ChatParticipantRequestBatch, ChatParticipantRequestItem, Conversation } from "../../../../shared/types";
-import { readActiveRunIds } from "../../../../shared/chatRunState";
 import { APP_PERMISSIONS_REQUEST_CHANGE_TOOL } from "../../appMcp";
-import { chatAppToolApprovals, permissionApprovalResumeRunId } from "../approvals/approvalRecords";
+import { chatAppToolApprovals } from "../approvals/approvalRecords";
 import { PARTICIPANT_REQUEST_INTERRUPTED_BEFORE_COMPLETION } from "../constants";
 import { chatParticipants } from "../members/identity";
 import { isOpenParticipantRequestStatus, rollupParticipantRequestStatus, updateParticipantRequestBatch } from "./requestRecords";
@@ -137,31 +136,49 @@ export function repliesAnswering(
   return { finished, running };
 }
 
-/** How long after the User approved a member's permission card its resumed
- *  turn is waited for before it is asked (its run is live from then on); one
- *  that is never asked must not hold the request. */
-const APPROVED_CARD_RESUME_GRACE_MS = 60_000;
+/** Permission cards the member raised in a turn that answers the request:
+ *  `waiting` while one still waits for the User, or was approved and no reply
+ *  of the member's to the request came after (its resumed turn, or another
+ *  card's on the same turn) since it was raised, for at most a day after
+ *  she approved it (its device may be asleep or stopped then); `leftUnanswered` once an approved one went a
+ *  day with none (its resume never came: the request ends interrupted). */
+export function permissionCardsAnswering(
+  conversation: Conversation,
+  memberId: string,
+  requestMessageId: string,
+  byId: MessagesById,
+  now = Date.now()
+): { waiting: boolean; leftUnanswered: boolean } {
+  let waiting = false;
+  let leftUnanswered = false;
+  let replyTimes: string[] | undefined;
+  const repliedAfter = (at: string): boolean => {
+    replyTimes ??= conversation.messages.filter((message) => message.role === "participant" && message.participantId === memberId &&
+      message.metadata?.runId && !message.metadata.participantRequest &&
+      requestAnsweredByTurn(conversation, memberId, message.metadata.sourceMessageId, byId)?.id === requestMessageId).map((message) => message.createdAt);
+    return replyTimes.some((createdAt) => createdAt > at);
+  };
+  for (const approval of chatAppToolApprovals(conversation)) {
+    if (approval.toolName !== APP_PERMISSIONS_REQUEST_CHANGE_TOOL || approval.requesterParticipantId !== memberId) continue;
+    if (approval.status !== "pending" && approval.status !== "approved") continue;
+    if (requestAnsweredByTurn(conversation, memberId, approval.resumeContext?.triggerMessageId, byId)?.id !== requestMessageId) continue;
+    if (approval.status === "pending") {
+      waiting = true;
+      continue;
+    }
+    // A reply to the request written after the card was raised (its
+    // resumed turn's, or another card's on the same turn) answers it.
+    if (repliedAfter(approval.createdAt)) continue;
+    if (now - Date.parse(approval.updatedAt) < OWN_REQUEST_STALE_MS) waiting = true;
+    else leftUnanswered = true;
+  }
+  return { waiting, leftUnanswered };
+}
 
-/** A permission card the member raised in a turn that answers the request,
- *  still waiting for the User, or approved and its resumed turn not begun
- *  yet: that turn's reply answers. */
+/** Whether a permission card in a turn answering the request still holds it
+ *  (permissionCardsAnswering). */
 export function permissionCardAnswering(conversation: Conversation, memberId: string, requestMessageId: string, byId: MessagesById, now = Date.now()): boolean {
-  return chatAppToolApprovals(conversation).some((approval) => {
-    if (approval.toolName !== APP_PERMISSIONS_REQUEST_CHANGE_TOOL || approval.requesterParticipantId !== memberId) return false;
-    const resumeRunId = permissionApprovalResumeRunId(approval.id);
-    const trigger = approval.resumeContext?.triggerMessageId;
-    // Approved: until its resumed turn's reply exists, while that turn is
-    // asked (its run is live here, or its line "Auto-resumed … after
-    // permission approval." is written, on whichever device; at most a day,
-    // as any wait), or for a short grace before it is.
-    const waitsForTurn = approval.status === "pending" || (approval.status === "approved" &&
-      !conversation.messages.some((message) => message.participantId === memberId && message.metadata?.runId === resumeRunId) &&
-      (readActiveRunIds(conversation.metadata).includes(resumeRunId) || now - Date.parse(approval.updatedAt) < APPROVED_CARD_RESUME_GRACE_MS ||
-        conversation.messages.some((message) => message.role === "system" && message.metadata?.sourceMessageId === trigger &&
-          message.content.includes("after permission approval.") && message.createdAt >= approval.updatedAt &&
-          now - Date.parse(message.createdAt) < OWN_REQUEST_STALE_MS)));
-    return waitsForTurn && requestAnsweredByTurn(conversation, memberId, approval.resumeContext?.triggerMessageId, byId)?.id === requestMessageId;
-  });
+  return permissionCardsAnswering(conversation, memberId, requestMessageId, byId, now).waiting;
 }
 
 /** Whether `reply` is not yet the member's answer to the request because it

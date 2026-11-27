@@ -89,6 +89,12 @@ export class ChatService {
     return this.modules.activeRuns.liveRunIds();
   }
 
+  /** A member's wait on its own requests runs here (not live work: a
+   *  restart arms it again; but a machine hosting one does not idle-stop). */
+  hasWaitOnlyWork(): boolean {
+    return this.modules.activeRuns.hasWaitOnlyWork();
+  }
+
   /** Turns the server asked of members here that this device took and that
    *  are not over: from before they become a run (reading the chat,
    *  preparing the machine) to their end. */

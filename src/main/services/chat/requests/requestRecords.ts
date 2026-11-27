@@ -669,7 +669,7 @@ export function pendingParticipantRequestApprovalTargetIds(
   return targetIds;
 }
 
-export function markParticipantRequestAutoResumeFailed(conversation: Conversation, requestMessageId: string, error: unknown): void {
+export function markParticipantRequestAutoResumeFailed(conversation: Conversation, requestMessageId: string, error: unknown, stopped = false): void {
   const message = error instanceof Error ? error.message : String(error);
   const now = new Date().toISOString();
   updateParticipantRequestBatch(conversation, requestMessageId, (batch) => ({
@@ -677,7 +677,7 @@ export function markParticipantRequestAutoResumeFailed(conversation: Conversatio
     status: "failed",
     updatedAt: now,
     error: message || "Requester auto-resume failed before completion.",
-    requesterResumeEnded: { reason: "failed", error: message || "Requester auto-resume failed before completion.", at: now }
+    requesterResumeEnded: stopped ? { reason: "stopped", at: now } : { reason: "failed", error: message || "Requester auto-resume failed before completion.", at: now }
   }));
   conversation.updatedAt = new Date().toISOString();
 }

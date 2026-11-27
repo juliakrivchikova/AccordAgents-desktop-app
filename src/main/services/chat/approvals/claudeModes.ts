@@ -202,7 +202,9 @@ export class ClaudeModes {
     const pendingById = new Map(conversation.messages.map((message) => [message.id, message]));
     const runIds: string[] = [];
     for (const [runId, meta] of this.chat.activeRuns.chatRunMeta) {
-      if (meta.conversationId !== conversation.id || meta.participantId !== participantId || !this.chat.activeRuns.chatRunControllers.has(runId)) continue;
+      // A run that only waits on the member's own requests writes nothing.
+      if (meta.conversationId !== conversation.id || meta.participantId !== participantId || !this.chat.activeRuns.chatRunControllers.has(runId) ||
+        this.chat.activeRuns.waitOnlyRunIds.has(runId)) continue;
       const pending = meta.pendingMessageId ? pendingById.get(meta.pendingMessageId) : undefined;
       if (pending?.metadata?.turnQueued || pending?.metadata?.queuedBehind) continue;
       runIds.push(runId);

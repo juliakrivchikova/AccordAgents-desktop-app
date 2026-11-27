@@ -54,7 +54,25 @@ export class ActiveRuns {
    *  so now: a restart loses nothing (the wait is armed again at the next
    *  start), so they hold no update, idle stop or restart of the member. */
   readonly waitOnlyRunIds = new Set<string>();
-  readonly waitOnlyRequests = new Set<string>();
+  /** How many waits of each request (one per target that waits). */
+  private readonly waitOnlyRequestCounts = new Map<string, number>();
+
+  beginWaitOnly(requestMessageId: string): void {
+    this.waitOnlyRequestCounts.set(requestMessageId, (this.waitOnlyRequestCounts.get(requestMessageId) ?? 0) + 1);
+  }
+
+  endWaitOnly(requestMessageId: string): void {
+    const left = (this.waitOnlyRequestCounts.get(requestMessageId) ?? 1) - 1;
+    if (left > 0) this.waitOnlyRequestCounts.set(requestMessageId, left);
+    else this.waitOnlyRequestCounts.delete(requestMessageId);
+  }
+
+  /** Whether a member's wait on its own requests runs here: a machine
+   *  that hosts one stays on (its requester is resumed only from here, and
+   *  nothing else wakes the machine for the member's answer). */
+  hasWaitOnlyWork(): boolean {
+    return this.waitOnlyRunIds.size > 0 || this.waitOnlyRequestCounts.size > 0;
+  }
 
   activeParticipantRuns(): ChatParticipantRun[] {
     return [...this.chatRunMeta.entries()].filter(([runId]) => !this.waitOnlyRunIds.has(runId)).map(([runId, meta]) => ({ runId, ...meta }));
@@ -66,7 +84,7 @@ export class ActiveRuns {
     // A member request still collecting answers counts too: its requester
     // waits for them in the background, and a restart would lose that wait.
     const requestRunners = [...this.chat.participantRequests.participantRequestRunners.keys()]
-      .filter((id) => !this.waitOnlyRequests.has(id)).map((id) => `participant-request:${id}`);
+      .filter((id) => !this.waitOnlyRequestCounts.has(id)).map((id) => `participant-request:${id}`);
     return [...new Set([...this.activeRunIds, ...this.chatRunMeta.keys(), ...requestRunners])].filter((id) => !this.waitOnlyRunIds.has(id));
   }
 

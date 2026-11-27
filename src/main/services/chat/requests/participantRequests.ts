@@ -682,10 +682,10 @@ export class ParticipantRequests {
   resumeOwnRequestWait(conversationId: string, requestMessageId: string): void {
     if (this.participantRequestRunners.has(requestMessageId)) return;
     this.chat.activeRuns.incrementBackgroundRunner(conversationId);
-    this.chat.activeRuns.waitOnlyRequests.add(requestMessageId);
+    this.chat.activeRuns.beginWaitOnly(requestMessageId);
     const waited = this.waitOnOwnRequestsAgain(conversationId, requestMessageId).finally(() => {
       this.participantRequestRunners.delete(requestMessageId);
-      this.chat.activeRuns.waitOnlyRequests.delete(requestMessageId);
+      this.chat.activeRuns.endWaitOnly(requestMessageId);
       this.chat.activeRuns.decrementBackgroundRunner(conversationId);
     });
     const runner = waited.then((outcome) => outcome.result);
@@ -757,7 +757,7 @@ export class ParticipantRequests {
     if (options.parentSignal?.aborted) controller.abort();
     else options.parentSignal?.addEventListener("abort", abort, { once: true });
     this.chat.activeRuns.waitOnlyRunIds.add(runId);
-    this.chat.activeRuns.waitOnlyRequests.add(requestMessageId);
+    this.chat.activeRuns.beginWaitOnly(requestMessageId);
     this.chat.activeRuns.registerTargetRun(runId, controller, { conversationId: conversation.id, participantId: target.id, participantHandle: target.handle });
     let begun = false;
     try {
@@ -770,7 +770,7 @@ export class ParticipantRequests {
       if (begun) await this.chat.activeRuns.endChatRun(conversation, runId);
       this.chat.activeRuns.unregisterTargetRun(runId, controller);
       this.chat.activeRuns.waitOnlyRunIds.delete(runId);
-      this.chat.activeRuns.waitOnlyRequests.delete(requestMessageId);
+      this.chat.activeRuns.endWaitOnly(requestMessageId);
     }
   }
 

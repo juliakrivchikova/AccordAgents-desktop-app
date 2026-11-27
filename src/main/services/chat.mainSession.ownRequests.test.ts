@@ -9,7 +9,7 @@ import { PARTICIPANT_REQUEST_CUT_BY_SEND_NOW, PARTICIPANT_REQUEST_INTERRUPTED_BE
 import {
   clone, GENERIC_ROLE, mainActor, mainSession, mainSessionChat, member, NOW, permissions, resumesOf, sessionRecord, testService, waitFor
 } from "./chat/test/mainSessionFixtures";
-import { messagesById, ownRequestsAnswering, permissionCardAnswering, requestAnsweredByTurn } from "./chat/requests/ownRequests";
+import { messagesById, ownRequestsAnswering, permissionCardAnswering, permissionCardsAnswering, requestAnsweredByTurn } from "./chat/requests/ownRequests";
 import { permissionApprovalResumeRunId } from "./chat/approvals/approvalRecords";
 import { markParticipantRequestAutoResumeFailed } from "./chat/requests/requestRecords";
 
@@ -737,7 +737,7 @@ test("a quit while the member's question waits on the User's card leaves the car
   assert.equal(resumesOf(next.runs, "main-id").filter((run) => run.prompt.includes("Auto-resumed @main after member request.\nTarget replies")).length, 1);
 });
 
-test("an approved permission card holds the task only until its resumed turn begins, or a minute at most", () => {
+test("an approved permission card holds the task until a reply to it comes after the card, at most a day; with none by then the task ends", () => {
   const conversation = machineMemberChat({ items: "answered", status: "completed" });
   const at = Date.now();
   conversation.metadata.pendingAppToolApprovals = [{
@@ -747,14 +747,12 @@ test("an approved permission card holds the task only until its resumed turn beg
     resumeContext: { runId: "remote-run-1", triggerMessageId: "task", participantRequestBatchId: "task-batch" }
   }] as any;
   const byId = messagesById(conversation);
-  assert.equal(permissionCardAnswering(conversation, "remote-id", "task", byId, at + 30_000), true, "approved, its turn not begun");
-  assert.equal(permissionCardAnswering(conversation, "remote-id", "task", byId, at + 61_000), false, "its turn never began");
-  conversation.messages.push({ id: "resumed", role: "participant", participantId: "remote-id", content: "", createdAt: new Date(at).toISOString(), status: "pending",
+  assert.deepEqual(permissionCardsAnswering(conversation, "remote-id", "task", byId, at + 10 * 60_000), { waiting: true, leftUnanswered: false }, "its device slow to take it");
+  assert.deepEqual(permissionCardsAnswering(conversation, "remote-id", "task", byId, at + 25 * 60 * 60_000), { waiting: false, leftUnanswered: true }, "never resumed");
+  conversation.messages.push({ id: "resumed", role: "participant", participantId: "remote-id", content: "", createdAt: new Date(at + 1000).toISOString(), status: "pending",
     metadata: { sourceMessageId: "task", runId: permissionApprovalResumeRunId("card") } } as ChatMessage);
-  assert.equal(permissionCardAnswering(conversation, "remote-id", "task", messagesById(conversation), at + 30_000), false, "its turn began: that reply holds it now");
+  assert.deepEqual(permissionCardsAnswering(conversation, "remote-id", "task", messagesById(conversation), at + 10 * 60_000), { waiting: false, leftUnanswered: false }, "a reply came after it");
 });
-
-// --- second review pass -------------------------------------------------------
 
 test("a restart more than a day after the member's resume was cut short ends the task interrupted and wakes nobody", async () => {
   const conversation = machineMemberChat({ items: "answered", status: "resuming_requester", ageMs: 26 * 60 * 60_000, local: true });
@@ -796,7 +794,7 @@ test("a resumed reply cut for a message delivered now ends the task as its first
   assert.equal(itemOf(storage.current, "main-id")!.error, PARTICIPANT_REQUEST_CUT_BY_SEND_NOW);
 });
 
-test("an approved card holds the task while its resumed turn is asked and queued, past the grace", () => {
+test("an approved card holds the task past a minute while no reply to it came (its turn queued behind another)", () => {
   const conversation = machineMemberChat({ items: "answered", status: "completed" });
   const at = Date.now();
   conversation.metadata.pendingAppToolApprovals = [{
@@ -809,7 +807,7 @@ test("an approved card holds the task while its resumed turn is asked and queued
   assert.equal(permissionCardAnswering(conversation, "remote-id", "task", messagesById(conversation), at + 5 * 60_000), true);
 });
 
-test("a member that only waits on its own question holds no update or idle stop and can be restarted or moved; it still shows working with its Stop", async () => {
+test("a member that only waits on its own question holds no update and can be restarted or moved, keeps a machine hosting the wait on, and still shows working with its Stop", async () => {
   let releaseAnswer: (() => void) | undefined;
   const answered = new Promise<void>((resolve) => { releaseAnswer = resolve; });
   const { service, storage } = scenario({ worker: asksMainThenAnswers, answer: async () => { await answered; return { ok: true, content: "blue" }; } });
@@ -823,6 +821,7 @@ test("a member that only waits on its own question holds no update or idle stop 
   assert.equal(live.includes(workerRuns[0]!), false, "its wait is not live work: a restart arms it again");
   assert.equal(live.some((id) => id === `participant-request:${requestBy(storage.current, "main-id")!.message.id}`), false);
   assert.equal(chatParts(service).members.memberAnswersNow(storage.current, "worker-id"), false, "not answering: restart and move are allowed");
+  assert.equal(service.hasWaitOnlyWork(), true, "a machine hosting the wait does not idle-stop");
   releaseAnswer!();
   await waitFor(() => Boolean(requestBy(storage.current, "main-id")?.batch.autoResumeMessageId));
 });

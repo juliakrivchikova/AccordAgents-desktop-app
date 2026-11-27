@@ -2,7 +2,7 @@ import type { ChatMessage, ChatParticipantRequestItem, Conversation } from "../.
 import type { SelfCompactedAnswer } from "../compaction/selfCompactionMarks";
 import { chatParticipants } from "../members/identity";
 import type { ChatModules } from "../modules";
-import { messagesById, ownRequestsAnswering, permissionCardAnswering, repliesAnswering } from "./ownRequests";
+import { messagesById, ownRequestsAnswering, permissionCardsAnswering, repliesAnswering } from "./ownRequests";
 import { isOpenParticipantRequestStatus } from "./requestRecords";
 
 /** How often a wait for a member to come back from its own requests looks
@@ -108,7 +108,8 @@ async function nextReplyAfterOwnRequests(
     const own = ownRequestsAnswering(conversation, targetId, requestMessageId, byId);
     if (own.all.length === 0) return { kind: "none" };
     const replies = repliesAnswering(conversation, targetId, requestMessageId, byId);
-    const stillOut = own.open.length > 0 || replies.running || permissionCardAnswering(conversation, targetId, requestMessageId, byId);
+    const cards = permissionCardsAnswering(conversation, targetId, requestMessageId, byId);
+    const stillOut = own.open.length > 0 || replies.running || cards.waiting;
     if (!stillOut) {
       const newer = replies.finished.filter((message) => message.id !== after.id && message.createdAt > after.createdAt);
       if (newer.length > 0) return { kind: "reply", reply: newer.at(-1)!, skipped: newer.slice(0, -1) };
@@ -118,6 +119,8 @@ async function nextReplyAfterOwnRequests(
         return { kind: "ended", answer: ended.reason === "failed" ? { kind: "ended", reason: "failed", error: ended.error ?? "It could not be resumed with the answers." }
           : { kind: "ended", reason: ended.reason === "stopped" ? "stopped" : "interrupted" } };
       }
+      // A card she approved whose resume never came.
+      if (cards.leftUnanswered) return { kind: "ended", answer: { kind: "ended", reason: "interrupted" } };
       return { kind: "none" };
     }
     const saved = await chat.store.nextChatSave(conversationId, OWN_REQUEST_LOOK_AGAIN_MS, signal);

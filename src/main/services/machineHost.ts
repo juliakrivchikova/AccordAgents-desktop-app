@@ -133,7 +133,7 @@ interface MachineAttachmentWaiter {
 }
 
 type HostChat = Pick<ChatService, "respondToChoice" | "respondToAppToolApproval" | "respondToMentions"> &
-  Partial<Pick<ChatService, "activeParticipantRuns" | "liveRunIds" | "onParticipantRunSettled" | "conversationIdForRun" | "setPromptSuggestionForwarder" |
+  Partial<Pick<ChatService, "activeParticipantRuns" | "liveRunIds" | "hasWaitOnlyWork" | "onParticipantRunSettled" | "conversationIdForRun" | "setPromptSuggestionForwarder" |
     "onBackgroundTasksChanged" | "localBackgroundTasks" | "setCardAppliers" | "serverTurnsStarting">>;
 
 export class MachineHostService {
@@ -402,6 +402,9 @@ export class MachineHostService {
     // hold ends, and other programs on the instance see it busy.
     if (this.closed || this.draining || this.held() || this.declinedWhileFenced || this.approvalExecutor.hasActiveWork() || this.choiceExecutor.hasActiveWork() ||
         this.mentionExecutor.hasActiveWork() || (this.chat.activeParticipantRuns?.().length ?? 0) > 0 || (this.chat.liveRunIds?.().length ?? 0) > 0 ||
+        // A member's wait on its own requests whose requester's request this
+        // machine settles: nothing else wakes it for the member's answer.
+        (this.chat.hasWaitOnlyWork?.() ?? false) ||
         // A turn taken from the server that has not become a run yet.
         (this.chat.serverTurnsStarting?.() ?? 0) > 0) return true;
     const unsent = await this.options.unsentServerWrites?.().catch(() => ({ queued: 1 }));
