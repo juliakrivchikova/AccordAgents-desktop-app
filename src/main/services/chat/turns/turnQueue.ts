@@ -106,15 +106,17 @@ export class TurnQueue {
     // next; Claude Code gets the CLI's send-now once the message is in its
     // queue (onCliMessageWritten below).
     const delivery = this.deliveryPriority(participant, triggerMessage, conversation);
-    if (delivery === "next") {
-      void this.chat.runCancel.deliverNow(conversation.id, participant.id, runId, "interrupt-and-restart").catch(() => undefined);
-    }
     let turnController: { signal: AbortSignal; cleanup: () => void } | undefined;
     // Whether the turn this run took on the server was ended there.
     let serverTurnEnded = false;
     let runningHere = false;
     try {
       turnController = this.chat.participantBatch.ensureChatTurnController(conversation, participant, runId, signal);
+      // Waiting for the member's own compaction and the turn it goes on in,
+      // it would only wait longer: nothing is cut then.
+      if (delivery === "next" && !turnController.signal.aborted && !this.memberActivity(conversation.id, participant.id).compacting) {
+        void this.chat.runCancel.deliverNow(conversation.id, participant.id, runId, "interrupt-and-restart").catch(() => undefined);
+      }
       await waitForParticipantTurnReservation(reservation, turnController.signal);
       if (turnController.signal.aborted) {
         throw new Error("Chat run cancelled.");
@@ -211,6 +213,7 @@ export class TurnQueue {
         this.runningTurnRuns.get(runKey)?.delete(runId);
         if (this.runningTurnRuns.get(runKey)?.size === 0) this.runningTurnRuns.delete(runKey);
       }
+      this.chat.activeRuns.cliReturnedRunIds.delete(runId);
       reservation.release();
       const stopped = turnController?.signal.aborted ?? false;
       turnController?.cleanup();
@@ -305,10 +308,14 @@ export class TurnQueue {
           : [];
       return this.heldReservation(held, {
         queued: waitsFor.length > 0,
-        ...(options.priority === "live" && runningNow.length > 0 ? { behindMemberTurn: true } : {}),
+        // A Claude Code CLI holds the message until the running step's next
+        // tool result (a Codex steer takes it at once).
+        ...(options.priority === "live" && mode === "shared" && runningNow.length > 0 ? { behindMemberTurn: true } : {}),
         wait: async () => {
+          // Waited for again by whoever it was handed to: it runs already.
+          if (ended || held.running) return;
           await Promise.all(waitsFor.map((turn) => turn.done));
-          for (let first = this.userTurnsFirst(key, held); held.userFirst && first.length > 0; first = this.userTurnsFirst(key, held)) {
+          for (let first = this.userTurnsFirst(key, held); held.userFirst && !held.running && first.length > 0; first = this.userTurnsFirst(key, held)) {
             await Promise.all(first.map((turn) => turn.done));
           }
           begin();
@@ -368,7 +375,7 @@ export class TurnQueue {
   /** The turn this run took, wherever it runs, by the reservation's order:
    *  a turn delivered now goes before the waiting ones (deliveryPriority). */
   reserveTurnFor(conversation: Conversation, participant: ChatParticipant, triggerMessage: ChatMessage): ParticipantTurnReservation {
-    const mode = participantTurnMode(participant, triggerMessage);
+    const mode = participantTurnMode(participant, triggerMessage, mainSessionParticipantId(conversation.metadata) ?? "");
     const priority = this.deliveryPriority(participant, triggerMessage, conversation);
     return this.reserveParticipantTurn(conversation.id, participant.id, mode, {
       ...(priority ? { priority } : {}),
@@ -395,12 +402,15 @@ export class TurnQueue {
   }
 
   /** What the member does now: an operation on its session, a turn, or nothing. */
-  memberActivity(conversationId: string, participantId: string): { running: "operation" | "turn" | "none"; waiting: number } {
+  memberActivity(conversationId: string, participantId: string): { running: "operation" | "turn" | "none"; waiting: number; compacting: boolean } {
     const key = `${conversationId}:${participantId}`;
     const running = [...(this.runningTurns.get(key) ?? [])];
     return {
       running: running.some((turn) => turn.operation) ? "operation" : running.length > 0 ? "turn" : "none",
-      waiting: this.pendingTurns.get(key)?.size ?? 0
+      waiting: this.pendingTurns.get(key)?.size ?? 0,
+      // Its own compaction (or the turn it goes on in) is put first: a
+      // request delivered now comes after them.
+      compacting: [...(this.priorityTurns.get(key) ?? [])].some((turn) => turn.priority === "next" && (turn.operation || turn.userFirst))
     };
   }
 

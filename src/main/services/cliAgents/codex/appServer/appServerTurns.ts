@@ -190,18 +190,29 @@ export class AppServerTurns {
     onCodexServerRequest?: CliAgentCodexServerRequestCallback,
     images?: CliAgentImageInput[]
   ): Promise<Promise<ParticipantRunResult> | undefined> {
+    // A turn Codex is still starting (its `turn/start` not answered yet) is
+    // steered once it has its id: cutting it then could leave it running.
+    const starting = this.pendingTurn;
+    for (const deadline = Date.now() + CODEX_STEER_TIMEOUT_MS; starting && !starting.turnId && this.pendingTurn === starting && Date.now() < deadline && !signal?.aborted;) {
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    }
     const running = this.pendingTurn;
     if (!running?.turnId || running.nativeGoal || running.outstandingServerRequestIds.size > 0 || signal?.aborted) return undefined;
+    const turnId = running.turnId;
     const input = codexAppServerTurnInput(codexPrompt(turnPrompt, this.launch.repoPath, this.launch.diffMode, this.launch.kind, this.launch.options), images);
     let reply: Promise<ParticipantRunResult> | undefined;
     try {
       // Handed over as Codex's answer is read: what the turn says after it
-      // (in the same output too) is this message's reply.
-      await this.server.connection.sendRequest("turn/steer", { threadId: running.threadId, expectedTurnId: running.turnId, input }, CODEX_STEER_TIMEOUT_MS, (answer) => {
-        if (answer.ok && this.pendingTurn === running) reply = this.handOverSteeredTurn(running, signal, onOutput, onSessionId, timeoutMsOverride, onCodexServerRequest);
+      // (in the same output too) is this message's reply. Its reply so far
+      // may be another message's steered in meanwhile (same Codex turn).
+      await this.server.connection.sendRequest("turn/steer", { threadId: running.threadId, expectedTurnId: turnId, input }, CODEX_STEER_TIMEOUT_MS, (answer) => {
+        const current = this.pendingTurn;
+        if (answer.ok && current && current.threadId === running.threadId && current.turnId === turnId) {
+          reply = this.handOverSteeredTurn(current, signal, onOutput, onSessionId, timeoutMsOverride, onCodexServerRequest);
+        }
       });
     } catch (error) {
-      void this.launch.debugLogs?.write("cli.codex-app-server.steer-refused", { threadId: running.threadId, turnId: running.turnId, message: errorText(error) });
+      void this.launch.debugLogs?.write("cli.codex-app-server.steer-refused", { threadId: running.threadId, turnId, message: errorText(error) });
       return undefined;
     }
     return reply;
@@ -244,6 +255,12 @@ export class AppServerTurns {
       };
     });
     const steered = this.pendingTurn!;
+    // An approval the turn asked for meanwhile goes on with it.
+    for (const id of running.outstandingServerRequestIds) steered.outstandingServerRequestIds.add(id);
+    running.outstandingServerRequestIds.clear();
+    for (const request of this.server.approvals.pendingInboundRequests.values()) {
+      if (request.turn === running) request.turn = steered;
+    }
     // The reply so far is over: its timer and Stop no longer reach the turn.
     if (running.timer) clearTimeout(running.timer);
     running.abort?.();
@@ -271,6 +288,8 @@ export class AppServerTurns {
     if (signal) {
       steered.abort = () => signal.removeEventListener("abort", abort);
       signal.addEventListener("abort", abort, { once: true });
+      // Stopped while Codex took it: the turn it went into stops now.
+      if (signal.aborted) abort();
     }
     return reply;
   }

@@ -223,6 +223,12 @@ test("a Claude Code member takes a request delivered now in its live CLI: the CL
   assert.equal(parts.turnQueue.deliveryPriority(claude, forced("now")), "live");
   assert.equal(parts.turnQueue.deliveryPriority(chatParticipant({ kind: "gemini-cli" }), forced("now")), "next");
   assert.equal(parts.turnQueue.deliveryPriority(claude, forced()), undefined);
+  // Only the request's first turn: one it starts later (an approval's resume)
+  // waits its turn.
+  const answered = { id: "m", role: "participant", content: "", createdAt: "", metadata: { participantRequest: { items: [
+    { targetParticipantId: "claude-worker", deliver: "now", replyMessageId: "earlier-reply" }
+  ] } } } as never;
+  assert.equal(parts.turnQueue.deliveryPriority(claude, answered), undefined);
 });
 
 test("the main session's task cut for a message to take now says so when it resumes the main session", () => {

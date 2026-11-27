@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import type { ChatMessage, ChatParticipant, ChatParticipantRequestBatch, Conversation } from "../../../../shared/types";
 import { formatHandleList } from "../members/identity";
 import { participantTurnMode } from "../members/roleRuntime";
+import { mainSessionParticipantId } from "../../../../shared/mainSession";
 import { turnShown } from "../runs/runOwnerRecords";
 import { RemoteTurnNotStartedError } from "../server/remoteTurnErrors";
 import { recordLastMessageByParticipant, repairLastMessagePointerAfterRemoval } from "../store/lastMessages";
@@ -44,7 +45,7 @@ export class ParticipantBatch {
     // Taken before anything awaits, in the order the User sent the messages:
     // a Claude Code member gets them in that order even when they overlap.
     const writeGates = new Map(participants
-      .filter((participant) => participantTurnMode(participant, triggerMessage) === "shared")
+      .filter((participant) => participantTurnMode(participant, triggerMessage, mainSessionParticipantId(conversation.metadata) ?? "") === "shared")
       .map((participant) => [participant.id, this.chat.promptContext.openClaudeWriteGate(conversation.id, participant.id)] as const));
     // Each member cannot be removed from here until its turn is registered
     // below (chatRunMeta), before that turn's first await.

@@ -125,12 +125,12 @@ test("a reply the member's CLI began on its own counts as running: a compaction 
   const compaction = run("compaction", reserve(queue, "exclusive", { operation: true, priority: "next" }));
   await delay(10);
   assert.deepEqual(started, []);
-  assert.deepEqual(queue.memberActivity("chat", "member"), { running: "turn", waiting: 1 });
+  assert.deepEqual(queue.memberActivity("chat", "member"), { running: "turn", waiting: 1, compacting: true });
   own.release();
   await compaction.started;
-  assert.deepEqual(queue.memberActivity("chat", "member"), { running: "operation", waiting: 0 });
+  assert.deepEqual(queue.memberActivity("chat", "member"), { running: "operation", waiting: 0, compacting: true });
   compaction.release();
-  assert.deepEqual(queue.memberActivity("chat", "member"), { running: "none", waiting: 0 });
+  assert.deepEqual(queue.memberActivity("chat", "member"), { running: "none", waiting: 0, compacting: false });
 });
 
 test("a turn stopped while it waits behind a turn put next gives up its place", async () => {
@@ -146,4 +146,19 @@ test("a turn stopped while it waits behind a turn put next gives up its place", 
   assert.deepEqual(started, ["running", "waiting"]);
   waiting.release();
   assert.equal(queue.hasWaitingTurns("chat", "member"), false);
+});
+
+test("a turn put first that is waited for again by whoever it was handed to does not wait for the User's message that waits for it", async () => {
+  const { queue, started, run } = queueOf();
+  const goOn = reserve(queue, "exclusive", { priority: "next", userFirst: true });
+  await goOn.wait();
+  // Her message, sent while the go-on turn runs, waits for it.
+  const user = run("user", reserve(queue, "exclusive", { byUser: true }));
+  await delay(10);
+  const again = await Promise.race([goOn.wait().then(() => "resolved"), delay(200).then(() => "stuck")]);
+  assert.equal(again, "resolved");
+  assert.deepEqual(started, []);
+  goOn.release();
+  await user.started;
+  assert.deepEqual(started, ["user"]);
 });

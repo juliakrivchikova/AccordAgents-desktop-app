@@ -294,12 +294,14 @@ export function preauthorizedAppMcpToolNamesFor(toolNames: string[]): string[] {
  *  to do it without a card (Settings → General → New chats, or "Don't ask
  *  again" on its card) decides whether it does it on its own (the User,
  *  2026-11-25). */
-export function compactionAccessLines(permissions: ChatAgentPermissions, isMainSession = false): string[] {
+export function compactionAccessLines(permissions: ChatAgentPermissions, isMainSession = false, kind?: ChatParticipant["kind"]): string[] {
+  // Claude Code defers MCP tools: the call is one ToolSearch away.
+  const load = kind === "claude-code" ? " (load it with ToolSearch if it is deferred)" : "";
   switch (normalizeChatParticipantRequestPermission(normalizeChatAgentPermissions(permissions).requestCompaction)) {
     case "allow":
       return [
-        "Compaction: compact your own context yourself with `app_chat_request_compaction` between big stages of your work, each time one is finished; User is not asked. Your reply ends with the call: the compaction runs next, before anything waiting for you, then the app calls you again to go on, so nobody has to call you.",
-        "- The moments: your task is done and the next one starts; implementation is done and QA starts; QA or review is done and the report or the next fix starts; an investigation ended, found or led nowhere. At each of them compact before you go on: your `instructions` carry what the next stage needs.",
+        `Compaction: when a big stage of your work is finished, your next step is \`app_chat_request_compaction\`${load}, not the next stage; User is not asked. Your reply ends with the call: the compaction runs next, before anything waiting for you, then the app calls you again right away to go on, so nobody has to call you and nothing of your work is lost.`,
+        "- The moments, inside one task given in stages too: your task is done and the next one starts; implementation is done and QA starts; QA or review is done and the report or the next fix starts; an investigation ended (found or led nowhere) and its findings are written. For example: findings written, compact (`instructions`: where the findings are, what the next stage must do), the app calls you, you implement.",
         "- Never in the middle of a stage, not because of context size alone, and not when you only wait for someone.",
         "- Say in the reply what is done and what comes next. Give `instructions` naming what the summary must keep: the goal and User's decisions (a task that has just arrived, in full), branch and changed files, what is done and checked, open findings, the next step. Then end the reply: no more tool calls.",
         "- `workDone: true` only when nothing is left of your task: you are not called again; what waits for you runs next.",

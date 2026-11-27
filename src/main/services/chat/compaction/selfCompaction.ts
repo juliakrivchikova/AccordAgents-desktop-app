@@ -308,6 +308,11 @@ export class SelfCompaction {
 
   /** A member's own compaction on a machine holds its place from when it
    *  asked until the machine takes the compaction's turn (startServerTurn). */
+  /** Its place kept for when the server offers the turn again. */
+  holdCompactionTurn(serverRunId: string, held: ParticipantTurnReservation): void {
+    this.heldCompactionTurns.set(serverRunId, held);
+  }
+
   takeHeldCompactionTurn(serverRunId: string): ParticipantTurnReservation | undefined {
     const held = this.heldCompactionTurns.get(serverRunId);
     this.heldCompactionTurns.delete(serverRunId);

@@ -648,7 +648,8 @@ test("a member's access says when to compact: on its own when it may, on a card 
   // Between big finished stages, with the moments named; never mid-stage
   // or for size alone (the User, 2026-11-27), and never a figure of how full
   // the context is.
-  assert.match(lines("allow"), /between big stages of your work, each time one is finished/);
+  assert.match(lines("allow"), /when a big stage of your work is finished, your next step is `app_chat_request_compaction`, not the next stage/);
+  assert.match(lines("allow"), /inside one task given in stages too.*For example: findings written, compact/s);
   assert.match(lines("allow"), /your task is done and the next one starts; implementation is done and QA starts; QA or review is done and the report or the next fix starts; an investigation ended/);
   assert.match(lines("allow"), /Never in the middle of a stage, not because of context size alone/);
   assert.match(lines("allow"), /Say in the reply what is done and what comes next\..*Then end the reply/s);

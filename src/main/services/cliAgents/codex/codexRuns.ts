@@ -278,7 +278,8 @@ export class CodexRuns {
       if (!steering) return runNow(target);
       const steered = await target.steer?.(prompt, signal, options.onOutput, options.onSessionId, options.timeoutMs, options.onCodexServerRequest, options.images?.items)
         .catch(() => undefined);
-      steering(steered ? "steered" : "not-steered");
+      // Stopped meanwhile: nothing is cut for it.
+      if (!signal?.aborted || steered) steering(steered ? "steered" : "not-steered");
       if (steered) return steered;
       await earlier.catch(() => undefined);
       return runNow(target);

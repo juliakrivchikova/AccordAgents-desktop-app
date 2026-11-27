@@ -246,21 +246,29 @@ export class ServerTurns {
         // A member's own compaction asked here holds its place from when it
         // asked: right after the reply that asked, before what waited
         // (startQueuedSelfCompaction).
-        const heldEarly = request.kind === "compaction"
-          ? this.chat.selfCompaction.takeHeldCompactionTurn(turn.runId)
-            ?? (typeof request.requestedByParticipantId === "string" ? this.chat.turnQueue.reserveParticipantTurn(chat.id, participant.id, "exclusive", { operation: true }) : undefined)
-          : undefined;
+        const heldOwn = request.kind === "compaction" ? this.chat.selfCompaction.takeHeldCompactionTurn(turn.runId) : undefined;
+        const heldEarly = heldOwn
+          ?? (request.kind === "compaction" && typeof request.requestedByParticipantId === "string"
+            ? this.chat.turnQueue.reserveParticipantTurn(chat.id, participant.id, "exclusive", { operation: true }) : undefined);
+        // A member's own compaction not taken here this time (the server could
+        // not be reached, or it is not this device's yet) keeps its place for
+        // when it is offered again: the turn it goes on in waits behind it.
+        const giveBack = (): void => {
+          if (heldOwn) this.chat.selfCompaction.holdCompactionTurn(turn.runId, heldOwn);
+          else heldEarly?.release();
+        };
         // Taken on the server first, like any turn (Д5); a Stop from any
         // device reaches it by its run id.
         let claimed: Awaited<ReturnType<ServerTurns["claimServerTurnHere"]>>;
         try {
           claimed = await this.claimServerTurnHere(turn, controller.signal);
         } catch (error) {
-          heldEarly?.release();
+          giveBack();
           throw error;
         }
         if (claimed !== "claimed") {
-          heldEarly?.release();
+          if (claimed === "stopped") heldEarly?.release();
+          else giveBack();
           return true;
         }
         const run = this.chat.participantBatch.registerBackgroundRunController(runId, controller.signal);

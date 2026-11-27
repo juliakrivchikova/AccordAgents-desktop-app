@@ -265,10 +265,10 @@ export function manageRolesParticipantsResolutionForRole(
 /** A Claude Code member takes the User's new messages while it works (see
  *  reserveParticipantTurn), wherever it runs. A native goal runs in a process
  *  of its own on the member's session, so it stays exclusive. */
-export function participantTurnMode(participant: ChatParticipant, triggerMessage: ChatMessage): "exclusive" | "shared" {
+export function participantTurnMode(participant: ChatParticipant, triggerMessage: ChatMessage, mainSessionId?: string): "exclusive" | "shared" {
   // A request asked with `deliver: "now"` goes into a Claude Code member's
   // live CLI as a message typed there mid-turn does (TurnQueue `live`).
-  if (participant.kind === "claude-code" && deliversNow(triggerMessage, participant.id)) {
+  if (participant.kind === "claude-code" && deliversNow(triggerMessage, participant.id, mainSessionId)) {
     return "shared";
   }
   // Only the User's own messages: a request from another member, a resume
@@ -287,7 +287,9 @@ export function deliversNow(triggerMessage: ChatMessage, participantId: string, 
   // Only the chat's main session delivers now, checked again where the turn
   // runs (a copy from another device included).
   if (mainSessionId !== undefined && batch?.requesterParticipantId !== mainSessionId) return false;
-  return batch?.items.some((item) => item.targetParticipantId === participantId && item.deliver === "now") === true;
+  // Only its first turn: a turn the same request starts later (an approval's
+  // resume) comes after the reply it already has.
+  return batch?.items.some((item) => item.targetParticipantId === participantId && item.deliver === "now" && !item.replyMessageId) === true;
 }
 
 /** How a busy member takes a message delivered now, as its dedicated CLI

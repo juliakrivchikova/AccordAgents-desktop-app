@@ -153,3 +153,32 @@ test("on a machine, a member's own compaction stopped before the machine took it
   assert.equal(parts.selfCompaction.heldCompactionTurns.size, 0);
   waiting.release();
 });
+
+test("on a machine, a member's own compaction whose claim failed keeps its place: offered again, it runs and nothing waits forever", async () => {
+  const participant = chatParticipant({ homeMachineId: "box", ...ALLOWED });
+  const chat = selfCompactingChat({ participant, turn: async () => "unused" });
+  const parts = chatParts(chat.service);
+  chat.service.setHostMachineId("box");
+  parts.host.machineRuntime = true;
+  const link = fakeServerLink("machine-device");
+  chat.service.setServerLink(link);
+  chat.storage.current.messages.push(acceptedMessage());
+  const conversation = await parts.store.requireChat(chat.conversation.id);
+  const resume = { runId: "run-asked-here", triggerMessageId: "anchor" };
+  parts.selfCompaction.startQueuedSelfCompaction(conversation, chat.participant, { type: "self_compaction" }, "run-asked-here", resume);
+  await waitFor(() => link.ops.some((op) => op.kind === "turn.request" && op.runId === "turn-run-asked-here"), 2_000);
+  const turn = { runId: "turn-run-asked-here", conversationId: conversation.id, messageId: "anchor", participantId: chat.participant.id, state: "requested" as const,
+    requestedBy: "machine-device", request: { kind: "compaction", triggeredBy: "agent", resume } };
+  // The server could not be reached: not taken this time.
+  const claim = parts.serverTurns.claimServerTurnHere.bind(parts.serverTurns);
+  parts.serverTurns.claimServerTurnHere = async () => { throw new Error("The server could not be reached."); };
+  await chat.service.startServerTurn(turn).catch(() => undefined);
+  assert.equal(parts.selfCompaction.heldCompactionTurns.size, 1, "its place is kept");
+  // Offered again: it runs, and the member's other turns are not held forever.
+  parts.serverTurns.claimServerTurnHere = claim;
+  void chat.service.startServerTurn(turn);
+  await waitFor(() => chat.order.includes("compact codex-admin"), 5_000);
+  const after = parts.turnQueue.reserveParticipantTurn(conversation.id, chat.participant.id);
+  await Promise.race([after.wait(), new Promise((_, reject) => setTimeout(() => reject(new Error("the member's queue is stuck")), 5_000))]);
+  after.release();
+});

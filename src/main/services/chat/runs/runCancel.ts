@@ -133,9 +133,16 @@ export class RunCancel {
       void this.deps.debugLogs.write("chat.deliver-now", { conversationId, participantId, runId: waitingRunId, way, outcome, tries });
       return;
     }
+    // The request was stopped (or ended) meanwhile: nothing is cut for it.
+    const alive = [...(this.chat.activeRuns.chatRunControllers.get(waitingRunId) ?? [])].some((controller) => !controller.signal.aborted);
+    if (!alive) {
+      void this.deps.debugLogs.write("chat.deliver-now", { conversationId, participantId, runId: waitingRunId, way, cutRunIds: [], skipped: "request-ended" });
+      return;
+    }
     const cut: string[] = [];
     for (const runId of this.chat.turnQueue.runningTurnRunIds(conversationId, participantId)) {
-      if (runId === waitingRunId) continue;
+      // A turn whose CLI has answered already is finished, not cut.
+      if (runId === waitingRunId || this.chat.activeRuns.cliReturnedRunIds.has(runId)) continue;
       const controllers = this.chat.activeRuns.chatRunControllers.get(runId);
       if (!controllers || [...controllers].every((controller) => controller.signal.aborted)) continue;
       this.chat.activeRuns.sentNowRunIds.add(runId);

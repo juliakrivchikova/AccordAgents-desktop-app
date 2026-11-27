@@ -1,6 +1,7 @@
 import { applyChatAccessOptionById } from "../../../../shared/chatAccessModes";
 import path from "node:path";
 import { memberMovedNote } from "../../../../shared/memberSessionMove";
+import { mainSessionParticipantId } from "../../../../shared/mainSession";
 import type {
   ChatAgentPermissions, ChatMessage, ChatExecutionLeaseMetadata, ChatParticipant, ChatPendingMention, Conversation
 } from "../../../../shared/types";
@@ -161,7 +162,7 @@ export class ParticipantTurn {
     // A Claude Code member may take this message while an earlier one is
     // still waiting in its CLI; context counts as delivered only once the CLI
     // has handed that message to a step (onReplyStarted below).
-    const sharedClaudeTurn = participantTurnMode(participant, triggerMessage) === "shared";
+    const sharedClaudeTurn = participantTurnMode(participant, triggerMessage, mainSessionParticipantId(conversation.metadata) ?? "") === "shared";
     // One nonce for everything this message carries (buildPromptParts).
     const turnNonce = newMessageNonce();
     const preparedPromptContext = await this.chat.promptContext.preparePromptContextForRun(
@@ -623,6 +624,7 @@ export class ParticipantTurn {
         }
       });
       let result = await runCli();
+      this.chat.activeRuns.cliReturnedRunIds.add(runId);
       if (!this.chat.host.machineRuntime) {
         this.chat.promptSuggestions.suggestions.replyEnded(conversation.id, participant.id, runId);
       }

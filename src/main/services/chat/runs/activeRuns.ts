@@ -37,6 +37,9 @@ export class ActiveRuns {
    *  their reply ends with what it wrote and the turn goes on in that
    *  message's reply, never as "stopped by user". Until the run unregisters. */
   readonly sentNowRunIds = new Set<string>();
+  /** Runs whose CLI has answered (its reply is in, the turn only settles):
+   *  a request delivered now cuts none of them (RunCancel.deliverNow). */
+  readonly cliReturnedRunIds = new Set<string>();
 
   constructor(
     private readonly chat: Pick<
@@ -163,6 +166,7 @@ export class ActiveRuns {
     }
     this.chatRunMeta.delete(runId);
     this.sentNowRunIds.delete(runId);
+    this.cliReturnedRunIds.delete(runId);
     this.chat.chatPostTools.appSendMessageCountsByRun.delete(runId);
     this.chat.chatPostTools.appSendMessageImageBytesByRun.delete(runId);
     if (meta) {
