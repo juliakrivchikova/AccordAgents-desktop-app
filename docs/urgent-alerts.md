@@ -22,7 +22,10 @@ even when she forgot it was watching.
    the outcome, and its cross folds it.
 
 The card (approved by the User on 2026-11-15 after five design reviews,
-header variant 5A): the red header whatever the state; the member and the
+header variant 5A): the red header whatever the state; until she answers it
+(Got it, or the cross), its border, bell and status line are red whatever its
+state, one that never left the app included, since then the card is all she
+gets (the User, 2026-11-27; `urgentAlertAlarming`, the desktop and the phone); the member and the
 time; the message; one status band that says what happens now ("Calling you
 in 0:49", "Calling you now · call 1 of 3", "Nobody answered 3 calls · no more
 calls", "Got it · …", "Not sent outside the app") with what happened before
