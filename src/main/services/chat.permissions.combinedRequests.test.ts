@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { defaultChatAgentPermissions, normalizeChatAgentPermissions } from "../../shared/agentPermissions";
+import { participantRequestVisibleRootId } from "../../shared/chatParticipantRequestThreads";
 import { chatParts } from "./chat/test/chatParts";
 import { chatParticipant, selfCompactingChat, waitFor } from "./chat/test/compactionFixtures";
 import * as fixtures from "./chat/test/permissionFixtures";
@@ -15,14 +16,17 @@ import type { ChatMessage } from "../../shared/types";
 const ASKS = { permissions: normalizeChatAgentPermissions({ ...defaultChatAgentPermissions(), requestParticipants: "allow" }) };
 
 /** A member busy with the User's task while askers each ask it something. */
-function busyMemberWithAskers(count: number, holdCombined?: Promise<void>) {
+function busyMemberWithAskers(count: number, holdCombined?: Promise<void>, member: Partial<import("../../shared/types").ChatParticipant> = {}) {
   const askers = Array.from({ length: count }, (_, index) => chatParticipant({ id: `asker${index + 1}`, handle: `asker${index + 1}`, ...ASKS }));
   let releaseBusy!: () => void;
   const busy = new Promise<void>((resolve) => { releaseBusy = resolve; });
   const asked: Record<string, any> = {};
+  const actors: any[] = [];
   const chat = selfCompactingChat({
+    participant: member,
     others: askers,
     turn: async ({ participantId, prompt, actor, service, call }) => {
+      if (participantId === "codex-admin") actors.push(actor);
       if (participantId.startsWith("asker")) {
         if (call === 1) asked[participantId] = await service.requestParticipantsFromTool(actor, { requests: [{ target: "admin", prompt: `Question from ${participantId}` }] });
         return call === 1 ? "Asked admin." : `Thanks (${participantId}).`;
@@ -36,7 +40,7 @@ function busyMemberWithAskers(count: number, holdCombined?: Promise<void>) {
       return `Answered ${questions.join(", ")}.`;
     }
   });
-  return { chat, asked, releaseBusy, askers };
+  return { chat, asked, releaseBusy, askers, actors };
 }
 
 async function ask(chat: ReturnType<typeof selfCompactingChat>, asked: Record<string, any>, asker: string): Promise<void> {
@@ -121,13 +125,13 @@ test("only requests right behind the one that begins go out with it, at most wit
   const message = (id: string) => ({ id, role: "participant", content: id, createdAt: "", status: "done" }) as never;
   const reserve = () => queue.reserveParticipantTurn("chat", "member");
   const lead = reserve();
-  queue.markCombinable(lead, message("r1"), 10);
+  queue.markCombinable(lead, message("r1"), 10, "run-r1");
   const r2 = reserve();
-  queue.markCombinable(r2, message("r2"), 10);
+  queue.markCombinable(r2, message("r2"), 10, "run-r2");
   const r3 = reserve();
-  queue.markCombinable(r3, message("r3"), 30);
+  queue.markCombinable(r3, message("r3"), 30, "run-r3");
   const r4 = reserve();
-  queue.markCombinable(r4, message("r4"), 5);
+  queue.markCombinable(r4, message("r4"), 5, "run-r4");
   void lead.wait();
   const reply = Promise.resolve([]);
   const taken = queue.takeCombinableTurns(lead, "chat", "member", reply, 40);
@@ -137,17 +141,17 @@ test("only requests right behind the one that begins go out with it, at most wit
 
   const queue2 = new TurnQueue({ host: { runsHere: () => true } } as never);
   const lead2 = queue2.reserveParticipantTurn("chat", "member");
-  queue2.markCombinable(lead2, message("a"), 1);
+  queue2.markCombinable(lead2, message("a"), 1, "run-a");
   queue2.reserveParticipantTurn("chat", "member", "exclusive", { byUser: true });
   const after = queue2.reserveParticipantTurn("chat", "member");
-  queue2.markCombinable(after, message("b"), 1);
+  queue2.markCombinable(after, message("b"), 1, "run-b");
   void lead2.wait();
   assert.deepEqual(queue2.takeCombinableTurns(lead2, "chat", "member", reply, 100), [], "the User's message keeps its place");
 });
 
 /** Three members on this computer ask a member that runs on a machine,
  *  busy with the first request; the test plays the machine. */
-async function machineMemberAskedThrice() {
+async function machineMemberAskedThrice(options: { refuseSecondTurn?: boolean } = {}) {
   const askers = ["one", "two", "three"].map((handle) => ({ ...fixtures.chatParticipant("codex-cli", { requestParticipants: "allow" }), id: handle, handle }));
   const target = { ...fixtures.chatParticipant("codex-cli"), id: "far", handle: "far", homeMachineId: "machine-1" };
   const conversation = fixtures.chatConversation([...askers, target]);
@@ -157,6 +161,14 @@ async function machineMemberAskedThrice() {
   });
   chatParts(service).chatHistory.ensureHistoryFiles = async () => tempRoot;
   const link = fixtures.fakeServerLink("desktop-device");
+  if (options.refuseSecondTurn) {
+    // The server refuses the second turn asked of the member.
+    const answered = link.opAnswered;
+    link.opAnswered = (async (opId: string) => {
+      const asks = link.ops.filter((op) => op.kind === "turn.request");
+      return asks.length === 2 && asks[1].opId === opId ? { status: "rejected" as const, seq: 1, reason: "its machine is being updated" } : answered(opId);
+    }) as typeof link.opAnswered;
+  }
   service.setServerLink(link);
   const turnRequests = () => link.ops.filter((op): op is Extract<HubOp, { kind: "turn.request" }> => op.kind === "turn.request" && op.participantId === target.id);
   const requestMessage = (handle: string) => storage.current.messages.find((message: ChatMessage) => message.metadata?.participantRequest?.requesterParticipantId === handle)!;
@@ -167,7 +179,7 @@ async function machineMemberAskedThrice() {
   await fixtures.waitFor(() => ["two", "three"].every((handle) => requestMessage(handle)), 5_000);
   // Its turn for the first request ends: the next goes out with the one behind it.
   await fixtures.memberDeviceAnswers(service, turnRequests()[0], { participant: target, content: "Answered one." });
-  await fixtures.waitFor(() => turnRequests().length === 2, 5_000);
+  await fixtures.waitFor(() => turnRequests().length >= 2, 5_000);
   return { service, storage, link, target, turnRequests, requestMessage };
 }
 
@@ -279,4 +291,123 @@ test("a Stop of the reply before the member's machine started ends every request
   await fixtures.waitFor(() => requestMessage("three").metadata!.participantRequest!.items[0].status === "interrupted", 5_000);
   await new Promise((resolve) => setTimeout(resolve, 100));
   assert.equal(turnRequests().length, 2, "no turn of its own for the third");
+  // The first one ends interrupted too, as a local member's request stopped before it started: never answered with no reply.
+  await fixtures.waitFor(() => requestMessage("two").metadata!.participantRequest!.items[0].status !== "running", 5_000);
+  const first = requestMessage("two").metadata!.participantRequest!.items[0];
+  assert.equal(first.status, "interrupted");
+  assert.equal(first.replyMessageId, undefined);
+});
+
+test("a request to a member on a machine stopped before the machine started it ends interrupted, as a local one does", async () => {
+  const { service, link, turnRequests, requestMessage } = await machineMemberAskedThrice();
+  // "one" was answered; "two" and "three" went out together and wait for the machine.
+  const lead = turnRequests()[1];
+  assert.equal(service.cancelRun(lead.runId.replace(/^turn-/, "")), true);
+  await fixtures.waitFor(() => link.ops.some((op) => op.kind === "turn.stop" && op.runId === lead.runId), 5_000);
+  await service.applyServerEntries([fixtures.fromServer(lead.conversationId, "desktop-device", { kind: "turn.stop",
+    turn: { runId: lead.runId, conversationId: lead.conversationId, messageId: lead.messageId, participantId: lead.participantId, state: "stopped" } })]);
+  await fixtures.waitFor(() => ["two", "three"].every((handle) => requestMessage(handle).metadata!.participantRequest!.items[0].status === "interrupted"), 5_000);
+  assert.equal(requestMessage("one").metadata!.participantRequest!.items[0].status, "answered");
+});
+
+test("a turn that fails before its reply exists leaves no request that went out with it waiting: each runs on its own and ends", async () => {
+  const { service, target, turnRequests, requestMessage } = await machineMemberAskedThrice({ refuseSecondTurn: true });
+  // The second turn (two, with three) was refused: two failed, three asks on its own.
+  await fixtures.waitFor(() => requestMessage("two").metadata!.participantRequest!.items[0].status === "failed", 5_000);
+  assert.match(requestMessage("two").metadata!.participantRequest!.items[0].error ?? "", /being updated/);
+  await fixtures.waitFor(() => turnRequests().length === 3, 5_000);
+  assert.equal(turnRequests()[2].messageId, requestMessage("three").id);
+  await fixtures.memberDeviceAnswers(service, turnRequests()[2], { participant: target, content: "Answered three." });
+  await fixtures.waitFor(() => requestMessage("three").metadata!.participantRequest!.items[0].status === "answered", 5_000);
+});
+
+test("a turn answering requests that went out together asks other members from the deepest of them, and within every one's chain limit", async () => {
+  const sections = await import("./chat/turns/promptSections");
+  const records = await import("./chat/requests/requestRecords");
+  const request = (id: string, depth: number, chainRootId?: string) => ({ id, metadata: { participantRequest: { id: `b-${id}`, depth, ...(chainRootId ? { chainRootId } : {}) } } }) as any;
+  assert.equal(sections.combinedRequestDepth(1, [request("a", 3), request("b", 2)]), 3);
+  assert.equal(sections.combinedRequestDepth(4, [request("a", 1)]), 4);
+  assert.deepEqual(sections.combinedChainRootIds([request("a", 1, "root-x"), request("b", 1), request("c", 1, "root-x")]), ["root-x", "b-b"]);
+  // A chain at its limit among them refuses what this turn asks next.
+  const full = Array.from({ length: 50 }, (_, index) => ({ id: `m${index}`, role: "participant", content: "", createdAt: new Date().toISOString(), status: "done",
+    metadata: { participantRequest: { id: `full-${index}`, chainRootId: "root-full", requesterParticipantId: "x", items: [{ targetParticipantId: "y", status: "answered" }], createdAt: "2000-01-01T00:00:00.000Z" } } }));
+  const conversation: any = { metadata: {}, messages: full };
+  const requester: any = { id: "admin" };
+  assert.equal(records.participantRequestLimitError(conversation, requester, { participantId: "admin" } as any, 1, 5, "root-free"), undefined);
+  assert.match(records.participantRequestLimitError(conversation, requester, { participantId: "admin", combinedChainRootIds: ["root-full"] } as any, 1, 5, "root-free") ?? "",
+    /chain limit/);
+});
+
+test("the turn's grant carries every joined request's chain and the deepest depth", async () => {
+  const { chat, asked, releaseBusy, actors } = busyMemberWithAskers(3);
+  await chat.service.sendMessage({ conversationId: chat.conversation.id, runId: "user-run", content: "@admin do the long task" });
+  await waitFor(() => adminPrompts(chat).length === 1, 5_000);
+  for (const asker of ["asker1", "asker2", "asker3"]) await ask(chat, asked, asker);
+  const batchOf = (asker: string) => chat.storage.current.messages.find((message: any) => message.metadata?.participantRequest?.requesterParticipantId === asker)!.metadata.participantRequest;
+  releaseBusy();
+  await waitFor(() => adminPrompts(chat).length === 2, 5_000);
+  const grant = actors[1];
+  assert.equal(grant.chainRootId, batchOf("asker1").chainRootId ?? batchOf("asker1").id);
+  assert.deepEqual(new Set(grant.combinedChainRootIds), new Set(["asker2", "asker3"].map((asker) => batchOf(asker).chainRootId ?? batchOf(asker).id)));
+  assert.equal(grant.participantRequestDepth, Math.max(...["asker1", "asker2", "asker3"].map((asker) => batchOf(asker).depth)));
+  await waitFor(() => chat.storage.current.metadata.running === false, 8_000);
+});
+
+test("a joined request stopped after the member asked to compact itself ends alone: the compaction and the turn it goes on in still run for the others", async () => {
+  const askers = ["asker1", "asker2"].map((id) => chatParticipant({ id, handle: id, ...ASKS }));
+  let releaseBusy!: () => void;
+  const busy = new Promise<void>((resolve) => { releaseBusy = resolve; });
+  const asked: Record<string, any> = {};
+  const chat = selfCompactingChat({
+    participant: { permissions: normalizeChatAgentPermissions({ ...defaultChatAgentPermissions(), requestCompaction: "allow" }) },
+    others: askers,
+    turn: async ({ participantId, actor, service, call }) => {
+      if (participantId.startsWith("asker")) {
+        if (call === 1) asked[participantId] = await service.requestParticipantsFromTool(actor, { requests: [{ target: "admin", prompt: `Question from ${participantId}` }] });
+        return call === 1 ? "Asked admin." : "Thanks.";
+      }
+      if (call === 1) { await busy; return "Busy work done."; }
+      if (call === 2) {
+        await service.requestSelfCompactionFromTool(actor, { instructions: "Answer the first." });
+        // The User stops asker2's request, which went out in this turn.
+        const joined = [...chatParts(service).activeRuns.chatRunMeta.entries()].find(([, meta]) => meta.participantId === "codex-admin" && !meta.pendingMessageId)?.[0];
+        assert.ok(joined);
+        service.cancelRun(joined);
+        return "Looked into both.";
+      }
+      return "Answered after compacting.";
+    }
+  });
+  await chat.service.sendMessage({ conversationId: chat.conversation.id, runId: "user-run", content: "@admin do the long task" });
+  await waitFor(() => adminPrompts(chat).length === 1, 5_000);
+  for (const asker of ["asker1", "asker2"]) await ask(chat, asked, asker);
+  releaseBusy();
+  await waitFor(() => chat.debugEvents.some(({ event }) => event === "chat.self-compaction.resumed"), 10_000);
+  await waitFor(() => itemFor(chat, "asker1").status === "answered", 8_000);
+  const final = chat.replies().find((message) => message.content === "Answered after compacting.");
+  assert.equal(itemFor(chat, "asker1").replyMessageId, final.id);
+  assert.equal(itemFor(chat, "asker2").status, "interrupted");
+  await waitFor(() => chat.storage.current.metadata.running === false, 8_000);
+});
+
+test("an Antigravity prompt that would pass its argument limit with the joined requests goes out without them; they run on their own", async () => {
+  const { chat, asked, releaseBusy } = busyMemberWithAskers(2, undefined, { kind: "gemini-cli" });
+  await chat.service.sendMessage({ conversationId: chat.conversation.id, runId: "user-run", content: "@admin do the long task" });
+  await waitFor(() => adminPrompts(chat).length === 1, 5_000);
+  await ask(chat, asked, "asker1");
+  await ask(chat, asked, "asker2");
+  // A long unseen message in the first request's thread, which its turn reads.
+  const first = chat.storage.current.messages.find((message: any) => message.metadata?.participantRequest?.requesterParticipantId === "asker1");
+  const root = participantRequestVisibleRootId(chat.storage.current.messages, first);
+  chat.storage.current.messages.push({ id: "long", role: "user", content: "x".repeat(600 * 1024), createdAt: new Date().toISOString(), status: "done",
+    metadata: { threadId: root, chatThreadRootId: root, parentMessageId: first.id } });
+  releaseBusy();
+  await waitFor(() => ["asker1", "asker2"].every((asker) => itemFor(chat, asker).status === "answered"), 10_000);
+  const prompts = adminPrompts(chat);
+  assert.equal(prompts.length, 3, "the second request had a turn of its own");
+  assert.deepEqual([...prompts[1].matchAll(/Question from (asker\d)/g)].map((match) => match[1]), ["asker1"]);
+  assert.ok(Buffer.byteLength(prompts[1]) < 1024 * 1024);
+  assert.deepEqual([...prompts[2].matchAll(/Question from (asker\d)/g)].map((match) => match[1]), ["asker2"]);
+  assert.equal(chat.debugEvents.some(({ event }) => event === "chat.requests.combined"), false);
+  await waitFor(() => chat.storage.current.metadata.running === false, 8_000);
 });

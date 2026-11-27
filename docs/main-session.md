@@ -167,15 +167,25 @@ verbatim there). Modelled on T3 Code (`~/reference/t3code`,
   member's CLI takes her messages itself), a request delivered now, an
   inline request (its requester's Stop stops it), a resume or an operation;
   at most 8 requests, and only while their text stays within one request's
-  limit (Antigravity gets its prompt as an argument). A member on a machine
+  limit. Antigravity gets its prompt as a command-line argument (1 MB for
+  arguments and environment together): a prompt that would pass 512 KB with
+  them (a long unseen thread, say) goes out without them, and they run on
+  their own. What the turn asks of other members counts from the deepest of
+  the requests it answers, and within every one's chain limit
+  (`combinedChainRootIds` on its grant); each request keeps its own depth and
+  chain. A request stopped before its member started ends interrupted, here
+  and on a machine alike, never answered without a reply; a turn that failed
+  before its reply existed leaves the requests that went out with it to run
+  on their own, so none waits forever. A member on a machine
   gets them in one turn too: the asking device names them in the turn's
   request (`combined`), the server lets through only requests to that member
   the asking device may ask (from a machine: its own members' requests that
   need no approval of hers), and the machine's reply lists the ones it
   answered (`combinedRequestMessageIds`); one it did not answer (left out,
   an older machine program) runs on its own after it, so nothing is lost. A
-  Stop of one request that went out with others ends only that request; a
-  Stop of the reply ends all of them, before the member started too.
+  Stop of one request that went out with others ends only that request (not
+  the member going on after a compaction it asked for in that turn); a Stop
+  of the reply ends all of them, before the member started too.
 - **The Chat Assistant and the Workflow Manager role are not in new chats.**
   Chats made before stay exactly as they are (with their Assistant).
 

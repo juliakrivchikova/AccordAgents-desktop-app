@@ -35,7 +35,8 @@ import {
   commitPromptContextPointerAdvance, forgetPromptContextPointers, promptContextScopeForTrigger, waitForEarlierClaudeMessages
 } from "./promptContextRecords";
 import {
-  appMcpToolInventoryKeyFor, appMcpToolNamesFor, appToolCapabilitiesForRun, newMessageNonce, preauthorizedAppMcpToolNamesFor
+  appMcpToolInventoryKeyFor, appMcpToolNamesFor, appToolCapabilitiesForRun, COMBINED_ARGUMENT_PROMPT_MAX_BYTES, combinedChainRootIds,
+  combinedRequestDepth, newMessageNonce, preauthorizedAppMcpToolNamesFor
 } from "./promptSections";
 import {
   cliStartedReplyStart, emitProgress, markParticipantMessageSentNow, markParticipantMessageStoppedByUser, markParticipantMessageStopUnconfirmed,
@@ -167,7 +168,7 @@ export class ParticipantTurn {
     const sharedClaudeTurn = participantTurnMode(participant, triggerMessage, mainSessionParticipantId(conversation.metadata) ?? "") === "shared";
     // One nonce for everything this message carries (buildPromptParts).
     const turnNonce = newMessageNonce();
-    const combinedRequestMessageIds = options.combinedTriggers?.length ? options.combinedTriggers.map((message) => message.id) : undefined;
+    const requestDepth = combinedRequestDepth(options.participantRequestDepth, options.combinedTriggers);
     const preparedPromptContext = await this.chat.promptContext.preparePromptContextForRun(
       conversation,
       promptConversation,
@@ -178,7 +179,7 @@ export class ParticipantTurn {
       sharedClaudeTurn ? undefined : runId,
       options.extraPromptContextMessageIds,
       turnNonce,
-      combinedRequestMessageIds
+      options.combinedTriggers?.map((message) => message.id)
     );
     const agentMode = agentModeForSession(session, participant);
     // A once-only approval is used by one turn: one that another turn of the
@@ -270,9 +271,8 @@ export class ParticipantTurn {
     // The message's pictures, as the CLI's own image input.
     const turnImages = await this.chat.attachments.turnImagesForCli(conversation.id, promptTriggerMessage, participant.kind, turnNonce);
     const imageOptions = { unavailableImagesNote: turnImages.unavailableNote, picturesNote: turnImages.picturesNote, imageCount: turnImages.images?.items.length ?? 0,
-      combinedTriggers: options.combinedTriggers };
-    if (combinedRequestMessageIds) void this.deps.debugLogs.write("chat.requests.combined", { conversationId: conversation.id, participantId: participant.id, runId, triggerMessageId: triggerMessage.id, combinedRequestMessageIds });
-    const primary = this.chat.turnPrompt.buildPromptParts(promptConversation, participant, session, promptTriggerMessage, workspacePath, Boolean(options.continuation), {
+      combinedTriggers: options.combinedTriggers?.length ? options.combinedTriggers : undefined };
+    const buildPrimary = () => this.chat.turnPrompt.buildPromptParts(promptConversation, participant, session, promptTriggerMessage, workspacePath, Boolean(options.continuation), {
       includeRoleInstructions: primaryIncludeRoleInstructions,
       turnNonce,
       agentMode,
@@ -284,6 +284,14 @@ export class ParticipantTurn {
       accessNote,
       ...imageOptions
     });
+    let primary = buildPrimary();
+    // Too large an argument for Antigravity with them: they run on their own.
+    if (imageOptions.combinedTriggers && participant.kind === "gemini-cli" && Buffer.byteLength(primary.prompt) > COMBINED_ARGUMENT_PROMPT_MAX_BYTES) {
+      imageOptions.combinedTriggers = undefined;
+      primary = buildPrimary();
+    }
+    const combinedRequestMessageIds = imageOptions.combinedTriggers?.map((message) => message.id);
+    if (combinedRequestMessageIds) void this.deps.debugLogs.write("chat.requests.combined", { conversationId: conversation.id, participantId: participant.id, runId, triggerMessageId: triggerMessage.id, combinedRequestMessageIds });
     const prompt = primary.prompt;
     const promptFallbackPrompt = this.chat.turnPrompt.buildPrompt(promptConversation, participant, session, promptTriggerMessage, workspacePath, Boolean(options.continuation), {
       includeRoleInstructions: true,
@@ -337,7 +345,7 @@ export class ParticipantTurn {
         Boolean(options.continuation),
         {
           turnSegmentId: options.turnSegmentId,
-          participantRequestDepth: options.participantRequestDepth ?? 0,
+          participantRequestDepth: requestDepth,
           participantRequestBatchId: options.participantRequestBatchId,
           chainRootId: options.chainRootId,
           combinedRequestMessageIds
@@ -358,7 +366,7 @@ export class ParticipantTurn {
           approvedContinuation: options.continuation || undefined,
           runId,
           turnSegmentId: options.turnSegmentId,
-          participantRequestDepth: options.participantRequestDepth ?? 0,
+          participantRequestDepth: requestDepth,
           participantRequestBatchId: options.participantRequestBatchId,
           participantRequestChainRootId: options.chainRootId,
           combinedRequestMessageIds,
@@ -414,9 +422,10 @@ export class ParticipantTurn {
       turnSegmentId: options.turnSegmentId,
       agentMode,
       runPermissions: effectiveChatAgentPermissionsForProvider(participant.kind, agentMode, cliPermissions),
-      participantRequestDepth: options.participantRequestDepth ?? 0,
+      participantRequestDepth: requestDepth,
       participantRequestBatchId: options.participantRequestBatchId,
       chainRootId: options.chainRootId,
+      combinedChainRootIds: combinedChainRootIds(imageOptions.combinedTriggers),
       historyMarkdownPath: path.join(workspacePath, "history.md"),
       historyJsonPath: path.join(workspacePath, "history.json")
     };

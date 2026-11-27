@@ -159,7 +159,11 @@ export class RunCancel {
     }
     const controllers = this.chat.activeRuns.chatRunControllers.get(targetRunId);
     const stopped = this.chat.activeRuns.chatRunMeta.get(targetRunId);
-    if (stopped && !this.chat.activeRuns.sentNowRunIds.has(targetRunId)) this.chat.selfCompactionResumes.noteMemberStopped(stopped.conversationId, stopped.participantId);
+    // A request taken into another's turn does not run the member: its Stop
+    // ends only that request.
+    if (stopped && !this.chat.activeRuns.sentNowRunIds.has(targetRunId) && !this.chat.turnQueue.isJoinedRun(targetRunId)) {
+      this.chat.selfCompactionResumes.noteMemberStopped(stopped.conversationId, stopped.participantId);
+    }
     void this.deps.debugLogs.write("chat.cancel.requested", {
       runId: targetRunId,
       localControllers: controllers?.size ?? 0

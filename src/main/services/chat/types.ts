@@ -68,6 +68,7 @@ export interface ChatAppMcpGateway {
     participantRequestDepth?: number;
     participantRequestBatchId?: string;
     chainRootId?: string;
+    combinedChainRootIds?: string[];
     historyMarkdownPath?: string;
     historyJsonPath?: string;
     agentMode?: ChatAgentMode;
@@ -96,6 +97,9 @@ export interface ChatAppMcpActor {
   participantRequestDepth?: number;
   participantRequestBatchId?: string;
   chainRootId?: string;
+  /** The chains of requests that went out with this turn's own in one turn
+   *  (TurnQueue takeCombinableTurns): the chain limit holds for each. */
+  combinedChainRootIds?: string[];
   historyMarkdownPath?: string;
   historyJsonPath?: string;
   agentMode?: ChatAgentMode;

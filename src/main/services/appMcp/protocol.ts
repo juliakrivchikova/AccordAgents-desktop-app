@@ -26,6 +26,7 @@ export function actorFromGrant(grant: AppMcpTokenGrant): AppMcpActor {
     participantRequestDepth: grant.participantRequestDepth,
     participantRequestBatchId: grant.participantRequestBatchId,
     chainRootId: grant.chainRootId,
+    ...(grant.combinedChainRootIds?.length ? { combinedChainRootIds: [...grant.combinedChainRootIds] } : {}),
     historyMarkdownPath: grant.historyMarkdownPath,
     historyJsonPath: grant.historyJsonPath,
     agentMode: grant.agentMode ? normalizeChatAgentMode(grant.agentMode) : undefined,
