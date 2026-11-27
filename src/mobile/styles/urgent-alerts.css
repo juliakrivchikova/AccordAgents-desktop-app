@@ -47,6 +47,12 @@
   color: var(--danger);
 }
 
+/* Never left the app (alerts off, or Telegram refused it with no phone). */
+.urgent-alert-status.is-off .urgent-alert-status-icon,
+.urgent-alert-status.is-off .urgent-alert-status-main {
+  color: var(--warn);
+}
+
 .urgent-alert-status-words {
   flex: 1;
   min-width: 0;

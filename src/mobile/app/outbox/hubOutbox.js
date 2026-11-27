@@ -250,7 +250,8 @@ async function operationOf(entry, client) {
   if (entry.kind === "message.system") return { ...base, kind: "message.create", message: payload.message };
   if (entry.kind === "conversation.create") return { ...base, kind: "conversation.create", conversation: payload.conversation };
   if (entry.kind === "turn.stop") {
-    return { ...base, kind: "turn.stop", runId: payload.runId, messageId: payload.messageId, participantId: payload.participantId };
+    return { ...base, kind: "turn.stop", runId: payload.runId, messageId: payload.messageId, participantId: payload.participantId,
+      ...(payload.sendNow ? { sendNow: true } : {}), ...(payload.sendNow && payload.waitingRunId ? { waitingRunId: payload.waitingRunId } : {}) };
   }
   if (entry.kind === "card.answer") return { ...base, kind: "card.answer", cardId: payload.cardId, answer: payload.answer || {} };
   if (entry.kind === "message.remove") return { ...base, kind: "message.remove", messageId: payload.messageId };

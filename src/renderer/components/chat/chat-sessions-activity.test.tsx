@@ -278,7 +278,11 @@ test("a message its member has not taken yet is sent now or taken back from the 
   assert.ok(shown.includes("main-running") && shown.includes("u-waiting"));
   assert.ok(!shown.includes("main-queued"), "no Queued row");
   const stopped: string[] = [];
-  const row = (message: ChatMessage) => renderSessionsRow(message, sessions, { onStopRun: (runId: string) => { stopped.push(runId); } } as Partial<Parameters<typeof ChatMessageItem>[0]>);
+  const sentNow: string[] = [];
+  const row = (message: ChatMessage) => renderSessionsRow(message, sessions, {
+    onStopRun: (runId: string) => { stopped.push(runId); },
+    onSendNow: (runId: string, waitingRunId?: string) => { sentNow.push(`${runId} for ${waitingRunId}`); }
+  } as Partial<Parameters<typeof ChatMessageItem>[0]>);
   const press = (root: ReactTestInstance, testId: string): void => {
     const button = root.find((node) => node.type === "button" && node.props?.["data-testid"] === testId);
     act(() => button.props.onClick({ defaultPrevented: false, preventDefault: noop, stopPropagation: noop }));
@@ -286,9 +290,10 @@ test("a message its member has not taken yet is sent now or taken back from the 
   const root = row(waiting);
   assert.doesNotMatch(textOf(root), /Queued/);
   press(root, "chat-waiting-send-now");
-  assert.deepEqual(stopped, ["run-running"], "the step being worked on makes way, the message stays in line");
+  assert.deepEqual(sentNow, ["run-running for run-queued"], "Send now names the running reply and the message that waits");
+  assert.deepEqual(stopped, [], "Send now stops nothing");
   press(row(waiting), "chat-waiting-take-back");
-  assert.deepEqual(stopped, ["run-running", "run-queued"]);
+  assert.deepEqual(stopped, ["run-queued"]);
   assert.equal(row(running).findAll((node) => node.props?.["data-testid"] === "chat-waiting-message").length, 0);
 });
 
@@ -370,8 +375,8 @@ test("folded steps are cut by the lines they are drawn as: a fold is one, and wh
 });
 
 test("a message sent now that still waits, behind the next reply, can be sent now again", () => {
-  const stopped: string[] = [];
-  const actions = (behindRunId: string) => <ChatWaitingMessageActions runId="run-queued" behindRunId={behindRunId} onStopRun={(runId) => { stopped.push(runId); }} />;
+  const sent: string[] = [];
+  const actions = (behindRunId: string) => <ChatWaitingMessageActions runId="run-queued" behindRunId={behindRunId} onTakeBack={noop} onSendNow={(runId) => { sent.push(runId); }} />;
   let renderer: ReactTestRenderer | undefined;
   act(() => { renderer = create(actions("run-1")); });
   const button = (testId: string) => renderer!.root.find((node) => node.type === "button" && node.props["data-testid"] === testId);
@@ -382,5 +387,5 @@ test("a message sent now that still waits, behind the next reply, can be sent no
   act(() => renderer!.update(actions("run-2")));
   assert.equal(button("chat-waiting-send-now").props.disabled, false);
   press("chat-waiting-send-now");
-  assert.deepEqual(stopped, ["run-1", "run-2"]);
+  assert.deepEqual(sent, ["run-1", "run-2"]);
 });

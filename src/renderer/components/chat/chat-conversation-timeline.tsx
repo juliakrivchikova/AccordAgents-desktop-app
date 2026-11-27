@@ -59,6 +59,7 @@ export function ChatConversationTimeline(props: {
   onScroll: () => void;
   onScrollIntent: () => void;
   onStopRun?: (runId: string) => void;
+  onSendNow?: (runId: string, waitingRunId?: string) => void;
   onToggleReaction: (messageId: string, emoji: string) => void;
   onDismissTurnFinishedNote?: (messageId: string) => void;
   participantStatusById: ReadonlyMap<string, ChatParticipantRosterStatus>;
@@ -167,6 +168,7 @@ export function ChatConversationTimeline(props: {
                     onDismissTurnFinishedNote: props.onDismissTurnFinishedNote,
                     onCompactParticipant: props.onCompactParticipant,
                     onStopRun: props.onStopRun,
+                    onSendNow: props.onSendNow,
                     onRespondToAppToolApproval: props.onRespondToAppToolApproval
                   }}
                 />

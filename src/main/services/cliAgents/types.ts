@@ -238,6 +238,12 @@ export type ClaudePermissionDenialLayer =
   | "provider-sandbox-settings-or-os"
   | "unknown-provider-runtime";
 
+/** What a Claude Code process did with Send now: the CLI's own answer;
+ *  `not_at_cli` when it can but the message is still on its way to it (just
+ *  sent: the caller asks again shortly); or `unsupported` (an older CLI, no
+ *  reply running here), when the caller stops the reply for the message. */
+export type ClaudeSendNowOutcome = "delivering" | "stopped" | "nothing_waiting" | "not_at_cli" | "unsupported";
+
 export interface WarmAgentEntry {
   key: string;
   scopeKey: string;
@@ -282,6 +288,17 @@ export interface WarmAgentEntry {
    *  `mcp_authenticate`, `mcp_reconnect`), answered while a reply runs too.
    *  Its response, or an error with the CLI's words. */
   control?: (request: Record<string, unknown>, timeoutMs: number, signal?: AbortSignal) => Promise<Record<string, unknown>>;
+  /** Claude only: Send now on a message waiting behind the running reply, as
+   *  the CLI's own send-now (`interrupt` with `send_now`, advertised as
+   *  interrupt_send_now_v1): it stops no background task, and the CLI may
+   *  take the message into the running step instead of ending it. With no
+   *  waiting run named, every message waiting at the CLI counts. */
+  sendNow?: (waitingRunId?: string, runningRunId?: string) => Promise<ClaudeSendNowOutcome>;
+  /** Claude only: the capabilities the CLI announced on `system/init`. */
+  cliCapabilities?: () => ReadonlySet<string>;
+  /** Claude only: the member runs on the CLI's own sign-in (not an added
+   *  provider), so the account's plan usage can be read through it. */
+  ownSignIn?: boolean;
   /** Claude only: the permission mode the process is in, as far as the app
    *  knows: `--permission-mode` at its start, then each `set_permission_mode`
    *  it accepted and each mode the CLI reported itself (its `system` events). */
@@ -353,6 +370,11 @@ export interface ClaudeWarmReply {
   settled: boolean;
   /** Stop was requested: an interrupt (running) or a queue removal (waiting). */
   stopRequested: boolean;
+  /** Send now was pressed on a message waiting behind this running reply (the
+   *  CLI's send-now): if the CLI cuts the step for that message, this reply
+   *  ends with what it wrote and the member's turn goes on in that message's
+   *  reply. It was not stopped. */
+  sentNow?: boolean;
   startedAt: number;
   messages: string[];
   streamedText: string;

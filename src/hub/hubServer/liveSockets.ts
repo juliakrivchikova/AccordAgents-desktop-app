@@ -1,6 +1,6 @@
 import type { IncomingMessage } from "node:http";
 import type { Duplex } from "node:stream";
-import type { HubLiveOps } from "../../shared/hubProtocol";
+import type { HubLiveOps, HubLivePlanUsage, HubLivePlanUsageRefresh } from "../../shared/hubProtocol";
 import type { HubLiveSettings } from "../../shared/hubOps";
 import { HubRequestError } from "./httpAnswers";
 import type { LiveSocket, LiveSocketServer } from "./types";
@@ -47,15 +47,28 @@ export class LiveSockets {
     }
   }
 
-  /** A live word to the devices of one machine (its settings changed). */
-  tellMachine(machineId: string, frame: HubLiveSettings): void {
-    void this.deps.options.storage.hub().devices().then((devices) => {
+  /** A live word to the devices of one machine (its settings changed, read
+   *  its plan usage again): how many live sockets of it took it. */
+  tellMachine(machineId: string, frame: HubLiveSettings | HubLivePlanUsageRefresh): Promise<number> {
+    return this.deps.options.storage.hub().devices().then((devices) => {
       const ids = new Set(devices.filter((item) => item.role === "machine" && item.machineId === machineId).map((item) => item.deviceId));
       const text = JSON.stringify(frame);
+      let sent = 0;
       for (const [socket, deviceId] of this.live) {
-        if (ids.has(deviceId) && socket.readyState === socket.OPEN) socket.send(text);
+        if (!ids.has(deviceId) || socket.readyState !== socket.OPEN) continue;
+        socket.send(text);
+        sent += 1;
       }
-    }).catch(() => undefined);
+      return sent;
+    }).catch(() => 0);
+  }
+
+  /** A live word to every live device (a device's plan usage changed). */
+  broadcast(frame: HubLivePlanUsage): void {
+    const text = JSON.stringify(frame);
+    for (const socket of this.live.keys()) {
+      if (socket.readyState === socket.OPEN) socket.send(text);
+    }
   }
 
   broadcastOps(head: number): void {

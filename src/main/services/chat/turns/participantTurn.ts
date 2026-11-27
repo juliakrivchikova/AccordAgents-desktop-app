@@ -37,7 +37,7 @@ import {
   appMcpToolInventoryKeyFor, appMcpToolNamesFor, appToolCapabilitiesForRun, newMessageNonce, preauthorizedAppMcpToolNamesFor
 } from "./promptSections";
 import {
-  cliStartedReplyStart, emitProgress, markParticipantMessageStoppedByUser, markParticipantMessageStopUnconfirmed,
+  cliStartedReplyStart, emitProgress, markParticipantMessageSentNow, markParticipantMessageStoppedByUser, markParticipantMessageStopUnconfirmed,
   processingTranscriptWithTerminalMessage, withCliStartedReplyStart
 } from "./replyMessages";
 import { takenBackMark } from "./takenBackMessages";
@@ -743,7 +743,9 @@ export class ParticipantTurn {
           }
         }
       }
-      if (!signal?.aborted) {
+      const sentNow = Boolean(signal?.aborted) && this.chat.activeRuns.sentNowRunIds.has(runId);
+      // A run Send now cut short used its once-only grants as one that finished.
+      if (!signal?.aborted || sentNow) {
         consumeOneTimePermissionApprovals(conversation, participant, appliedOneTimePermissionApprovalIds);
       }
       const now = new Date().toISOString();
@@ -751,7 +753,19 @@ export class ParticipantTurn {
       updateParticipantContextUsage(conversation, participant.id, result.contextUsage);
       const writtenBeforeEnd = pendingMessage.content;
       pendingMessage.content = result.content;
-      if (signal?.aborted) {
+      if (sentNow || (result.ok && result.cutBySendNow)) {
+        // A card its cut-short step was waiting on is not answered any more,
+        // on the chat as saved now (the card was saved on another copy).
+        await this.retireApprovalsCutBySendNow(conversation, participant, runId);
+      }
+      if (sentNow) {
+        // Cut for the message waiting behind it: what it had written stays,
+        // never the CLI's cancellation notice.
+        if (!(result.ok && result.content.trim())) {
+          pendingMessage.content = writtenBeforeEnd.trim() ? writtenBeforeEnd : progressSink.processingTranscript(now)?.content ?? "";
+        }
+        markParticipantMessageSentNow(pendingMessage);
+      } else if (signal?.aborted) {
         // A Stop that lands as the reply finishes keeps the reply the member
         // already delivered, as the CLI does.
         markParticipantMessageStoppedByUser(pendingMessage, participant, {
@@ -789,7 +803,7 @@ export class ParticipantTurn {
       if (!signal?.aborted && !result.ok && !endedByQuit && result.error) {
         options.warnings.push(`@${participant.handle}: ${result.error}`);
       }
-      if (result.ok && result.turnContinues && !signal?.aborted) {
+      if ((result.ok && result.turnContinues && !signal?.aborted) || sentNow) {
         // The turn goes on in the next message's reply (as in the CLI's
         // transcript): no "Worked for" of its own, its steps stay open.
         const { workedMs: _workedMs, ...metadata } = pendingMessage.metadata ?? {};
@@ -808,7 +822,7 @@ export class ParticipantTurn {
         pendingMessage.metadata = { ...pendingMessage.metadata, activityEvents };
       }
       let processingTranscript = progressSink.processingTranscript(now);
-      if (processingTranscript && signal?.aborted) {
+      if (processingTranscript && signal?.aborted && !sentNow) {
         processingTranscript = processingTranscriptWithTerminalMessage(
           processingTranscript,
           pendingMessage.content
@@ -817,6 +831,9 @@ export class ParticipantTurn {
       if (processingTranscript) {
         pendingMessage.metadata = { ...pendingMessage.metadata, processingTranscript };
       }
+      // A reply Send now cut short read its prompt as one that finished did.
+      const promptRead = (!signal?.aborted && result.ok) || sentNow;
+      if (sentNow) commitPromptContextPointerAdvance(conversation, participant.id, preparedPromptContext.pointerAdvance);
       if (!signal?.aborted && result.ok && result.content.trim()) {
         commitPromptContextPointerAdvance(conversation, participant.id, preparedPromptContext.pointerAdvance);
         this.chat.pendingReplies.logMissingSelectedSkillStatus(triggerMessage, participant, pendingMessage, runId);
@@ -835,12 +852,12 @@ export class ParticipantTurn {
         session.lastSyncedMessageId = pendingMessage.id;
       }
       // Told where it is now (its CLI answered this prompt): not again.
-      if (carriedMoveNote && !signal?.aborted && result.ok) delete session.movedHere;
+      if (carriedMoveNote && promptRead) delete session.movedHere;
       // Its access as this turn's CLI was told it (its instructions, or a
       // note): a later turn says only a change of it. A compaction of its
       // conversation (by its CLI, in this turn or in a reply nobody waited
       // on) makes the next turn say it again, unless this turn said it after.
-      const told = !signal?.aborted && result.ok;
+      const told = promptRead;
       if (told) delete session.importIntroPending;
       const compactedNow = this.chat.turnPrompt.noteMemberCompactions(conversation.id, participant);
       if (told && carriesCurrentAccess && !compactedNow) this.chat.memberSessions.accessRestateDue.delete(restateKey);
@@ -880,16 +897,23 @@ export class ParticipantTurn {
         }
       }
       if (pendingMessage.status === "pending") {
-        if (signal?.aborted) {
+        const sentNow = Boolean(signal?.aborted) && this.chat.activeRuns.sentNowRunIds.has(runId);
+        if (sentNow) {
+          markParticipantMessageSentNow(pendingMessage);
+        } else if (signal?.aborted) {
           markParticipantMessageStoppedByUser(pendingMessage, participant);
         } else {
           pendingMessage.status = "error";
         }
-        if (!pendingMessage.content) {
+        if (!pendingMessage.content && sentNow) {
+          // What it had streamed stays as its words.
+          pendingMessage.content = progressSink.processingTranscript(new Date().toISOString())?.content ?? "";
+        } else if (!pendingMessage.content) {
           pendingMessage.content = `@${participant.handle} run was interrupted before a response was produced.`;
         }
       }
-      const selfCompaction = this.chat.selfCompactionResumes.selfCompactionMarkFor(conversation.id, participant.id, runId, Boolean(signal?.aborted));
+      const selfCompaction = this.chat.selfCompactionResumes.selfCompactionMarkFor(conversation.id, participant.id, runId,
+        Boolean(signal?.aborted) && !this.chat.activeRuns.sentNowRunIds.has(runId));
       if (selfCompaction) pendingMessage.metadata = { ...pendingMessage.metadata, selfCompaction };
       // Skip the snapshot push for two cases:
       //   1. The run was cancelled — caller (`discardStoppedTargetRun`) will
@@ -918,5 +942,15 @@ export class ParticipantTurn {
       }
       progressSink.finish();
     }
+  }
+
+  /** The cards a step cut short by Send now was waiting on: not answered any
+   *  more, on the chat as it is saved now (they were saved on another copy). */
+  private async retireApprovalsCutBySendNow(conversation: Conversation, participant: ChatParticipant, runId: string): Promise<void> {
+    await this.chat.store.withChatMutation(conversation, async () => {
+      this.chat.approvalDecisions.markPendingAppToolApprovalsForRunTerminal(conversation, runId,
+        `@${participant.handle} moved on to the message sent now before this was answered.`);
+      this.chat.store.queueSnapshot(conversation);
+    });
   }
 }

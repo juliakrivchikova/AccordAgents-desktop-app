@@ -53,6 +53,7 @@ import { ScriptService, handleScriptsOperation } from "../main/services/scripts"
 import { HubTunnelClient } from "../main/services/hubTunnelClient";
 import { HubClient } from "../main/services/hubClient";
 import { ServerChatLink } from "../main/services/serverChatLink";
+import { PlanUsageLink } from "../main/services/planUsageLink";
 import { ScriptSecretStore, ScriptStore } from "../main/services/scriptStore";
 import { machineScriptHostPhrase } from "../shared/scripts";
 
@@ -582,12 +583,18 @@ export async function startMachine(args: MachineArgs): Promise<() => Promise<voi
     await idlePower.start();
   }
   await host.start();
-  // The server's live word: its settings changed (or the link came back and
-  // a word may have been missed).
+  // Its members' plan usage on the User's server, where the computer reads it
+  // for their rings (as it reads its own CLIs' for local members).
+  const planUsageLink = new PlanUsageLink({ runner: cliAgentRunner, client: () => hubClient, readsMachines: false, log });
+  planUsageLink.start();
+  // The server's live word: its settings changed, read the plan usage again
+  // (or the link came back and a word may have been missed).
   const stopLive = hubClient.live((connected) => {
     if (connected) void machineSettings.refresh("reconnected");
+    if (connected) planUsageLink.reconnected();
   }, (frame) => {
     if (frame.type === "settings") void machineSettings.refresh("published");
+    planUsageLink.handleLiveFrame(frame);
   });
   // Which machine this is, as the server's roster says (its members are the
   // ones whose home is that machine), then its settings, then its chats and
@@ -658,6 +665,7 @@ export async function startMachine(args: MachineArgs): Promise<() => Promise<voi
     await serverChatLink.stop();
     machineSettings.stop();
     stopLive();
+    planUsageLink.stop();
     idlePower?.close();
     await idlePower?.releaseAfterShutdown();
     // The registration outlives the idle scheduler: it is released only once

@@ -11,6 +11,7 @@ import { CodexRuns } from "./codex/codexRuns";
 import { GeminiRuns } from "./gemini/geminiRuns";
 import { ModelCatalogs } from "./models/modelCatalogs";
 import { SessionLogs } from "./runs/sessionLogs";
+import { PlanUsage } from "./usage/planUsage";
 import { WarmAgentClose } from "./warm/warmAgentClose";
 import { WarmAgents } from "./warm/warmAgents";
 
@@ -30,6 +31,7 @@ export interface CliModules {
   readonly claudeProcess: ClaudeProcess;
   readonly claudeReplyFlow: ClaudeReplyFlow;
   readonly claudeSettings: ClaudeSettings;
+  readonly planUsage: PlanUsage;
 }
 
 /** Builds every part around one registry: parts call each other only once all of them exist. */
@@ -49,5 +51,6 @@ export function createCliModules(deps: CliDependencies): CliModules {
   modules.claudeProcess = new ClaudeProcess(modules);
   modules.claudeReplyFlow = new ClaudeReplyFlow(modules);
   modules.claudeSettings = new ClaudeSettings(modules, deps);
+  modules.planUsage = new PlanUsage(modules, deps);
   return modules;
 }

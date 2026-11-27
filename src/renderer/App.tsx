@@ -6,7 +6,7 @@ import type {
   ChatSkillMention,
   PluginCatalogItem
 } from "../shared/types";
-import { FilesIcon, ArrowsClockwiseIcon, IconContext, TerminalWindowIcon, XCircleIcon } from "@phosphor-icons/react";
+import { FilesIcon, IconContext, TerminalWindowIcon, XCircleIcon } from "@phosphor-icons/react";
 import { Button } from "@/components/ui/button";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { Toaster } from "@/components/ui/sonner";
@@ -196,16 +196,7 @@ function App(): JSX.Element {
   const topBarLeading = state.railView === "chats" && state.sidebarCollapsed ? (
     <SidebarToggleButton expanded={false} onToggle={expandSidebar} />
   ) : undefined;
-  const windowActions = (
-    <>
-      <ModeToggle />
-      <IconButton
-        label="Refresh"
-        icon={ArrowsClockwiseIcon}
-        onClick={() => void conversationActions.refreshAll()}
-      />
-    </>
-  );
+  const windowActions = <ModeToggle />;
   const accordEligibleParticipants = React.useMemo(
     () => view.activeChatParticipants.filter((participant) => !isChatAssistantParticipant(participant)),
     [view.activeChatParticipants]

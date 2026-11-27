@@ -63,14 +63,14 @@ test("Pinned lists pinned chats in the order they were pinned, never an archived
   assert.deepEqual(pinnedChatSummaries(summaries).map((summary) => summary.id), ["early-pin", "late-pin"]);
 });
 
-test("Recents lists the newest chats of every project, pinned ones included, at most twenty", () => {
+test("Recents lists the newest chats of every project, pinned ones included, at most ten", () => {
   const summaries = Array.from({ length: 25 }, (_, index) =>
     listed(`chat-${index}`, new Date(Date.parse("2026-11-01T00:00:00.000Z") + index * 60_000).toISOString(), {
       repoPath: index % 2 ? "/a" : "/b", ...(index === 24 ? { pinned: true, pinnedAt: "2026-11-15T00:00:00.000Z" } : {}), ...(index === 23 ? { archived: true } : {})
     }));
   const recents = recentChatSummaries(summaries);
-  assert.equal(RECENT_CHAT_LIMIT, 20);
-  assert.equal(recents.length, 20);
+  assert.equal(RECENT_CHAT_LIMIT, 10);
+  assert.equal(recents.length, 10);
   assert.deepEqual(recents.slice(0, 3).map((summary) => summary.id), ["chat-24", "chat-22", "chat-21"], "newest first, pinned too, archived never");
 });
 

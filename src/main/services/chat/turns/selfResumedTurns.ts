@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import type { ChatExecutionLeaseMetadata, Conversation } from "../../../../shared/types";
+import type { ChatExecutionLeaseMetadata, ChatParticipant, Conversation } from "../../../../shared/types";
 import type { CliAgentReplyOrigin, CliAgentSelfResumedTurn } from "../../cliAgents";
 import { cliFailureNoticeText } from "../../../../shared/warnings";
 import { pendingChoiceFromAgentReply } from "../choices/choiceRecords";
@@ -10,7 +10,7 @@ import { recordReplySessionCut } from "../sessions/forkNotes";
 import { recordLastMessageByParticipant } from "../store/lastMessages";
 import { createChatMessage } from "../store/messages";
 import {
-  emitProgress, failedPrecreatedPendingMessageContent, markParticipantMessageStoppedByUser,
+  emitProgress, failedPrecreatedPendingMessageContent, markParticipantMessageSentNow, markParticipantMessageStoppedByUser,
   processingTranscriptWithTerminalMessage
 } from "./replyMessages";
 import type { ChatAppMcpTokenGrant } from "../types";
@@ -154,8 +154,21 @@ export class SelfResumedTurns {
       });
       const now = new Date().toISOString();
       updateParticipantContextUsage(conversation, participant.id, result.contextUsage);
+      const writtenBeforeEnd = pendingMessage.content;
       pendingMessage.content = result.content;
-      if (controller.signal.aborted) {
+      const sentNow = controller.signal.aborted && this.chat.activeRuns.sentNowRunIds.has(runId);
+      if (sentNow || (result.ok && result.cutBySendNow)) {
+        // A card its cut-short step was waiting on is not answered any more,
+        // on the chat as saved now (the card was saved on another copy).
+        await this.retireApprovalsCutBySendNow(conversation, participant, runId);
+      }
+      if (sentNow) {
+        // What it had written stays, never the CLI's cancellation notice.
+        if (!(result.ok && result.content.trim())) {
+          pendingMessage.content = writtenBeforeEnd.trim() ? writtenBeforeEnd : progressSink.processingTranscript(now)?.content ?? "";
+        }
+        markParticipantMessageSentNow(pendingMessage);
+      } else if (controller.signal.aborted) {
         markParticipantMessageStoppedByUser(pendingMessage, participant, {
           preserveContent: result.ok && result.content.trim().length > 0
         });
@@ -171,7 +184,7 @@ export class SelfResumedTurns {
         }
         this.chat.approvalDecisions.markPendingAppToolApprovalsForRunTerminal(conversation, runId, pendingMessage.content, true);
       }
-      if (result.ok && result.turnContinues && !controller.signal.aborted) {
+      if ((result.ok && result.turnContinues && !controller.signal.aborted) || sentNow) {
         // The User's next message joined this step the CLI started itself:
         // as on the main path, no "Worked for" of its own.
         const { workedMs: _workedMs, ...metadata } = pendingMessage.metadata ?? {};
@@ -190,7 +203,12 @@ export class SelfResumedTurns {
         pendingMessage.metadata = { ...pendingMessage.metadata, pendingChoice };
       }
     } catch (error) {
-      if (controller.signal.aborted) {
+      if (controller.signal.aborted && this.chat.activeRuns.sentNowRunIds.has(runId)) {
+        await this.retireApprovalsCutBySendNow(conversation, participant, runId);
+        // What it had streamed stays as its words.
+        if (!pendingMessage.content.trim()) pendingMessage.content = progressSink.processingTranscript(new Date().toISOString())?.content ?? "";
+        markParticipantMessageSentNow(pendingMessage);
+      } else if (controller.signal.aborted) {
         markParticipantMessageStoppedByUser(pendingMessage, participant);
       } else {
         pendingMessage.status = "error";
@@ -207,7 +225,7 @@ export class SelfResumedTurns {
       }
       const capturedAt = new Date().toISOString();
       let processingTranscript = progressSink.processingTranscript(capturedAt);
-      if (processingTranscript && controller.signal.aborted) {
+      if (processingTranscript && controller.signal.aborted && !this.chat.activeRuns.sentNowRunIds.has(runId)) {
         processingTranscript = processingTranscriptWithTerminalMessage(processingTranscript, pendingMessage.content);
       }
       if (processingTranscript) {
@@ -267,5 +285,15 @@ export class SelfResumedTurns {
       this.chat.appMcpGrants.appMcpConnections.set(key, updated);
       this.chat.appMcpGrants.lastAppMcpGrants.set(key, grant);
     }
+  }
+
+  /** The cards a step cut short by Send now was waiting on: not answered any
+   *  more, on the chat as it is saved now (they were saved on another copy). */
+  private async retireApprovalsCutBySendNow(conversation: Conversation, participant: ChatParticipant, runId: string): Promise<void> {
+    await this.chat.store.withChatMutation(conversation, async () => {
+      this.chat.approvalDecisions.markPendingAppToolApprovalsForRunTerminal(conversation, runId,
+        `@${participant.handle} moved on to the message sent now before this was answered.`);
+      this.chat.store.queueSnapshot(conversation);
+    });
   }
 }

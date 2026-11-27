@@ -1,7 +1,7 @@
 import path from "node:path";
 import type {
   AgentContextUsage, AgentDetectionRequest, AgentHealth, ChatProviderKind, CliProviderHost, ClaudeChromeSetting, ConversationKind,
-  GitDiffMode, ParticipantConfig, ProviderModelCatalog
+  GitDiffMode, ParticipantConfig, PlanUsageProvider, PlanUsageSnapshot, ProviderModelCatalog
 } from "../../shared/types";
 import type { CliStartDefaultsByKind } from "../../shared/cliStartDefaults";
 import { spawnCommand } from "./command";
@@ -13,7 +13,7 @@ import type { ClaudePermissionMode } from "./cliAgents/claude/permissionModes";
 import {
   CLAUDE_MODEL_PROBE_DIR, type ClaudeModelProbeExpectSpawn, type ClaudeModelProbePtySpawn
 } from "./cliAgents/models/claudeModelProbe";
-import type { CliAgentCompactResult, CliAgentDebugLogger, CliAgentRunnerOptions, CliAgentRunOptions } from "./cliAgents/types";
+import type { ClaudeSendNowOutcome, CliAgentCompactResult, CliAgentDebugLogger, CliAgentRunnerOptions, CliAgentRunOptions } from "./cliAgents/types";
 import { createCliModules, type CliModules } from "./cliAgents/modules";
 
 export { CLAUDE_PERMISSION_MODE_TIMEOUT_MS } from "./cliAgents/claude/claudeRuns";
@@ -26,7 +26,7 @@ export { withCliStartModel, parseAgyModelList, agyModelsInvocation } from "./cli
 export { antigravityExpectProgram, antigravityInteractiveGoalAtPrompt, antigravityInteractivePermissionPrompt } from "./cliAgents/gemini/goalTerminal";
 export { resolveCodexCompactTimeoutMs } from "./cliAgents/codex/appServer/appServerTurns";
 export { isForkSourceMissingError, forkCopyNotMade } from "./cliAgents/runs/forkSource";
-export type { CliAgentImageInput, CliAgentTurnImages, CliAgentRunOptions, NativeGoalRun, CliAgentOutputKind, CliAgentOutputEvent, CliAgentOutputCallback, CliAgentSessionIdCallback, CliAgentCodexServerRequest, CliAgentCodexServerRequestCallback, CliAgentWarmOptions, CliAgentBackgroundTask, CliAgentReplyOrigin, CliAgentReplyStart, CliAgentSelfResumedTurn, CliAgentRoleOptions, CliAgentAppMcpOptions, CliAgentAppMcpClientStatus, CliAgentCompactResult } from "./cliAgents/types";
+export type { CliAgentImageInput, CliAgentTurnImages, CliAgentRunOptions, NativeGoalRun, CliAgentOutputKind, CliAgentOutputEvent, CliAgentOutputCallback, CliAgentSessionIdCallback, CliAgentCodexServerRequest, CliAgentCodexServerRequestCallback, CliAgentWarmOptions, CliAgentBackgroundTask, CliAgentReplyOrigin, CliAgentReplyStart, CliAgentSelfResumedTurn, CliAgentRoleOptions, CliAgentAppMcpOptions, CliAgentAppMcpClientStatus, CliAgentCompactResult, ClaudeSendNowOutcome } from "./cliAgents/types";
 export { type ClaudePermissionMode, ClaudeControlError, isClaudeAutoModeRefusal, isClaudePermissionMode, CLAUDE_PERMISSION_MODE_LABELS, claudePermissionModeRank, claudeCodePermissionMode } from "./cliAgents/claude/permissionModes";
 export { ClaudeFolderNotTrustedError, parseClaudeModelPickerOutput, claudeModelProbeEnv, resolveClaudeModelProbeCwd, probeClaudeModelsInFolder, runClaudeModelProbeWithExpect, runClaudeModelProbeInPty } from "./cliAgents/models/claudeModelProbe";
 export { parseClaudeInitializeModels, claudeAppliedSettings, ClaudeModelListTimeoutError, runClaudeModelListProbe } from "./cliAgents/models/claudeModelList";
@@ -227,6 +227,12 @@ export class CliAgentRunner {
     return this.modules.warmAgents.memberClaudeControl(conversationId, participantId, request, timeoutMs, signal);
   }
 
+  /** Send now on the member's live Claude Code process, as the CLI's own
+   *  send-now; `unsupported` when it cannot (the caller stops the reply). */
+  memberClaudeSendNow(conversationId: string, participantId: string, waitingRunId?: string, runningRunId?: string): Promise<ClaudeSendNowOutcome> {
+    return this.modules.warmAgents.memberClaudeSendNow(conversationId, participantId, waitingRunId, runningRunId);
+  }
+
   /** Where this device's Claude Code keeps its members' sessions (the
    *  environment members get decides it: CLAUDE_CONFIG_DIR on a machine). */
   claudeProjectsDirectory(): Promise<string> {
@@ -242,6 +248,24 @@ export class CliAgentRunner {
    *  pick it up with their next turn once their process is idle. */
   setClaudeChromeEnabledByDefault(enabled: boolean): Promise<ClaudeChromeSetting> {
     return this.modules.claudeSettings.setClaudeChromeEnabledByDefault(enabled);
+  }
+
+  /** The plan usage of this device's CLI accounts, as their CLIs last
+   *  reported it (cliAgents/usage/planUsage.ts). */
+  planUsage(): PlanUsageSnapshot[] {
+    return this.modules.planUsage.list();
+  }
+
+  /** Told every change of planUsage(). Reads happen only while someone listens. */
+  onPlanUsageChanged(listener: (snapshots: PlanUsageSnapshot[]) => void): () => void {
+    return this.modules.planUsage.onChanged(listener);
+  }
+
+  /** Reads one CLI's account again (a card opened, Refresh): not twice at
+   *  once, and not again within a minute (ten seconds for Refresh). */
+  async refreshPlanUsage(provider: PlanUsageProvider, force = false): Promise<PlanUsageSnapshot[]> {
+    await this.modules.planUsage.refresh(provider, force);
+    return this.modules.planUsage.list();
   }
 
   /** Retire every warm process of one member, e.g. when the credential it was

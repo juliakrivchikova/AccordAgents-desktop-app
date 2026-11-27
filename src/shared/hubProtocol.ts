@@ -9,7 +9,7 @@
  */
 
 import type { CliStartDefaultsByKind } from "./cliStartDefaults";
-import type { ChatAgentMode, ChatAgentPermissions, ChatForkSeenReply, ChatParticipant, ChatParticipantRequestPermission, ChatProviderKind, ChatSkillMention, ChatViewMode } from "./types";
+import type { ChatAgentMode, ChatAgentPermissions, ChatForkSeenReply, ChatParticipant, ChatParticipantRequestPermission, ChatProviderKind, ChatSkillMention, ChatViewMode, PlanUsageProvider, PlanUsageSnapshot } from "./types";
 import type { NewChatMemberOption, NewChatProviderOffer } from "./newChat";
 import type { ForkToNewChatOffer } from "./forkToNewChat";
 import type { MachineProgressFrame } from "./machineProgress";
@@ -211,6 +211,54 @@ export interface HubPhoneEnrollResponse {
 export const HUB_PROGRESS_PATH = "/v1/progress";
 export interface HubProgressPost {
   frames: MachineProgressFrame[];
+}
+
+/** Each device's plan usage of its CLI accounts (types/planUsage.ts), put by
+ *  the device that runs the members (the computer, a machine): its last
+ *  value only, a few kilobytes, kept so a server restart loses nothing. The
+ *  computer reads every device's (GET) to show a cloud member's ring as a
+ *  local one's; a put is told on the live socket (HubLivePlanUsage). */
+export const HUB_PLAN_USAGE_PATH = "/v1/plan-usage";
+/** POST: the computer (or the phone) asks a machine to read its usage again
+ *  now (HubLivePlanUsageRefresh on that machine's live socket). */
+export const HUB_PLAN_USAGE_REFRESH_PATH = "/v1/plan-usage/refresh";
+export const HUB_PLAN_USAGE_MAX_SNAPSHOTS = 6;
+export const HUB_PLAN_USAGE_MAX_SNAPSHOT_BYTES = 2_048;
+
+export interface HubPlanUsagePut {
+  snapshots: PlanUsageSnapshot[];
+}
+
+export interface HubPlanUsageDevice {
+  deviceId: string;
+  /** The machine it is, as the server's roster names it. */
+  machineId?: string;
+  snapshots: PlanUsageSnapshot[];
+  updatedAt: string;
+}
+
+export interface HubPlanUsageResponse {
+  devices: HubPlanUsageDevice[];
+}
+
+export interface HubPlanUsageRefresh {
+  machineId: string;
+  provider: PlanUsageProvider;
+  /** The User pressed Refresh: read sooner than an opened card would. */
+  force?: boolean;
+}
+
+/** The live word that a device put its plan usage (to every live device). */
+export interface HubLivePlanUsage {
+  type: "plan-usage";
+  deviceId: string;
+}
+
+/** The live word to a machine: read this CLI's plan usage again now. */
+export interface HubLivePlanUsageRefresh {
+  type: "plan-usage-refresh";
+  provider: PlanUsageProvider;
+  force?: boolean;
 }
 
 export function hubPhoneInviteSigningText(invite: HubPhoneInvite): string {

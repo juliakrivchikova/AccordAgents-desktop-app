@@ -1,7 +1,9 @@
 /* An urgent alert's card (chat-urgent-alert-card.tsx), as the User approved it
-   on 2026-11-15: the red header whatever the state, the member and the time,
-   the message, then a status band (what happens now, the history in one grey
-   line, Got it or Set up alerts on the right). */
+   on 2026-11-27 (docs/design/urgent-alert, variant 1): a kit card, red only
+   while it waits for her (its border and bell), a head line (Urgent alert,
+   who, when), the message, then the status as a small dot and colored words
+   (what happens now, the history in one grey line, Got it or Set up alerts on
+   the right). */
 /* No avatar: in the messages' text column (past their 38 px avatar and
    12 px gap), as a turn-finished note is. */
 .chat-urgent-alert {
@@ -11,77 +13,90 @@
 }
 
 .chat-urgent-alert-panel {
+  /* The status's tone: red while it waits or nobody answered, amber when it
+     never left the app, green once she reacted. */
+  --urgent-tone: var(--ui-danger);
+  --urgent-tone-dot: var(--ui-danger-dot);
   max-width: 624px;
-  overflow: hidden;
-  border: 1px solid var(--app-urgent);
+  padding: 10px 12px 12px;
+  border: 1px solid var(--ui-border);
   border-radius: var(--ui-radius-8);
-  background: var(--app-surface);
+  background: var(--ui-bg);
   box-shadow: var(--ui-shadow-sm);
+}
+
+.chat-urgent-alert-panel.is-awaiting {
+  border-color: color-mix(in srgb, var(--ui-danger) 45%, var(--ui-border));
+}
+
+.chat-urgent-alert-panel.is-off {
+  --urgent-tone: var(--ui-warning);
+  --urgent-tone-dot: var(--ui-warning-dot);
+}
+
+.chat-urgent-alert-panel.is-done {
+  --urgent-tone: var(--ui-success);
+  --urgent-tone-dot: var(--ui-success-dot);
 }
 
 .chat-urgent-alert-head {
   display: flex;
   align-items: center;
   gap: 8px;
-  height: 44px;
-  padding: 0 10px 0 15px;
-  background: var(--app-urgent);
-  color: var(--app-urgent-fg);
+  min-width: 0;
+  min-height: 24px;
+}
+
+.chat-urgent-alert-bell {
+  flex: none;
+  color: var(--ui-text-3);
+}
+
+.chat-urgent-alert-panel.is-awaiting .chat-urgent-alert-bell {
+  color: var(--ui-danger);
 }
 
 .chat-urgent-alert-title {
+  flex: none;
+  color: var(--ui-text);
   font-size: 13px;
   font-weight: 600;
 }
 
-.chat-urgent-alert-close {
-  display: grid;
-  place-items: center;
-  width: 28px;
-  height: 28px;
-  margin-left: auto;
-  border: 0;
-  border-radius: 8px;
-  background: transparent;
-  color: inherit;
-  cursor: pointer;
-}
-
-.chat-urgent-alert-close:hover {
-  background: color-mix(in srgb, var(--app-urgent-fg) 18%, transparent);
-}
-
-.chat-urgent-alert-close:focus-visible {
-  outline: 2px solid var(--app-urgent-fg);
-  outline-offset: -2px;
-}
-
-.chat-urgent-alert-close:disabled {
-  opacity: 0.6;
-  cursor: default;
-}
-
-/* The member and the time, inside the card above the message. */
+/* Who raised it, then when, at the head's end. */
 .chat-urgent-alert-from {
-  padding: 12px 15px 0;
-  color: var(--app-text-secondary);
+  min-width: 0;
+  overflow: hidden;
+  color: var(--ui-text-2);
   font-size: 12px;
   font-weight: 500;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.chat-urgent-alert-when {
+  flex: none;
+  margin-left: auto;
+  color: var(--ui-text-3);
+  font-size: 12px;
   font-variant-numeric: tabular-nums;
 }
 
-.chat-urgent-alert-from .message-when,
-.chat-urgent-alert-from time {
+.chat-urgent-alert-when .message-when,
+.chat-urgent-alert-when time {
   color: inherit;
   font-size: inherit;
 }
 
+.chat-urgent-alert-close {
+  margin-right: -6px;
+}
+
 .chat-urgent-alert-text {
-  padding: 4px 15px 14px;
-  color: var(--app-text-strong);
-  font-size: 13px;
-  font-weight: 600;
-  line-height: 1.42;
+  margin-top: 6px;
+  color: var(--ui-text);
+  font-size: 14px;
+  line-height: 22px;
   overflow-wrap: anywhere;
   white-space: pre-wrap;
 }
@@ -90,31 +105,20 @@
 .chat-urgent-alert-status {
   display: flex;
   align-items: center;
-  gap: 11px;
-  padding: 12px 12px 12px 15px;
-  border-top: 1px solid var(--app-border);
-  background: var(--app-surface-subtle);
+  gap: 8px;
+  margin-top: 12px;
+  padding-top: 12px;
+  border-top: 1px solid var(--ui-border-subtle);
 }
 
-.chat-urgent-alert-status.is-bad {
-  border-top-color: var(--app-danger-border);
-  background: var(--app-danger-soft);
-}
-
-.chat-urgent-alert-status-icon {
+.chat-urgent-alert-status-dot {
   flex: none;
   align-self: flex-start;
-  margin-top: 2px;
-  color: var(--app-text-strong);
-}
-
-.chat-urgent-alert-status.is-done .chat-urgent-alert-status-icon {
-  color: var(--app-success);
-}
-
-.chat-urgent-alert-status.is-bad .chat-urgent-alert-status-icon,
-.chat-urgent-alert-status.is-bad .chat-urgent-alert-status-main {
-  color: var(--app-danger);
+  width: 6px;
+  height: 6px;
+  margin-top: 7px;
+  border-radius: 999px;
+  background: var(--urgent-tone-dot);
 }
 
 .chat-urgent-alert-status-words {
@@ -123,31 +127,30 @@
 }
 
 .chat-urgent-alert-status-main {
-  color: var(--app-text-strong);
+  color: var(--urgent-tone);
   font-size: 13px;
-  font-weight: 600;
-  line-height: 1.35;
+  font-weight: 500;
+  line-height: 20px;
   font-variant-numeric: tabular-nums;
 }
 
 .chat-urgent-alert-countdown {
-  font-weight: 750;
+  font-weight: 600;
 }
 
 .chat-urgent-alert-status-detail {
-  margin-top: 2px;
-  color: var(--app-text-secondary);
+  color: var(--ui-text-3);
   font-size: 12px;
-  line-height: 1.4;
+  line-height: 18px;
   overflow-wrap: anywhere;
   font-variant-numeric: tabular-nums;
 }
 
 .chat-urgent-alert-error {
-  margin-top: 4px;
-  color: var(--app-danger);
+  margin-top: 2px;
+  color: var(--ui-danger);
   font-size: 12px;
-  line-height: 1.4;
+  line-height: 18px;
   overflow-wrap: anywhere;
 }
 
@@ -201,8 +204,9 @@ button.chat-card-row:hover {
   color: var(--ui-text-3);
 }
 
+/* One that never left the app: amber, as its open card's status. */
 .chat-urgent-alert-folded.is-unresolved .chat-urgent-alert-folded-bell {
-  color: var(--app-urgent);
+  color: var(--ui-warning);
 }
 
 .chat-urgent-alert-folded-preview,
@@ -230,7 +234,7 @@ button.chat-card-row:hover {
 }
 
 .chat-urgent-alert-folded.is-unresolved .chat-urgent-alert-folded-outcome {
-  color: var(--app-danger);
+  color: var(--ui-warning);
 }
 
 .chat-urgent-alert-folded-chevron,

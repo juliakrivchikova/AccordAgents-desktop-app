@@ -116,6 +116,11 @@ export class ServerTurns {
       });
       return;
     }
+    if (turn.state === "claimed" && turn.sendNowRequestedAt && !turn.stopRequestedAt && turn.executorDeviceId === me) {
+      const waiting = turn.sendNowWaitingRunId;
+      void this.chat.runCancel.sendNow(this.localRunOfServer.get(turn.runId) ?? turn.runId, waiting ? this.localRunOfServer.get(waiting) ?? waiting : undefined);
+      return;
+    }
     if (turn.state === "claimed" && turn.stopRequestedAt && turn.executorDeviceId === me) {
       this.chat.runCancel.cancelRun(this.localRunOfServer.get(turn.runId) ?? turn.runId);
       return;

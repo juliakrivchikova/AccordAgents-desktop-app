@@ -52,6 +52,9 @@ export interface CommandOptions {
 
 export interface CommandEnvironmentOptions {
   dropProcessEnvKeysAbsentFromLoginShell?: readonly string[];
+  /** Values the command gets unless this computer, the app's own environment
+   *  or the caller sets them. */
+  defaults?: Readonly<Record<string, string>>;
 }
 
 let loginShellEnv: NodeJS.ProcessEnv | undefined;
@@ -137,6 +140,7 @@ async function captureFreshLoginShellEnv(): Promise<LoginShellEnvironmentRefresh
 export function commandEnvironment(extraEnv: NodeJS.ProcessEnv = {}, options: CommandEnvironmentOptions = {}): NodeJS.ProcessEnv {
   const shellEnv = loginShellEnv ?? {};
   const env: NodeJS.ProcessEnv = {
+    ...options.defaults,
     ...process.env,
     ...shellEnv,
     ...extraEnv,

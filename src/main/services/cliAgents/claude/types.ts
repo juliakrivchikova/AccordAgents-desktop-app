@@ -72,6 +72,8 @@ export interface ClaudeWarmProcessState {
   errorOutsideReply?: string;
   /** What it last wrote to stderr since a step began. */
   stderr?: string;
+  /** What the CLI says it can do (`capabilities` of its `system/init`). */
+  capabilities: ReadonlySet<string>;
   /** control_request ids of our own questions to the CLI, and who waits. */
   controlWaiters: Map<string, (response: Record<string, unknown> | undefined) => void>;
   /** What the CLI said about the last compaction of this session, numbered,

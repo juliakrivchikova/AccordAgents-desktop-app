@@ -216,9 +216,10 @@ export class ParticipantBatch {
           if (serverTurn.kind === "remote") {
             // The member's own device wrote its reply and ran what follows it.
             await this.chat.serverPlaceholders.dropServerPlaceholder(conversation, pendingMessage.id);
-          } else if (targetController.signal.aborted) {
+          } else if (targetController.signal.aborted && !this.chat.activeRuns.sentNowRunIds.has(targetRunId)) {
             await this.discardStoppedTargetRun(conversation, targetRunId, participant, pendingMessage.id);
           } else {
+            // A reply Send now cut short is a finished reply whose turn goes on.
             await appendCompletedTurn(participant, messages);
           }
         } catch (error) {
@@ -305,7 +306,9 @@ export class ParticipantBatch {
         runId,
         `@${participant.handle} stopped before pending approval was resolved.`
       );
-      if (!keptStoppedParticipantMessage) {
+      // Send now stopped it for the message waiting behind it: its reply ends
+      // as a turn that goes on, not as a Stop.
+      if (!keptStoppedParticipantMessage && !this.chat.activeRuns.sentNowRunIds.has(runId)) {
         conversation.messages.push(createChatMessage(
           "system",
           `@${participant.handle} stopped by user.`,

@@ -794,6 +794,11 @@ export class ChatService {
     return this.modules.runCancel.cancelRun(runId);
   }
 
+  /** Send now on a message waiting behind a member's running reply (RunCancel.sendNow). */
+  sendNow(runId: string, waitingRunId?: string): Promise<void> {
+    return this.modules.runCancel.sendNow(runId, waitingRunId);
+  }
+
   /** Which conversation a run belongs to. Live progress carries no conversation
    *  of its own, so whoever forwards it — the phone relay in particular — has to
    *  ask rather than assume: attributing a run to the wrong chat puts one

@@ -58,7 +58,7 @@ function snippetDisplayText(chat) {
 }
 
 /** How many chats Recents lists, as Claude's does (and the desktop). */
-const RECENT_CHAT_LIMIT = 20;
+const RECENT_CHAT_LIMIT = 10;
 
 /** The folds of the two lists above the projects (never a project's name). */
 const PINNED_GROUP_KEY = "\u0000pinned";

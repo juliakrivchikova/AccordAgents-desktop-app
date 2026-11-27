@@ -21,7 +21,7 @@
   --pre-fg: #f9fafb;
   --link: #2563eb;
   --danger: #b4443a;
-  /* An urgent alert's header: the desktop's --app-urgent pair. */
+  /* An urgent alert's red (the desktop now draws it with --ui-danger). */
   --urgent: #dc2626;
   --urgent-fg: #ffffff;
   /* Its status band when the alert never reached her (the desktop's

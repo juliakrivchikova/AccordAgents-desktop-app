@@ -9,6 +9,7 @@ import {
   normalizeAppSidebarWidth
 } from "../../lib/sidebar-sizing";
 import { isMacPlatform } from "../../lib/platform";
+import { useWindowFullScreen } from "./use-window-full-screen";
 
 export interface AppShellProps {
   sidebar: React.ReactNode;
@@ -38,6 +39,7 @@ export const AppShell = ({
   const cleanupResizeRef = React.useRef<(() => void) | null>(null);
   const sidebarSlotRef = React.useRef<HTMLDivElement>(null);
   const [isResizingSidebar, setIsResizingSidebar] = React.useState(false);
+  const fullScreen = useWindowFullScreen();
   const [rootWidth, setRootWidth] = React.useState<number | undefined>();
   const normalizedSidebarWidth = normalizeAppSidebarWidth(sidebarWidth);
   const effectiveSidebarMax = rootWidth !== undefined
@@ -102,8 +104,9 @@ export const AppShell = ({
     <div
       data-shell="root"
       // macOS draws the traffic lights over the top-left corner of the window,
-      // so title rows at the window's left edge leave room for them.
-      data-platform={isMacPlatform() ? "mac" : undefined}
+      // so title rows at the window's left edge leave room for them (none in
+      // full screen, where the lights are hidden and the window cannot be dragged).
+      data-platform={isMacPlatform() && !fullScreen ? "mac" : undefined}
       data-sidebar-collapsed={sidebarCollapsed ? "true" : undefined}
       ref={rootRef}
       style={{ "--app-sidebar-width": `${effectiveSidebarWidth}px` } as React.CSSProperties}

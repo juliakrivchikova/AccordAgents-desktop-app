@@ -234,6 +234,13 @@ export function createWindow(desktopApp: DesktopApp): void {
     desktopApp.filePreviewService.releaseAll();
   });
   guardFilePreviewNavigation(desktopApp, window.webContents);
+  // macOS hides the traffic lights in full screen: the title rows then drop
+  // the room they keep for them (app-shell.tsx).
+  const sendFullScreen = (): void => {
+    if (!window.isDestroyed()) window.webContents.send("app:full-screen-changed", window.isFullScreen());
+  };
+  window.on("enter-full-screen", sendFullScreen);
+  window.on("leave-full-screen", sendFullScreen);
   window.on("unresponsive", () => {
     void desktopApp.debugLogService.write("app-window.unresponsive", { windowId });
   });

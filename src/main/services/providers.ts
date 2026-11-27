@@ -32,6 +32,9 @@ export interface ParticipantRunResult {
    *  transcript, this part has no "Worked for" of its own (the turn's one is
    *  on its last part). */
   turnContinues?: boolean;
+  /** Claude Code ended the step for a message the User sent now (its own
+   *  send-now), not because the next message joined it. */
+  cutBySendNow?: boolean;
 }
 
 export class ProviderRunner {

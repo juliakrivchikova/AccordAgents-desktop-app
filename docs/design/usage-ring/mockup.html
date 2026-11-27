@@ -1,0 +1,460 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Usage ring</title>
+<!-- The app's real tokens (light in :root, dark in .dark) and the real CSS of
+     the composer, its context strip, the model chip, the provider marks and
+     the composer menus. Only the ring, its hover card and the detail panels
+     are new; their rules are at the end of the style block, on tokens only. -->
+<link rel="stylesheet" href="../../../src/renderer/styles/app-theme.css">
+<link rel="stylesheet" href="../../../src/renderer/styles/views/chat-conversation/composer.css">
+<link rel="stylesheet" href="../../../src/renderer/styles/views/chat-conversation/composer-shell.css">
+<link rel="stylesheet" href="../../../src/renderer/styles/views/chat-model-access.css">
+<link rel="stylesheet" href="../../../src/renderer/styles/views/chat-sessions/delegations.css">
+<link rel="stylesheet" href="../../../src/renderer/styles/views/chat-sessions/model-chip.css">
+<link rel="stylesheet" href="../../../src/renderer/styles/views/chat-sessions/sessions-view.css">
+<link rel="stylesheet" href="../../../src/renderer/styles/views/chat-sessions/provider-icons.css">
+<style>
+@font-face {
+  font-family: "Inter Variable";
+  font-style: normal;
+  font-display: block;
+  font-weight: 100 900;
+  src: url("../../../node_modules/@fontsource-variable/inter/files/inter-latin-wght-normal.woff2") format("woff2-variations");
+}
+
+/* app-theme.css locks html and body to the window; a mockup page scrolls. */
+html, body { height: auto; min-height: 100%; overflow: visible; }
+body {
+  margin: 0;
+  padding: 32px;
+  background: var(--ui-bg-sidebar);
+  color: var(--ui-text);
+  font-family: var(--font-body);
+  font-size: 13px;
+  line-height: 20px;
+}
+p, h1, h2, h3 { margin: 0; }
+button { font-family: inherit; }
+
+/* ---------- page chrome (not part of the design) ---------- */
+.page-head { max-width: 1400px; margin-bottom: 28px; }
+.page-head h1 { font-size: 16px; line-height: 24px; font-weight: 600; }
+.page-head p { margin-top: 4px; color: var(--ui-text-2); max-width: 1040px; }
+.section { margin-bottom: 44px; }
+.section-head { max-width: 1400px; margin-bottom: 12px; }
+.section-head h2 { font-size: 14px; line-height: 22px; font-weight: 600; }
+.section-head p { margin-top: 2px; color: var(--ui-text-2); max-width: 1100px; }
+.themes { display: flex; gap: 24px; align-items: flex-start; }
+.theme-col { flex: none; padding: 20px; border-radius: var(--ui-radius-12); background: var(--ui-bg-panel); border: 1px solid var(--ui-border); }
+.theme-col.dark { color: var(--ui-text); }
+.theme-name { margin: 0 0 12px; color: var(--ui-text-3); font-size: 12px; line-height: 16px; }
+.state-label { margin: 0 0 6px 2px; color: var(--ui-text-3); font-size: 12px; line-height: 16px; }
+.stack { display: grid; gap: 18px; }
+.row { display: flex; gap: 20px; align-items: flex-start; }
+
+/* ---------- the composer as the app draws it (real classes) ---------- */
+.mock-composer { width: 640px; }
+.mock-composer .chat-composer-shell { background: var(--ui-bg); }
+.mock-input {
+  min-height: 44px;
+  padding: 4px 4px 0;
+  color: var(--ui-text-3);
+  font-size: 14px;
+  line-height: 22px;
+}
+.mock-toolbar { display: flex; align-items: center; justify-content: space-between; padding: 0 2px; }
+.mock-tool { display: inline-flex; align-items: center; justify-content: center; width: 28px; height: 28px; border-radius: var(--ui-radius-8); color: var(--ui-text-3); }
+.mock-tool svg { width: 16px; height: 16px; fill: currentColor; }
+.mock-actions { display: flex; align-items: center; gap: 6px; }
+.chat-composer-context-item svg.ph,
+.chat-model-chip svg.ph { width: 14px; height: 14px; fill: currentColor; flex: none; }
+.composer-menu-chevron { width: 12px; height: 12px; fill: currentColor; }
+.composer-send-button svg { width: 14px; height: 14px; fill: currentColor; }
+
+/* ================= NEW: the usage ring ================= */
+
+/* A 28px quiet control in the strip, left of the model chip; the ring is its
+   14px icon. It never changes size or position between states (layout
+   stability): only the arc's length and colour change. */
+.usage-ring-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: none;
+  width: 28px;
+  height: 28px;
+  border: 0;
+  border-radius: var(--ui-radius-8);
+  background: transparent;
+  color: var(--ui-text-3);
+  cursor: pointer;
+}
+.usage-ring-button.is-hover,
+.usage-ring-button.is-open { background: var(--ui-row-hover); }
+.usage-ring { width: 14px; height: 14px; display: block; transform: rotate(-90deg); }
+.usage-ring .track { fill: none; stroke: var(--ui-border); }
+.usage-ring .arc { fill: none; stroke: var(--ring-tone, var(--ui-text-2)); stroke-linecap: round; }
+.usage-ring.is-full .arc { stroke-linecap: butt; }
+/* Tones: neutral while the CLI says nothing; the CLI's own warning; refused. */
+.tone-normal { --ring-tone: var(--ui-text-2); --tone-text: var(--ui-text); }
+.tone-warning { --ring-tone: var(--ui-warning); --tone-text: var(--ui-warning); }
+.tone-blocked { --ring-tone: var(--ui-danger); --tone-text: var(--ui-danger); }
+
+/* ---------- hover card (kit hover-card proportions, 500ms delay) ---------- */
+.usage-hover {
+  width: 272px;
+  padding: 9px 11px 10px;
+  border: 1px solid var(--ui-border);
+  border-radius: var(--ui-radius-12);
+  background: var(--ui-bg-elevated);
+  box-shadow: var(--ui-shadow-md);
+  color: var(--ui-text);
+  font-size: 12px;
+  line-height: 17px;
+}
+.usage-hover .lead { font-size: 13px; line-height: 18px; font-weight: 500; }
+.usage-hover .sub { color: var(--ui-text-3); }
+.usage-hover .rows { display: grid; gap: 2px; margin-top: 7px; padding-top: 7px; border-top: 1px solid var(--ui-border-subtle); }
+.usage-hover .line { display: flex; align-items: baseline; gap: 8px; color: var(--ui-text-2); }
+.usage-hover .line .name { flex: 1 1 auto; min-width: 0; }
+.usage-hover .line .val { flex: none; font-variant-numeric: tabular-nums; color: var(--ui-text); }
+.usage-hover .foot { margin-top: 7px; padding-top: 7px; border-top: 1px solid var(--ui-border-subtle); color: var(--ui-text-3); }
+
+/* Quiet status: a small dot and coloured text, never a filled pill. */
+.status { display: inline-flex; align-items: center; gap: 6px; color: var(--tone-text); }
+.status::before { content: ""; width: 6px; height: 6px; border-radius: 50%; background: var(--ring-tone); flex: none; }
+.tone-normal.status::before { display: none; }
+
+/* ---------- click: detail panels (composer-menu, real classes) ---------- */
+.composer-menu.is-static { position: static; width: 320px; max-height: none; }
+.usage-detail-head {
+  display: flex; align-items: center; gap: 8px;
+  padding: 6px 8px 8px;
+  border-bottom: 1px solid var(--ui-border-subtle);
+}
+.usage-detail-head .title { flex: 1 1 auto; font-size: 13px; font-weight: 600; color: var(--ui-text); }
+.usage-detail-head .plan { color: var(--ui-text-3); font-size: 12px; }
+.usage-window { display: grid; gap: 4px; padding: 6px 8px; }
+.usage-window .top { display: flex; align-items: baseline; gap: 8px; }
+.usage-window .name { flex: 1 1 auto; min-width: 0; color: var(--ui-text); }
+.usage-window .pct { flex: none; font-variant-numeric: tabular-nums; }
+.usage-window .reset { color: var(--ui-text-3); font-size: 12px; line-height: 16px; }
+.usage-bar { height: 4px; border-radius: 2px; background: var(--ui-bg-muted); overflow: hidden; }
+.usage-bar > span { display: block; height: 100%; border-radius: 2px; background: var(--ring-tone); }
+.tone-normal .usage-bar > span { background: var(--ui-text-3); }
+.usage-facts { display: grid; gap: 2px; padding: 6px 8px; border-top: 1px solid var(--ui-border-subtle); }
+.usage-fact { display: flex; align-items: baseline; gap: 8px; min-height: 22px; color: var(--ui-text-2); }
+.usage-fact .name { flex: 1 1 auto; }
+.usage-fact .val { flex: none; color: var(--ui-text); font-variant-numeric: tabular-nums; }
+.usage-detail-foot {
+  display: flex; align-items: center; gap: 8px;
+  padding: 6px 4px 2px 8px;
+  border-top: 1px solid var(--ui-border-subtle);
+  color: var(--ui-text-3); font-size: 12px; line-height: 16px;
+}
+.usage-detail-foot .where { flex: 1 1 auto; min-width: 0; }
+.usage-refresh {
+  display: inline-flex; align-items: center; gap: 5px;
+  height: 24px; padding: 0 8px;
+  border: 0; border-radius: var(--ui-radius-8);
+  background: transparent; color: var(--ui-text-2);
+  font-size: 12px; font-weight: 500; cursor: pointer;
+}
+.usage-refresh svg { width: 12px; height: 12px; fill: currentColor; }
+.usage-group-label { padding: 8px 8px 0; color: var(--ui-text-3); font-size: 11px; font-weight: 500; line-height: 16px; }
+.usage-group-label .mine { color: var(--ui-text-2); }
+
+/* Variant B: every account the chat's members use, one row each. */
+.usage-account { display: grid; grid-template-columns: 16px minmax(0, 1fr) auto; gap: 2px 8px; align-items: center; padding: 7px 8px; border-radius: var(--ui-radius-8); }
+.usage-account.is-current { background: var(--ui-row-active); }
+.usage-account .chat-provider-icon { grid-row: 1; }
+.usage-account .who { min-width: 0; color: var(--ui-text); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.usage-account .who .plan { color: var(--ui-text-3); }
+.usage-account .head { display: inline-flex; align-items: center; gap: 6px; font-variant-numeric: tabular-nums; }
+.usage-account .more { grid-column: 2 / 4; color: var(--ui-text-3); font-size: 12px; line-height: 16px; }
+.usage-account .more b { font-weight: 400; color: var(--ui-text-2); }
+
+/* A strip cut-out with an overlay attached under the ring. */
+.anchor { display: grid; gap: 6px; justify-items: start; }
+.strip-cut { display: inline-flex; align-items: center; gap: 2px; padding: 4px 6px; border-radius: var(--ui-radius-12); background: var(--ui-bg); border: 1px solid var(--ui-border); }
+.ring-states { display: flex; gap: 14px; align-items: flex-end; }
+.ring-state { display: grid; justify-items: center; gap: 4px; }
+.ring-state .cap { color: var(--ui-text-3); font-size: 11px; line-height: 14px; text-align: center; max-width: 92px; }
+.ring-state.big .usage-ring { width: 28px; height: 28px; }
+.notes { margin-top: 10px; color: var(--ui-text-3); font-size: 12px; line-height: 17px; max-width: 640px; }
+</style>
+</head>
+<body>
+
+<div class="page-head">
+  <h1>Usage ring in the composer</h1>
+  <p>A 14px ring left of the model chip shows how much of the member's plan limit its CLI reports used. Hover tells the limit and when it resets; click opens the CLI's own usage figures for that account. Sample data, but every field shown is one the CLI really reports: Claude Code's <code>rate_limit_event</code> and <code>get_usage</code>, Codex's <code>account/rateLimits/read</code> and <code>account/rateLimits/updated</code>, Antigravity's <code>agy -p "/usage" --output-format json</code> and <code>/credits</code>.</p>
+</div>
+
+<!-- ============ 1. The ring in the context row ============ -->
+<section class="section" data-shot="strip">
+  <div class="section-head">
+    <h2>1. The ring in the context row</h2>
+    <p>Same place and size in every state; only the arc and its colour change. Neutral while the CLI reports nothing alarming, amber at the CLI's own warning (Claude Code's <code>allowed_warning</code>), red when the CLI refuses requests. The headline is the window closest to its limit.</p>
+  </div>
+  <div class="themes">
+    <div class="theme-col" data-theme-col="light"><div class="theme-name">Light</div><div class="stack" data-composers></div></div>
+    <div class="theme-col dark" data-theme-col="dark"><div class="theme-name">Dark</div><div class="stack" data-composers></div></div>
+  </div>
+</section>
+
+<section class="section" data-shot="states">
+  <div class="section-head">
+    <h2>Ring states at 2x</h2>
+    <p>Arc from 12 o'clock, clockwise, no animation. Not read yet: the empty track, as at 0% (the hover says which); never a spinner. A member on an API key has no plan limit: no ring at all.</p>
+  </div>
+  <div class="themes">
+    <div class="theme-col"><div class="theme-name">Light</div><div class="ring-states" data-ring-states></div></div>
+  </div>
+  <div class="themes" style="margin-top:18px">
+    <div class="theme-col dark"><div class="theme-name">Dark</div><div class="ring-states" data-ring-states></div></div>
+  </div>
+</section>
+
+<!-- ============ 2. Hover ============ -->
+<section class="section" data-shot="hover">
+  <div class="section-head">
+    <h2>2. Hover (after 500ms, like every hover card)</h2>
+    <p>The headline window first, as Claude Code's own ring shows it, then the account's other windows in one line each, then the member's context, which the app already reads. Wording follows each CLI: Claude Code's <code>/usage</code> titles, Codex's "5h limit" and "Weekly limit", Antigravity's groups.</p>
+  </div>
+  <div class="themes">
+    <div class="theme-col"><div class="theme-name">Light</div><div class="row" data-hovers="a"></div><div class="row" style="margin-top:18px" data-hovers="b"></div></div>
+  </div>
+  <div class="themes" style="margin-top:18px">
+    <div class="theme-col dark"><div class="theme-name">Dark</div><div class="row" data-hovers="a"></div><div class="row" style="margin-top:18px" data-hovers="b"></div></div>
+  </div>
+</section>
+
+<!-- ============ 3. Click: variant A ============ -->
+<section class="section" data-shot="detail-a">
+  <div class="section-head">
+    <h2>3A. Click: this member's account, as its CLI's /usage shows it (recommended)</h2>
+    <p>A composer menu (320px, radius 12) with every window the CLI reports for the account the member runs on, a bar and a reset each, then the account facts the CLI also reports (extra usage, credits, limit resets) and the context. The footer says where the figures come from (this computer or the cloud machine) and when, with Refresh.</p>
+  </div>
+  <div class="themes">
+    <div class="theme-col"><div class="theme-name">Light</div><div class="row" data-details-a></div></div>
+  </div>
+  <div class="themes" style="margin-top:18px">
+    <div class="theme-col dark"><div class="theme-name">Dark</div><div class="row" data-details-a></div></div>
+  </div>
+</section>
+
+<!-- ============ 3. Click: variant B ============ -->
+<section class="section" data-shot="detail-b">
+  <div class="section-head">
+    <h2>3B. Click: every account this chat's members use</h2>
+    <p>One row per CLI account (by the account id each CLI reports; a cloud machine signed in to another account gets its own row), the members on it, the headline and the other windows in a line. The account of this composer's member is highlighted.</p>
+  </div>
+  <div class="themes">
+    <div class="theme-col"><div class="theme-name">Light</div><div class="row" data-details-b></div></div>
+    <div class="theme-col dark"><div class="theme-name">Dark</div><div class="row" data-details-b></div></div>
+  </div>
+</section>
+
+<script>
+const ICONS = {
+  FolderSimple: "M216,72H130.67L102.93,51.2a16.12,16.12,0,0,0-9.6-3.2H40A16,16,0,0,0,24,64V200a16,16,0,0,0,16,16H216.89A15.13,15.13,0,0,0,232,200.89V88A16,16,0,0,0,216,72Zm0,128H40V64H93.33L123.2,86.4A8,8,0,0,0,128,88h88Z",
+  GitBranch: "M232,64a32,32,0,1,0-40,31v17a8,8,0,0,1-8,8H96a23.84,23.84,0,0,0-8,1.38V95a32,32,0,1,0-16,0v66a32,32,0,1,0,16,0V144a8,8,0,0,1,8-8h88a24,24,0,0,0,24-24V95A32.06,32.06,0,0,0,232,64ZM64,64A16,16,0,1,1,80,80,16,16,0,0,1,64,64ZM96,192a16,16,0,1,1-16-16A16,16,0,0,1,96,192ZM200,80a16,16,0,1,1,16-16A16,16,0,0,1,200,80Z",
+  CaretDown: "M213.66,101.66l-80,80a8,8,0,0,1-11.32,0l-80-80A8,8,0,0,1,53.66,90.34L128,164.69l74.34-74.35a8,8,0,0,1,11.32,11.32Z",
+  Image: "M216,40H40A16,16,0,0,0,24,56V200a16,16,0,0,0,16,16H216a16,16,0,0,0,16-16V56A16,16,0,0,0,216,40Zm0,16V158.75l-26.07-26.06a16,16,0,0,0-22.63,0l-20,20-44-44a16,16,0,0,0-22.62,0L40,149.37V56ZM40,172l52-52,80,80H40Zm176,28H194.63l-36-36,20-20L216,181.38V200ZM144,100a12,12,0,1,1,12,12A12,12,0,0,1,144,100Z",
+  Microphone: "M128,176a48.05,48.05,0,0,0,48-48V64a48,48,0,0,0-96,0v64A48.05,48.05,0,0,0,128,176ZM96,64a32,32,0,0,1,64,0v64a32,32,0,0,1-64,0Zm40,143.6V232a8,8,0,0,1-16,0V207.6A80.11,80.11,0,0,1,48,128a8,8,0,0,1,16,0,64,64,0,0,0,128,0,8,8,0,0,1,16,0A80.11,80.11,0,0,1,136,207.6Z",
+  ArrowUp: "M205.66,117.66a8,8,0,0,1-11.32,0L136,59.31V216a8,8,0,0,1-16,0V59.31L61.66,117.66a8,8,0,0,1-11.32-11.32l72-72a8,8,0,0,1,11.32,0l72,72A8,8,0,0,1,205.66,117.66Z",
+  ArrowClockwise: "M240,56v48a8,8,0,0,1-8,8H184a8,8,0,0,1,0-16H211.4L184.81,71.64l-.25-.24a80,80,0,1,0-1.67,114.78,8,8,0,0,1,11,11.63A95.44,95.44,0,0,1,128,224h-1.32A96,96,0,1,1,195.75,60L224,85.8V56a8,8,0,1,1,16,0Z"
+};
+const ph = (name, cls = "ph") => `<svg class="${cls}" viewBox="0 0 256 256" aria-hidden="true"><path d="${ICONS[name]}"/></svg>`;
+const CODEX_PATH = "M8.086.457a6.105 6.105 0 013.046-.415c1.333.153 2.521.72 3.564 1.7a.117.117 0 00.107.029c1.408-.346 2.762-.224 4.061.366l.063.03.154.076c1.357.703 2.33 1.77 2.918 3.198.278.679.418 1.388.421 2.126a5.655 5.655 0 01-.18 1.631.167.167 0 00.04.155 5.982 5.982 0 011.578 2.891c.385 1.901-.01 3.615-1.183 5.14l-.182.22a6.063 6.063 0 01-2.934 1.851.162.162 0 00-.108.102c-.255.736-.511 1.364-.987 1.992-1.199 1.582-2.962 2.462-4.948 2.451-1.583-.008-2.986-.587-4.21-1.736a.145.145 0 00-.14-.032c-.518.167-1.04.191-1.604.185a5.924 5.924 0 01-2.595-.622 6.058 6.058 0 01-2.146-1.781c-.203-.269-.404-.522-.551-.821a7.74 7.74 0 01-.495-1.283 6.11 6.11 0 01-.017-3.064.166.166 0 00.008-.074.115.115 0 00-.037-.064 5.958 5.958 0 01-1.38-2.202 5.196 5.196 0 01-.333-1.589 6.915 6.915 0 01.188-2.132c.45-1.484 1.309-2.648 2.577-3.493.282-.188.55-.334.802-.438.286-.12.573-.22.861-.304a.129.129 0 00.087-.087A6.016 6.016 0 015.635 2.31C6.315 1.464 7.132.846 8.086.457zm-.804 7.85a.848.848 0 00-1.473.842l1.694 2.965-1.688 2.848a.849.849 0 001.46.864l1.94-3.272a.849.849 0 00.007-.854l-1.94-3.393zm5.446 6.24a.849.849 0 000 1.695h4.848a.849.849 0 000-1.696h-4.848z";
+let gradientSeq = 0;
+const mark = (kind, size = "is-mini") => {
+  if (kind === "codex") {
+    const id = `cg${gradientSeq++}`;
+    return `<span class="chat-provider-icon ${size} is-bare" data-provider-kind="codex-cli" role="img" aria-label="Codex"><svg viewBox="0 0 24 24"><defs><linearGradient id="${id}" x1="12" x2="12" y1="0" y2="24" gradientUnits="userSpaceOnUse"><stop stop-color="var(--provider-setup-codex-gradient-top)"/><stop offset=".5" stop-color="var(--provider-setup-codex-gradient-mid)"/><stop offset="1" stop-color="var(--provider-setup-codex-gradient-bottom)"/></linearGradient></defs><path fill="url(#${id})" fill-rule="evenodd" clip-rule="evenodd" d="${CODEX_PATH}"/></svg></span>`;
+  }
+  if (kind === "gemini") return `<span class="chat-provider-icon ${size} is-bare" data-provider-kind="gemini-cli" role="img" aria-label="Antigravity"><span class="provider-mark-antigravity"></span></span>`;
+  return `<span class="chat-provider-icon ${size} is-bare" data-provider-kind="claude-code" role="img" aria-label="Claude Code"><span class="provider-mark-claude"></span></span>`;
+};
+
+/* The ring: r 5.25 in a 14 box, stroke 2.5 (outer 13px). */
+const ring = (pct, tone, unknown = false) => {
+  const r = 5.25, c = 2 * Math.PI * r;
+  const len = Math.max(0, Math.min(1, (pct ?? 0) / 100)) * c;
+  const full = pct >= 100;
+  const arc = unknown || !pct ? "" : `<circle class="arc" cx="7" cy="7" r="${r}" stroke-width="2.5" stroke-dasharray="${full ? c : Math.max(len, 0.01)} ${c}"/>`;
+  return `<svg class="usage-ring tone-${tone}${full ? " is-full" : ""}${unknown ? " is-unknown" : ""}" viewBox="0 0 14 14" aria-hidden="true"><circle class="track" cx="7" cy="7" r="${r}" stroke-width="2.5"/>${arc}</svg>`;
+};
+const ringButton = (pct, tone, opts = {}) =>
+  `<button class="usage-ring-button tone-${tone}${opts.hover ? " is-hover" : ""}${opts.open ? " is-open" : ""}" aria-label="${opts.label ?? "Plan usage"}">${ring(pct, tone, opts.unknown)}</button>`;
+
+const chip = (label, glyph) => `<button class="chat-model-chip composer-menu-trigger"><span class="chat-model-chip-label">${glyph ?? ""}<span class="chat-composer-control-text${glyph ? " is-model" : ""}">${label}</span></span>${ph("CaretDown", "composer-menu-chevron")}</button>`;
+
+const strip = ({ kind, model, effort, mode, ringHtml }) => `
+  <div class="chat-composer-context">
+    <div class="chat-composer-context-lead">
+      <span class="chat-composer-context-item">${ph("FolderSimple")}<span class="chat-composer-context-text">ai-consensus</span></span>
+      <button class="chat-composer-context-item is-quiet is-menu">${ph("GitBranch")}<span class="chat-composer-context-text">beta</span>${ph("CaretDown", "composer-menu-chevron")}</button>
+    </div>
+    <span class="chat-composer-context-spacer"></span>
+    ${ringHtml ?? ""}
+    <div class="chat-composer-controls">
+      ${chip(model, mark(kind))}
+      ${effort ? chip(effort) : ""}
+      ${chip(mode)}
+    </div>
+  </div>`;
+
+const composer = (cfg) => `
+  <div class="mock-composer">
+    <div class="state-label">${cfg.caption}</div>
+    <div class="chat-composer"><div class="chat-composer-shell">
+      ${strip(cfg)}
+      <div class="mock-input">Ask anything. / commands, # files</div>
+      <div class="mock-toolbar">
+        <span class="mock-tool">${ph("Image", "")}</span>
+        <span class="mock-actions"><span class="mock-tool">${ph("Microphone", "")}</span><button class="composer-send-button" aria-label="Send">${ph("ArrowUp", "")}</button></span>
+      </div>
+    </div></div>
+  </div>`;
+
+const COMPOSERS = [
+  { caption: "Claude Code, 34% of the week used: neutral", kind: "claude", model: "Opus 5.5", effort: "Extra High", mode: "Auto", ringHtml: ringButton(34, "normal") },
+  { caption: "Codex, 82% of the week used, past the CLI's warning: amber", kind: "codex", model: "GPT-6.2 Astra", effort: "High", mode: "Default", ringHtml: ringButton(82, "warning") },
+  { caption: "Claude Code, week used up, requests refused until it resets: red", kind: "claude", model: "Opus 5.5", effort: "Extra High", mode: "Auto", ringHtml: ringButton(100, "blocked") },
+  { caption: "Antigravity on GEMINI_API_KEY: no plan limit, no ring", kind: "gemini", model: "Gemini 4 Neon", effort: "High", mode: "Default", ringHtml: "" }
+];
+document.querySelectorAll("[data-composers]").forEach((el) => { el.innerHTML = COMPOSERS.map(composer).join(""); });
+
+const STATES = [
+  [0, "normal", "0%, fresh window"], [34, "normal", "34%"], [74, "normal", "74%, below warning"],
+  [82, "warning", "82%, CLI warns"], [100, "blocked", "100%, refused"], [null, "normal", "Not read yet"]
+];
+document.querySelectorAll("[data-ring-states]").forEach((el) => {
+  el.innerHTML = STATES.map(([p, t, cap, unk]) => `<div class="ring-state big">${ring(p, t, unk)}<span class="cap">${cap}</span></div>`).join("")
+    + `<div class="ring-state" style="margin-left:10px"><div style="display:flex;gap:4px">${STATES.map(([p, t]) => ringButton(p, t)).join("")}</div><span class="cap" style="max-width:none">Actual size, in 28px buttons</span></div>`;
+});
+
+/* ---------- hover cards ---------- */
+const cut = (kind, model, ringHtml) => `<div class="strip-cut">${ringHtml}${chip(model, mark(kind))}</div>`;
+const HOVERS = {
+  a: [
+    cut("claude", "Opus 5.5", ringButton(87, "warning", { hover: true })) + `
+    <div class="usage-hover">
+      <div class="lead"><span class="status tone-warning">Current week (all models): 87%</span></div>
+      <div class="sub">Resets Sun 6:00 PM</div>
+      <div class="rows">
+        <div class="line"><span class="name">Current week (Fable)</span><span class="val">23%</span></div>
+        <div class="line"><span class="name">Current session</span><span class="val">12%</span></div>
+      </div>
+      <div class="foot">Context: 62% left (380k used / 1M tokens)</div>
+    </div>`,
+    cut("codex", "GPT-6.2 Astra", ringButton(82, "warning", { hover: true })) + `
+    <div class="usage-hover">
+      <div class="lead"><span class="status tone-warning">Weekly limit: 82% used</span></div>
+      <div class="sub">Resets Mon 9:14 AM</div>
+      <div class="rows">
+        <div class="line"><span class="name">5h limit</span><span class="val">18%</span></div>
+      </div>
+      <div class="foot">Context: 71% left (74k used / 258k tokens)</div>
+    </div>`,
+    cut("gemini", "Gemini 4 Neon", ringButton(39, "normal", { hover: true })) + `
+    <div class="usage-hover">
+      <div class="lead">Gemini models, weekly: 39% used</div>
+      <div class="sub">Resets Thu 9:53 AM</div>
+      <div class="rows">
+        <div class="line"><span class="name">Gemini models, 5 hours</span><span class="val">0%</span></div>
+      </div>
+      <div class="foot">Context: 88% left (120k used / 1M tokens)</div>
+    </div>`
+  ],
+  b: [
+    cut("claude", "Opus 5.5", ringButton(100, "blocked", { hover: true })) + `
+    <div class="usage-hover">
+      <div class="lead"><span class="status tone-blocked">Limit reached: current week</span></div>
+      <div class="sub">Claude Code refuses requests until Sun 6:00 PM. Extra usage is off.</div>
+      <div class="rows">
+        <div class="line"><span class="name">Current week (Fable)</span><span class="val">41%</span></div>
+      </div>
+    </div>`,
+    cut("codex", "GPT-6.2 Astra", ringButton(null, "normal", { hover: true })) + `
+    <div class="usage-hover">
+      <div class="lead">Usage not read yet</div>
+      <div class="sub">Codex reports it with the member's next reply, or now on click.</div>
+    </div>`,
+    `<div class="strip-cut">${chip("Gemini 4 Neon", mark("gemini"))}</div>
+    <div class="notes" style="max-width:250px;margin-top:2px">API key: no ring, so nothing to hover. The detail menu of the model chip can say "No plan limit: this member runs on GEMINI_API_KEY, usage is in Google AI Studio", Antigravity's own words when <code>/usage</code> runs on a key.</div>`
+  ]
+};
+document.querySelectorAll("[data-hovers]").forEach((el) => {
+  el.innerHTML = HOVERS[el.dataset.hovers].map((h) => `<div class="anchor">${h}</div>`).join("");
+});
+
+/* ---------- click: variant A ---------- */
+const win = (name, pct, tone, reset) => `
+  <div class="usage-window tone-${tone}">
+    <div class="top"><span class="name">${name}</span><span class="pct ${tone === "normal" ? "" : "status tone-" + tone}">${pct}% used</span></div>
+    <div class="usage-bar"><span style="width:${pct}%"></span></div>
+    <div class="reset">${reset}</div>
+  </div>`;
+const idle = (name) => `<div class="usage-fact" style="padding:0"><span class="name" style="color:var(--ui-text)">${name}</span><span class="val" style="color:var(--ui-text-3)">Not used yet</span></div>`;
+const fact = (name, val) => `<div class="usage-fact"><span class="name">${name}</span><span class="val">${val}</span></div>`;
+const foot = (where) => `<div class="usage-detail-foot"><span class="where">${where}</span><button class="usage-refresh">${ph("ArrowClockwise", "")}Refresh</button></div>`;
+const head = (kind, title, plan) => `<div class="usage-detail-head">${mark(kind)}<span class="title">${title}</span>${plan ? `<span class="plan">${plan}</span>` : ""}</div>`;
+
+const DETAIL_A = [
+  `<div class="composer-menu is-static">
+    ${head("claude", "Claude Code usage", "Max plan")}
+    ${win("Current session", 12, "normal", "Resets 4:10 PM")}
+    ${win("Current week (all models)", 87, "warning", "Resets Sun 6:00 PM")}
+    ${win("Current week (Fable)", 23, "normal", "Resets Sun 6:00 PM")}
+    <div class="usage-facts">${fact("Extra usage", "Off")}${fact("Context", "62% left")}</div>
+    ${foot("This computer, 1 min ago")}
+  </div>`,
+  `<div class="composer-menu is-static">
+    ${head("codex", "Codex usage", "Pro plan")}
+    ${win("5h limit", 18, "normal", "Resets 2:40 PM")}
+    ${win("Weekly limit", 82, "warning", "Resets Mon 9:14 AM")}
+    <div class="usage-facts">${fact("Credits", "0")}${fact("Limit resets available", "2")}${fact("Context", "71% left")}</div>
+    ${foot("build-box (cloud), just now")}
+  </div>`,
+  `<div class="composer-menu is-static">
+    ${head("gemini", "Antigravity usage", "")}
+    <div class="usage-group-label">Gemini models <span class="mine">(this member's model)</span></div>
+    ${win("Weekly", 39, "normal", "Resets Thu 9:53 AM")}
+    ${win("5 hours", 4, "normal", "Resets 1:20 PM")}
+    <div class="usage-group-label">Claude and GPT models</div>
+    <div class="usage-window">${idle("Weekly")}${idle("5 hours")}</div>
+    <div class="usage-facts">${fact("AI credits", "0")}${fact("Context", "88% left")}</div>
+    ${foot("This computer, 3 min ago")}
+  </div>`
+];
+document.querySelectorAll("[data-details-a]").forEach((el, i) => {
+  el.innerHTML = (i === 0 ? DETAIL_A : DETAIL_A).map((d) => `<div>${d}</div>`).join("");
+});
+
+/* ---------- click: variant B ---------- */
+const account = (kind, who, plan, pct, tone, reset, more, current) => `
+  <div class="usage-account${current ? " is-current" : ""}">
+    ${mark(kind, "is-chip")}
+    <span class="who">${who} <span class="plan">${plan}</span></span>
+    <span class="head tone-${tone}">${ring(pct, tone)}<span style="color:var(--tone-text)">${pct}%</span></span>
+    <span class="more">${more}</span>
+  </div>`;
+const DETAIL_B = `<div class="composer-menu is-static" style="width:360px">
+  <div class="usage-detail-head"><span class="title">Plan usage in this chat</span></div>
+  <div style="display:grid;gap:2px;padding:4px 0">
+    ${account("claude", "Claude Code", "Max", 87, "warning", "", "<b>Lead, Reviewer, here.</b> Week (all models) resets Sun 6:00 PM. Session 12%, Fable 23%.", true)}
+    ${account("codex", "Codex", "Pro", 64, "normal", "", "<b>Builder here, Tester on build-box (one account).</b> Weekly resets Mon 9:14 AM. 5h 18%.")}
+    ${account("gemini", "Antigravity", "", 39, "normal", "", "<b>Researcher, here.</b> Gemini models: weekly resets Thu 9:53 AM, 5 hours 4%.")}
+  </div>
+  ${foot("Updated 1 min ago")}
+</div>`;
+document.querySelectorAll("[data-details-b]").forEach((el) => { el.innerHTML = `<div>${DETAIL_B}</div>`; });
+</script>
+</body>
+</html>

@@ -48,7 +48,7 @@ export interface SidebarProps {
   onDelete?: (id: string) => Promise<void>;
   onSetPinned?: (id: string, pinned: boolean) => void;
   onToggleSidebar?: () => void;
-  // Small window-level controls (theme, refresh) shown next to Settings.
+  // Small window-level controls (the theme) shown next to Settings.
   footerActions?: ReactNode;
 }
 
@@ -210,9 +210,10 @@ export const Sidebar = ({
                 // The project's row and its chats' rows keep the same 1px gap
                 // between them, so two highlighted rows never touch.
                 <section key={group.key} className="flex min-w-0 flex-col gap-px" data-testid="project-group" data-project-key={group.key}>
-                    <div className="group flex min-w-0 items-center gap-0.5">
+                    {/* The whole row lights up on hover, its New chat button too (as Claude Code's). */}
+                    <div className="group flex min-w-0 items-center gap-0.5 rounded-ui-8 pr-0.5 transition-colors duration-120 ease-ui-out hover:bg-ui-row-hover">
                       {/* As Recents: the name, then its caret; its chats start under the name. */}
-                      <button type="button" onClick={() => toggleProject(group.key)} aria-expanded={!collapsed} data-testid="project-toggle" className={cn(ROW, "min-w-0 flex-1 gap-1.5 text-ui-text-2")}>
+                      <button type="button" onClick={() => toggleProject(group.key)} aria-expanded={!collapsed} data-testid="project-toggle" className={cn(ROW, "min-w-0 flex-1 gap-1.5 text-ui-text-2 hover:bg-transparent")}>
                           <FolderSimpleIcon className="size-3.5 shrink-0 text-ui-text-3" aria-hidden />
                           <span className="min-w-0 truncate">{group.label}</span>
                           <CaretRightIcon className={cn(CARET, "text-ui-text-3", !collapsed && "rotate-90")} aria-hidden />

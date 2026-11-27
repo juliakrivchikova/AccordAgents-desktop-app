@@ -1,0 +1,473 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Urgent alert variants</title>
+<!-- The app's real tokens (light in :root, dark in .dark) and the real
+     chat-urgent-alert.css, which draws the current card and the folded row
+     every variant shares. Nothing else from the app is loaded. -->
+<link rel="stylesheet" href="../../../src/renderer/styles/app-theme.css">
+<link rel="stylesheet" href="../../../src/renderer/styles/views/chat-urgent-alert.css">
+<style>
+@font-face {
+  font-family: "Inter Variable";
+  font-style: normal;
+  font-display: block;
+  font-weight: 100 900;
+  src: url("../../../node_modules/@fontsource-variable/inter/files/inter-latin-wght-normal.woff2") format("woff2-variations");
+}
+
+/* app-theme.css locks html and body to the window; a mockup page scrolls. */
+html, body { height: auto; min-height: 100%; overflow: visible; }
+body {
+  margin: 0;
+  padding: 32px;
+  background: var(--ui-bg-sidebar);
+  color: var(--ui-text);
+  font-family: var(--font-body);
+  font-size: 13px;
+  line-height: 20px;
+}
+html.dark body { background: var(--ui-bg-sidebar); }
+p, h1, h2, h3 { margin: 0; }
+button { font-family: inherit; }
+
+/* ---------- page chrome (not part of the design) ---------- */
+.page-head { max-width: 1560px; margin-bottom: 28px; }
+.page-head h1 { font-size: 16px; line-height: 24px; font-weight: 600; }
+.page-head p { margin-top: 4px; color: var(--ui-text-2); max-width: 980px; }
+.variant { margin-bottom: 44px; }
+.variant-head { max-width: 1560px; margin-bottom: 12px; }
+.variant-head h2 { font-size: 14px; line-height: 22px; font-weight: 600; }
+.variant-head .why { margin-top: 2px; color: var(--ui-text); max-width: 1100px; }
+.variant-head .uses { margin-top: 2px; color: var(--ui-text-3); font-size: 12px; line-height: 18px; max-width: 1100px; }
+.themes { display: flex; gap: 24px; align-items: flex-start; }
+.theme-col { flex: none; }
+.theme-name { margin: 0 0 6px 2px; color: var(--ui-text-3); font-size: 12px; line-height: 16px; }
+
+/* One chat pane: the reading column of the chat (768px, --ui-reading-width). */
+.pane {
+  width: 768px;
+  padding: 22px 24px 20px;
+  border: 1px solid var(--ui-border);
+  border-radius: var(--ui-radius-12);
+  background: var(--ui-bg);
+  color: var(--ui-text);
+}
+.state-label {
+  margin: 18px -24px 10px;
+  padding: 10px 24px 0 74px;
+  border-top: 1px solid var(--ui-border-subtle);
+  color: var(--ui-text-3);
+  font-size: 11px;
+  line-height: 16px;
+}
+
+/* ---------- an ordinary chat message (messages.css proportions) ---------- */
+.msg { display: grid; grid-template-columns: 38px minmax(0, 1fr); gap: 12px; margin-bottom: 14px; }
+.avatar {
+  display: grid; place-items: center;
+  width: 38px; height: 38px; border-radius: 8px;
+  background: var(--brand-anthropic-soft); color: var(--brand-anthropic);
+}
+.msg-meta { display: flex; align-items: baseline; gap: 8px; margin-bottom: 5px; line-height: 1.25; min-width: 0; }
+.msg-meta strong { font-size: 14px; font-weight: 600; color: var(--ui-text); }
+.msg-provider, .msg-when { color: var(--ui-text-3); font-size: 11px; font-variant-numeric: tabular-nums; }
+.msg-text { font-size: 14px; line-height: 22px; color: var(--ui-text); overflow-wrap: anywhere; }
+.mini-avatar {
+  display: grid; place-items: center; flex: none;
+  width: 20px; height: 20px; border-radius: 6px;
+  background: var(--brand-anthropic-soft); color: var(--brand-anthropic);
+}
+
+/* The slot every card sits in: the messages' text column (past the 38px
+   avatar and 12px gap), at most 624px, as .chat-urgent-alert places it. */
+.alert-slot { margin-left: 50px; max-width: 624px; padding: 4px 0; }
+
+/* ---------- kit pieces, as the kit draws them ---------- */
+/* Button size="sm": h-7, px-2.5, text-ui-13 medium, rounded-ui-8. */
+.k-btn {
+  display: inline-flex; flex: none; align-items: center; justify-content: center; gap: 6px;
+  height: var(--ui-control-sm); padding: 0 10px;
+  border: 1px solid transparent; border-radius: var(--ui-radius-8);
+  font-size: 13px; font-weight: 500; line-height: 20px; white-space: nowrap; cursor: pointer;
+}
+.k-btn.primary { background: var(--ui-primary); color: var(--ui-primary-fg); }
+.k-btn.outline { border-color: var(--ui-border); background: var(--ui-bg); color: var(--ui-text); }
+/* IconButton size="xs": 24px, 14px glyph, text-2, no border or fill at rest. */
+.k-icon-btn {
+  display: inline-grid; flex: none; place-items: center;
+  width: var(--ui-control-xs); height: var(--ui-control-xs);
+  border: 0; border-radius: var(--ui-radius-8); padding: 0;
+  background: transparent; color: var(--ui-text-2); cursor: pointer;
+}
+
+/* ---------- quiet status: a small dot and colored words ---------- */
+.tone-now, .tone-bad { --tone: var(--ui-danger); --tone-dot: var(--ui-danger-dot); }
+.tone-off { --tone: var(--ui-warning); --tone-dot: var(--ui-warning-dot); }
+.tone-done { --tone: var(--ui-success); --tone-dot: var(--ui-success-dot); }
+.dot { flex: none; width: 6px; height: 6px; border-radius: 999px; background: var(--tone-dot); }
+.st-main { color: var(--tone); font-size: 13px; font-weight: 500; line-height: 20px; font-variant-numeric: tabular-nums; }
+.st-main b { font-weight: 600; }
+.st-detail { color: var(--ui-text-3); font-size: 12px; line-height: 18px; overflow-wrap: anywhere; font-variant-numeric: tabular-nums; }
+.st-error { margin-top: 2px; color: var(--ui-danger); font-size: 12px; line-height: 18px; overflow-wrap: anywhere; }
+.st-words { flex: 1; min-width: 0; }
+
+/* ---------- Variant 1: kit card on the approved anatomy ---------- */
+.v1 {
+  padding: 10px 12px 12px;
+  border: 1px solid var(--ui-border);
+  border-radius: var(--ui-radius-8);
+  background: var(--ui-bg);
+  box-shadow: var(--ui-shadow-sm);
+}
+.v1.is-awaiting { border-color: color-mix(in srgb, var(--ui-danger) 45%, var(--ui-border)); }
+.v1-head { display: flex; align-items: center; gap: 8px; min-height: 24px; }
+.v1-bell { flex: none; color: var(--ui-text-3); }
+.v1.is-awaiting .v1-bell { color: var(--ui-danger); }
+.v1-title { font-size: 13px; font-weight: 600; color: var(--ui-text); }
+.v1-who { color: var(--ui-text-2); font-size: 12px; font-weight: 500; }
+.v1-when { margin-left: auto; color: var(--ui-text-3); font-size: 12px; font-variant-numeric: tabular-nums; }
+.v1-head .k-icon-btn { margin-right: -6px; }
+.v1-text { margin-top: 6px; font-size: 14px; line-height: 22px; color: var(--ui-text); overflow-wrap: anywhere; }
+.v1-status {
+  display: flex; align-items: center; gap: 8px;
+  margin-top: 12px; padding-top: 12px;
+  border-top: 1px solid var(--ui-border-subtle);
+}
+.v1-status .dot { align-self: flex-start; margin-top: 7px; }
+
+/* ---------- Variant 2: the compaction card's sibling ---------- */
+.v2-who { display: flex; align-items: center; gap: 6px; margin: 0 0 6px 2px; color: var(--ui-text-2); font-size: 12px; font-weight: 500; }
+.v2-who .msg-when { font-size: 12px; font-weight: 400; }
+.v2-panel {
+  padding: 12px;
+  border: 1px solid var(--ui-border);
+  border-radius: var(--ui-radius-8);
+  background: var(--ui-bg);
+  box-shadow: var(--ui-shadow-sm);
+}
+.v2-top { display: flex; align-items: flex-start; gap: 12px; }
+.v2-tile {
+  display: grid; flex: none; place-items: center;
+  width: 30px; height: 30px; margin-top: 1px;
+  border-radius: var(--ui-radius-8);
+  background: var(--ui-bg-subtle); color: var(--ui-text-2);
+}
+.v2.is-awaiting .v2-tile { background: color-mix(in srgb, var(--ui-danger) 12%, var(--ui-bg)); color: var(--ui-danger); }
+.v2-text { flex: 1; min-width: 0; }
+.v2-title { color: var(--ui-text); font-size: 13px; font-weight: 600; line-height: 22px; }
+.v2-desc { margin-top: 3px; color: var(--ui-text); font-size: 13px; line-height: 21px; overflow-wrap: anywhere; }
+.v2-top .k-icon-btn { margin: 0 -4px 0 0; }
+.v2-foot { display: flex; align-items: center; gap: 8px; margin-top: 12px; padding-left: 42px; }
+.v2-foot .dot { align-self: flex-start; margin-top: 7px; }
+
+/* ---------- Variant 3: the member's message with a status strip ---------- */
+.v3-flag { display: inline-flex; align-items: center; gap: 4px; align-self: center; color: var(--ui-text-3); font-size: 12px; font-weight: 500; }
+.v3.is-awaiting .v3-flag { color: var(--ui-danger); }
+.v3-strip {
+  display: flex; align-items: center; gap: 8px;
+  max-width: 624px; margin-top: 10px;
+  padding: 7px 8px 7px 12px;
+  border: 1px solid var(--ui-border);
+  border-radius: var(--ui-radius-8);
+  background: var(--ui-bg);
+  box-shadow: var(--ui-shadow-sm);
+}
+.v3.is-awaiting .v3-strip { border-color: color-mix(in srgb, var(--ui-danger) 45%, var(--ui-border)); }
+.v3-strip .dot { align-self: flex-start; margin-top: 7px; }
+
+/* ---------- Variant 4: the kit Notice (Alert), tone by state ---------- */
+.v4 {
+  display: grid; grid-template-columns: 16px minmax(0, 1fr) auto; column-gap: 8px;
+  padding: 8px 8px 10px 10px;
+  border: 1px solid var(--ui-border);
+  border-radius: var(--ui-radius-8);
+  background: var(--ui-bg-elevated);
+}
+.v4.is-error { border-color: color-mix(in srgb, var(--app-danger) 30%, transparent); background: var(--app-danger-soft); }
+.v4-icon { margin-top: 4px; color: var(--ui-text-3); }
+.v4.is-error .v4-icon { color: var(--app-danger); }
+.v4.is-warning .v4-icon { color: var(--app-warning); }
+.v4.is-done .v4-icon { color: var(--ui-success); }
+.v4-body { min-width: 0; padding-top: 2px; }
+.v4-title { display: flex; align-items: baseline; gap: 8px; color: var(--ui-text); font-size: 13px; font-weight: 500; line-height: 20px; }
+.v4-title .msg-when { font-size: 12px; font-weight: 400; }
+.v4-desc { margin-top: 2px; color: var(--ui-text); font-size: 13px; line-height: 20px; overflow-wrap: anywhere; }
+.v4-status { margin-top: 8px; }
+.v4-status .st-main { color: var(--ui-text); }
+.v4-action { display: flex; align-self: start; align-items: center; gap: 4px; }
+
+/* ---------- the current card: real CSS, the button as the code draws it ---------- */
+.cur-btn {
+  display: inline-flex; flex: none; align-items: center; height: 32px; padding: 0 15px;
+  border: 1px solid transparent; border-radius: var(--ui-radius-8);
+  background: var(--ui-primary); color: var(--ui-primary-fg);
+  font-size: 13px; font-weight: 600; white-space: nowrap;
+}
+.chat-urgent-alert-head svg, .chat-urgent-alert-status svg { flex: none; }
+
+/* ---------- shots ---------- */
+body.is-shot { padding: 24px; }
+#shot { display: inline-block; }
+#shot > .variant:last-child, #shot > section:last-child { margin-bottom: 0; }
+</style>
+</head>
+<body>
+<div id="app"></div>
+<script>
+const ICONS = {"BellRinging":["M224,71.1a8,8,0,0,1-10.78-3.42,94.13,94.13,0,0,0-33.46-36.91,8,8,0,1,1,8.54-13.54,111.46,111.46,0,0,1,39.12,43.09A8,8,0,0,1,224,71.1ZM35.71,72a8,8,0,0,0,7.1-4.32A94.13,94.13,0,0,1,76.27,30.77a8,8,0,1,0-8.54-13.54A111.46,111.46,0,0,0,28.61,60.32,8,8,0,0,0,35.71,72Zm186.1,103.94A16,16,0,0,1,208,200H167.2a40,40,0,0,1-78.4,0H48a16,16,0,0,1-13.79-24.06C43.22,160.39,48,138.28,48,112a80,80,0,0,1,160,0C208,138.27,212.78,160.38,221.81,175.94ZM150.62,200H105.38a24,24,0,0,0,45.24,0ZM208,184c-10.64-18.27-16-42.49-16-72a64,64,0,0,0-128,0c0,29.52-5.38,53.74-16,72Z"],"BellSlash":["M53.92,34.62A8,8,0,1,0,42.08,45.38L58.82,63.8A79.59,79.59,0,0,0,48,104c0,35.34-8.26,62.38-13.81,71.94A16,16,0,0,0,48,200H88.8a40,40,0,0,0,78.4,0h15.44l19.44,21.38a8,8,0,1,0,11.84-10.76ZM128,216a24,24,0,0,1-22.62-16h45.24A24,24,0,0,1,128,216ZM48,184c7.7-13.24,16-43.92,16-80a63.65,63.65,0,0,1,6.26-27.62L168.09,184Zm166-4.73a8.13,8.13,0,0,1-2.93.55,8,8,0,0,1-7.44-5.08C196.35,156.19,192,129.75,192,104A64,64,0,0,0,96.43,48.31a8,8,0,0,1-7.9-13.91A80,80,0,0,1,208,104c0,35.35,8.05,58.59,10.52,64.88A8,8,0,0,1,214,179.25Z"],"Bell":["M221.8,175.94C216.25,166.38,208,139.33,208,104a80,80,0,1,0-160,0c0,35.34-8.26,62.38-13.81,71.94A16,16,0,0,0,48,200H88.81a40,40,0,0,0,78.38,0H208a16,16,0,0,0,13.8-24.06ZM128,216a24,24,0,0,1-22.62-16h45.24A24,24,0,0,1,128,216ZM48,184c7.7-13.24,16-43.92,16-80a64,64,0,1,1,128,0c0,36.05,8.28,66.73,16,80Z"],"CaretDown":["M213.66,101.66l-80,80a8,8,0,0,1-11.32,0l-80-80A8,8,0,0,1,53.66,90.34L128,164.69l74.34-74.35a8,8,0,0,1,11.32,11.32Z"],"CaretUp":["M213.66,165.66a8,8,0,0,1-11.32,0L128,91.31,53.66,165.66a8,8,0,0,1-11.32-11.32l80-80a8,8,0,0,1,11.32,0l80,80A8,8,0,0,1,213.66,165.66Z"],"CheckCircle":["M173.66,98.34a8,8,0,0,1,0,11.32l-56,56a8,8,0,0,1-11.32,0l-24-24a8,8,0,0,1,11.32-11.32L112,148.69l50.34-50.35A8,8,0,0,1,173.66,98.34ZM232,128A104,104,0,1,1,128,24,104.11,104.11,0,0,1,232,128Zm-16,0a88,88,0,1,0-88,88A88.1,88.1,0,0,0,216,128Z"],"Clock":["M128,24A104,104,0,1,0,232,128,104.11,104.11,0,0,0,128,24Zm0,192a88,88,0,1,1,88-88A88.1,88.1,0,0,1,128,216Zm64-88a8,8,0,0,1-8,8H128a8,8,0,0,1-8-8V72a8,8,0,0,1,16,0v48h48A8,8,0,0,1,192,128Z"],"PhoneCall":["M144.27,45.93a8,8,0,0,1,9.8-5.66,86.22,86.22,0,0,1,61.66,61.66,8,8,0,0,1-5.66,9.8A8.23,8.23,0,0,1,208,112a8,8,0,0,1-7.73-5.94,70.35,70.35,0,0,0-50.33-50.33A8,8,0,0,1,144.27,45.93Zm-2.33,41.8c13.79,3.68,22.65,12.54,26.33,26.33A8,8,0,0,0,176,120a8.23,8.23,0,0,0,2.07-.27,8,8,0,0,0,5.66-9.8c-5.12-19.16-18.5-32.54-37.66-37.66a8,8,0,1,0-4.13,15.46Zm81.94,95.35A56.26,56.26,0,0,1,168,232C88.6,232,24,167.4,24,88A56.26,56.26,0,0,1,72.92,32.12a16,16,0,0,1,16.62,9.52l21.12,47.15,0,.12A16,16,0,0,1,109.39,104c-.18.27-.37.52-.57.77L88,129.45c7.49,15.22,23.41,31,38.83,38.51l24.34-20.71a8.12,8.12,0,0,1,.75-.56,16,16,0,0,1,15.17-1.4l.13.06,47.11,21.11A16,16,0,0,1,223.88,183.08Zm-15.88-2s-.07,0-.11,0h0l-47-21.05-24.35,20.71a8.44,8.44,0,0,1-.74.56,16,16,0,0,1-15.75,1.14c-18.73-9.05-37.4-27.58-46.46-46.11a16,16,0,0,1,1-15.7,6.13,6.13,0,0,1,.57-.77L96,95.15l-21-47a.61.61,0,0,1,0-.12A40.2,40.2,0,0,0,40,88,128.14,128.14,0,0,0,168,216,40.21,40.21,0,0,0,208,181.07Z"],"PhoneX":["M146.34,98.34,164.69,80,146.34,61.66a8,8,0,0,1,11.32-11.32L176,68.69l18.34-18.35a8,8,0,0,1,11.32,11.32L187.32,80l18.34,18.34a8,8,0,0,1-11.32,11.32L176,91.31l-18.34,18.35a8,8,0,0,1-11.32-11.32Zm77.54,84.74A56.26,56.26,0,0,1,168,232C88.6,232,24,167.4,24,88A56.26,56.26,0,0,1,72.92,32.12a16,16,0,0,1,16.62,9.52l21.12,47.15,0,.12A16,16,0,0,1,109.39,104c-.18.27-.37.52-.57.77L88,129.45c7.49,15.22,23.41,31,38.83,38.51l24.34-20.71a8.12,8.12,0,0,1,.75-.56,16,16,0,0,1,15.17-1.4l.13.06,47.11,21.11A16,16,0,0,1,223.88,183.08Zm-15.88-2s-.07,0-.11,0h0l-47-21.05-24.35,20.71a8.44,8.44,0,0,1-.74.56,16,16,0,0,1-15.75,1.14c-18.73-9.05-37.4-27.58-46.46-46.11a16,16,0,0,1,1-15.7,6.13,6.13,0,0,1,.57-.77L96,95.15l-21-47a.61.61,0,0,1,0-.12A40.2,40.2,0,0,0,40,88,128.14,128.14,0,0,0,168,216,40.21,40.21,0,0,0,208,181.07Z"],"PaperPlaneTilt":["M227.32,28.68a16,16,0,0,0-15.66-4.08l-.15,0L19.57,82.84a16,16,0,0,0-2.49,29.8L102,154l41.3,84.87A15.86,15.86,0,0,0,157.74,248q.69,0,1.38-.06a15.88,15.88,0,0,0,14-11.51l58.2-191.94c0-.05,0-.1,0-.15A16,16,0,0,0,227.32,28.68ZM157.83,231.85l-.05.14,0-.07-40.06-82.3,48-48a8,8,0,0,0-11.31-11.31l-48,48L24.08,98.25l-.07,0,.14,0L216,40Z"],"Warning":["M236.8,188.09,149.35,36.22h0a24.76,24.76,0,0,0-42.7,0L19.2,188.09a23.51,23.51,0,0,0,0,23.72A24.35,24.35,0,0,0,40.55,224h174.9a24.35,24.35,0,0,0,21.33-12.19A23.51,23.51,0,0,0,236.8,188.09ZM222.93,203.8a8.5,8.5,0,0,1-7.48,4.2H40.55a8.5,8.5,0,0,1-7.48-4.2,7.59,7.59,0,0,1,0-7.72L120.52,44.21a8.75,8.75,0,0,1,15,0l87.45,151.87A7.59,7.59,0,0,1,222.93,203.8ZM120,144V104a8,8,0,0,1,16,0v40a8,8,0,0,1-16,0Zm20,36a12,12,0,1,1-12-12A12,12,0,0,1,140,180Z"],"WarningCircle":["M128,24A104,104,0,1,0,232,128,104.11,104.11,0,0,0,128,24Zm0,192a88,88,0,1,1,88-88A88.1,88.1,0,0,1,128,216Zm-8-80V80a8,8,0,0,1,16,0v56a8,8,0,0,1-16,0Zm20,36a12,12,0,1,1-12-12A12,12,0,0,1,140,172Z"],"X":["M205.66,194.34a8,8,0,0,1-11.32,11.32L128,139.31,61.66,205.66a8,8,0,0,1-11.32-11.32L116.69,128,50.34,61.66A8,8,0,0,1,61.66,50.34L128,116.69l66.34-66.35a8,8,0,0,1,11.32,11.32L139.31,128Z"],"Asterisk":["M214.86,180.12a8,8,0,0,1-11,2.74L136,142.13V216a8,8,0,0,1-16,0V142.13L52.12,182.86a8,8,0,1,1-8.23-13.72L112.45,128,43.89,86.86a8,8,0,1,1,8.23-13.72L120,113.87V40a8,8,0,0,1,16,0v73.87l67.88-40.73a8,8,0,1,1,8.23,13.72L143.55,128l68.56,41.14A8,8,0,0,1,214.86,180.12Z"],"ArrowsInSimple":["M213.66,53.66,163.31,104H192a8,8,0,0,1,0,16H144a8,8,0,0,1-8-8V64a8,8,0,0,1,16,0V92.69l50.34-50.35a8,8,0,0,1,11.32,11.32ZM112,136H64a8,8,0,0,0,0,16H92.69L42.34,202.34a8,8,0,0,0,11.32,11.32L104,163.31V192a8,8,0,0,0,16,0V144A8,8,0,0,0,112,136Z"],"GearSix":["M128,80a48,48,0,1,0,48,48A48.05,48.05,0,0,0,128,80Zm0,80a32,32,0,1,1,32-32A32,32,0,0,1,128,160Zm109.94-52.79a8,8,0,0,0-3.89-5.4l-29.83-17-.12-33.62a8,8,0,0,0-2.83-6.08,111.91,111.91,0,0,0-36.72-20.67,8,8,0,0,0-6.46.59L128,41.85,97.88,25a8,8,0,0,0-6.47-.6A112.1,112.1,0,0,0,54.73,45.15a8,8,0,0,0-2.83,6.07l-.15,33.65-29.83,17a8,8,0,0,0-3.89,5.4,106.47,106.47,0,0,0,0,41.56,8,8,0,0,0,3.89,5.4l29.83,17,.12,33.62a8,8,0,0,0,2.83,6.08,111.91,111.91,0,0,0,36.72,20.67,8,8,0,0,0,6.46-.59L128,214.15,158.12,231a7.91,7.91,0,0,0,3.9,1,8.09,8.09,0,0,0,2.57-.42,112.1,112.1,0,0,0,36.68-20.73,8,8,0,0,0,2.83-6.07l.15-33.65,29.83-17a8,8,0,0,0,3.89-5.4A106.47,106.47,0,0,0,237.94,107.21Zm-15,34.91-28.57,16.25a8,8,0,0,0-3,3c-.58,1-1.19,2.06-1.81,3.06a7.94,7.94,0,0,0-1.22,4.21l-.15,32.25a95.89,95.89,0,0,1-25.37,14.3L134,199.13a8,8,0,0,0-3.91-1h-.19c-1.21,0-2.43,0-3.64,0a8.08,8.08,0,0,0-4.1,1l-28.84,16.1A96,96,0,0,1,67.88,201l-.11-32.2a8,8,0,0,0-1.22-4.22c-.62-1-1.23-2-1.8-3.06a8.09,8.09,0,0,0-3-3.06l-28.6-16.29a90.49,90.49,0,0,1,0-28.26L61.67,97.63a8,8,0,0,0,3-3c.58-1,1.19-2.06,1.81-3.06a7.94,7.94,0,0,0,1.22-4.21l.15-32.25a95.89,95.89,0,0,1,25.37-14.3L122,56.87a8,8,0,0,0,4.1,1c1.21,0,2.43,0,3.64,0a8.08,8.08,0,0,0,4.1-1l28.84-16.1A96,96,0,0,1,188.12,55l.11,32.2a8,8,0,0,0,1.22,4.22c.62,1,1.23,2,1.8,3.06a8.09,8.09,0,0,0,3,3.06l28.6,16.29A90.49,90.49,0,0,1,222.9,142.12Z"],"TelegramLogo":["M228.88,26.19a9,9,0,0,0-9.16-1.57L17.06,103.93a14.22,14.22,0,0,0,2.43,27.21L72,141.45V200a15.92,15.92,0,0,0,10,14.83,15.91,15.91,0,0,0,17.51-3.73l25.32-26.26L165,220a15.88,15.88,0,0,0,10.51,4,16.3,16.3,0,0,0,5-.79,15.85,15.85,0,0,0,10.67-11.63L231.77,35A9,9,0,0,0,228.88,26.19Zm-61.14,36L78.15,126.35l-49.6-9.73ZM88,200V152.52l24.79,21.74Zm87.53,8L92.85,135.5l119-85.29Z"]};
+
+const icon = (name, size = 16, cls = "") =>
+  `<svg class="${cls}" width="${size}" height="${size}" viewBox="0 0 256 256" fill="currentColor" aria-hidden="true">${ICONS[name].map((d) => `<path d="${d}"/>`).join("")}</svg>`;
+
+const MESSAGE = "Release 2.4 is failing: 18% of requests error on the new version, and it didn't roll back by itself. Roll back now, or keep it?";
+const WHO = "@opus";
+const AT = "23:48";
+
+/* Every state the card has (shared/urgentAlerts.ts urgentAlertStatus and
+   urgentAlertFailureText, the card's folded line). The copy is the app's,
+   with its " · " separators turned into commas, parentheses and periods. */
+const STATES = [
+  { id: "waiting", label: "Waiting: the first call is due (state waiting, Telegram sent)", tone: "now", lead: "Calling you in ", countdown: "0:49",
+    detail: "Sent to Telegram. Got it here or there stops the call.", action: "got-it", awaiting: true },
+  { id: "again", label: "Waiting again: call 1 went unanswered (state calling)", tone: "now", lead: "Calling again in ", countdown: "2:31", tail: " (call 2 of 3)",
+    detail: "Sent to Telegram. Call 1 at 23:53: no answer.", action: "got-it", awaiting: true },
+  { id: "calling", label: "Calling now (a call rings)", tone: "now", lead: "Calling you now (call 1 of 3)",
+    detail: "Answer and press 1, or press Got it here.", action: "got-it", awaiting: true },
+  { id: "sent", label: "Sent: Telegram only, no phone connected", tone: "now", lead: "Sent to Telegram",
+    detail: "No phone is connected, so no call will follow.", action: "got-it", awaiting: true },
+  { id: "error", label: "Got it here did not go through", tone: "now", lead: "Calling you in ", countdown: "0:12",
+    detail: "Sent to Telegram. Got it here or there stops the call.", error: "Not confirmed: the server can't be reached. A call may still come.", action: "got-it", awaiting: true },
+  { id: "missed", label: "Missed: three calls, nobody answered (state unanswered)", tone: "bad", lead: "Nobody answered 3 calls, no more calls",
+    detail: "Sent to Telegram. Calls at 23:53, 23:56, 23:59: no answer.", action: "got-it", awaiting: true },
+  { id: "failed", label: "Failed: Telegram refused it, no phone (state failed)", tone: "off", lead: "Not sent outside the app",
+    detail: "Telegram didn't take it (chat not found) and no phone is connected.", action: "set-up", closable: true },
+  { id: "off", label: "Alerts off: nothing is set up (state not_set_up)", tone: "off", lead: "Not sent outside the app",
+    detail: `Alerts aren't set up, so ${WHO} could reach you only here.`, action: "set-up", closable: true },
+  { id: "done", label: "Done: Got it in Telegram (state acknowledged, not closed yet)", tone: "done", lead: "Got it in Telegram at 23:49",
+    detail: "No call was made.", closable: true },
+  { id: "folded", label: "Folded: closed after Got it, and one that never reached you", folded: true }
+];
+
+const mainLine = (s) => `${s.lead}${s.countdown ? `<b>${s.countdown}</b>` : ""}${s.tail ?? ""}`;
+const words = (s) => `<div class="st-words"><div class="st-main">${mainLine(s)}</div>` +
+  (s.detail ? `<div class="st-detail">${s.detail}</div>` : "") +
+  (s.error ? `<div class="st-error">${s.error}</div>` : "") + `</div>`;
+const actionButton = (s) => s.action === "got-it" ? `<button class="k-btn primary">Got it</button>`
+  : s.action === "set-up" ? `<button class="k-btn outline">Set up alerts</button>` : "";
+const closeButton = (s) => s.closable ? `<button class="k-icon-btn" aria-label="Close alert">${icon("X", 14)}</button>` : "";
+
+/* The folded line: the real .chat-urgent-alert-folded row (the same row a
+   used choice, a closed Accord and a used approval draw). */
+const foldedRows = () => `
+  <article class="chat-urgent-alert is-folded">
+    <button type="button" class="chat-urgent-alert-folded">
+      ${icon("BellRinging", 14, "chat-urgent-alert-folded-bell")}
+      <span class="chat-urgent-alert-folded-preview">${MESSAGE}</span>
+      <span class="chat-urgent-alert-folded-outcome">${WHO}, Got it in Telegram 23:49</span>
+      ${icon("CaretDown", 14, "chat-urgent-alert-folded-chevron")}
+    </button>
+  </article>
+  <article class="chat-urgent-alert is-folded">
+    <button type="button" class="chat-urgent-alert-folded is-unresolved">
+      ${icon("BellRinging", 14, "chat-urgent-alert-folded-bell")}
+      <span class="chat-urgent-alert-folded-preview">${MESSAGE}</span>
+      <span class="chat-urgent-alert-folded-outcome">${WHO}, No answer</span>
+      ${icon("CaretDown", 14, "chat-urgent-alert-folded-chevron")}
+    </button>
+  </article>`;
+
+const avatar = () => `<span class="avatar">${icon("Asterisk", 20)}</span>`;
+const ordinaryMessage = () => `
+  <div class="msg">
+    ${avatar()}
+    <div>
+      <div class="msg-meta"><strong>${WHO}</strong><span class="msg-provider">Claude</span><span class="msg-when">23:31</span></div>
+      <div class="msg-text">Rolled 2.4 out to production. I'll watch the error rate for the next 15 minutes and raise an urgent alert if it goes wrong.</div>
+    </div>
+  </div>`;
+
+const V1 = (s) => `
+  <div class="alert-slot">
+    <article class="v1 tone-${s.tone}${s.awaiting ? " is-awaiting" : ""}">
+      <div class="v1-head">
+        ${icon("BellRinging", 16, "v1-bell")}
+        <span class="v1-title">Urgent alert</span>
+        <span class="v1-who">from ${WHO}</span>
+        <span class="v1-when">${AT}</span>
+        ${closeButton(s)}
+      </div>
+      <p class="v1-text">${MESSAGE}</p>
+      <div class="v1-status">
+        <span class="dot"></span>
+        ${words(s)}
+        ${actionButton(s)}
+      </div>
+    </article>
+  </div>`;
+
+const V2 = (s) => `
+  <div class="alert-slot">
+    <section class="v2 tone-${s.tone}${s.awaiting ? " is-awaiting" : ""}">
+      <div class="v2-who"><span class="mini-avatar">${icon("Asterisk", 12)}</span><span>${WHO}</span><span class="msg-when">${AT}</span></div>
+      <div class="v2-panel">
+        <div class="v2-top">
+          <span class="v2-tile">${icon("BellRinging", 16)}</span>
+          <div class="v2-text">
+            <h3 class="v2-title">Urgent alert</h3>
+            <p class="v2-desc">${MESSAGE}</p>
+          </div>
+          ${closeButton(s)}
+        </div>
+        <div class="v2-foot">
+          <span class="dot"></span>
+          ${words(s)}
+          ${actionButton(s)}
+        </div>
+      </div>
+    </section>
+  </div>`;
+
+const V3 = (s) => `
+  <div class="msg v3 tone-${s.tone}${s.awaiting ? " is-awaiting" : ""}">
+    ${avatar()}
+    <div style="min-width:0">
+      <div class="msg-meta"><strong>${WHO}</strong><span class="v3-flag">${icon("BellRinging", 12)}Urgent alert</span><span class="msg-when">${AT}</span></div>
+      <div class="msg-text">${MESSAGE}</div>
+      <div class="v3-strip">
+        <span class="dot"></span>
+        ${words(s)}
+        ${actionButton(s)}
+        ${closeButton(s)}
+      </div>
+    </div>
+  </div>`;
+
+/* Only the state that needs you takes the tint (the Notice's warning tint
+   is a beige, so a state that never left the app stays a plain card). */
+const V4_TONE = { now: "is-error", bad: "is-error", off: "is-warning", done: "is-done" };
+const V4_ICON = { now: "BellRinging", bad: "PhoneX", off: "BellSlash", done: "CheckCircle" };
+const V4 = (s) => `
+  <div class="alert-slot">
+    <div class="v4 ${V4_TONE[s.tone]}" role="alert">
+      ${icon(V4_ICON[s.tone], 16, "v4-icon")}
+      <div class="v4-body">
+        <div class="v4-title">Urgent alert from ${WHO}<span class="msg-when">${AT}</span></div>
+        <div class="v4-desc">${MESSAGE}</div>
+        <div class="v4-status">${words(s)}</div>
+      </div>
+      <div class="v4-action">${actionButton(s)}${closeButton(s)}</div>
+    </div>
+  </div>`;
+
+/* The card on beta today: the real classes and CSS, the waiting state. */
+const CURRENT = () => `
+  <article class="chat-urgent-alert">
+    <div class="chat-urgent-alert-panel">
+      <div class="chat-urgent-alert-head">
+        ${icon("BellRinging", 18, "chat-urgent-alert-bell")}
+        <span class="chat-urgent-alert-title">Urgent alert</span>
+      </div>
+      <div class="chat-urgent-alert-from">${WHO} &middot; ${AT}</div>
+      <div class="chat-urgent-alert-text">${MESSAGE}</div>
+      <div class="chat-urgent-alert-status is-now">
+        ${icon("Clock", 16, "chat-urgent-alert-status-icon")}
+        <div class="chat-urgent-alert-status-words">
+          <div class="chat-urgent-alert-status-main">Calling you in <strong class="chat-urgent-alert-countdown">0:49</strong></div>
+          <div class="chat-urgent-alert-status-detail">Sent to Telegram. Got it here or there stops the call.</div>
+        </div>
+        <button class="cur-btn">Got it</button>
+      </div>
+    </div>
+  </article>`;
+
+const VARIANTS = [
+  { id: "v1", name: "Variant 1: kit card on the approved anatomy", render: V1,
+    why: "Keeps the approved order (header, message, what happens now, one action) but drops the red fill and the grey band: a plain kit card, a red bell, a red-tinted edge only while it waits for you, and the status as a dot with colored words.",
+    uses: "Card shell of .chat-app-tool-approval-panel (--ui-bg, --ui-border, --ui-radius-8, --ui-shadow-sm, 12px padding), a --ui-border-subtle divider, Button sm primary and outline, IconButton xs (X), BellRinging 16, --ui-danger / --ui-warning / --ui-success with their -dot tokens." },
+  { id: "v2", name: "Variant 2: the compaction card's sibling", render: V2,
+    why: "The anatomy of the compaction card approved on 2026-11-22: who and when on a small line above, an icon tile, the title and the message, then status and action in the foot. Red lives only in the tile and the dot.",
+    uses: ".chat-compaction-card proportions (who line 12px with a 20px avatar, 30px icon tile at --ui-radius-8, title 13/600, text 13/21, foot indented 42px), Button sm, IconButton xs, the tile tinted with color-mix of --ui-danger over --ui-bg." },
+  { id: "v3", name: "Variant 3: the member's message with a status strip", render: V3,
+    why: "The alert is the member's own message (avatar, name, a red Urgent alert flag, the text at chat size), and only the live part (status, countdown, Got it) is a small bordered strip under it. The most compact, and the closest to the chat around it.",
+    uses: "The chat message grid (38px avatar, 12px gap, 14/22 text), a strip with the card shell (--ui-border, --ui-radius-8, --ui-shadow-sm) tinted at the edge while it waits, Button sm, IconButton xs, BellRinging 12 in the meta row." },
+  { id: "v4", name: "Variant 4: the kit Notice, tone by state", render: V4,
+    why: "Built on the kit Notice (Alert): the danger tint while it needs you, a plain card otherwise (an amber icon when it never left the app, a green one once you got it). The state reads from the color before a word, but it is the loudest of the four.",
+    uses: "Notice tones as primitives/notice.tsx draws them (error: --app-danger-soft with --app-danger at 30% for the edge; otherwise the plain Alert on --ui-bg-elevated and --ui-border), a 16px state icon (BellRinging, PhoneX, BellSlash, CheckCircle), the action column of AlertAction, Button sm, IconButton xs." }
+];
+
+const pane = (inner) => `<div class="pane">${inner}</div>`;
+
+const statesPane = (variant) => {
+  let html = ordinaryMessage();
+  STATES.forEach((s, index) => {
+    if (index > 0) html += `<div class="state-label">${s.label}</div>`;
+    else html += `<div class="state-label" style="border-top:0;margin-top:0;padding-top:0">${s.label}</div>`;
+    html += s.folded ? foldedRows() : variant.render(s);
+  });
+  return pane(html);
+};
+
+const themeCol = (theme, inner) =>
+  `<div class="theme-col${theme === "dark" ? " dark" : ""}"><div class="theme-name">${theme === "dark" ? "Dark" : "Light"}</div>${inner}</div>`;
+
+const variantHead = (v) => `<header class="variant-head"><h2>${v.name}</h2><p class="why">${v.why}</p><p class="uses">${v.uses}</p></header>`;
+
+const currentSection = () => `
+  <section class="variant" id="current">
+    <header class="variant-head"><h2>Current card (beta)</h2>
+      <p class="why">For comparison: the solid red header, the who line, the message in 13/600, the grey status band and a 32px Got it, drawn with the real chat-urgent-alert.css.</p></header>
+    <div class="themes">
+      ${themeCol("light", pane(ordinaryMessage() + CURRENT()))}
+      ${themeCol("dark", pane(ordinaryMessage() + CURRENT()))}
+    </div>
+  </section>`;
+
+const variantSection = (v) => `
+  <section class="variant" id="${v.id}">
+    ${variantHead(v)}
+    <div class="themes">
+      ${themeCol("light", statesPane(v))}
+      ${themeCol("dark", statesPane(v))}
+    </div>
+  </section>`;
+
+/* Overview: the waiting state of every design, light and dark. */
+const overview = () => {
+  const rows = [{ name: "Current card (beta)", body: () => ordinaryMessage() + CURRENT() },
+    ...VARIANTS.map((v) => ({ name: v.name, body: () => ordinaryMessage() + v.render(STATES[0]) }))];
+  return `<header class="page-head"><h1>Urgent alert card: the current card and four variants (waiting state)</h1></header>` +
+    rows.map((r) => `<section class="variant"><header class="variant-head"><h2>${r.name}</h2></header>
+      <div class="themes">${themeCol("light", pane(r.body()))}${themeCol("dark", pane(r.body()))}</div></section>`).join("");
+};
+
+const params = new URLSearchParams(location.search);
+const shot = params.get("shot");
+const app = document.getElementById("app");
+if (!shot) {
+  app.innerHTML = `
+    <header class="page-head">
+      <h1>Urgent alert card: four variants</h1>
+      <p>Mockups only. Colors, sizes and radii come from the app's app-theme.css (light in :root, dark in .dark); the current card and the folded row are drawn with the real chat-urgent-alert.css. Every variant shows every state the card has, in the 768px chat column next to an ordinary message, with the card in the messages' text column (624px at most).</p>
+    </header>
+    ${currentSection()}
+    ${VARIANTS.map(variantSection).join("")}`;
+} else {
+  document.body.classList.add("is-shot");
+  const [id, theme] = shot.split("-");
+  if (theme === "dark") document.documentElement.classList.add("dark");
+  let inner = "";
+  if (shot === "overview") inner = overview();
+  else if (id === "current") inner = currentSection();
+  else {
+    const v = VARIANTS.find((x) => x.id === id);
+    inner = `<section class="variant" style="margin:0;width:768px">${variantHead(v)}<div>${statesPane(v)}</div></section>`;
+  }
+  app.innerHTML = `<div id="shot">${inner}</div>`;
+}
+document.fonts.ready.then(() => { document.body.dataset.ready = "1"; });
+</script>
+</body>
+</html>

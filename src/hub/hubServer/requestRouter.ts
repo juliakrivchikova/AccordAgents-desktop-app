@@ -3,7 +3,7 @@ import type { IncomingMessage, ServerResponse } from "node:http";
 import path from "node:path";
 import { isDeviceEventBlobReference } from "../../shared/deviceEventBlobs";
 import {
-  HUB_MAX_BODY_BYTES, HUB_MAX_SMALL_BODY_BYTES, HUB_MEMBER_RULES_PATH, HUB_PROGRESS_PATH, HUB_PROOF_CHALLENGE,
+  HUB_MAX_BODY_BYTES, HUB_MAX_SMALL_BODY_BYTES, HUB_MEMBER_RULES_PATH, HUB_PLAN_USAGE_PATH, HUB_PLAN_USAGE_REFRESH_PATH, HUB_PROGRESS_PATH, HUB_PROOF_CHALLENGE,
   HUB_PROTOCOL_VERSION, hubPhoneInviteSigningText, hubProofSigningText, type HubHealth, type HubPhoneInvite, type HubProgressPost,
   type HubRosterRequest, type HubRosterResponse
 } from "../../shared/hubProtocol";
@@ -223,6 +223,10 @@ export class RequestRouter {
         const entries = validMachineWake(parseJson(body));
         await this.deps.options.storage.hub().replaceMachineWake(entries.map((entry) => ({ machineId: entry.machineId, configJson: JSON.stringify(entry) })), new Date(this.deps.now()).toISOString());
         return json(response, 200, { ok: true, machines: entries.length });
+      }
+      if (url.pathname === HUB_PLAN_USAGE_PATH || url.pathname === HUB_PLAN_USAGE_REFRESH_PATH) {
+        status = await this.server.deviceRequests.handlePlanUsage(request, response, url, device, body);
+        return;
       }
       if (url.pathname === HUB_PROGRESS_PATH && request.method === "POST") {
         // Members run on the computer and on machines; a phone runs nothing.

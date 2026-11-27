@@ -275,3 +275,49 @@ test("retention thresholds come from the environment only as positive whole numb
   assert.equal(config.batch, HUB_RETENTION_DEFAULTS.batch);
   assert.equal(config.maxBatches, HUB_RETENTION_DEFAULTS.maxBatches);
 });
+
+test("a machine's plan usage is kept for the computer, which asks that machine to read again through the server", async (t) => {
+  const h = await hub(t);
+  const machine = createDeviceIdentity(new Date().toISOString());
+  const phone = createDeviceIdentity(new Date().toISOString());
+  const readingPhone = createDeviceIdentity(new Date().toISOString());
+  await h.call(h.owner, "PUT", "/v1/roster", { devices: [
+    { deviceId: machine.originId, publicKeyDerBase64: machine.publicKeyDerBase64, role: "machine", name: "Box", machineId: "machine-1" },
+    { deviceId: phone.originId, publicKeyDerBase64: phone.publicKeyDerBase64, role: "phone", name: "iPhone" },
+    { deviceId: readingPhone.originId, publicKeyDerBase64: readingPhone.publicKeyDerBase64, role: "phone", name: "iPad", scope: { scope: "device" } }
+  ] });
+  const snapshot = { provider: "codex-cli", hasPlanLimits: true, windows: [{ id: "primary", label: "Weekly limit", usedPercent: 82, tone: "warning" }],
+    facts: [], observedAt: new Date().toISOString() };
+  assert.equal((await h.call(machine, "PUT", "/v1/plan-usage", { snapshots: [snapshot] })).status, 200);
+  assert.equal((await h.call(phone, "PUT", "/v1/plan-usage", { snapshots: [snapshot] })).status, 403, "a phone runs no member");
+  assert.equal((await h.call(machine, "PUT", "/v1/plan-usage", { snapshots: [{ ...snapshot, windows: [{ ...snapshot.windows[0], usedPercent: 140 }] }] })).status, 400);
+  const read = await h.call(h.owner, "GET", "/v1/plan-usage");
+  const devices = read.body.devices as Array<{ machineId?: string; snapshots: Array<{ windows: Array<{ usedPercent: number }> }> }>;
+  assert.deepEqual(devices.map((device) => [device.machineId, device.snapshots[0]?.windows[0]?.usedPercent]), [["machine-1", 82]], "the refused put kept nothing");
+  assert.equal((await h.call(machine, "GET", "/v1/plan-usage")).status, 403);
+  // A phone without the scope to read every chat reads no usage and asks no machine.
+  assert.equal((await h.call(phone, "GET", "/v1/plan-usage")).status, 403);
+  assert.equal((await h.call(phone, "POST", "/v1/plan-usage/refresh", { machineId: "machine-1", provider: "codex-cli" })).status, 403);
+  assert.equal((await h.call(readingPhone, "GET", "/v1/plan-usage")).status, 200);
+  // A put after a restart that read only Claude keeps the Codex reading.
+  assert.equal((await h.call(machine, "PUT", "/v1/plan-usage", { snapshots: [{ ...snapshot, provider: "claude-code" }] })).status, 200);
+  const merged = (await h.call(h.owner, "GET", "/v1/plan-usage")).body.devices as Array<{ snapshots: Array<{ provider: string }> }>;
+  assert.deepEqual(merged[0]?.snapshots.map((item) => item.provider).sort(), ["claude-code", "codex-cli"]);
+  // Offline: nobody took the request.
+  assert.equal((await h.call(h.owner, "POST", "/v1/plan-usage/refresh", { machineId: "machine-1", provider: "codex-cli" })).body.delivered, false);
+
+  const auth = signHubRequest(machine, { method: "GET", pathWithQuery: "/v1/live" });
+  const socket = new WebSocket(`${h.base.replace("http", "ws")}/v1/live?auth=${encodeURIComponent(auth)}`);
+  const frames: Array<{ type: string; provider?: string }> = [];
+  await new Promise<void>((resolve, reject) => {
+    socket.addEventListener("message", (event) => {
+      frames.push(JSON.parse(String(event.data)) as { type: string });
+      resolve();
+    });
+    socket.addEventListener("error", () => reject(new Error("socket failed")));
+  });
+  assert.equal((await h.call(h.owner, "POST", "/v1/plan-usage/refresh", { machineId: "machine-1", provider: "codex-cli", force: true })).body.delivered, true);
+  for (let i = 0; i < 50 && !frames.some((frame) => frame.type === "plan-usage-refresh"); i += 1) await new Promise((resolve) => setTimeout(resolve, 20));
+  socket.close();
+  assert.deepEqual(frames.filter((frame) => frame.type === "plan-usage-refresh"), [{ type: "plan-usage-refresh", provider: "codex-cli", force: true }]);
+});

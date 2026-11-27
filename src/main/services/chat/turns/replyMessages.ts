@@ -69,6 +69,16 @@ export function markParticipantMessageStoppedByUser(
   markStoppedByUser(message, participant.handle, options);
 }
 
+/** Send now cut this reply short for the message waiting behind it (the CLI's
+ *  send-now): it keeps what it wrote, and the member's turn goes on in that
+ *  message's reply, as when the CLI hands a message to the running step. It
+ *  was not stopped: no "stopped by user". */
+export function markParticipantMessageSentNow(message: ChatMessage): void {
+  message.status = "done";
+  const { workedMs: _workedMs, ...metadata } = message.metadata ?? {};
+  message.metadata = { ...metadata, turnContinues: true };
+}
+
 /** Rule 2 (docs/parity-requirements.md): a Stop the member's machine never
  *  confirmed is shown as exactly that, never as "stopped by user". */
 export function markParticipantMessageStopUnconfirmed(message: ChatMessage, participant: ChatParticipant, reason?: string): void {

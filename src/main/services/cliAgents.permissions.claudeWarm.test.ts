@@ -353,7 +353,8 @@ test("claude warm: Stop interrupts only the running step and keeps the process a
   send({ type: "system", subtype: "task_started", task_id: "t1", description: "agent", is_backgrounded: true });
   cliParts(runner).claudeReplyFlow.stopClaudeWarmReply(state, reply, hooks, participant);
   const interrupt = written.find((message) => message.type === "control_request");
-  assert.deepEqual((interrupt as any)?.request, { subtype: "interrupt" });
+  // Since Claude Code 2.1.329 a plain interrupt ends background agents too.
+  assert.deepEqual((interrupt as any)?.request, { subtype: "interrupt", spare_background_tasks: true });
   send({ type: "control_response", response: { subtype: "success", request_id: (interrupt as any).request_id, response: { still_queued: [] } } });
   send({ type: "result", subtype: "error_during_execution", is_error: true });
   send({ type: "command_lifecycle", command_uuid: "cmd-1", state: "cancelled" });
@@ -362,6 +363,53 @@ test("claude warm: Stop interrupts only the running step and keeps the process a
   assert.equal(harness.flags.unusable, false, "an acknowledged Stop does not retire the process");
   assert.equal(state.backgroundTasks.size, 1, "background work survives the Stop");
   clearTimeout(reply.stopTimer);
+});
+
+test("claude warm: a step Send now cut for the waiting message ends its reply with what it wrote, not stopped", () => {
+  const runner = makeRunner() as any;
+  const harness = makeClaudeWarmHarness(runner, { lifecycle: true });
+  const { send, state } = harness;
+  const first = harness.addReply();
+  const waiting = harness.addReply();
+  send({ type: "command_lifecycle", command_uuid: "cmd-1", state: "started" });
+  send({ type: "system", subtype: "init" });
+  send({ type: "system", subtype: "task_started", task_id: "t1", description: "agent", is_backgrounded: true });
+  send({ type: "assistant", message: { role: "assistant", content: [{ type: "text", text: "Reading the logs." }] } });
+  send({ type: "command_lifecycle", command_uuid: "cmd-2", state: "queued" });
+  first.reply.sentNow = true;
+  send({ type: "result", subtype: "error_during_execution", is_error: true });
+  assert.equal(first.rejected.length, 0);
+  assert.equal(first.resolved[0]?.ok, true);
+  assert.equal(first.resolved[0]?.content, "Reading the logs.");
+  assert.equal(first.resolved[0]?.turnContinues, true);
+  assert.equal(harness.flags.unusable, false);
+  assert.equal(state.backgroundTasks.size, 1);
+  send({ type: "command_lifecycle", command_uuid: "cmd-2", state: "started" });
+  send({ type: "system", subtype: "init" });
+  send({ type: "result", subtype: "success", result: "Answer." });
+  assert.equal(waiting.resolved[0]?.content, "Answer.");
+});
+
+test("claude warm: after Send now a real API error still fails the reply; only the CLI's own interrupt is a cut", () => {
+  const runner = makeRunner() as any;
+  const failing = makeClaudeWarmHarness(runner, { lifecycle: true });
+  const failed = failing.addReply();
+  failing.addReply();
+  failing.send({ type: "command_lifecycle", command_uuid: "cmd-1", state: "started" });
+  failing.send({ type: "system", subtype: "init" });
+  failed.reply.sentNow = true;
+  failing.send({ type: "result", subtype: "error_during_execution", is_error: true, errors: ["API Error: 529 overloaded"] });
+  assert.equal(failed.resolved[0]?.ok, false, "an error the CLI names is a failure");
+
+  const cut = makeClaudeWarmHarness(runner, { lifecycle: true });
+  const running = cut.addReply();
+  cut.addReply();
+  cut.send({ type: "command_lifecycle", command_uuid: "cmd-1", state: "started" });
+  cut.send({ type: "system", subtype: "init" });
+  running.reply.sentNow = true;
+  cut.send({ type: "result", subtype: "error_during_execution", is_error: true, terminal_reason: "aborted_tools", errors: ["Request was aborted."] });
+  assert.equal(running.resolved[0]?.ok, true, "Claude Code's own interrupt ends the reply as a turn that goes on");
+  assert.equal(running.resolved[0]?.turnContinues, true);
 });
 
 test("claude warm: Stop on a message still queued in the CLI removes it from the queue", () => {

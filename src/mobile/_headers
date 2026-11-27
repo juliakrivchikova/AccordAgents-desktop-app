@@ -17,6 +17,10 @@
   X-Content-Type-Options: nosniff
   Referrer-Policy: no-referrer
   Permissions-Policy: camera=(self), microphone=(), geolocation=(), payment=(), usb=()
+  # The phone app is a private client paired with the User's server, not a
+  # page for searchers; Google was listing it for brand searches. Leave it
+  # fetchable (no robots.txt Disallow) so crawlers can read this noindex.
+  X-Robots-Tag: noindex, nofollow
 
 /
   Cache-Control: public, max-age=0, must-revalidate

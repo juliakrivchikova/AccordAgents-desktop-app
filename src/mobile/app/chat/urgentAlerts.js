@@ -118,7 +118,7 @@ export function urgentAlertCardElement(entry) {
   const from = document.createElement("div");
   from.className = "urgent-alert-from";
   const when = formatClockTime(entry.createdAt);
-  from.textContent = [label, when].filter(Boolean).join(" · ");
+  from.textContent = [label, when].filter(Boolean).join(", ");
   const text = document.createElement("div");
   text.className = "urgent-alert-text";
   text.textContent = entry.content || "";

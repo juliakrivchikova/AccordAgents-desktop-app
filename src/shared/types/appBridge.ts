@@ -73,6 +73,9 @@ import type { DisableSpeechToTextRequest, SpeechToTextState, TranscribeSpeechReq
 
 export interface AppBridge {
   getAppVersion(): Promise<string>;
+  /** Whether the window is in full screen, where macOS hides its traffic lights. */
+  isFullScreen(): Promise<boolean>;
+  onFullScreenChanged(callback: (fullScreen: boolean) => void): () => void;
   openExternal(url: string): Promise<void>;
   inspectLocalFile(request: InspectLocalFileRequest): Promise<InspectLocalFileResult>;
   openLocalFile(request: OpenLocalFileRequest): Promise<OpenLocalFileResult>;
@@ -291,6 +294,9 @@ export interface AppBridge {
   recoverImplementationPlan(request: RecoverImplementationPlanRequest): Promise<StartReviewResult>;
   reviseImplementationPlan(request: ReviseImplementationPlanRequest): Promise<StartReviewResult>;
   cancelReview(runId: string): Promise<void>;
+  /** Send now on a message waiting behind the member's running reply `runId`
+   *  (the CLI's send-now): the one waiting as `waitingRunId`, or every one. */
+  sendNowChatRun(runId: string, waitingRunId?: string): Promise<void>;
   listArtifacts(request: ListArtifactsRequest): Promise<ArtifactResult<ArtifactSummary[]>>;
   readArtifact(request: ReadArtifactRequest): Promise<ArtifactResult<ArtifactReadResult>>;
   diffArtifactVersions(request: DiffArtifactRequest): Promise<ArtifactResult<ArtifactDiffResult>>;
@@ -365,4 +371,9 @@ export interface AppBridge {
   /** Live background work of the chat's members, by member id. */
   getChatBackgroundTasks(conversationId: string): Promise<Record<string, ChatBackgroundTask[]>>;
   onChatBackgroundTasks(callback: (event: ChatBackgroundTasksEvent) => void): () => void;
+  /** The plan usage of the members' CLI accounts: this computer's, and each
+   *  machine's as it put them on the User's server. */
+  getPlanUsage(): Promise<import("./planUsage").PlanUsageView>;
+  refreshPlanUsage(request: import("./planUsage").PlanUsageRefreshRequest): Promise<import("./planUsage").PlanUsageRefreshResult>;
+  onPlanUsageChanged(callback: (view: import("./planUsage").PlanUsageView) => void): () => void;
 }

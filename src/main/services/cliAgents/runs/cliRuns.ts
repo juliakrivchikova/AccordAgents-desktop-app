@@ -5,6 +5,7 @@ import { commandEnvironment, resolveCommandPath, type CommandEnvironmentOptions 
 import type { ParticipantRunResult } from "../../providers";
 import { errorText, failedCompact, isTimeoutError } from "./outputText";
 import { agentRunEnv, repoPathForRun } from "./runEnvironment";
+import { runsOnOwnSignIn } from "../../cliPlanUsage";
 import type { CliAgentCompactResult, CliAgentRunOptions } from "../types";
 import type { CliModules } from "../modules";
 import type { CliDependencies } from "../dependencies";
@@ -28,7 +29,7 @@ export class CliRuns {
   constructor(
     private readonly cli: Pick<
       CliModules,
-      | "claudeRuns" | "claudeSettings" | "codexRuns" | "geminiRuns" | "warmAgentClose" | "warmAgents"
+      | "claudeRuns" | "claudeSettings" | "codexRuns" | "geminiRuns" | "planUsage" | "warmAgentClose" | "warmAgents"
     >,
     private readonly deps: Pick<CliDependencies, "codexExecutable" | "debugLogs">
   ) {}
@@ -110,6 +111,9 @@ export class CliRuns {
       this.nativeOperations--;
       this.cli.warmAgents.trackConversationOperation(options.warm?.conversationId, -1);
       idleMonitor?.close();
+      // agy pushes no usage: `/usage` is read after its turns (a minute apart
+      // at most), on its own sign-in only.
+      if (participant.kind === "gemini-cli" && runsOnOwnSignIn(participant, options.agentEnv)) this.cli.planUsage.geminiTurnEnded();
     }
   }
 

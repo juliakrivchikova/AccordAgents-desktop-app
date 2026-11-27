@@ -13,7 +13,7 @@ import { normalizeChatAgentPermissions } from "../../../../shared/agentPermissio
 import { hasChatAppToolCapability } from "../../../../shared/appTools";
 import { hasPendingPermissionApprovalForParticipantTurn } from "../approvals/approvalRecords";
 import { participantForMentionHandle } from "../choices/mentions";
-import { PARTICIPANT_REQUEST_INTERRUPTED_BEFORE_COMPLETION, PARTICIPANT_REQUEST_STOPPED_BY_USER } from "../constants";
+import { PARTICIPANT_REQUEST_CUT_BY_SEND_NOW, PARTICIPANT_REQUEST_INTERRUPTED_BEFORE_COMPLETION, PARTICIPANT_REQUEST_STOPPED_BY_USER } from "../constants";
 import { chatParticipants, participantForRun } from "../members/identity";
 import {
   awaitParticipantRequestRunner, formatParticipantRequestMessage, isOpenParticipantRequestStatus, normalizeParticipantRequest,
@@ -471,7 +471,9 @@ export class ParticipantRequests {
           // A reply the User's quit ended is interrupted, as the requests the
           // quit itself ends are (endTurnsForQuit), however it ended first.
           const endedByQuit = this.chat.appQuit.endsByQuit(reply?.metadata?.runId) && reply?.metadata?.terminalReason === "user-stopped";
-          const stoppedByUser = reply?.metadata?.terminalReason === "user-stopped";
+          // A reply cut short for a message the User sent now (or joined by
+          // one) did not finish answering: the request is interrupted.
+          const stoppedByUser = reply?.metadata?.terminalReason === "user-stopped" || reply?.metadata?.turnContinues === true;
           continues = !waitingOnPermissionApproval && !stoppedByUser && Boolean(reply?.metadata?.selfCompaction && reply.metadata.runId);
           updateParticipantRequestBatch(conversation, requestMessageId, (current) => ({
             ...current,
@@ -491,7 +493,7 @@ export class ParticipantRequests {
                     : endedByQuit
                       ? PARTICIPANT_REQUEST_INTERRUPTED_BEFORE_COMPLETION
                       : stoppedByUser
-                        ? PARTICIPANT_REQUEST_STOPPED_BY_USER
+                        ? (reply?.metadata?.turnContinues === true ? PARTICIPANT_REQUEST_CUT_BY_SEND_NOW : PARTICIPANT_REQUEST_STOPPED_BY_USER)
                         : reply?.status === "error" ? reply.content : undefined,
                   updatedAt: now
                 }
@@ -513,7 +515,9 @@ export class ParticipantRequests {
           targetHandle: target.handle,
           messageId: reply?.id,
           content: reply ? [...earlier, reply].map((message) => chatMessageMemberText(message)).filter(Boolean).join("\n\n") : undefined,
-          error: reply?.status === "error" ? reply.content : undefined
+          error: reply?.status === "error" ? reply.content
+            // Cut short for a message the User sent now: what it wrote is not its answer.
+            : reply?.metadata?.turnContinues === true ? `@${target.handle} was interrupted before it finished: the User sent it a message now.` : undefined
         });
       } catch (error) {
         // A Stop that lands before any reply exists (the member still waits

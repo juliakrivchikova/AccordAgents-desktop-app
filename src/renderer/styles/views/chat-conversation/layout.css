@@ -129,3 +129,62 @@
   font-size: 13px;
   font-weight: 600;
 }
+
+/* The right side moves as the sidebar does (shell.css, the User, 2026-11-26):
+   opened, the panel slides in from 24px and fades in while the timeline
+   takes its new width at once; closed, the timeline takes the whole width at
+   once and the panel slides out over it (use-side-panel-motion.ts). Moving
+   from one panel to another while the side is open does not slide. */
+.chat-view[data-side-panel-motion="opening"] > :is(.chat-thread-panel, .artifacts-panel) {
+  animation:
+    chat-side-panel-slide-in var(--ui-duration-slow) var(--ui-ease-out),
+    chat-side-panel-fade-in var(--ui-duration-base) var(--ui-ease-out);
+}
+
+.chat-view[data-side-panel-motion="closing"] > :is(.chat-thread-panel, .artifacts-panel) {
+  position: absolute;
+  z-index: 5;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  grid-column: 1 / -1;
+  grid-row: 1 / -1;
+  border-left: 1px solid var(--app-border);
+  pointer-events: none;
+  animation:
+    chat-side-panel-slide-out var(--ui-duration-slow) var(--ui-ease-out) forwards,
+    chat-side-panel-fade-out var(--ui-duration-base) var(--ui-ease-out) forwards;
+}
+
+/* As wide as its track was: the timeline keeps its floor beside it. */
+.chat-view[data-side-panel-motion="closing"] > .chat-thread-panel {
+  width: min(var(--chat-thread-width, 430px), calc(100% - var(--chat-main-floor) - 1px));
+}
+
+.chat-view[data-side-panel-motion="closing"] > .thread-resizer {
+  display: none;
+}
+
+@keyframes chat-side-panel-slide-in {
+  from {
+    transform: translateX(24px);
+  }
+}
+
+@keyframes chat-side-panel-fade-in {
+  from {
+    opacity: 0;
+  }
+}
+
+@keyframes chat-side-panel-slide-out {
+  to {
+    transform: translateX(24px);
+  }
+}
+
+@keyframes chat-side-panel-fade-out {
+  to {
+    opacity: 0;
+  }
+}

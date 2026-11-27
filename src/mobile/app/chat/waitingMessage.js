@@ -1,4 +1,4 @@
-import { stopRequestedRunIds, stopRunFromPhone } from "../outbox/sending.js";
+import { sendNowPressedRunIds, stopRequestedRunIds, stopRunFromPhone } from "../outbox/sending.js";
 import { sessionsRules } from "../sessions/sessionsState.js";
 
 /** The User's messages a member has not taken yet, by message id, by the
@@ -23,11 +23,13 @@ export function waitingSignature(entry) {
 }
 
 function isPressed(waiting) {
-  return stopRequestedRunIds.has(waiting.runId) || Boolean(waiting.behind && stopRequestedRunIds.has(waiting.behind.runId));
+  return stopRequestedRunIds.has(waiting.runId) ||
+    Boolean(waiting.behind && (stopRequestedRunIds.has(waiting.behind.runId) || sendNowPressedRunIds.has(waiting.behind.runId)));
 }
 
 /** Under a message its member has not taken yet: send it now, which
- *  interrupts the step the member is in, or take it back. Left alone, the
+ *  lets the member take it at once (as the CLI's send-now; its reply so far
+ *  is not stopped), or take it back. Left alone, the
  *  member takes it itself (as on the desktop). */
 export function syncWaitingActions(item, entry) {
   const shown = Array.from(item.children).find(function (child) { return child.classList.contains("message-waiting"); });
@@ -41,7 +43,7 @@ export function syncWaitingActions(item, entry) {
   line.dataset.waiting = signature;
   if (waiting.behind) {
     line.append(waitingButton("is-send-now", "Send now", "Send this message now", waiting, function () {
-      return stopRunFromPhone(waiting.behind.runId, undefined, { messageId: waiting.behind.messageId, participantId: waiting.participantId });
+      return stopRunFromPhone(waiting.behind.runId, undefined, { messageId: waiting.behind.messageId, participantId: waiting.participantId, sendNow: true, waitingRunId: waiting.runId });
     }));
   }
   line.append(waitingButton("is-take-back", "×", "Take this message back", waiting, function () {

@@ -147,7 +147,10 @@ export type HubOpBody =
   | { kind: "message.remove"; messageId: string }
   | { kind: "turn.request"; runId: string; messageId: string; participantId: string; pendingMessageId?: string; request?: Record<string, unknown> }
   | { kind: "turn.claim"; runId: string; messageId: string; participantId: string }
-  | { kind: "turn.stop"; runId: string; messageId: string; participantId: string }
+  /** `sendNow`: the User's Send now on a message waiting behind this turn,
+   *  not her Stop: its device lets the member take that message now (the
+   *  CLI's send-now) and the reply is not "stopped by user". */
+  | { kind: "turn.stop"; runId: string; messageId: string; participantId: string; sendNow?: boolean; waitingRunId?: string }
   /** `contextUsage`: the member's context use as its CLI reported it after
    *  the turn, which every device shows as it shows a local member's. */
   | { kind: "turn.finish"; runId: string; outcome: HubTurnOutcome; contextUsage?: Record<string, unknown> }
@@ -232,6 +235,12 @@ export interface HubTurn {
   claimedAt?: string;
   /** Asked to stop while it was taken: its executor stops it. */
   stopRequestedAt?: string;
+  /** The User's Send now on a message waiting behind it (turn.stop
+   *  `sendNow`): its executor lets the member take that message now (the one
+   *  waiting as `sendNowWaitingRunId`, or any). Carried in the feed only,
+   *  never kept with the turn, which a Send now leaves as it is. */
+  sendNowRequestedAt?: string;
+  sendNowWaitingRunId?: string;
   finishedAt?: string;
   outcome?: HubTurnOutcome;
   /** The member's context use after the turn, as its device said when it
@@ -629,6 +638,8 @@ export function hubOpShapeProblem(value: unknown): string | undefined {
       return isHubTurnRunId(value.runId) && isHubOpId(value.messageId) && isName(value.participantId) ? undefined : "Invalid turn.";
     case "turn.claim":
     case "turn.stop":
+      if (value.kind === "turn.stop" && ((value.sendNow !== undefined && value.sendNow !== true) ||
+        (value.waitingRunId !== undefined && (value.sendNow !== true || !isHubTurnRunId(value.waitingRunId))))) return "Invalid turn.";
       return isHubTurnRunId(value.runId) && isHubOpId(value.messageId) && isName(value.participantId) ? undefined : "Invalid turn.";
     case "card.raise":
       if (!isHubOpId(value.cardId) || !["permission", "choice", "mention", "roster"].includes(value.cardKind as string) || !isRecord(value.card) ||
