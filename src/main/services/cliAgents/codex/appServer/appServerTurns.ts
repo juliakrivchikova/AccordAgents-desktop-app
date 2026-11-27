@@ -189,7 +189,7 @@ export class AppServerTurns {
     timeoutMsOverride?: number,
     onCodexServerRequest?: CliAgentCodexServerRequestCallback,
     images?: CliAgentImageInput[]
-  ): Promise<Promise<ParticipantRunResult> | undefined> {
+  ): Promise<Promise<ParticipantRunResult> | "after-turn" | undefined> {
     // A turn Codex is still starting (its `turn/start` not answered yet) is
     // steered once it has its id: cutting it then could leave it running.
     const starting = this.pendingTurn;
@@ -197,6 +197,10 @@ export class AppServerTurns {
       await new Promise((resolve) => setTimeout(resolve, 50));
     }
     const running = this.pendingTurn;
+    // Waiting on the User's approval: the CLI's prompt holds what is typed
+    // then, and the message goes in once the turn is over (never a cut that
+    // would take her card away).
+    if (running?.turnId && !running.nativeGoal && running.outstandingServerRequestIds.size > 0 && !signal?.aborted) return "after-turn";
     if (!running?.turnId || running.nativeGoal || running.outstandingServerRequestIds.size > 0 || signal?.aborted) return undefined;
     const turnId = running.turnId;
     const input = codexAppServerTurnInput(codexPrompt(turnPrompt, this.launch.repoPath, this.launch.diffMode, this.launch.kind, this.launch.options), images);

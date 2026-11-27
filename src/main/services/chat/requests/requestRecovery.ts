@@ -1,10 +1,11 @@
-import type { ChatMessage, ChatParticipantRequestBatch, Conversation } from "../../../../shared/types";
+import type { ChatMessage, ChatParticipantRequestBatch, ChatParticipantRequestItem, Conversation } from "../../../../shared/types";
 import { PARTICIPANT_REQUEST_INTERRUPTED_BEFORE_COMPLETION } from "../constants";
 import { chatParticipants } from "../members/identity";
 import { delegationTurnGroup, requesterResumeRecoveryKey, turnSegmentKey } from "./delegationGroups";
 import {
-  participantRequestHasUnfinishedItems, participantRequestWaitsOnPermissionCard, pendingParticipantRequestApprovalTargetIds,
-  rollupParticipantRequestStatus, terminalParticipantRequestBatch, updateParticipantRequestBatch
+  isOpenParticipantRequestStatus, participantRequestHasUnfinishedItems, participantRequestWaitsOnPermissionCard,
+  pendingParticipantRequestApprovalTargetIds, rollupParticipantRequestStatus, settleRequestsAnsweredWith, terminalParticipantRequestBatch,
+  updateParticipantRequestBatch
 } from "./requestRecords";
 import type { ChatModules } from "../modules";
 import type { ChatDependencies } from "../dependencies";
@@ -80,14 +81,21 @@ export class RequestRecovery {
     }
     const now = new Date().toISOString();
     const reason = PARTICIPANT_REQUEST_INTERRUPTED_BEFORE_COMPLETION;
+    // A request that went out with another in one turn has no runner of its
+    // own: it ends when that one does (settleRequestsAnsweredWith), not here
+    // while that one is still open.
+    const leadOpen = (item: ChatParticipantRequestItem): boolean => {
+      const lead = item.answeredWith && conversation.messages.find((candidate) => candidate.id === item.answeredWith!.requestMessageId)
+        ?.metadata?.participantRequest?.items.find((candidate) => candidate.targetParticipantId === item.targetParticipantId);
+      return Boolean(lead && isOpenParticipantRequestStatus(lead.status));
+    };
     const nextBatch = terminalParticipantRequestBatch(
       batch,
       "interrupted",
       reason,
       now,
       (item) =>
-        item.status === "running" ||
-        item.status === "resuming_requester" ||
+        ((item.status === "running" || item.status === "resuming_requester") && !leadOpen(item)) ||
         (item.status === "pending_approval" && !backedPendingTargetIds.has(item.targetParticipantId))
     );
     if (nextBatch === batch) {
@@ -97,6 +105,8 @@ export class RequestRecovery {
       ...message.metadata,
       participantRequest: nextBatch
     };
+    // The requests that went out with it end with it.
+    settleRequestsAnsweredWith(conversation, message.id, nextBatch);
     // A task of the main session, or a request made with
     // app_chat_request_participants, that a restart ended: the others of its
     // turn may have ended before, and nothing else would resume it now.

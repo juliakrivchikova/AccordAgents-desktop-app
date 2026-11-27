@@ -359,6 +359,9 @@ export function updateParticipantRequestBatch(
 export function settleRequestsAnsweredWith(conversation: Conversation, requestMessageId: string, batch: ChatParticipantRequestBatch): void {
   const ended = batch.items.filter((item) => !isOpenParticipantRequestStatus(item.status));
   if (ended.length === 0) return;
+  // Nothing went out with it (nearly always): the chat is left as it is.
+  const linked = (message: ChatMessage) => message.metadata?.participantRequest?.items.some((item) => item.answeredWith?.requestMessageId === requestMessageId) === true;
+  if (!conversation.messages.some(linked)) return;
   const now = new Date().toISOString();
   conversation.messages = conversation.messages.map((message) => {
     const other = message.metadata?.participantRequest;

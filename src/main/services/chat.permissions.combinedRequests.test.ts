@@ -411,3 +411,79 @@ test("an Antigravity prompt that would pass its argument limit with the joined r
   assert.equal(chat.debugEvents.some(({ event }) => event === "chat.requests.combined"), false);
   await waitFor(() => chat.storage.current.metadata.running === false, 8_000);
 });
+
+test("a turn whose reply ends in an error fails every request that went out with it, with that error", async () => {
+  const askers = ["asker1", "asker2"].map((id) => chatParticipant({ id, handle: id, ...ASKS }));
+  let releaseBusy!: () => void;
+  const busy = new Promise<void>((resolve) => { releaseBusy = resolve; });
+  const asked: Record<string, any> = {};
+  const chat = selfCompactingChat({
+    others: askers,
+    turn: async ({ participantId, actor, service, call }) => {
+      if (participantId.startsWith("asker")) {
+        if (call === 1) asked[participantId] = await service.requestParticipantsFromTool(actor, { requests: [{ target: "admin", prompt: `Question from ${participantId}` }] });
+        return call === 1 ? "Asked admin." : "Thanks.";
+      }
+      if (call === 1) { await busy; return "Busy work done."; }
+      // The member's CLI fails on the turn that answers both.
+      return { content: "The CLI exited unexpectedly.", ok: false, error: "The CLI exited unexpectedly." } as any;
+    }
+  });
+  await chat.service.sendMessage({ conversationId: chat.conversation.id, runId: "user-run", content: "@admin do the long task" });
+  await waitFor(() => adminPrompts(chat).length === 1, 5_000);
+  for (const asker of ["asker1", "asker2"]) await ask(chat, asked, asker);
+  releaseBusy();
+  await waitFor(() => ["asker1", "asker2"].every((asker) => itemFor(chat, asker).status === "failed"), 8_000);
+  assert.equal(adminPrompts(chat).length, 2, "one turn for both, not a retry of the second");
+  assert.equal(itemFor(chat, "asker2").replyMessageId, itemFor(chat, "asker1").replyMessageId);
+  assert.equal(itemFor(chat, "asker2").error, itemFor(chat, "asker1").error);
+  assert.match(itemFor(chat, "asker2").error ?? "", /exited unexpectedly/);
+  await waitFor(() => chat.storage.current.metadata.running === false, 8_000);
+});
+
+test("a joined request waiting while the member goes on after compacting itself is not taken for orphaned when its requester checks on it", async () => {
+  const askers = ["asker1", "asker2"].map((id) => chatParticipant({ id, handle: id, ...ASKS }));
+  let releaseBusy!: () => void;
+  const busy = new Promise<void>((resolve) => { releaseBusy = resolve; });
+  const asked: Record<string, any> = {};
+  const askerActors: Record<string, any> = {};
+  let checked: any;
+  const chat = selfCompactingChat({
+    participant: { permissions: normalizeChatAgentPermissions({ ...defaultChatAgentPermissions(), requestCompaction: "allow" }) },
+    others: askers,
+    turn: async ({ participantId, actor, service, call }) => {
+      if (participantId.startsWith("asker")) {
+        askerActors[participantId] = actor;
+        if (call === 1) asked[participantId] = await service.requestParticipantsFromTool(actor, { requests: [{ target: "admin", prompt: `Question from ${participantId}` }] });
+        return call === 1 ? "Asked admin." : "Thanks.";
+      }
+      if (call === 1) { await busy; return "Busy work done."; }
+      if (call === 2) { await service.requestSelfCompactionFromTool(actor, { instructions: "Answer both." }); return "Looked into both."; }
+      // While it goes on, asker2 checks on its request (which sweeps orphaned requests).
+      checked = await service.participantRequestStatusForTool(askerActors.asker2, { requestId: asked.asker2.requestId });
+      return "Answered both after compacting.";
+    }
+  });
+  await chat.service.sendMessage({ conversationId: chat.conversation.id, runId: "user-run", content: "@admin do the long task" });
+  await waitFor(() => adminPrompts(chat).length === 1, 5_000);
+  for (const asker of ["asker1", "asker2"]) await ask(chat, asked, asker);
+  releaseBusy();
+  await waitFor(() => ["asker1", "asker2"].every((asker) => itemFor(chat, asker).status !== "running"), 10_000);
+  assert.ok(checked);
+  const final = chat.replies().find((message) => message.content === "Answered both after compacting.");
+  for (const asker of ["asker1", "asker2"]) {
+    assert.equal(itemFor(chat, asker).status, "answered", asker);
+    assert.equal(itemFor(chat, asker).replyMessageId, final.id, asker);
+  }
+  await waitFor(() => chat.storage.current.metadata.running === false, 8_000);
+});
+
+test("a request its machine did not take together keeps its place: it runs before the User's message sent meanwhile", async () => {
+  const { service, target, turnRequests, requestMessage } = await machineMemberAskedThrice();
+  // The User writes to the member while "two" (with "three") is on its machine.
+  await service.sendMessage({ conversationId: "conversation-1", content: "@far one more thing from me" });
+  await new Promise((resolve) => setTimeout(resolve, 50));
+  await fixtures.memberDeviceAnswers(service, turnRequests()[1], { participant: target, content: "Answered two." });
+  await fixtures.waitFor(() => turnRequests().length >= 3, 5_000);
+  assert.equal(turnRequests()[2].messageId, requestMessage("three").id, "the request that waited goes first");
+});

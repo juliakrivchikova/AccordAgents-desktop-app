@@ -136,8 +136,11 @@ verbatim there). Modelled on T3 Code (`~/reference/t3code`,
   running turn is steered with it (`turn/steer`, Enter mid-turn in its CLI):
   the reply so far ends as a turn that goes on and the rest of the turn is the
   request's reply, split as Claude's is (`AppServerTurns.steer`, handed over
-  as Codex's answer is read); when Codex cannot take it (no turn yet, an
-  approval waits, it refuses) the turn is cut as below. A member whose CLI
+  as Codex's answer is read); while the turn waits on the User's approval
+  it is neither steered nor cut (the CLI's prompt holds what is typed then):
+  it runs right after that turn, her card kept; when Codex cannot take it
+  (no turn yet, it refuses) the turn is cut as below. Only a request the
+  main session wrote delivers now (the server vouches for who wrote it). A member whose CLI
   cannot take a message in the middle of a turn (Antigravity runs a process
   per turn) has its running turn cut as Send now cuts it (it keeps what it
   wrote, its run settles, a request it answered ends interrupted) and goes on

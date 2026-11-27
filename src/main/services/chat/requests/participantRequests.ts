@@ -198,7 +198,7 @@ export class ParticipantRequests {
           target: handle,
           way: "into-running-turn",
           note: target.kind === "codex-cli"
-            ? `${handle} is working: the request goes into its running turn now, as a message typed into Codex mid-turn (Codex steers the turn with it). If Codex cannot take it there, the running turn is interrupted (what it wrote stays) and it goes on at once in the same session with this request.`
+            ? `${handle} is working: the request goes into its running turn now, as a message typed into Codex mid-turn (Codex steers the turn with it). While that turn waits on the User's approval, it takes the request right after the turn. If Codex cannot take it there, the running turn is interrupted (what it wrote stays) and it goes on at once in the same session with this request.`
             : `${handle} is working: the request goes into its running turn now, as a message typed into Claude Code mid-turn (it takes it at its next tool result, or its step is cut for it).`
         }];
       }
@@ -567,7 +567,8 @@ export class ParticipantRequests {
                     : endedByQuit
                       ? PARTICIPANT_REQUEST_INTERRUPTED_BEFORE_COMPLETION
                       : stoppedByUser
-                        ? (reply?.metadata?.turnContinues === true ? PARTICIPANT_REQUEST_CUT_BY_SEND_NOW : PARTICIPANT_REQUEST_STOPPED_BY_USER)
+                        ? (reply?.metadata?.turnContinues === true || (notRun && this.chat.activeRuns.sentNowRunIds.has(targetRunId!))
+                          ? PARTICIPANT_REQUEST_CUT_BY_SEND_NOW : PARTICIPANT_REQUEST_STOPPED_BY_USER)
                         : reply?.status === "error" ? reply.content : notRun ? `@${target.handle} did not start on this request.` : undefined,
                   updatedAt: now
                 }
@@ -592,15 +593,18 @@ export class ParticipantRequests {
           error: reply?.status === "error" ? reply.content
             // Cut short for a message the User sent now: what it wrote is not its answer.
             : reply?.metadata?.turnContinues === true ? `@${target.handle} was interrupted before it finished: it was sent a message to take now (by the User, or a request delivered now).`
-            : !reply ? (targetController.signal.aborted ? PARTICIPANT_REQUEST_STOPPED_BY_USER : `@${target.handle} did not start on this request.`) : undefined
+            : !reply ? (!targetController.signal.aborted ? `@${target.handle} did not start on this request.`
+              : this.chat.activeRuns.sentNowRunIds.has(targetRunId) ? PARTICIPANT_REQUEST_CUT_BY_SEND_NOW : PARTICIPANT_REQUEST_STOPPED_BY_USER) : undefined
         });
       } catch (error) {
         // A Stop that lands before any reply exists (the member still waits
         // for its turn, or its machine is still being prepared) ends here.
         // Or the reply it went out in was stopped before the member started.
         const stoppedBeforeStart = targetController?.signal.aborted === true || error instanceof CombinedTurnStopped;
+        // Cut for a request delivered now, not stopped by the User.
+        const cut = targetRunId !== undefined && this.chat.activeRuns.sentNowRunIds.has(targetRunId);
         const message = stoppedBeforeStart
-          ? PARTICIPANT_REQUEST_STOPPED_BY_USER
+          ? (cut ? PARTICIPANT_REQUEST_CUT_BY_SEND_NOW : PARTICIPANT_REQUEST_STOPPED_BY_USER)
           : error instanceof Error ? error.message : String(error);
         const now = new Date().toISOString();
         updateParticipantRequestBatch(conversation, requestMessageId, (current) => ({

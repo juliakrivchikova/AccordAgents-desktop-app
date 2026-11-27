@@ -103,7 +103,7 @@ export class ParticipantTurn {
       onCliMessageWritten?: () => void;
       /** A request delivered now to a Codex member: steered into its running
        *  turn (CliAgentRunOptions.steerIntoRunningTurn). */
-      steerIntoRunningTurn?: (outcome: "steered" | "not-steered") => void;
+      steerIntoRunningTurn?: (outcome: "steered" | "not-steered" | "after-turn") => void;
       /** Requests that go out with the trigger (TurnQueue takeCombinableTurns). */
       combinedTriggers?: ChatMessage[];
     }
@@ -284,16 +284,7 @@ export class ParticipantTurn {
       accessNote,
       ...imageOptions
     });
-    let primary = buildPrimary();
-    // Too large an argument for Antigravity with them: they run on their own.
-    if (imageOptions.combinedTriggers && participant.kind === "gemini-cli" && Buffer.byteLength(primary.prompt) > COMBINED_ARGUMENT_PROMPT_MAX_BYTES) {
-      imageOptions.combinedTriggers = undefined;
-      primary = buildPrimary();
-    }
-    const combinedRequestMessageIds = imageOptions.combinedTriggers?.map((message) => message.id);
-    if (combinedRequestMessageIds) void this.deps.debugLogs.write("chat.requests.combined", { conversationId: conversation.id, participantId: participant.id, runId, triggerMessageId: triggerMessage.id, combinedRequestMessageIds });
-    const prompt = primary.prompt;
-    const promptFallbackPrompt = this.chat.turnPrompt.buildPrompt(promptConversation, participant, session, promptTriggerMessage, workspacePath, Boolean(options.continuation), {
+    const buildFallback = () => this.chat.turnPrompt.buildPrompt(promptConversation, participant, session, promptTriggerMessage, workspacePath, Boolean(options.continuation), {
       includeRoleInstructions: true,
       turnNonce,
       agentMode,
@@ -306,7 +297,7 @@ export class ParticipantTurn {
     // A fork whose source session is gone starts clean from this prompt
     // (the CLI's resume-miss fallback): it is still told who it is, with its
     // role's instructions, as the fork would have been.
-    const resumeFallbackPrompt = isResumingSession
+    const buildResumeFallback = () => isResumingSession
       ? this.chat.turnPrompt.buildPrompt(promptConversation, participant, session, promptTriggerMessage, workspacePath, Boolean(options.continuation), {
           includeRoleInstructions: usePromptRole || includeRefreshedRoleInstructions || Boolean(forkSource),
           turnNonce,
@@ -319,6 +310,16 @@ export class ParticipantTurn {
           ...(forkSource ? { identityNoteBlock: forkStartedCleanIdentityNote(conversation, participant, session) } : {})
         })
       : undefined;
+    let [primary, promptFallbackPrompt, resumeFallbackPrompt] = [buildPrimary(), buildFallback(), buildResumeFallback()];
+    // Too large an argument for Antigravity with them (any prompt its CLI may get): they run on their own.
+    if (imageOptions.combinedTriggers && participant.kind === "gemini-cli" &&
+      [primary.prompt, promptFallbackPrompt, resumeFallbackPrompt ?? ""].some((text) => Buffer.byteLength(text) > COMBINED_ARGUMENT_PROMPT_MAX_BYTES)) {
+      imageOptions.combinedTriggers = undefined;
+      [primary, promptFallbackPrompt, resumeFallbackPrompt] = [buildPrimary(), buildFallback(), buildResumeFallback()];
+    }
+    const combinedRequestMessageIds = imageOptions.combinedTriggers?.map((message) => message.id);
+    if (combinedRequestMessageIds) void this.deps.debugLogs.write("chat.requests.combined", { conversationId: conversation.id, participantId: participant.id, runId, triggerMessageId: triggerMessage.id, combinedRequestMessageIds });
+    const prompt = primary.prompt;
     const role = usePromptRole ? undefined : this.chat.agentEnvironment.cliRoleOptions(conversation, participant, session, access, workspacePath, promptFallbackPrompt);
     void this.deps.debugLogs.write("chat.prompt.size", {
       conversationId: conversation.id,

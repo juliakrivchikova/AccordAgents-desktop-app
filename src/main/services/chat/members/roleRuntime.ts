@@ -285,8 +285,10 @@ export function participantTurnMode(participant: ChatParticipant, triggerMessage
 export function deliversNow(triggerMessage: ChatMessage, participantId: string, mainSessionId?: string): boolean {
   const batch = triggerMessage.metadata?.participantRequest;
   // Only the chat's main session delivers now, checked again where the turn
-  // runs (a copy from another device included).
-  if (mainSessionId !== undefined && batch?.requesterParticipantId !== mainSessionId) return false;
+  // runs (a copy from another device included): by who wrote the request,
+  // which the User's server vouches for, not only by what it says.
+  if (mainSessionId !== undefined && (batch?.requesterParticipantId !== mainSessionId ||
+    triggerMessage.role !== "participant" || triggerMessage.participantId !== mainSessionId)) return false;
   // Only its first turn: a turn the same request starts later (an approval's
   // resume) comes after the reply it already has.
   return batch?.items.some((item) => item.targetParticipantId === participantId && item.deliver === "now" && !item.replyMessageId) === true;

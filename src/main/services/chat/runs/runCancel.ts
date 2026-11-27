@@ -108,9 +108,11 @@ export class RunCancel {
    * as a turn that goes on, never "stopped by user"), and the request runs
    * next in the same session (TurnQueue `next`).
    */
-  async deliverNow(conversationId: string, participantId: string, waitingRunId: string, way: DeliveryWay | "steered"): Promise<void> {
-    // Codex took it into its running turn itself (its steer): only said.
-    if (way === "steered") {
+  async deliverNow(conversationId: string, participantId: string, waitingRunId: string, way: DeliveryWay | "steered" | "after-turn"): Promise<void> {
+    // Codex took it into its running turn itself (its steer), or takes it
+    // right after that turn, which waits on the User's approval (its CLI's
+    // prompt holds what is typed then): only said, nothing is cut.
+    if (way === "steered" || way === "after-turn") {
       void this.deps.debugLogs.write("chat.deliver-now", { conversationId, participantId, runId: waitingRunId, way });
       return;
     }

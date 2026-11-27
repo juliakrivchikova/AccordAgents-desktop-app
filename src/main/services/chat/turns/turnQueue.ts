@@ -150,9 +150,13 @@ export class TurnQueue {
       if (!(error instanceof NotAnsweredTogether)) throw error;
       // Taken into another request's turn that did not answer it (that turn
       // ended before it ran, or the member's device did not take it in): it
-      // runs on its own, as it would have.
+      // runs on its own, as it would have, in the place it had (right after
+      // that turn, before what was asked of the member since).
       const { combine: _combine, turnReservation: _reservation, ...own } = options;
-      return this.runTurnSerialized(conversation, participant, triggerMessage, runId, signal, progress, own);
+      return this.runTurnSerialized(conversation, participant, triggerMessage, runId, signal, progress, {
+        ...own,
+        turnReservation: this.reserveParticipantTurn(conversation.id, participant.id, "exclusive", { priority: "next" })
+      });
     }
   }
 
@@ -283,8 +287,8 @@ export class TurnQueue {
             ...(delivery === "live" && participant.kind === "codex-cli" ? {
               // Codex steers its running turn with it; when it cannot, the
               // running turn is cut and this one runs next, in its session.
-              steerIntoRunningTurn: (outcome: "steered" | "not-steered") => {
-                void this.chat.runCancel.deliverNow(conversation.id, participant.id, runId, outcome === "steered" ? "steered" : "interrupt-and-restart").catch(() => undefined);
+              steerIntoRunningTurn: (outcome: "steered" | "not-steered" | "after-turn") => {
+                void this.chat.runCancel.deliverNow(conversation.id, participant.id, runId, outcome === "not-steered" ? "interrupt-and-restart" : outcome).catch(() => undefined);
               }
             } : delivery === "live" ? {
               onCliMessageWritten: () => {

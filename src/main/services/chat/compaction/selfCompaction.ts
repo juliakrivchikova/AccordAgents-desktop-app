@@ -297,9 +297,14 @@ export class SelfCompaction {
       void this.requestServerSelfCompaction(conversationId, participant, request, runId, resume).catch(async (error) => {
         this.takeHeldCompactionTurn(serverRunId)?.release();
         const message = error instanceof Error ? error.message : String(error);
-        await this.deps.debugLogs.write("chat.self-compaction.request-error", { conversationId, participantId: participant.id, runId, message });
-        await this.recordSelfCompactionFailure(conversationId, participant, runId, request.instructions, message);
-        if (resume) await this.chat.selfCompactionResumes.continueAfterSelfCompaction(conversationId, participant.id, resume, { kind: "failed", reason: message }, request.instructions);
+        void this.deps.debugLogs.write("chat.self-compaction.request-error", { conversationId, participantId: participant.id, runId, message });
+        // The member goes on (its turn behind the compaction is freed) even
+        // when the failure cannot be written down.
+        try {
+          await this.recordSelfCompactionFailure(conversationId, participant, runId, request.instructions, message);
+        } finally {
+          if (resume) await this.chat.selfCompactionResumes.continueAfterSelfCompaction(conversationId, participant.id, resume, { kind: "failed", reason: message }, request.instructions);
+        }
       });
       return;
     }
