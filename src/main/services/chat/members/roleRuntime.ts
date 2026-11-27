@@ -23,7 +23,8 @@ import type { ResolvedChatParticipantRole } from "../types";
  *  member starts an Accord with app_chat_start_accord when it has the tool
  *  (Settings → General → "Any agent can start an Accord"), else asks the main
  *  session (mainSessionMemberRules). 27: a note about one project is
- *  never global; another project's is filed under it with `project`
+ *  never global; another project's is filed under it with `project`; who
+ *  merges or releases work updates the status notes of all it ships
  *  (MEMBER_MEMORY_INSTRUCTIONS). */
 const CHAT_ROLE_RUNTIME_CONFIG_VERSION = 27;
 

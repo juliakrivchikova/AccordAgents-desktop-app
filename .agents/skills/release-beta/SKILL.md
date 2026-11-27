@@ -81,6 +81,9 @@ Read the run (`gh run view <run-id> --log` for details) and report:
 - Phone app: the `ASSET_VERSION` the `Phone app` job reports `mobile.accordagents.com` now serves
 - Update feed: offered, or the warning if it still lags (the release is published; re-probe the feed,
   never re-run the release)
+- Members' memory: the status notes of everything the release ships, whoever wrote them, found with
+  `app_memory_search` (branch names, features), each marked released with the version, or archived
+  once nothing is open (lasting knowledge kept as an article first)
 
 ## Recovery
 

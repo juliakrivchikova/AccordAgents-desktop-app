@@ -236,6 +236,12 @@ Decided by the User on 2026-11-26 (same chat document): OpenAI
   for a different change is refused.
 - Kind, scope and field types are checked on every change, not only on create
   (tool schemas are not enforced before the server).
+- Whoever merges or releases work updates the status notes of all it ships,
+  whoever wrote them: merged or released with the version, or archived once
+  nothing is open, lasting knowledge kept as an article first (the User,
+  2026-11-27: a release is usually done later by someone else, so a status
+  left to its author kept saying "not released" after the release). The
+  `release-beta` skill makes it a step of every release.
 - A status nobody updated for 30 days is archived by the server (swept at most
   every 10 minutes).
 - A note nobody wrote, read or confirmed for 60 days leaves the session-start
