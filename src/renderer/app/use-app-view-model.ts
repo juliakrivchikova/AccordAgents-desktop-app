@@ -82,7 +82,9 @@ export function useAppViewModel(state: AppState) {
   }, [state.conversation, state.progressLog]);
   const activeChatConversation = state.conversation?.kind === "chat" ? state.conversation : undefined;
   const activeChatParticipants = useMemo(() => activeChatConversation ? chatParticipants(activeChatConversation) : [], [activeChatConversation]);
-  const participantBackgroundTasksById = useChatBackgroundTasks(activeChatConversation?.id);
+  const backgroundTasks = useChatBackgroundTasks(activeChatConversation?.id);
+  const participantBackgroundTasksById = backgroundTasks.tasks;
+  const participantEnvironmentPending = backgroundTasks.environmentPending;
   const participantStatusById = useMemo(
     () => buildChatParticipantStatusMap(activeChatConversation, participantBackgroundTasksById),
     [activeChatConversation, participantBackgroundTasksById]
@@ -119,6 +121,7 @@ export function useAppViewModel(state: AppState) {
     activeChatParticipants,
     participantStatusById,
     participantBackgroundTasksById,
+    participantEnvironmentPending,
     participantHasRunById,
     busyParticipantIds
   };

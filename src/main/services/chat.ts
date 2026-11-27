@@ -723,6 +723,12 @@ export class ChatService {
     return this.modules.backgroundTasks.backgroundTasksForConversation(conversationId);
   }
 
+  /** Members of a chat whose background tasks keep them on the environment
+   *  variables their process started with. */
+  environmentPendingForConversation(conversationId: string): string[] {
+    return this.modules.backgroundTasks.environmentPendingForConversation(conversationId);
+  }
+
   /** Every member with live background work here (a machine reports these to
    *  the desktop on reconnect). */
   localBackgroundTasks(): ChatBackgroundTasksEvent[] {

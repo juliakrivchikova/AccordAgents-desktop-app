@@ -373,7 +373,7 @@ export class Compaction {
         // Called only before a process is started for the compaction.
         onReplyStarted: grantBeforeStart,
         onSelfResumedTurn: (turn) => this.chat.selfResumedTurns.handleSelfResumedTurn(conversation.id, participant.id, turn),
-        onBackgroundTasksChanged: (tasks) => this.chat.backgroundTasks.handleBackgroundTasksChanged(conversation.id, participant.id, tasks),
+        onBackgroundTasksChanged: (tasks, environmentPending) => this.chat.backgroundTasks.handleBackgroundTasksChanged(conversation.id, participant.id, tasks, environmentPending),
         // Started with suggestions on, as a turn starts it; the compaction
         // itself is not a reply a suggestion follows.
         onPromptSuggestion: (text) => this.chat.promptSuggestions.receiveMemberPromptSuggestion({

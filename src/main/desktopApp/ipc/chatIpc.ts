@@ -169,6 +169,9 @@ export function registerChatIpc(desktopApp: DesktopApp): void {
   ipcMain.handle("chat:get-background-tasks", (_event, conversationId: unknown) =>
     typeof conversationId === "string" ? desktopApp.chatService.backgroundTasksForConversation(conversationId) : {});
 
+  ipcMain.handle("chat:get-environment-pending", (_event, conversationId: unknown) =>
+    typeof conversationId === "string" ? desktopApp.chatService.environmentPendingForConversation(conversationId) : []);
+
   ipcMain.handle("chat:send", async (_event, request: SendChatMessageRequest) => {
     const runId = request.runId ?? randomUUID();
     const controller = new AbortController();

@@ -418,7 +418,8 @@ export class ClaudeReplyFlow {
   }
 
   /** Tells the caller which background tasks are live whenever that changes,
-   *  so the member can be shown as working in the background. */
+   *  so the member can be shown as working in the background, and whether
+   *  they keep it on environment values members no longer get. */
   reportClaudeBackgroundTasks(state: ClaudeWarmProcessState, participant: ParticipantConfig, ended = false): void {
     const tasks: CliAgentBackgroundTask[] = ended ? [] : Array.from(state.backgroundTasks.entries()).map(([id, label]) => ({
       id,
@@ -426,13 +427,14 @@ export class ClaudeReplyFlow {
       startedAt: taskStartedAt(state, id),
       origin: state.backgroundTaskOrigins.get(id)
     }));
-    const signature = JSON.stringify(tasks.map((task) => [task.id, task.label, task.origin?.messageId]));
+    const environmentPending = tasks.length > 0 && state.environmentPending?.() === true;
+    const signature = JSON.stringify([tasks.map((task) => [task.id, task.label, task.origin?.messageId]), environmentPending]);
     if (signature === state.reportedBackgroundTasks) {
       return;
     }
     state.reportedBackgroundTasks = signature;
     try {
-      state.onBackgroundTasksChanged?.(tasks);
+      state.onBackgroundTasksChanged?.(tasks, environmentPending);
     } catch (error) {
       void this.cli.cliRuns.writeDebugLog("cli-agent-claude-background-report-error", {
         participantId: participant.id,

@@ -86,7 +86,12 @@ export class MachineMessages {
         if (typeof body.conversationId !== "string" || typeof body.participantId !== "string" || !Array.isArray(body.labels)) return;
         this.emitMemberBackground({
           machineId: connection.record.id,
-          member: { conversationId: body.conversationId, participantId: body.participantId, tasks: backgroundTasksFromWire(body.labels, body.startedAt) }
+          member: {
+            conversationId: body.conversationId,
+            participantId: body.participantId,
+            tasks: backgroundTasksFromWire(body.labels, body.startedAt),
+            ...(body.environmentPending === true ? { environmentPending: true } : {})
+          }
         });
         return;
       case "machine.member.background.snapshot":
@@ -96,7 +101,12 @@ export class MachineMessages {
           snapshot: body.members
             .filter((member) => member && typeof member.conversationId === "string" && typeof member.participantId === "string" && Array.isArray(member.labels))
             .slice(0, 500)
-            .map((member) => ({ conversationId: member.conversationId, participantId: member.participantId, tasks: backgroundTasksFromWire(member.labels, member.startedAt) }))
+            .map((member) => ({
+              conversationId: member.conversationId,
+              participantId: member.participantId,
+              tasks: backgroundTasksFromWire(member.labels, member.startedAt),
+              ...(member.environmentPending === true ? { environmentPending: true } : {})
+            }))
         });
         return;
       case "machine.turn.suggestion":

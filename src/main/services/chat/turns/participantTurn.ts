@@ -590,7 +590,7 @@ export class ParticipantTurn {
             chatThreadRootId: pendingMessage.metadata?.chatThreadRootId
           },
           onSelfResumedTurn: (turn) => this.chat.selfResumedTurns.handleSelfResumedTurn(conversation.id, participant.id, turn),
-          onBackgroundTasksChanged: (tasks) => this.chat.backgroundTasks.handleBackgroundTasksChanged(conversation.id, participant.id, tasks),
+          onBackgroundTasksChanged: (tasks, environmentPending) => this.chat.backgroundTasks.handleBackgroundTasksChanged(conversation.id, participant.id, tasks, environmentPending),
           onReplyStarted: grantAtReplyStart || sharedClaudeTurn ? onReplyStarted : undefined,
           onMessageWritten: options.writeGate?.markWritten,
           onPromptSuggestion: (text) => this.chat.promptSuggestions.receiveMemberPromptSuggestion({

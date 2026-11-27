@@ -38,7 +38,7 @@ export class CliAgentRunner {
 
   constructor(
     debugLogs?: CliAgentDebugLogger,
-    manualReadinessEnvironment?: () => Promise<{ env: NodeJS.ProcessEnv }>,
+    manualReadinessEnvironment?: () => Promise<{ env: NodeJS.ProcessEnv; version?: string }>,
     codexExecutableOrOptions: string | CliAgentRunnerOptions = "codex",
     claudeModelProbePtySpawn?: ClaudeModelProbePtySpawn,
     claudeModelProbeExpectSpawn: ClaudeModelProbeExpectSpawn = spawnCommand
@@ -139,15 +139,14 @@ export class CliAgentRunner {
     return this.modules.warmAgents.shutdownWarmAgents();
   }
 
-  /** The environment members get changed (`version`: the new one, from
-   * SettingsService.getManualAgentEnvironment). A member process started with
-   * other values closes once it holds no work: at once when idle, otherwise
-   * as soon as its turn ends, so the member's next message resumes its session
-   * in a new process with the new values. A turn in progress finishes on the
-   * process it started on, and messages sent meanwhile join it. Nothing is
+  /** The environment members get changed (Settings → Environment saved, or
+   * a machine's settings imported). A member process started with other
+   * values closes once it holds no work, so the member's next message resumes
+   * its session in a new process with the new values (WarmEnvironment). A
+   * turn in progress finishes on the process it started on. Nothing is
    * fenced: turns keep starting meanwhile. */
-  environmentChanged(version: string): Promise<void> {
-    return this.modules.warmAgents.environmentChanged(version);
+  environmentChanged(): Promise<void> {
+    return this.modules.warmAgents.environmentChanged();
   }
 
   /** Archive/delete closes resident processes, while leaving provider session

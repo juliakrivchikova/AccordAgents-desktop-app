@@ -8,7 +8,7 @@ export class BackgroundTasks {
    *  process that runs it: kept in memory and never stored, so it cannot
    *  outlive a restart or drift between copies of the chat. `source` is
    *  "local" for this host's members, or the machine that reported them. */
-  readonly memberBackgroundTasks = new Map<string, Map<string, { source: string; tasks: ChatBackgroundTask[] }>>();
+  readonly memberBackgroundTasks = new Map<string, Map<string, MemberBackgroundTasks>>();
   private readonly backgroundTaskListeners = new Set<(event: ChatBackgroundTasksEvent) => void>();
 
   constructor(private readonly deps: Pick<ChatDependencies, "debugLogs">) {}
@@ -19,6 +19,14 @@ export class BackgroundTasks {
     return () => {
       this.backgroundTaskListeners.delete(listener);
     };
+  }
+
+  /** The members of a chat whose background tasks keep their process on the
+   *  environment variables it started with (ChatBackgroundTasksEvent). */
+  environmentPendingForConversation(conversationId: string): string[] {
+    return Array.from(this.memberBackgroundTasks.get(conversationId)?.entries() ?? [])
+      .filter(([, entry]) => entry.environmentPending)
+      .map(([participantId]) => participantId);
   }
 
   /** The live background tasks of a chat's members, by member id. */
@@ -34,7 +42,7 @@ export class BackgroundTasks {
     for (const [conversationId, members] of this.memberBackgroundTasks) {
       for (const [participantId, entry] of members) {
         if (entry.source === "local") {
-          events.push({ conversationId, participantId, tasks: entry.tasks.map((task) => ({ ...task })) });
+          events.push(backgroundEvent(conversationId, participantId, entry.tasks, entry.environmentPending));
         }
       }
     }
@@ -43,7 +51,7 @@ export class BackgroundTasks {
 
   /** A machine reported the live background tasks of a member it hosts. */
   applyMachineBackgroundTasks(machineId: string, event: ChatBackgroundTasksEvent): void {
-    this.setMemberBackgroundTasks(event.conversationId, event.participantId, event.tasks, `machine:${machineId}`);
+    this.setMemberBackgroundTasks(event.conversationId, event.participantId, event.tasks, `machine:${machineId}`, event.environmentPending === true);
   }
 
   /** A machine's complete list (sent with its hello or on request): replaces
@@ -63,12 +71,13 @@ export class BackgroundTasks {
     }
   }
 
-  handleBackgroundTasksChanged(conversationId: string, participantId: string, tasks: CliAgentBackgroundTask[]): void {
-    this.setMemberBackgroundTasks(conversationId, participantId, tasks.map((task) => ({ label: task.label, startedAt: task.startedAt })), "local");
+  handleBackgroundTasksChanged(conversationId: string, participantId: string, tasks: CliAgentBackgroundTask[], environmentPending = false): void {
+    this.setMemberBackgroundTasks(conversationId, participantId, tasks.map((task) => ({ label: task.label, startedAt: task.startedAt })), "local", environmentPending);
   }
 
-  private setMemberBackgroundTasks(conversationId: string, participantId: string, tasks: ChatBackgroundTask[], source: string): void {
-    const members = this.memberBackgroundTasks.get(conversationId) ?? new Map<string, { source: string; tasks: ChatBackgroundTask[] }>();
+  private setMemberBackgroundTasks(conversationId: string, participantId: string, tasks: ChatBackgroundTask[], source: string, environmentPending = false): void {
+    const pending = environmentPending && tasks.length > 0;
+    const members = this.memberBackgroundTasks.get(conversationId) ?? new Map<string, MemberBackgroundTasks>();
     const current = members.get(participantId);
     if (tasks.length === 0) {
       if (!current || current.source !== source) {
@@ -76,17 +85,17 @@ export class BackgroundTasks {
       }
       members.delete(participantId);
     } else {
-      if (current && current.source === source && sameTasks(current.tasks, tasks)) {
+      if (current && current.source === source && sameTasks(current.tasks, tasks) && current.environmentPending === pending) {
         return;
       }
-      members.set(participantId, { source, tasks: tasks.map((task) => ({ ...task })) });
+      members.set(participantId, { source, tasks: tasks.map((task) => ({ ...task })), environmentPending: pending });
     }
     if (members.size > 0) {
       this.memberBackgroundTasks.set(conversationId, members);
     } else {
       this.memberBackgroundTasks.delete(conversationId);
     }
-    const event: ChatBackgroundTasksEvent = { conversationId, participantId, tasks: tasks.map((task) => ({ ...task })) };
+    const event = backgroundEvent(conversationId, participantId, tasks, pending);
     for (const listener of this.backgroundTaskListeners) {
       try {
         listener(event);
@@ -98,6 +107,16 @@ export class BackgroundTasks {
       }
     }
   }
+}
+
+interface MemberBackgroundTasks {
+  source: string;
+  tasks: ChatBackgroundTask[];
+  environmentPending: boolean;
+}
+
+function backgroundEvent(conversationId: string, participantId: string, tasks: readonly ChatBackgroundTask[], environmentPending: boolean): ChatBackgroundTasksEvent {
+  return { conversationId, participantId, tasks: tasks.map((task) => ({ ...task })), ...(environmentPending ? { environmentPending: true } : {}) };
 }
 
 function sameTasks(left: readonly ChatBackgroundTask[], right: readonly ChatBackgroundTask[]): boolean {

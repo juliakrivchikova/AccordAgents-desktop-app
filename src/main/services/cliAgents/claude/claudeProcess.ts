@@ -119,7 +119,7 @@ export class ClaudeProcess {
       sessionId: options.sessionId ?? newSessionId,
       model: participant.model,
       cancelRequests: new Map(),
-      reportedBackgroundTasks: "[]",
+      reportedBackgroundTasks: "[[],false]",
       lastTaskEventAt: 0,
       selfResumeExpectedUntil: 0,
       controlWaiters: new Map(),
@@ -174,7 +174,7 @@ export class ClaudeProcess {
       // Work it did on its own (a reply to a finished background task) or its
       // background tasks are over: a process started with outdated
       // environment values is replaced now.
-      this.cli.warmAgents.retireIfEnvironmentOutdated(entry);
+      this.cli.warmAgents.environment.mayBeFree(entry);
       if (!isIdle()) {
         return;
       }
@@ -574,6 +574,8 @@ export class ClaudeProcess {
         });
       }
     };
+    state.environmentPending = () => this.cli.warmAgents.environment.pending(entry);
+    entry.refreshBackgroundReport = () => this.cli.claudeReplyFlow.reportClaudeBackgroundTasks(state, participant);
     return entry;
   }
 

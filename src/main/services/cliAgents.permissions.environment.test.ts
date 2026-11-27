@@ -1,16 +1,29 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { CliAgentRunner } from "./cliAgents";
 import { cliParts } from "./cliAgents/test/cliParts";
 import { warmAgentKey } from "./cliAgents/warm/warmKeys";
-import { makeRunner } from "./cliAgents/test/runnerFixtures";
 
 // Settings → Environment changed while members' processes live: each one
-// started with other values is replaced as soon as it holds no work.
+// started with other values is replaced once it has held no work for a
+// moment (WarmEnvironment); background tasks are waited for.
 
 type Entry = Record<string, any>;
 
-function setup(): { runner: any; closed: string[]; add: (name: string, agentEnvKey: string | undefined, extra?: Entry) => Entry } {
-  const runner = makeRunner() as any;
+const tick = (ms = 5): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
+
+function setup(settleMs = 0): {
+  runner: any; closed: string[]; env: { version?: string; fail?: boolean; delay?: number };
+  add: (name: string, agentEnvKey: string | undefined, extra?: Entry) => Entry;
+} {
+  const env: { version?: string; fail?: boolean; delay?: number } = { version: "v1" };
+  const runner = new CliAgentRunner(undefined, async () => {
+    const version = env.version;
+    if (env.delay) await tick(env.delay);
+    if (env.fail) throw new Error("secret store unavailable");
+    return { env: {}, version };
+  }) as any;
+  cliParts(runner).warmAgents.environment.settleMs = settleMs;
   const closed: string[] = [];
   cliParts(runner).warmAgentClose.closeWarmAgent = async (entry: Entry, reason: string) => {
     entry.closed = true;
@@ -19,117 +32,177 @@ function setup(): { runner: any; closed: string[]; add: (name: string, agentEnvK
   };
   const add = (name: string, agentEnvKey: string | undefined, extra: Entry = {}): Entry => {
     const key = JSON.stringify({ conversationId: "c1", participantId: name, ...(agentEnvKey === undefined ? {} : { agentEnvKey }) });
-    const entry = { name, key, scopeKey: `c1:${name}`, closed: false, queue: Promise.resolve(), ...extra };
+    const entry = {
+      name, key, scopeKey: `c1:${name}`, closed: false, queue: Promise.resolve(),
+      environmentGeneration: cliParts(runner).warmAgents.environment.currentGeneration(), ...extra
+    };
     cliParts(runner).warmAgents.entries.set(key, entry);
     return entry;
   };
-  return { runner, closed, add };
+  return { runner, closed, env, add };
 }
+
+/** A Claude process: the app sees its background work. */
+const claude = (state: { replying?: boolean; tasks?: number } = {}): Entry => ({
+  isIdle: () => !state.replying && !state.tasks,
+  isReplyIdle: () => !state.replying,
+  hasLiveBackgroundWork: () => (state.tasks ?? 0) > 0
+});
 
 const live = (runner: any): string[] => [...cliParts(runner).warmAgents.entries.values()].map((entry: Entry) => entry.name).sort();
 
-test("a changed environment closes idle member processes now and busy ones the moment their turn ends", async () => {
-  const { runner, closed, add } = setup();
-  add("idle-claude", "v1", { isIdle: () => true, isReplyIdle: () => true });
-  let answering = true;
-  const claude = add("answering-claude", "v1", { isIdle: () => !answering, isReplyIdle: () => !answering });
+test("a changed environment replaces idle member processes, and busy ones once their turn is over", async () => {
+  const { runner, closed, env, add } = setup();
+  add("idle-claude", "v1", claude());
+  const answering = { replying: true };
+  const busy = add("answering-claude", "v1", claude(answering));
   add("idle-codex", "v1");
   const codex = add("running-codex", "v1");
   let finish!: () => void;
   const turn = cliParts(runner).warmAgents.enqueueWarmRun(codex, () => new Promise<void>((resolve) => { finish = resolve; }));
 
-  await runner.environmentChanged("v2");
+  env.version = "v2";
+  await runner.environmentChanged();
+  await tick();
   assert.deepEqual(closed.sort(), ["idle-claude:environment-changed", "idle-codex:environment-changed"]);
   assert.deepEqual(live(runner), ["answering-claude", "running-codex"], "a reply in progress and a running turn keep their process");
   assert.equal(cliParts(runner).warmAgents.warmShutdown, undefined, "new turns are not refused meanwhile");
 
+  // A Claude process says when it may have gone idle.
+  answering.replying = false;
+  cliParts(runner).warmAgents.environment.mayBeFree(busy);
+  await tick();
+  assert.ok(closed.includes("answering-claude:environment-changed"), "its reply is over: replaced, not on the next message");
+
+  // What a Codex process left running the app cannot see: it is not cut
+  // after its turn; its next turn replaces it, as before.
   finish();
   await turn;
+  await tick();
   assert.equal(codex.activeRuns, 0);
-  assert.ok(closed.includes("running-codex:environment-changed"), "its turn ended: replaced then, not on the next message");
-
-  // The Claude process tells the runner each time it may have gone idle.
-  cliParts(runner).warmAgents.retireIfEnvironmentOutdated(claude);
-  assert.deepEqual(live(runner), ["answering-claude"], "still answering: kept");
-  answering = false;
-  cliParts(runner).warmAgents.retireIfEnvironmentOutdated(claude);
-  assert.deepEqual(live(runner), [], "its reply is over: replaced");
+  assert.deepEqual(live(runner), ["running-codex"]);
 });
 
-test("only processes started with other values are replaced", async () => {
-  const { runner, closed, add } = setup();
-  add("same", "v2", { isIdle: () => true });
-  add("added-provider-same", "v2|host-a", { isIdle: () => true });
-  add("added-provider-old", "v1|host-a", { isIdle: () => true });
-  add("no-version", undefined, { isIdle: () => true });
-  add("empty-version", "", { isIdle: () => true });
-  await runner.environmentChanged("v2");
+test("only processes started before the change with other values are replaced", async () => {
+  const { runner, closed, env, add } = setup();
+  add("same", "v2", claude());
+  add("added-provider-same", "v2|host-a", claude());
+  add("added-provider-old", "v1|host-a", claude());
+  add("no-version", undefined, claude());
+  add("empty-version", "", claude());
+  env.version = "v2";
+  await runner.environmentChanged();
+  await tick();
   assert.deepEqual(closed, ["added-provider-old:environment-changed"]);
   assert.deepEqual(live(runner), ["added-provider-same", "empty-version", "no-version", "same"]);
 
-  // A save that changes nothing (the same values again) restarts nobody.
-  await runner.environmentChanged("v2");
+  // A save that changes nothing restarts nobody.
+  await runner.environmentChanged();
+  await tick();
   assert.equal(closed.length, 1);
 
-  // A process started after the change with the values read before it (its
-  // turn read them first) is outdated too, and goes once its turn is over.
-  const late = add("late", "v1");
-  const run = cliParts(runner).warmAgents.enqueueWarmRun(late, async () => "done");
-  assert.deepEqual(live(runner).includes("late"), true, "kept while its run is admitted");
-  await run;
-  assert.ok(closed.includes("late:environment-changed"));
+  // A process started after the change is judged by its own next turn only:
+  // a stale reading can never make every turn restart.
+  const late = add("late", "v1", claude());
+  await cliParts(runner).warmAgents.trackWarmRun(late, async () => "done");
+  await tick();
+  assert.ok(!closed.includes("late:environment-changed"));
+  await runner.environmentChanged();
+  await tick();
+  assert.ok(closed.includes("late:environment-changed"), "a later change finds it");
 });
 
-test("nothing is replaced before the environment is known to have changed", async () => {
-  const { runner, closed, add } = setup();
-  const entry = add("idle", "v1", { isIdle: () => true });
-  cliParts(runner).warmAgents.retireIfEnvironmentOutdated(entry);
-  await cliParts(runner).warmAgents.enqueueWarmRun(entry, async () => undefined);
+test("nothing is replaced before a change, and a failed reading judges nothing outdated", async () => {
+  const { runner, closed, env, add } = setup();
+  const entry = add("idle", "v1", claude());
+  cliParts(runner).warmAgents.environment.mayBeFree(entry);
+  await cliParts(runner).warmAgents.trackWarmRun(entry, async () => undefined);
+  await tick();
   assert.deepEqual(closed, []);
-  assert.deepEqual(live(runner), ["idle"]);
+
+  env.version = "v2";
+  env.fail = true;
+  await runner.environmentChanged();
+  await tick();
+  assert.deepEqual(closed, [], "the reading failed: nothing is restarted on a guess");
+  assert.equal(cliParts(runner).warmAgents.environment.pending(entry), false);
 });
 
-test("background tasks: 'wait' replaces the process once they finish, 'stop' right after the turn", async () => {
-  for (const policy of ["wait", "stop"] as const) {
-    const { runner, closed, add } = setup();
-    cliParts(runner).warmAgents.environmentReplacementWithBackgroundTasks = policy;
-    let tasks = 1;
-    let replying = false;
-    const entry = add("claude", "v1", {
-      isReplyIdle: () => !replying,
-      isIdle: () => !replying && tasks === 0,
-      hasLiveBackgroundWork: () => tasks > 0
-    });
-    await runner.environmentChanged("v2");
-    if (policy === "stop") {
-      assert.deepEqual(closed, ["claude:environment-changed"], "stop: not in a turn, only its tasks keep it, so it goes now");
-      continue;
-    }
-    assert.deepEqual(closed, [], "wait: its background task keeps it");
-    // A turn on it ends while the task still runs: kept.
-    replying = true;
-    await cliParts(runner).warmAgents.trackWarmRun(entry, async () => { replying = false; });
-    assert.deepEqual(closed, []);
-    // The task finishes (the CLI reports it; the process calls back).
-    tasks = 0;
-    cliParts(runner).warmAgents.retireIfEnvironmentOutdated(entry);
-    assert.deepEqual(closed, ["claude:environment-changed"]);
-  }
+test("of two changes told at once, the later reading wins", async () => {
+  const { runner, closed, env, add } = setup();
+  add("a", "v1", claude());
+  add("b", "v3", claude());
+  env.version = "v2";
+  env.delay = 30;
+  const first = runner.environmentChanged();
+  await tick(2);
+  env.version = "v3";
+  env.delay = 0;
+  const second = runner.environmentChanged();
+  await Promise.all([first, second]);
+  await tick();
+  assert.deepEqual(closed, ["a:environment-changed"], "v3 stands; the slower v2 reading is not applied");
+});
 
-  // 'stop' while answering: replaced once the reply is over, its tasks with it.
-  const { runner, closed, add } = setup();
-  cliParts(runner).warmAgents.environmentReplacementWithBackgroundTasks = "stop";
-  let replying = true;
-  const entry = add("claude", "v1", { isReplyIdle: () => !replying, isIdle: () => false, hasLiveBackgroundWork: () => true });
-  await runner.environmentChanged("v2");
+test("background tasks are waited for; meanwhile the member says new values are waiting", async () => {
+  const { runner, closed, env, add } = setup();
+  const state = { tasks: 1, replying: false };
+  let reports = 0;
+  const entry = add("claude", "v1", { ...claude(state), refreshBackgroundReport: () => { reports++; } });
+  env.version = "v2";
+  await runner.environmentChanged();
+  await tick();
+  assert.deepEqual(closed, [], "its background task keeps it");
+  assert.equal(cliParts(runner).warmAgents.environment.pending(entry), true);
+  assert.equal(reports, 1, "it is told to report again, the waiting values included");
+
+  // A turn on it ends while the task still runs: kept.
+  state.replying = true;
+  await cliParts(runner).warmAgents.trackWarmRun(entry, async () => { state.replying = false; });
+  await tick();
   assert.deepEqual(closed, []);
-  replying = false;
-  cliParts(runner).warmAgents.retireIfEnvironmentOutdated(entry);
+
+  // The values are put back: nothing waits any more.
+  env.version = "v1";
+  await runner.environmentChanged();
+  assert.equal(cliParts(runner).warmAgents.environment.pending(entry), false);
+  env.version = "v2";
+  await runner.environmentChanged();
+  assert.equal(cliParts(runner).warmAgents.environment.pending(entry), true);
+
+  // The task finishes (the process calls back): replaced.
+  state.tasks = 0;
+  cliParts(runner).warmAgents.environment.mayBeFree(entry);
+  await tick();
   assert.deepEqual(closed, ["claude:environment-changed"]);
+  assert.equal(cliParts(runner).warmAgents.environment.pending(entry), false);
+});
+
+test("a process is replaced only after it has stayed free a while: every sign of life moves that on", async () => {
+  const { runner, closed, env, add } = setup(60);
+  const state = { replying: false };
+  const entry = add("claude", "v1", claude(state));
+  const otherState = { replying: false };
+  const other = add("other", "v1", claude(otherState));
+  env.version = "v2";
+  await runner.environmentChanged();
+  // The other one starts work on its own before its moment comes.
+  otherState.replying = true;
+  await tick(35);
+  cliParts(runner).warmAgents.environment.mayBeFree(entry);
+  await tick(35);
+  assert.deepEqual(closed, [], "a line it printed (a late notification, a suggestion) moved the moment on");
+  await tick(45);
+  assert.deepEqual(closed, ["claude:environment-changed"]);
+  assert.deepEqual(live(runner), ["other"], "busy when its moment came: kept until it is free again");
+  otherState.replying = false;
+  cliParts(runner).warmAgents.environment.mayBeFree(other);
+  await tick(80);
+  assert.deepEqual(closed.sort(), ["claude:environment-changed", "other:environment-changed"]);
 });
 
 test("an environment change waits for a busy member process instead of the member waiting for it", () => {
-  const runner = makeRunner() as any;
+  const runner = new CliAgentRunner() as any;
   const member = { id: "p1", kind: "claude-code" };
   const warm = { conversationId: "c1", participantId: "p1", contextKey: "", idleTimeoutMs: 1 };
   const runningKey = warmAgentKey(member as never, "/r", "chat", { warm, agentEnvKey: "v1" });
@@ -148,61 +221,38 @@ test("an environment change waits for a busy member process instead of the membe
 });
 
 test("a turn routed into the busy process holds it until the turn is over", async () => {
-  const runner = makeRunner() as any;
-  const closed: string[] = [];
-  cliParts(runner).warmAgentClose.closeWarmAgent = async (entry: Entry, reason: string) => {
-    entry.closed = true;
-    cliParts(runner).warmAgents.entries.delete(entry.key);
-    closed.push(reason);
-  };
+  const { runner, closed, env } = setup();
   const member = { id: "p1", kind: "claude-code" };
   const warm = { conversationId: "c1", participantId: "p1", contextKey: "", idleTimeoutMs: 1 };
   const runningKey = warmAgentKey(member as never, "/r", "chat", { warm, agentEnvKey: "v1" });
-  let idle = false;
-  const entry = { key: runningKey, scopeKey: "c1:p1", closed: false, isIdle: () => idle, isReplyIdle: () => idle };
+  const state = { replying: true };
+  const entry = { name: "p1", key: runningKey, scopeKey: "c1:p1", closed: false, environmentGeneration: 0, ...claude(state) };
   cliParts(runner).warmAgents.entries.set(runningKey, entry);
-  await runner.environmentChanged("v2");
+  env.version = "v2";
+  await runner.environmentChanged();
   const routed = cliParts(runner).warmAgents.withBusyMemberEnvironment(member, "/r", "chat", { warm, agentEnvKey: "v2" });
   assert.equal(routed.options.agentEnvKey, "v1");
   // The running reply ends before the routed message reaches the process.
-  idle = true;
-  cliParts(runner).warmAgents.retireIfEnvironmentOutdated(entry);
+  state.replying = false;
+  cliParts(runner).warmAgents.environment.mayBeFree(entry);
+  await tick();
   assert.deepEqual(closed, [], "not replaced under a turn that is on its way to it");
   routed.release();
-  assert.deepEqual(closed, ["environment-changed"], "that turn is over: replaced");
+  await tick();
+  assert.deepEqual(closed, ["p1:environment-changed"], "that turn is over: replaced");
   routed.release();
   assert.equal((entry as Entry).environmentHolds, 0, "a second release changes nothing");
 });
 
-test("'stop': a process kept only by background tasks is replaced when the member's next message comes", () => {
-  const runner = makeRunner() as any;
-  const closed: string[] = [];
-  cliParts(runner).warmAgentClose.closeWarmAgent = async (entry: Entry, reason: string) => {
-    entry.closed = true;
-    closed.push(reason);
-  };
-  cliParts(runner).warmAgents.environmentReplacementWithBackgroundTasks = "stop";
-  const member = { id: "p1", kind: "claude-code" };
-  const warm = { conversationId: "c1", participantId: "p1", contextKey: "", idleTimeoutMs: 1 };
-  const runningKey = warmAgentKey(member as never, "/r", "chat", { warm, agentEnvKey: "v1" });
-  cliParts(runner).warmAgents.entries.set(runningKey, {
-    key: runningKey, scopeKey: "c1:p1", closed: false, isIdle: () => false, isReplyIdle: () => true, hasLiveBackgroundWork: () => true
-  });
-  const routed = cliParts(runner).warmAgents.withBusyMemberEnvironment(member, "/r", "chat", { warm, agentEnvKey: "v2" });
-  assert.equal(routed.options.agentEnvKey, "v2", "the message starts a process with the new values");
-  assert.deepEqual(closed, ["environment-changed"]);
-  assert.equal(cliParts(runner).warmAgents.entries.size, 0);
-});
-
 test("a new process of the member waits until its replaced one has gone", async () => {
-  const runner = makeRunner() as any;
+  const runner = new CliAgentRunner() as any;
   let finishClose!: () => void;
   const closing = new Promise<void>((resolve) => { finishClose = resolve; });
   cliParts(runner).warmAgentClose.closingWarmAgents.set({ key: "old", scopeKey: "c1:p1" }, closing);
   cliParts(runner).warmAgentClose.closingWarmAgents.set({ key: "other", scopeKey: "c1:p2" }, new Promise<void>(() => undefined));
   let ready = false;
   const prepared = cliParts(runner).warmAgents.closeStaleWarmAgents("c1:p1", "new").then(() => { ready = true; });
-  await new Promise((resolve) => setImmediate(resolve));
+  await tick();
   assert.equal(ready, false, "the old process still holds the session");
   finishClose();
   await prepared;

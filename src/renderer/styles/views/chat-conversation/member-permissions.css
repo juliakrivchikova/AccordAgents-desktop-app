@@ -190,6 +190,20 @@
   animation: chat-rt-blink 1.6s ease-in-out infinite;
 }
 
+/* The pending dot alone, as a hover and focus target for its card (new
+   environment variables waiting): a few pixels of room around it. */
+.chat-environment-pending {
+  padding: 4px;
+  margin: -4px;
+  border-radius: 50%;
+  cursor: default;
+}
+
+.chat-environment-pending:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 2px var(--ui-focus-ring);
+}
+
 /* Work the member left running in the background: neutral, slow pulse. */
 .chat-rt-status.is-background {
   --st: var(--app-muted);

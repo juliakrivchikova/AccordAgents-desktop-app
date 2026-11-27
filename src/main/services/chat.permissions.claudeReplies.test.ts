@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { AppMcpService } from "./appMcp";
+import { CliAgentRunner } from "./cliAgents";
 import { appMcpParts } from "./appMcp/test/appMcpParts";
 import { chatParts } from "./chat/test/chatParts";
 import { participantTurnMode } from "./chat/members/roleRuntime";
@@ -521,4 +522,50 @@ test("a cloud member's background tasks keep their start over the machine link, 
     "each start stays with its own name, and a bad one is dropped"
   );
   assert.equal(backgroundTasksFromWire(Array.from({ length: 80 }, (_, index) => `task ${index}`), []).length, 50);
+});
+
+test("new environment values waiting ride with a member's background tasks, local and from a machine, and end with them", () => {
+  const { service } = testService();
+  const events: unknown[] = [];
+  service.onBackgroundTasksChanged((event) => events.push(event));
+  const local = chatParts(service).backgroundTasks;
+  local.handleBackgroundTasksChanged("c1", "p1", [{ id: "t1", label: "Run the soak", startedAt: NOW }], false);
+  assert.deepEqual(service.environmentPendingForConversation("c1"), []);
+  local.handleBackgroundTasksChanged("c1", "p1", [{ id: "t1", label: "Run the soak", startedAt: NOW }], true);
+  assert.deepEqual(events.at(-1), { conversationId: "c1", participantId: "p1", tasks: [{ label: "Run the soak", startedAt: NOW }], environmentPending: true },
+    "the same tasks, now waiting for new values: told again");
+  assert.deepEqual(service.environmentPendingForConversation("c1"), ["p1"]);
+  assert.deepEqual(service.localBackgroundTasks(), [{ conversationId: "c1", participantId: "p1", tasks: [{ label: "Run the soak", startedAt: NOW }], environmentPending: true }],
+    "a machine tells it to the computer with its list");
+  local.handleBackgroundTasksChanged("c1", "p1", [], true);
+  assert.deepEqual(service.environmentPendingForConversation("c1"), [], "nothing waits without a task");
+  assert.deepEqual(events.at(-1), { conversationId: "c1", participantId: "p1", tasks: [] });
+
+  service.applyMachineBackgroundTasks("machine-a", { conversationId: "c1", participantId: "p2", tasks: [{ label: "watch" }], environmentPending: true });
+  assert.deepEqual(service.environmentPendingForConversation("c1"), ["p2"]);
+  service.replaceMachineBackgroundTasks("machine-a", []);
+  assert.deepEqual(service.environmentPendingForConversation("c1"), [], "gone with the machine");
+});
+
+test("a Claude process tells its background tasks again when its environment becomes outdated, and only then", () => {
+  const reports: Array<[number, boolean | undefined]> = [];
+  let pending = false;
+  const state: any = {
+    backgroundTasks: new Map([["t1", "Run the soak"]]),
+    backgroundTaskOrigins: new Map(),
+    backgroundTaskStartedAt: new Map([["t1", NOW]]),
+    reportedBackgroundTasks: "[[],false]",
+    environmentPending: () => pending,
+    onBackgroundTasksChanged: (tasks: unknown[], environmentPending?: boolean) => reports.push([tasks.length, environmentPending])
+  };
+  const flow = (new CliAgentRunner() as any).modules.claudeReplyFlow;
+  const participant = { id: "p1", kind: "claude-code", label: "Claude" };
+  flow.reportClaudeBackgroundTasks(state, participant);
+  flow.reportClaudeBackgroundTasks(state, participant);
+  pending = true;
+  flow.reportClaudeBackgroundTasks(state, participant);
+  state.backgroundTasks = new Map();
+  flow.reportClaudeBackgroundTasks(state, participant);
+  flow.reportClaudeBackgroundTasks(state, participant);
+  assert.deepEqual(reports, [[1, false], [1, true], [0, false]], "no task, nothing waiting; an empty list after it is not told twice");
 });

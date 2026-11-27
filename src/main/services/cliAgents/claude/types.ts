@@ -1,7 +1,7 @@
 import type { ClaudeToolActivityContext } from "../../cliToolActivity";
 import type { ClaudePermissionMode } from "./permissionModes";
 import type {
-  ClaudeCompactBoundary, ClaudePermissionDenialLayer, ClaudeWarmReply, CliAgentBackgroundTask, CliAgentOutputEvent,
+  ClaudeCompactBoundary, ClaudePermissionDenialLayer, ClaudeWarmReply, CliAgentBackgroundTasksCallback, CliAgentOutputEvent,
   CliAgentReplyOrigin, CliAgentSelfResumedTurn
 } from "../types";
 
@@ -49,9 +49,12 @@ export interface ClaudeWarmProcessState {
   sessionId?: string;
   model?: string;
   onSelfResumedTurn?: (turn: CliAgentSelfResumedTurn) => void;
-  onBackgroundTasksChanged?: (tasks: CliAgentBackgroundTask[]) => void;
+  onBackgroundTasksChanged?: CliAgentBackgroundTasksCallback;
   /** What was last reported through onBackgroundTasksChanged. */
   reportedBackgroundTasks: string;
+  /** Whether the process still runs with environment values members no
+   *  longer get (WarmEnvironment.pending); told with its background tasks. */
+  environmentPending?: () => boolean;
   /** Where the CLI's next `prompt_suggestion` goes: the reply that ended last,
    *  until a step starts (the CLI drops a pending suggestion then, too). */
   promptSuggestionTarget?: (suggestion: string) => void;
