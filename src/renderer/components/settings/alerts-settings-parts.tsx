@@ -1,6 +1,6 @@
 import { WarningIcon, BellIcon, BellSlashIcon, CheckCircleIcon, MoonIcon, DotsThreeIcon, DeviceMobileIcon, PaperPlaneTiltIcon, HardDrivesIcon } from "@phosphor-icons/react";
 import { useRef, useState, type ReactNode } from "react";
-import { ALERT_CALL_CONTACT_HINT } from "../../../shared/alertCallContact";
+import { ALERT_CALL_CONTACT_HINT } from "../../../shared/alertCallContactText";
 import { Button } from "@/components/ui/button";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import {
