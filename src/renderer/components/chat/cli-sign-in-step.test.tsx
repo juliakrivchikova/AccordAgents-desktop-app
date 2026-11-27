@@ -19,7 +19,7 @@ test("a signed-out Claude card starts the CLI's own sign-in, follows it, and Can
   const bridge = installBridge();
   const panel = await mount(["claude-code"]);
   const card = () => cardOf(panel, "claude-code");
-  assert.match(textOf(card()), /Sign in with your browser.*Or in Terminal:.*claude auth login/, "the Terminal command stays as a fallback");
+  assert.match(textOf(card()), /Terminal:.*claude auth login/, "the Terminal command stays as a fallback");
   await click(button(card(), "Sign in"));
   assert.deepEqual(bridge.started, ["claude-code"]);
 
@@ -61,8 +61,6 @@ test("Claude's fallback page opens from the card and its code is passed back; Co
   });
   assert.match(textOf(claude()), /^(?!.*invoking remote method).*This code belongs to another sign-in\./s, "the refusal is shown in plain words");
 
-  await click(button(claude(), "Hide Claude Code"));
-  await click(button(cardOf(panel, "codex-cli"), "Set up Codex"));
   await bridge.emit({ kind: "codex-cli", requestId: "x1", status: "waiting", revision: 5, pageUrl: "https://auth.openai.com/oauth/authorize?state=x", pageGivesCode: false });
   await click(button(cardOf(panel, "codex-cli"), "Open the sign-in page"));
   assert.equal(cardOf(panel, "codex-cli").findAll((node) => node.type === "input").length, 0);
@@ -101,8 +99,6 @@ test("a sign-in already running when the panel opens is shown, not started again
   const panel = await mount(["claude-code", "codex-cli"], () => { refreshes += 1; });
   assert.match(textOf(cardOf(panel, "claude-code")), /Finish signing in/);
   assert.deepEqual(bridge.started, []);
-  await click(button(cardOf(panel, "claude-code"), "Hide Claude Code"));
-  await click(button(cardOf(panel, "codex-cli"), "Set up Codex"));
   assert.doesNotMatch(textOf(cardOf(panel, "codex-cli")), /an old failure/, "a result from before the panel opened is not shown again");
   assert.ok(button(cardOf(panel, "codex-cli"), "Sign in"));
   assert.equal(refreshes, 0);
@@ -113,7 +109,7 @@ test("Antigravity has no sign-in command, so its card offers no Sign in button",
   installBridge();
   const panel = await mount(["gemini-cli"]);
   const card = cardOf(panel, "gemini-cli");
-  assert.match(textOf(card), /Sign in from Terminal/);
+  assert.match(textOf(card), /in Terminal to sign in/);
   assert.equal(card.findAll((node) => node.type === "button" && textOf(node).trim() === "Sign in").length, 0);
   panel.unmount();
 });

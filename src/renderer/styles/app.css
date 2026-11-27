@@ -8,7 +8,6 @@
 @import "./views/review-layout.css" layer(components);
 @import "./views/chat-setup/new-chat.css" layer(components);
 @import "./views/chat-setup/cli-readiness.css" layer(components);
-@import "./views/chat-setup/cli-sign-in.css" layer(components);
 @import "./views/chat-setup/prompt.css" layer(components);
 @import "./views/chat-setup/menus.css" layer(components);
 @import "./views/chat-setup/member-setup.css" layer(components);

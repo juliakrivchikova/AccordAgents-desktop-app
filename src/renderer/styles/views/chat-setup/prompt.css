@@ -1,3 +1,28 @@
+.new-chat-input-wrap {
+  /* Keep this wrapper out of a stacking context so downward menus paint above the toolbar. */
+  position: relative;
+  min-width: 0;
+}
+
+/* One line to start, as the chat's own composer: the composer has the same
+   height before and after Enter. */
+.new-chat-prompt {
+  display: block;
+  width: 100%;
+  min-height: 27px;
+  max-height: 220px;
+  padding: 3px 4px;
+  border: 0;
+  outline: 0;
+  overflow-y: hidden;
+  resize: none;
+  background: transparent;
+  color: var(--app-text-strong);
+  font-family: var(--font-body);
+  font-size: 14px;
+  line-height: 1.5;
+}
+
 .new-chat-prompt::placeholder {
   color: var(--ui-text-3);
 }

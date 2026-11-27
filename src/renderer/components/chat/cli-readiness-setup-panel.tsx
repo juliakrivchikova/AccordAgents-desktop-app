@@ -1,11 +1,12 @@
-import { useEffect, useRef, useState } from "react";
-import { CheckIcon, ChecksIcon, CaretDownIcon, CaretUpIcon, CopyIcon, ArrowSquareOutIcon, ArrowsClockwiseIcon, GearSixIcon, ShieldCheckIcon, TerminalIcon } from "@phosphor-icons/react";
+import { useState, type ReactNode } from "react";
+import { ArrowSquareOutIcon, ArrowsClockwiseIcon, GearSixIcon, ShieldCheckIcon, TerminalIcon } from "@phosphor-icons/react";
 
 import type {
   AgentHealth,
   AgentReadinessState,
   AppSettings,
   ChatProviderKind,
+  CliSignInKind,
   CliSignInState
 } from "../../../shared/types";
 import {
@@ -16,11 +17,21 @@ import {
   isCliTerminalPlatform,
   providerEnabled
 } from "../../../shared/cliReadiness";
-import { IconButton } from "../primitives";
+import { Button } from "@/components/ui/button";
+import { useDelayedFlag } from "@/components/ui/delayed";
+import { Spinner } from "@/components/ui/spinner";
+import { CopyButton } from "../primitives";
 import { CliSignInStep, useCliSignIns } from "./cli-sign-in-step";
 import { ProviderIcon } from "./provider-icon";
-import { Spinner } from "@/components/ui/spinner";
 
+type ProviderMetadata = ReturnType<typeof cliProviderMetadata>;
+type OnError = (message: string | undefined) => void;
+
+/**
+ * The New chat screen while no CLI is ready: one list, a row per CLI with its
+ * state and its next step as one button at the row's end, and the Terminal
+ * way under it (the User chose this layout, 2026-11-27).
+ */
 export function CliReadinessSetupPanel(props: {
   agents: AgentHealth[];
   settings: AppSettings;
@@ -28,43 +39,12 @@ export function CliReadinessSetupPanel(props: {
   onRefresh: () => Promise<AgentHealth[]>;
   onOpenSettings: () => void;
 }): JSX.Element {
-  const [expandedKind, setExpandedKind] = useState<ChatProviderKind | undefined>(
-    () => defaultExpandedProviderKind(props.agents, props.settings)
-  );
-  const didResolveInitialExpansionRef = useRef(expandedKind !== undefined);
-  const [copiedValue, setCopiedValue] = useState<string | undefined>();
   const [refreshing, setRefreshing] = useState(false);
   const [actionError, setActionError] = useState<string | undefined>();
   const checking = props.checking || refreshing;
+  // Disabled at once; the spinner only for a check that takes a while.
+  const showSpinner = useDelayedFlag(checking);
   const { signIns, checkingAfterSignIn } = useCliSignIns(refreshAll);
-
-  useEffect(() => {
-    if (didResolveInitialExpansionRef.current) {
-      return;
-    }
-    const nextExpandedKind = defaultExpandedProviderKind(props.agents, props.settings);
-    if (!nextExpandedKind) {
-      return;
-    }
-    didResolveInitialExpansionRef.current = true;
-    setExpandedKind((current) => current ?? nextExpandedKind);
-  }, [props.agents, props.settings]);
-
-  function toggleProvider(kind: ChatProviderKind): void {
-    didResolveInitialExpansionRef.current = true;
-    setExpandedKind((current) => current === kind ? undefined : kind);
-  }
-
-  async function copyCommand(command: string): Promise<void> {
-    try {
-      await navigator.clipboard.writeText(command);
-      setActionError(undefined);
-      setCopiedValue(command);
-      window.setTimeout(() => setCopiedValue((current) => current === command ? undefined : current), 1600);
-    } catch {
-      setActionError("Could not copy the command. Open the official guide instead.");
-    }
-  }
 
   async function refreshAll(): Promise<void> {
     setRefreshing(true);
@@ -81,259 +61,175 @@ export function CliReadinessSetupPanel(props: {
   return (
     <section className="cli-readiness-panel" data-testid="cli-readiness-panel">
       <div className="cli-readiness-heading">
-        <div>
-          <h2>Connect a CLI provider</h2>
-          <p>AccordAgents uses a CLI you've already installed and signed in on this computer.</p>
-        </div>
-        <button
-          type="button"
-          className="cli-readiness-secondary"
-          disabled={checking}
-          onClick={() => void refreshAll()}
-        >
-          {checking ? <Spinner size={15} /> : <ArrowsClockwiseIcon size={15} aria-hidden />}
+        <h2>Connect a CLI</h2>
+        <Button variant="ghost" size="xs" disabled={checking} onClick={() => void refreshAll()}>
+          {showSpinner ? <Spinner size={14} /> : <ArrowsClockwiseIcon aria-hidden />}
           Check again
-        </button>
+        </Button>
       </div>
-
-      <div className="cli-readiness-grid">
+      <p className="cli-readiness-hint">AccordAgents works through the CLIs installed and signed in on this computer.</p>
+      <ul className="cli-readiness-list">
         {CLI_PROVIDER_DISPLAY_ORDER.map((kind) => {
-          const metadata = cliProviderMetadata(kind);
           const health = props.agents.find((agent) => agent.kind === kind);
           const readiness = deriveAgentReadiness(health, providerEnabled(props.settings.providers, kind));
-          const expanded = expandedKind === kind;
           return (
-            <article className={`cli-readiness-card is-${kind} ${expanded ? "is-expanded" : ""}`} key={kind} data-provider-kind={kind}>
-              <div className="cli-readiness-card-header">
-                <ProviderIcon kind={kind} label={metadata.label} />
-                <div className="cli-readiness-provider-copy">
-                  <h3>{metadata.label}</h3>
-                  <span className={`cli-readiness-status is-${readiness}`}>
-                    <span className="cli-readiness-status-dot" aria-hidden="true" />
-                    <span>{readinessStatusLabel(readiness, health)}</span>
-                    {health?.checking && readiness !== "checking" && <span> · Checking</span>}
-                  </span>
-                </div>
-                <IconButton
-                  className="cli-readiness-toggle"
-                  label={`${expanded ? "Hide" : "Set up"} ${metadata.label}`}
-                  icon={expanded ? CaretUpIcon : CaretDownIcon}
-                  aria-expanded={expanded}
-                  onClick={() => toggleProvider(kind)}
-                />
-              </div>
-
-              {expanded && (
-                <CliReadinessDetails
-                  kind={kind}
-                  metadata={metadata}
-                  health={health}
-                  readiness={readiness}
-                  copiedValue={copiedValue}
-                  signIn={isCliSignInKind(kind) ? signIns[kind] : undefined}
-                  checkingAfterSignIn={isCliSignInKind(kind) && Boolean(checkingAfterSignIn[kind])}
-                  onCopy={copyCommand}
-                  onOpenSettings={props.onOpenSettings}
-                  onError={setActionError}
-                />
-              )}
-            </article>
+            <CliReadinessRow
+              key={kind}
+              kind={kind}
+              metadata={cliProviderMetadata(kind)}
+              health={health}
+              readiness={readiness}
+              signIn={isCliSignInKind(kind) ? signIns[kind] : undefined}
+              checkingAfterSignIn={isCliSignInKind(kind) && Boolean(checkingAfterSignIn[kind])}
+              onOpenSettings={props.onOpenSettings}
+              onError={setActionError}
+            />
           );
         })}
-      </div>
+      </ul>
       {actionError && <p className="inline-error cli-readiness-error">{actionError}</p>}
       <p className="cli-readiness-note">
-        <ShieldCheckIcon size={15} aria-hidden />
-        <span>AccordAgents never installs software. <strong>Sign in</strong> runs the CLI's own sign-in; the CLI keeps your credentials.</span>
+        <ShieldCheckIcon aria-hidden />
+        <span>AccordAgents never installs software. Sign in runs the CLI's own sign-in, and the CLI keeps your credentials.</span>
       </p>
     </section>
   );
 }
 
-function CliReadinessDetails(props: {
+interface CliReadinessRowProps {
   kind: ChatProviderKind;
-  metadata: ReturnType<typeof cliProviderMetadata>;
+  metadata: ProviderMetadata;
   health?: AgentHealth;
   readiness: AgentReadinessState;
-  copiedValue?: string;
   signIn?: CliSignInState;
   checkingAfterSignIn: boolean;
-  onCopy: (command: string) => Promise<void>;
   onOpenSettings: () => void;
-  onError: (message: string | undefined) => void;
-}): JSX.Element {
+  onError: OnError;
+}
+
+/** One CLI's row: what its state allows now, and nothing it does not. */
+const CliReadinessRow = (props: CliReadinessRowProps): JSX.Element => {
+  const { kind, metadata, readiness } = props;
+  const row = (action?: ReactNode, detail?: ReactNode): JSX.Element => (
+    <RowFrame kind={kind} label={metadata.label} status={<RowStatus readiness={readiness} health={props.health} />} action={action}>
+      {detail}
+    </RowFrame>
+  );
+  const terminal = <OpenTerminalButton look="action" onError={props.onError} />;
+  const terminalLink = <OpenTerminalButton look="link" onError={props.onError} />;
+  const guide = <GuideButton look="link" url={metadata.guideUrl} onError={props.onError} />;
+
+  if (readiness === "ready" || readiness === "checking") return row();
+  if (readiness === "disabled") {
+    return row(<Button variant="outline" size="sm" onClick={props.onOpenSettings}><GearSixIcon aria-hidden />Enable in Settings</Button>);
+  }
+
   const platform = props.health?.platform;
-  const supportedPlatform = isCliTerminalPlatform(platform);
-  const installCommand = supportedPlatform ? props.metadata.installCommandByPlatform[platform] : undefined;
-
-  if (props.readiness === "disabled") {
-    return (
-      <div className="cli-readiness-steps">
-        <p>This provider is disabled in AccordAgents.</p>
-        <button type="button" className="cli-readiness-settings-action" onClick={props.onOpenSettings}>
-          <GearSixIcon size={15} aria-hidden /> Enable in Settings
-        </button>
-      </div>
-    );
+  const installCommand = isCliTerminalPlatform(platform) ? metadata.installCommandByPlatform[platform] : undefined;
+  if (!isCliTerminalPlatform(platform) || (readiness === "not-detected" && !installCommand)) {
+    return row(<GuideButton look="action" url={metadata.guideUrl} onError={props.onError} />, <span>No setup steps for this computer here; the guide has them.</span>);
+  }
+  if (readiness === "failed-to-run") {
+    return row(terminal, <><span>Found, but it could not run. Check it in Terminal.</span>{guide}</>);
+  }
+  if (readiness === "not-detected") {
+    return row(terminal, (
+      <>
+        <span>Install in Terminal: <Command command={installCommand ?? ""} label="install" /></span>
+        {guide}
+        <p>{postInstallStep(kind)}</p>
+      </>
+    ));
   }
 
-  if (props.readiness === "ready") {
-    return (
-      <div className="cli-readiness-steps">
-        <p className="cli-readiness-ready"><CheckIcon size={15} aria-hidden /> Ready to use.</p>
-      </div>
-    );
-  }
-
-  if (!supportedPlatform || (props.readiness === "not-detected" && !installCommand)) {
-    return (
-      <div className="cli-readiness-steps">
-        <p>Open the official guide for setup instructions on this platform.</p>
-        <button
-          type="button"
-          className="cli-readiness-settings-action"
-          onClick={() => void window.consensus.openExternal(props.metadata.guideUrl).catch(() => props.onError("Could not open the official guide."))}
-        >
-          <ArrowSquareOutIcon size={15} aria-hidden /> Official guide
-        </button>
-      </div>
-    );
-  }
-
-  if (props.readiness === "failed-to-run") {
-    return (
-      <div className="cli-readiness-steps">
-        <p>The CLI was found, but AccordAgents could not run it. Open Terminal to check the command, then use the official guide if it still fails.</p>
-        <CliReadinessActionButtons guideUrl={props.metadata.guideUrl} onError={props.onError} />
-      </div>
-    );
-  }
-
-  if (props.readiness === "not-detected") {
-    return (
-      <div className="cli-readiness-steps">
-        <SetupStep number={1}>Install the CLI in Terminal</SetupStep>
-        <SetupCommand
-          command={installCommand}
-          copiedValue={props.copiedValue}
-          label="install"
-          onCopy={props.onCopy}
-        />
-        <SetupStep number={2}>{postInstallStepLabel(props.kind)}</SetupStep>
-        <CliReadinessActionButtons guideUrl={props.metadata.guideUrl} onError={props.onError} />
-      </div>
-    );
-  }
-
-  // Claude Code and Codex sign in from here; Antigravity only from its app.
-  const appSignIn = isCliSignInKind(props.kind) ? props.kind : undefined;
-  const tryOnly = props.readiness === "could-not-verify";
-  return (
-    <div className="cli-readiness-steps">
-      <SetupStep number={1} done>Install the CLI in Terminal</SetupStep>
-      <SetupStep number={2}>
-        {appSignIn ? (tryOnly ? "Try signing in with your browser" : "Sign in with your browser") : tryOnly ? "Try sign-in from Terminal" : "Sign in from Terminal"}
-      </SetupStep>
-      {appSignIn && (
-        <CliSignInStep kind={appSignIn} label={props.metadata.label} signIn={props.signIn} checkingAfterSignIn={props.checkingAfterSignIn} onError={props.onError} />
-      )}
-      {appSignIn && <p className="cli-sign-in-fallback">Or in Terminal:</p>}
-      <SetupCommand
-        command={props.metadata.loginCommand}
-        copiedValue={props.copiedValue}
-        label={tryOnly ? "try sign-in" : "sign-in"}
-        onCopy={props.onCopy}
-      />
-      <CliReadinessActionButtons guideUrl={props.metadata.guideUrl} onError={props.onError} />
-    </div>
-  );
-}
-
-function CliReadinessActionButtons(props: {
-  guideUrl: string;
-  onError: (message: string | undefined) => void;
-}): JSX.Element {
-  return (
-    <div className="cli-readiness-detail-actions">
-      <button
-        type="button"
-        className="cli-readiness-detail-action"
-        onClick={() => void window.consensus.openTerminal().catch(() => props.onError("Could not open Terminal."))}
-      >
-        <TerminalIcon size={15} aria-hidden /> Open Terminal
-      </button>
-      <button
-        type="button"
-        className="cli-readiness-detail-action"
-        onClick={() => void window.consensus.openExternal(props.guideUrl).catch(() => props.onError("Could not open the official guide."))}
-      >
-        <ArrowSquareOutIcon size={15} aria-hidden /> Official guide
-      </button>
-    </div>
-  );
-}
-
-function SetupStep(props: {
-  children: string;
-  done?: boolean;
-  number: number;
-}): JSX.Element {
-  return (
-    <div className="cli-readiness-step">
-      <span className="cli-readiness-step-number">{props.number}</span>
-      <span>{props.children}</span>
-      {props.done && <ChecksIcon className="cli-readiness-step-done" size={17} aria-label="Done" />}
-    </div>
-  );
-}
-
-function SetupCommand(props: {
-  command?: string;
-  copiedValue?: string;
-  label: string;
-  onCopy: (command: string) => Promise<void>;
-}): JSX.Element {
-  if (!props.command) {
-    return <p>Open the official guide for setup instructions on this platform.</p>;
+  // Signed out, or its sign-in could not be checked: Claude Code and Codex
+  // sign in from here, Antigravity only from Terminal.
+  const tryOnly = readiness === "could-not-verify";
+  const login = <Command command={metadata.loginCommand} label={tryOnly ? "try sign-in" : "sign-in"} />;
+  const appSignIn: CliSignInKind | undefined = isCliSignInKind(kind) ? kind : undefined;
+  if (!appSignIn) {
+    return row(terminal, <><span>{tryOnly ? <>Try {login} in Terminal; sign in if it asks.</> : <>Run {login} in Terminal to sign in.</>}</span>{guide}</>);
   }
   return (
-    <div className="cli-readiness-command">
-      <code><span aria-hidden="true">$</span> {props.command}</code>
-      <IconButton
-        size="xs"
-        label={`Copy ${props.label} command`}
-        tooltip={props.copiedValue === props.command ? "Copied" : "Copy"}
-        icon={props.copiedValue === props.command ? CheckIcon : CopyIcon}
-        onClick={() => void props.onCopy(props.command as string)}
-      />
-    </div>
+    <CliSignInStep kind={appSignIn} label={metadata.label} signIn={props.signIn} checkingAfterSignIn={props.checkingAfterSignIn} onError={props.onError}>
+      {({ action, progress }) => row(action, (
+        <>
+          {progress}
+          <span>Terminal: {login}</span>
+          {terminalLink}
+          {guide}
+        </>
+      ))}
+    </CliSignInStep>
   );
-}
+};
 
-function readinessStatusLabel(readiness: AgentReadinessState, health: AgentHealth | undefined): JSX.Element | string {
-  switch (readiness) {
-    case "not-detected": return "Not detected";
-    case "failed-to-run": return "Failed to run";
-    case "sign-in-required": return <>{health?.installed ? "Installed · " : ""}<strong>sign-in required</strong></>;
-    case "could-not-verify": return "Could not verify";
-    case "ready": return "Ready";
-    case "disabled": return "Disabled";
-    case "checking": return "Checking";
-  }
-}
+const RowFrame = (props: { kind: ChatProviderKind; label: string; status: ReactNode; action?: ReactNode; children?: ReactNode }): JSX.Element => (
+  <li className="cli-readiness-row" data-provider-kind={props.kind}>
+    <div className="cli-readiness-row-main">
+      <ProviderIcon className="chat-provider-icon is-large" kind={props.kind} label={props.label} />
+      <div className="cli-readiness-row-text">
+        <h3>{props.label}</h3>
+        {props.status}
+      </div>
+      {props.action}
+    </div>
+    {props.children && <div className="cli-readiness-row-detail">{props.children}</div>}
+  </li>
+);
 
-function postInstallStepLabel(kind: ChatProviderKind): string {
-  if (kind === "gemini-cli") return "Open Antigravity and sign in — then it's detected automatically.";
-  if (kind === "codex-cli") return "Sign in with codex — then it's detected automatically.";
-  return "Sign in from Terminal";
-}
+const STATUS: Record<AgentReadinessState, { tone: "ok" | "warning" | "danger" | "muted"; label: string }> = {
+  "ready": { tone: "ok", label: "Ready" },
+  "sign-in-required": { tone: "warning", label: "Not signed in" },
+  "could-not-verify": { tone: "warning", label: "Could not verify sign-in" },
+  "failed-to-run": { tone: "danger", label: "Failed to run" },
+  "not-detected": { tone: "muted", label: "Not detected" },
+  "disabled": { tone: "muted", label: "Disabled" },
+  "checking": { tone: "muted", label: "Checking" }
+};
 
-function defaultExpandedProviderKind(agents: AgentHealth[], settings: AppSettings): ChatProviderKind | undefined {
-  return CLI_PROVIDER_DISPLAY_ORDER.find((kind) => {
-    const readiness = deriveAgentReadiness(
-      agents.find((agent) => agent.kind === kind),
-      providerEnabled(settings.providers, kind)
-    );
-    return readiness === "sign-in-required" || readiness === "could-not-verify" || readiness === "failed-to-run";
-  });
+const RowStatus = (props: { readiness: AgentReadinessState; health?: AgentHealth }): JSX.Element => {
+  const { tone, label } = STATUS[props.readiness];
+  const installed = props.readiness === "sign-in-required" && props.health?.installed;
+  return (
+    <span className={`cli-readiness-status is-${tone}`}>
+      <span className="cli-readiness-status-dot" aria-hidden="true" />
+      {installed ? "Installed, not signed in" : label}
+      {props.health?.checking && props.readiness !== "checking" && ", checking"}
+    </span>
+  );
+};
+
+const Command = (props: { command: string; label: string }): JSX.Element => (
+  <span className="cli-readiness-command">
+    <code>{props.command}</code>
+    <CopyButton text={props.command} label={`Copy ${props.label} command`} size="xs" />
+  </span>
+);
+
+/** A row's next step at its end, or a quiet link in the line under it. */
+type Look = "action" | "link";
+
+const LookButton = (props: { look: Look; onClick: () => void; children: ReactNode }): JSX.Element => (
+  props.look === "action"
+    ? <Button variant="outline" size="sm" onClick={props.onClick}>{props.children}</Button>
+    : <Button variant="link" size="xs" className="h-auto p-0 text-ui-12 text-ui-text-3 hover:text-ui-text [&_svg]:hidden" onClick={props.onClick}>{props.children}</Button>
+);
+
+const OpenTerminalButton = (props: { look: Look; onError: OnError }): JSX.Element => (
+  <LookButton look={props.look} onClick={() => void window.consensus.openTerminal().catch(() => props.onError("Could not open Terminal."))}>
+    <TerminalIcon aria-hidden />Open Terminal
+  </LookButton>
+);
+
+const GuideButton = (props: { look: Look; url: string; onError: OnError }): JSX.Element => (
+  <LookButton look={props.look} onClick={() => void window.consensus.openExternal(props.url).catch(() => props.onError("Could not open the official guide."))}>
+    <ArrowSquareOutIcon aria-hidden />Official guide
+  </LookButton>
+);
+
+function postInstallStep(kind: ChatProviderKind): string {
+  if (kind === "gemini-cli") return "Then open Antigravity and sign in; it is found by itself.";
+  if (kind === "codex-cli") return "Then sign in with codex; it is found by itself.";
+  return "Then sign in from Terminal.";
 }

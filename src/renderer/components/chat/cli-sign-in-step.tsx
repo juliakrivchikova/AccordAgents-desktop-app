@@ -4,6 +4,8 @@ import { SignInIcon, XIcon } from "@phosphor-icons/react";
 import { isCliSignInRunning } from "../../../shared/cliReadiness";
 import type { CliSignInKind, CliSignInState } from "../../../shared/types";
 import { cleanIpcError } from "../../lib/ipc-error";
+import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
 
 export interface CliSignInsView {
   signIns: Partial<Record<CliSignInKind, CliSignInState>>;
@@ -50,6 +52,13 @@ export function useCliSignIns(onSignedIn: () => Promise<void>): CliSignInsView {
   return { signIns, checkingAfterSignIn };
 }
 
+/** What a CLI's sign-in puts in its row: the button at the row's end (Sign
+ *  in, or Cancel while it runs) and, under the row, how it goes. */
+export interface CliSignInParts {
+  action: JSX.Element;
+  progress?: JSX.Element;
+}
+
 export function CliSignInStep(props: {
   kind: CliSignInKind;
   label: string;
@@ -57,6 +66,7 @@ export function CliSignInStep(props: {
   /** This sign-in just succeeded and readiness is being checked again. */
   checkingAfterSignIn: boolean;
   onError: (message: string | undefined) => void;
+  children: (parts: CliSignInParts) => JSX.Element;
 }): JSX.Element {
   const signIn = props.signIn;
   const running = isCliSignInRunning(signIn?.status);
@@ -117,34 +127,31 @@ export function CliSignInStep(props: {
   }
 
   if (!running || !signIn) {
-    return (
-      <div className="cli-sign-in" data-testid={`cli-sign-in-${props.kind}`}>
-        <button
-          type="button"
-          className="cli-readiness-settings-action"
-          disabled={starting || props.checkingAfterSignIn}
-          onClick={() => void start()}
-        >
-          <SignInIcon size={15} aria-hidden /> {signIn?.status === "failed" ? "Sign in again" : "Sign in"}
-        </button>
-        {signIn?.status === "failed" && signIn.message && <p className="inline-error cli-sign-in-error" role="alert">{signIn.message}</p>}
-        {props.checkingAfterSignIn && <p role="status">Signed in. Checking {props.label}…</p>}
-      </div>
-    );
+    const failed = signIn?.status === "failed" ? signIn.message : undefined;
+    return props.children({
+      action: (
+        <Button size="sm" disabled={starting || props.checkingAfterSignIn} onClick={() => void start()} data-testid={`cli-sign-in-${props.kind}`}>
+          <SignInIcon aria-hidden /> {signIn?.status === "failed" ? "Sign in again" : "Sign in"}
+        </Button>
+      ),
+      progress: failed || props.checkingAfterSignIn ? (
+        <>
+          {failed && <p className="inline-error cli-sign-in-error" role="alert">{failed}</p>}
+          {props.checkingAfterSignIn && <p className="cli-sign-in-status" role="status">Signed in. Checking {props.label}…</p>}
+        </>
+      ) : undefined
+    });
   }
 
-  return (
-    <div className="cli-sign-in is-running" data-testid={`cli-sign-in-${props.kind}`}>
-      <div className="cli-sign-in-row">
-        <button
-          type="button"
-          className="cli-readiness-settings-action"
-          disabled={cancelling}
-          onClick={() => void cancel()}
-        >
-          <XIcon size={15} aria-hidden /> Cancel
-        </button>
-        <p role="status">
+  return props.children({
+    action: (
+      <Button variant="outline" size="sm" disabled={cancelling} onClick={() => void cancel()} data-testid={`cli-sign-in-${props.kind}`}>
+        <XIcon aria-hidden /> Cancel
+      </Button>
+    ),
+    progress: (
+      <>
+        <p className="cli-sign-in-status" role="status">
           {cancelling
             ? "Cancelling sign-in…"
             : signIn.status === "starting"
@@ -152,22 +159,21 @@ export function CliSignInStep(props: {
               : signIn.status === "checking-code"
                 ? "Checking the code…"
                 : "Finish signing in with your browser."}
+          {signIn.pageUrl && (
+            <>
+              {" "}{showCodeField ? "Closed the page? " : "Browser didn't open? "}
+              <Button variant="link" size="xs" className="h-auto p-0 text-ui-12" onClick={openPage}>
+                {showCodeField ? "Open it again" : "Open the sign-in page"}
+              </Button>
+            </>
+          )}
         </p>
-      </div>
-      {signIn.pageUrl && (
-        <p className="cli-sign-in-hint">
-          {showCodeField ? "Closed the page? " : "Browser didn't open? "}
-          <button type="button" className="cli-sign-in-link" onClick={openPage}>
-            {showCodeField ? "Open it again" : "Open the sign-in page"}
-          </button>
-        </p>
-      )}
-      {showCodeField && (
-        <form className="cli-sign-in-code" onSubmit={(event) => { event.preventDefault(); void submitCode(); }}>
-          <label>
-            <span>Paste the code from the Claude page</span>
-            <input
+        {showCodeField && (
+          <form className="cli-sign-in-code" onSubmit={(event) => { event.preventDefault(); void submitCode(); }}>
+            <Input
               type="password"
+              aria-label="Paste the code from the Claude page"
+              placeholder="Paste the code from the Claude page"
               autoComplete="off"
               spellCheck={false}
               maxLength={4096}
@@ -175,19 +181,15 @@ export function CliSignInStep(props: {
               disabled={signIn.status !== "waiting" || cancelling}
               onChange={(event) => setCode(event.currentTarget.value)}
             />
-          </label>
-          <button
-            type="submit"
-            className="cli-readiness-settings-action"
-            disabled={signIn.status !== "waiting" || cancelling || !code.trim()}
-          >
-            Complete sign-in
-          </button>
-          {codeError && <p className="inline-error cli-sign-in-error" role="alert">{codeError}</p>}
-        </form>
-      )}
-    </div>
-  );
+            <Button type="submit" variant="outline" size="sm" disabled={signIn.status !== "waiting" || cancelling || !code.trim()}>
+              Complete sign-in
+            </Button>
+            {codeError && <p className="inline-error cli-sign-in-error" role="alert">{codeError}</p>}
+          </form>
+        )}
+      </>
+    )
+  });
 }
 
 function cleanError(error: unknown, fallback: string): string {

@@ -1,346 +1,161 @@
-.cli-readiness-heading {
-  display: flex;
-  align-items: flex-start;
-  justify-content: space-between;
-  gap: 12px;
-  padding: 16px 18px 14px;
-  border-bottom: 1px solid var(--cli-border-faint);
+/* The New chat screen while no CLI is ready: a heading with Check again
+   beside it, one list with a row per CLI, a quiet note under it. */
+.cli-readiness-panel {
+  width: min(100%, 460px);
+  color: var(--ui-text);
+  text-align: left;
 }
 
-.cli-readiness-heading h2,
-.cli-readiness-card h3 {
-  margin: 0;
-  color: var(--cli-fg1);
+.cli-readiness-heading {
+  display: flex;
+  align-items: center;
+  gap: 6px;
 }
 
 .cli-readiness-heading h2 {
-  font-size: 13px;
+  margin: 0;
+  color: var(--ui-text);
+  font-size: 14px;
   font-weight: 600;
-  line-height: 1.25;
+  line-height: 22px;
 }
 
-.cli-readiness-heading p {
-  max-width: 320px;
-  margin: 3px 0 0;
-  color: var(--cli-fg3);
+.cli-readiness-hint {
+  margin: 0 0 10px;
+  color: var(--ui-text-3);
   font-size: 12px;
-  line-height: 1.45;
+  line-height: 18px;
 }
 
-.cli-readiness-secondary {
-  display: inline-flex;
-  min-height: 30px;
-  align-items: center;
-  justify-content: center;
-  gap: 6px;
-  padding: 6px 11px;
-  border: 1px solid transparent;
-  border-radius: 8px;
-  background: transparent;
-  color: var(--cli-fg2);
-  font: 600 12.5px/1.2 var(--font-body);
-  white-space: nowrap;
-  cursor: pointer;
-  transition: background 120ms ease, color 120ms ease;
-}
-
-.cli-readiness-secondary:hover:not(:disabled) {
-  background: var(--cli-bg-sunken);
-  color: var(--cli-fg1);
-}
-
-.cli-readiness-secondary:disabled {
-  cursor: default;
-  opacity: 0.62;
-}
-
-.cli-readiness-grid {
-  display: flex;
-  flex-direction: column;
-  gap: 9px;
-  padding: 14px 16px 4px;
-}
-
-.cli-readiness-card {
-  --cli-provider: var(--brand-gemini);
-  --cli-provider-soft: var(--brand-gemini-soft);
-  min-width: 0;
+.cli-readiness-list {
+  margin: 0;
+  padding: 0;
   overflow: hidden;
-  border: 1px solid var(--cli-border);
-  border-radius: 12px;
-  background: var(--cli-surface);
+  border: 1px solid var(--ui-border);
+  border-radius: var(--radius-ui-12);
+  background: var(--ui-bg);
+  list-style: none;
 }
 
-.cli-readiness-card.is-claude-code {
-  --cli-provider: var(--brand-anthropic);
-  --cli-provider-soft: var(--brand-anthropic-soft);
+.cli-readiness-row + .cli-readiness-row {
+  border-top: 1px solid var(--ui-border-subtle);
 }
 
-.cli-readiness-card.is-codex-cli {
-  --cli-provider: var(--provider-setup-codex);
-  --cli-provider-soft: var(--provider-setup-codex-soft);
+.cli-readiness-row {
+  padding: 10px 12px;
 }
 
-.cli-readiness-card-header {
+.cli-readiness-row-main {
   display: flex;
   align-items: center;
-  gap: 13px;
-  padding: 11px 13px;
+  gap: 10px;
 }
 
-.cli-readiness-provider-icon {
-  display: flex;
-  flex: 0 0 auto;
-  width: 38px;
-  height: 38px;
-  align-items: center;
-  justify-content: center;
-  border-radius: 8px;
-  background: var(--cli-surface-2);
-}
-
-.cli-readiness-card.is-claude-code .cli-readiness-provider-icon {
-  background: var(--cli-provider);
-}
-
-.cli-readiness-provider-icon svg,
-.cli-readiness-antigravity-mark,
-.cli-readiness-claude-mark {
-  display: block;
-  width: 22px;
-  height: 22px;
-}
-
-.cli-readiness-card.is-gemini-cli .cli-readiness-antigravity-mark {
-  width: 25px;
-  height: 23px;
-  background: url("../../../assets/antigravity-logo.png") center / contain no-repeat;
-}
-
-.cli-readiness-card.is-claude-code .cli-readiness-claude-mark {
-  width: 24px;
-  height: 24px;
-  background: url("../../../assets/claude-avatar.png") center / contain no-repeat;
-}
-
-.cli-readiness-provider-copy {
+.cli-readiness-row-text {
   flex: 1;
   min-width: 0;
 }
 
-.cli-readiness-card h3 {
+.cli-readiness-row-text h3 {
+  margin: 0;
   overflow: hidden;
+  color: var(--ui-text);
   font-size: 13px;
-  font-weight: 600;
-  line-height: 1.25;
+  font-weight: 500;
+  line-height: 18px;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
+/* Its state: a small dot and colored words. */
 .cli-readiness-status {
   display: flex;
   align-items: center;
   gap: 6px;
-  margin-top: 2px;
-  color: var(--cli-fg3);
+  color: var(--st, var(--ui-text-3));
   font-size: 12px;
-  line-height: 1.25;
+  line-height: 16px;
 }
 
-.cli-readiness-status.is-sign-in-required {
-  color: var(--cli-fg2);
-}
-
-.cli-readiness-status.is-sign-in-required strong {
-  color: var(--cli-warning);
-  font-weight: 600;
-}
+.cli-readiness-status.is-ok { --st: var(--ui-success); --st-dot: var(--ui-success-dot); }
+.cli-readiness-status.is-warning { --st: var(--ui-warning); --st-dot: var(--ui-warning-dot); }
+.cli-readiness-status.is-danger { --st: var(--ui-danger); --st-dot: var(--ui-danger-dot); }
 
 .cli-readiness-status-dot {
-  flex: 0 0 auto;
-  width: 7px;
-  height: 7px;
+  width: 6px;
+  height: 6px;
+  flex: none;
   border-radius: 50%;
-  background: var(--cli-border-strong);
+  background: var(--st-dot, var(--ui-text-3));
 }
 
-.cli-readiness-status.is-sign-in-required .cli-readiness-status-dot {
-  background: var(--cli-warning);
-}
-
-.cli-readiness-status.is-ready .cli-readiness-status-dot,
-.cli-readiness-ready {
-  color: var(--cli-ok);
-}
-
-.cli-readiness-status.is-ready .cli-readiness-status-dot {
-  background: var(--cli-ok);
-}
-
-.cli-readiness-steps {
+/* The Terminal way and the guide, under the name, in one wrapping line. */
+.cli-readiness-row-detail {
   display: flex;
-  flex-direction: column;
-  gap: 11px;
-  padding: 13px 14px 15px;
-  border-top: 1px solid var(--cli-border-faint);
-  background: var(--cli-surface-2);
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 2px 10px;
+  margin-top: 4px;
+  padding-left: 38px;
+  color: var(--ui-text-2);
+  font-size: 12px;
+  line-height: 20px;
 }
 
-.cli-readiness-steps p,
-.cli-readiness-note {
+.cli-readiness-row-detail p {
+  flex-basis: 100%;
   margin: 0;
 }
 
-.cli-readiness-ready {
-  display: inline-flex;
-  align-items: center;
-  gap: 7px;
-  font-size: 12px;
-  line-height: 1.4;
-}
-
-.cli-readiness-step {
-  display: flex;
-  align-items: center;
-  gap: 9px;
-  min-width: 0;
-  color: var(--cli-fg2);
-  font-size: 12px;
-  line-height: 1.35;
-}
-
-.cli-readiness-step-number {
-  display: flex;
-  flex: 0 0 auto;
-  width: 18px;
-  height: 18px;
-  align-items: center;
-  justify-content: center;
-  border-radius: 50%;
-  background: var(--cli-provider-soft);
-  color: var(--cli-provider);
-  font: 600 11px/1 var(--font-code);
-}
-
-.cli-readiness-step-done {
-  flex: 0 0 auto;
-  margin-left: auto;
-  color: var(--cli-ok);
-}
-
 .cli-readiness-command {
-  display: flex;
+  display: inline-flex;
+  max-width: 100%;
   align-items: center;
-  gap: 10px;
-  padding: 9px 9px 9px 13px;
-  border: 1px solid var(--cli-border);
-  border-radius: 8px;
-  background: var(--cli-bg-sunken);
+  gap: 2px;
+  padding: 0 1px 0 6px;
+  border-radius: var(--radius-ui-6);
+  background: var(--ui-code-bg);
+  vertical-align: middle;
 }
 
 .cli-readiness-command code {
-  flex: 1;
-  min-width: 0;
-  overflow: hidden;
-  background: transparent;
-  color: var(--cli-fg1);
-  font: 400 12.5px/1.5 var(--font-code);
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  overflow-wrap: anywhere;
+  color: var(--ui-text);
+  font-family: var(--font-code);
+  font-size: 12px;
 }
 
-.cli-readiness-command code span {
-  color: var(--cli-provider);
+.cli-sign-in-status {
+  color: var(--ui-text-2);
 }
 
-.cli-readiness-settings-action {
-  display: inline-flex;
-  width: fit-content;
-  min-height: 30px;
-  align-items: center;
-  justify-content: center;
-  gap: 7px;
-  padding: 6px 10px;
-  border: 1px solid var(--cli-border);
-  border-radius: 8px;
-  background: var(--cli-surface);
-  color: var(--cli-fg1);
-  font: 600 12.5px/1.2 var(--font-body);
-  cursor: pointer;
-}
-
-.cli-readiness-detail-actions {
+.cli-sign-in-code {
   display: flex;
+  flex-basis: 100%;
   flex-wrap: wrap;
-  justify-content: flex-end;
-  gap: 8px;
-  margin-top: 2px;
+  gap: 6px;
 }
 
-.cli-readiness-detail-action {
-  display: inline-flex;
-  min-height: 30px;
-  align-items: center;
-  justify-content: center;
-  gap: 7px;
-  padding: 6px 11px;
-  border: 1px solid var(--cli-border);
-  border-radius: 8px;
-  background: var(--cli-surface);
-  color: var(--cli-fg2);
-  font: 600 12.5px/1.2 var(--font-body);
-  white-space: nowrap;
-  cursor: pointer;
-  transition: background 120ms ease, border-color 120ms ease, color 120ms ease;
+.cli-sign-in-code input {
+  flex: 1 1 180px;
 }
 
-.cli-readiness-detail-action:hover {
-  border-color: var(--cli-border-strong);
-  background: var(--cli-bg-sunken);
-  color: var(--cli-fg1);
-}
-
-.cli-sign-in .cli-readiness-settings-action:hover:not(:disabled) {
-  border-color: var(--cli-border-strong);
-  background: var(--cli-bg-sunken);
-}
-
-.cli-sign-in .cli-readiness-settings-action:disabled {
-  cursor: default;
-  opacity: 0.62;
+.cli-readiness-error {
+  margin: 8px 0 0;
 }
 
 .cli-readiness-note {
   display: flex;
-  gap: 9px;
-  align-items: flex-start;
-  margin-top: 12px;
-  padding: 14px 18px 16px;
-  border-top: 1px solid var(--cli-border-faint);
-  color: var(--cli-fg3);
+  gap: 6px;
+  margin: 10px 0 0;
+  color: var(--ui-text-3);
   font-size: 12px;
-  line-height: 1.5;
+  line-height: 18px;
 }
 
 .cli-readiness-note svg {
-  flex: 0 0 auto;
-  margin-top: 1px;
-}
-
-.cli-readiness-note strong {
-  color: var(--cli-fg2);
-  font-weight: 600;
-}
-
-.cli-readiness-error {
-  margin: 10px 16px 0;
-}
-
-.cli-sign-in {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-  color: var(--cli-fg2);
-  font-size: 12px;
-  line-height: 1.45;
+  width: 14px;
+  height: 14px;
+  flex: none;
+  margin-top: 2px;
 }

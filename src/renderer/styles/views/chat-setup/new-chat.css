@@ -140,33 +140,3 @@
   display: none;
 }
 
-.cli-readiness-heading p {
-  color: var(--app-muted);
-  font-size: 13px;
-  line-height: 1.45;
-}
-
-.cli-readiness-panel {
-  --cli-surface: var(--provider-setup-surface);
-  --cli-surface-2: var(--provider-setup-surface-2);
-  --cli-bg-sunken: var(--provider-setup-bg-sunken);
-  --cli-border: var(--provider-setup-border);
-  --cli-border-strong: var(--provider-setup-border-strong);
-  --cli-border-faint: var(--provider-setup-border-faint);
-  --cli-fg1: var(--provider-setup-fg1);
-  --cli-fg2: var(--provider-setup-fg2);
-  --cli-fg3: var(--provider-setup-fg3);
-  --cli-warning: var(--provider-setup-warning);
-  --cli-ok: var(--provider-setup-ok);
-  --cli-provider: var(--brand-gemini);
-  --cli-provider-soft: var(--brand-gemini-soft);
-  width: min(100%, 480px);
-  margin-top: 26px;
-  overflow: hidden;
-  border: 1px solid var(--cli-border);
-  border-radius: 12px;
-  background: var(--cli-surface);
-  box-shadow: var(--provider-setup-shadow-md);
-  color: var(--cli-fg1);
-  font-family: var(--font-body);
-}
