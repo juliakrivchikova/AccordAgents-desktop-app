@@ -292,7 +292,12 @@ CLIs remember in members' memory too, one note per entry
   and a note the computer names that never reached the new server (the User
   deleted it before the move) is marked deleted there and not made again. A
   status the server archived is linked, not doubled, when another device
-  sends the same entry. Everything goes through the User's server; an older
+  sends the same entry. A note of no project (global) that a member moves
+  into a project — the User, 2026-11-27: such entries stay global, and
+  members move one where it belongs — is the member's from then on, like any
+  note a member changed: the sync never moves it back, never makes a global
+  copy beside it (from this device, another one, or after the notes moved to
+  another server), and the file's later changes do not overwrite it. Everything goes through the User's server; an older
   server refuses the request, and the device asks that server again an hour
   later (another server at once).
 - **Secrets:** a line that looks like it holds a key, a token or a password
@@ -312,7 +317,8 @@ CLIs remember in members' memory too, one note per entry
   reads a copy and not the User's own memory.
 - **Known limits:** a machine that syncs before the computer has moved the
   notes to a new server can make a note the move then brings a second copy
-  of. A Claude Code folder name over 200 characters (the CLI
+  of; so can a device that never sent an entry before the move, for a note a
+  member had moved or changed. A Claude Code folder name over 200 characters (the CLI
   shortens it with a hash of its own) and an `autoMemoryDirectory` the User
   set in Claude Code's settings are not followed; their memories are not
   read. A project the app knows under two folder names that both have

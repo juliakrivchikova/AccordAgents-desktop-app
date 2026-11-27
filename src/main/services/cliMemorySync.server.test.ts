@@ -424,6 +424,42 @@ test("a note a member archived is not made again when another device sends its e
   assert.equal((await notes()).length, 0);
 });
 
+test("a global note a member moved into a project stays there and stays theirs: never moved back, copied, or overwritten", async (t) => {
+  const { desktopHome, machineHome, desktopSync, machineSync, tool, notes, note, hubStorage } = await setup(t);
+  // A folder of no project the app knows: a global note.
+  const entry = "---\nname: Playground deploy recipe\ntype: reference\n---\nBuild, then deploy.\n";
+  const playground = (home: string) => path.join(home, ".claude", "projects", "-Users-x-mctb-all-apps-playground", "memory", "recipe.md");
+  await put(playground(desktopHome), entry);
+  const server = { id: "A" };
+  assert.deepEqual((await desktopSync({ serverId: async () => server.id }).syncNow()).outcomes, { created: 1 });
+  const recipe = await note("Playground deploy recipe");
+  assert.equal(recipe.scope, "global");
+  // A member working in the project it belongs to moves it there.
+  const moved = ok<MemoryNote>(await tool("desktop", CHAT_A, taylor, APP_MEMORY_WRITE_TOOL, { noteId: recipe.id, baseVersion: recipe.version, scope: "project" }));
+  assert.deepEqual([moved.scope, moved.projectPath, moved.updatedBy], ["project", "/work/accord", "taylor"]);
+  const only = async () => {
+    const all = (await notes()).filter((item) => item.title.startsWith("Playground deploy recipe"));
+    assert.deepEqual(all.map((item) => [item.id, item.scope, item.projectPath, item.version]), [[recipe.id, "project", "/work/accord", moved.version]], "one note, where the member put it");
+    assert.equal((await note("Playground deploy recipe")).body, "Build, then deploy.");
+  };
+  // The CLI's file changes: the note stays as the member left it.
+  await put(playground(desktopHome), entry.replace("Build, then deploy.", "Build, test, then deploy."));
+  assert.deepEqual((await desktopSync({ serverId: async () => server.id }).syncNow()).outcomes, { kept: 1 });
+  await only();
+  // Another device with the same entry (as it was first): no global copy.
+  await put(playground(machineHome), entry);
+  assert.deepEqual((await machineSync().syncNow()).outcomes, { kept: 1 });
+  await only();
+  // A new server the notes moved to (no record of what filled them): the
+  // computer names the note it filled before; still no global copy.
+  server.id = "B";
+  await hubStorage.sqlExecutor().runSql("delete from member_memory_cli_sources; delete from member_memory_cli_notes;");
+  assert.deepEqual((await desktopSync({ serverId: async () => server.id }).syncNow()).outcomes, { kept: 1 });
+  await only();
+  // A restart: nothing to send.
+  assert.equal((await desktopSync({ serverId: async () => server.id }).syncNow()).sent, 0);
+});
+
 test("the CLIs' own memory is only read: every file and folder is byte-identical and untouched after syncing", async (t) => {
   const { desktopHome, machineHome, desktopSync, machineSync, tool, note, desktopLink } = await setup(t);
   const claude = accordFolder(desktopHome);
