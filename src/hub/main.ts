@@ -250,7 +250,7 @@ export function composeHub(options: {
     ...(options.hubKey ? { hubKey: options.hubKey } : {}),
     ...(options.acmeWebroot ? { acmeWebroot: options.acmeWebroot } : {}), debugLog: log,
     phone: phoneApi,
-    onCatalogChanged: () => phoneApi.catalogChanged(),
+    onCatalogChanged: (catalog) => phoneApi.catalogChanged(catalog),
     onProgress: (frames) => { for (const frame of frames) progress.noteFrame(frame); },
     ops,
     memory,

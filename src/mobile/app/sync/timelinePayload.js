@@ -62,7 +62,9 @@ function activityOfEvent(event) {
   if (!event || !Array.isArray(event.activity)) return {};
   const activity = event.activity.filter(function (row) {
     return row && SESSIONS_ACTIVITY_KINDS.has(row.kind) && typeof row.text === "string" && row.text.trim();
-  }).slice(-24).map(function (row) { return { kind: row.kind, text: row.text.slice(0, 200), ...(row.folded === true ? { folded: true } : {}) }; });
+  }).slice(-24).map(function (row) {
+    return { kind: row.kind, text: row.text.slice(0, 200), ...(row.folded === true ? { folded: true } : {}), ...(row.notice === true ? { notice: true } : {}) };
+  });
   if (activity.length === 0) return {};
   const more = Number.isFinite(event.activityMore) && event.activityMore > 0 ? Math.floor(event.activityMore) : 0;
   return more > 0 ? { activity: activity, activityMore: more } : { activity: activity };
@@ -316,6 +318,8 @@ export async function handleRelayTimelinePayload(payload, fallbackConversationId
       // live text is where the run stands rather than words of the reply.
       ...activity,
       ...(role === "participant" && status === "pending" && event.liveStatus === true ? { liveStatus: true } : {}),
+      // That live text names the step in progress (hidden with members' actions).
+      ...(role === "participant" && status === "pending" && event.liveActivity === true ? { liveActivity: true } : {}),
       // Waiting behind its member's turn before it, or when its own run
       // began: its "Queued", and where its "Working for …" counts from.
       ...(role === "participant" && status === "pending" && event.queued === true ? { queued: true } : {}),

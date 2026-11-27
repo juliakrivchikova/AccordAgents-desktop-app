@@ -12,7 +12,7 @@ import { mobileControlSettingsFromEnvironment } from "../../../../shared/mobileP
 import { crashReportsNoticeDue, readCrashReportsChoice } from "../../crashReportPreferences";
 import { normalizeCustomAvatars } from "../avatars/avatarFiles";
 import { normalizeCloudRunsSettings } from "../aws/storedAws";
-import { normalizeBetaUpdates } from "../preferences/storedPreferences";
+import { normalizeBetaUpdates, normalizeChatShowMemberActions } from "../preferences/storedPreferences";
 import { canonicalProviderLabel } from "../providers/defaultProviders";
 import { publicCliProviderHosts } from "../providers/storedHosts";
 import { DEFAULT_CHAT_ROLES } from "../roles/defaultRoles";
@@ -28,6 +28,7 @@ export class PublicSettings {
     return {
       roundLimitDefault: stored.roundLimitDefault,
       betaUpdates: normalizeBetaUpdates(stored.betaUpdates),
+      chatShowMemberActions: normalizeChatShowMemberActions(stored.chatShowMemberActions),
       crashReports: readCrashReportsChoice(userDataPath()),
       crashReportsNotice: crashReportsNoticeDue(userDataPath()),
       cliAgentRunTimeoutMs: normalizeCliAgentRunTimeoutMs(stored.cliAgentRunTimeoutMs),

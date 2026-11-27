@@ -28,6 +28,7 @@ function chatServiceWithRoles(roles: ChatRoleConfig[]) {
       return {
         roundLimitDefault: 1,
         betaUpdates: false,
+        chatShowMemberActions: true,
         crashReports: true,
         crashReportsNotice: false,
         cliAgentRunTimeoutMs: 1,

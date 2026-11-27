@@ -51,6 +51,7 @@ import { ChatConversationTimeline } from "./chat-conversation-timeline";
 import type { ChatConversationViewProps } from "./chat-conversation-types";
 import { useChatConversationViewport } from "./use-chat-conversation-viewport";
 import { useChatActivityDisclosure } from "./use-chat-activity-disclosure";
+import { ChatMemberActionsContext } from "./chat-member-actions";
 import { useChatLocalFileOpen } from "./use-chat-local-file-open";
 import { useSubmittingIdSet } from "./use-submitting-id-set";
 import { useStableChatMessageActions } from "./use-stable-chat-message-actions";
@@ -120,12 +121,15 @@ export function ChatConversationView(props: ChatConversationViewProps): JSX.Elem
   });
   // The sessions view (docs/main-session.md): the main timeline holds the User
   // and the main session; each other member's session is in the right panel.
+  // Settings → General → Show members’ actions (chat-member-actions.ts).
+  const actionsShown = props.settings.chatShowMemberActions !== false;
   const sessions = useChatSessionsView({
     conversation: props.conversation,
     view: viewMode.view,
     participants,
     participantStatusById: participantStatusById,
-    liveRunIds: activeRunSummary.runIds
+    liveRunIds: activeRunSummary.runIds,
+    actionsShown
   });
   const sessionsMainMessages = sessions?.mainMessages;
   // The branch is this computer's checkout: not shown for a main session that
@@ -134,12 +138,12 @@ export function ChatConversationView(props: ChatConversationViewProps): JSX.Elem
   const mainSessionLocal = Boolean(sessions) && !mainSession?.homeMachineId && !mainSession?.cloudRun;
   const [repo, setRepo] = useRepoInfo(mainSessionLocal ? props.conversation.repoPath : undefined);
   const topLevelMessages = useMemo(
-    () => sessionsMainMessages ?? chatTopLevelMessages(props.conversation),
-    [props.conversation.messages, sessionsMainMessages]
+    () => sessionsMainMessages ?? chatTopLevelMessages(props.conversation, actionsShown),
+    [actionsShown, props.conversation.messages, sessionsMainMessages]
   );
   const threadSummaries = useMemo(
-    () => (sessionsMainMessages ? NO_THREADS : chatThreadSummaryMap(props.conversation)),
-    [props.conversation.messages, sessionsMainMessages !== undefined]
+    () => (sessionsMainMessages ? NO_THREADS : chatThreadSummaryMap(props.conversation, actionsShown)),
+    [actionsShown, props.conversation.messages, sessionsMainMessages !== undefined]
   );
   const inferredParticipantRequestsByTrigger = useMemo(() => chatInferredParticipantRequestBatchesByTrigger(props.conversation), [props.conversation.messages]);
   const continuedMentionRequestIds = useMemo(() => chatContinuedMentionRequestIds(props.conversation), [props.conversation.messages]);
@@ -451,6 +455,7 @@ export function ChatConversationView(props: ChatConversationViewProps): JSX.Elem
   ) : null);
 
   return (
+    <ChatMemberActionsContext.Provider value={actionsShown}>
     <ChatSessionsPresentationContext.Provider value={Boolean(sessions)}><ChatSessionsLinksContext.Provider value={sessionsChrome.links}><ChatSessionsNamesContext.Provider value={sessionsNames}>
     <MentionDirectoryContext.Provider value={mentionDirectory}>
     <MessageLinkContext.Provider value={viewport.focusChatMessage}>
@@ -585,6 +590,7 @@ export function ChatConversationView(props: ChatConversationViewProps): JSX.Elem
     </MessageLinkContext.Provider>
     </MentionDirectoryContext.Provider>
     </ChatSessionsNamesContext.Provider></ChatSessionsLinksContext.Provider></ChatSessionsPresentationContext.Provider>
+    </ChatMemberActionsContext.Provider>
   );
 }
 

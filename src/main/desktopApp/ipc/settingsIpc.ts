@@ -16,6 +16,9 @@ export function registerSettingsIpc(desktopApp: DesktopApp): void {
   ipcMain.handle("settings:set-beta-updates", (_event, enabled: boolean) => {
     return desktopApp.settingsService.setBetaUpdates(enabled);
   });
+  ipcMain.handle("settings:set-chat-show-member-actions", (_event, shown: unknown) => {
+    return desktopApp.settingsService.setChatShowMemberActions(shown !== false);
+  });
 
   ipcMain.handle("settings:set-crash-reports", async (_event, enabled: unknown) => {
     // Off stops first, so a failed write cannot leave reports running.

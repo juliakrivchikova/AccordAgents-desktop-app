@@ -144,7 +144,8 @@ function sameTimelineEntryContent(left, right) {
     Boolean(left.stopped) === Boolean(right.stopped) &&
     // A running reply's steps, and what its Worked for opens to.
     activitySignature(left) === activitySignature(right) &&
-    Boolean(left.liveStatus) === Boolean(right.liveStatus);
+    Boolean(left.liveStatus) === Boolean(right.liveStatus) &&
+    Boolean(left.liveActivity) === Boolean(right.liveActivity);
 }
 
 function sameMobileEvent(left, right) {
@@ -250,7 +251,8 @@ export function putTimelineEntryDeduped(entry, options) {
         // reconnect.
         if (current.status !== "pending") return 0;
         if (isScaffoldingEntry(entry) && !isPlaceholderTimelineContent(current.content)) {
-          entry = { ...entry, content: current.content };
+          // With what it is: the step in progress stays hidden with members' actions.
+          entry = { ...entry, content: current.content, ...(current.liveActivity ? { liveActivity: true } : {}) };
         }
         // Live progress does not repeat the snapshot's visual thread metadata.
         entry = { ...entry, createdAt: current.createdAt, threadRootId: entry.threadRootId || current.threadRootId };
@@ -462,6 +464,12 @@ export function deletePendingTimelineEntriesForRun(conversationId, runId, mobile
 // placeholder-sentence rows qualify; real pending text is never touched,
 // which is what the reverted age guard got wrong.
 const PLACEHOLDER_CORPSE_AGE_MS = 30 * 60 * 1000;
+
+/** The placeholder text of a running reply that has written nothing yet, as
+ *  the server writes it (hubPhoneState.ts liveTimelineEvents). */
+export function placeholderTimelineContent(participantLabel) {
+  return participantLabel ? participantLabel + " is running..." : "Running...";
+}
 
 export function isPlaceholderTimelineContent(content) {
   const text = (content || "").trim();

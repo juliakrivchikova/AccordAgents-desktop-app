@@ -30,3 +30,8 @@ export function mergeRepoFileOpenSettings(settings: StoredSettings): Pick<Stored
 export function normalizeBetaUpdates(value: unknown): boolean {
   return value === true;
 }
+
+/** Members' actions are shown unless the User turned them off. */
+export function normalizeChatShowMemberActions(value: unknown): boolean {
+  return value !== false;
+}

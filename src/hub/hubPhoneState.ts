@@ -8,6 +8,7 @@ import type { StorageService } from "../main/services/storage";
 import { mobileInterimPosts, phoneTurnTiming, timelineAttachmentsFromMessage } from "../main/services/mobileTimeline";
 import { chatViewFor } from "../shared/mainSession";
 import { isClaudeMember, phoneSessionsActivity } from "../shared/sessionsActivity";
+import { chatActivityStandsAlone } from "../shared/processingTranscript";
 
 /**
  * What the hub works out for the phone, so that the phone needs no other
@@ -94,8 +95,14 @@ export function liveTimelineEvents(conversation: Conversation, runs: ReviewProgr
     const progress = runId ? byRun.get(runId) : undefined;
     const agent = progress?.agentProgress;
     const partial = agent?.partialContent?.trim();
-    const content = (partial ? partial.slice(-LIVE_TEXT_TAIL_CHARS) : undefined) ||
-      agent?.remoteRunStatus?.label?.trim() || agent?.activity?.trim() ||
+    const runStatus = agent?.remoteRunStatus?.label?.trim();
+    // The step in progress, unless it is a notice about the run itself (a
+    // stalled provider, a failed background task), which always shows.
+    const newest = agent?.activityEvents?.[agent.activityEvents.length - 1];
+    const notice = Boolean(newest && chatActivityStandsAlone(newest) && newest.label.trim() === agent?.activity?.trim());
+    const activityText = !partial && !runStatus ? agent?.activity?.trim() : undefined;
+    const stepInProgress = notice ? undefined : activityText;
+    const content = (partial ? partial.slice(-LIVE_TEXT_TAIL_CHARS) : undefined) || runStatus || activityText ||
       (message.participantLabel ? `${message.participantLabel} is running...` : "Running...");
     const mobileEventId = typeof message.metadata?.mobileEventId === "string" ? message.metadata.mobileEventId : undefined;
     const sourceMessageId = typeof message.metadata?.sourceMessageId === "string" && message.metadata.sourceMessageId ? message.metadata.sourceMessageId : undefined;
@@ -123,6 +130,9 @@ export function liveTimelineEvents(conversation: Conversation, runs: ReviewProgr
       // progress), not words of the reply: the sessions view shows it as a
       // step, not as the reply's text.
       ...(!partial ? { liveStatus: true } : {}),
+      // That text is the step in progress: a phone hides it with members'
+      // actions (Settings → General → Show members’ actions).
+      ...(stepInProgress ? { liveActivity: true } : {}),
       // Queued behind the member's turn before it, or when its own run began.
       ...phoneTurnTiming(message, agent?.remoteRunStatus ?? message.metadata?.remoteRunStatus),
       status: "pending",

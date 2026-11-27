@@ -112,8 +112,12 @@ export function useChatSessionsView(input: {
   /** The runs this computer holds live (activeRunSummaryForConversation):
    *  a member's reply of any other run is not the one it works on now. */
   liveRunIds?: readonly string[];
+  /** Settings → General → Show members’ actions: off, a reply of steps
+   *  alone has no row. */
+  actionsShown?: boolean;
 }): ChatSessionsView | undefined {
   const { conversation, view, participants, participantStatusById } = input;
+  const actionsShown = input.actionsShown !== false;
   const mainId = view === "sessions" ? mainSessionParticipantId(conversation.metadata) : undefined;
   const cached = useSignatureCache<readonly SessionsTaskEntry[]>();
 
@@ -122,7 +126,7 @@ export function useChatSessionsView(input: {
     const messages = conversation.messages;
     const index = buildSessionsViewIndex(messages, mainId);
     // A reply that has not started has no row: the message it answers says so.
-    const shown = (message: ChatMessage): boolean => !isChatMessageHiddenInSessions(conversation, message) && !isWaitingReply(message);
+    const shown = (message: ChatMessage): boolean => !isChatMessageHiddenInSessions(conversation, message, actionsShown) && !isWaitingReply(message);
     const openCards = openMemberCardMessages(messages, index).filter(shown);
     const openCardMessageIds = new Set(openCards.map((message) => message.id));
     const lane = messages.filter((message) => openCardMessageIds.has(message.id) ||
@@ -139,7 +143,7 @@ export function useChatSessionsView(input: {
       titleTasksByMember: titleTaskByMember(messages),
       requestMessages: messages.filter((message) => message.metadata?.participantRequest)
     };
-  }, [conversation.messages, mainId]);
+  }, [actionsShown, conversation.messages, mainId]);
 
   // Its own memo: the chat's metadata is a new object on every update, and
   // only this reads the approvals.

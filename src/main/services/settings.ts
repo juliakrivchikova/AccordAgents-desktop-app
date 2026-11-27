@@ -163,6 +163,10 @@ export class SettingsService {
     return this.modules.appPreferences.setBetaUpdates(enabled);
   }
 
+  setChatShowMemberActions(shown: boolean): Promise<AppSettings> {
+    return this.modules.appPreferences.setChatShowMemberActions(shown);
+  }
+
   /** Kept in a marker file next to settings.json, not in it; see
    *  CRASH_REPORTS_OFF_MARKER. */
   setCrashReports(enabled: boolean): Promise<AppSettings> {

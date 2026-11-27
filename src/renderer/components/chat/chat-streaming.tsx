@@ -14,15 +14,17 @@ import {
 import { activityGroupKey, ChatInlineActivityEvent, ChatInlineActivityGroup } from "./chat-inline-activity";
 import type { ChatThinkingRow } from "./chat-conversation-progress";
 import type { ChatActivityDisclosureState } from "./use-chat-activity-disclosure";
+import { useChatMemberActionsShown } from "./chat-member-actions";
 
 export const ChatThinkingRowItem = memo(function ChatThinkingRowItem({ row }: { row: ChatThinkingRow }): JSX.Element {
+  const actionsShown = useChatMemberActionsShown();
   return (
     <div className="chat-thinking-row" aria-live="polite">
       <div className="chat-thinking-primary">
         <strong>{row.participantLabel}</strong>
         <span className="streaming-status-label">Thinking</span>
       </div>
-      {row.activity && <div className="chat-thinking-activity">{row.activity}</div>}
+      {actionsShown && row.activity && <div className="chat-thinking-activity">{row.activity}</div>}
     </div>
   );
 });

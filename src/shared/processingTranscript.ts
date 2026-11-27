@@ -52,7 +52,10 @@ export function chatInlineTranscriptBlocks(parts: ChatInlineTranscriptPart[]): C
   return blocks;
 }
 
-function chatActivityStandsAlone(event: ChatAgentActivityEvent): boolean {
+/** A notice about the run itself rather than a step of the member's: shown
+ *  as its own row, and still shown while members' actions are hidden
+ *  (Settings → General → Show members’ actions). */
+export function chatActivityStandsAlone(event: Pick<ChatAgentActivityEvent, "kind" | "status">): boolean {
   return event.kind === "status" || (event.kind === "approval" && event.status === "failed");
 }
 
