@@ -110,6 +110,8 @@ export interface DesktopApp {
   artifactService: ArtifactClient;
   memoryMirror: MemoryMirror;
   serverChatLink: ServerChatLink;
+  /** Members' urgent alerts its server has not taken yet (their cards here). */
+  urgentAlertOutbox?: import("../services/urgentAlertTools").UrgentAlertOutbox;
   serverChatLinkStarted: boolean;
   lastNewChatOptions: import("../../shared/hubProtocol").HubNewChatOptions | undefined;
   hubMemberRulesPublisher: HubMemberRulesPublisher;

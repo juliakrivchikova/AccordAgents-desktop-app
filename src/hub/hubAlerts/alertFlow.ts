@@ -6,6 +6,7 @@ import {
   type UrgentAlertRaised, type UrgentAlertView
 } from "../../shared/urgentAlerts";
 import { AlertChannelError } from "../alertChannels";
+import { urgentAlertCardMessageId } from "../../main/services/urgentAlertTools";
 import { chatViewFor, isChatViewMode } from "../../shared/mainSession";
 import { sessionsMemberTitle, titleTaskByMember } from "../../shared/mainSessionView";
 import { homeDeviceId } from "../hubOps";
@@ -128,7 +129,10 @@ export class AlertFlow {
           ...(dueAt !== undefined ? { callAt: new Date(dueAt).toISOString() } : {})
         },
         conversationId: request.conversationId,
-        messageId: randomUUID(),
+        // The same id the raising device gives the card it may have put up
+        // itself while this server could not be reached: this card takes
+        // its place there.
+        messageId: urgentAlertCardMessageId(request.conversationId, member.participant.id, request.requestId),
         participantId: member.participant.id,
         requester: `@${member.participant.handle}`,
         ...(member.announcedAs !== undefined ? { announcedAs: member.announcedAs } : {}),

@@ -17,6 +17,7 @@ import { spokenAlert, twilioSignature } from "./alertChannels";
 import { callTwiml } from "./hubAlerts";
 import { HUB_SERVER_WRITER } from "./hubOps";
 import { composeHub } from "./main";
+import { urgentAlertCardMessageId } from "../main/services/urgentAlertTools";
 
 type Identity = ReturnType<typeof createDeviceIdentity>;
 
@@ -285,6 +286,19 @@ test("with nothing connected an alert stays a card in the chat, written by the s
   assert.equal(written.body.results[0].status, "accepted");
   const stored = (await h.storage.getConversation("chat-1"))?.messages.find((item) => item.id === "fake-alert");
   assert.equal(stored?.metadata?.urgentAlert, undefined);
+});
+
+test("an alert's card carries the id the raising device gives the card it may have put up itself, and a retry finds the same alert", async (t) => {
+  const h = await hub(t);
+  await seedChat(h);
+  const request = { action: "raise" as const, conversationId: "chat-1", participantId: member.id, text: "Production is down", requestId: "req-same" };
+  const first = await h.alerts<UrgentAlertRaised>(h.owner, request);
+  const again = await h.alerts<UrgentAlertRaised>(h.owner, request);
+  assert.equal(first.value?.messageId, urgentAlertCardMessageId("chat-1", member.id, "req-same"));
+  assert.deepEqual(again.value, first.value, "the same request is the same alert");
+  const cards = (await h.storage.getConversation("chat-1"))!.messages.filter((message) => message.metadata?.urgentAlert);
+  assert.equal(cards.length, 1);
+  assert.equal(cards[0].id, first.value?.messageId);
 });
 
 test("Telegram connects by Start and the test button; an alert's Got it ends it before any call", async (t) => {

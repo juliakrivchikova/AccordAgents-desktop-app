@@ -64,6 +64,7 @@ import { ServerCards } from "./server/serverCards";
 import { ServerChat } from "./server/serverChat";
 import { ServerLink } from "./server/serverLink";
 import { ServerPlaceholders } from "./server/serverPlaceholders";
+import { UnsentAlertCards } from "./server/unsentAlertCards";
 import { ServerTurns } from "./server/serverTurns";
 import { ToolPermissions } from "./approvals/toolPermissions";
 import { TurnPrompt } from "./turns/turnPrompt";
@@ -137,6 +138,7 @@ export interface ChatModules {
   readonly serverLink: ServerLink;
   readonly serverTurns: ServerTurns;
   readonly serverPlaceholders: ServerPlaceholders;
+  readonly unsentAlertCards: UnsentAlertCards;
   readonly remoteTurns: RemoteTurns;
   readonly serverCards: ServerCards;
   readonly serverCardMirrors: ServerCardMirrors;
@@ -211,6 +213,7 @@ export function createChatModules(deps: ChatDependencies): ChatModules {
   modules.serverLink = new ServerLink(modules);
   modules.serverTurns = new ServerTurns(modules, deps);
   modules.serverPlaceholders = new ServerPlaceholders(modules, deps);
+  modules.unsentAlertCards = new UnsentAlertCards(modules);
   modules.remoteTurns = new RemoteTurns(modules, deps);
   modules.serverCards = new ServerCards(modules, deps);
   modules.serverCardMirrors = new ServerCardMirrors(modules, deps);

@@ -13,6 +13,13 @@ export function registerHubIpc(desktopApp: DesktopApp): void {
     if (!request || typeof request !== "object" || typeof action !== "string" || !URGENT_ALERT_USER_ACTIONS.has(action)) {
       return { ok: false, error: { code: "invalid_request", message: "Unknown alert request." } };
     }
+    if (action === "close") {
+      // A card this computer put up itself is answered here; one the server
+      // took meanwhile is closed there.
+      const local = await desktopApp.urgentAlertOutbox?.close(String((request as { alertId?: unknown }).alertId ?? ""));
+      if (local && "handled" in local) return local.handled;
+      if (local) return desktopApp.serverChatLink.alerts<unknown>({ action: "close", alertId: local.forwardTo });
+    }
     if (action !== "close") {
       // Where Twilio reaches the server: the address this computer links to,
       // when it is the User's own server (https); none for the one in the app.

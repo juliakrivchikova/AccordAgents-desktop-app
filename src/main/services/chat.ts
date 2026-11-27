@@ -907,6 +907,11 @@ export class ChatService {
     return this.modules.serverPlaceholders.markMessageRefused(conversationId, messageId, reason);
   }
 
+  /** Urgent alert cards this computer puts up while the server cannot take them. */
+  get unsentAlertCards(): import("./chat/server/unsentAlertCards").UnsentAlertCards {
+    return this.modules.unsentAlertCards;
+  }
+
   /** Installs (or removes) the link to the User's server (Д1). Without a
    *  link, `parked` is where saves keep queuing what they change for it. */
   setServerLink(link: ChatServerLink | undefined, parked?: ChatServerQueue): void {

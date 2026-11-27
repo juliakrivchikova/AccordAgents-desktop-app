@@ -71,7 +71,7 @@ function mergeStoredChatMessage(
 ): ChatMessage {
   const chosen = preferredChatMessageForRefresh(stored, current);
   const preferred = chosen === stored ? adopt(stored) : chosen;
-  if (chosen === stored && stored.status !== current.status) {
+  if (chosen === stored && (stored.status !== current.status || placeholderReplaced(stored, current))) {
     // The stored copy is the finished message and the current one a stale
     // in-flight copy (another turn's view of it): the finished message's own
     // metadata (worked time, transcript, choices) is the truth. Merging the
@@ -94,7 +94,18 @@ function mergeStoredChatMessage(
   return preferred;
 }
 
+/** The stored copy is the server's message that took the place of a
+ *  placeholder this copy still holds (the server's card of an alert this
+ *  computer had put up itself, a member's bubble written elsewhere): the
+ *  placeholder is gone, whatever it said. */
+function placeholderReplaced(stored: ChatMessage, current: ChatMessage): boolean {
+  return current.metadata?.serverPlaceholder === true && stored.metadata?.serverPlaceholder !== true && stored.metadata?.serverSeq !== undefined;
+}
+
 function preferredChatMessageForRefresh(stored: ChatMessage, current: ChatMessage): ChatMessage {
+  if (placeholderReplaced(stored, current)) {
+    return stored;
+  }
   if (stored.status === "done" && current.status !== "done") {
     return stored;
   }
@@ -132,6 +143,7 @@ function mergeStoredChatMessageMetadata(
     !storedMetadata?.serverTurns &&
     !storedMetadata?.serverRejected &&
     !storedMetadata?.serverCard &&
+    !storedMetadata?.urgentAlert &&
     !storedMetadata?.selfCompaction
   ) {
     return undefined;
@@ -155,6 +167,10 @@ function mergeStoredChatMessageMetadata(
   // (only ever written through the stored copy): the stored one, or none.
   if (storedMetadata?.serverCard) merged.serverCard = cloneJsonValue(storedMetadata.serverCard);
   else delete merged.serverCard;
+  // An urgent alert's card, as the server (or, while it could not take the
+  // alert, this computer) last wrote it: only ever written through the stored
+  // copy, so a running turn's older copy never takes it back.
+  if (storedMetadata?.urgentAlert) merged.urgentAlert = cloneJsonValue(storedMetadata.urgentAlert);
   if (storedMetadata?.reactions) {
     merged.reactions = cloneJsonValue(storedMetadata.reactions);
   } else {

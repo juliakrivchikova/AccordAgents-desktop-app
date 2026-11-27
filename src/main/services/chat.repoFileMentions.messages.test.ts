@@ -158,8 +158,9 @@ test("buildPromptParts: a resumed session's message is User's text alone; its in
   const fullNoRepoRead = build(conversationWithRepo, permBlocked, true);
   for (const parts of [fullRepoRead, fullNoRepoRead]) {
     assert.ok(parts.prompt.endsWith("\n\nShort trigger."));
-    // 14,500: the nonce blocks are explained once (beta.4 review).
-    assert.ok(parts.sections.staticEnvelope < 14500, `staticEnvelope too large: ${parts.sections.staticEnvelope}`);
+    // 14,500: the nonce blocks are explained once (beta.4 review); 15,000
+    // with the standing rule for urgent alerts (the User, 2026-11-27).
+    assert.ok(parts.sections.staticEnvelope < 15000, `staticEnvelope too large: ${parts.sections.staticEnvelope}`);
   }
   assert.match(fullRepoRead.prompt, /Repository: \/repo \(repoRead allowed\)/);
   assert.match(fullNoRepoRead.prompt, /Repository: \/repo \(repoRead blocked\)/);

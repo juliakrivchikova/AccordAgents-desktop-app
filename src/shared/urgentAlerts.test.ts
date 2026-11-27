@@ -101,6 +101,33 @@ test("only a card the User's server wrote is an alert's card", () => {
   assert.equal(urgentAlertOfMessage({ role: "participant", metadata: { serverWriter: "server", urgentAlert: { state: "waiting" } } }), undefined);
 });
 
+test("or the card this computer put up itself while her server could not take the alert, and nothing that only looks like it", () => {
+  const unsent: UrgentAlertView = { ...base, id: "unsent-0123", state: "unsent", phone: false, callMode: "answer", unsent: { reason: "unreachable", retrying: true } };
+  assert.equal(urgentAlertOfMessage({ role: "participant", metadata: { serverPlaceholder: true, urgentAlert: unsent } }), unsent);
+  // Once the server took the message it is the server's card or nothing.
+  assert.equal(urgentAlertOfMessage({ role: "participant", metadata: { serverPlaceholder: true, serverSeq: 7, urgentAlert: unsent } }), undefined);
+  assert.equal(urgentAlertOfMessage({ role: "participant", metadata: { serverPlaceholder: true, serverWriter: "device-1", urgentAlert: unsent } }), undefined);
+  assert.equal(urgentAlertOfMessage({ role: "participant", metadata: { urgentAlert: unsent } }), undefined, "not a placeholder: a device's own message");
+  assert.equal(urgentAlertOfMessage({ role: "participant", metadata: { serverPlaceholder: true, urgentAlert: { ...unsent, id: "a1" } } }), undefined);
+  assert.equal(urgentAlertOfMessage({ role: "participant", metadata: { serverPlaceholder: true, urgentAlert: { ...unsent, unsent: undefined } } }), undefined);
+});
+
+test("a card the server could not take says why, offers Got it, and after Got it says it never left the app", () => {
+  const unreachable: UrgentAlertView = { ...base, id: "unsent-1", state: "unsent", phone: false, callMode: "answer", unsent: { reason: "unreachable", retrying: true } };
+  const waiting = urgentAlertStatus(unreachable, "@taylor", now);
+  assert.deepEqual([waiting.lead, waiting.tone, waiting.action], ["Not sent outside the app", "off", "got-it"]);
+  assert.equal(waiting.detail, "Your server couldn't be reached, so @taylor could reach you only here. It goes out once your server takes it, unless you press Got it.");
+  assert.equal(urgentAlertAwaitsGotIt(unreachable), true);
+  const refused = urgentAlertStatus({ ...unreachable, unsent: { reason: "refused", message: "This member is not in the chat.", retrying: false } }, "@taylor", now);
+  assert.equal(refused.detail, "Your server didn't take it (This member is not in the chat), so @taylor could reach you only here.");
+  assert.equal(refused.action, "got-it");
+  const seen = urgentAlertStatus({ ...unreachable, state: "acknowledged", ackSource: "app", ackedAt: "2026-11-12T18:53:00.000Z", closedAt: "2026-11-12T18:53:00.000Z",
+    unsent: { reason: "unreachable", retrying: false } }, "@taylor", now);
+  assert.equal(seen.lead, `Got it, you pressed it in the app at ${at("2026-11-12T18:53:00.000Z")}`);
+  assert.equal(seen.detail, "Not sent outside the app.");
+  assert.equal(seen.action, undefined);
+});
+
 test("the edges: no channel at all, one unanswered call, calls that never rang, a state this app does not know", () => {
   const nothing = urgentAlertStatus({ ...base, phone: false }, "@taylor", now);
   assert.deepEqual([nothing.lead, nothing.action], ["Waiting for Got it", "got-it"]);
@@ -127,6 +154,9 @@ test("the edges: no channel at all, one unanswered call, calls that never rang, 
 test("the card offers Got it in exactly the states the server takes it", () => {
   const all: UrgentAlertState[] = ["waiting", "calling", "acknowledged", "unanswered", "not_set_up", "failed"];
   assert.deepEqual(all.filter((state) => urgentAlertAwaitsGotIt({ state })), [...URGENT_ALERT_ACKNOWLEDGEABLE_STATES]);
+  // An unsent card is answered by the computer that put it up, never by the server.
+  assert.equal(URGENT_ALERT_ACKNOWLEDGEABLE_STATES.includes("unsent"), false);
+  assert.equal(urgentAlertAwaitsGotIt({ state: "unsent" }), true);
   for (const state of all) {
     const status = urgentAlertStatus({ ...base, state, callAt: "2026-11-12T18:57:00.000Z" }, "@taylor", now);
     assert.equal(status.action === "got-it", urgentAlertAwaitsGotIt({ state }), state);

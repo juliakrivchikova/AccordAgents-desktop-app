@@ -43,7 +43,12 @@ export type UrgentAlertState =
   /** Nothing is connected: the alert stayed in the chat. */
   | "not_set_up"
   /** Telegram refused it and no phone is connected. */
-  | "failed";
+  | "failed"
+  /** The User's server could not take it (not reached, or it refused): the
+   *  card stands only on the computer the member runs on, which raises it
+   *  on the server once it can (`UrgentAlertView.unsent`). Never a server's
+   *  state: a server's card replaces this one. */
+  | "unsent";
 
 export type UrgentAlertAckSource = "telegram" | "call" | "app";
 
@@ -78,7 +83,15 @@ export interface UrgentAlertView {
   callMode: "keypad" | "answer";
   /** Closed in the app: the card folds away on every device. */
   closedAt?: string;
+  /** A card the computer put up itself because the User's server could not
+   *  take the alert: why, and whether the computer still raises it there
+   *  (until it gets through, or she presses Got it). Kept after Got it. */
+  unsent?: { reason: "unreachable" | "refused"; message?: string; retrying: boolean };
 }
+
+/** The id of a card the computer put up itself (state "unsent"); a server's
+ *  alert ids are UUIDs. */
+export const URGENT_ALERT_UNSENT_ID_PREFIX = "unsent-";
 
 /** States in which the server may still place a call. */
 export const URGENT_ALERT_OPEN_STATES: readonly UrgentAlertState[] = ["waiting", "calling"];
@@ -272,7 +285,9 @@ export interface UrgentAlertStatus {
 /** Whether the alert still waits for her Got it: the card offers the button
  *  and no cross. */
 export function urgentAlertAwaitsGotIt(alert: Pick<UrgentAlertView, "state">): boolean {
-  return URGENT_ALERT_ACKNOWLEDGEABLE_STATES.includes(alert.state);
+  // An unsent card waits for her too: the computer that put it up takes Got
+  // it (and then does not raise it on the server).
+  return URGENT_ALERT_ACKNOWLEDGEABLE_STATES.includes(alert.state) || alert.state === "unsent";
 }
 
 export function urgentAlertStatus(alert: UrgentAlertView, requester: string, now: number): UrgentAlertStatus {
@@ -285,6 +300,14 @@ export function urgentAlertStatus(alert: UrgentAlertView, requester: string, now
     case "failed":
       return { tone: "off", icon: "failed", lead: "Not sent outside the app",
         detail: `Telegram didn't take it${alert.telegram?.error ? ` (${alert.telegram.error})` : ""} and no phone is connected.`, action: "set-up" };
+    case "unsent": {
+      const why = alert.unsent?.reason === "refused"
+        ? `Your server didn't take it${alert.unsent.message ? ` (${alert.unsent.message.trim().replace(/[.\s]+$/, "")})` : ""}`
+        : "Your server couldn't be reached";
+      return { tone: "off", icon: "off", lead: "Not sent outside the app",
+        detail: `${why}, so ${requester} could reach you only here.${alert.unsent?.retrying
+          ? " It goes out once your server takes it, unless you press Got it." : ""}`, action: "got-it" };
+    }
     case "acknowledged": {
       const at = urgentAlertClock(alert.ackedAt);
       const by = alert.ackSource === "telegram" ? "you pressed it in Telegram"
@@ -295,6 +318,7 @@ export function urgentAlertStatus(alert: UrgentAlertView, requester: string, now
       const before = alert.ackSource === "call" ? calls.slice(0, -1) : calls;
       const history = [...historyParts(alert, before)];
       if (alert.phone && calls.length === 0) history.push("No call was made");
+      if (alert.unsent) history.push("Not sent outside the app");
       return { tone: "done", icon: "check", lead: `Got it, ${by}${at ? ` at ${at}` : ""}`, detail: joined(history) };
     }
     case "unanswered": {
@@ -405,10 +429,16 @@ function joined(parts: string[]): string | undefined {
   return parts.length ? `${parts.join(". ")}.` : undefined;
 }
 
-/** A message that is an urgent alert's card: written by the User's server
- *  (a device cannot forge one there) on a member's row. */
-export function urgentAlertOfMessage(message: { role?: string; metadata?: { serverWriter?: unknown; urgentAlert?: unknown } }): UrgentAlertView | undefined {
-  if (message.role !== "participant" || message.metadata?.serverWriter !== URGENT_ALERT_SERVER_WRITER) return undefined;
+/** A message that is an urgent alert's card on a member's row: written by
+ *  the User's server (a device cannot forge one there), or the card this
+ *  computer put up itself while her server could not take the alert (a
+ *  placeholder that never left it, so never another device's). */
+export function urgentAlertOfMessage(message: { role?: string; metadata?: { serverWriter?: unknown; serverPlaceholder?: unknown; serverSeq?: unknown; urgentAlert?: unknown } }): UrgentAlertView | undefined {
+  if (message.role !== "participant") return undefined;
   const alert = message.metadata?.urgentAlert as UrgentAlertView | undefined;
-  return alert && typeof alert === "object" && typeof alert.id === "string" ? alert : undefined;
+  if (!alert || typeof alert !== "object" || typeof alert.id !== "string") return undefined;
+  if (message.metadata?.serverWriter === URGENT_ALERT_SERVER_WRITER) return alert;
+  const unsentHere = message.metadata?.serverPlaceholder === true && message.metadata.serverSeq === undefined &&
+    message.metadata.serverWriter === undefined && alert.id.startsWith(URGENT_ALERT_UNSENT_ID_PREFIX) && Boolean(alert.unsent);
+  return unsentHere ? alert : undefined;
 }

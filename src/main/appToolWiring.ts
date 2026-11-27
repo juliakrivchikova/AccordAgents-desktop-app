@@ -6,7 +6,7 @@
  * change through the User's server) run.
  */
 
-import { callUrgentAlertTool, type UrgentAlertServerAccess } from "./services/urgentAlertTools";
+import { UrgentAlertOutbox, type UrgentAlertCardHost, type UrgentAlertOutboxStore, type UrgentAlertServerAccess } from "./services/urgentAlertTools";
 import type {
   ArtifactDraftAudiencePolicyByAuthor,
   PublishArtifactSourceRequest
@@ -106,18 +106,31 @@ export function wireMemoryToolHandler(
   chatService.setMemoryAccess(access);
 }
 
-/** Registers members' urgent alert tool (shared/urgentAlerts.ts). `access`
- *  is read at each call: the link to the server may start after wiring. */
+/** Registers members' urgent alert tool (shared/urgentAlerts.ts) and takes
+ *  up the alerts its server has not taken yet. `access` is read at each
+ *  call: the link to the server may start after wiring. `cards`: where this
+ *  device shows the User a card itself (the computer; never a machine). */
 export function wireUrgentAlertToolHandler(
   appMcpService: AppMcpService,
-  access: () => UrgentAlertServerAccess | undefined
-): void {
-  appMcpService.setUrgentAlertToolHandler((actor, request) => {
-    let now: UrgentAlertServerAccess | undefined;
-    try { now = access(); } catch { now = undefined; }
-    return callUrgentAlertTool(now, actor, request);
-  });
+  options: {
+    access: () => UrgentAlertServerAccess | undefined;
+    store: UrgentAlertOutboxStore;
+    cards?: UrgentAlertCardHost;
+    log: (event: string, payload: Record<string, unknown>) => void;
+  }
+): UrgentAlertOutbox {
+  const outbox = new UrgentAlertOutbox(options);
+  appMcpService.setUrgentAlertToolHandler((actor, request) => outbox.raise(actor, request));
+  outbox.start();
+  return outbox;
 }
+
+/** Where a device keeps the alerts its server has not taken yet. */
+export function urgentAlertOutboxStore(hub: { clientState(key: string): Promise<string | undefined>; setClientState(key: string, value: string): Promise<void> }): UrgentAlertOutboxStore {
+  return { read: () => hub.clientState(URGENT_ALERT_OUTBOX_KEY), write: (value) => hub.setClientState(URGENT_ALERT_OUTBOX_KEY, value) };
+}
+
+const URGENT_ALERT_OUTBOX_KEY = "urgent-alerts.unsent";
 
 /** Registers the artifact tool handler: resolves the acting member through the
  *  chat service, then dispatches to the artifact service. */

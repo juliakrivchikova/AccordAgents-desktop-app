@@ -3,7 +3,7 @@ import { randomUUID } from "node:crypto";
 import { app } from "electron";
 import { NATIVE_PROCESS_REGISTRY_FILE, usesNativeProcessRegistry } from "../services/nativeProcessRegistry";
 import { quitStep } from "../terminal/quitConfirmation";
-import { createArtifactToolDispatcher, wireArtifactToolHandler, wireMemoryToolHandler, wireUrgentAlertToolHandler } from "../appToolWiring";
+import { createArtifactToolDispatcher, urgentAlertOutboxStore, wireArtifactToolHandler, wireMemoryToolHandler, wireUrgentAlertToolHandler } from "../appToolWiring";
 import type { MemoryOwnerListValue, MemorySettingsListRequest, MemorySettingsListResult } from "../../shared/memory";
 import { MachineApprovalExecutor } from "../services/machineApprovalExecutor";
 import { readPosixProcessTableAsync } from "../services/processTermination";
@@ -43,7 +43,14 @@ export function wireAppTools(desktopApp: DesktopApp): void {
   // Members' memory lives on the User's server only (shared/memory.ts).
   wireMemoryToolHandler(desktopApp.appMcpService, desktopApp.chatService, () => desktopApp.serverChatLink, () => desktopApp.usageMilestones?.reach("memory_note_written"));
 
-  wireUrgentAlertToolHandler(desktopApp.appMcpService, () => desktopApp.serverChatLink);
+  // Urgent alerts go through the User's server; while it cannot take one,
+  // its card stands in the chat here and the alert waits to go there.
+  desktopApp.urgentAlertOutbox = wireUrgentAlertToolHandler(desktopApp.appMcpService, {
+    access: () => desktopApp.serverChatLink,
+    store: urgentAlertOutboxStore(desktopApp.storageService.hub()),
+    cards: desktopApp.chatService.unsentAlertCards,
+    log: (event, payload) => { void desktopApp.debugLogService.write(event, payload); }
+  });
   desktopApp.chatService.setConnectorSignedInObserver(() => desktopApp.usageMilestones?.reach("connector_signed_in"));
   desktopApp.chatService.setCardAppliers(() => localCardAppliers(desktopApp));
   desktopApp.activeReviews = new Map<string, AbortController>();

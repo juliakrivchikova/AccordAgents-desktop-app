@@ -55,11 +55,11 @@ const MEMBER_MEMORY_INSTRUCTIONS = [
   "- Your CLI's own memory (such as Claude Code's memory files) is read only by sessions of that CLI on this computer: members on other providers or on cloud machines never see it. When User states a preference or corrects how you work, also write it here as an article tagged `preference` (scope project when it concerns only this chat's project, otherwise global), updating the note that already covers it, in addition to what your CLI keeps itself."
 ] as const;
 
-/** When members alert the User outside the app (shared/urgentAlerts.ts),
- *  asked by the User on 2026-11-12: what she asked them to watch, or a real
- *  emergency; how often is her arrangement with the member. */
+/** When members alert the User outside the app (shared/urgentAlerts.ts):
+ *  emergencies only, a standing rule for every member, main session
+ *  included (the User, 2026-11-27; worded strictly so it is not abused). */
 const URGENT_ALERT_INSTRUCTIONS = [
-  "Urgent alerts: if something User asked you to watch goes wrong, or an emergency needs her now, call `app_urgent_alert` (her Telegram, then her phone). Never for routine news; follow what User arranged with you."
+  "Urgent alert (app_urgent_alert) is for emergencies only: something is broken or about to cause real harm right now and the User has to act within minutes, and a chat message could be missed. Examples: production is down or failing for its users, data is being lost or corrupted, a security incident, money is being lost, something she told you she must not miss. Never use it for progress, finished work, questions, choices, a failed test or build, or anything that can wait an hour; when in doubt, write in the chat instead. One alert per incident, then put the details in a chat message to her."
 ] as const;
 
 /** A member's CLI session and the instructions it is started with. */
