@@ -9,6 +9,7 @@ import {
   MEMORY_INDEX_MAX_NOTES,
   MEMORY_INDEX_MAX_TAGS,
   MEMORY_INDEX_NEAR_MAX,
+  MEMORY_INDEX_PREFERENCES_MAX,
   MEMORY_LIST_MAX,
   MEMORY_LIVE_NOTES_MAX,
   MEMORY_PICK_MAX,
@@ -369,10 +370,15 @@ export class HubMemory {
       order by ${rank}, ${activity} desc, id;`);
     let notes = rows;
     if (rows.length > MEMORY_INDEX_MAX_NOTES) {
-      const near = rows.filter(isNear).slice(0, MEMORY_INDEX_NEAR_MAX);
-      const room = Math.max(0, MEMORY_INDEX_MAX_NOTES - near.length);
-      const global = rows.filter((row) => !isNear(row));
-      notes = [...near, ...(room ? (await this.mostRelevant(global, request.text, picks)).slice(0, room) : [])];
+      // The User's preferences always, ahead of the rest (the User,
+      // 2026-11-27: they are few), then all of the chat's own, then the
+      // global notes most relevant to the chat while there is room.
+      const preferences = rows.filter((row) => parseTags(row.tagsJson).includes("preference")).slice(0, MEMORY_INDEX_PREFERENCES_MAX);
+      const listed = new Set(preferences.map((row) => row.id));
+      const near = rows.filter((row) => isNear(row) && !listed.has(row.id)).slice(0, MEMORY_INDEX_NEAR_MAX);
+      const room = Math.max(0, MEMORY_INDEX_MAX_NOTES - preferences.length - near.length);
+      const global = rows.filter((row) => !isNear(row) && !listed.has(row.id));
+      notes = [...preferences, ...near, ...(room ? (await this.mostRelevant(global, request.text, picks)).slice(0, room) : [])];
     }
     const tags = await this.tagsInUse(member, MEMORY_INDEX_MAX_TAGS);
     return { ok: true, value: { notes: notes.map(summaryOf), more: rows.length - notes.length, ...(tags.length ? { tags } : {}), ...(picks ? { picks: true } : {}), full: true } };

@@ -115,8 +115,9 @@ not there yet.
   member's open statuses, then project notes waiting for the repository, then
   the rest of its project's, role's and chat's notes by activity), the global
   ones after; then a line with the most used tags (up to 12). Past 150 notes
-  the list keeps all of the chat's own (up to 300) and the global ones most
-  relevant to the chat: closest in meaning to the chat's title and the
+  the list starts with the User's preferences (notes tagged `preference`, at
+  most 50; the User, 2026-11-27: they are few), then keeps all of the chat's
+  own (up to 300) and the global ones most relevant to the chat: closest in meaning to the chat's title and the
   message the session starts with, when the server searches by meaning (else
   the most recently active), and says how many are left out and that
   `app_memory_search` finds them. The list is at most 32 KB (UTF-8; a

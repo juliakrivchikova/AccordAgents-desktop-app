@@ -832,3 +832,22 @@ test("a current server with no note to list and picks on says there are none; a 
   const own = await callMemoryTool(lost, actor, APP_MEMORY_ARCHIVE_TOOL, { noteId: "n1", requestId: "mine-1" }) as { requestId: string; note: string };
   assert.equal(own.requestId, "mine-1");
 });
+
+test("past 150 of the chat's own notes the User's preferences are still listed, first; other global notes wait for search", async (t) => {
+  const { tool, desktopLink, clock } = await setup(t);
+  let second = 0;
+  const write = async (title: string, scope: string, tags: string[] = []) => {
+    clock.now = new Date(Date.parse("2026-11-04T09:00:00.000Z") + (second += 1) * 1000);
+    return ok<MemoryNote>(await tool("desktop", CHAT_A, taylor, APP_MEMORY_WRITE_TOOL, { kind: "article", title, body: "x", scope, tags }));
+  };
+  const preference = await write("Reply in Russian, short", "global", ["preference"]);
+  const ownPreference = await write("This project: commit messages in English", "project", ["preference"]);
+  await write("Some global fact", "global");
+  for (let index = 0; index < 151; index += 1) await write(`Project note ${index}`, "project");
+  const index = ok<MemoryIndexValue>(await desktopLink.memory({ action: "index", conversationId: CHAT_A, participantId: taylor.id, full: true }));
+  const ids = index.notes.map((note) => note.id);
+  assert.deepEqual(new Set(ids.slice(0, 2)), new Set([preference.id, ownPreference.id]));
+  assert.equal(index.notes.length, 153);
+  assert.ok(!index.notes.some((note) => note.title === "Some global fact"));
+  assert.equal(index.more, 1);
+});

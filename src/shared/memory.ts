@@ -27,13 +27,16 @@ export const MEMORY_SEARCH_MAX_LIMIT = 100;
 /** A task status nobody updated for this long is archived by the server. */
 export const MEMORY_STATUS_STALE_DAYS = 30;
 /** A session starts with every note its member sees, one line each (the
- *  User, 2026-11-27). Past this many, it gets all of its chat's own notes
- *  (project, role, chat) and the global ones most relevant to the chat, and
- *  is told how many are left out. */
+ *  User, 2026-11-27). Past this many, it gets the User's preferences first,
+ *  then all of its chat's own notes (project, role, chat) and the global
+ *  ones most relevant to the chat, and is told how many are left out. */
 export const MEMORY_INDEX_MAX_NOTES = 150;
 /** At most this many of the chat's own notes are listed all the same (a
  *  bound on a session's first message; a project far past it is unlikely). */
 export const MEMORY_INDEX_NEAR_MAX = 300;
+/** Past MEMORY_INDEX_MAX_NOTES the User's preferences (tag `preference`)
+ *  are listed first, at most this many (the User, 2026-11-27: they are few). */
+export const MEMORY_INDEX_PREFERENCES_MAX = 50;
 /** At most this many bytes (UTF-8) of the list go into a session's first
  *  message (a Gemini member gets its message as one command-line argument,
  *  128 KB at most on Linux). */
