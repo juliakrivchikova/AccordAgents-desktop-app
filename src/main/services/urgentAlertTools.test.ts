@@ -166,14 +166,14 @@ test("Got it pressed while the alert is on its way: once the server takes it, it
 });
 
 test("the server refuses the alert: the card still stands here, says why, and it is not raised again", async () => {
-  const s = server([{ ok: false, error: { code: "access_denied", message: "The server has no such chat (yet)." } }]);
+  const s = server([{ ok: false, error: { code: "access_denied", message: "This member is not in the chat." } }]);
   const c = cards();
   const outbox = new UrgentAlertOutbox({ access: () => s.access, store: store().store, cards: c.host, log: () => undefined, retryMs: 20 });
   const result = await outbox.raise(actor, { message: "Production is down", requestId: "req-1" }) as { ok: boolean; note: string };
   assert.equal(result.ok, true);
   assert.match(result.note, /did not take the alert/);
   const card = [...c.shown.values()][0]!;
-  assert.deepEqual(card.alert.unsent, { reason: "refused", message: "The server has no such chat (yet).", retrying: false });
+  assert.deepEqual(card.alert.unsent, { reason: "refused", message: "This member is not in the chat.", retrying: false });
   await new Promise((resolve) => setTimeout(resolve, 100));
   assert.equal(s.raises().length, 1);
   outbox.stop();
@@ -241,5 +241,87 @@ test("a timeout is not an answer: the card stands, and a retry finds the alert t
   const result = await outbox.raise(actor, { message: "Production is down", requestId: "req-1" }) as { value: UrgentAlertRaised };
   assert.equal(result.value.state, "unsent");
   await until(() => s.raises().length === 2);
+  outbox.stop();
+});
+
+test("Got it on a card the server took meanwhile goes to the server's alert", async () => {
+  const s = server([unreachable, raisedFor("req-1", { alertId: "server-alert-9" })]);
+  const c = cards();
+  const outbox = new UrgentAlertOutbox({ access: () => s.access, store: store().store, cards: c.host, log: () => undefined, retryMs: 20 });
+  const result = await outbox.raise(actor, { message: "Production is down", requestId: "req-1" }) as { value: UrgentAlertRaised };
+  await until(() => s.raises().length === 2);
+  await new Promise((resolve) => setTimeout(resolve, 30));
+  assert.deepEqual(await outbox.close(result.value.alertId), { forwardTo: "server-alert-9" });
+  outbox.stop();
+});
+
+test("what was kept cannot be read (damaged, another version): nothing is taken up, and new alerts still work", async () => {
+  for (const raw of ["{not json", JSON.stringify({ version: 99, alerts: [] }), JSON.stringify({ version: 1, alerts: "x" }),
+    JSON.stringify({ version: 1, alerts: [{ alertId: "unsent-1" }, null, 5] })]) {
+    const kept = store(raw);
+    const s = server([unreachable]);
+    const outbox = new UrgentAlertOutbox({ access: () => s.access, store: kept.store, cards: cards().host, log: () => undefined, retryMs: 60_000 });
+    await outbox.retryDue();
+    assert.equal(s.raises().length, 0, raw);
+    const result = await outbox.raise(actor, { message: "Production is down", requestId: "req-1" }) as { value: UrgentAlertRaised };
+    assert.equal(result.value.state, "unsent");
+    assert.match(kept.box.value ?? "", /req-1/);
+    outbox.stop();
+  }
+});
+
+test("at most 50 alerts are kept; the oldest the server refused go first, never one still to go out", async () => {
+  const refused: HubAlertResult<unknown> = { ok: false, error: { code: "access_denied", message: "This member is not in the chat." } };
+  let answer: HubAlertResult<unknown> = refused;
+  const kept = store();
+  const outbox = new UrgentAlertOutbox({ access: () => ({ alerts: async <T>() => answer as HubAlertResult<T> }), store: kept.store, cards: cards().host, log: () => undefined, retryMs: 60_000 });
+  for (let index = 0; index < 10; index += 1) await outbox.raise(actor, { message: `refused ${index}`, requestId: `refused-${index}` });
+  answer = unreachable;
+  for (let index = 0; index < 45; index += 1) await outbox.raise(actor, { message: `waiting ${index}`, requestId: `waiting-${index}` });
+  const alerts = (JSON.parse(kept.box.value!) as { alerts: Array<{ requestId: string; retrying: boolean }> }).alerts;
+  assert.equal(alerts.length, 50);
+  assert.equal(alerts.filter((item) => item.retrying).length, 45, "every alert still to go out is kept");
+  assert.deepEqual(alerts.filter((item) => !item.retrying).map((item) => item.requestId), ["refused-5", "refused-6", "refused-7", "refused-8", "refused-9"]);
+  outbox.stop();
+});
+
+test("a server that does not have the chat yet is asked again for a while; a card gone meanwhile (the chat deleted) ends it", async () => {
+  const noChat: HubAlertResult<unknown> = { ok: false, error: { code: "access_denied", message: "The server has no such chat (yet)." } };
+  const s = server([noChat, noChat, raisedFor("req-1")]);
+  const c = cards();
+  const kept = store();
+  const outbox = new UrgentAlertOutbox({ access: () => s.access, store: kept.store, cards: c.host, log: () => undefined, retryMs: 20 });
+  const result = await outbox.raise(actor, { message: "Production is down", requestId: "req-1" }) as { value: UrgentAlertRaised; note: string };
+  assert.match(result.note, /keeps raising it/);
+  assert.equal([...c.shown.values()][0]!.alert.unsent?.retrying, true);
+  await until(() => s.raises().length === 3);
+  await until(() => !(kept.box.value ?? "").includes("req-1"));
+  outbox.stop();
+
+  const s2 = server([noChat]);
+  const c2 = cards();
+  const kept2 = store();
+  const outbox2 = new UrgentAlertOutbox({ access: () => s2.access, store: kept2.store, cards: c2.host, log: () => undefined, retryMs: 20 });
+  await outbox2.raise(actor, { message: "Production is down", requestId: "req-2" });
+  c2.shown.clear();
+  await until(() => !(kept2.box.value ?? "").includes("req-2"));
+  const asked = s2.raises().length;
+  await new Promise((resolve) => setTimeout(resolve, 80));
+  assert.equal(s2.raises().length, asked, "not asked again once its card is gone");
+  outbox2.stop();
+});
+
+test("a server that keeps not having the chat: after a while the alert counts as refused and the card says so", async () => {
+  const noChat: HubAlertResult<unknown> = { ok: false, error: { code: "access_denied", message: "The server has no such chat (yet)." } };
+  const s = server([noChat]);
+  const c = cards();
+  const outbox = new UrgentAlertOutbox({ access: () => s.access, store: store().store, cards: c.host, log: () => undefined, retryMs: 5 });
+  await outbox.raise(actor, { message: "Production is down", requestId: "req-1" });
+  await until(() => [...c.shown.values()][0]!.alert.unsent?.retrying === false, 5_000);
+  assert.deepEqual([...c.shown.values()][0]!.alert.unsent, { reason: "refused", message: "The server has no such chat (yet).", retrying: false });
+  const asked = s.raises().length;
+  assert.ok(asked >= 20 && asked <= 21, `asked ${asked} times`);
+  await new Promise((resolve) => setTimeout(resolve, 60));
+  assert.equal(s.raises().length, asked);
   outbox.stop();
 });

@@ -13,6 +13,7 @@ import { HubOps } from "../../hub/hubOps";
 import { HubServer } from "../../hub/hubServer";
 import { urgentAlertOutboxStore } from "../appToolWiring";
 import { ChatService } from "./chat";
+import { mergeStoredChatMessages } from "./chat/store/mergeStoredChat";
 import { chatParts } from "./chat/test/chatParts";
 import { MAIN_ROLE } from "./chat/test/forkFixtures";
 import { DeviceIdentityService, createDeviceIdentity } from "./deviceIdentity";
@@ -214,4 +215,48 @@ test("the app restarts while the server cannot be reached: the card is still the
   const replaced = await until(() => h.stored("chat-c"), (chat) => cardsIn(chat.messages).some((message) => message.metadata?.serverWriter === "server"), 30_000);
   assert.equal(cardsIn(replaced.messages).length, 1);
   assert.ok(next.outbox);
+});
+
+test("a card put up before this computer ever linked to the server stays out of the chats it moves there; the server's own card follows once the alert is raised", async (t) => {
+  const h = await setup(t);
+  await save(h.chat, localChat("chat-d"));
+  // Not linked yet: the outbox has no server to ask.
+  const early = new UrgentAlertOutbox({ access: () => undefined, store: urgentAlertOutboxStore(h.storage.hub()), cards: h.chat.unsentAlertCards, log: () => undefined, retryMs: 60_000 });
+  const result = await early.raise({ conversationId: "chat-d", participantId: member.id }, { message: "Backups failed", requestId: "req-4" }) as { value: UrgentAlertRaised };
+  assert.equal(result.value.state, "unsent");
+  early.stop();
+  await h.link.start();
+  await until(async () => (await h.link.status())?.ready ?? false, (ready) => ready);
+  const moved = await until(() => h.page("chat-d"), (page) => Boolean((page as { messages?: unknown[] }).messages?.length));
+  assert.equal(moved.messages.some((message) => message.id === result.value.messageId), false, "the unsent card is not moved as a plain message");
+  h.outbox.start();
+  const raised = await until(() => h.page("chat-d"), (page) => cardsIn(page.messages).length > 0);
+  assert.equal(cardsIn(raised.messages).length, 1);
+  assert.equal(cardsIn(raised.messages)[0].id, result.value.messageId);
+  const here = await until(() => h.stored("chat-d"), (chat) => cardsIn(chat.messages).some((message) => message.metadata?.serverWriter === "server"));
+  assert.equal(cardsIn(here.messages).length, 1);
+});
+
+test("merging a running turn's copy: a placeholder never wins over the server's message, and an alert's card is always the stored one", () => {
+  const at = "2026-11-27T09:00:00.000Z";
+  const unsent = { id: "unsent-1", state: "unsent", createdAt: at, calls: [], phone: false, callMode: "answer", unsent: { reason: "unreachable", retrying: true } } as UrgentAlertView;
+  const placeholder: ChatMessage = { id: "m1", role: "participant", participantId: member.id, content: "Down", createdAt: at, status: "done", metadata: { serverPlaceholder: true, urgentAlert: unsent } };
+  const serverCard: ChatMessage = { ...placeholder, metadata: { serverSeq: 12, serverWriter: "server", urgentAlert: { ...unsent, id: "a1", state: "not_set_up", unsent: undefined } } };
+  const [kept] = mergeStoredChatMessages([serverCard], [placeholder]);
+  assert.equal(kept.metadata?.serverPlaceholder, undefined);
+  assert.equal(kept.metadata?.urgentAlert?.state, "not_set_up");
+  // A member's bubble written elsewhere takes its placeholder's place the same way.
+  const bubble: ChatMessage = { id: "m2", role: "participant", participantId: member.id, content: "", createdAt: at, status: "done", metadata: { serverPlaceholder: true, runId: "r" } };
+  const real: ChatMessage = { ...bubble, content: "the reply", metadata: { serverSeq: 13, serverWriter: "machine-1", runId: "r" } };
+  const [replaced] = mergeStoredChatMessages([real], [bubble]);
+  assert.equal(replaced.content, "the reply");
+  assert.equal(replaced.metadata?.serverPlaceholder, undefined);
+  // Two placeholders: the running copy as before; a stored card change still wins.
+  const acknowledged = { ...placeholder, metadata: { ...placeholder.metadata, urgentAlert: { ...unsent, state: "acknowledged", ackSource: "app", closedAt: at } } } as ChatMessage;
+  const [stillHere] = mergeStoredChatMessages([acknowledged], [placeholder]);
+  assert.equal(stillHere.metadata?.serverPlaceholder, true);
+  assert.equal(stillHere.metadata?.urgentAlert?.state, "acknowledged", "Got it pressed here is not undone by an older copy");
+  // A stored placeholder without seq never replaces a running copy's server message.
+  const [server] = mergeStoredChatMessages([placeholder], [serverCard]);
+  assert.equal(server.metadata?.serverWriter, "server");
 });

@@ -6,7 +6,7 @@ import {
   type UrgentAlertRaised, type UrgentAlertView
 } from "../../shared/urgentAlerts";
 import { AlertChannelError } from "../alertChannels";
-import { urgentAlertCardMessageId } from "../../main/services/urgentAlertTools";
+import { urgentAlertCardMessageId } from "../../main/services/urgentAlertCardIds";
 import { chatViewFor, isChatViewMode } from "../../shared/mainSession";
 import { sessionsMemberTitle, titleTaskByMember } from "../../shared/mainSessionView";
 import { homeDeviceId } from "../hubOps";

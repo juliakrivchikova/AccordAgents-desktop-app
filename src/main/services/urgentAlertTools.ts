@@ -3,6 +3,9 @@ import {
   URGENT_ALERT_MESSAGE_MAX_CHARS, URGENT_ALERT_UNSENT_ID_PREFIX,
   type HubAlertRequest, type HubAlertResult, type UrgentAlertError, type UrgentAlertRaised, type UrgentAlertView
 } from "../../shared/urgentAlerts";
+import { urgentAlertCardMessageId, urgentAlertUnsentId } from "./urgentAlertCardIds";
+
+export { urgentAlertCardMessageId } from "./urgentAlertCardIds";
 
 /** The one way to urgent alerts: the User's server (ServerChatLink.alerts). */
 export interface UrgentAlertServerAccess {
@@ -29,20 +32,6 @@ export interface UrgentAlertOutboxStore {
   write(value: string): Promise<void>;
 }
 
-/**
- * The id of an alert's card in its chat: the same on the server (which
- * writes the card) and on the device that raised it (which may put the card
- * up itself first), so the server's card replaces that one in place.
- */
-export function urgentAlertCardMessageId(conversationId: string, participantId: string, requestId: string): string {
-  const hex = alertKeyHash(conversationId, participantId, requestId);
-  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-5${hex.slice(13, 16)}-${((Number.parseInt(hex[16]!, 16) & 0x3) | 0x8).toString(16)}${hex.slice(17, 20)}-${hex.slice(20, 32)}`;
-}
-
-function alertKeyHash(conversationId: string, participantId: string, requestId: string): string {
-  return createHash("sha256").update(`urgent-alert-card\n${conversationId}\n${participantId}\n${requestId}`).digest("hex");
-}
-
 /** An alert the server has not taken yet. */
 interface UnsentAlert {
   /** The card's alert id here (`unsent-…`). */
@@ -62,6 +51,16 @@ interface UnsentAlert {
 const STORE_VERSION = 1;
 /** Alerts kept at most; the oldest the server refused go first. */
 const MAX_KEPT = 50;
+/** Cards the server took lately, remembered (in memory) so that Got it on
+ *  one still waiting for the server's card goes to the server's alert. */
+const MAX_REACHED_REMEMBERED = 200;
+/** A server that does not have the chat yet (its writes still on their way)
+ *  is asked again this many times before the alert counts as refused. */
+const MAX_NO_CHAT_ATTEMPTS = 20;
+/** Without a request id, the same message within this window (a retry after
+ *  a lost answer) is the same alert; a later one is a new alert. */
+const REQUEST_ID_WINDOW_MS = 60_000;
+const MAX_REQUEST_ID_CHARS = 200;
 const DEFAULT_RAISE_TIMEOUT_MS = 10_000;
 const DEFAULT_RETRY_MS = 30_000;
 
@@ -122,12 +121,10 @@ export class UrgentAlertOutbox {
       return failure("invalid_request", `An alert message is at most ${URGENT_ALERT_MESSAGE_MAX_CHARS} characters; say what happened and what the User should do.`);
     }
     const requestId = typeof args.requestId === "string" && args.requestId
-      ? args.requestId
-      // Without one: the same message within a minute (a retry after a lost
-      // answer) is the same alert; a later one is a new alert.
-      : createHash("sha256").update(`${actor.conversationId}\n${actor.participantId}\n${text}\n${Math.floor(Date.now() / 60_000)}`).digest("hex").slice(0, 32);
+      ? args.requestId.slice(0, MAX_REQUEST_ID_CHARS)
+      : createHash("sha256").update(`${actor.conversationId}\n${actor.participantId}\n${text}\n${Math.floor(Date.now() / REQUEST_ID_WINDOW_MS)}`).digest("hex").slice(0, 32);
     const alert: Omit<UnsentAlert, "retrying" | "attempts"> = {
-      alertId: `${URGENT_ALERT_UNSENT_ID_PREFIX}${alertKeyHash(actor.conversationId, actor.participantId, requestId).slice(0, 32)}`,
+      alertId: urgentAlertUnsentId(actor.conversationId, actor.participantId, requestId),
       requestId,
       conversationId: actor.conversationId,
       participantId: actor.participantId,
@@ -143,19 +140,20 @@ export class UrgentAlertOutbox {
     // The member's own mistake (the server checks more than this device): it
     // fixes the call; nothing to show her.
     if (result.error.code === "invalid_request") return result;
-    const retrying = result.error.code === "server_unavailable";
+    const retrying = retryable(result.error, 1);
     const shown = await this.keep(alert, retrying, result.error);
+    const why = trimmedReason(result.error.message);
     if (shown) {
       return {
         ok: true,
         value: { alertId: alert.alertId, messageId: alert.messageId, state: "unsent", telegram: false, phone: false } satisfies UrgentAlertRaised,
         note: retrying
-          ? `User's server could not be reached (${result.error.message.replace(/[.\s]+$/, "")}), so the alert reached her only as a red card in this chat on her computer: no Telegram and no call yet. The app keeps raising it on her server and sends it on once it gets through (never twice), unless she presses Got it first. Do not call again for the same incident; say in your reply that the alert could not go out.`
-          : `User's server did not take the alert (${result.error.message.replace(/[.\s]+$/, "")}), so it reached her only as a red card in this chat on her computer: no Telegram, no call. Say so in your reply.`
+          ? `User's server could not take the alert now (${why}), so it reached her only as a red card in this chat on her computer: no Telegram and no call yet. The app keeps raising it on her server and sends it on once it gets through (never twice), unless she presses Got it first. Do not call again for the same incident; say in your reply that the alert could not go out.`
+          : `User's server did not take the alert (${why}), so it reached her only as a red card in this chat on her computer: no Telegram, no call. Say so in your reply.`
       };
     }
     if (retrying) {
-      return failure("server_unavailable", `User's server could not be reached from here (${result.error.message.replace(/[.\s]+$/, "")}), so nothing reached her yet. It is raised on her server as soon as it can be reached (a red card in this chat, then Telegram and calls), never twice. Do not call again for the same incident; tell User in your reply.`);
+      return failure("server_unavailable", `User's server could not take the alert now (${why}), so nothing reached her yet. It is raised on her server as soon as it can take it (a red card in this chat, then Telegram and calls), never twice. Do not call again for the same incident; tell User in your reply.`);
     }
     return result;
   }
@@ -167,8 +165,8 @@ export class UrgentAlertOutbox {
    */
   async close(alertId: string): Promise<{ handled: HubAlertResult<UrgentAlertView> } | { forwardTo: string } | undefined> {
     if (!alertId.startsWith(URGENT_ALERT_UNSENT_ID_PREFIX)) return undefined;
-    const reached = this.reachedServer.get(alertId);
-    if (reached) return { forwardTo: reached };
+    const reachedBefore = this.reachedServer.get(alertId);
+    if (reachedBefore) return { forwardTo: reachedBefore };
     const entry = await this.serialize(async () => {
       const entries = await this.load();
       const found = entries.find((item) => item.alertId === alertId);
@@ -204,8 +202,7 @@ export class UrgentAlertOutbox {
     const running = this.inFlight.get(key);
     if (running) return running;
     const run = (async (): Promise<HubAlertResult<UrgentAlertRaised>> => {
-      let access: UrgentAlertServerAccess | undefined;
-      try { access = this.options.access(); } catch { access = undefined; }
+      const access = this.currentAccess();
       if (!access) return failure("server_unavailable", "This device is not linked to User's server yet.");
       const timeoutMs = this.options.raiseTimeoutMs ?? DEFAULT_RAISE_TIMEOUT_MS;
       try {
@@ -226,7 +223,7 @@ export class UrgentAlertOutbox {
   private async reached(alert: Omit<UnsentAlert, "retrying" | "attempts">, raised: UrgentAlertRaised): Promise<void> {
     const key = keyOf(alert);
     this.reachedServer.set(alert.alertId, raised.alertId);
-    while (this.reachedServer.size > MAX_KEPT) this.reachedServer.delete(this.reachedServer.keys().next().value as string);
+    while (this.reachedServer.size > MAX_REACHED_REMEMBERED) this.reachedServer.delete(this.reachedServer.keys().next().value as string);
     const had = await this.serialize(async () => {
       const entries = await this.load();
       const found = entries.find((item) => keyOf(item) === key);
@@ -240,8 +237,7 @@ export class UrgentAlertOutbox {
     }
     if (this.closedWhileRaising.delete(key)) {
       // She pressed Got it here while it was on its way: it is Got it there too.
-      let access: UrgentAlertServerAccess | undefined;
-      try { access = this.options.access(); } catch { access = undefined; }
+      const access = this.currentAccess();
       const closed = access ? await access.alerts({ action: "close", alertId: raised.alertId }).catch((error: unknown) => failure("server_unavailable", messageOf(error))) : undefined;
       this.options.log("urgent-alert.outbox.closed-on-server", { alertId: raised.alertId, ok: closed?.ok === true });
     }
@@ -313,26 +309,35 @@ export class UrgentAlertOutbox {
     const due = (await this.load()).filter((item) => item.retrying);
     for (const entry of due) {
       if (this.stopped) return;
+      const key = keyOf(entry);
       const result = await this.attempt(entry);
       if (result.ok) {
         await this.reached(entry, result.value);
         continue;
       }
-      if (result.error.code === "server_unavailable") {
+      const attempts = entry.attempts + 1;
+      if (retryable(result.error, attempts)) {
+        // A server without the chat: is its card still here (the chat not
+        // deleted, the card not replaced)? Gone, it is not asked again.
+        if (result.error.code !== "server_unavailable" && this.options.cards
+          && !await this.options.cards.update(entry.conversationId, entry.messageId, (alert) => alert).catch(() => undefined)) {
+          await this.forget(key);
+          continue;
+        }
         await this.serialize(async () => {
           const entries = await this.load();
-          const found = entries.find((item) => keyOf(item) === keyOf(entry));
+          const found = entries.find((item) => keyOf(item) === key);
           if (found) await this.save(entries.map((item) => item === found ? { ...found, attempts: found.attempts + 1 } : item));
-          else this.closedWhileRaising.delete(keyOf(entry));
+          else this.closedWhileRaising.delete(key);
         });
         continue;
       }
-      // Refused now (the chat or the member is gone, say): it never goes
-      // out; the card says why, and is answered here.
-      this.options.log("urgent-alert.outbox.refused", { alertId: entry.alertId, code: result.error.code });
+      // Refused (the chat or the member is gone, say): it never goes out;
+      // the card says why, and is answered here.
+      this.options.log("urgent-alert.outbox.refused", { alertId: entry.alertId, code: result.error.code, attempts });
       const stillHere = await this.serialize(async () => {
         const entries = await this.load();
-        const found = entries.find((item) => keyOf(item) === keyOf(entry));
+        const found = entries.find((item) => keyOf(item) === key);
         if (!found) return false;
         await this.save(this.options.cards ? entries.map((item) => item === found ? { ...found, retrying: false } : item) : entries.filter((item) => item !== found));
         return Boolean(this.options.cards);
@@ -341,8 +346,16 @@ export class UrgentAlertOutbox {
         const updated = await this.options.cards.update(entry.conversationId, entry.messageId, (alert) => alert.state === "unsent"
           ? { ...alert, unsent: { reason: "refused", message: result.error.message, retrying: false } }
           : alert).catch(() => undefined);
-        if (!updated) await this.forget(keyOf(entry));
+        if (!updated) await this.forget(key);
       }
+    }
+  }
+
+  private currentAccess(): UrgentAlertServerAccess | undefined {
+    try {
+      return this.options.access();
+    } catch {
+      return undefined;
     }
   }
 
@@ -373,6 +386,18 @@ export class UrgentAlertOutbox {
     await this.options.store.write(JSON.stringify({ version: STORE_VERSION, alerts: kept }));
     this.entries = kept;
   }
+}
+
+/** Whether the server may still take the alert later: it was not reached,
+ *  or it does not have the chat yet (this device's writes still on their
+ *  way), for a while. */
+function retryable(error: UrgentAlertError, attempts: number): boolean {
+  if (error.code === "server_unavailable") return true;
+  return error.code === "access_denied" && /no such chat/i.test(error.message) && attempts < MAX_NO_CHAT_ATTEMPTS;
+}
+
+function trimmedReason(message: string): string {
+  return message.trim().replace(/[.\s]+$/, "");
 }
 
 function keyOf(alert: Pick<UnsentAlert, "conversationId" | "participantId" | "requestId">): string {

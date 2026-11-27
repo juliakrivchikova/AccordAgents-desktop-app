@@ -878,9 +878,13 @@ export class ServerChatLink {
   /** One chat moved to the server, in pages; returns the writes sent. */
   private async importChat(client: HubClient, conversation: Conversation): Promise<number> {
     // A closed Accord's line the old server refused draws nothing: moved, it
-    // would fold that Accord on every device.
+    // would fold that Accord on every device. An urgent alert's card this
+    // computer put up itself stays here: moved, it would stand on the server
+    // as the member's plain message under the id the server's own card
+    // takes once the alert is raised there.
     const ops = chatImportOps(conversation, conversation.messages
-      .filter((message) => !(accordClosedLaunchId(message) && message.metadata?.serverRejected)));
+      .filter((message) => !(accordClosedLaunchId(message) && message.metadata?.serverRejected))
+      .filter((message) => !(message.metadata?.serverPlaceholder && message.metadata.urgentAlert)));
     for (const op of ops) {
       // Its pictures go first, as with every message written to a server:
       // made while this computer had only the server inside the app, or

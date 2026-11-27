@@ -17,7 +17,7 @@ import { spokenAlert, twilioSignature } from "./alertChannels";
 import { callTwiml } from "./hubAlerts";
 import { HUB_SERVER_WRITER } from "./hubOps";
 import { composeHub } from "./main";
-import { urgentAlertCardMessageId } from "../main/services/urgentAlertTools";
+import { urgentAlertCardMessageId } from "../main/services/urgentAlertCardIds";
 
 type Identity = ReturnType<typeof createDeviceIdentity>;
 
