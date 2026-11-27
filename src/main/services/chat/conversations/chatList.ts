@@ -21,20 +21,25 @@ export class ChatList {
     private readonly deps: Pick<ChatDependencies, "cliRunner" | "debugLogs" | "storage">
   ) {}
 
+  /** Renames a chat, at any moment: while its members run, answer, carry
+   *  background tasks or compact too (the User, 2026-11-27). The chat is read
+   *  as saved inside its mutation queue, as a member's own first title is
+   *  written (ChatTitles.setChatTitleFromTool), so nothing a running turn
+   *  saved is overwritten; a turn's older copy saved later keeps the new name
+   *  (mergeStoredChatTitle, mergeStoredChatMetadata). It reaches the User's
+   *  server, the phone and the cloud machines with the save, as any rename.
+   *  The chat returned shares its messages with the saved copy: read it,
+   *  never edit it (the window gets only the name, chat:rename). */
   async renameConversation(request: RenameChatConversationRequest): Promise<Conversation | undefined> {
-    return this.chat.activeRuns.withChatRunLock(request.conversationId, async () => {
-      await this.chat.store.waitForQueuedSave(request.conversationId);
-      const conversation = await this.deps.storage.getConversation(request.conversationId);
+    const title = normalizeChatTitle(request.title);
+    let renamed: Conversation | undefined;
+    const saved = await this.chat.store.withSavedConversation(request.conversationId, async (conversation) => {
       if (!conversation) {
         return undefined;
       }
       if (conversation.kind !== "chat") {
         throw new Error("Only chat conversations can be renamed.");
       }
-      if (conversation.metadata.running === true || this.chat.activeRuns.chatHasLiveWork(conversation.id)) {
-        throw new Error("Chat name cannot be edited while members are running.");
-      }
-      const title = normalizeChatTitle(request.title);
       const existingAutoTitle = chatAutoTitleMetadata(conversation);
       const hadAutoTitleEligibility = Boolean(chatAutoTitleEligibility(conversation));
       if (title === conversation.title && existingAutoTitle?.source === "manual" && !hadAutoTitleEligibility) {
@@ -45,12 +50,13 @@ export class ChatList {
       conversation.metadata = metadataWithManualChatTitle(conversation.metadata, title, now);
       conversation.updatedAt = now;
       await this.chat.store.saveConversation(conversation);
-      await this.chat.chatHistory.ensureHistoryFiles(conversation);
+      renamed = conversation;
       return conversation;
-    }, {
-      rejectIfQueued: true,
-      queuedMessage: "Chat name cannot be edited while members are running."
     });
+    if (renamed) {
+      await this.chat.chatHistory.ensureHistoryFiles(renamed);
+    }
+    return saved;
   }
 
   async setArchived(request: SetChatArchivedRequest): Promise<Conversation | undefined> {

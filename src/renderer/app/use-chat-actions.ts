@@ -384,6 +384,10 @@ export function useChatActions(state: AppState, conversationActions: Conversatio
     }
   }
 
+  /** Renames the open chat, members running or not. The answer is only the
+   *  chat's name, never its messages: an open chat keeps what it shows, a
+   *  member's live reply included (the save's own update brings the rest, as
+   *  for the pin). */
   async function renameChatConversation(title: string): Promise<boolean> {
     if (!state.conversation || state.conversation.kind !== "chat") return false;
     const conversationId = state.conversation.id;
@@ -394,8 +398,8 @@ export function useChatActions(state: AppState, conversationActions: Conversatio
         state.setError("Chat was not found.");
         return false;
       }
-      state.setConversation((current) => (current?.id === conversationId ? saved : current));
-      state.setSummaries((current) => upsertConversationSummary(current, saved));
+      state.setConversation((current) => (current?.id === conversationId ? { ...current, title: saved.title } : current));
+      state.setSummaries((current) => current.map((summary) => summary.id === conversationId ? { ...summary, title: saved.title } : summary));
       return true;
     } catch (caught) {
       state.setError(errorText(caught));

@@ -80,6 +80,13 @@ export interface RenameChatConversationRequest {
   title: string;
 }
 
+/** A chat's name as saved: all the window needs back from a rename (the chat
+ *  itself can be megabytes, and the rest comes with the chat's own update). */
+export interface ChatTitleState {
+  conversationId: string;
+  title: string;
+}
+
 export interface SetChatArchivedRequest {
   conversationId: string;
   archived: boolean;

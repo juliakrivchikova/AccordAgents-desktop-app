@@ -345,34 +345,125 @@ test("renameConversation rejects non-chat conversations", async () => {
   );
 });
 
-test("renameConversation rejects running chats", async () => {
-  const conversation = chatConversation({
-    title: "Running chat",
-    metadata: { running: true }
-  });
-  const { service, storage } = testService([conversation]);
+test("renameConversation of a chat that is not there answers nothing, saves nothing and writes no history", async () => {
+  const conversation = chatConversation({ title: "Kept" });
+  const { service, storage, snapshots, historyWrites } = testService([conversation]);
+
+  const saved = await service.renameConversation({ conversationId: "no-such-chat", title: "New title" });
+
+  assert.equal(saved, undefined);
+  assert.equal(await storage.getConversation("no-such-chat"), undefined);
+  assert.equal(snapshots.length, 0);
+  assert.deepEqual(historyWrites, []);
+  assert.equal((await storage.getConversation(conversation.id))?.title, "Kept");
+});
+
+test("renameConversation of a chat deleted meanwhile refuses and does not bring it back", async () => {
+  const conversation = chatConversation({ title: "Doomed", metadata: { archived: true } });
+  const { service, storage, historyWrites } = testService([conversation]);
+  assert.equal(await service.deleteConversation({ conversationId: conversation.id }), true);
 
   await assert.rejects(
     () => service.renameConversation({ conversationId: conversation.id, title: "New title" }),
-    /cannot be edited while members are running/
+    /permanently deleted/
   );
-  assert.equal((await storage.getConversation(conversation.id))?.title, "Running chat");
+  assert.equal(await storage.getConversation(conversation.id), undefined);
+  assert.deepEqual(historyWrites, []);
 });
 
-test("renameConversation rejects when a chat run already owns the run queue", async () => {
+test("renameConversation renames a chat while its members are running", async () => {
+  const conversation = chatConversation({
+    title: "Running chat",
+    metadata: { running: true, activeRunIds: ["run-live"] }
+  });
+  const { service, storage, historyWrites } = testService([conversation]);
+
+  const saved = await service.renameConversation({ conversationId: conversation.id, title: "New title" });
+
+  assert.equal(saved?.title, "New title");
+  const stored = await storage.getConversation(conversation.id);
+  assert.equal(stored?.title, "New title");
+  assert.equal(stored?.metadata.running, true, "the run state is left as it was");
+  assert.deepEqual(stored?.metadata.activeRunIds, ["run-live"]);
+  assert.deepEqual(historyWrites, ["New title"]);
+});
+
+test("renameConversation does not wait for, or refuse, a chat run that holds the run queue", async () => {
   const conversation = chatConversation({ title: "Queued chat" });
   const { service, storage } = testService([conversation]);
   const releaseRun = await holdChatRunLock(service, conversation.id);
 
   try {
-    await assert.rejects(
-      () => service.renameConversation({ conversationId: conversation.id, title: "New title" }),
-      /cannot be edited while members are running/
-    );
-    assert.equal((await storage.getConversation(conversation.id))?.title, "Queued chat");
+    const saved = await service.renameConversation({ conversationId: conversation.id, title: "New title" });
+    assert.equal(saved?.title, "New title");
+    assert.equal((await storage.getConversation(conversation.id))?.title, "New title");
   } finally {
     await releaseRun();
   }
+});
+
+test("a rename made while members' turns hold older copies of the chat keeps the new name", async () => {
+  const participant = chatParticipant();
+  const conversation = chatConversation({
+    title: "Agent title",
+    metadata: {
+      participants: [participant],
+      participantSessions: [],
+      autoTitle: { source: "first-agent", title: "Agent title", appliedAt: NOW, participantId: participant.id }
+    }
+  });
+  const { service, storage } = testService([conversation]);
+  // Two flows read the chat before the rename (a turn and its follow-up)...
+  const first = (await storage.getConversation(conversation.id))!;
+  const second = (await storage.getConversation(conversation.id))!;
+  // ...the User renames it meanwhile...
+  await service.renameConversation({ conversationId: conversation.id, title: "Mine" });
+  // ...and each flow saves its copy, the way a running turn does.
+  const store = chatParts(service).store as unknown as {
+    withChatMutation(conversation: Conversation, mutate: () => Promise<void>): Promise<void>;
+    saveConversation(conversation: Conversation): Promise<void>;
+  };
+  for (const stale of [first, second]) {
+    await store.withChatMutation(stale, async () => {
+      stale.updatedAt = new Date().toISOString();
+      await store.saveConversation(stale);
+    });
+    const stored = await storage.getConversation(conversation.id);
+    assert.equal(stored?.title, "Mine", "an older copy does not bring the old name back");
+    const autoTitle = stored?.metadata.autoTitle as { source?: string; title?: string } | undefined;
+    assert.equal(autoTitle?.source, "manual", "nor the old name's record");
+    assert.equal(autoTitle?.title, "Mine");
+    assert.equal(stale.title, "Mine", "the flow's own copy has the new name from then on");
+  }
+});
+
+test("a rename made before the first member names the chat keeps that member from naming it", async () => {
+  const participant = chatParticipant();
+  const conversation = chatConversation({
+    metadata: {
+      participants: [participant],
+      participantSessions: [],
+      autoTitleEligibility: autoTitleEligibility(participant)
+    }
+  });
+  const { service, storage } = testService([conversation]);
+  // The member's turn read the chat while it could still name it.
+  const stale = (await storage.getConversation(conversation.id))!;
+  await service.renameConversation({ conversationId: conversation.id, title: "Mine" });
+  const store = chatParts(service).store as unknown as {
+    withChatMutation(conversation: Conversation, mutate: () => Promise<void>): Promise<void>;
+    saveConversation(conversation: Conversation): Promise<void>;
+  };
+  await store.withChatMutation(stale, async () => {
+    await store.saveConversation(stale);
+  });
+  assert.equal((await storage.getConversation(conversation.id))?.metadata.autoTitleEligibility, undefined);
+
+  const result = await service.setChatTitleFromTool(autoTitleActor(participant), { title: "Agent title" });
+
+  assert.equal(result.status, "ignored");
+  assert.equal(result.reason, "already_titled");
+  assert.equal((await storage.getConversation(conversation.id))?.title, "Mine");
 });
 
 function autoTitleEligibility(participant: ChatParticipant): Record<string, unknown> {

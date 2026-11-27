@@ -24,18 +24,25 @@ const CHAT_ACTIVITY_EVENT_MAX_COUNT = 500;
 const CHAT_ACTIVITY_DETAILS_TOTAL_MAX_CHARS = 24_000;
 
 export function mergeStoredChatTitle(stored: Conversation, current: Conversation): string {
-  const storedTitle = chatAutoTitleMetadata(stored);
-  const currentTitle = chatAutoTitleMetadata(current);
-  if (!storedTitle && !currentTitle) {
-    return current.title;
+  return storedChatTitleWins(stored.metadata, current.metadata) ? stored.title : current.title;
+}
+
+/** Whether the saved chat's name is newer than the one a copy holds: the name
+ *  changes while members run (a rename, a member's first title, either from
+ *  another device through the server), so the newer one wins, by when it was
+ *  given (metadata.autoTitle). The name and that record always come from the
+ *  same side (mergeStoredChatMetadata): a copy keeping its older record would
+ *  tie with the next older copy, which would then bring its old name back. */
+export function storedChatTitleWins(storedMetadata: Conversation["metadata"], currentMetadata: Conversation["metadata"]): boolean {
+  const storedTitle = chatAutoTitleMetadata({ metadata: storedMetadata } as Conversation);
+  const currentTitle = chatAutoTitleMetadata({ metadata: currentMetadata } as Conversation);
+  if (!storedTitle) {
+    return false;
   }
-  if (storedTitle && !currentTitle) {
-    return stored.title;
+  if (!currentTitle) {
+    return true;
   }
-  if (!storedTitle && currentTitle) {
-    return current.title;
-  }
-  return (storedTitle?.appliedAt ?? "") > (currentTitle?.appliedAt ?? "") ? stored.title : current.title;
+  return storedTitle.appliedAt > currentTitle.appliedAt;
 }
 
 export function mergeStoredChatMessages(storedMessages: ChatMessage[], currentMessages: ChatMessage[], shared = false): ChatMessage[] {
