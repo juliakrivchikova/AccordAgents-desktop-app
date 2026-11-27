@@ -682,6 +682,11 @@ switch is disabled.
     either: in a member's session its task is "Task" and its answers carry
     its provider's logo; Stop is "Stop"; the New chat note says which CLI
     runs the chat;
+  - an urgent alert's card stands on the main timeline whichever member
+    raised it, and stays in that member's session too; Got it (or the cross)
+    in either place folds it in both, on the computer and the phone (the
+    User, 2026-11-27: the card must reach her in any case, and what she has
+    to see is on the main timeline; `isMainTimelineAlertCard`);
   - the Accord: above the composer one quiet line (Accord · its name ·
     where it stands) that opens the whole card in the side panel; the
     classic view keeps the pinned card;

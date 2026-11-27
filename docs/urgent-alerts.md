@@ -86,6 +86,10 @@ server's.
   server's copy of the same message, and `urgentAlert` is taken from the
   stored copy).
 
+In the sessions view (docs/main-session.md) a member's alert card stands on
+the main timeline as well as in that member's session, on the computer and
+the phone; Got it in either place folds it in both.
+
 ## When members use it
 
 Every member, the main session included, gets the standing rule in its
