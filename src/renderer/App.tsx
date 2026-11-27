@@ -186,7 +186,6 @@ function App(): JSX.Element {
     ? (
       <ChatTopBarTitle
         conversation={view.activeChatConversation}
-        isRunning={view.conversationRunning}
         onRenameTitle={chatActions.renameChatConversation}
       />
     )

@@ -90,12 +90,31 @@ export class ChatStore {
     }, { skipRefresh: true });
   }
 
+  /** As withSavedChat, for a change the User asks of a conversation that may
+   *  be gone (`fn` gets undefined) or not a chat: it is read once, as saved,
+   *  inside its mutation queue, from memory while this process's last save
+   *  still owns it (readStoredChatStateForRefresh). */
+  withSavedConversation<T>(conversationId: string, fn: (conversation: Conversation | undefined) => Promise<T>): Promise<T> {
+    const conversation = { id: conversationId } as Conversation;
+    return this.withChatMutation(conversation, async () => {
+      await this.waitForQueuedSave(conversationId);
+      const stored = (await this.readStoredChatStateForRefresh(conversationId)).stored;
+      if (!stored) return fn(undefined);
+      this.assignSavedChat(conversation, stored);
+      return fn(conversation);
+    }, { skipRefresh: true });
+  }
+
   private async loadSavedChat(conversation: Conversation): Promise<void> {
     await this.waitForQueuedSave(conversation.id);
     const stored = (await this.readStoredChatStateForRefresh(conversation.id)).stored;
     if (!stored || stored.kind !== "chat" || !Array.isArray(stored.metadata.participants)) {
       throw new Error("Chat was not found.");
     }
+    this.assignSavedChat(conversation, stored);
+  }
+
+  private assignSavedChat(conversation: Conversation, stored: Conversation): void {
     Object.assign(conversation, stored, {
       metadata: cloneJsonValue(stored.metadata),
       messages: [...stored.messages]

@@ -478,6 +478,39 @@ test("an unpin made while a member's turn holds an older copy of the chat stays 
   assert.equal((await h.page("chat-pin-run")).conversation.metadata.pinned, undefined, "nor on the server");
 });
 
+test("a chat renamed while members run here and on a machine keeps its new name here, on the server and on the machine, after their turns end", async (t) => {
+  // Named by its first member earlier: the turns' older copies hold that name's record.
+  const base = localChat("chat-rename-run");
+  const h = await linked(t, { ...base, metadata: { ...base.metadata, autoTitle: { source: "first-agent", title: "Plans", appliedAt: base.createdAt, participantId: desk.id } } });
+  h.desktopControl.hold = true;
+  h.machineControl.hold = true;
+  // Replies that mention nobody, so no further turn starts.
+  const plainReply = (pending: ChatMessage) => { pending.content = "Done."; };
+  (h.desktopControl as { reply?: (pending: ChatMessage) => void }).reply = plainReply;
+  h.machineControl.reply = plainReply;
+  await h.desktopChat.sendMessage({ conversationId: "chat-rename-run", content: "@taylor @drew long job" } as never);
+  await until(async () => h.desktopControl.releases.length + h.machineControl.releases.length, (count) => count === 2);
+  const renamed = await h.desktopChat.renameConversation({ conversationId: "chat-rename-run", title: "Renamed mid-run" });
+  assert.equal(renamed?.title, "Renamed mid-run", "renamed while both members run");
+  await until(() => h.page("chat-rename-run"), (page) => page.conversation?.title === "Renamed mid-run");
+  await until(() => h.machineStorage.getConversation("chat-rename-run"), (chat) => chat?.title === "Renamed mid-run");
+  // Both turns end, each saving the copy of the chat it read before the rename.
+  for (const release of [...h.desktopControl.releases, ...h.machineControl.releases]) release();
+  await until(() => h.page("chat-rename-run"), (page) => page.messages.filter((message) => message.role === "participant" && message.status === "done").length === 2);
+  await until(async () => h.desktopChat.liveRunIds().length + h.machineChat.liveRunIds().length, (count) => count === 0);
+  await new Promise((resolve) => setTimeout(resolve, 300));
+  const manual = (chat: Conversation | undefined) => (chat?.metadata.autoTitle as { source?: string } | undefined)?.source;
+  const desktop = await h.desktopStorage.getConversation("chat-rename-run");
+  assert.equal(desktop?.title, "Renamed mid-run", "here");
+  assert.equal(manual(desktop), "manual");
+  const server = (await h.page("chat-rename-run")).conversation as Conversation;
+  assert.equal(server.title, "Renamed mid-run", "on the server");
+  assert.equal(manual(server), "manual");
+  const machine = await h.machineStorage.getConversation("chat-rename-run");
+  assert.equal(machine?.title, "Renamed mid-run", "on the machine");
+  assert.equal(manual(machine), "manual");
+});
+
 test("a chat deleted on the computer is deleted on the machine too, through the server, with its members' sessions there closed", async (t) => {
   const h = await linked(t, localChat("chat-g"));
   await h.desktopChat.setArchived({ conversationId: "chat-g", archived: true } as never);

@@ -5,7 +5,7 @@ import { PARTICIPANT_COMPACTIONS_KEY, readActiveRunIds, readParticipantCompactio
 import { sanitizeWarningList } from "../../../../shared/warnings";
 import { isTerminalAppToolApprovalStatus } from "../approvals/approvalRecords";
 import { isMetadataRecord, mergeAgentContextUsageRecords } from "../compaction/contextUsage";
-import { mergeRemovedChatMessageIds } from "./mergeStoredChat";
+import { mergeRemovedChatMessageIds, storedChatTitleWins } from "./mergeStoredChat";
 import { mergePromptContextPointers } from "../turns/promptContextRecords";
 
 export function mergeStoredChatMetadata(
@@ -30,6 +30,8 @@ export function mergeStoredChatMetadata(
     if (storedMetadata[key] !== undefined) merged[key] = storedMetadata[key];
     else delete merged[key];
   }
+  // The record of the chat's name comes with the name (mergeStoredChatTitle).
+  if (storedChatTitleWins(storedMetadata, currentMetadata)) merged.autoTitle = storedMetadata.autoTitle;
   if (merged.autoTitle) {
     delete merged.autoTitleEligibility;
   }

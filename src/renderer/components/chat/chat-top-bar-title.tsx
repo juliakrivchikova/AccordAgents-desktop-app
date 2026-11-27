@@ -12,7 +12,6 @@ export function normalizeChatTitle(value: string): string {
 
 export function ChatTopBarTitle(props: {
   conversation: Pick<Conversation, "id" | "title">;
-  isRunning: boolean;
   onRenameTitle: (title: string) => Promise<boolean>;
 }): JSX.Element {
   const [renamingTitle, setRenamingTitle] = useState(false);
@@ -20,7 +19,7 @@ export function ChatTopBarTitle(props: {
   const [titleSaving, setTitleSaving] = useState(false);
   const titleEditorRef = useRef<HTMLDivElement>(null);
   const normalizedTitleDraft = normalizeChatTitle(titleDraft);
-  const titleSaveDisabled = props.isRunning || titleSaving || !titleDraft.trim() || normalizedTitleDraft === props.conversation.title;
+  const titleSaveDisabled = titleSaving || !titleDraft.trim() || normalizedTitleDraft === props.conversation.title;
 
   function startTitleRename(): void {
     setTitleDraft(props.conversation.title);
@@ -122,8 +121,7 @@ export function ChatTopBarTitle(props: {
             size="xs"
             icon={PencilSimpleIcon}
             label="Edit chat name"
-            tooltip={props.isRunning ? "Chat name cannot be edited while members are running" : "Edit chat name"}
-            disabled={props.isRunning}
+            tooltip="Edit chat name"
             data-testid="chat-title-edit"
             onClick={startTitleRename}
           />
