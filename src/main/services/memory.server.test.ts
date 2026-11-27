@@ -754,7 +754,7 @@ test("search and picks put the chat's own notes before global ones of similar re
   const pick = async (text: string) => ok<MemoryPickValue>(await desktopLink.memory({ action: "pick", conversationId: CHAT_A, participantId: taylor.id, text })).notes.map((note) => note.title);
 
   // By meaning: the global note a little closer comes after the chat's own.
-  semantic.closeness.set("Other project's release", 0.5).set("Our release", 0.46).set("Our chat's release", 0.47).set("Reply in Russian", 0.1);
+  semantic.closeness.set("Other project's release", 0.5).set("Our release", 0.48).set("Our chat's release", 0.485).set("Reply in Russian", 0.1);
   assert.deepEqual((await search("выпуск")).slice(0, 3), ["Our chat's release", "Our release", "Other project's release"]);
   assert.deepEqual(await pick("давай выпустим бету"), ["Our chat's release", "Our release", "Other project's release"]);
   // A global preference that fits clearly better leads, by meaning and in picks.

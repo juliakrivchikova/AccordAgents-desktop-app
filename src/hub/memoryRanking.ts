@@ -6,8 +6,13 @@
  * project's work (filed globally because it could not be filed under that
  * project) otherwise came first in every project.
  *
- * Tuned on the User's notes (~/reference/memory-search-eval/scripts/project.mjs,
- * 2026-11-27): see NEAR_MEANING_LEAD and NEAR_WORDS_FACTOR.
+ * Tuned on the User's 113 notes (~/reference/memory-search-eval/scripts/
+ * project.mjs, 2026-11-27): another project's global runbook led "выпуск
+ * беты через GitHub Actions" by 0.012 in closeness, while a global
+ * preference that must win ("no release while a question is open") led the
+ * chat's own note by 0.036; a lead of 0.03 fixes the first and keeps the
+ * second (0.04 and more lost it). Words: 1.5 kept another project's note out
+ * of the first three for more queries than 1.25 and changed nothing else.
  */
 
 /** A note's own place: its chat's project, the member's role or the chat
@@ -22,10 +27,10 @@ export interface PlacedScore<T> {
 
 /** How much closer in meaning a global note must be to come before one of
  *  the chat's own (closeness of prints of 1536 numbers). */
-export const NEAR_MEANING_LEAD = 0.05;
+export const NEAR_MEANING_LEAD = 0.03;
 /** How many times the word score of a global note must be higher to come
  *  before one of the chat's own (BM25). */
-export const NEAR_WORDS_FACTOR = 1.25;
+export const NEAR_WORDS_FACTOR = 1.5;
 
 /** What a score counts for once the chat's own notes are given their lead. */
 export function placedScore(score: number, near: boolean, by: "meaning" | "words"): number {

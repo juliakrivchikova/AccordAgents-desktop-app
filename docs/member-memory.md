@@ -235,6 +235,24 @@ Decided by the User on 2026-11-26 (same chat document): OpenAI
   keeping the first place of every query asked by meaning (sums of scores and
   reciprocal ranks lost it for a third). The passage is the closest one, cut
   around the words asked.
+- The chat's own notes first (the User, 2026-11-27; `src/hub/memoryRanking.ts`):
+  at similar relevance a note of the chat's project, the member's role or the
+  chat comes before a global one, in both rankings and in picks: by meaning a
+  global note must be more than 0.03 closer, by words score more than 1.5
+  times as much. A global note that fits clearly better still leads; a pick
+  still needs 0.40 by itself. Measured on her 113 notes with 79 queries
+  (`~/reference/memory-search-eval/scripts/project.mjs`): "выпуск беты через
+  GitHub Actions" asked from an AccordAgents chat put another project's
+  global runbook first; now this project's note is first and that runbook is
+  out of the first three. Over 12 such queries the right note came first for
+  83% (75% before) and another project's note was in the first three for
+  17% (42%); 12 queries a global preference must win, the queries asked from
+  another project and the earlier 37 kept their first places (the first
+  three of the 37 rose from 92% to 95%); of 22 exact names one went from
+  third to fourth ("Liquibase", another project's word, asked here). Notes of
+  another project were picked for 8% of this project's messages (17%), and
+  global preferences were picked as before. A larger lead (0.04 and more)
+  put the global preference "no release while a question is open" second.
 - Notes for each message (`pick`): only notes at least 0.40 close and within
   0.07 of the closest, at most 5, none the member was given in its session
   already unless changed since (the app keeps that per session; it starts
