@@ -41,36 +41,46 @@ call", artifact "План: Urgent alert — Telegram и звонок".
 ## When her server cannot take an alert
 
 The card appears in any case (the User, 2026-11-27). When the computer's
-raise does not get through (the server is not reached within 10 seconds,
-the link has not started, an older server without alerts, or the server
+raise does not get through (the server is not reached within 20 seconds,
+the link has not started, a server older than urgent alerts, or the server
 refuses it), the computer puts the same red card up in the chat itself, at
 once: "Not sent outside the app", with why. Telegram and the calls stay the
 server's.
 
 - The card is a placeholder message (`serverPlaceholder`, state `unsent`,
-  `UrgentAlertView.unsent`): never sent to the server, kept with the chat
-  across restarts. Its message id is `urgentAlertCardMessageId(chat, member,
-  requestId)`, the id the server gives its own card for the same request, so
-  the server's card replaces it in place when it arrives: one card, never
-  two. A server older than this change writes its card under another id; the
-  computer then takes its card down when the raise is answered.
-- While the server could not be reached, the computer raises the alert again
-  every 30 seconds with the same request id (never twice), across restarts
-  (`UrgentAlertOutbox`, kept in the client state `urgent-alerts.unsent`).
-  Once it gets through, Telegram and the calls follow as for any alert
-  (approved by the User, 2026-11-27).
-- Got it on that card before then keeps it from going out, and folds it
-  ("Got it in the app", "Not sent outside the app"). Got it pressed while a
-  raise is on its way closes the alert on the server as soon as it arrives.
-- A refusal (the chat or the member is gone) is not tried again; the card
-  says why.
+  `UrgentAlertView.unsent`): never sent to the server (nor moved there with
+  the chats), kept with the chat across restarts. Its message id is
+  `urgentAlertCardMessageId(chat, member, requestId)`, the id the server
+  gives its own card for the same request, so the server's card replaces it
+  in place when it arrives: one card, never two. A server older than this
+  change writes its card under another id; the computer then takes its card
+  down when the raise is answered.
+- What is not settled with the server is kept in the client state
+  `urgent-alerts.unsent` (`UrgentAlertOutbox`), across restarts, in stages:
+  waiting (raised again every 30 seconds with the same request id, so never
+  twice), reached (the server took it; let go when its card arrives through
+  the feed, `ServerChat` → `unsentAlertCards.serverMessageArrived`), closed
+  (she pressed Got it on this computer's card). Once it gets through,
+  Telegram and the calls follow as for any alert (approved by the User,
+  2026-11-27).
+- Got it on that card before then: it is never raised again, the member's
+  repeated call does not send it, and if a raise did reach the server after
+  all (an answer lost to a timeout, a raise on its way), the server's alert
+  is closed as soon as it is known (the answer, or its card in the feed),
+  tried again until the server confirms. The card folds ("Got it in the
+  app", "Not sent outside the app"). A card the server's took over sends Got
+  it there.
+- A refusal (a chat or member the server does not know yet, a chat that
+  would not take the card) is asked again 20 times, then the card says the
+  server did not take it and it is not raised any more.
 - The member's tool result says what happened: sent (Telegram, call), a card
   only because nothing is set up, or a card only because the server could
-  not take it.
+  not take it (and that it may have gone out when the server did not answer
+  in time).
 - A cloud machine has no screen of its own and reaches the User only through
   her server: it keeps raising the alert until the server takes it, and the
   card then reaches her through the server like every card. Its member hears
-  that nothing reached her yet.
+  that nothing may have reached her yet.
 - A running turn's older copy of the chat never brings the unsent card back
   over the server's (`mergeStoredChat`: a placeholder never wins over the
   server's copy of the same message, and `urgentAlert` is taken from the
