@@ -6,6 +6,7 @@ import { chatParticipants } from "../members/identity";
 import { deliversNow, memberDeliveryWay, participantTurnMode } from "../members/roleRuntime";
 import { mainSessionParticipantId } from "../../../../shared/mainSession";
 import { turnSegmentKey } from "../requests/delegationGroups";
+import { abortableWait } from "../runs/abortableWait";
 import { turnShown } from "../runs/runOwnerRecords";
 import { chainParticipantTurn, offersPromptSuggestionAfter, waitForParticipantTurnReservation } from "./turnOrder";
 import type { ClaudeWriteGate } from "./types";
@@ -31,7 +32,17 @@ interface HeldTurn {
   userFirst: boolean;
   running: boolean;
   priority?: TurnPriority;
+  /** A request from another member that may go out with the ones waiting
+   *  next to it (takeCombinableTurns). */
+  combinable?: { trigger: ChatMessage; chars: number };
+  /** Taken into the turn of the request before it: its reply answers it. */
+  combinedInto?: Promise<ChatMessage[]>;
+  /** Ends its wait once it is taken into another turn. */
+  wake?: () => void;
 }
+
+/** At most this many requests go out in one turn. */
+const COMBINED_REQUESTS_MAX = 8;
 
 function setOf<T>(map: Map<string, Set<T>>, key: string): Set<T> {
   let set = map.get(key);
@@ -40,6 +51,44 @@ function setOf<T>(map: Map<string, Set<T>>, key: string): Set<T> {
     map.set(key, set);
   }
   return set;
+}
+
+/** How a member's turn runs (runParticipantTurnSerialized). */
+interface SerializedTurnOptions {
+  continuation?: boolean;
+  warnings: string[];
+  promptConversation?: Conversation;
+  workspacePath?: string;
+  promptContextScope?: ChatPromptContextScope;
+  /** Messages outside the scope this turn reads too (preparePromptContextForRun). */
+  extraPromptContextMessageIds?: readonly string[];
+  participantRequestDepth?: number;
+  participantRequestBatchId?: string;
+  chainRootId?: string;
+  queuedBehindHandle?: string;
+  existingPendingMessage?: ChatMessage;
+  turnReservation?: ParticipantTurnReservation;
+  writeGate?: ClaudeWriteGate;
+  /** A turn of its own on the server, named after this run, even when its
+   *  trigger is a User's message to this member, whose own turn is over
+   *  (a permission approval's resume). */
+  ownServerTurn?: boolean;
+  /** A request from another member (participantRequests): it may go out
+   *  with the requests waiting next to it, all within `maxChars`. */
+  combine?: { chars: number; maxChars: number };
+  /** The requests that go out with this turn's trigger, taken here or by the
+   *  device that asked for this turn. */
+  combinedTriggers?: ChatMessage[];
+}
+
+/** A request taken into another's turn that did not answer it. */
+class NotAnsweredTogether extends Error {}
+
+/** The reply of the turn a request went out with, or a Stop of its own run first. */
+async function abortableReply(reply: Promise<ChatMessage[]>, signal: AbortSignal): Promise<ChatMessage[]> {
+  let messages: ChatMessage[] = [];
+  await abortableWait(reply.then((value) => { messages = value; }), signal);
+  return messages;
 }
 
 /** The order of one member's turns, and where each runs. */
@@ -59,6 +108,8 @@ export class TurnQueue {
   /** The run ids of member turns that run now (runParticipantTurnSerialized). */
   private readonly runningTurnRuns = new Map<string, Set<string>>();
   private readonly heldOf = new WeakMap<ParticipantTurnReservation, HeldTurn>();
+  /** Runs whose request a request's turn before it answered (takeAnsweredTogether). */
+  private readonly answeredTogether = new Set<string>();
 
   constructor(
     private readonly chat: Pick<
@@ -75,31 +126,45 @@ export class TurnQueue {
     runId: string,
     signal: AbortSignal | undefined,
     progress: ProgressCallback | undefined,
-    options: {
-      continuation?: boolean;
-      warnings: string[];
-      promptConversation?: Conversation;
-      workspacePath?: string;
-      promptContextScope?: ChatPromptContextScope;
-      /** Messages outside the scope this turn reads too (preparePromptContextForRun). */
-      extraPromptContextMessageIds?: readonly string[];
-      participantRequestDepth?: number;
-      participantRequestBatchId?: string;
-      chainRootId?: string;
-      queuedBehindHandle?: string;
-      existingPendingMessage?: ChatMessage;
-      turnReservation?: ParticipantTurnReservation;
-      writeGate?: ClaudeWriteGate;
-      /** A turn of its own on the server, named after this run, even when its
-       *  trigger is a User's message to this member, whose own turn is over
-       *  (a permission approval's resume). */
-      ownServerTurn?: boolean;
+    options: SerializedTurnOptions
+  ): Promise<ChatMessage[]> {
+    try {
+      return await this.runTurnSerialized(conversation, participant, triggerMessage, runId, signal, progress, options);
+    } catch (error) {
+      if (!(error instanceof NotAnsweredTogether)) throw error;
+      // Taken into another request's turn that did not answer it (that turn
+      // ended before it ran, or the member's device did not take it in): it
+      // runs on its own, as it would have.
+      const { combine: _combine, turnReservation: _reservation, ...own } = options;
+      return this.runTurnSerialized(conversation, participant, triggerMessage, runId, signal, progress, own);
     }
+  }
+
+  /** Whether this run's request was answered by the turn of a request
+   *  before it, which it went out with (asked once, after the run). */
+  takeAnsweredTogether(runId: string): boolean {
+    return this.answeredTogether.delete(runId);
+  }
+
+  private async runTurnSerialized(
+    conversation: Conversation,
+    participant: ChatParticipant,
+    triggerMessage: ChatMessage,
+    runId: string,
+    signal: AbortSignal | undefined,
+    progress: ProgressCallback | undefined,
+    options: SerializedTurnOptions
   ): Promise<ChatMessage[]> {
     const turnSegmentId = randomUUID();
     const liveTurnKey = turnSegmentKey(conversation.id, turnSegmentId);
     this.chat.delegation.liveTurnSegments.add(liveTurnKey);
     const reservation = options.turnReservation ?? this.reserveTurnFor(conversation, participant, triggerMessage);
+    if (options.combine) this.markCombinable(reservation, triggerMessage, options.combine.chars);
+    // The requests that go out with this one, and the end of this turn for
+    // them (its reply, or none when it did not run).
+    let combinedTriggers = options.combinedTriggers ?? [];
+    let settleCombined: ((messages: ChatMessage[]) => void) | undefined;
+    let answered: ChatMessage[] | undefined;
     const runKey = `${conversation.id}:${participant.id}`;
     // A request delivered now to a member here: a CLI that cannot take it in
     // the middle of a turn has its running turn cut now, and this turn runs
@@ -121,8 +186,24 @@ export class TurnQueue {
       if (turnController.signal.aborted) {
         throw new Error("Chat run cancelled.");
       }
+      const combinedInto = this.combinedInto(reservation);
+      if (combinedInto) {
+        // It went out with the request before it: that turn's reply answers
+        // it. Its place is given up now (what waits behind it still waits
+        // for that turn).
+        reservation.release();
+        const messages = await abortableReply(combinedInto, turnController.signal);
+        if (!messages[0]?.metadata?.combinedRequestMessageIds?.includes(triggerMessage.id)) throw new NotAnsweredTogether();
+        this.answeredTogether.add(runId);
+        return messages;
+      }
       setOf(this.runningTurnRuns, runKey).add(runId);
       runningHere = true;
+      if (options.combine && !options.combinedTriggers) {
+        const result = new Promise<ChatMessage[]>((resolve) => { settleCombined = resolve; });
+        combinedTriggers = this.takeCombinableTurns(reservation, conversation.id, participant.id, result, options.combine.maxChars);
+        if (combinedTriggers.length === 0) settleCombined = undefined;
+      }
       // The member's settings as they are when its turn starts, not when the
       // turn was asked for: a continuation waits for other members' turns,
       // and the User may change the member's model or permissions meanwhile,
@@ -166,7 +247,8 @@ export class TurnQueue {
           warnings: options.warnings,
           existingPendingMessage: options.existingPendingMessage,
           continuation: options.continuation,
-          turnSegmentId
+          turnSegmentId,
+          ...(combinedTriggers.length > 0 ? { combinedTriggerIds: combinedTriggers.map((message) => message.id) } : {})
         });
         this.chat.serverTurns.serverTurnOpens.delete(runId);
       } else {
@@ -175,6 +257,7 @@ export class TurnQueue {
           messages = await this.chat.participantTurn.runParticipantTurn(conversation, participant, triggerMessage, runId, turnController.signal, progress, {
             ...options,
             turnSegmentId,
+            combinedTriggers,
             queuedInCli: Boolean(reservation.behindMemberTurn),
             ...(delivery === "live" && participant.kind === "codex-cli" ? {
               // Codex steers its running turn with it; when it cannot, the
@@ -207,8 +290,11 @@ export class TurnQueue {
           this.chat.promptSuggestions.suggestions.replyFinished(conversation.id, participant.id, runId, source);
         }
       }
+      answered = messages;
       return messages;
     } finally {
+      // The requests that went out with it get its reply (none: they run on their own).
+      settleCombined?.(answered ?? []);
       if (runningHere) {
         this.runningTurnRuns.get(runKey)?.delete(runId);
         if (this.runningTurnRuns.get(runKey)?.size === 0) this.runningTurnRuns.delete(runKey);
@@ -331,8 +417,8 @@ export class TurnQueue {
       queued: chained.queued || (this.priorityTurns.get(key)?.size ?? 0) > 0,
       ...(chained.behindMemberTurn !== undefined ? { behindMemberTurn: chained.behindMemberTurn } : {}),
       wait: async () => {
-        await chained.wait();
-        if (ended || held.running) return;
+        if (!held.combinedInto) await Promise.race([chained.wait(), new Promise<void>((resolve) => { held.wake = resolve; })]);
+        if (ended || held.running || held.combinedInto) return;
         setOf(this.readyTurns, key).add(held);
         for (let first = this.blockingPriorityTurns(key, held); first.length > 0; first = this.blockingPriorityTurns(key, held)) {
           await Promise.all(first.map((turn) => turn.done));
@@ -365,6 +451,46 @@ export class TurnQueue {
    *  in the line has come (ready or running). */
   private userTurnsFirst(key: string, self: HeldTurn): HeldTurn[] {
     return [...(this.readyTurns.get(key) ?? []), ...(this.runningTurns.get(key) ?? [])].filter((turn) => turn !== self && turn.byUser);
+  }
+
+  /** A request from another member that waits for its turn and may go out
+   *  together with the requests waiting next to it, as the member's
+   *  dedicated CLI sends what was queued while it worked in one message. */
+  markCombinable(reservation: ParticipantTurnReservation, trigger: ChatMessage, chars: number): void {
+    const held = this.heldOf.get(reservation);
+    if (held && !held.running && !held.priority && held.mode === "exclusive") held.combinable = { trigger, chars };
+  }
+
+  /** The requests waiting right behind a request whose turn begins, taken
+   *  into it in the order they were made: up to the first turn that is not
+   *  such a request (the User's message, a resume, an operation), at most
+   *  COMBINED_REQUESTS_MAX, and only while all their text stays within
+   *  `maxChars` (one request's limit: Antigravity gets its prompt as an
+   *  argument). Each taken turn's wait ends; its reply is `result`'s. */
+  takeCombinableTurns(reservation: ParticipantTurnReservation, conversationId: string, participantId: string, result: Promise<ChatMessage[]>, maxChars: number): ChatMessage[] {
+    const lead = this.heldOf.get(reservation);
+    if (!lead?.combinable) return [];
+    const key = `${conversationId}:${participantId}`;
+    const taken: HeldTurn[] = [];
+    let chars = lead.combinable.chars;
+    for (const turn of this.pendingTurns.get(key) ?? []) {
+      if (turn === lead) continue;
+      if (!turn.combinable || turn.combinedInto || turn.running || taken.length + 1 >= COMBINED_REQUESTS_MAX) break;
+      if (chars + turn.combinable.chars > maxChars) break;
+      chars += turn.combinable.chars;
+      taken.push(turn);
+    }
+    for (const turn of taken) {
+      turn.combinedInto = result;
+      for (const map of [this.pendingTurns, this.readyTurns]) map.get(key)?.delete(turn);
+      turn.wake?.();
+    }
+    return taken.map((turn) => turn.combinable!.trigger);
+  }
+
+  /** The reply of the turn this one was taken into, if it was. */
+  combinedInto(reservation: ParticipantTurnReservation): Promise<ChatMessage[]> | undefined {
+    return this.heldOf.get(reservation)?.combinedInto;
   }
 
   private heldReservation(held: HeldTurn, reservation: ParticipantTurnReservation): ParticipantTurnReservation {

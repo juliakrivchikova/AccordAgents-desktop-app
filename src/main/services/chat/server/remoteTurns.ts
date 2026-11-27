@@ -1,5 +1,5 @@
 import type { CloudRunPreparationProgress, CloudRunSelection } from "../../../../shared/cloudRunPreparation";
-import { newOpId } from "../../chatServerOps";
+import { newOpId, serverSeqOf } from "../../chatServerOps";
 import type { HubTurn } from "../../../../shared/hubOps";
 import type { ChatMessage, ChatMessageMetadata, ChatParticipant, ChatProviderKind, Conversation } from "../../../../shared/types";
 import { chatParticipants } from "../members/identity";
@@ -75,7 +75,11 @@ export class RemoteTurns {
     opened: Extract<ServerTurnOpen, { kind: "remote" }>,
     signal: AbortSignal | undefined,
     progress: ProgressCallback | undefined,
-    options: { warnings: string[]; existingPendingMessage?: ChatMessage; continuation?: boolean; turnSegmentId: string }
+    options: {
+      warnings: string[]; existingPendingMessage?: ChatMessage; continuation?: boolean; turnSegmentId: string;
+      /** Requests that go out with the trigger (TurnQueue takeCombinableTurns). */
+      combinedTriggerIds?: string[];
+    }
   ): Promise<ChatMessage[]> {
     const link = this.chat.serverLink.current!;
     const serverRunId = opened.serverRunId;
@@ -211,11 +215,18 @@ export class RemoteTurns {
     // updated), when this device knows.
     const waitReason = participant.homeMachineId ? this.machineWaitReason?.(participant.homeMachineId) : undefined;
     await setOnBubble((metadata) => ({ ...metadata, machinePending: { machineName, at: new Date().toISOString(), ...(waitReason ? { reason: waitReason } : {}) } }));
+    // The requests that go out with it are on the server before the member's
+    // device reads them (Д13), as the message the turn answers is.
+    const combined = options.combinedTriggerIds ?? [];
+    for (const id of combined) {
+      const stored = conversation.messages.find((message) => message.id === id);
+      if (stored && serverSeqOf(stored) === undefined) await link.messageAccepted(conversation.id, id, signal);
+    }
     // Asked of the member's device (a User's message asked it already).
     const opId = newOpId();
     await link.enqueue([{ opId, kind: "turn.request", conversationId: conversation.id, runId: serverRunId, messageId: triggerMessage.id, participantId: participant.id,
       ...(bubble.metadata?.serverPlaceholder ? { pendingMessageId: bubble.id } : {}),
-      request: { kind: "turn", ...(options.continuation ? { continuation: true } : {}) } }]);
+      request: { kind: "turn", ...(options.continuation ? { continuation: true } : {}), ...(combined.length > 0 ? { combined } : {}) } }]);
     const asked = await link.opAnswered(opId);
     if (asked.status === "rejected") {
       // Refused by the server (a machine whose program cannot run its mode,

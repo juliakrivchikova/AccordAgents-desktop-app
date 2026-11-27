@@ -53,7 +53,10 @@ export class PromptContext {
      *  context like the scope's own. */
     extraMessageIds?: readonly string[],
     /** The message's nonce (ChatPromptBuildOptions.turnNonce). */
-    nonce: string = newMessageNonce()
+    nonce: string = newMessageNonce(),
+    /** Requests that go out with the trigger, given as requests, not as chat
+     *  (TurnQueue takeCombinableTurns). */
+    combinedMessageIds: readonly string[] = []
   ): Promise<PreparedPromptContext> {
     const settings = await this.deps.settings.getPublicSettings();
     const policy = scope.type === "thread"
@@ -71,8 +74,8 @@ export class PromptContext {
       const pointer = inFlight && !promptContextPointerAtOrAfter(committed, inFlight) ? inFlight : committed;
       const records = promptContextRecordsAfterPointer(promptConversation.messages, scope, pointer, triggerMessage.id);
       const takenBack = takenBackMessageIds([...promptConversation.messages, ...conversation.messages], participant.id);
-      const renderCandidates = records.filter((record) =>
-        record.message.id !== triggerMessage.id && !takenBack.has(record.message.id) && !record.message.metadata?.takenBack);
+      const renderCandidates = records.filter((record) => record.message.id !== triggerMessage.id &&
+        !combinedMessageIds.includes(record.message.id) && !takenBack.has(record.message.id) && !record.message.metadata?.takenBack);
       const resumedRenderCandidates = isResumingSession
         ? renderCandidates.filter((record) => !isParticipantOwnPromptContextMessage(record.message, participant.id))
         : renderCandidates;

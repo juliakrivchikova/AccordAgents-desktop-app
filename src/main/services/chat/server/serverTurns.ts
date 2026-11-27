@@ -326,9 +326,16 @@ export class ServerTurns {
         return true;
       });
       if (!stillMember) return false;
+      // Requests that waited for the member and go out with this one, as the
+      // device that asked put them together (TurnQueue takeCombinableTurns);
+      // one not here is not answered by this reply, and runs on its own there.
+      const combinedTriggers = Array.isArray(request.combined)
+        ? request.combined.flatMap((id) => chat.messages.filter((item) => item.id === id && item.metadata?.participantRequest))
+        : [];
       await this.chat.participantBatch.runParticipantBatch(chat, [participant], message, runId, controller.signal, this.deps.onReviewProgress, warnings, {
         targetRunIds: new Map([[participant.id, runId]]),
-        ...(turn.pendingMessageId ? { pendingMessageIds: new Map([[participant.id, turn.pendingMessageId]]) } : {})
+        ...(turn.pendingMessageId ? { pendingMessageIds: new Map([[participant.id, turn.pendingMessageId]]) } : {}),
+        ...(combinedTriggers.length > 0 ? { combinedTriggers } : {})
       });
     } catch (error) {
       if (!controller.signal.aborted) {

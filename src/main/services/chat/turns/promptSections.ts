@@ -86,6 +86,13 @@ export function triggerPromptText(participant: ChatParticipant, message: ChatMes
   return [`<<<EVENT ${nonce}>>>`, text, `<<<END EVENT ${nonce}>>>`].join("\n");
 }
 
+/** Said with requests from other members that waited for the member while
+ *  it was busy and go out together in one message (TurnQueue
+ *  takeCombinableTurns), as its dedicated CLI sends what was queued. */
+export function combinedRequestsNote(count: number): string {
+  return `These ${count} requests waited for you while you were busy and reach you together, each in its own REQUEST block, in the order they were made. Answer every one of them in this reply: it goes back to each member who asked as its answer.`;
+}
+
 /** The app's own notes in one message, between markers with the message's
  *  nonce (buildPromptParts); nothing when there are none. */
 export function appNotesBlock(nonce: string, notes: readonly string[]): string {

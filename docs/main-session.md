@@ -147,6 +147,30 @@ verbatim there). Modelled on T3 Code (`~/reference/t3code`,
   on a machine gets the same there (its device orders its turns). The tool's
   result says per target which way it went (`delivery`: `started`,
   `into-running-turn`, `interrupted-and-restarted`, `after-operation`).
+- **Requests that piled up for a busy member go out in one turn** (the User,
+  2026-11-27), as each dedicated CLI sends what was queued while it worked:
+  Claude Code hands every queued message to the next step together, Codex
+  merges the messages it could not steer in into one next turn, Antigravity
+  holds follow-ups until the turn ends and sends them together. When the
+  member frees up, the request whose turn begins takes the requests from
+  other members waiting right behind it (`TurnQueue.takeCombinableTurns`):
+  each is its own REQUEST block, in the order they were made, with one note
+  that they came together and that the reply goes back to each requester.
+  The reply (in the first request's thread) is every one's answer: each item
+  ends as the first one's does, with the same reply (after an approval or a
+  compaction of the member's own as well), and each requester is resumed
+  with it, reading it even outside its own thread. Not taken: the User's own
+  message (a request behind it waits for the turn after it; a Claude Code
+  member's CLI takes her messages itself), a request delivered now, an
+  inline request (its requester's Stop stops it), a resume or an operation;
+  at most 8 requests, and only while their text stays within one request's
+  limit (Antigravity gets its prompt as an argument). A member on a machine
+  gets them in one turn too: the asking device names them in the turn's
+  request (`combined`) and the machine's reply lists the ones it answered
+  (`combinedRequestMessageIds`); one it did not answer (an older machine
+  program) runs on its own after it, so nothing is lost. A Stop of one
+  request that went out with others ends only that request; a Stop of the
+  reply ends all of them.
 - **The Chat Assistant and the Workflow Manager role are not in new chats.**
   Chats made before stay exactly as they are (with their Assistant).
 

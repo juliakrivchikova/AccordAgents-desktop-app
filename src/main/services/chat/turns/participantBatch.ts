@@ -39,6 +39,9 @@ export class ParticipantBatch {
        *  message id the desktop created, so both copies name the same bubble. */
       pendingMessageIds?: ReadonlyMap<string, string>;
       onTargetRunBegun?: (participantId: string, runId: string) => Promise<void> | void;
+      /** Requests that go out with the trigger, put together by the device
+       *  that asked for this turn (TurnQueue takeCombinableTurns). */
+      combinedTriggers?: ChatMessage[];
     } = {}
   ): Promise<void> {
     if (conversation.metadata.archived === true) throw new Error("Unarchive the chat before starting a member.");
@@ -212,7 +215,8 @@ export class ParticipantBatch {
             promptContextScope: promptContextScopeForTrigger(triggerMessage),
             existingPendingMessage: pendingMessage,
             turnReservation,
-            writeGate: writeGates.get(participant.id)
+            writeGate: writeGates.get(participant.id),
+            ...(options.combinedTriggers ? { combinedTriggers: options.combinedTriggers } : {})
           });
           if (serverTurn.kind === "remote") {
             // The member's own device wrote its reply and ran what follows it.

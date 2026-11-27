@@ -758,7 +758,9 @@ export function fromServer(conversationId: string, deviceId: string, effect: Hub
 /** A member's device takes a turn asked on the server, writes its reply and
  *  ends the turn there, as the feed brings it to this device. */
 export async function memberDeviceAnswers(service: ChatService, request: Extract<HubOp, { kind: "turn.request" }>, options: {
-  deviceId?: string; content?: string; participant: ChatParticipant; contextUsage?: Record<string, unknown>; replyId?: string
+  deviceId?: string; content?: string; participant: ChatParticipant; contextUsage?: Record<string, unknown>; replyId?: string;
+  /** More on the reply, as the member's device writes it. */
+  metadata?: ChatMessage["metadata"];
 }): Promise<ChatMessage> {
   const deviceId = options.deviceId ?? "machine-device";
   const base: HubTurn = { runId: request.runId, conversationId: request.conversationId, messageId: request.messageId, participantId: request.participantId,
@@ -766,7 +768,7 @@ export async function memberDeviceAnswers(service: ChatService, request: Extract
   const reply: ChatMessage = {
     ...pendingParticipantMessage(options.participant, options.replyId ?? request.pendingMessageId ?? `reply-${request.runId}`, request.runId),
     status: "done", content: options.content ?? "MACHINE_REPLY",
-    metadata: { runId: request.runId, sourceMessageId: request.messageId, parentMessageId: request.messageId, serverSeq: 20_000 + feedSeq, serverWriter: deviceId }
+    metadata: { runId: request.runId, sourceMessageId: request.messageId, parentMessageId: request.messageId, serverSeq: 20_000 + feedSeq, serverWriter: deviceId, ...options.metadata }
   };
   await service.applyServerEntries([fromServer(request.conversationId, deviceId, { kind: "turn.claim", turn: base })]);
   await service.applyServerEntries([fromServer(request.conversationId, deviceId, { kind: "message.create", message: reply })]);

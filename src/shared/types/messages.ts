@@ -156,6 +156,11 @@ export interface ChatMessageMetadata {
   participantRequestDepth?: number;
   participantRequestBatchId?: string;
   participantRequestChainRootId?: string;
+  /** A reply to requests from other members that waited for the member
+   *  while it was busy and went out with its trigger in one turn: their
+   *  request messages' ids (the trigger's own is sourceMessageId). Each of
+   *  them is answered by this reply. */
+  combinedRequestMessageIds?: string[];
   nativeCommand?: {
     name: "goal";
     objective: string;

@@ -16,6 +16,7 @@ import { participantForMentionHandle } from "../choices/mentions";
 import { PARTICIPANT_REQUEST_CUT_BY_SEND_NOW, PARTICIPANT_REQUEST_INTERRUPTED_BEFORE_COMPLETION, PARTICIPANT_REQUEST_STOPPED_BY_USER } from "../constants";
 import { chatParticipants, participantForRun } from "../members/identity";
 import { memberDeliveryWay } from "../members/roleRuntime";
+import { abortableWait } from "../runs/abortableWait";
 import {
   awaitParticipantRequestRunner, formatParticipantRequestMessage, isOpenParticipantRequestStatus, normalizeParticipantRequest,
   participantRequestBatchForTool, participantRequestFailedToolResult, participantRequestLimitError, participantRequestSummary,
@@ -508,8 +509,20 @@ export class ParticipantRequests {
           warnings,
           participantRequestDepth: depth,
           participantRequestBatchId: batch.id,
-          chainRootId: batch.chainRootId
+          chainRootId: batch.chainRootId,
+          // Waiting for a busy member, it goes out with the requests waiting
+          // next to it in one turn: not one delivered now (it does not wait),
+          // nor one its requester's turn waits for (that turn's Stop stops it).
+          ...(item.deliver !== "now" && !item.replyMessageId && !inlineParentSignal ? { combine: { chars: item.prompt.length, maxChars: await this.chatParticipantRequestPromptMaxChars() } } : {})
         });
+        if (this.chat.turnQueue.takeAnsweredTogether(targetRunId)) {
+          // Answered by the turn of a request it went out with: it ends as
+          // that request does, with its reply.
+          const settled = await this.settleAnsweredTogether(conversation, requestMessageId, target, messages[0], targetController.signal);
+          const answer = settled?.replyMessageId ? conversation.messages.find((message) => message.id === settled.replyMessageId) : undefined;
+          replies.push({ targetHandle: target.handle, messageId: settled?.replyMessageId, content: answer ? chatMessageMemberText(answer) : undefined, error: settled?.error });
+          return;
+        }
         let reply = messages[0];
         // A reply that asked to compact the member's context is not its
         // answer yet: the one it goes on to is (continueAfterSelfCompaction).
@@ -616,6 +629,51 @@ export class ParticipantRequests {
       };
     })) ?? batch;
     return { batch: updatedBatch, replies };
+  }
+
+  /** A request answered by the turn of a request before it, which it went
+   *  out with (TurnQueue takeCombinableTurns): it ends as that request's item
+   *  for the member ends (answered, failed, interrupted), with the same reply,
+   *  once that one has (after an approval or the member's own compaction the
+   *  reply may come later). Not when its own item was closed meanwhile (its
+   *  Stop, a quit). The item it ended with. */
+  private async settleAnsweredTogether(
+    conversation: Conversation,
+    requestMessageId: string,
+    target: ChatParticipant,
+    reply: ChatMessage | undefined,
+    signal: AbortSignal
+  ): Promise<ChatParticipantRequestItem | undefined> {
+    const itemOf = (messageId: string | undefined) => conversation.messages.find((message) => message.id === messageId)?.metadata?.participantRequest?.items
+      .find((item) => item.targetParticipantId === target.id);
+    for (let delayMs = 100; ; delayMs = Math.min(delayMs * 2, 5_000)) {
+      let ended: ChatParticipantRequestItem | undefined;
+      let closed = false;
+      await this.chat.store.withChatMutation(conversation, async () => {
+        const own = itemOf(requestMessageId);
+        if (!own || !isOpenParticipantRequestStatus(own.status)) {
+          closed = true;
+          ended = own;
+          return;
+        }
+        const lead = itemOf(reply?.metadata?.sourceMessageId);
+        // Its request gone (removed with its message): the reply answers it.
+        const outcome = lead
+          ? (isOpenParticipantRequestStatus(lead.status) ? undefined : { status: lead.status, replyMessageId: lead.replyMessageId, error: lead.error })
+          : { status: reply?.status === "error" ? "failed" as const : "answered" as const, replyMessageId: reply?.id, error: reply?.status === "error" ? reply.content : undefined };
+        if (!outcome) return;
+        const now = new Date().toISOString();
+        updateParticipantRequestBatch(conversation, requestMessageId, (current) => ({
+          ...current,
+          items: current.items.map((candidate) => candidate.targetParticipantId === target.id ? { ...candidate, ...outcome, updatedAt: now } : candidate),
+          updatedAt: now
+        }));
+        ended = itemOf(requestMessageId);
+        this.chat.store.queueSnapshot(conversation);
+      });
+      if (ended || closed) return ended;
+      await abortableWait(new Promise<void>((resolve) => setTimeout(resolve, delayMs)), signal);
+    }
   }
 
   /** Background request: once every target is done, the requester gets a

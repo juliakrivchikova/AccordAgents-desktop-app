@@ -103,6 +103,8 @@ export class ParticipantTurn {
       /** A request delivered now to a Codex member: steered into its running
        *  turn (CliAgentRunOptions.steerIntoRunningTurn). */
       steerIntoRunningTurn?: (outcome: "steered" | "not-steered") => void;
+      /** Requests that go out with the trigger (TurnQueue takeCombinableTurns). */
+      combinedTriggers?: ChatMessage[];
     }
   ): Promise<ChatMessage[]> {
     this.chat.host.assertOwnsParticipant(participant);
@@ -165,6 +167,7 @@ export class ParticipantTurn {
     const sharedClaudeTurn = participantTurnMode(participant, triggerMessage, mainSessionParticipantId(conversation.metadata) ?? "") === "shared";
     // One nonce for everything this message carries (buildPromptParts).
     const turnNonce = newMessageNonce();
+    const combinedRequestMessageIds = options.combinedTriggers?.length ? options.combinedTriggers.map((message) => message.id) : undefined;
     const preparedPromptContext = await this.chat.promptContext.preparePromptContextForRun(
       conversation,
       promptConversation,
@@ -174,7 +177,8 @@ export class ParticipantTurn {
       isResumingSession,
       sharedClaudeTurn ? undefined : runId,
       options.extraPromptContextMessageIds,
-      turnNonce
+      turnNonce,
+      combinedRequestMessageIds
     );
     const agentMode = agentModeForSession(session, participant);
     // A once-only approval is used by one turn: one that another turn of the
@@ -265,7 +269,9 @@ export class ParticipantTurn {
       : isResumingSession ? this.chat.memberSessions.accessChangedNote(conversation, participant, session, access) : undefined;
     // The message's pictures, as the CLI's own image input.
     const turnImages = await this.chat.attachments.turnImagesForCli(conversation.id, promptTriggerMessage, participant.kind, turnNonce);
-    const imageOptions = { unavailableImagesNote: turnImages.unavailableNote, picturesNote: turnImages.picturesNote, imageCount: turnImages.images?.items.length ?? 0 };
+    const imageOptions = { unavailableImagesNote: turnImages.unavailableNote, picturesNote: turnImages.picturesNote, imageCount: turnImages.images?.items.length ?? 0,
+      combinedTriggers: options.combinedTriggers };
+    if (combinedRequestMessageIds) void this.deps.debugLogs.write("chat.requests.combined", { conversationId: conversation.id, participantId: participant.id, runId, triggerMessageId: triggerMessage.id, combinedRequestMessageIds });
     const primary = this.chat.turnPrompt.buildPromptParts(promptConversation, participant, session, promptTriggerMessage, workspacePath, Boolean(options.continuation), {
       includeRoleInstructions: primaryIncludeRoleInstructions,
       turnNonce,
@@ -333,7 +339,8 @@ export class ParticipantTurn {
           turnSegmentId: options.turnSegmentId,
           participantRequestDepth: options.participantRequestDepth ?? 0,
           participantRequestBatchId: options.participantRequestBatchId,
-          chainRootId: options.chainRootId
+          chainRootId: options.chainRootId,
+          combinedRequestMessageIds
         },
         { keepQueued: Boolean(options.queuedInCli) }
       );
@@ -354,6 +361,7 @@ export class ParticipantTurn {
           participantRequestDepth: options.participantRequestDepth ?? 0,
           participantRequestBatchId: options.participantRequestBatchId,
           participantRequestChainRootId: options.chainRootId,
+          combinedRequestMessageIds,
           queuedBehind: options.queuedBehindHandle ? { handle: options.queuedBehindHandle } : undefined,
           turnQueued: options.queuedBehindHandle ? true : undefined
         },

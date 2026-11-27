@@ -163,9 +163,12 @@ export class RequesterResumes {
         await this.chat.activeRuns.beginChatRun(conversation, resumeRunId, [requester.id]);
         // The replies of the other tasks are not in the first one's thread:
         // the turn reads them as well, and what a member wrote before it went
-        // on after a compaction of its own.
+        // on after a compaction of its own, and a reply in another request's
+        // thread (it answered requests that went out together in one turn).
         const compacted = group.some((entry) => entry.batch.items.some((item) => item.earlierReplyMessageIds?.length));
-        const extraPromptContextMessageIds = group.length > 1 || compacted
+        const answeredElsewhere = group.some((entry) => entry.batch.items.some((item) => item.replyMessageId &&
+          conversation.messages.find((message) => message.id === item.replyMessageId)?.metadata?.combinedRequestMessageIds?.includes(entry.message.id)));
+        const extraPromptContextMessageIds = group.length > 1 || compacted || answeredElsewhere
           ? group.flatMap((entry) => entry.batch.items.flatMap((item) => [...(item.earlierReplyMessageIds ?? []), ...(item.replyMessageId ? [item.replyMessageId] : [])]))
           : undefined;
         if (group.length > 1) {

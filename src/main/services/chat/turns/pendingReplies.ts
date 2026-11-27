@@ -47,6 +47,8 @@ export class PendingReplies {
       participantRequestDepth: number;
       participantRequestBatchId?: string;
       chainRootId?: string;
+      /** Requests that went out with the trigger (TurnQueue takeCombinableTurns). */
+      combinedRequestMessageIds?: string[];
     },
     queue: { keepQueued: boolean } = { keepQueued: false }
   ): Promise<ChatMessage> {
@@ -68,7 +70,8 @@ export class PendingReplies {
           : {}),
         ...(inferenceContext.chainRootId !== undefined
           ? { participantRequestChainRootId: inferenceContext.chainRootId }
-          : {})
+          : {}),
+        ...(inferenceContext.combinedRequestMessageIds?.length ? { combinedRequestMessageIds: inferenceContext.combinedRequestMessageIds } : {})
       };
       if (!queue.keepQueued) {
         if (metadata.queuedBehind || metadata.turnQueued) {

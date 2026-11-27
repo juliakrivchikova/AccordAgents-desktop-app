@@ -7,7 +7,7 @@ import { isAdministratorSession } from "../members/identity";
 import { memoryIndexKey } from "../members/roleRuntime";
 import {
   ANTIGRAVITY_READ_ONLY_NOTE, antigravityAccessLines, antigravityReadOnly, appNotesBlock, chatAssistantPermissionPolicy,
-  compactionAccessLines, handleWritingLines, idleLargeMembersNote, initialAutoTitlePromptSection, newMessageNonce, notAsCliCommand,
+  combinedRequestsNote, compactionAccessLines, handleWritingLines, idleLargeMembersNote, initialAutoTitlePromptSection, newMessageNonce, notAsCliCommand,
   participantPermissionPolicy, participantRepositoryLine, repoFileMentionsPromptSection, scheduledTaskAccessLines,
   skillMentionsPromptSection, stagedWorkCompactionNote, triggerPromptText
 } from "./promptSections";
@@ -36,6 +36,8 @@ interface ChatPromptSectionSizes {
   memory: number;
   /** Pictures given to the CLI as images (not counted in total). */
   images: number;
+  /** Requests that went out with the trigger (TurnQueue takeCombinableTurns). */
+  combinedRequests: number;
   total: number;
 }
 
@@ -62,6 +64,9 @@ interface ChatPromptBuildOptions {
   picturesNote?: string;
   /** How many pictures go to the CLI as images (for the size log). */
   imageCount?: number;
+  /** Requests from other members that waited for the member and go out with
+   *  the trigger, in the order they were made. */
+  combinedTriggers?: readonly ChatMessage[];
 }
 
 /** Goes with a resume that brings the replies of the members it asked. */
@@ -121,7 +126,9 @@ export class TurnPrompt {
     const closedChoicesNote = this.closedChoicesPromptSection(conversation, participant, triggerMessage);
     const idleLargeNote = idleLargeMembersNote(conversation, participant, options.permissions);
     const autoTitleBlock = initialAutoTitlePromptSection(conversation, participant, triggerMessage);
-    const triggerBlock = triggerPromptText(participant, triggerMessage, nonce);
+    const combined = options.combinedTriggers ?? [];
+    const triggerBlock = [triggerMessage, ...combined].map((message) => triggerPromptText(participant, message, nonce)).join("\n\n");
+    const combinedNote = combined.length > 0 ? combinedRequestsNote(combined.length + 1) : "";
     const skillsBlock = skillMentionsPromptSection(triggerMessage, participant.kind);
     const mentionsBlock = repoFileMentionsPromptSection(
       triggerMessage,
@@ -159,7 +166,7 @@ export class TurnPrompt {
       appNotesBlock(nonce, [identityNote, staticEnvelope, accessNote, moveNote]),
       memoryBlock,
       promptContextBlock,
-      appNotesBlock(nonce, [closedChoicesNote, idleLargeNote, autoTitleBlock]),
+      appNotesBlock(nonce, [closedChoicesNote, idleLargeNote, autoTitleBlock, combinedNote]),
       triggerBlock,
       appNotesBlock(nonce, [skillsBlock, mentionsBlock, unavailableImagesBlock, readOnlyNote, continuationNote, stagesNote])
     ].filter(Boolean);
@@ -184,6 +191,7 @@ export class TurnPrompt {
         autoTitle: autoTitleBlock.length,
         memory: memoryIndexBlock.length,
         images: options.imageCount ?? 0,
+        combinedRequests: combined.length,
         total: prompt.length
       }
     };
