@@ -240,3 +240,55 @@ test("on a machine, a member's own compaction whose claim the server refused giv
   await waitFor(() => chat.order.includes("compact codex-admin"), 5_000);
   assert.equal(link.ops.filter((op) => op.kind === "turn.claim" && op.runId === turn.runId).length, 2);
 });
+
+test("each turn a member goes on in after compacting itself quotes that compaction's own instructions, right after it, never an older one late", async () => {
+  // As seen in the User's chat on 2026-11-27 (before this change): the turn
+  // going on after a first compaction waited behind requests and came only
+  // after a second compaction was asked, quoting the first one's instructions.
+  const askers = ["asker1", "asker2"].map((id) => chatParticipant({ id, handle: id, ...ASKS }));
+  let releaseFirst!: () => void;
+  const first = new Promise<void>((resolve) => { releaseFirst = resolve; });
+  const asked: Record<string, any> = {};
+  const chat = selfCompactingChat({
+    participant: ALLOWED,
+    others: askers,
+    turn: async ({ participantId, prompt, actor, service, call }) => {
+      if (participantId.startsWith("asker")) {
+        if (call === 1) asked[participantId] = await service.requestParticipantsFromTool(actor, { requests: [{ target: "admin", prompt: `Question from ${participantId}` }] });
+        return call === 1 ? "Asked admin." : "Thanks.";
+      }
+      if (call === 1) {
+        await first;
+        await service.requestSelfCompactionFromTool(actor, { instructions: "Keep the FIRST plan." });
+        return "Stage one done.";
+      }
+      if (/Question from asker1/.test(prompt)) {
+        // An hour later, as in the User's chat (past the compaction cooldown).
+        chat.storage.current.metadata.participantSelfCompactionRequestedAtByParticipantId = { "codex-admin": new Date(Date.now() - 3_600_000).toISOString() };
+        const second = await service.requestSelfCompactionFromTool(actor, { instructions: "Keep the SECOND plan." });
+        assert.equal(second.status, "queued", JSON.stringify(second));
+        return "Answered asker1.";
+      }
+      return "Went on.";
+    }
+  });
+  await chat.service.sendMessage({ conversationId: chat.conversation.id, runId: "user-run", content: "@admin do the long task" });
+  await waitFor(() => chat.prompts.some((item) => item.participantId === "codex-admin"), 5_000);
+  for (const asker of ["asker1", "asker2"]) {
+    await chat.service.sendMessage({ conversationId: chat.conversation.id, runId: `run-${asker}`, content: `@${asker} ask admin` });
+    await waitFor(() => asked[asker]?.status === "running", 5_000);
+  }
+  releaseFirst();
+  await waitFor(() => chat.order.filter((entry) => entry === "compact codex-admin").length === 2 &&
+    chat.prompts.filter((item) => item.participantId === "codex-admin" && /SECOND plan/.test(item.prompt)).length === 1, 10_000);
+  const admin = chat.prompts.filter((item) => item.participantId === "codex-admin").map((item) => item.prompt);
+  const goOnFirst = admin.findIndex((prompt) => /FIRST plan/.test(prompt));
+  const goOnSecond = admin.findIndex((prompt) => /SECOND plan/.test(prompt));
+  const request1 = admin.findIndex((prompt) => /Question from asker1/.test(prompt));
+  assert.equal(goOnFirst, 1, "right after the first compaction, before the requests that waited");
+  assert.ok(request1 > goOnFirst);
+  assert.equal(goOnSecond, request1 + 1, "right after the second compaction, before the request still waiting");
+  assert.doesNotMatch(admin[goOnSecond], /FIRST plan/);
+  assert.equal(admin.filter((prompt) => /FIRST plan/.test(prompt)).length, 1, "the first one's instructions are quoted once, in its own turn");
+  await waitFor(() => chat.storage.current.metadata.running === false, 10_000);
+});
