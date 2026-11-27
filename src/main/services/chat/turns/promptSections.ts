@@ -298,16 +298,16 @@ export function compactionAccessLines(permissions: ChatAgentPermissions, isMainS
   switch (normalizeChatParticipantRequestPermission(normalizeChatAgentPermissions(permissions).requestCompaction)) {
     case "allow":
       return [
-        "Compaction: compact your own context yourself with `app_chat_request_compaction`; User is not asked. Your reply ends with the call: the compaction runs next, before anything waiting for you, then the app calls you again to go on, so nobody has to call you.",
-        "- Do it when most of what your context holds is not needed for what comes next and a short summary carries the rest: before you start a new task or the next stage of a big task, after an investigation or approach that led nowhere, once large outputs (logs, test runs, file dumps, screenshots) have served their purpose, when you switch to unrelated work.",
-        "- Not because of context size alone, not while details in your context are still needed, and not when nothing is left to do or you only wait for someone.",
+        "Compaction: compact your own context yourself with `app_chat_request_compaction` between big stages of your work, each time one is finished; User is not asked. Your reply ends with the call: the compaction runs next, before anything waiting for you, then the app calls you again to go on, so nobody has to call you.",
+        "- The moments: your task is done and the next one starts; implementation is done and QA starts; QA or review is done and the report or the next fix starts; an investigation ended, found or led nowhere. At each of them compact before you go on: your `instructions` carry what the next stage needs.",
+        "- Never in the middle of a stage, not because of context size alone, and not when you only wait for someone.",
         "- Say in the reply what is done and what comes next. Give `instructions` naming what the summary must keep: the goal and User's decisions (a task that has just arrived, in full), branch and changed files, what is done and checked, open findings, the next step. Then end the reply: no more tool calls.",
         "- `workDone: true` only when nothing is left of your task: you are not called again; what waits for you runs next.",
         ...(isMainSession ? memberCompactionAccessLines() : [])
       ];
     case "ask":
       return [
-        "Compaction: `app_chat_request_compaction` asks User on a card to compact your own context after your reply; ask only when it would materially help the work that comes next, naming in `instructions` what the summary must keep, then end the reply. Once she answers the app calls you again to go on, with your context compacted, or as it is if she declines; `workDone: true` only if nothing of your task is left."
+        "Compaction: `app_chat_request_compaction` asks User on a card to compact your context after your reply. Ask between big finished stages (task done, implementation done and QA next, review done, investigation over), never mid-stage or for size alone; `instructions` name what the summary keeps; then end the reply. Once she answers the app calls you again to go on; `workDone: true` only if nothing of your task is left."
       ];
     default:
       return [];

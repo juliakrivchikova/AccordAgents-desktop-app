@@ -645,8 +645,16 @@ test("a member's access says when to compact: on its own when it may, on a card 
   const lines = (right: "allow" | "ask" | "deny"): string =>
     compactionAccessLines(normalizeChatAgentPermissions({ ...defaultChatAgentPermissions(), requestCompaction: right })).join("\n");
   assert.match(lines("allow"), /User is not asked\..*the app calls you again/s);
-  assert.match(lines("allow"), /before you start a new task or the next stage of a big task/);
+  // Between big finished stages, with the moments named; never mid-stage
+  // or for size alone (the User, 2026-11-27), and never a figure of how full
+  // the context is.
+  assert.match(lines("allow"), /between big stages of your work, each time one is finished/);
+  assert.match(lines("allow"), /your task is done and the next one starts; implementation is done and QA starts; QA or review is done and the report or the next fix starts; an investigation ended/);
+  assert.match(lines("allow"), /Never in the middle of a stage, not because of context size alone/);
+  assert.match(lines("allow"), /Say in the reply what is done and what comes next\..*Then end the reply/s);
   assert.match(lines("ask"), /asks User on a card/);
+  assert.match(lines("ask"), /Ask between big finished stages .*never mid-stage or for size alone/);
+  assert.doesNotMatch(lines("allow") + lines("ask"), /\d+ ?%|percent|how full|tokens/i);
   assert.equal(lines("deny"), "");
 });
 
