@@ -8,7 +8,7 @@ import {
   APP_MEMORY_WRITE_TOOL
 } from "../../shared/appMcpToolContracts";
 import {
-  MEMORY_INDEX_MAX_CHARS,
+  MEMORY_INDEX_MAX_BYTES,
   MEMORY_PICK_SHOWN_MAX,
   MEMORY_PICK_TEXT_MAX_CHARS,
   isUnknownMemoryAction,
@@ -93,9 +93,10 @@ export async function callMemoryTool(access: MemoryServerAccess | undefined, act
     }
     case APP_MEMORY_WRITE_TOOL: {
       const project = typeof args.project === "string" && args.project.trim() ? args.project : undefined;
+      const requestId = typeof args.requestId === "string" && args.requestId ? args.requestId : randomUUID();
       const result = await access.memory<MemoryNote>({
         action: "write", ...member,
-        requestId: typeof args.requestId === "string" && args.requestId ? args.requestId : randomUUID(),
+        requestId,
         ...(typeof args.noteId === "string" && args.noteId ? { noteId: args.noteId } : {}),
         ...(typeof args.baseVersion === "number" ? { baseVersion: args.baseVersion } : {}),
         ...(typeof args.kind === "string" ? { kind: args.kind as never } : {}),
@@ -108,6 +109,10 @@ export async function callMemoryTool(access: MemoryServerAccess | undefined, act
         ...(typeof args.awaitingRepository === "boolean" ? { awaitingRepository: args.awaitingRepository } : {}),
         ...(args.verified === true ? { verified: true } : {})
       });
+      // Its answer was lost: the same requestId sent again changes nothing
+      // twice and is answered as done if it reached the server (a moved note
+      // is no longer found by reading it).
+      if (!result.ok && result.error.code === "server_unavailable") return lostAnswer(result, requestId);
       if (!project) return result;
       // A server older than this app does not know `project` (it updates
       // itself soon after the app): it keeps the note under this chat's
@@ -124,15 +129,19 @@ export async function callMemoryTool(access: MemoryServerAccess | undefined, act
       }
       return { ...result, note: `Kept for the project ${kept}: members see it in that project's chats only, so it is not found from a chat of another project.` };
     }
-    case APP_MEMORY_ARCHIVE_TOOL:
-      return access.memory({
-        action: "archive", ...member,
-        noteId: typeof args.noteId === "string" ? args.noteId : "",
-        requestId: typeof args.requestId === "string" && args.requestId ? args.requestId : randomUUID()
-      });
+    case APP_MEMORY_ARCHIVE_TOOL: {
+      const requestId = typeof args.requestId === "string" && args.requestId ? args.requestId : randomUUID();
+      const result = await access.memory({ action: "archive", ...member, noteId: typeof args.noteId === "string" ? args.noteId : "", requestId });
+      return !result.ok && result.error.code === "server_unavailable" ? lostAnswer(result, requestId) : result;
+    }
     default:
       return { ok: false, error: { code: "invalid_request", message: `Unknown memory tool: ${toolName}.` } };
   }
+}
+
+/** A change whose answer did not come: how to send it again safely. */
+function lostAnswer(result: MemoryResult<unknown>, requestId: string): MemoryResult<unknown> & { requestId: string; note: string } {
+  return { ...result, requestId, note: `To try again, send the same call with requestId "${requestId}": a change that did reach the server is not made twice, and is answered as done.` };
 }
 
 function unavailable(): MemoryResult<never> {
@@ -183,7 +192,7 @@ export async function memoryIndex(
   }
   const picked = result.value.picks ? ["- Notes that fit a message also come with it, picked by meaning."] : [];
   // An older server leaves the list out while it picks notes for each message.
-  if (result.value.picks && !result.value.notes.length) {
+  if (result.value.picks && !result.value.notes.length && !result.value.full) {
     const counted = result.value.more > 0 ? ` (${result.value.more} you can see)` : "";
     return {
       text: [header, `- Notes that fit a message come with it, picked by meaning; find others${counted} with app_memory_search.`, ...tagsLine(result.value.tags)].join("\n"),
@@ -199,9 +208,10 @@ export async function memoryIndex(
   let size = 0;
   for (const note of result.value.notes) {
     const line = listLine(note);
-    if (size + line.length + 1 > MEMORY_INDEX_MAX_CHARS) break;
+    const bytes = Buffer.byteLength(line) + 1;
+    if (size + bytes > MEMORY_INDEX_MAX_BYTES) break;
     lines.push(line);
-    size += line.length + 1;
+    size += bytes;
   }
   const left = result.value.more + result.value.notes.length - lines.length;
   return {

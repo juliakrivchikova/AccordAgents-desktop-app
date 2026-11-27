@@ -250,6 +250,8 @@ test("members' memory: every member is told how to keep it, a new session's prom
   assert.doesNotMatch(roles[0], /in addition to what your CLI keeps itself/);
   // Whoever merges or releases work updates the status notes it ships.
   assert.match(roles[0], /When you merge or release work, update the status notes of all it ships, whoever wrote them: merged or released with the version, or archived once nothing is open/);
+  // A status of repository work is kept where whoever releases it sees it.
+  assert.match(roles[0], /scope project for repository work, so whoever releases it sees it/);
   // A note about one project is never global.
   assert.match(roles[0], /knowledge about one project is never global: file it under that project, naming it with `project`/);
 

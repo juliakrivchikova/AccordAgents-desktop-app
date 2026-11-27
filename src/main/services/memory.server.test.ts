@@ -695,8 +695,13 @@ test("a note about another of the User's projects is filed under it, by name or 
   assert.equal(ok<MemoryNote>(await write(CHAT_A, { title: "Empty name", project: "  " })).projectPath, "/work/accord");
   refused(await desktopLink.memory({ action: "write", conversationId: CHAT_A, participantId: taylor.id, requestId: "blank-1", kind: "runbook",
     title: "Blank", body: "x", scope: "project", project: "  " }), "invalid_request");
-  // The same title in that project is the note there to update.
-  assert.equal(refused(await write(CHAT_D, { title: "release the OTHER bot", project: "other" }), "duplicate").current?.id, named.value.id);
+  // The same title there, from a chat that cannot see that project's notes:
+  // refused without pointing at a note it could not read or change.
+  const elsewhere = refused(await write(CHAT_D, { title: "release the OTHER bot", project: "other" }), "duplicate");
+  assert.match(elsewhere.message, /already exists in the project \/work\/other, whose notes this chat does not see\. Give this note a more specific title/);
+  assert.equal(elsewhere.current, undefined);
+  // From a chat of that project it is the note there to update.
+  assert.equal(refused(await write(CHAT_C, { title: "release the OTHER bot" }), "duplicate").current?.id, named.value.id);
 });
 
 test("two projects of one name are told apart by path", async (t) => {
@@ -804,15 +809,26 @@ test("past 150 notes a session's list keeps all of its chat's own and the global
   assert.deepEqual([older.notes.length, older.more, older.picks], [0, 155, true]);
 });
 
-test("the list stays a bounded part of a session's first message", async () => {
+test("the list stays a bounded part of a session's first message, counted in bytes", async () => {
   const long = Array.from({ length: 400 }, (_, index) => ({
-    id: `note-${index}`, kind: "article", title: `${"A long title ".repeat(12)}${index}`, tags: [], scope: "project", author: "taylor",
+    id: `note-${index}`, kind: "article", title: `${"Длинный заголовок ".repeat(8)}${index}`, tags: [], scope: "project", author: "taylor",
     updatedBy: "taylor", version: 1, createdAt: "2026-11-04T08:00:00.000Z", updatedAt: "2026-11-04T08:00:00.000Z", awaitingRepository: false
   }));
   const access = { memory: async <T>() => ({ ok: true, value: { notes: long, more: 20 } }) as unknown as MemoryResult<T> };
   const block = await memoryIndexBlock(access, { conversationId: CHAT_A, participantId: taylor.id });
-  assert.ok(block.length < 33_000, String(block.length));
+  assert.ok(Buffer.byteLength(block) < 34 * 1024, String(Buffer.byteLength(block)));
   const listed = block.split("\n").filter((line) => line.startsWith("- [article]")).length;
-  assert.ok(listed > 100 && listed < 400, String(listed));
+  assert.ok(listed > 50 && listed < 400, String(listed));
   assert.match(block, new RegExp(`- ${420 - listed} more are left out of this list; app_memory_search finds them\\.`));
+});
+
+test("a current server with no note to list and picks on says there are none; a write whose answer was lost says which requestId to send again", async () => {
+  const actor = { conversationId: CHAT_A, participantId: taylor.id };
+  const empty = { memory: async <T>() => ({ ok: true, value: { notes: [], more: 0, picks: true, full: true } }) as unknown as MemoryResult<T> };
+  assert.match(await memoryIndexBlock(empty, actor), /No notes yet for this chat, its project or your role/);
+  const lost = { memory: async <T>() => ({ ok: false, error: { code: "server_unavailable", message: "Your server did not confirm this change." } }) as unknown as MemoryResult<T> };
+  const write = await callMemoryTool(lost, actor, APP_MEMORY_WRITE_TOOL, { noteId: "n1", baseVersion: 1, scope: "project", project: "other" }) as { requestId: string; note: string };
+  assert.match(write.note, new RegExp(`send the same call with requestId "${write.requestId}"`));
+  const own = await callMemoryTool(lost, actor, APP_MEMORY_ARCHIVE_TOOL, { noteId: "n1", requestId: "mine-1" }) as { requestId: string; note: string };
+  assert.equal(own.requestId, "mine-1");
 });

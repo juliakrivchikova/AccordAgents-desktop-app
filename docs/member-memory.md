@@ -56,7 +56,9 @@ Decided by the User on 2026-11-27; members are told it in this order
 3. **Never a CLI's own memory** (Claude Code's memory files, Codex memories):
    only that CLI on that computer reads it, so members on other providers and
    on cloud machines never see it (on 2026-11-26 the main session had kept
-   the User's preferences only in Claude Code's memory files). A separate
+   the User's preferences only in Claude Code's memory files). This differs
+   from the dedicated CLI on purpose: an approved exception in
+   `docs/parity-requirements.md`. A separate
    sync of those memories into this one will file each under the project its
    CLI folder belongs to, with `project` (below).
 
@@ -115,9 +117,9 @@ not there yet.
   relevant to the chat: closest in meaning to the chat's title and the
   message the session starts with, when the server searches by meaning (else
   the most recently active), and says how many are left out and that
-  `app_memory_search` finds them. The list is at most 32,000 characters (a
-  Gemini member gets its message as one command-line argument); what does
-  not fit is counted as left out. The list carrying a message goes as a POST
+  `app_memory_search` finds them. The list is at most 32 KB (UTF-8; a
+  Gemini member gets its message as one command-line argument, 128 KB at
+  most on Linux); what does not fit is counted as left out. The list carrying a message goes as a POST
   (any server takes any memory action as POST). The app asks for it with
   `full`; an app older than the server (a machine runtime not upgraded yet)
   asks without it and gets the list it knows: the 25 most relevant, or none
@@ -262,7 +264,17 @@ Decided by the User on 2026-11-26 (same chat document): OpenAI
   nothing is open, lasting knowledge kept as an article first (the User,
   2026-11-27: a release is usually done later by someone else, so a status
   left to its author kept saying "not released" after the release). The
-  `release-beta` skill makes it a step of every release.
+  `release-beta` skill makes it a step of every release. A status of
+  repository work is kept at project scope so the releaser sees it (a chat
+  status is seen only in its chat); the release report names shipped work
+  whose status it could not find.
+- A note filed under another project with the same title as one there is
+  refused without pointing at that note (the member cannot read or change
+  it): it is told to give a more specific title or leave the change to a
+  chat of that project.
+- A write or archive whose answer did not come says which `requestId` to send
+  again: a change that reached the server is then answered as done, not made
+  twice (a moved note is no longer found by reading it).
 - A status nobody updated for 30 days is archived by the server (swept at most
   every 10 minutes).
 - A server keeps at most 2000 unarchived notes; past that a write is refused

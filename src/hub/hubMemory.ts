@@ -375,7 +375,7 @@ export class HubMemory {
       notes = [...near, ...(room ? (await this.mostRelevant(global, request.text, picks)).slice(0, room) : [])];
     }
     const tags = await this.tagsInUse(member, MEMORY_INDEX_MAX_TAGS);
-    return { ok: true, value: { notes: notes.map(summaryOf), more: rows.length - notes.length, ...(tags.length ? { tags } : {}), ...(picks ? { picks: true } : {}) } };
+    return { ok: true, value: { notes: notes.map(summaryOf), more: rows.length - notes.length, ...(tags.length ? { tags } : {}), ...(picks ? { picks: true } : {}), full: true } };
   }
 
   /** The list as apps before 2026-11-27 ask for it: the 25 most relevant
@@ -596,7 +596,7 @@ export class HubMemory {
       ...(project !== undefined ? { scopeKey: project } : {})
     }, member);
     if ("code" in fields) return { ok: false, error: fields };
-    const duplicate = await this.duplicateOf(fields, undefined);
+    const duplicate = await this.duplicateOf(fields, undefined, member);
     if (duplicate) return { ok: false, error: duplicate };
     const live = await this.query<{ total: number }>("select count(*) as total from member_memory_notes where archived_at is null;");
     if (Number(live[0]?.total ?? 0) >= MEMORY_LIVE_NOTES_MAX) {
@@ -648,7 +648,7 @@ export class HubMemory {
       ...(scopeKey !== undefined ? { scopeKey } : {})
     }, member);
     if ("code" in fields) return { ok: false, error: fields };
-    const duplicate = await this.duplicateOf(fields, row.id);
+    const duplicate = await this.duplicateOf(fields, row.id, member);
     if (duplicate) return { ok: false, error: duplicate };
     const now = this.now().toISOString();
     await this.run(`${BUMP_SQL} update member_memory_notes set kind = ${quote(fields.kind)}, title = ${quote(fields.title)}, title_key = ${quote(memoryTitleKey(fields.title))},
@@ -718,12 +718,20 @@ export class HubMemory {
     };
   }
 
-  private async duplicateOf(fields: ValidFields, exceptId: string | undefined): Promise<MemoryError | undefined> {
+  private async duplicateOf(fields: ValidFields, exceptId: string | undefined, member: MemberContext): Promise<MemoryError | undefined> {
     const rows = await this.query<Row>(`select ${SUMMARY_COLUMNS} from member_memory_notes where archived_at is null
       and kind = ${quote(fields.kind)} and scope = ${quote(fields.scope)} and scope_key = ${quote(fields.scopeKey)}
       and title_key = ${quote(memoryTitleKey(fields.title))}${exceptId ? ` and id <> ${quote(exceptId)}` : ""} limit 1;`);
     const row = rows[0];
     if (!row) return undefined;
+    // In another project (filed there with `project`): this member cannot
+    // read or change that note, so it is not pointed at it.
+    if (fields.scope === "project" && fields.scopeKey !== member.projectPath) {
+      return {
+        code: "duplicate",
+        message: `A ${row.kind} titled "${row.title}" already exists in the project ${fields.scopeKey}, whose notes this chat does not see. Give this note a more specific title, or leave the change to a chat of that project.`
+      };
+    }
     return {
       code: "duplicate",
       message: `A ${row.kind} titled "${row.title}" already exists here (id ${row.id}, version ${row.version}). Update that note instead of adding another.`,

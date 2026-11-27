@@ -169,6 +169,7 @@ test("with the User's key the server finds notes and messages by meaning and pic
   // Never in an address, where logs keep it (nor a message's whole text).
   assert.equal((await h.call(h.owner, "GET", `/v3/memory?${new URLSearchParams({ request: JSON.stringify({ action: "semantic-key", key: GOOD_KEY }) })}`)).status, 400);
   assert.equal((await h.call(h.owner, "GET", `/v3/memory?${new URLSearchParams({ request: JSON.stringify({ action: "pick", ...h.member, text: "x" }) })}`)).status, 400);
+  assert.equal((await h.call(h.owner, "GET", `/v3/memory?${new URLSearchParams({ request: JSON.stringify({ action: "index", ...h.member, full: true, text: "x" }) })}`)).status, 400);
   const set = await h.memory<SemanticSettingsView>({ action: "semantic-key", key: GOOD_KEY });
   assert.ok(set.ok && set.value.keySet);
   assert.ok(!JSON.stringify(set).includes(GOOD_KEY));
@@ -199,7 +200,7 @@ test("with the User's key the server finds notes and messages by meaning and pic
   assert.equal((await h.ok<MemoryIndexValue>({ action: "index", ...h.member })).notes.length, 3);
   // An app that asks for every note (`full`) gets the list with picks on too.
   const full = await h.ok<MemoryIndexValue>({ action: "index", ...h.member, picks: true, full: true });
-  assert.deepEqual([full.notes.length, full.more, full.picks], [3, 0, true]);
+  assert.deepEqual([full.notes.length, full.more, full.picks, full.full], [3, 0, true, true]);
 
   // Chats by meaning: Russian finds the English messages, only in this project.
   const chats = await h.ok<ChatSearchValue>({ action: "chat-search", ...h.member, query: "выкатка" });

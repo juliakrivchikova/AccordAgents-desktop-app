@@ -34,9 +34,10 @@ export const MEMORY_INDEX_MAX_NOTES = 150;
 /** At most this many of the chat's own notes are listed all the same (a
  *  bound on a session's first message; a project far past it is unlikely). */
 export const MEMORY_INDEX_NEAR_MAX = 300;
-/** At most this much text of the list goes into a session's first message
- *  (a Gemini member gets its message as one command-line argument). */
-export const MEMORY_INDEX_MAX_CHARS = 32_000;
+/** At most this many bytes (UTF-8) of the list go into a session's first
+ *  message (a Gemini member gets its message as one command-line argument,
+ *  128 KB at most on Linux). */
+export const MEMORY_INDEX_MAX_BYTES = 32 * 1024;
 /** At most this many tags are named at the start of a session. */
 export const MEMORY_INDEX_MAX_TAGS = 12;
 /** At most this many tags are given when a member asks for them. */
@@ -228,6 +229,9 @@ export interface MemoryIndexValue {
   tags?: MemoryTagCount[];
   /** Search by meaning is on: notes that fit come with each message. */
   picks?: boolean;
+  /** Every note the member sees was asked for (`full`) and given, past
+   *  MEMORY_INDEX_MAX_NOTES as described there; absent from an older server. */
+  full?: boolean;
 }
 
 /** A tag in use, with how many notes (not archived) carry it. */
