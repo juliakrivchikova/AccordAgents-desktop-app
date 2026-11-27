@@ -1,6 +1,6 @@
 /* An urgent alert's card (chat-urgent-alert-card.tsx), as the User approved it
-   on 2026-11-27 (docs/design/urgent-alert, variant 1): a kit card, red only
-   while it waits for her (its border and bell), a head line (Urgent alert,
+   on 2026-11-27 (docs/design/urgent-alert, variant 1): a kit card, red
+   until she answers it (its border, bell and status), a head line (Urgent alert,
    who, when), the message, then the status as a small dot and colored words
    (what happens now, the history in one grey line, Got it or Set up alerts on
    the right). */
@@ -13,8 +13,8 @@
 }
 
 .chat-urgent-alert-panel {
-  /* The status's tone: red while it waits or nobody answered, amber when it
-     never left the app, green once she reacted. */
+  /* The status's tone: red until she answers it (is-alarming), green once
+     she reacted, amber for one that never left the app and was closed. */
   --urgent-tone: var(--ui-danger);
   --urgent-tone-dot: var(--ui-danger-dot);
   max-width: 624px;
@@ -25,7 +25,8 @@
   box-shadow: var(--ui-shadow-sm);
 }
 
-.chat-urgent-alert-panel.is-awaiting {
+.chat-urgent-alert-panel.is-awaiting,
+.chat-urgent-alert-panel.is-alarming {
   border-color: color-mix(in srgb, var(--ui-danger) 45%, var(--ui-border));
 }
 
@@ -37,6 +38,14 @@
 .chat-urgent-alert-panel.is-done {
   --urgent-tone: var(--ui-success);
   --urgent-tone-dot: var(--ui-success-dot);
+}
+
+/* Until she answers it, red whatever its state: one that never left the app
+   (alerts not set up, her server not reached) is all she gets, so it looks
+   as alarming as one that calls her (the User, 2026-11-27). */
+.chat-urgent-alert-panel.is-alarming {
+  --urgent-tone: var(--ui-danger);
+  --urgent-tone-dot: var(--ui-danger-dot);
 }
 
 .chat-urgent-alert-head {
@@ -52,7 +61,8 @@
   color: var(--ui-text-3);
 }
 
-.chat-urgent-alert-panel.is-awaiting .chat-urgent-alert-bell {
+.chat-urgent-alert-panel.is-awaiting .chat-urgent-alert-bell,
+.chat-urgent-alert-panel.is-alarming .chat-urgent-alert-bell {
   color: var(--ui-danger);
 }
 

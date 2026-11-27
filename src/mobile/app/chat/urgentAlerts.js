@@ -126,7 +126,9 @@ export function urgentAlertCardElement(entry) {
   const status = shared && typeof shared.urgentAlertStatus === "function" ? shared.urgentAlertStatus(alert, rawLabel, Date.now()) : undefined;
   if (status) {
     const band = document.createElement("div");
-    band.className = "urgent-alert-status is-" + status.tone;
+    // Red until she answers it, whatever its state (shared urgentAlertAlarming).
+    const alarming = Boolean(shared && typeof shared.urgentAlertAlarming === "function" && shared.urgentAlertAlarming(alert));
+    band.className = "urgent-alert-status is-" + status.tone + (alarming ? " is-alarming" : "");
     const icon = lineIcon(URGENT_ALERT_STATUS_PATHS[status.icon] || URGENT_ALERT_STATUS_PATHS.clock, 16);
     icon.classList.add("urgent-alert-status-icon");
     const words = document.createElement("div");

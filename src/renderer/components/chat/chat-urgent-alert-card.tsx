@@ -2,7 +2,7 @@ import { BellRingingIcon, CaretDownIcon, XIcon } from "@phosphor-icons/react";
 import { useContext, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { Button } from "@/components/ui/button";
 import {
-  URGENT_ALERT_UNSENT_ID_PREFIX, urgentAlertAwaitsGotIt, urgentAlertFailureText, urgentAlertOutcome, urgentAlertStatus, type UrgentAlertView
+  URGENT_ALERT_UNSENT_ID_PREFIX, urgentAlertAlarming, urgentAlertAwaitsGotIt, urgentAlertFailureText, urgentAlertOutcome, urgentAlertStatus, type UrgentAlertView
 } from "../../../shared/urgentAlerts";
 import type { ChatMessage, ChatParticipant } from "../../../shared/types";
 import { IconButton } from "../primitives";
@@ -12,8 +12,9 @@ import { useSessionsViewLabel, useSessionsViewText } from "./chat-sessions-links
 
 /**
  * An urgent alert a member raised, as the User approved it on 2026-11-27
- * (docs/design/urgent-alert, variant 1): a plain kit card with a red border
- * and bell while it waits for her, a head line (Urgent alert, who, when), the
+ * (docs/design/urgent-alert, variant 1): a plain kit card with a red border,
+ * bell and status line until she answers it, whatever its state (it never
+ * left the app included: urgentAlertAlarming), a head line (Urgent alert, who, when), the
  * message, then one status line that says what happens now (when the phone
  * rings, or how it ended) as a small dot and colored words, with what
  * happened before in one grey line.
@@ -136,7 +137,7 @@ export function ChatUrgentAlertCard(props: {
   const folds = Boolean(alert.closedAt) && !awaiting;
   return (
     <article ref={card} data-message-id={message.id} className="chat-urgent-alert" aria-label={appText(`Urgent alert from ${requester}`)}>
-      <div className={`chat-urgent-alert-panel is-${status.tone}${awaiting ? " is-awaiting" : ""}`}>
+      <div className={`chat-urgent-alert-panel is-${status.tone}${awaiting ? " is-awaiting" : ""}${urgentAlertAlarming(alert) ? " is-alarming" : ""}`}>
         <div className="chat-urgent-alert-head">
           <BellRingingIcon className="chat-urgent-alert-bell" size={16} aria-hidden="true" />
           <span className="chat-urgent-alert-title">Urgent alert</span>

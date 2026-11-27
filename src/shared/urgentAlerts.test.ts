@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
   URGENT_ALERT_ACKNOWLEDGEABLE_STATES, maskedPhoneNumber, normalizePhoneNumber, urgentAlertAwaitsGotIt, urgentAlertClock, urgentAlertCountdown,
-  urgentAlertFailureText, urgentAlertOfMessage, urgentAlertOutcome, urgentAlertStatus, type UrgentAlertState, type UrgentAlertView
+  urgentAlertAlarming, urgentAlertFailureText, urgentAlertOfMessage, urgentAlertOutcome, urgentAlertStatus, type UrgentAlertState, type UrgentAlertView
 } from "./urgentAlerts";
 
 const base: UrgentAlertView = { id: "a1", state: "waiting", createdAt: "2026-11-12T18:52:00.000Z", calls: [], phone: true, callMode: "keypad" };
@@ -182,4 +182,12 @@ test("phone numbers are taken with their country code only", () => {
   assert.equal(normalizePhoneNumber("99 123 342"), undefined);
   assert.equal(normalizePhoneNumber("+0123456789"), undefined);
   assert.equal(maskedPhoneNumber("+35799123342"), "+357 ••• 342");
+});
+
+test("the card is red until she answers it, whatever its state; quiet once she pressed Got it or closed it", () => {
+  for (const state of ["waiting", "calling", "unanswered", "not_set_up", "failed", "unsent"] as UrgentAlertState[]) {
+    assert.equal(urgentAlertAlarming({ state }), true, state);
+    assert.equal(urgentAlertAlarming({ state, closedAt: "2026-11-12T18:55:00.000Z" }), false, `${state}, closed`);
+  }
+  assert.equal(urgentAlertAlarming({ state: "acknowledged" }), false);
 });

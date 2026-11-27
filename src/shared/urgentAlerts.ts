@@ -288,6 +288,16 @@ export interface UrgentAlertStatus {
   action?: "got-it" | "set-up";
 }
 
+/** Whether the card is drawn red (its border, its bell, its status line):
+ *  every alert she has not answered yet, whether it rings her phone, went to
+ *  Telegram, or never left the app (alerts not set up, her server not
+ *  reached), since then the card is all she gets. Once she pressed Got it or
+ *  closed it, it is quiet (the User, 2026-11-27). The desktop and the phone
+ *  use this. */
+export function urgentAlertAlarming(alert: Pick<UrgentAlertView, "state" | "closedAt">): boolean {
+  return alert.state !== "acknowledged" && !alert.closedAt;
+}
+
 /** Whether the alert still waits for her Got it: the card offers the button
  *  and no cross. */
 export function urgentAlertAwaitsGotIt(alert: Pick<UrgentAlertView, "state">): boolean {

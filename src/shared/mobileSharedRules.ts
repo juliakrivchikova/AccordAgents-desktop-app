@@ -55,7 +55,7 @@ export {
 // An urgent alert's card: its status band, its folded line and whether it
 // still waits for Got it, worded once for the desktop's card and the phone's.
 export {
-  HUB_ALERTS_PATH, urgentAlertAwaitsGotIt, urgentAlertCountdown, urgentAlertFailureText, urgentAlertOutcome, urgentAlertStatus
+  HUB_ALERTS_PATH, urgentAlertAlarming, urgentAlertAwaitsGotIt, urgentAlertCountdown, urgentAlertFailureText, urgentAlertOutcome, urgentAlertStatus
 } from "./urgentAlerts";
 // The main session and the chat's two views (docs/main-session.md): which
 // view a chat opens in, where each message lives in the sessions view, the
