@@ -38,6 +38,54 @@ does not make a "finished answering" note: it would only repeat the reply.
 Decisions and the approved design: chat "Agent alerts via messenger and phone
 call", artifact "План: Urgent alert — Telegram и звонок".
 
+## When her server cannot take an alert
+
+The card appears in any case (the User, 2026-11-27). When the computer's
+raise does not get through (the server is not reached within 10 seconds,
+the link has not started, an older server without alerts, or the server
+refuses it), the computer puts the same red card up in the chat itself, at
+once: "Not sent outside the app", with why. Telegram and the calls stay the
+server's.
+
+- The card is a placeholder message (`serverPlaceholder`, state `unsent`,
+  `UrgentAlertView.unsent`): never sent to the server, kept with the chat
+  across restarts. Its message id is `urgentAlertCardMessageId(chat, member,
+  requestId)`, the id the server gives its own card for the same request, so
+  the server's card replaces it in place when it arrives: one card, never
+  two. A server older than this change writes its card under another id; the
+  computer then takes its card down when the raise is answered.
+- While the server could not be reached, the computer raises the alert again
+  every 30 seconds with the same request id (never twice), across restarts
+  (`UrgentAlertOutbox`, kept in the client state `urgent-alerts.unsent`).
+  Once it gets through, Telegram and the calls follow as for any alert
+  (approved by the User, 2026-11-27).
+- Got it on that card before then keeps it from going out, and folds it
+  ("Got it in the app", "Not sent outside the app"). Got it pressed while a
+  raise is on its way closes the alert on the server as soon as it arrives.
+- A refusal (the chat or the member is gone) is not tried again; the card
+  says why.
+- The member's tool result says what happened: sent (Telegram, call), a card
+  only because nothing is set up, or a card only because the server could
+  not take it.
+- A cloud machine has no screen of its own and reaches the User only through
+  her server: it keeps raising the alert until the server takes it, and the
+  card then reaches her through the server like every card. Its member hears
+  that nothing reached her yet.
+- A running turn's older copy of the chat never brings the unsent card back
+  over the server's (`mergeStoredChat`: a placeholder never wins over the
+  server's copy of the same message, and `urgentAlert` is taken from the
+  stored copy).
+
+## When members use it
+
+Every member, the main session included, gets the standing rule in its
+instructions (`URGENT_ALERT_INSTRUCTIONS` in `memberSessions.ts`) and the
+same in the tool's description: emergencies only, where the User has to act
+within minutes and a chat message could be missed; never for progress,
+finished work, questions, choices, a failed test or build, or anything that
+can wait an hour; one alert per incident, then the details in a chat message
+(the User, 2026-11-27).
+
 ## Where it lives
 
 - `src/shared/urgentAlerts.ts` — wire format, states, what the card says
@@ -50,9 +98,11 @@ call", artifact "План: Urgent alert — Telegram и звонок".
 - `HubOps.writeServerMessage` — the only way the server writes a chat message
   itself: alert cards only, with `serverWriter = "server"`, so every device
   (including the member's own) takes it from the feed and none may change it.
-- `src/main/services/urgentAlertTools.ts` + `wireUrgentAlertToolHandler` — the
-  tool on the computer and on cloud machines (same code), through
-  `ServerChatLink.alerts` → `POST /v3/alerts`.
+- `src/main/services/urgentAlertTools.ts` (`UrgentAlertOutbox`) +
+  `wireUrgentAlertToolHandler` — the tool on the computer and on cloud
+  machines (same code), through `ServerChatLink.alerts` → `POST /v3/alerts`;
+  the computer's own card while the server cannot take an alert is
+  `ChatService.unsentAlertCards` (`chat/server/unsentAlertCards.ts`).
 - Desktop: `chat-urgent-alert-card.tsx`, Settings → Alerts
   (`alerts-settings-section.tsx`, `alerts-settings-parts.tsx`,
   `alerts-connect-dialogs.tsx`, `alerts-phone-dialog.tsx`; what each state
@@ -114,4 +164,7 @@ The server reads these only for loopback addresses:
   which turns the keypad on for a local server.
 
 Tests: `src/hub/hubAlerts.test.ts` (whole course against stand-ins, restart,
-signatures, rights) and `src/shared/urgentAlerts.test.ts`, in `npm run test:hub`.
+signatures, rights), `src/shared/urgentAlerts.test.ts`,
+`src/main/services/urgentAlertTools.test.ts` (the outbox) and
+`src/main/services/urgentAlert.unsent.test.ts` (a real chat, link and server
+going away and coming back, restart), in `npm run test:hub`.
