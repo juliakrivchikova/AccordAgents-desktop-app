@@ -23,8 +23,8 @@ import {
   participantRequestToolResult, recordPreparedParticipantRequest, rollupParticipantRequestStatus, settleRequestsAnsweredWith,
   updateParticipantRequestBatch
 } from "./requestRecords";
-import { itemWaitsOnOwnRequests, ownRequestsAnswering, stillWorksAfter } from "./ownRequests";
-import { answerThroughOwnWork } from "./ownRequestWaits";
+import { itemWaitsOnOwnRequests, memberWorksOnAfter, messagesById } from "./ownRequests";
+import { answerThroughOwnWork, type OwnWorkAnswer } from "./ownRequestWaits";
 import type { ParticipantRequestRunResult, PreparedParticipantRequest } from "./types";
 import { createChatMessage } from "../store/messages";
 import type { ChatAppMcpActor, ProgressCallback } from "../types";
@@ -550,7 +550,7 @@ export class ParticipantRequests {
           // one) did not finish answering: the request is interrupted.
           const stoppedByUser = reply?.metadata?.terminalReason === "user-stopped" || reply?.metadata?.turnContinues === true;
           continues = !waitingOnPermissionApproval && !stoppedByUser && Boolean(reply && (
-            (reply.metadata?.selfCompaction && reply.metadata.runId) || stillWorksAfter(ownRequestsAnswering(conversation, target.id, requestMessageId), reply)
+            (reply.metadata?.selfCompaction && reply.metadata.runId) || memberWorksOnAfter(conversation, target.id, requestMessageId, reply)
           ));
           updateParticipantRequestBatch(conversation, requestMessageId, (current) => ({
             ...current,
@@ -579,26 +579,27 @@ export class ParticipantRequests {
           }));
           this.chat.store.queueSnapshot(conversation);
         });
+        // Requests its reply made by mentions start now, not after the wait
+        // below (they are not what it waits on).
+        this.startDeferredParticipantRequestRunners(conversation.id, participantRequestsToRun);
+        participantRequestsToRun = [];
         // What it wrote before each compaction of its own and before each
         // resume after its own requests; the last reply is its answer. Its
         // run stays live meanwhile: the member's Stop ends the request.
         const earlier: ChatMessage[] = [];
-        // Ended meanwhile on the member's device (its resume will not be
-        // made): it stays as it was ended there.
-        let endedElsewhere: { item: ChatParticipantRequestItem | undefined } | undefined;
-        if (continues && reply) {
-          const through = await answerThroughOwnWork(this.chat, conversation.id, requestMessageId, target.id, reply, [], targetController.signal);
-          if (through.kind === "closed") {
-            endedElsewhere = { item: through.item };
-          } else {
-            reply = through.reply;
-            earlier.push(...through.earlier);
-            await this.chat.selfCompaction.settleSelfCompactedItem(conversation, requestMessageId, batch.id, target, through);
-          }
+        const through = continues && reply
+          ? await answerThroughOwnWork(this.chat, conversation.id, requestMessageId, target.id, reply, [], targetController.signal)
+          : undefined;
+        if (through?.kind === "answer") {
+          reply = through.reply;
+          earlier.push(...through.earlier);
+          await this.chat.selfCompaction.settleSelfCompactedItem(conversation, requestMessageId, batch.id, target, through);
         }
-        if (endedElsewhere) {
-          const ended = endedElsewhere.item?.replyMessageId ? conversation.messages.find((message) => message.id === endedElsewhere?.item?.replyMessageId) : undefined;
-          replies.push({ targetHandle: target.handle, messageId: ended?.id, content: ended ? chatMessageMemberText(ended) : undefined, error: endedElsewhere.item?.error });
+        if (through?.kind === "closed") {
+          // Ended meanwhile elsewhere (its member's resume will not be
+          // made): it stays as it was ended there.
+          const ended = through.item?.replyMessageId ? conversation.messages.find((message) => message.id === through.item?.replyMessageId) : undefined;
+          replies.push({ targetHandle: target.handle, messageId: ended?.id, content: ended ? chatMessageMemberText(ended) : undefined, error: through.item?.error });
         } else {
           replies.push({
             targetHandle: target.handle,
@@ -664,59 +665,74 @@ export class ParticipantRequests {
       this.participantRequestRunners.delete(requestMessageId);
       this.chat.activeRuns.decrementBackgroundRunner(conversationId);
     });
-    const runner = waited.then((outcome) => outcome.result ?? { batch: outcome.batch, replies: [] });
-    void runner.catch(() => undefined);
+    const runner = waited.then((outcome) => outcome.result);
     this.participantRequestRunners.set(requestMessageId, runner);
-    // Nothing waited any more (the restart's look ended it, or it was
-    // answered meanwhile): what ended it resumes its requester, or not.
+    // Nothing waited here (the start's look ended it, it was answered
+    // meanwhile, or it ended elsewhere): what ended it resumes its
+    // requester, or decided not to.
     void waited.then((outcome) => {
-      if (outcome?.result) this.resumeRequesterWhenRunnerSettles(conversationId, requestMessageId, Promise.resolve(outcome.result), this.deps.onReviewProgress);
-    }, (error: unknown) => this.resumeRequesterWhenRunnerSettles(conversationId, requestMessageId, Promise.reject(error), this.deps.onReviewProgress));
+      if (outcome.waited) this.resumeRequesterWhenRunnerSettles(conversationId, requestMessageId, runner, this.deps.onReviewProgress);
+    }, () => this.resumeRequesterWhenRunnerSettles(conversationId, requestMessageId, runner, this.deps.onReviewProgress));
   }
 
   private async waitOnOwnRequestsAgain(
     conversationId: string,
     requestMessageId: string
-  ): Promise<{ batch: ChatParticipantRequestBatch; result?: ParticipantRequestRunResult }> {
+  ): Promise<{ waited: boolean; result: ParticipantRequestRunResult }> {
     await this.chat.store.waitForQueuedSave(conversationId);
     const conversation = await this.chat.store.requireChat(conversationId);
     const requestMessage = conversation.messages.find((message) => message.id === requestMessageId);
     const batch = requestMessage?.metadata?.participantRequest;
     if (!requestMessage || !batch) throw new Error("Member request message was not found.");
-    const waiting = batch.items.filter((item) => itemWaitsOnOwnRequests(conversation, requestMessage, item));
-    if (waiting.length === 0) return { batch };
-    const byId = new Map(conversation.messages.map((message) => [message.id, message]));
     const replies: ParticipantRequestRunResult["replies"] = [];
+    const waiting = batch.items.filter((item) => !item.answeredWith && itemWaitsOnOwnRequests(conversation, requestMessage, item));
+    if (waiting.length === 0) return { waited: false, result: { batch, replies } };
+    const byId = messagesById(conversation);
+    let settled = 0;
     await Promise.all(waiting.map(async (item) => {
       const target = chatParticipants(conversation).find((participant) => participant.id === item.targetParticipantId);
       const first = item.replyMessageId ? byId.get(item.replyMessageId) : undefined;
       if (!target || !first) return;
       const earlier = (item.earlierReplyMessageIds ?? []).flatMap((id) => byId.get(id) ?? []);
-      // Its run is live again while it waits: the member's Stop ends it.
-      const runId = randomUUID();
-      const controller = new AbortController();
-      this.chat.activeRuns.registerTargetRun(runId, controller, { conversationId, participantId: target.id, participantHandle: target.handle });
-      let begun = false;
-      try {
-        await this.chat.activeRuns.beginChatRun(conversation, runId);
-        begun = true;
-        void this.deps.debugLogs.write("chat.participant-request.own-requests.wait-again", { conversationId, requestMessageId, participantId: target.id });
-        const through = await answerThroughOwnWork(this.chat, conversationId, requestMessageId, target.id, first, earlier, controller.signal);
-        if (through.kind === "answer") {
-          await this.chat.selfCompaction.settleSelfCompactedItem(conversation, requestMessageId, batch.id, target, through);
-          replies.push({ targetHandle: target.handle, messageId: through.reply.id, content: [...through.earlier, through.reply].map((message) => chatMessageMemberText(message)).filter(Boolean).join("\n\n") });
-        }
-      } finally {
-        if (begun) await this.chat.activeRuns.endChatRun(conversation, runId);
-        this.chat.activeRuns.unregisterTargetRun(runId, controller);
-      }
+      void this.deps.debugLogs.write("chat.participant-request.own-requests.wait-again", { conversationId, requestMessageId, participantId: target.id });
+      const through = await this.answerWithLiveRun(conversation, requestMessageId, target, first, earlier);
+      if (through.kind !== "answer") return;
+      settled += 1;
+      await this.chat.selfCompaction.settleSelfCompactedItem(conversation, requestMessageId, batch.id, target, through);
+      replies.push({ targetHandle: target.handle, messageId: through.reply.id, content: [...through.earlier, through.reply].map((message) => chatMessageMemberText(message)).filter(Boolean).join("\n\n") });
     }));
     const updatedBatch = await this.chat.store.saveChatChange(conversation, () => updateParticipantRequestBatch(conversation, requestMessageId, (current) => ({
       ...current,
       status: rollupParticipantRequestStatus(current.items),
       updatedAt: new Date().toISOString()
     }))) ?? batch;
-    return { batch: updatedBatch, result: { batch: updatedBatch, replies } };
+    return { waited: settled > 0, result: { batch: updatedBatch, replies } };
+  }
+
+  /** The member's answer to a request after the work of its own in between
+   *  (answerThroughOwnWork), waited for with a run of the member's live, as
+   *  its first turn's run stays live in runParticipantRequest: its Stop ends
+   *  the request, it shows working, and a turn its requester starts meanwhile
+   *  does not take the request for one nobody works on any more. */
+  async answerWithLiveRun(
+    conversation: Conversation,
+    requestMessageId: string,
+    target: ChatParticipant,
+    first: ChatMessage,
+    earlier: readonly ChatMessage[]
+  ): Promise<OwnWorkAnswer> {
+    const runId = randomUUID();
+    const controller = new AbortController();
+    this.chat.activeRuns.registerTargetRun(runId, controller, { conversationId: conversation.id, participantId: target.id, participantHandle: target.handle });
+    let begun = false;
+    try {
+      await this.chat.activeRuns.beginChatRun(conversation, runId);
+      begun = true;
+      return await answerThroughOwnWork(this.chat, conversation.id, requestMessageId, target.id, first, earlier, controller.signal);
+    } finally {
+      if (begun) await this.chat.activeRuns.endChatRun(conversation, runId);
+      this.chat.activeRuns.unregisterTargetRun(runId, controller);
+    }
   }
 
   /** A request answered by the turn of a request before it, which it went

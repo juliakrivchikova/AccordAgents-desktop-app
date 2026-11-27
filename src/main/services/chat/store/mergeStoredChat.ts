@@ -308,10 +308,14 @@ function mergeStoredParticipantRequest(
     : storedBatch.status === "completed" || currentBatch.status === "completed"
       ? "completed"
       : rollupParticipantRequestStatus(items);
+  // Once written, the end of its requester's resume stays (a copy read
+  // before it was written does not take it back).
+  const requesterResumeEnded = newerBatch.requesterResumeEnded ?? storedBatch.requesterResumeEnded ?? currentBatch.requesterResumeEnded;
   return {
     ...newerBatch,
     items,
     status,
+    ...(requesterResumeEnded ? { requesterResumeEnded } : {}),
     updatedAt: currentBatch.updatedAt >= storedBatch.updatedAt ? currentBatch.updatedAt : storedBatch.updatedAt
   };
 }

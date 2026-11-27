@@ -1,12 +1,16 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { chatParts } from "./chat/test/chatParts";
+import { chatParticipant, selfCompactingChat, waitFor as waitLong } from "./chat/test/compactionFixtures";
+import { defaultChatAgentPermissions, normalizeChatAgentPermissions } from "../../shared/agentPermissions";
 import { sessionsTaskReplyLine, sessionsTaskStatus } from "../../shared/mainSessionView";
 import type { ChatMessage, ChatParticipantRequestBatch, ChatParticipantRequestItem, Conversation, ParticipantConfig } from "../../shared/types";
 import { PARTICIPANT_REQUEST_INTERRUPTED_BEFORE_COMPLETION, PARTICIPANT_REQUEST_STOPPED_BY_USER } from "./chat/constants";
 import {
-  GENERIC_ROLE, mainActor, mainSession, mainSessionChat, member, permissions, resumesOf, sessionRecord, testService, waitFor
+  GENERIC_ROLE, mainActor, mainSession, mainSessionChat, member, NOW, permissions, resumesOf, sessionRecord, testService, waitFor
 } from "./chat/test/mainSessionFixtures";
+import { ownRequestsAnswering, requestAnsweredByTurn } from "./chat/requests/ownRequests";
+import { markParticipantRequestAutoResumeFailed } from "./chat/requests/requestRecords";
 
 // A member that asks the main session (or anyone) something while it works
 // on a request, with app_chat_request_participants and the default
@@ -31,11 +35,12 @@ async function memberActor(storage: Service["storage"], participantId: string): 
     participantId,
     roleConfigId: GENERIC_ROLE.id,
     roleConfigVersion: 1,
-    capabilities: ["participants.request"],
+    capabilities: ["participants.request", "permissions.request"],
     triggerMessageId: metadata.sourceMessageId,
     triggerThreadId: metadata.threadId,
     runId: metadata.runId,
     turnSegmentId: metadata.turnSegmentId,
+    participantRequestBatchId: metadata.participantRequestBatchId,
     participantRequestDepth: metadata.participantRequestDepth ?? 1
   };
 }
@@ -67,6 +72,7 @@ function scenario(options: {
   answer?: (prompt: string, signal?: AbortSignal) => Promise<Reply>;
   workerPermissions?: Parameters<typeof permissions>[0];
   others?: ReturnType<typeof member>[];
+  othersRun?: (participant: ParticipantConfig) => Promise<string>;
 }) {
   const main = mainSession("claude-code", { model: "sonnet" });
   const worker = member("worker-id", "worker", { kind: "claude-code", model: "sonnet", permissions: permissions({ requestParticipants: "allow", ...options.workerPermissions }) });
@@ -95,7 +101,7 @@ function scenario(options: {
         const answered = options.answer ? await options.answer(prompt, signal) : { ok: true, content: "blue" };
         return { participant, durationMs: 1, ...answered };
       }
-      if (isOther) return ok(participant, `Answer from ${participant.id}.`);
+      if (isOther) return ok(participant, options.othersRun ? await options.othersRun(participant) : `Answer from ${participant.id}.`);
       return ok(participant, "Noted.");
     }
   });
@@ -488,4 +494,208 @@ test("a member on a cloud machine whose own question was declined is resumed by 
   await settle();
   assert.equal(quiet.runs.length, 0);
   assert.ok(quiet.debugEvents.some((event) => event.payload.reason === "all-items-denied"));
+});
+
+// --- requests that went out together in one turn ------------------------------
+
+test("requests answered together in one turn wait with it when their member asks someone itself, and each ends with its final reply", async () => {
+  const asks = { permissions: normalizeChatAgentPermissions({ ...defaultChatAgentPermissions(), requestParticipants: "allow" }) };
+  const askers = ["asker1", "asker2"].map((id) => chatParticipant({ id, handle: id, ...asks }));
+  const helper = chatParticipant({ id: "helper", handle: "helper", ...asks });
+  let releaseBusy!: () => void;
+  const busy = new Promise<void>((resolve) => { releaseBusy = resolve; });
+  const asked: Record<string, any> = {};
+  const chat = selfCompactingChat({
+    participant: asks,
+    others: [...askers, helper],
+    turn: async ({ participantId, prompt, actor, service, call }) => {
+      if (participantId.startsWith("asker")) {
+        if (call === 1) asked[participantId] = await service.requestParticipantsFromTool(actor, { requests: [{ target: "admin", prompt: `Question from ${participantId}` }] });
+        return call === 1 ? "Asked admin." : `Thanks (${participantId}).`;
+      }
+      if (participantId === "helper") return "The answer is 7.";
+      if (call === 1) { await busy; return "Busy work done."; }
+      if (call === 2) {
+        // Both questions in one turn: the admin asks the helper and ends its turn to wait.
+        const own = await service.requestParticipantsFromTool(actor, { requests: [{ target: "helper", prompt: "What is the answer?" }] });
+        assert.equal(own.status, "running", JSON.stringify(own));
+        return "Asked the helper; I answer once it replies.";
+      }
+      assert.match(prompt, /Auto-resumed @admin after member request/);
+      return "FINAL for asker1 and asker2: 7.";
+    }
+  });
+  await chat.service.sendMessage({ conversationId: chat.conversation.id, runId: "user-run", content: "@admin do the long task" });
+  await waitLong(() => chat.prompts.filter((item) => item.participantId === "codex-admin").length === 1, 5_000);
+  for (const asker of ["asker1", "asker2"]) {
+    await chat.service.sendMessage({ conversationId: chat.conversation.id, runId: `run-${asker}`, content: `@${asker} ask admin` });
+    await waitLong(() => asked[asker]?.status === "running", 5_000);
+  }
+  releaseBusy();
+  const itemFor = (asker: string) => chat.storage.current.messages
+    .find((message: any) => message.metadata?.participantRequest?.requesterParticipantId === asker)!.metadata.participantRequest.items[0];
+  await waitLong(() => ["asker1", "asker2"].every((asker) => chat.prompts.filter((item) => item.participantId === asker).length === 2), 8_000);
+  const final = chat.replies().find((message: any) => message.content === "FINAL for asker1 and asker2: 7.");
+  assert.ok(final, "the admin went on after the helper's answer");
+  for (const asker of ["asker1", "asker2"]) {
+    const item = itemFor(asker);
+    assert.equal(item.status, "answered", asker);
+    assert.equal(item.replyMessageId, final.id, `${asker} ends with the final reply`);
+    const resumes = chat.prompts.filter((entry) => entry.participantId === asker).slice(1);
+    assert.equal(resumes.length, 1, `${asker} is resumed once`);
+    assert.match(resumes[0]!.prompt, /FINAL for asker1 and asker2: 7\./);
+  }
+  await waitLong(() => chat.storage.current.metadata.running === false, 8_000);
+});
+
+// --- review of 2026-11-27: resumes that end with no reply, permission cards ---
+
+/** The machine chat of above, its member's own request now answered and its
+ *  resume ended on its machine with no reply of the member's. */
+async function machineResumeEnds(reason: "failed" | "stopped" | "not-made"): Promise<ChatParticipantRequestItem> {
+  const { service, storage, runs } = testService({ conversation: machineMemberChat({ items: "answered", status: "resuming_requester" }) });
+  await chatParts(service).store.requireChat("conversation-1");
+  await waitFor(() => Object.values((storage.current.metadata.activeRunParticipantIdsByRunId ?? {}) as Record<string, string>).includes("remote-id"));
+  const written = structuredClone(storage.current) as Conversation;
+  const own = written.messages.find((message) => message.id === "own")!.metadata!.participantRequest!;
+  const now = new Date().toISOString();
+  // As its machine writes it; the batch's own status is the items' (a merge recomputes it).
+  Object.assign(own, { status: "answered", updatedAt: now, requesterResumeEnded: { reason, at: now, ...(reason === "failed" ? { error: "The machine could not start its turn." } : {}) } });
+  storage.current = written;
+  for (const listener of [...chatParts(service).store.chatSavedListeners.get("conversation-1") ?? []]) listener(undefined);
+  await waitFor(() => itemOf(storage.current, "main-id")?.status !== "running");
+  await settle();
+  assert.equal(runs.filter((run) => run.participant.id === "remote-id").length, 0);
+  return itemOf(storage.current, "main-id")!;
+}
+
+test("a member's resume that ends with no reply ends the task as that resume did, never with the interim line", async () => {
+  const failed = await machineResumeEnds("failed");
+  assert.equal(failed.status, "failed");
+  assert.equal(failed.error, "The machine could not start its turn.");
+  const stopped = await machineResumeEnds("stopped");
+  assert.equal(stopped.status, "interrupted");
+  assert.equal(stopped.error, PARTICIPANT_REQUEST_STOPPED_BY_USER);
+  const notMade = await machineResumeEnds("not-made");
+  assert.equal(notMade.status, "interrupted");
+  assert.equal(notMade.error, PARTICIPANT_REQUEST_INTERRUPTED_BEFORE_COMPLETION);
+});
+
+test("a failed resume stays known after a merge rewrites its request's status, and a request nobody resumes for a day stops being waited on", () => {
+  const conversation = machineMemberChat({ items: "answered", status: "resuming_requester" });
+  const own = () => conversation.messages.find((message) => message.id === "own")!;
+  assert.equal(ownRequestsAnswering(conversation, "remote-id", "task").open.length, 1);
+  markParticipantRequestAutoResumeFailed(conversation, "own", new Error("No server link."));
+  // What a merge of an older copy makes of it: the status from the items, the rest from the newer copy.
+  own().metadata!.participantRequest = { ...own().metadata!.participantRequest!, status: "answered" };
+  const state = ownRequestsAnswering(conversation, "remote-id", "task");
+  assert.deepEqual(state.ended.map((entry) => [entry.reason, entry.error]), [["failed", "No server link."]]);
+  assert.equal(state.open.length, 0);
+
+  const stale = machineMemberChat({ items: "answered", status: "answered" });
+  const later = Date.now() + 25 * 60 * 60_000;
+  assert.equal(ownRequestsAnswering(stale, "remote-id", "task", undefined, later).open.length, 0, "nothing resumed it for a day");
+  const running = machineMemberChat({ items: "answered", status: "answered" });
+  running.messages.find((message) => message.id === "own")!.metadata!.participantRequest!.items[0]!.status = "running";
+  assert.equal(ownRequestsAnswering(running, "remote-id", "task", undefined, later).open.length, 1, "still asked: it waits");
+});
+
+test("a long chain of asking and resuming still leads back to the task, with no cap on its length, and a turn the User started leads nowhere", () => {
+  const conversation = machineMemberChat({ items: "answered", status: "completed" });
+  let trigger = "task";
+  for (let round = 0; round < 60; round += 1) {
+    const ownId = `own-${round}`;
+    conversation.messages.push(
+      { id: ownId, role: "participant", participantId: "remote-id", content: "@main ?", createdAt: NOW, status: "done",
+        metadata: { participantRequest: { id: `b-${round}`, requesterParticipantId: "remote-id", requesterHandle: "remote", source: "mcp", resumeRequester: true,
+          status: "completed", depth: 2, createdAt: NOW, updatedAt: NOW, triggerMessageId: trigger, items: [] } } } as unknown as ChatMessage,
+      { id: `line-${round}`, role: "system", content: "Auto-resumed @remote after member request.", createdAt: NOW, status: "done", metadata: { sourceMessageId: ownId } } as ChatMessage
+    );
+    trigger = `line-${round}`;
+  }
+  assert.equal(requestAnsweredByTurn(conversation, "remote-id", trigger)?.id, "task");
+  assert.equal(requestAnsweredByTurn(conversation, "remote-id", "user-message"), undefined);
+  assert.equal(requestAnsweredByTurn(conversation, "main-id", "task"), undefined, "the task is not one the main session answers");
+});
+
+test("the turn after a permission card's approval that asks someone itself does not answer the task: the reply after its resume does", async () => {
+  // Another member at work the whole time (with nothing running, the stale-run
+  // sweep ends a task that waits on a card: that is older behavior, not this one).
+  const busy = member("busy-id", "busy", { kind: "claude-code" });
+  let releaseBusy!: () => void;
+  const busyDone = new Promise<void>((resolve) => { releaseBusy = resolve; });
+  const { service, storage, runs, workerTurns } = scenario({
+    others: [busy],
+    othersRun: async () => { await busyDone; return "Busy work done."; },
+    answer: async (prompt) => ({ ok: true, content: prompt.includes("Which page?") ? "The home page." : "Noted." }),
+    worker: async (turn, _prompt, ask) => {
+      if (turn === 1) {
+        const actor = await memberActor(storage, "worker-id");
+        const card = await service.requestPermissionChangeFromTool(actor, { kind: "portable", permissions: ["webAccess"] });
+        assert.equal(card.status, "pending_user_approval", JSON.stringify(card));
+        return { ok: true, content: "I need web access." };
+      }
+      if (turn === 2) {
+        await ask("main", "Which page?");
+        return { ok: true, content: "Approved; I asked the main session which page." };
+      }
+      return { ok: true, content: "FINAL: the home page is up." };
+    }
+  });
+  storage.current.messages.push({ id: "user-message-2", role: "user", content: "And the long job.", createdAt: NOW, status: "done" } as ChatMessage);
+  const asked = await service.requestParticipantsFromTool(mainActor(undefined, { triggerMessageId: "user-message-2", triggerThreadId: "user-message-2", turnSegmentId: "t0", runId: "r0" }),
+    { requests: [{ target: "busy", prompt: "Long job." }] });
+  assert.equal(asked.status, "running", JSON.stringify(asked));
+  await service.requestParticipantsFromTool(mainActor(undefined, { turnSegmentId: "t", runId: "r" }), { requests: [{ target: "worker", prompt: "Check the site." }] });
+  let card: { id: string } | undefined;
+  await waitFor(() => Boolean(card = (storage.current.metadata.pendingAppToolApprovals as any[] | undefined)?.find((approval) => approval.status === "pending")));
+  await waitFor(() => storage.current.messages.some((message: ChatMessage) => message.content === "I need web access." && message.status === "done"));
+  await settle();
+  // The busy member's request is the main session's first; the task is its second.
+  assert.equal(itemOf(storage.current, "main-id", 1)!.status, "running", "waits for the card, as before");
+  await service.respondToAppToolApproval({ conversationId: "conversation-1", approvalId: card!.id, approve: true, scope: "once" });
+  await waitFor(() => Boolean(requestBy(storage.current, "main-id", 1)?.batch.autoResumeMessageId), 4000);
+  await settle();
+  const item = itemOf(storage.current, "main-id", 1)!;
+  assert.equal(item.status, "answered", JSON.stringify({ item, own: requestBy(storage.current, "worker-id")?.batch }));
+  assert.equal(replyText(storage.current, item.replyMessageId), "FINAL: the home page is up.");
+  assert.equal(workerTurns(), 3);
+  const woken = resumesOf(runs, "main-id").filter((run) => run.prompt.includes("Auto-resumed @main after member request.\nTarget replies"));
+  assert.equal(woken.length, 1);
+  assert.match(woken[0]!.prompt, /FINAL: the home page is up\./);
+  releaseBusy();
+  await waitFor(() => Boolean(requestBy(storage.current, "main-id", 0)?.batch.autoResumeMessageId));
+});
+
+test("a permission card raised in the turn the member was resumed in keeps the task waiting; the reply after its approval answers", async () => {
+  const { service, storage, runs, workerTurns } = scenario({
+    worker: async (turn, _prompt, ask) => {
+      if (turn === 1) {
+        await ask("main", "Which site?");
+        return { ok: true, content: "Asked the main session." };
+      }
+      if (turn === 2) {
+        const actor = await memberActor(storage, "worker-id");
+        const card = await service.requestPermissionChangeFromTool(actor, { kind: "portable", permissions: ["webAccess"] });
+        assert.equal(card.status, "pending_user_approval", JSON.stringify(card));
+        return { ok: true, content: "I need web access for that site." };
+      }
+      return { ok: true, content: "FINAL: the site is up." };
+    }
+  });
+  await service.requestParticipantsFromTool(mainActor(undefined, { turnSegmentId: "t", runId: "r" }), { requests: [{ target: "worker", prompt: "Check the site." }] });
+  let card: { id: string } | undefined;
+  await waitFor(() => Boolean(card = (storage.current.metadata.pendingAppToolApprovals as any[] | undefined)?.find((approval) => approval.status === "pending")));
+  await waitFor(() => storage.current.messages.some((message: ChatMessage) => message.content === "I need web access for that site." && message.status === "done"));
+  await settle();
+  assert.equal(itemOf(storage.current, "main-id")!.status, "running", "waits for the card");
+  assert.equal(resumesOf(runs, "main-id").length, 0);
+  await service.respondToAppToolApproval({ conversationId: "conversation-1", approvalId: card!.id, approve: true, scope: "once" });
+  await waitFor(() => Boolean(requestBy(storage.current, "main-id")?.batch.autoResumeMessageId), 4000);
+  await settle();
+  const item = itemOf(storage.current, "main-id")!;
+  assert.equal(item.status, "answered");
+  assert.equal(replyText(storage.current, item.replyMessageId), "FINAL: the site is up.");
+  assert.equal(workerTurns(), 3);
+  assert.equal(resumesOf(runs, "main-id").length, 1);
 });

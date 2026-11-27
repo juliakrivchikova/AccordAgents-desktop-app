@@ -90,4 +90,10 @@ export interface ChatParticipantRequestBatch {
   delegation?: { start: "clean" | "fork"; turnId?: string };
   items: ChatParticipantRequestItem[];
   error?: string;
+  /** Its requester's resume ended with no reply of the requester's: it could
+   *  not run (`failed`), it was stopped before it began (`stopped`), or a
+   *  restart will not make it (`not-made`). Written by the requester's own
+   *  device; a request that waits on this one's answer (its requester asked
+   *  it while answering that request, ownRequests.ts) ends with it. */
+  requesterResumeEnded?: { reason: "failed" | "stopped" | "not-made"; error?: string; at: string };
 }

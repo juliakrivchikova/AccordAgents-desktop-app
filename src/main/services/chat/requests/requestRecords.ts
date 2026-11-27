@@ -664,11 +664,13 @@ export function pendingParticipantRequestApprovalTargetIds(
 
 export function markParticipantRequestAutoResumeFailed(conversation: Conversation, requestMessageId: string, error: unknown): void {
   const message = error instanceof Error ? error.message : String(error);
+  const now = new Date().toISOString();
   updateParticipantRequestBatch(conversation, requestMessageId, (batch) => ({
     ...batch,
     status: "failed",
-    updatedAt: new Date().toISOString(),
-    error: message || "Requester auto-resume failed before completion."
+    updatedAt: now,
+    error: message || "Requester auto-resume failed before completion.",
+    requesterResumeEnded: { reason: "failed", error: message || "Requester auto-resume failed before completion.", at: now }
   }));
   conversation.updatedAt = new Date().toISOString();
 }

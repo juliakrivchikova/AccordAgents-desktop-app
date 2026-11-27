@@ -16,6 +16,7 @@ import { chatParticipants, participantForRun } from "../members/identity";
 import {
   applyPermissionResumeToParticipantRequest, participantRequestMessageForResumeContext, participantRequestResumeDepth
 } from "../requests/requestRecords";
+import { memberWorksOnAfter } from "../requests/ownRequests";
 import { createChatMessage } from "../store/messages";
 import { emitChatRunFailure, emitProgress } from "../turns/replyMessages";
 import type { ChatAppMcpActor, ProgressCallback } from "../types";
@@ -228,10 +229,15 @@ export class PermissionRequests {
         participantRequestBatchId: participantRequestBatch?.id,
         chainRootId: participantRequestBatch?.chainRootId
       });
+      let goesOn = false;
       const { participantRequestsToRun, participantRequestResumeMessageId } = await this.chat.store.withChatMutation(conversation, async () => {
         const toRun = await this.chat.pendingReplies.appendParticipantTurnMessages(conversation, requester, messages);
-        // It compacts its own context next: its answer is the turn after that.
-        const resumeMessageId = participantRequestMessage && participantRequestBatch && !messages[0]?.metadata?.selfCompaction
+        // It compacts its own context next, or it asked others itself and
+        // waits for them (ownRequests.ts): its answer is a turn after this one.
+        const reply = messages[0];
+        goesOn = Boolean(participantRequestMessage && reply && (reply.metadata?.selfCompaction ||
+          memberWorksOnAfter(conversation, requester.id, participantRequestMessage.id, reply)));
+        const resumeMessageId = participantRequestMessage && participantRequestBatch && !goesOn
           ? applyPermissionResumeToParticipantRequest(conversation, participantRequestMessage.id, participantRequestBatch.id, requester, messages)
           : undefined;
         conversation.updatedAt = new Date().toISOString();
@@ -241,10 +247,12 @@ export class PermissionRequests {
       this.chat.participantRequests.startDeferredParticipantRequestRunners(conversation.id, participantRequestsToRun);
       await this.chat.chatHistory.ensureHistoryFiles(conversation);
       emitProgress(resumeRunId, progress, "done", "Permission approval resume finished.");
-      const compacting = messages[0];
-      if (participantRequestMessage && participantRequestBatch && compacting?.metadata?.selfCompaction) {
-        const through = await this.chat.selfCompaction.answerThroughSelfCompactions(conversation.id, requester.id, compacting, undefined);
-        await this.chat.selfCompaction.settleSelfCompactedItem(conversation, participantRequestMessage.id, participantRequestBatch.id, requester, through, true);
+      const first = messages[0];
+      if (participantRequestMessage && participantRequestBatch && first && goesOn) {
+        const through = await this.chat.participantRequests.answerWithLiveRun(conversation, participantRequestMessage.id, requester, first, []);
+        if (through.kind === "answer") {
+          await this.chat.selfCompaction.settleSelfCompactedItem(conversation, participantRequestMessage.id, participantRequestBatch.id, requester, through, true);
+        }
         await this.chat.store.waitForQueuedSave(conversation.id);
         this.heldParticipantRequests.delete(participantRequestMessage.id);
         await this.chat.requesterResumes.autoResumeParticipantRequest(conversation.id, participantRequestMessage.id, progress);

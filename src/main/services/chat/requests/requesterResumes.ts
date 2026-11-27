@@ -4,7 +4,7 @@ import { participantRequestVisibleRootId } from "../../../../shared/chatParticip
 import { PARTICIPANT_REQUEST_INTERRUPTED_BEFORE_COMPLETION } from "../constants";
 import { chatParticipants } from "../members/identity";
 import { delegationGroupResumeText, delegationTurnGroup, turnSegmentKey } from "./delegationGroups";
-import { endWaitOnUnresumedOwnRequest, requestWaitingOnOwnRequest } from "./ownRequests";
+import { markOwnRequestResumeEnded, requestWaitingOnOwnRequest } from "./ownRequests";
 import {
   markParticipantRequestAutoResumeFailed, participantRequestBatchRequesterDepth, participantRequestHasUnfinishedItems,
   updateParticipantRequestBatch
@@ -119,8 +119,9 @@ export class RequesterResumes {
         // A request a member made while it answers another, and that the one
         // it answers waits on (ownRequests.ts), resumes it even when every
         // target was declined: its answer comes from that turn.
-        const answeringRequest = group.length === 1 ? requestWaitingOnOwnRequest(conversation, requestMessage) : undefined;
-        if (items.length > 0 && items.every((item) => item.status === "denied") && !answeringRequest) {
+        const allDenied = items.length > 0 && items.every((item) => item.status === "denied");
+        const answeringRequest = allDenied && group.some((entry) => requestWaitingOnOwnRequest(conversation, entry.message));
+        if (allDenied && !answeringRequest) {
           void this.logParticipantRequestAutoResumeSkipped(conversationId, requestMessageId, "all-items-denied", batch);
           return;
         }
@@ -132,10 +133,10 @@ export class RequesterResumes {
           items.every((item) => item.status === "interrupted" && item.error === PARTICIPANT_REQUEST_INTERRUPTED_BEFORE_COMPLETION)) {
           void this.logParticipantRequestAutoResumeSkipped(conversationId, requestMessageId, "all-items-interrupted-before-completion", batch);
           // Not resumed: a request its turn answered, waiting on these, ends
-          // as the restart ended them.
+          // as the restart ended them, wherever it is waited on.
           await this.chat.store.withChatMutation(conversation, async () => {
-            const ended = group.map((entry) => Boolean(endWaitOnUnresumedOwnRequest(conversation, entry.message.id))).some(Boolean);
-            if (!ended) return;
+            const marked = group.map((entry) => markOwnRequestResumeEnded(conversation, entry.message.id, "not-made")).some(Boolean);
+            if (!marked) return;
             conversation.updatedAt = new Date().toISOString();
             await this.chat.store.saveConversation(conversation);
           });
@@ -291,12 +292,16 @@ export class RequesterResumes {
       });
       const participantRequestsToRun = await this.chat.store.withChatMutation(conversation, async () => {
         const toRun = await this.chat.pendingReplies.appendParticipantTurnMessages(conversation, requester, messages);
+        const now = new Date().toISOString();
         for (const requestMessageId of requestMessageIds) {
           updateParticipantRequestBatch(conversation, requestMessageId, (current) => ({
             ...current,
             status: "completed",
             autoResumeMessageId: messages[0]?.id,
-            updatedAt: new Date().toISOString()
+            // Its turn was stopped before it began (no reply): a request
+            // waiting on this requester's answer ends with it (ownRequests.ts).
+            ...(messages[0] ? {} : { requesterResumeEnded: { reason: "stopped" as const, at: now } }),
+            updatedAt: now
           }));
         }
         conversation.updatedAt = new Date().toISOString();

@@ -176,6 +176,24 @@ verbatim there). Modelled on T3 Code (`~/reference/t3code`,
   an older machine program) runs on its own after it, so nothing is lost. A
   Stop of one request that went out with others ends only that request; a
   Stop of the reply ends all of them, before the member started too.
+- **A member that asks someone itself and ends its turn to wait has not
+  answered yet** (the User, 2026-11-27). A task (or any member request) whose
+  member asked the main session or another member with
+  `app_chat_request_participants` (a resume of its own) and ended its turn
+  stays running: the reply it writes once resumed with the answers settles
+  it, and that reply is what the main session is woken with (once); asking
+  again, or a permission card in that turn, keeps it waiting
+  (`requests/ownRequests.ts`, `ownRequestWaits.ts`). Its earlier lines are
+  kept (`earlierReplyMessageIds`) and read too. The member shows working
+  meanwhile and its Stop ends the task (its own question still comes back to
+  it, as finished background work does in its CLI). Its own question failing,
+  interrupted or declined still resumes it. A resume that ends with no reply
+  (it could not run, was stopped before it began, a restart will not make
+  it: `requesterResumeEnded` on the member's own request, written by the
+  member's device) ends the task failed or interrupted, never with the
+  interim line. A quit or restart leaves it running and it is waited on
+  again at the chat's first look; the same on a cloud machine. A request
+  inferred from a mention is not waited on.
 - **The Chat Assistant and the Workflow Manager role are not in new chats.**
   Chats made before stay exactly as they are (with their Assistant).
 
