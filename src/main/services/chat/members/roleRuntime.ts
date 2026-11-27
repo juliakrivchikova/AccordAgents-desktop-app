@@ -25,7 +25,8 @@ import type { ResolvedChatParticipantRole } from "../types";
  *  session (mainSessionMemberRules). 27: a note about one project is
  *  never global; another project's is filed under it with `project`; who
  *  merges or releases work updates the status notes of all it ships;
- *  knowledge goes to the repository, then this memory, never a CLI's own;
+ *  knowledge goes to the repository, then this memory first (a CLI's own
+ *  memory stays as the CLI keeps it);
  *  a session starts with every note its member sees
  *  (MEMBER_MEMORY_INSTRUCTIONS, memoryIndex). */
 const CHAT_ROLE_RUNTIME_CONFIG_VERSION = 27;

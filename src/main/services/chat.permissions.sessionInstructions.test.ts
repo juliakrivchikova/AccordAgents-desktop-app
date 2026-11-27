@@ -241,13 +241,13 @@ test("members' memory: every member is told how to keep it, a new session's prom
   assert.match(asked[0].text, /First task\.$/);
   // The way to keep memory goes with the member's instructions.
   assert.match(roles[0], /Long-term memory:\n- Keep it yourself with `app_memory_search`, `app_memory_read`, `app_memory_write`, `app_memory_archive`; User never asks for it\. Do not mention memory to User unless User asks\./);
-  // Where knowledge goes, in order: the repository, this memory, never a CLI's own.
+  // Where knowledge goes, in order: the repository, this memory first; a CLI's own memory is left as it is.
   assert.match(roles[0], /Where knowledge goes, in this order\. 1\) The repository: everything about the code, its architecture and how the project is worked on \(parity rules included\) goes into its docs, CLAUDE\.md or AGENTS\.md with your current task's changes/);
   assert.match(roles[0], /write a project note with `awaitingRepository: true`, move it with the next task there, then archive the note/);
   assert.match(roles[0], /2\) This memory, for everything else: User's preferences and corrections \(an article tagged `preference`/);
-  assert.match(roles[0], /anything unfit for a public repository \(assume public unless you checked\), task statuses, outside systems\. It is the only memory members share\./);
-  assert.match(roles[0], /3\) Never your CLI's own memory \(Claude Code's memory files, Codex memories\): members on other providers or on cloud machines never see it\./);
-  assert.doesNotMatch(roles[0], /in addition to what your CLI keeps itself/);
+  assert.match(roles[0], /anything unfit for a public repository \(assume public unless you checked\), task statuses, outside systems\. It is the primary memory members share: write shared knowledge here first\./);
+  assert.match(roles[0], /3\) Whatever your CLI keeps in its own memory \(Claude Code's memory files, Codex memories\) stays as the CLI keeps it; the app copies it into this memory, read-only\./);
+  assert.doesNotMatch(roles[0], /in addition to what your CLI keeps itself|Never your CLI's own memory/);
   // Whoever merges or releases work updates the status notes it ships.
   assert.match(roles[0], /When you merge or release work, update the status notes of all it ships, whoever wrote them: merged or released with the version, or archived once nothing is open/);
   // A status of repository work is kept where whoever releases it sees it.

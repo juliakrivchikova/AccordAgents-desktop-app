@@ -52,15 +52,17 @@ Decided by the User on 2026-11-27; members are told it in this order
    corrections (articles tagged `preference`), User-specific or private
    details and anything not for a public repository (a member treats a
    repository as public unless it checked it is private), task statuses,
-   outside systems. It is the primary memory and the only one members share.
-3. **Never a CLI's own memory** (Claude Code's memory files, Codex memories):
-   only that CLI on that computer reads it, so members on other providers and
-   on cloud machines never see it (on 2026-11-26 the main session had kept
-   the User's preferences only in Claude Code's memory files). This differs
-   from the dedicated CLI on purpose: an approved exception in
-   `docs/parity-requirements.md`. A separate
-   sync of those memories into this one will file each under the project its
-   CLI folder belongs to, with `project` (below).
+   outside systems. It is the primary memory members share: they write
+   shared knowledge here first (on 2026-11-26 the main session had kept the
+   User's preferences only in Claude Code's memory files, which only that
+   CLI on that computer reads, so members on other providers and on cloud
+   machines never saw them).
+3. **A CLI's own memory is never touched** (the User, 2026-11-27): whatever
+   Claude Code or Codex keeps in its own memory stays exactly as the CLI
+   keeps it, so working with the CLI directly is as before. Members are not
+   told to stop using or to clean it; the app copies it into members' memory
+   read-only (a separate sync, which files each copy under the project its
+   CLI folder belongs to with `project`, below).
 
 ## Where it lives and who sees what
 
