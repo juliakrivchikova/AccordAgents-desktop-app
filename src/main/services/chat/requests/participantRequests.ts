@@ -501,19 +501,30 @@ export class ParticipantRequests {
         });
         await this.chat.activeRuns.beginChatRun(conversation, targetRunId);
         targetRunBegun = true;
-        const messages = await this.chat.turnQueue.runParticipantTurnSerialized(conversation, target, targetTriggerMessage, targetRunId, targetController.signal, progress, {
+        const ownMessages = await this.chat.turnQueue.runParticipantTurnSerialized(conversation, target, targetTriggerMessage, targetRunId, targetController.signal, progress, {
           warnings,
           participantRequestDepth: depth,
           participantRequestBatchId: batch.id,
-          chainRootId: batch.chainRootId
+          chainRootId: batch.chainRootId,
+          settlesJoinedTurns: true
         });
+        // Taken into the member's turn before it (TurnQueue.joinWaitingTurns):
+        // that turn's reply, added to the chat by its own caller, is the
+        // answer to this request too.
+        const joined = this.chat.turnQueue.takeJoinedTurn(targetRunId);
+        if (joined?.detached) throw new Error("Chat run cancelled.");
+        if (joined?.error !== undefined) throw new Error(joined.error);
+        const messages = joined ? joined.messages : ownMessages;
         let reply = messages[0];
         // A reply that asked to compact the member's context is not its
         // answer yet: the one it goes on to is (continueAfterSelfCompaction).
         let continues = false;
         await this.chat.store.withChatMutation(conversation, async () => {
-          participantRequestsToRun = await this.chat.pendingReplies.appendParticipantTurnMessages(conversation, target, messages);
-          const waitingOnPermissionApproval = hasPendingPermissionApprovalForParticipantTurn(
+          participantRequestsToRun = joined ? [] : await this.chat.pendingReplies.appendParticipantTurnMessages(conversation, target, messages);
+          // A turn this request went into that waits on a permission card
+          // answers it with what it said so far: the card's resume goes on
+          // for the turn's own request only.
+          const waitingOnPermissionApproval = !joined && hasPendingPermissionApprovalForParticipantTurn(
             conversation,
             target,
             requestMessage.id,
@@ -555,6 +566,10 @@ export class ParticipantRequests {
           }));
           this.chat.store.queueSnapshot(conversation);
         });
+        // Its reply is in the chat: the requests it took in end with it now,
+        // before it waits for the turn its own compaction goes on in (that
+        // turn waits for them).
+        this.chat.turnQueue.settleJoinedTurns(targetRunId);
         // What it wrote before each compaction of its own; the last reply is
         // its answer.
         const earlier: ChatMessage[] = [];
@@ -589,6 +604,8 @@ export class ParticipantRequests {
         }));
         replies.push({ targetHandle: target.handle, error: message });
       } finally {
+        // Its reply is in the chat now: the requests it took in end with it.
+        if (targetRunId) this.chat.turnQueue.settleJoinedTurns(targetRunId);
         inlineParentSignal?.removeEventListener("abort", abortFromInlineParent);
         if (targetRunBegun && targetRunId) {
           await this.chat.activeRuns.endChatRun(conversation, targetRunId);

@@ -31,9 +31,8 @@ import {
 } from "../sessions/forkNotes";
 import { recordLastMessageByParticipant } from "../store/lastMessages";
 import { createChatMessage } from "../store/messages";
-import {
-  commitPromptContextPointerAdvance, forgetPromptContextPointers, promptContextScopeForTrigger, waitForEarlierClaudeMessages
-} from "./promptContextRecords";
+import { commitPreparedPromptContext } from "./promptContext";
+import { forgetPromptContextPointers, promptContextScopeForTrigger, waitForEarlierClaudeMessages } from "./promptContextRecords";
 import {
   appMcpToolInventoryKeyFor, appMcpToolNamesFor, appToolCapabilitiesForRun, newMessageNonce, preauthorizedAppMcpToolNamesFor
 } from "./promptSections";
@@ -103,12 +102,16 @@ export class ParticipantTurn {
       /** A request delivered now to a Codex member: steered into its running
        *  turn (CliAgentRunOptions.steerIntoRunningTurn). */
       steerIntoRunningTurn?: (outcome: "steered" | "not-steered") => void;
+      /** The waiting messages it took in, and their runs (TurnQueue.joinWaitingTurns). */
+      joinedTriggers?: readonly ChatMessage[];
+      joinedRunIds?: readonly string[];
     }
   ): Promise<ChatMessage[]> {
     this.chat.host.assertOwnsParticipant(participant);
     const sessionState = await this.chat.memberSessions.sessionForParticipant(conversation, participant);
     const session = sessionState.session;
     const sourcePromptConversation = options.promptConversation ?? conversation;
+    const joined = options.joinedTriggers ?? [];
     const nativeGoal = triggerMessage.role === "user" && triggerMessage.metadata?.nativeCommand?.name === "goal"
       ? triggerMessage.metadata.nativeCommand
       : undefined;
@@ -156,7 +159,7 @@ export class ParticipantTurn {
     if (memoryIndexIsDue) this.chat.memberSessions.memoryPicksShown.delete(memoryKey);
     const shownPicks = this.chat.memberSessions.memoryPicksShown.get(memoryKey);
     const memoryPicksPending = options.continuation || memoryPicksOff ? undefined : memoryPicks(
-      memoryAccessNow(this.chat.memberSessions.memoryAccess), memoryActor, promptTriggerMessage.content,
+      memoryAccessNow(this.chat.memberSessions.memoryAccess), memoryActor, [promptTriggerMessage, ...joined].map((message) => message.content).join("\n\n"),
       [...(shownPicks ?? new Map<string, number>())].map(([id, version]) => ({ id, version }))
     );
     // A Claude Code member may take this message while an earlier one is
@@ -165,7 +168,7 @@ export class ParticipantTurn {
     const sharedClaudeTurn = participantTurnMode(participant, triggerMessage, mainSessionParticipantId(conversation.metadata) ?? "") === "shared";
     // One nonce for everything this message carries (buildPromptParts).
     const turnNonce = newMessageNonce();
-    const preparedPromptContext = await this.chat.promptContext.preparePromptContextForRun(
+    const preparedPromptContext = await this.chat.promptContext.preparePromptContextForTurn(
       conversation,
       promptConversation,
       participant,
@@ -174,7 +177,8 @@ export class ParticipantTurn {
       isResumingSession,
       sharedClaudeTurn ? undefined : runId,
       options.extraPromptContextMessageIds,
-      turnNonce
+      turnNonce,
+      joined
     );
     const agentMode = agentModeForSession(session, participant);
     // A once-only approval is used by one turn: one that another turn of the
@@ -264,8 +268,8 @@ export class ParticipantTurn {
       ? `Your access: ${this.chat.turnPrompt.participantDynamicHeader(conversation, participant, session, access)}`
       : isResumingSession ? this.chat.memberSessions.accessChangedNote(conversation, participant, session, access) : undefined;
     // The message's pictures, as the CLI's own image input.
-    const turnImages = await this.chat.attachments.turnImagesForCli(conversation.id, promptTriggerMessage, participant.kind, turnNonce);
-    const imageOptions = { unavailableImagesNote: turnImages.unavailableNote, picturesNote: turnImages.picturesNote, imageCount: turnImages.images?.items.length ?? 0 };
+    const turnImages = await this.chat.attachments.turnImagesForMessages(conversation.id, [promptTriggerMessage, ...joined], participant.kind, turnNonce);
+    const imageOptions = { unavailableImagesNote: turnImages.unavailableNote, picturesNote: turnImages.picturesNote, imageCount: turnImages.images?.items.length ?? 0, joinedTriggers: joined };
     const primary = this.chat.turnPrompt.buildPromptParts(promptConversation, participant, session, promptTriggerMessage, workspacePath, Boolean(options.continuation), {
       includeRoleInstructions: primaryIncludeRoleInstructions,
       turnNonce,
@@ -354,6 +358,7 @@ export class ParticipantTurn {
           participantRequestDepth: options.participantRequestDepth ?? 0,
           participantRequestBatchId: options.participantRequestBatchId,
           participantRequestChainRootId: options.chainRootId,
+          ...(joined.length > 0 ? { joinedTriggerMessageIds: joined.map((message) => message.id), joinedRunIds: [...options.joinedRunIds ?? []] } : {}),
           queuedBehind: options.queuedBehindHandle ? { handle: options.queuedBehindHandle } : undefined,
           turnQueued: options.queuedBehindHandle ? true : undefined
         },
@@ -850,9 +855,9 @@ export class ParticipantTurn {
       }
       // A reply Send now cut short read its prompt as one that finished did.
       const promptRead = (!signal?.aborted && result.ok) || sentNow;
-      if (sentNow) commitPromptContextPointerAdvance(conversation, participant.id, preparedPromptContext.pointerAdvance);
+      if (sentNow) commitPreparedPromptContext(conversation, participant.id, preparedPromptContext);
       if (!signal?.aborted && result.ok && result.content.trim()) {
-        commitPromptContextPointerAdvance(conversation, participant.id, preparedPromptContext.pointerAdvance);
+        commitPreparedPromptContext(conversation, participant.id, preparedPromptContext);
         this.chat.pendingReplies.logMissingSelectedSkillStatus(triggerMessage, participant, pendingMessage, runId);
         const pendingMentions: ChatPendingMention[] = [];
         const pendingChoice = pendingChoiceFromAgentReply(result.content);

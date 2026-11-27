@@ -263,6 +263,9 @@ export class RemoteTurns {
       });
       return [];
     }
-    return refreshed.messages.filter((message) => message.participantId === participant.id && message.metadata?.runId === serverRunId && message.status !== "pending");
+    // Taken into the member's turn before it on its device (TurnQueue
+    // joinWaitingTurns): that turn's reply answers it too.
+    return refreshed.messages.filter((message) => message.participantId === participant.id && message.status !== "pending" &&
+      (message.metadata?.runId === serverRunId || message.metadata?.joinedRunIds?.includes(serverRunId) === true));
   }
 }

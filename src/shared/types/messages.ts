@@ -187,6 +187,15 @@ export interface ChatMessageMetadata {
    *  its own and its steps stay open; the turn's "Worked for" is on its last
    *  part (counted from the turn's start, turnStartedAt). */
   turnContinues?: true;
+  /** A reply to several messages at once: the messages and requests that
+   *  waited for its member while it was busy went into this one turn with
+   *  the one it answers (sourceMessageId), as a CLI takes the messages
+   *  queued while it works (TurnQueue.joinWaitingTurns). The others' ids,
+   *  in the order they came, and the runs that asked for them (on a machine,
+   *  the turns' ids on the User's server: the asking device finds its
+   *  answer by them). */
+  joinedTriggerMessageIds?: string[];
+  joinedRunIds?: string[];
   /** A member's reply that ended a turn: where its CLI session stood then,
    *  so Fork to new chat copies the session up to it. Written by the device
    *  that ran the turn, when its CLI said (Claude Code's stream, Codex's

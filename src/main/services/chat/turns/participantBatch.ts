@@ -13,6 +13,7 @@ import { emitProgress } from "./replyMessages";
 import { takenBackMark } from "./takenBackMessages";
 import type { ProgressCallback, ServerTurnOpen } from "../types";
 import type { ChatModules } from "../modules";
+import type { ChatDependencies } from "../dependencies";
 
 /** Runs the turns of one message's members together. */
 export class ParticipantBatch {
@@ -22,7 +23,8 @@ export class ParticipantBatch {
       | "activeRuns" | "agentEnvironment" | "appQuit" | "approvalDecisions" | "chatHistory" | "members" | "messageSending"
       | "participantRequests" | "pendingReplies" | "promptContext" | "serverLink" | "serverPlaceholders" | "serverTurns"
       | "store" | "titles" | "turnQueue"
-    >
+    >,
+    private readonly deps: Pick<ChatDependencies, "debugLogs">
   ) {}
 
   async runParticipantBatch(
@@ -212,13 +214,19 @@ export class ParticipantBatch {
             promptContextScope: promptContextScopeForTrigger(triggerMessage),
             existingPendingMessage: pendingMessage,
             turnReservation,
-            writeGate: writeGates.get(participant.id)
+            writeGate: writeGates.get(participant.id),
+            settlesJoinedTurns: true
           });
-          if (serverTurn.kind === "remote") {
+          // Taken into the member's turn before it (TurnQueue.joinWaitingTurns):
+          // that turn's reply answers it, and its own bubble is gone.
+          const joined = this.chat.turnQueue.takeJoinedTurn(targetRunId);
+          if (joined) {
+            // Nothing of its own to add: the turn it went into added its reply.
+          } else if (serverTurn.kind === "remote") {
             // The member's own device wrote its reply and ran what follows it.
             await this.chat.serverPlaceholders.dropServerPlaceholder(conversation, pendingMessage.id);
           } else if (targetController.signal.aborted && !this.chat.activeRuns.sentNowRunIds.has(targetRunId)) {
-            await this.discardStoppedTargetRun(conversation, targetRunId, participant, pendingMessage.id);
+            await this.discardStoppedTargetRun(conversation, targetRunId, participant, this.ownBubbleId(targetRunId, pendingMessage));
           } else {
             // A reply Send now cut short is a finished reply whose turn goes on.
             await appendCompletedTurn(participant, messages);
@@ -230,12 +238,14 @@ export class ParticipantBatch {
             await this.chat.serverPlaceholders.dropServerPlaceholder(conversation, pendingMessage.id);
             if (!targetController.signal.aborted) warnings.push(error instanceof Error ? error.message : String(error));
           } else if (targetController.signal.aborted) {
-            await this.discardStoppedTargetRun(conversation, targetRunId, participant, pendingMessage.id);
+            await this.discardStoppedTargetRun(conversation, targetRunId, participant, this.ownBubbleId(targetRunId, pendingMessage));
           } else {
-            await this.chat.pendingReplies.finalizeFailedPrecreatedPendingMessage(conversation, pendingMessage.id, participant, error);
+            await this.chat.pendingReplies.finalizeFailedPrecreatedPendingMessage(conversation, this.ownBubbleId(targetRunId, pendingMessage) ?? pendingMessage.id, participant, error);
             throw error;
           }
         } finally {
+          // Its messages are in the chat now: the turns it took in end with them.
+          this.chat.turnQueue.settleJoinedTurns(targetRunId);
           signal?.removeEventListener("abort", onParentAbort);
           writeGates.get(participant.id)?.markWritten();
           if (!reservationHandedOff) {
@@ -255,6 +265,37 @@ export class ParticipantBatch {
       })
     );
     await this.chat.chatHistory.ensureHistoryFiles(conversation);
+  }
+
+  /** The bubble this run's turn wrote into: the one made for it, unless it
+   *  took waiting turns in and made its own after them (dropJoinedBubbles). */
+  private ownBubbleId(runId: string, pendingMessage: ChatMessage): string | undefined {
+    return this.chat.turnQueue.ledJoinedTurn(runId) ? this.chat.activeRuns.chatRunMeta.get(runId)?.pendingMessageId : pendingMessage.id;
+  }
+
+  /** The queued bubbles of turns that went into one turn (TurnQueue
+   *  joinWaitingTurns), the turn's own included: its reply is made after
+   *  the last message it answers, as a CLI shows the answer to the messages
+   *  it took together after the last of them. */
+  async dropJoinedBubbles(conversation: Conversation, ids: ReadonlyArray<string | undefined>): Promise<void> {
+    const drop = new Set(ids.filter((id): id is string => Boolean(id)));
+    if (drop.size === 0) return;
+    await this.chat.store.withChatMutation(conversation, async () => {
+      for (const id of drop) {
+        const index = conversation.messages.findIndex((message) => message.id === id);
+        const message = index >= 0 ? conversation.messages[index] : undefined;
+        if (!message || message.role !== "participant" || message.status !== "pending") continue;
+        conversation.messages.splice(index, 1);
+        markChatMessageRemoved(conversation, id);
+        repairLastMessagePointerAfterRemoval(conversation, id);
+      }
+      conversation.updatedAt = new Date().toISOString();
+      this.chat.store.queueSnapshot(conversation);
+    });
+  }
+
+  logJoinedTurn(conversationId: string, participantId: string, runId: string, joinedRunIds: string[]): Promise<void> {
+    return this.deps.debugLogs.write("chat.turn.joined-waiting", { conversationId, participantId, runId, joinedRunIds });
   }
 
   private async discardStoppedTargetRun(

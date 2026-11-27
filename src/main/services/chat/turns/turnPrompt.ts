@@ -62,6 +62,11 @@ interface ChatPromptBuildOptions {
   picturesNote?: string;
   /** How many pictures go to the CLI as images (for the size log). */
   imageCount?: number;
+  /** The messages and requests that waited for the member and go into
+   *  this turn after the one it answers, in the order they came
+   *  (TurnQueue.joinWaitingTurns): each as it would come alone, one after
+   *  the other, as a CLI takes the messages queued while it worked. */
+  joinedTriggers?: readonly ChatMessage[];
 }
 
 /** Goes with a resume that brings the replies of the members it asked. */
@@ -121,16 +126,18 @@ export class TurnPrompt {
     const closedChoicesNote = this.closedChoicesPromptSection(conversation, participant, triggerMessage);
     const idleLargeNote = idleLargeMembersNote(conversation, participant, options.permissions);
     const autoTitleBlock = initialAutoTitlePromptSection(conversation, participant, triggerMessage);
-    const triggerBlock = triggerPromptText(participant, triggerMessage, nonce);
-    const skillsBlock = skillMentionsPromptSection(triggerMessage, participant.kind);
-    const mentionsBlock = repoFileMentionsPromptSection(
-      triggerMessage,
+    const triggers = [triggerMessage, ...(options.joinedTriggers ?? [])];
+    const eachTrigger = (section: (message: ChatMessage) => string): string => [...new Set(triggers.map(section).filter(Boolean))].join("\n\n");
+    const triggerBlock = triggers.map((message) => triggerPromptText(participant, message, nonce)).join("\n\n");
+    const skillsBlock = eachTrigger((message) => skillMentionsPromptSection(message, participant.kind));
+    const mentionsBlock = eachTrigger((message) => repoFileMentionsPromptSection(
+      message,
       participant.kind,
       options.agentMode,
       options.permissions,
       canRequestPermissions,
       isAdministratorSession(session)
-    );
+    ));
     const unavailableImagesBlock = [options.picturesNote ?? "", options.unavailableImagesNote ?? ""].filter(Boolean).join("\n\n");
     // Resumed with the replies of the members it asked, a member tends to
     // name them by handle when it sums them up, and each @handle asks that
@@ -139,7 +146,7 @@ export class TurnPrompt {
     // resumes only. In the sessions view a handle starts nobody
     // (handleWritingLines), so there is nothing to warn about.
     const continuationNote = continuation && chatViewFor(conversation.metadata) !== "sessions" ? CONTINUATION_HANDLE_NOTE : "";
-    const stagesNote = stagedWorkCompactionNote(triggerMessage, participant, options.permissions);
+    const stagesNote = eachTrigger((message) => stagedWorkCompactionNote(message, participant, options.permissions));
     // Antigravity has no read-only sandbox of its own (geminiExec): a
     // read-only member is reminded with every message.
     // (Not when its access is said in this message already.)

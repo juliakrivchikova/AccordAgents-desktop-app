@@ -3,9 +3,9 @@ import type {
 } from "../../../../shared/types";
 import { cappedTaskReplyRecords } from "../requests/delegationGroups";
 import {
-  inFlightPromptContextKey, isParticipantOwnPromptContextMessage, isPromptContextMessage, newestPostsReadThrough,
+  commitPromptContextPointerAdvance, inFlightPromptContextKey, isParticipantOwnPromptContextMessage, isPromptContextMessage, newestPostsReadThrough,
   normalizedPromptContextPointers, promptContextBlock, promptContextPointerAtOrAfter, promptContextPointerForScope,
-  promptContextRecordsAfterPointer, selectPromptContextRecords
+  promptContextRecordsAfterPointer, promptContextScopeForTrigger, selectPromptContextRecords
 } from "./promptContextRecords";
 import { newMessageNonce } from "./promptSections";
 import { takenBackMessageIds } from "./takenBackMessages";
@@ -18,6 +18,20 @@ interface PreparedPromptContext {
   block: string;
   resumeFallbackBlock: string;
   pointerAdvance?: ChatPromptContextPointerAdvance;
+  /** The other threads a turn that took waiting messages in read
+   *  (preparePromptContextForTurn). */
+  otherPointerAdvances?: ChatPromptContextPointerAdvance[];
+}
+
+/** What a turn read is passed: the next turn reads only what came after. */
+export function commitPreparedPromptContext(conversation: Conversation, participantId: string, prepared: PreparedPromptContext): void {
+  for (const advance of [prepared.pointerAdvance, ...(prepared.otherPointerAdvances ?? [])]) {
+    commitPromptContextPointerAdvance(conversation, participantId, advance);
+  }
+}
+
+function scopeKey(scope: ChatPromptContextScope): string {
+  return scope.type === "thread" ? `thread:${scope.threadRootId}` : "timeline";
 }
 
 interface InFlightPromptContext {
@@ -53,7 +67,10 @@ export class PromptContext {
      *  context like the scope's own. */
     extraMessageIds?: readonly string[],
     /** The message's nonce (ChatPromptBuildOptions.turnNonce). */
-    nonce: string = newMessageNonce()
+    nonce: string = newMessageNonce(),
+    /** Messages the turn gets as its own, not as chat it has not seen (the
+     *  ones it took in, preparePromptContextForTurn). */
+    ownMessageIds: ReadonlySet<string> = new Set()
   ): Promise<PreparedPromptContext> {
     const settings = await this.deps.settings.getPublicSettings();
     const policy = scope.type === "thread"
@@ -71,8 +88,8 @@ export class PromptContext {
       const pointer = inFlight && !promptContextPointerAtOrAfter(committed, inFlight) ? inFlight : committed;
       const records = promptContextRecordsAfterPointer(promptConversation.messages, scope, pointer, triggerMessage.id);
       const takenBack = takenBackMessageIds([...promptConversation.messages, ...conversation.messages], participant.id);
-      const renderCandidates = records.filter((record) =>
-        record.message.id !== triggerMessage.id && !takenBack.has(record.message.id) && !record.message.metadata?.takenBack);
+      const renderCandidates = records.filter((record) => record.message.id !== triggerMessage.id && !ownMessageIds.has(record.message.id) &&
+        !takenBack.has(record.message.id) && !record.message.metadata?.takenBack);
       const resumedRenderCandidates = isResumingSession
         ? renderCandidates.filter((record) => !isParticipantOwnPromptContextMessage(record.message, participant.id))
         : renderCandidates;
@@ -130,6 +147,43 @@ export class PromptContext {
       }
     });
     return { block, resumeFallbackBlock, pointerAdvance };
+  }
+
+  /** preparePromptContextForRun for a turn, with the messages and requests
+   *  it took in (TurnQueue.joinWaitingTurns): it reads what it has not seen
+   *  in each of their threads too, as each would have alone, and gets none
+   *  of them as chat it has not seen. */
+  async preparePromptContextForTurn(
+    conversation: Conversation,
+    promptConversation: Conversation,
+    participant: ChatParticipant,
+    triggerMessage: ChatMessage,
+    scope: ChatPromptContextScope,
+    isResumingSession: boolean,
+    runId: string | undefined,
+    extraMessageIds: readonly string[] | undefined,
+    nonce: string,
+    joinedTriggers: readonly ChatMessage[] = []
+  ): Promise<PreparedPromptContext> {
+    const own = new Set(joinedTriggers.map((message) => message.id));
+    const lead = await this.preparePromptContextForRun(conversation, promptConversation, participant, triggerMessage, scope, isResumingSession, runId, extraMessageIds, nonce, own);
+    if (joinedTriggers.length === 0) return lead;
+    own.add(triggerMessage.id);
+    const read = new Set([scopeKey(scope)]);
+    const others: PreparedPromptContext[] = [];
+    for (const message of joinedTriggers) {
+      const other = promptContextScopeForTrigger(message);
+      if (read.has(scopeKey(other))) continue;
+      read.add(scopeKey(other));
+      others.push(await this.preparePromptContextForRun(conversation, promptConversation, participant, message, other, isResumingSession, runId, undefined, nonce, own));
+    }
+    const all = [lead, ...others];
+    return {
+      block: all.map((part) => part.block).filter(Boolean).join("\n\n"),
+      resumeFallbackBlock: all.map((part) => part.resumeFallbackBlock).filter(Boolean).join("\n\n"),
+      ...(lead.pointerAdvance ? { pointerAdvance: lead.pointerAdvance } : {}),
+      otherPointerAdvances: others.flatMap((part) => part.pointerAdvance ? [part.pointerAdvance] : [])
+    };
   }
 
   registerInFlightPromptContext(

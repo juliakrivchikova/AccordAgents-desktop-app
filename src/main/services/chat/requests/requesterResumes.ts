@@ -165,7 +165,12 @@ export class RequesterResumes {
         // the turn reads them as well, and what a member wrote before it went
         // on after a compaction of its own.
         const compacted = group.some((entry) => entry.batch.items.some((item) => item.earlierReplyMessageIds?.length));
-        const extraPromptContextMessageIds = group.length > 1 || compacted
+        // A reply that answered this request together with other messages
+        // waiting for its member (TurnQueue.joinWaitingTurns) is in the
+        // thread of the first of them, perhaps not this one's.
+        const joinedReply = group.some((entry) => entry.batch.items.some((item) => item.replyMessageId &&
+          conversation.messages.find((message) => message.id === item.replyMessageId)?.metadata?.joinedTriggerMessageIds?.length));
+        const extraPromptContextMessageIds = group.length > 1 || compacted || joinedReply
           ? group.flatMap((entry) => entry.batch.items.flatMap((item) => [...(item.earlierReplyMessageIds ?? []), ...(item.replyMessageId ? [item.replyMessageId] : [])]))
           : undefined;
         if (group.length > 1) {

@@ -188,7 +188,7 @@ export function createChatModules(deps: ChatDependencies): ChatModules {
   modules.chatPostTools = new ChatPostTools(modules, deps);
   modules.attachments = new ChatAttachments(modules, deps);
   modules.messageSending = new MessageSending(modules, deps);
-  modules.participantBatch = new ParticipantBatch(modules);
+  modules.participantBatch = new ParticipantBatch(modules, deps);
   modules.participantTurn = new ParticipantTurn(modules, deps);
   modules.turnQueue = new TurnQueue(modules);
   modules.pendingReplies = new PendingReplies(modules, deps);

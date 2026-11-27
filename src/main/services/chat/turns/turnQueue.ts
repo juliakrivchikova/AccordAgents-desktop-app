@@ -23,6 +23,10 @@ import type { ChatModules } from "../modules";
 export type TurnPriority = "next" | "live" | "elsewhere";
 
 interface HeldTurn {
+  /** Its place in the member's line: turns reserved later have a higher one. */
+  order: number;
+  /** Takes it out of the waiting turns: it runs now. */
+  begin: () => void;
   /** Settled once the turn is released. */
   done: Promise<void>;
   operation: boolean;
@@ -31,6 +35,51 @@ interface HeldTurn {
   userFirst: boolean;
   running: boolean;
   priority?: TurnPriority;
+}
+
+/** How the turn a waiting message went into ended (joinWaitingTurns), for
+ *  the caller that asked for the waiting one (takeJoinedTurn). */
+export interface JoinedTurnOutcome {
+  /** The run whose turn took it in. */
+  leadRunId: string;
+  /** That turn's messages, its reply first, once its caller has added them
+   *  to the chat; none when it ended before it had a reply. */
+  messages: ChatMessage[];
+  /** That turn failed before it had a reply. */
+  error?: string;
+  /** Stopped after it went in: it no longer waits for the reply, which
+   *  still answers the others (a message already in a CLI's turn cannot be
+   *  taken back). */
+  detached?: true;
+}
+
+/** A turn waiting that may go into the turn before it (joinableTurn). */
+interface WaitingJoinable {
+  triggerMessage: ChatMessage;
+  runId: string;
+  signal: AbortSignal;
+  /** Its queued bubble, made before it waited (participantBatch). */
+  pendingMessageId?: string;
+  join: (outcome: Promise<JoinedTurnOutcome>) => void;
+}
+
+/** A turn that took waiting ones in, until its caller settles them. */
+interface JoinedLead {
+  followers: Array<(outcome: JoinedTurnOutcome) => void>;
+  messages?: ChatMessage[];
+  /** They ended already: it ended without a reply. */
+  ended?: true;
+}
+
+/** How much waiting text one turn takes in (joinWaitingTurns): what does not
+ *  fit goes into the turn after it. Antigravity is given its prompt as a
+ *  command-line argument, which the system caps at 1 MB with the
+ *  environment, and a member request alone may be 50,000 characters. */
+const JOINED_TURN_MAX_CHARS = 200_000;
+
+function triggerChars(message: ChatMessage, participantId: string): number {
+  const asked = message.metadata?.participantRequest?.items.find((item) => item.targetParticipantId === participantId);
+  return asked ? asked.prompt.length : message.content.length;
 }
 
 function setOf<T>(map: Map<string, Set<T>>, key: string): Set<T> {
@@ -59,6 +108,13 @@ export class TurnQueue {
   /** The run ids of member turns that run now (runParticipantTurnSerialized). */
   private readonly runningTurnRuns = new Map<string, Set<string>>();
   private readonly heldOf = new WeakMap<ParticipantTurnReservation, HeldTurn>();
+  private nextTurnOrder = 0;
+  /** Waiting turns another turn may take in (joinWaitingTurns). */
+  private readonly joinableWaiting = new Map<HeldTurn, WaitingJoinable>();
+  /** By the lead's run: the turns it took in. */
+  private readonly joinedLeads = new Map<string, JoinedLead>();
+  /** By a taken-in turn's run: how the turn it went into ended. */
+  private readonly joinedOutcomes = new Map<string, JoinedTurnOutcome>();
 
   constructor(
     private readonly chat: Pick<
@@ -94,6 +150,11 @@ export class TurnQueue {
        *  trigger is a User's message to this member, whose own turn is over
        *  (a permission approval's resume). */
       ownServerTurn?: boolean;
+      /** The caller reads takeJoinedTurn after this returns and calls
+       *  settleJoinedTurns once the turn's messages are in the chat: only
+       *  then may this turn take waiting ones in, or go into the one before
+       *  it (joinWaitingTurns). */
+      settlesJoinedTurns?: boolean;
     }
   ): Promise<ChatMessage[]> {
     const turnSegmentId = randomUUID();
@@ -106,10 +167,16 @@ export class TurnQueue {
     // next; Claude Code gets the CLI's send-now once the message is in its
     // queue (onCliMessageWritten below).
     const delivery = this.deliveryPriority(participant, triggerMessage, conversation);
+    const held = this.heldOf.get(reservation);
+    const joinable = options.settlesJoinedTurns === true && held !== undefined &&
+      this.joinableTurn(conversation, participant, triggerMessage, options, delivery);
     let turnController: { signal: AbortSignal; cleanup: () => void } | undefined;
     // Whether the turn this run took on the server was ended there.
     let serverTurnEnded = false;
     let runningHere = false;
+    // Taken into the turn before it: how that one ended, for its own server turn.
+    let joinedOutcome: JoinedTurnOutcome | undefined;
+    let leadError: unknown;
     try {
       turnController = this.chat.participantBatch.ensureChatTurnController(conversation, participant, runId, signal);
       // Waiting for the member's own compaction and the turn it goes on in,
@@ -117,7 +184,14 @@ export class TurnQueue {
       if (delivery === "next" && !turnController.signal.aborted && !this.memberActivity(conversation.id, participant.id).compacting) {
         void this.chat.runCancel.deliverNow(conversation.id, participant.id, runId, "interrupt-and-restart").catch(() => undefined);
       }
-      await waitForParticipantTurnReservation(reservation, turnController.signal);
+      const joined = joinable
+        ? await this.waitOrJoin(held!, { triggerMessage, runId, signal: turnController.signal, pendingMessageId: options.existingPendingMessage?.id }, reservation, turnController.signal)
+        : await waitForParticipantTurnReservation(reservation, turnController.signal);
+      if (joined) {
+        joinedOutcome = await this.followJoinedTurn(joined.outcome, turnController.signal, runId);
+        this.joinedOutcomes.set(runId, joinedOutcome);
+        return [];
+      }
       if (turnController.signal.aborted) {
         throw new Error("Chat run cancelled.");
       }
@@ -170,10 +244,26 @@ export class TurnQueue {
         });
         this.chat.serverTurns.serverTurnOpens.delete(runId);
       } else {
+        // The messages and requests waiting behind this turn go into it, as a
+        // CLI takes the messages queued while it worked into its next turn.
+        const followers = joinable && this.chat.host.runsHere(participant) ? this.joinWaitingTurns(runKey, held!, runId, triggerMessage, participant.id) : [];
+        if (followers.length > 0) {
+          await this.chat.participantBatch.dropJoinedBubbles(conversation, [options.existingPendingMessage?.id, ...followers.map((follower) => follower.pendingMessageId)]);
+          void this.chat.participantBatch.logJoinedTurn(conversation.id, participant.id, runId, followers.map((follower) => follower.runId));
+        }
         let outcome: "done" | "error" | "stopped" = "error";
         try {
           messages = await this.chat.participantTurn.runParticipantTurn(conversation, participant, triggerMessage, runId, turnController.signal, progress, {
             ...options,
+            // Its reply comes after the last message it answers: the bubbles
+            // made for them while they waited go, and its own is made now
+            // (dropJoinedBubbles), reading the chat as it is now.
+            ...(followers.length > 0 ? {
+              existingPendingMessage: undefined,
+              promptConversation: undefined,
+              joinedTriggers: followers.map((follower) => follower.triggerMessage),
+              joinedRunIds: followers.map((follower) => follower.runId)
+            } : {}),
             turnSegmentId,
             queuedInCli: Boolean(reservation.behindMemberTurn),
             ...(delivery === "live" && participant.kind === "codex-cli" ? {
@@ -189,6 +279,7 @@ export class TurnQueue {
             } : {})
           });
           outcome = turnController.signal.aborted && !this.chat.activeRuns.sentNowRunIds.has(runId) ? "stopped" : "done";
+          if (followers.length > 0) this.noteJoinedLeadMessages(runId, messages);
         } catch (error) {
           outcome = turnController.signal.aborted ? (this.chat.activeRuns.sentNowRunIds.has(runId) ? "done" : "stopped") : "error";
           throw error;
@@ -208,7 +299,12 @@ export class TurnQueue {
         }
       }
       return messages;
+    } catch (error) {
+      leadError = error;
+      throw error;
     } finally {
+      // A turn that took others in and ended without a reply: they end with it.
+      this.endJoinedLeadWithoutReply(runId, leadError);
       if (runningHere) {
         this.runningTurnRuns.get(runKey)?.delete(runId);
         if (this.runningTurnRuns.get(runKey)?.size === 0) this.runningTurnRuns.delete(runKey);
@@ -220,18 +316,150 @@ export class TurnQueue {
       // Taken on the server before it waited its turn here (a send takes it
       // first), and stopped or failed before it ran: ended there too, never
       // left taken with every device showing it busy.
-      if (!serverTurnEnded) await this.endServerTurnNotRun(runId, stopped);
+      if (!serverTurnEnded) {
+        await this.endServerTurnNotRun(runId, joinedOutcome
+          ? (joinedOutcome.detached ? "stopped" : joinedOutcome.error ? "error" : "done")
+          : stopped ? "stopped" : "error");
+      }
       this.chat.delegation.liveTurnSegments.delete(liveTurnKey);
       this.chat.requesterResumes.resumeDelegationsOfEndedTurn(liveTurnKey);
     }
   }
 
-  private async endServerTurnNotRun(runId: string, stopped: boolean): Promise<void> {
+  private async endServerTurnNotRun(runId: string, outcome: "done" | "error" | "stopped"): Promise<void> {
     const opening = this.chat.serverTurns.serverTurnOpens.get(runId);
     if (!opening) return;
     const opened = await opening.catch(() => undefined);
-    if (opened?.kind === "local") this.chat.serverTurns.finishServerTurn(runId, stopped ? "stopped" : "error");
+    if (opened?.kind === "local") this.chat.serverTurns.finishServerTurn(runId, outcome);
     else this.chat.serverTurns.serverTurnOpens.delete(runId);
+  }
+
+  /** Whether a turn may go into the turn before it, or take the ones
+   *  waiting behind it in: a member request (or a task the main session
+   *  gave), or the User's own message to a member whose CLI does not take
+   *  messages while it works, waiting here, where the member runs. A Claude
+   *  Code member's CLI takes the User's messages itself and joins those
+   *  queued while it works (shared turns); a request delivered now takes its
+   *  own place; a resume, a native command and the turns a member's own
+   *  compaction makes keep theirs. */
+  private joinableTurn(
+    conversation: Conversation,
+    participant: ChatParticipant,
+    triggerMessage: ChatMessage,
+    options: { continuation?: boolean; ownServerTurn?: boolean },
+    delivery: TurnPriority | undefined
+  ): boolean {
+    if (delivery !== undefined || options.continuation || options.ownServerTurn) return false;
+    if (!this.chat.host.runsHere(participant) || triggerMessage.metadata?.nativeCommand) return false;
+    if (participantTurnMode(participant, triggerMessage, mainSessionParticipantId(conversation.metadata) ?? "") !== "exclusive") return false;
+    const asked = triggerMessage.metadata?.participantRequest?.items.some((item) => item.targetParticipantId === participant.id) === true;
+    return asked || triggerMessage.role === "user";
+  }
+
+  /** Waits for the turn's place in the line, unless the turn before it
+   *  takes it in first (joinWaitingTurns): then how that turn ends. */
+  private async waitOrJoin(
+    held: HeldTurn,
+    entry: Omit<WaitingJoinable, "join">,
+    reservation: ParticipantTurnReservation,
+    signal: AbortSignal
+  ): Promise<{ outcome: Promise<JoinedTurnOutcome> } | undefined> {
+    let joined: { outcome: Promise<JoinedTurnOutcome> } | undefined;
+    let wake!: () => void;
+    const taken = new Promise<void>((resolve) => { wake = resolve; });
+    this.joinableWaiting.set(held, {
+      ...entry,
+      join: (outcome) => {
+        joined = { outcome };
+        this.joinableWaiting.delete(held);
+        // It runs now, in that turn: not waiting any more.
+        held.begin();
+        wake();
+      }
+    });
+    try {
+      await Promise.race([waitForParticipantTurnReservation(reservation, signal), taken]);
+    } catch (error) {
+      // Stopped while it waited, before it went in: only it goes.
+      if (!joined) throw error;
+    } finally {
+      this.joinableWaiting.delete(held);
+    }
+    return joined;
+  }
+
+  /** The turn this one went into ends, or this one's own Stop comes first. */
+  private async followJoinedTurn(outcome: Promise<JoinedTurnOutcome>, signal: AbortSignal, runId: string): Promise<JoinedTurnOutcome> {
+    const detached = (): JoinedTurnOutcome => ({ leadRunId: runId, messages: [], detached: true });
+    if (signal.aborted) return detached();
+    return await new Promise<JoinedTurnOutcome>((resolve) => {
+      const onAbort = (): void => resolve(detached());
+      signal.addEventListener("abort", onAbort, { once: true });
+      void outcome.then((value) => {
+        signal.removeEventListener("abort", onAbort);
+        resolve(value);
+      });
+    });
+  }
+
+  /** The turns waiting right behind a turn that starts now, in their order,
+   *  up to the first that keeps its own place (a turn put first, one that
+   *  may not join, or one not yet waiting here): they go into it. */
+  private joinWaitingTurns(key: string, lead: HeldTurn, leadRunId: string, leadTrigger: ChatMessage, participantId: string): WaitingJoinable[] {
+    const behind = [...(this.pendingTurns.get(key) ?? [])]
+      .filter((turn) => turn.order > lead.order && !turn.running)
+      .sort((left, right) => left.order - right.order);
+    const followers: WaitingJoinable[] = [];
+    let chars = triggerChars(leadTrigger, participantId);
+    for (const turn of behind) {
+      const entry = this.joinableWaiting.get(turn);
+      if (entry?.signal.aborted) continue;
+      if (turn.priority || !entry) break;
+      chars += triggerChars(entry.triggerMessage, participantId);
+      if (chars > JOINED_TURN_MAX_CHARS) break;
+      followers.push(entry);
+    }
+    if (followers.length === 0) return [];
+    let settle!: (outcome: JoinedTurnOutcome) => void;
+    const outcome = new Promise<JoinedTurnOutcome>((resolve) => { settle = resolve; });
+    this.joinedLeads.set(leadRunId, { followers: [settle] });
+    for (const follower of followers) follower.join(outcome);
+    return followers;
+  }
+
+  private noteJoinedLeadMessages(leadRunId: string, messages: ChatMessage[]): void {
+    const lead = this.joinedLeads.get(leadRunId);
+    if (lead) lead.messages = messages;
+  }
+
+  private endJoinedLeadWithoutReply(leadRunId: string, error: unknown): void {
+    const lead = this.joinedLeads.get(leadRunId);
+    if (!lead || lead.messages || lead.ended) return;
+    lead.ended = true;
+    const reason = error instanceof Error ? error.message : error === undefined ? undefined : String(error);
+    for (const settle of lead.followers) settle({ leadRunId, messages: [], ...(reason ? { error: reason } : {}) });
+  }
+
+  /** Whether this run's turn took waiting ones in (until settleJoinedTurns). */
+  ledJoinedTurn(runId: string): boolean {
+    return this.joinedLeads.has(runId);
+  }
+
+  /** The caller of a turn that took waiting ones in has its messages in the
+   *  chat: the turns it took in end with them. */
+  settleJoinedTurns(leadRunId: string): void {
+    const lead = this.joinedLeads.get(leadRunId);
+    if (!lead) return;
+    this.joinedLeads.delete(leadRunId);
+    if (!lead.ended) for (const settle of lead.followers) settle({ leadRunId, messages: lead.messages ?? [] });
+  }
+
+  /** How the turn this run went into ended, once: undefined when it ran a
+   *  turn of its own (runParticipantTurnSerialized returned its messages). */
+  takeJoinedTurn(runId: string): JoinedTurnOutcome | undefined {
+    const outcome = this.joinedOutcomes.get(runId);
+    this.joinedOutcomes.delete(runId);
+    return outcome;
   }
 
   /** Same-participant turns are serialized, except that a Claude Code member
@@ -267,6 +495,8 @@ export class TurnQueue {
     const key = `${conversationId}:${participantId}`;
     let finish!: () => void;
     const held: HeldTurn = {
+      order: this.nextTurnOrder++,
+      begin: () => begin(),
       done: new Promise<void>((resolve) => { finish = resolve; }),
       operation: options.operation === true,
       mode,
@@ -376,7 +606,12 @@ export class TurnQueue {
    *  a turn delivered now goes before the waiting ones (deliveryPriority). */
   reserveTurnFor(conversation: Conversation, participant: ChatParticipant, triggerMessage: ChatMessage): ParticipantTurnReservation {
     const mode = participantTurnMode(participant, triggerMessage, mainSessionParticipantId(conversation.metadata) ?? "");
-    const priority = this.deliveryPriority(participant, triggerMessage, conversation);
+    // A request to a member on another device is asked there at once: the
+    // requests waiting for it meet in its own line, which joins them
+    // (joinWaitingTurns), as the User's messages to it do.
+    const askedElsewhere = !this.chat.host.runsHere(participant) &&
+      triggerMessage.metadata?.participantRequest?.items.some((item) => item.targetParticipantId === participant.id) === true;
+    const priority = this.deliveryPriority(participant, triggerMessage, conversation) ?? (askedElsewhere ? "elsewhere" : undefined);
     return this.reserveParticipantTurn(conversation.id, participant.id, mode, {
       ...(priority ? { priority } : {}),
       ...(triggerMessage.role === "user" ? { byUser: true } : {}),

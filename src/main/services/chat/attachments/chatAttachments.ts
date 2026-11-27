@@ -182,6 +182,29 @@ export class ChatAttachments {
     };
   }
 
+  /** turnImagesForCli for a turn that took waiting messages in
+   *  (TurnQueue.joinWaitingTurns): the pictures of each, in their order. */
+  async turnImagesForMessages(
+    conversationId: string,
+    messages: readonly ChatMessage[],
+    providerKind: ChatProviderKind,
+    nonce: string = newMessageNonce()
+  ): Promise<{ images?: CliAgentTurnImages; picturesNote?: string; unavailableNote?: string; cleanup: () => Promise<void> }> {
+    const parts = await Promise.all(messages.map((message) => this.turnImagesForCli(conversationId, message, providerKind, nonce)));
+    if (parts.length === 1) return parts[0]!;
+    const items = parts.flatMap((part) => part.images?.items ?? []);
+    const join = (texts: Array<string | undefined>): string | undefined => texts.filter(Boolean).join("\n\n") || undefined;
+    const fallbackText = join(parts.map((part) => part.images?.fallbackText));
+    const picturesNote = join(parts.map((part) => part.picturesNote));
+    const unavailableNote = join(parts.map((part) => part.unavailableNote));
+    return {
+      ...(items.length > 0 ? { images: { items, fallbackText: fallbackText ?? "" } } : {}),
+      ...(picturesNote ? { picturesNote } : {}),
+      ...(unavailableNote ? { unavailableNote } : {}),
+      cleanup: async () => { await Promise.all(parts.map((part) => part.cleanup())); }
+    };
+  }
+
   private async copyAttachmentToExportTarget(
     conversationId: string,
     attachment: ChatImageAttachment,
