@@ -329,8 +329,12 @@ export class ServerTurns {
       // Requests that waited for the member and go out with this one, as the
       // device that asked put them together (TurnQueue takeCombinableTurns);
       // one not here is not answered by this reply, and runs on its own there.
+      // Only requests to this member (the server let only those through that
+      // the asking device may ask; their state here is not this device's to
+      // judge: a request made elsewhere is not running here).
       const combinedTriggers = Array.isArray(request.combined)
-        ? request.combined.flatMap((id) => chat.messages.filter((item) => item.id === id && item.metadata?.participantRequest))
+        ? request.combined.flatMap((id) => chat.messages.filter((item) => item.id === id && item.id !== message.id && item.metadata?.participantRequest?.items
+          .some((candidate) => candidate.targetParticipantId === participant.id)))
         : [];
       await this.chat.participantBatch.runParticipantBatch(chat, [participant], message, runId, controller.signal, this.deps.onReviewProgress, warnings, {
         targetRunIds: new Map([[participant.id, runId]]),

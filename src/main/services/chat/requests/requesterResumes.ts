@@ -18,6 +18,8 @@ import type { ChatDependencies } from "../dependencies";
 /** The turn that gives a requester its answers back. */
 export class RequesterResumes {
   readonly participantRequestAutoResumes = new Set<string>();
+  /** Requests asked to resume while a look at them was under way. */
+  private readonly autoResumeRechecks = new Set<string>();
   /** Groups of the main session's tasks being resumed now, by chat and turn. */
   readonly delegationGroupResumes = new Set<string>();
 
@@ -52,18 +54,27 @@ export class RequesterResumes {
     }
     const ownsEntry = !this.participantRequestAutoResumes.has(requestMessageId);
     if (!ownsEntry && !options.groupCheck) {
+      // The look under way may have read it unfinished a moment before it
+      // ended: it looks again when it is done (a request that went out with
+      // another ends when that one does).
+      this.autoResumeRechecks.add(requestMessageId);
       void this.logParticipantRequestAutoResumeSkipped(conversationId, requestMessageId, "already-auto-resuming");
       return;
     }
     if (ownsEntry) this.participantRequestAutoResumes.add(requestMessageId);
     let backgroundStarted = false;
     let claimedGroupKey: string | undefined;
+    // The requests that went out in one turn with this one ended with it
+    // (settleRequestsAnsweredWith): their requesters are resumed too.
+    let answeredWith: string[] = [];
     try {
       const ingest = await this.chat.activeRuns.withChatRunLock(conversationId, async () => {
         // Read as saved: a task of the same turn that ended a moment ago
         // must be seen ended.
         await this.chat.store.waitForQueuedSave(conversationId);
         const conversation = await this.chat.store.requireChat(conversationId);
+        answeredWith = conversation.messages.filter((message) => message.metadata?.participantRequest?.items
+          .some((item) => item.answeredWith?.requestMessageId === requestMessageId)).map((message) => message.id);
         const requestMessage = conversation.messages.find((message) => message.id === requestMessageId);
         const batch = requestMessage?.metadata?.participantRequest;
         if (!requestMessage || !batch) {
@@ -181,8 +192,7 @@ export class RequesterResumes {
         // on after a compaction of its own, and a reply in another request's
         // thread (it answered requests that went out together in one turn).
         const compacted = group.some((entry) => entry.batch.items.some((item) => item.earlierReplyMessageIds?.length));
-        const answeredElsewhere = group.some((entry) => entry.batch.items.some((item) => item.replyMessageId &&
-          conversation.messages.find((message) => message.id === item.replyMessageId)?.metadata?.combinedRequestMessageIds?.includes(entry.message.id)));
+        const answeredElsewhere = group.some((entry) => entry.batch.items.some((item) => item.answeredWith));
         const extraPromptContextMessageIds = group.length > 1 || compacted || answeredElsewhere
           ? group.flatMap((entry) => entry.batch.items.flatMap((item) => [...(item.earlierReplyMessageIds ?? []), ...(item.replyMessageId ? [item.replyMessageId] : [])]))
           : undefined;
@@ -226,13 +236,22 @@ export class RequesterResumes {
           });
         })
         .finally(() => {
-          if (ownsEntry) this.participantRequestAutoResumes.delete(requestMessageId);
+          if (ownsEntry) {
+            this.participantRequestAutoResumes.delete(requestMessageId);
+            this.autoResumeRechecks.delete(requestMessageId);
+          }
           if (claimedGroupKey) this.delegationGroupResumes.delete(claimedGroupKey);
         });
     } finally {
       if (!backgroundStarted) {
         if (ownsEntry) this.participantRequestAutoResumes.delete(requestMessageId);
         if (claimedGroupKey) this.delegationGroupResumes.delete(claimedGroupKey);
+      }
+      if (ownsEntry && this.autoResumeRechecks.delete(requestMessageId) && !backgroundStarted) {
+        void this.autoResumeParticipantRequest(conversationId, requestMessageId, resumeProgress, options).catch(() => undefined);
+      }
+      for (const linked of answeredWith) {
+        void this.autoResumeParticipantRequest(conversationId, linked, resumeProgress).catch(() => undefined);
       }
     }
   }

@@ -340,7 +340,46 @@ export function updateParticipantRequestBatch(
       }
     };
   });
+  // Every way a request's item ends (its turn, an approval's resume, a
+  // compaction the member went on from, a Stop, a quit, a restart) goes
+  // through here: the requests that went out with it end with it.
+  if (updated) settleRequestsAnsweredWith(conversation, requestMessageId, updated);
   return updated;
+}
+
+/** The requests that went out in one turn with `requestMessageId`'s
+ *  (ChatParticipantRequestItem.answeredWith) and are still open end as its
+ *  item for the same target has ended: the same status, reply and error, and
+ *  they read the reply of the turn they went out in as well (an approval's
+ *  resume or a compaction may have given the request a later reply). */
+export function settleRequestsAnsweredWith(conversation: Conversation, requestMessageId: string, batch: ChatParticipantRequestBatch): void {
+  const ended = batch.items.filter((item) => !isOpenParticipantRequestStatus(item.status));
+  if (ended.length === 0) return;
+  const now = new Date().toISOString();
+  conversation.messages = conversation.messages.map((message) => {
+    const other = message.metadata?.participantRequest;
+    if (!other || message.id === requestMessageId) return message;
+    let changed = false;
+    const items = other.items.map((item) => {
+      const lead = item.answeredWith?.requestMessageId === requestMessageId && isOpenParticipantRequestStatus(item.status)
+        ? ended.find((candidate) => candidate.targetParticipantId === item.targetParticipantId)
+        : undefined;
+      if (!lead) return item;
+      changed = true;
+      const turnReply = item.answeredWith?.replyMessageId;
+      const earlier = [...new Set([...(lead.earlierReplyMessageIds ?? []), ...(turnReply && turnReply !== lead.replyMessageId ? [turnReply] : [])])];
+      return {
+        ...item,
+        status: lead.status,
+        replyMessageId: lead.replyMessageId,
+        error: lead.error,
+        ...(earlier.length > 0 ? { earlierReplyMessageIds: earlier } : {}),
+        updatedAt: now
+      };
+    });
+    if (!changed) return message;
+    return { ...message, metadata: { ...message.metadata, participantRequest: { ...other, items, status: rollupParticipantRequestStatus(items), updatedAt: now } } };
+  });
 }
 
 export async function awaitParticipantRequestRunner(
