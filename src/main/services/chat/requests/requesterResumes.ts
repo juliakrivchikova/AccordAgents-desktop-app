@@ -4,6 +4,7 @@ import { participantRequestVisibleRootId } from "../../../../shared/chatParticip
 import { PARTICIPANT_REQUEST_INTERRUPTED_BEFORE_COMPLETION } from "../constants";
 import { chatParticipants } from "../members/identity";
 import { delegationGroupResumeText, delegationTurnGroup, turnSegmentKey } from "./delegationGroups";
+import { endWaitOnUnresumedOwnRequest, requestWaitingOnOwnRequest } from "./ownRequests";
 import {
   markParticipantRequestAutoResumeFailed, participantRequestBatchRequesterDepth, participantRequestHasUnfinishedItems,
   updateParticipantRequestBatch
@@ -104,7 +105,11 @@ export class RequesterResumes {
           return;
         }
         const items = group.flatMap((entry) => entry.batch.items);
-        if (items.length > 0 && items.every((item) => item.status === "denied")) {
+        // A request a member made while it answers another, and that the one
+        // it answers waits on (ownRequests.ts), resumes it even when every
+        // target was declined: its answer comes from that turn.
+        const answeringRequest = group.length === 1 ? requestWaitingOnOwnRequest(conversation, requestMessage) : undefined;
+        if (items.length > 0 && items.every((item) => item.status === "denied") && !answeringRequest) {
           void this.logParticipantRequestAutoResumeSkipped(conversationId, requestMessageId, "all-items-denied", batch);
           return;
         }
@@ -115,6 +120,14 @@ export class RequesterResumes {
         if (batch.delegation && items.length > 0 &&
           items.every((item) => item.status === "interrupted" && item.error === PARTICIPANT_REQUEST_INTERRUPTED_BEFORE_COMPLETION)) {
           void this.logParticipantRequestAutoResumeSkipped(conversationId, requestMessageId, "all-items-interrupted-before-completion", batch);
+          // Not resumed: a request its turn answered, waiting on these, ends
+          // as the restart ended them.
+          await this.chat.store.withChatMutation(conversation, async () => {
+            const ended = group.map((entry) => Boolean(endWaitOnUnresumedOwnRequest(conversation, entry.message.id))).some(Boolean);
+            if (!ended) return;
+            conversation.updatedAt = new Date().toISOString();
+            await this.chat.store.saveConversation(conversation);
+          });
           return;
         }
         const requester = chatParticipants(conversation).find((participant) => participant.id === batch.requesterParticipantId);
@@ -148,7 +161,9 @@ export class RequesterResumes {
                 "Target replies/errors are in the transcript above. Continue from your request using the available answers and errors.",
                 // A reply cut short (for a message delivered now, a Stop) may
                 // hold no words at all: why it ended is said here.
-                ...batch.items.filter((item) => item.status === "interrupted" && item.error).map((item) => `@${item.targetHandle}: ${item.error}`)
+                ...batch.items.filter((item) => item.status === "interrupted" && item.error).map((item) => `@${item.targetHandle}: ${item.error}`),
+                // Declined, it was resumed only because a request waits on its answer.
+                ...(answeringRequest ? batch.items.filter((item) => item.status === "denied").map((item) => `@${item.targetHandle}: User declined this request; it was not asked.`) : [])
               ].join("\n"),
           undefined,
           {

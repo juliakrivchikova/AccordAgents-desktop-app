@@ -2,6 +2,7 @@ import type { ChatMessage, ChatParticipantRequestBatch, Conversation } from "../
 import { PARTICIPANT_REQUEST_INTERRUPTED_BEFORE_COMPLETION } from "../constants";
 import { chatParticipants } from "../members/identity";
 import { delegationTurnGroup, requesterResumeRecoveryKey, turnSegmentKey } from "./delegationGroups";
+import { endWaitOnUnresumedOwnRequest, itemWaitsOnOwnRequests } from "./ownRequests";
 import {
   participantRequestHasUnfinishedItems, participantRequestWaitsOnPermissionCard, pendingParticipantRequestApprovalTargetIds,
   rollupParticipantRequestStatus, terminalParticipantRequestBatch, updateParticipantRequestBatch
@@ -86,7 +87,10 @@ export class RequestRecovery {
       reason,
       now,
       (item) =>
-        item.status === "running" ||
+        // A member that ended its turn waiting on its own requests goes on
+        // once resumed with their answers, after a restart too: its answer is
+        // still to come (resumeOwnRequestWait waits for it again).
+        (item.status === "running" && !itemWaitsOnOwnRequests(conversation, message, item)) ||
         item.status === "resuming_requester" ||
         (item.status === "pending_approval" && !backedPendingTargetIds.has(item.targetParticipantId))
     );
@@ -103,24 +107,47 @@ export class RequestRecovery {
     // Before the chat's first look since the app started, that look (right
     // after this, recoverDelegationGroupsOfEndedTurns) weighs it; after it,
     // it is weighed here once its last task has ended.
-    const turnId = nextBatch.delegation?.turnId;
-    const recoveryKey = requesterResumeRecoveryKey(conversation.id, message.id, nextBatch);
     // Only work a restart cut short: a request whose approval card went
     // away was ended here before (no resume, as it never ran).
-    if (recoveryKey && (turnId || canInterruptRunning) && this.delegationRecoveryLookedChats.has(conversation.id)) {
-      const group = delegationTurnGroup(conversation, message, nextBatch);
-      if (!this.delegationGroupsRecovered.has(recoveryKey) && !group.some((entry) => participantRequestHasUnfinishedItems(entry.batch) ||
-        participantRequestWaitsOnPermissionCard(conversation, entry.message, entry.batch))) {
-        this.delegationGroupsRecovered.add(recoveryKey);
-        const verdict = this.delegationGroupRecoveryVerdict(conversation, turnId, group.map((entry) => entry.message));
-        if (verdict === "resume") {
-          this.scheduleDelegationGroupResume(conversation.id, message.id);
-        } else {
-          this.logDelegationGroupSettled(conversation.id, group.map((entry) => entry.message.id), verdict, false);
-        }
-      }
-    }
+    if (nextBatch.delegation?.turnId || canInterruptRunning) this.weighRequestARestartEnded(conversation, message);
     return true;
+  }
+
+  /** A request a restart ended, once the chat's first look since the app
+   *  started was made (before it, that look weighs it): once its last task
+   *  has ended, its requester is resumed with the answers, or it is settled
+   *  (delegationGroupRecoveryVerdict). Not resumed: a request that waited on
+   *  this one's requester (its own request, ownRequests.ts) ends as well and
+   *  is weighed the same way. */
+  private weighRequestARestartEnded(conversation: Conversation, message: ChatMessage): void {
+    const batch = message.metadata?.participantRequest;
+    const recoveryKey = batch ? requesterResumeRecoveryKey(conversation.id, message.id, batch) : undefined;
+    if (!batch || !recoveryKey || !this.delegationRecoveryLookedChats.has(conversation.id)) return;
+    const group = delegationTurnGroup(conversation, message, batch);
+    if (this.delegationGroupsRecovered.has(recoveryKey) || group.some((entry) => participantRequestHasUnfinishedItems(entry.batch) ||
+      participantRequestWaitsOnPermissionCard(conversation, entry.message, entry.batch))) return;
+    this.delegationGroupsRecovered.add(recoveryKey);
+    const verdict = this.delegationGroupRecoveryVerdict(conversation, batch.delegation?.turnId, group.map((entry) => entry.message));
+    if (verdict === "resume") {
+      this.scheduleDelegationGroupResume(conversation.id, message.id);
+      return;
+    }
+    this.logDelegationGroupSettled(conversation.id, group.map((entry) => entry.message.id), verdict, false);
+    this.endWaitsOnUnresumed(conversation, group.map((entry) => entry.message.id));
+  }
+
+  /** Requests of a member's own that will not resume it: what waited on
+   *  them ends interrupted (endWaitOnUnresumedOwnRequest) and is weighed as a
+   *  request a restart ended. Returns whether one changed. */
+  private endWaitsOnUnresumed(conversation: Conversation, ownRequestMessageIds: readonly string[]): boolean {
+    let changed = false;
+    for (const id of ownRequestMessageIds) {
+      const waiting = endWaitOnUnresumedOwnRequest(conversation, id);
+      if (!waiting) continue;
+      changed = true;
+      this.weighRequestARestartEnded(conversation, waiting);
+    }
+    return changed;
   }
 
   /**
@@ -145,6 +172,7 @@ export class RequestRecovery {
     // main session runs here: it looks once it does.
     if (this.delegationRecoveryLookedChats.has(conversation.id) || (this.chat.host.machineRuntime && !this.chat.host.hostMachineId)) return false;
     this.delegationRecoveryLookedChats.add(conversation.id);
+    this.waitAgainOnOwnRequests(conversation);
     // The main session's tasks by the turn that gave them; a request made
     // with app_chat_request_participants on its own: a quit or a restart
     // cuts the wait for its answers short the same way (its resume is
@@ -192,6 +220,8 @@ export class RequestRecovery {
         if (verdict !== "too-old" || turnId || cutShort) {
           this.logDelegationGroupSettled(conversation.id, messages.map((message) => message.id), verdict, cutShort);
         }
+        // Its requester is not resumed: a request that waited on it ends.
+        if (this.endWaitsOnUnresumed(conversation, messages.map((message) => message.id))) changed = true;
         continue;
       }
       void this.deps.debugLogs.write("chat.participant-request.auto-resume.recovered", {
@@ -257,6 +287,21 @@ export class RequestRecovery {
         (message.role === "participant" && message.participantId === requesterId && !sameTurn(message));
     });
     return movedOn ? "moved-on" : "resume";
+  }
+
+  /** At the chat's first look since the app started: each request whose
+   *  member waits on its own requests (a restart left it running) is waited
+   *  on again where its requester runs. */
+  private waitAgainOnOwnRequests(conversation: Conversation): void {
+    const participants = chatParticipants(conversation);
+    for (const message of conversation.messages) {
+      const batch = message.metadata?.participantRequest;
+      if (!batch || !batch.items.some((item) => itemWaitsOnOwnRequests(conversation, message, item))) continue;
+      const requester = participants.find((participant) => participant.id === batch.requesterParticipantId);
+      if (!requester || !this.chat.host.ownsParticipant(requester) || this.chat.participantRequests.participantRequestRunners.has(message.id)) continue;
+      const timer = setTimeout(() => this.chat.participantRequests.resumeOwnRequestWait(conversation.id, message.id), 0);
+      timer.unref?.();
+    }
   }
 
   private logDelegationGroupSettled(conversationId: string, requestMessageIds: string[], reason: string, cutShort: boolean): void {

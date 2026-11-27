@@ -22,6 +22,8 @@ import {
   participantRequestBatchForTool, participantRequestFailedToolResult, participantRequestLimitError, participantRequestSummary,
   participantRequestToolResult, recordPreparedParticipantRequest, rollupParticipantRequestStatus, updateParticipantRequestBatch
 } from "./requestRecords";
+import { itemWaitsOnOwnRequests, ownRequestsAnswering, stillWorksAfter } from "./ownRequests";
+import { answerThroughOwnWork } from "./ownRequestWaits";
 import type { ParticipantRequestRunResult, PreparedParticipantRequest } from "./types";
 import { createChatMessage } from "../store/messages";
 import type { ChatAppMcpActor, ProgressCallback } from "../types";
@@ -526,6 +528,9 @@ export class ParticipantRequests {
         let reply = messages[0];
         // A reply that asked to compact the member's context is not its
         // answer yet: the one it goes on to is (continueAfterSelfCompaction).
+        // Nor is one that ended while the member waits on what it asked
+        // others itself (app_chat_request_participants, resumed with the
+        // answers): the turn it is resumed in is (ownRequests.ts).
         let continues = false;
         await this.chat.store.withChatMutation(conversation, async () => {
           participantRequestsToRun = await this.chat.pendingReplies.appendParticipantTurnMessages(conversation, target, messages);
@@ -543,7 +548,9 @@ export class ParticipantRequests {
           // A reply cut short for a message the User sent now (or joined by
           // one) did not finish answering: the request is interrupted.
           const stoppedByUser = reply?.metadata?.terminalReason === "user-stopped" || reply?.metadata?.turnContinues === true;
-          continues = !waitingOnPermissionApproval && !stoppedByUser && Boolean(reply?.metadata?.selfCompaction && reply.metadata.runId);
+          continues = !waitingOnPermissionApproval && !stoppedByUser && Boolean(reply && (
+            (reply.metadata?.selfCompaction && reply.metadata.runId) || stillWorksAfter(ownRequestsAnswering(conversation, target.id, requestMessageId), reply)
+          ));
           updateParticipantRequestBatch(conversation, requestMessageId, (current) => ({
             ...current,
             items: current.items.map((candidate) => candidate.targetParticipantId === item.targetParticipantId
@@ -571,23 +578,36 @@ export class ParticipantRequests {
           }));
           this.chat.store.queueSnapshot(conversation);
         });
-        // What it wrote before each compaction of its own; the last reply is
-        // its answer.
+        // What it wrote before each compaction of its own and before each
+        // resume after its own requests; the last reply is its answer. Its
+        // run stays live meanwhile: the member's Stop ends the request.
         const earlier: ChatMessage[] = [];
+        // Ended meanwhile on the member's device (its resume will not be
+        // made): it stays as it was ended there.
+        let endedElsewhere: { item: ChatParticipantRequestItem | undefined } | undefined;
         if (continues && reply) {
-          const through = await this.chat.selfCompaction.answerThroughSelfCompactions(conversation.id, target.id, reply, targetController.signal);
-          reply = through.reply;
-          earlier.push(...through.earlier);
-          await this.chat.selfCompaction.settleSelfCompactedItem(conversation, requestMessageId, batch.id, target, through);
+          const through = await answerThroughOwnWork(this.chat, conversation.id, requestMessageId, target.id, reply, [], targetController.signal);
+          if (through.kind === "closed") {
+            endedElsewhere = { item: through.item };
+          } else {
+            reply = through.reply;
+            earlier.push(...through.earlier);
+            await this.chat.selfCompaction.settleSelfCompactedItem(conversation, requestMessageId, batch.id, target, through);
+          }
         }
-                replies.push({
-          targetHandle: target.handle,
-          messageId: reply?.id,
-          content: reply ? [...earlier, reply].map((message) => chatMessageMemberText(message)).filter(Boolean).join("\n\n") : undefined,
-          error: reply?.status === "error" ? reply.content
-            // Cut short for a message the User sent now: what it wrote is not its answer.
-            : reply?.metadata?.turnContinues === true ? `@${target.handle} was interrupted before it finished: it was sent a message to take now (by the User, or a request delivered now).` : undefined
-        });
+        if (endedElsewhere) {
+          const ended = endedElsewhere.item?.replyMessageId ? conversation.messages.find((message) => message.id === endedElsewhere?.item?.replyMessageId) : undefined;
+          replies.push({ targetHandle: target.handle, messageId: ended?.id, content: ended ? chatMessageMemberText(ended) : undefined, error: endedElsewhere.item?.error });
+        } else {
+          replies.push({
+            targetHandle: target.handle,
+            messageId: reply?.id,
+            content: reply ? [...earlier, reply].map((message) => chatMessageMemberText(message)).filter(Boolean).join("\n\n") : undefined,
+            error: reply?.status === "error" ? reply.content
+              // Cut short for a message the User sent now: what it wrote is not its answer.
+              : reply?.metadata?.turnContinues === true ? `@${target.handle} was interrupted before it finished: it was sent a message to take now (by the User, or a request delivered now).` : undefined
+          });
+        }
       } catch (error) {
         // A Stop that lands before any reply exists (the member still waits
         // for its turn, or its machine is still being prepared) ends here.
@@ -629,6 +649,72 @@ export class ParticipantRequests {
       };
     })) ?? batch;
     return { batch: updatedBatch, replies };
+  }
+
+  /** After a restart, a request whose member was waiting on its own requests
+   *  (itemWaitsOnOwnRequests; its runner went with the old process) is waited
+   *  on again here, on its requester's device, as its runner did, and the
+   *  requester is resumed once it ends. One wait per request at a time. */
+  resumeOwnRequestWait(conversationId: string, requestMessageId: string): void {
+    if (this.participantRequestRunners.has(requestMessageId)) return;
+    this.chat.activeRuns.incrementBackgroundRunner(conversationId);
+    const waited = this.waitOnOwnRequestsAgain(conversationId, requestMessageId).finally(() => {
+      this.participantRequestRunners.delete(requestMessageId);
+      this.chat.activeRuns.decrementBackgroundRunner(conversationId);
+    });
+    const runner = waited.then((outcome) => outcome.result ?? { batch: outcome.batch, replies: [] });
+    void runner.catch(() => undefined);
+    this.participantRequestRunners.set(requestMessageId, runner);
+    // Nothing waited any more (the restart's look ended it, or it was
+    // answered meanwhile): what ended it resumes its requester, or not.
+    void waited.then((outcome) => {
+      if (outcome?.result) this.resumeRequesterWhenRunnerSettles(conversationId, requestMessageId, Promise.resolve(outcome.result), this.deps.onReviewProgress);
+    }, (error: unknown) => this.resumeRequesterWhenRunnerSettles(conversationId, requestMessageId, Promise.reject(error), this.deps.onReviewProgress));
+  }
+
+  private async waitOnOwnRequestsAgain(
+    conversationId: string,
+    requestMessageId: string
+  ): Promise<{ batch: ChatParticipantRequestBatch; result?: ParticipantRequestRunResult }> {
+    await this.chat.store.waitForQueuedSave(conversationId);
+    const conversation = await this.chat.store.requireChat(conversationId);
+    const requestMessage = conversation.messages.find((message) => message.id === requestMessageId);
+    const batch = requestMessage?.metadata?.participantRequest;
+    if (!requestMessage || !batch) throw new Error("Member request message was not found.");
+    const waiting = batch.items.filter((item) => itemWaitsOnOwnRequests(conversation, requestMessage, item));
+    if (waiting.length === 0) return { batch };
+    const byId = new Map(conversation.messages.map((message) => [message.id, message]));
+    const replies: ParticipantRequestRunResult["replies"] = [];
+    await Promise.all(waiting.map(async (item) => {
+      const target = chatParticipants(conversation).find((participant) => participant.id === item.targetParticipantId);
+      const first = item.replyMessageId ? byId.get(item.replyMessageId) : undefined;
+      if (!target || !first) return;
+      const earlier = (item.earlierReplyMessageIds ?? []).flatMap((id) => byId.get(id) ?? []);
+      // Its run is live again while it waits: the member's Stop ends it.
+      const runId = randomUUID();
+      const controller = new AbortController();
+      this.chat.activeRuns.registerTargetRun(runId, controller, { conversationId, participantId: target.id, participantHandle: target.handle });
+      let begun = false;
+      try {
+        await this.chat.activeRuns.beginChatRun(conversation, runId);
+        begun = true;
+        void this.deps.debugLogs.write("chat.participant-request.own-requests.wait-again", { conversationId, requestMessageId, participantId: target.id });
+        const through = await answerThroughOwnWork(this.chat, conversationId, requestMessageId, target.id, first, earlier, controller.signal);
+        if (through.kind === "answer") {
+          await this.chat.selfCompaction.settleSelfCompactedItem(conversation, requestMessageId, batch.id, target, through);
+          replies.push({ targetHandle: target.handle, messageId: through.reply.id, content: [...through.earlier, through.reply].map((message) => chatMessageMemberText(message)).filter(Boolean).join("\n\n") });
+        }
+      } finally {
+        if (begun) await this.chat.activeRuns.endChatRun(conversation, runId);
+        this.chat.activeRuns.unregisterTargetRun(runId, controller);
+      }
+    }));
+    const updatedBatch = await this.chat.store.saveChatChange(conversation, () => updateParticipantRequestBatch(conversation, requestMessageId, (current) => ({
+      ...current,
+      status: rollupParticipantRequestStatus(current.items),
+      updatedAt: new Date().toISOString()
+    }))) ?? batch;
+    return { batch: updatedBatch, result: { batch: updatedBatch, replies } };
   }
 
   /** A request answered by the turn of a request before it, which it went
