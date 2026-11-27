@@ -42,6 +42,23 @@
   color: var(--mut);
 }
 
+/* A row whose buttons go under its words (Alert calls: a long hint, two
+   buttons). */
+.set-row.is-stacked {
+  flex-direction: column;
+  align-items: stretch;
+}
+
+.set-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.set-sub.set-error {
+  color: var(--danger);
+}
+
 /* ---- Pressed and focused, for every new control ---- */
 .pb-tab:active,
 .pb-action:active,

@@ -1,7 +1,7 @@
 import { URGENT_ALERT_USER_ACTIONS, type UrgentAlertSettingsView, type UrgentAlertUserRequest } from "../../../shared/urgentAlerts";
-import { ipcMain } from "electron";
+import { app, dialog, ipcMain, nativeImage } from "electron";
 import { hostPlatform } from "../../platform";
-import { openAlertCallContact } from "../alertCallContact";
+import { openAlertCallContact, saveAlertCallLogo } from "../alertCallContact";
 import { publishHubRoster } from "../hubRoster";
 import { createPhoneInvite } from "../phoneInvites";
 import type { DesktopApp } from "../desktopApp";
@@ -35,6 +35,15 @@ export function registerHubIpc(desktopApp: DesktopApp): void {
   ipcMain.handle("alerts:open-call-contact", () => openAlertCallContact({
     settings: () => desktopApp.serverChatLink.alerts<UrgentAlertSettingsView>({ action: "settings" }),
     openPath: (target) => hostPlatform().openPath(target)
+  }));
+  ipcMain.handle("alerts:save-call-logo", () => saveAlertCallLogo({
+    chooseFile: async (defaultPath) => {
+      const options = { title: "Save logo", defaultPath, filters: [{ name: "PNG image", extensions: ["png"] }] };
+      const result = desktopApp.mainWindow ? await dialog.showSaveDialog(desktopApp.mainWindow, options) : await dialog.showSaveDialog(options);
+      return result.canceled ? undefined : result.filePath;
+    },
+    toPng: (jpeg) => nativeImage.createFromBuffer(jpeg).toPNG(),
+    downloadsDirectory: app.getPath("downloads")
   }));
 
   ipcMain.handle("hub:setup-command", async (_event, request: import("../../../shared/hubSetup").HubSetupCommandRequest) => {

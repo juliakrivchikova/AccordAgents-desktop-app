@@ -948,3 +948,31 @@ test("in a chat shown in the sessions view Telegram and the call name a member b
   const laterText = await until(() => h.world.sent.find((item) => item.buttons.includes(`ack:${later.value!.alertId}`)), "the classic chat's alert in Telegram");
   assert.match(laterText.text, /^🔴 Urgent alert · @taylor · Deploy monitoring/);
 });
+
+test("a paired phone reads only the number calls come from; a machine or a stranger reads nothing", async (t) => {
+  const h = await hub(t, { publicUrl: true });
+  const token = randomBytes(32).toString("base64url");
+  const invite: HubPhoneInvite = {
+    version: 1, inviteId: `invite-${randomBytes(8).toString("hex")}`, hubId: "hub-alerts-test", issuerDeviceId: h.owner.originId,
+    tokenHash: sha256Hex(token), scope: { scope: "device" }, name: "Phone", issuedAt: new Date().toISOString(), expiresAt: new Date(Date.now() + 600_000).toISOString()
+  };
+  assert.equal((await h.call(h.owner, "PUT", "/v1/phone-invites", { invite, signature: signHubText(h.owner, hubPhoneInviteSigningText(invite)) })).status, 200);
+  const identity = await createHubDeviceIdentity();
+  await enrollHubPhone({ hubUrl: h.base, hubId: "hub-alerts-test", token, identity, name: "iPhone" });
+  const phone = createHubDeviceClient({ hubUrl: h.base, identity: async () => identity });
+  const read = () => phone.postJson<{ ok: boolean; value?: unknown; error?: { code: string } }>("/v3/alerts", { action: "phone.call-from" });
+  assert.deepEqual(await read(), { ok: true, value: {} });
+  await connectPhone(h);
+  assert.deepEqual(await read(), { ok: true, value: { from: "+14155550134" } });
+  // The rest of the settings stay the computer's.
+  assert.equal((await phone.postJson<{ ok: boolean; error?: { code: string } }>("/v3/alerts", { action: "settings" })).error?.code, "access_denied");
+  const machine = createDeviceIdentity(new Date().toISOString());
+  await h.call(h.owner, "PUT", "/v1/roster", { devices: [
+    { deviceId: h.owner.originId, publicKeyDerBase64: h.owner.publicKeyDerBase64, role: "desktop", name: "Mac" },
+    { deviceId: machine.originId, publicKeyDerBase64: machine.publicKeyDerBase64, role: "machine", name: "Cloud box", machineId: "m-1" }
+  ] });
+  assert.equal((await h.alerts(machine, { action: "phone.call-from" })).error?.code, "access_denied");
+  const stranger = await fetch(`${h.base}/v3/alerts`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ action: "phone.call-from" }) });
+  assert.ok(stranger.status >= 400 && stranger.status < 500);
+  assert.doesNotMatch(await stranger.text(), /14155550134/);
+});

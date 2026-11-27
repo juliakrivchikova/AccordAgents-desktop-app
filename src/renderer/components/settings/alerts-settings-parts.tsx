@@ -202,18 +202,19 @@ export function AlertsChannelRow(props: {
 
 /** Under the Phone call row once calls have a number to come from: Add to
  *  contacts opens a contact card for that number with the system, which shows
- *  it before saving (Mia's brief, approved by the User, 2026-11-27). */
+ *  it before saving; Save logo is for a contact she saved before (Mia's brief,
+ *  approved by the User, 2026-11-27). */
 export const AlertsCallContactRow = (): JSX.Element => {
-  const [opening, setOpening] = useState(false);
+  const [pending, setPending] = useState<"contact" | "logo" | undefined>();
   const [error, setError] = useState<string | undefined>();
-  const open = async () => {
-    setOpening(true);
+  const run = async (which: "contact" | "logo") => {
+    setPending(which);
     setError(undefined);
-    const result = await window.consensus.openAlertCallContact().catch((failure: unknown) => ({
+    const result = await (which === "contact" ? window.consensus.openAlertCallContact() : window.consensus.saveAlertCallLogo()).catch((failure: unknown) => ({
       ok: false as const, message: failure instanceof Error ? failure.message : String(failure)
     }));
-    setOpening(false);
-    if (!result.ok) setError(result.message);
+    setPending(undefined);
+    if (!result.ok && "message" in result) setError(result.message);
   };
   return (
     <div className="gen-row alerts-row alerts-subrow" data-testid="alerts-call-contact">
@@ -223,8 +224,11 @@ export const AlertsCallContactRow = (): JSX.Element => {
         {error ? <div className="gen-row-desc alerts-line-error" role="alert">{error}</div> : null}
       </div>
       <div className="alerts-actions">
-        <Button type="button" variant="outline" size="sm" disabled={opening} data-testid="alerts-call-contact-add" onClick={() => void open()}>
-          {opening ? <Delayed><Spinner size={13} /></Delayed> : null}Add to contacts
+        <Button type="button" variant="outline" size="sm" disabled={Boolean(pending)} data-testid="alerts-call-logo-save" onClick={() => void run("logo")}>
+          {pending === "logo" ? <Delayed><Spinner size={13} /></Delayed> : null}Save logo
+        </Button>
+        <Button type="button" variant="outline" size="sm" disabled={Boolean(pending)} data-testid="alerts-call-contact-add" onClick={() => void run("contact")}>
+          {pending === "contact" ? <Delayed><Spinner size={13} /></Delayed> : null}Add to contacts
         </Button>
       </div>
     </div>

@@ -3,7 +3,7 @@ import { mkdtemp, readFile, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { test } from "node:test";
-import { openAlertCallContact } from "./alertCallContact";
+import { openAlertCallContact, saveAlertCallLogo } from "./alertCallContact";
 import type { HubAlertResult, UrgentAlertSettingsView } from "../../shared/urgentAlerts";
 
 const withPhone = (from: string): HubAlertResult<UrgentAlertSettingsView> => ({
@@ -41,6 +41,25 @@ test("Add to contacts says why when there is nothing to save or the system can't
     assert.deepEqual(opened, []);
     const refused = await openAlertCallContact({ settings: async () => withPhone("+14155550134"), openPath: async () => "No application knows how to open it.", directory });
     assert.deepEqual(refused, { ok: false, message: "Couldn't open the contact card: No application knows how to open it." });
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("Save logo writes the contact photo as a PNG where she chose, and nothing when she closes the dialog", async () => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), "alert-logo-test-"));
+  try {
+    const offered: string[] = [];
+    const toPng = (jpeg: Buffer) => Buffer.concat([Buffer.from("PNG:"), jpeg.subarray(0, 3)]);
+    const canceled = await saveAlertCallLogo({ chooseFile: async (at) => { offered.push(at); return undefined; }, toPng, downloadsDirectory: directory });
+    assert.deepEqual(canceled, { ok: false, canceled: true });
+    assert.deepEqual(offered, [path.join(directory, "AccordAgents logo.png")]);
+    const target = path.join(directory, "mine.png");
+    assert.deepEqual(await saveAlertCallLogo({ chooseFile: async () => target, toPng, downloadsDirectory: directory }), { ok: true });
+    assert.deepEqual([...await readFile(target)], [...Buffer.from("PNG:"), 0xff, 0xd8, 0xff]);
+    const failed = await saveAlertCallLogo({ chooseFile: async () => path.join(directory, "missing", "x.png"), toPng, downloadsDirectory: directory });
+    assert.equal(failed.ok, false);
+    assert.match("message" in failed ? failed.message : "", /^Couldn't save the logo: /);
   } finally {
     await rm(directory, { recursive: true, force: true });
   }

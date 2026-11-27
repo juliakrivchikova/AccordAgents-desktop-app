@@ -89,3 +89,9 @@ export {
 // sessions-view chat shows it: no handles, a member by its task, the main
 // session by nothing; by the desktop's rule.
 export { sessionsMentionText, sessionsViewLabel, sessionsViewNames, sessionsViewReplyText, sessionsViewSummaryText, sessionsViewText } from "./sessionsViewText";
+// Alert calls in the phone's Settings: the same contact card and logo as
+// Add to contacts on the computer.
+export {
+  ALERT_CALL_CONTACT_FILE_NAME, ALERT_CALL_CONTACT_MIME, ALERT_CALL_CONTACT_PHONE_HINT, ALERT_CALL_LOGO_FILE_NAME, alertCallContactCard
+} from "./alertCallContact";
+export { ALERT_CALL_CONTACT_PHOTO_JPEG_BASE64 } from "./alertCallContactPhoto";

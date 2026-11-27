@@ -318,6 +318,7 @@ const bridge: AppBridge = {
   getHubSetupState: () => ipcRenderer.invoke("hub:setup-state"),
   urgentAlertRequest: (request) => ipcRenderer.invoke("alerts:request", request),
   openAlertCallContact: () => ipcRenderer.invoke("alerts:open-call-contact"),
+  saveAlertCallLogo: () => ipcRenderer.invoke("alerts:save-call-logo"),
   getHubSetupCommand: (request: HubSetupCommandRequest) => ipcRenderer.invoke("hub:setup-command", request),
   installHub: (request: HubInstallRequest) => ipcRenderer.invoke("hub:install", request),
   onHubSetupProgress: (callback: (state: HubSetupState) => void) => {

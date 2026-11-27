@@ -88,6 +88,9 @@ export class AlertFlow {
         case "close":
           if (device.role === "machine") return failure("access_denied", "Only the User closes an alert.");
           return await this.closeAlert(device, request.alertId);
+        case "phone.call-from":
+          if (device.role === "machine") return failure("access_denied", "A machine does not read alert settings.");
+          return { ok: true, value: await this.alerts.alertSettings.callFrom() };
         default:
           if (device.role !== "owner") return failure("access_denied", "Only the computer that set up this server changes alert settings.");
           return await this.alerts.alertSettings.settingsAction(request);

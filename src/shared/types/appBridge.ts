@@ -269,6 +269,8 @@ export interface AppBridge {
   /** Settings → Alerts → Add to contacts: opens a contact card for the number
    *  alert calls come from (shared/alertCallContact.ts) with the system. */
   openAlertCallContact(): Promise<import("../alertCallContact").OpenAlertCallContactResult>;
+  /** Settings → Alerts → Save logo: the same picture as a PNG, where she chooses. */
+  saveAlertCallLogo(): Promise<import("../alertCallContact").SaveAlertCallLogoResult>;
   getHubSetupCommand(request: import("../hubSetup").HubSetupCommandRequest): Promise<import("../hubSetup").HubSetupCommandResult>;
   installHub(request: import("../hubSetup").HubInstallRequest): Promise<import("../hubSetup").HubSetupState>;
   onHubSetupProgress(callback: (state: import("../hubSetup").HubSetupState) => void): () => void;

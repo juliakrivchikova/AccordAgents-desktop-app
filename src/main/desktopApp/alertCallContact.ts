@@ -1,7 +1,8 @@
 import { mkdir, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { ALERT_CALL_CONTACT_FILE_NAME, alertCallContactCard, type OpenAlertCallContactResult } from "../../shared/alertCallContact";
+import { ALERT_CALL_CONTACT_FILE_NAME, ALERT_CALL_LOGO_FILE_NAME, alertCallContactCard, type OpenAlertCallContactResult, type SaveAlertCallLogoResult } from "../../shared/alertCallContact";
+import { ALERT_CALL_CONTACT_PHOTO_JPEG_BASE64 } from "../../shared/alertCallContactPhoto";
 import type { HubAlertResult, UrgentAlertSettingsView } from "../../shared/urgentAlerts";
 
 export interface AlertCallContactDependencies {
@@ -33,4 +34,26 @@ export async function openAlertCallContact(deps: AlertCallContactDependencies): 
   }
   const failed = await deps.openPath(file);
   return failed ? { ok: false, message: `Couldn't open the contact card: ${failed}` } : { ok: true };
+}
+
+export interface AlertCallLogoDependencies {
+  /** Where she wants it: the system's save dialog, starting at this path;
+   *  undefined when she closed it. */
+  chooseFile(defaultPath: string): Promise<string | undefined>;
+  /** The contact photo, a JPEG, as a PNG. */
+  toPng(jpeg: Buffer): Buffer;
+  downloadsDirectory: string;
+}
+
+/** Settings → Alerts → Save logo: the contact's photo as a PNG, for a
+ *  contact she saved before (she sets it as its photo herself). */
+export async function saveAlertCallLogo(deps: AlertCallLogoDependencies): Promise<SaveAlertCallLogoResult> {
+  const target = await deps.chooseFile(path.join(deps.downloadsDirectory, ALERT_CALL_LOGO_FILE_NAME));
+  if (!target) return { ok: false, canceled: true };
+  try {
+    await writeFile(target, deps.toPng(Buffer.from(ALERT_CALL_CONTACT_PHOTO_JPEG_BASE64, "base64")));
+  } catch (error) {
+    return { ok: false, message: `Couldn't save the logo: ${error instanceof Error ? error.message : String(error)}` };
+  }
+  return { ok: true };
 }

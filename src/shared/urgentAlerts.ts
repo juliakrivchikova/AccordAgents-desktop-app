@@ -150,6 +150,12 @@ export function urgentAlertPhoneTestPassed(test: Pick<UrgentAlertPhoneTest, "sta
   return test?.state === "pressed" || (callMode === "answer" && test?.state === "answered");
 }
 
+/** What phone.call-from answers: the number alert calls come from (E.164),
+ *  absent while calls are not set up. */
+export interface UrgentAlertCallFrom {
+  from?: string;
+}
+
 export interface UrgentAlertPhoneCheck {
   accountName: string;
   trial: boolean;
@@ -178,6 +184,9 @@ export type HubAlertRequest =
   | { action: "raise"; conversationId: string; participantId: string; text: string; requestId: string }
   /** The User closes it in the app (her computer, a machine never, a phone). */
   | { action: "close"; alertId: string }
+  /** The number alert calls come from, for Add to contacts: the computer
+   *  and a paired phone may read it (nothing else of the settings). */
+  | { action: "phone.call-from" }
   // The owner's settings (Settings → Alerts).
   | { action: "settings" }
   | { action: "telegram.connect"; token: string }

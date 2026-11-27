@@ -1,7 +1,7 @@
 import { randomBytes } from "node:crypto";
 import {
   URGENT_ALERT_DEFAULT_WAIT_MINUTES, URGENT_ALERT_WAIT_MINUTES_MAX, URGENT_ALERT_WAIT_MINUTES_MIN, normalizePhoneNumber,
-  type HubAlertRequest, type HubAlertResult, type UrgentAlertPhoneCheck, type UrgentAlertSettingsView
+  type HubAlertRequest, type HubAlertResult, type UrgentAlertCallFrom, type UrgentAlertPhoneCheck, type UrgentAlertSettingsView
 } from "../../shared/urgentAlerts";
 import { AlertChannelError, TelegramBot, TwilioClient } from "../alertChannels";
 import { failure, messageOf } from "./alertText";
@@ -223,6 +223,13 @@ export class AlertSettings {
     number.catch(forget);
     setTimeout(forget, PURCHASE_REUSE_MS).unref?.();
     return number;
+  }
+
+  /** Only the Call-from number, never her own number, the account or keys:
+   *  a paired phone reads it for Add to contacts. */
+  async callFrom(): Promise<UrgentAlertCallFrom> {
+    const phone = (await this.settings()).phone;
+    return phone?.from ? { from: phone.from } : {};
   }
 
   callMode(settings: StoredSettings): "keypad" | "answer" {

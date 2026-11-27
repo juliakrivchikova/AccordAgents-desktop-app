@@ -3,6 +3,7 @@ import { openSendLog, owedSummary, sendLogCount, sendLogNewestAt, sendLogTime } 
 import { isHubPairing } from "../pairing/hubPairing.js";
 import { loadPairing } from "../pairing/pairing.js";
 import { enableMessageAlerts, messageAlertsState, pushEndpointRejected, reconnectMessageAlerts } from "../push/messageAlerts.js";
+import { addAlertCallContact, alertCallContactState, refreshAlertCallFrom, saveAlertCallLogo } from "./alertCallContact.js";
 import { hubMachines, hubMachineWake, wakeHubMachine } from "./machineWake.js";
 import { relativeTime } from "../sync/connectionStatus.js";
 
@@ -52,6 +53,31 @@ function settingsButton(label, onClick, disabled) {
   return button;
 }
 
+/** Alert calls: save the number they come from as a contact, or the logo
+ *  for a contact saved before. Shown only when her server says calls come
+ *  from a number (alertCallContact.js). */
+function alertCallsRow() {
+  const shared = globalThis.AccordMobileShared;
+  const row = settingsRow("Alert calls", shared ? shared.ALERT_CALL_CONTACT_PHONE_HINT : "");
+  row.classList.add("is-stacked");
+  row.dataset.testid = "alert-calls";
+  if (alertCallContactState.error) {
+    const error = document.createElement("span");
+    error.className = "set-sub set-error";
+    error.setAttribute("role", "alert");
+    error.textContent = alertCallContactState.error;
+    row.querySelector(".set-copy").append(error);
+  }
+  const actions = document.createElement("div");
+  actions.className = "set-actions";
+  actions.append(
+    settingsButton("Add to contacts", function () { addAlertCallContact(); }),
+    settingsButton("Save logo", function () { void saveAlertCallLogo(); })
+  );
+  row.append(actions);
+  return row;
+}
+
 /** What this phone can change about itself. Only what it can actually do:
  *  iOS does not let a web app turn its own alerts off, so they are offered
  *  while undecided and otherwise described, not drawn as a switch. */
@@ -60,10 +86,11 @@ export function renderSettings() {
   if (!list) return;
   const permission = "Notification" in globalThis ? Notification.permission : "unsupported";
   const hubPaired = isHubPairing(loadPairing());
+  if (hubPaired) void refreshAlertCallFrom();
   const pushable = hubPaired && "Notification" in globalThis && "PushManager" in globalThis;
   const sending = owedSummary();
   const signature = JSON.stringify([permission, pushable, pushEndpointRejected, messageAlertsState.alertsReconnect, hubPaired, hubMachines,
-    sending.owed, sending.failing, sendLogCount, sendLogNewestAt]);
+    sending.owed, sending.failing, sendLogCount, sendLogNewestAt, alertCallContactState.from, alertCallContactState.error]);
   if (signature === settingsViewState.lastSettingsRenderSignature) return;
   settingsViewState.lastSettingsRenderSignature = signature;
   list.replaceChildren();
@@ -117,7 +144,10 @@ export function renderSettings() {
       });
     });
   }
-  list.append(settingsGroup("Notifications", [settingsRow("Message alerts", alertsSub, alertsControl)]));
+  list.append(settingsGroup("Notifications", [
+    settingsRow("Message alerts", alertsSub, alertsControl),
+    ...(alertCallContactState.from ? [alertCallsRow()] : [])
+  ]));
 
   if (hubPaired && hubMachines.length > 0) {
     // The server wakes a machine itself when work waits for it; the button
