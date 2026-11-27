@@ -538,9 +538,19 @@ switch is disabled.
     Stop or copy on a running reply (the composer stops it, also with
     text typed; a member's session head stops the member). A reply that
     has not started has no row (the User, 2026-11-25: as Claude does, no
-    "Queued"); the message it answers has "Send now", which interrupts the
-    reply being written so the member takes what waits, and a × that takes
-    the message back (`waitingMessages.ts`, desktop and phone). In the
+    "Queued"); the message it answers has "Send now", the CLI's own
+    send-now, and a × that takes the message back (`waitingMessages.ts`,
+    desktop and phone). Send now is not a Stop (`RunCancel.sendNow`): a
+    Claude Code member gets `interrupt` with `send_now` and the waiting
+    message's uuid (interrupt_send_now_v1), which ends no background agent
+    and often lets the running step take the message in; a member of
+    another CLI, or a Claude Code without it, has its reply stopped for
+    the message. Either way the reply keeps what it wrote and ends as a
+    turn that goes on (`turnContinues`), never "stopped by user"; a member
+    on another device gets it as `turn.stop` with `sendNow` through the
+    server. A Stop of a Claude Code member sends `spare_background_tasks`,
+    so its background agents keep running, as with Esc in the CLI (since
+    2.1.329 a plain interrupt from a client ends them). In the
     composer Enter sends and waits, Cmd or Ctrl with Enter sends now, and
     Enter with nothing typed sends what already waits. A long turn
     draws its newest 50 steps (a folded line is one) under a muted "N

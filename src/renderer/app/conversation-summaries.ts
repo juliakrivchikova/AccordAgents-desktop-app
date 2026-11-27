@@ -49,7 +49,7 @@ export function buildProjectSessionGroups(summaries: ConversationSummary[]): Pro
 }
 
 /** How many chats Recents lists, as Claude's does. */
-export const RECENT_CHAT_LIMIT = 20;
+export const RECENT_CHAT_LIMIT = 10;
 
 /** Pinned chats, in the order they were pinned (a newly pinned chat goes to
  *  the bottom, so the list does not shift under the User; one whose time is

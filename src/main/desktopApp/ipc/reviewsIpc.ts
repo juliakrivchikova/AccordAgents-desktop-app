@@ -232,4 +232,11 @@ export function registerReviewsIpc(desktopApp: DesktopApp): void {
     }
     desktopApp.chatService.cancelRun(runId);
   });
+
+  ipcMain.handle("chat:send-now", async (_event, runId: string, waitingRunId?: string) => {
+    // Send now is not a Stop (RunCancel.sendNow): a run the app holds here
+    // only to show progress (a legacy review) has nothing waiting behind it.
+    if (typeof runId !== "string" || desktopApp.activeReviews.has(runId)) return;
+    await desktopApp.chatService.sendNow(runId, typeof waitingRunId === "string" ? waitingRunId : undefined);
+  });
 }

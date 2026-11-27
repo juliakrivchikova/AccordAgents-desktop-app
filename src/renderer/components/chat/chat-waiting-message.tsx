@@ -8,34 +8,37 @@ import { IconButton } from "../primitives";
 import type { ChatComposerSendNow } from "./chat-composer";
 
 interface ChatWaitingMessageActionsProps {
+  /** The run the message waits as: taking it back stops it. */
   runId: string;
+  /** The member's reply being written now, which Send now cuts short. */
   behindRunId?: string;
-  onStopRun: (runId: string) => void;
+  onTakeBack: (runId: string) => void;
+  onSendNow?: (runId: string, waitingRunId?: string) => void;
 }
 
 /** Under a message of the User's its member has not taken yet, as the CLI's
- *  own line under a waiting message (the User, 2026-11-25): send it now, which
- *  interrupts the step the member is in, or take it back. Left alone, the
- *  member takes it itself. */
-export const ChatWaitingMessageActions = ({ runId, behindRunId, onStopRun }: ChatWaitingMessageActionsProps): JSX.Element => {
-  // The run that was told to stop: what waits behind another one later can be
-  // sent now again.
-  const [stopped, setStopped] = useState<string>();
-  const pressed = stopped !== undefined && (stopped === runId || stopped === behindRunId);
-  const stop = (stoppedRunId: string): void => {
-    setStopped(stoppedRunId);
-    onStopRun(stoppedRunId);
+ *  own line under a waiting message (the User, 2026-11-25): send it now, as
+ *  the CLI's send-now (the member takes it at once, and its reply so far is
+ *  not stopped), or take it back. Left alone, the member takes it itself. */
+export const ChatWaitingMessageActions = ({ runId, behindRunId, onTakeBack, onSendNow }: ChatWaitingMessageActionsProps): JSX.Element => {
+  // The run the last press acted on: what waits behind another reply later
+  // can be sent now again.
+  const [pressedRunId, setPressedRunId] = useState<string>();
+  const pressed = pressedRunId !== undefined && (pressedRunId === runId || pressedRunId === behindRunId);
+  const act = (actedRunId: string, action: () => void): void => {
+    setPressedRunId(actedRunId);
+    action();
   };
   return (
     <div className="chat-waiting-message" data-testid="chat-waiting-message">
-      {behindRunId && (
+      {behindRunId && onSendNow && (
         <Button
           variant="ghost"
           size="xs"
           className="text-ui-text-2"
           disabled={pressed}
           data-testid="chat-waiting-send-now"
-          onClick={() => stop(behindRunId)}
+          onClick={() => act(behindRunId, () => onSendNow(behindRunId, runId))}
         >
           Send now
         </Button>
@@ -47,7 +50,7 @@ export const ChatWaitingMessageActions = ({ runId, behindRunId, onStopRun }: Cha
         tooltip="Take back"
         disabled={pressed}
         data-testid="chat-waiting-take-back"
-        onClick={() => stop(runId)}
+        onClick={() => act(runId, () => onTakeBack(runId))}
       />
     </div>
   );
@@ -58,13 +61,13 @@ export const ChatWaitingMessageActions = ({ runId, behindRunId, onStopRun }: Cha
 export function composerSendNow(
   messages: readonly ChatMessage[],
   participantId: string | undefined,
-  onStopRun: ((runId: string) => void) | undefined
+  onSendNow: ((runId: string, waitingRunId?: string) => void) | undefined
 ): ChatComposerSendNow | undefined {
-  const runId = participantId && onStopRun ? runningReplyOf(messages, participantId)?.metadata?.runId : undefined;
-  if (!participantId || !runId || !onStopRun) return undefined;
+  const runId = participantId && onSendNow ? runningReplyOf(messages, participantId)?.metadata?.runId : undefined;
+  if (!participantId || !runId || !onSendNow) return undefined;
   return {
     runId,
     waiting: waitingMessages(messages, participantId).size > 0,
-    onSendNow: () => onStopRun(runId)
+    onSendNow: () => onSendNow(runId)
   };
 }

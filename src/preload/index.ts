@@ -126,6 +126,12 @@ const CRASH_REPORTS_ACTIVE_ARG = "--accordagents-crash-reports=on";
 
 const bridge: AppBridge = {
   getAppVersion: () => ipcRenderer.invoke("app:get-version"),
+  isFullScreen: () => ipcRenderer.invoke("app:is-full-screen"),
+  onFullScreenChanged: (callback: (fullScreen: boolean) => void) => {
+    const listener = (_event: Electron.IpcRendererEvent, fullScreen: boolean) => callback(fullScreen);
+    ipcRenderer.on("app:full-screen-changed", listener);
+    return () => ipcRenderer.removeListener("app:full-screen-changed", listener);
+  },
   openExternal: (url: string) => ipcRenderer.invoke("app:open-external", url),
   openTerminal: () => ipcRenderer.invoke("app:open-terminal"),
   listTerminals: () => ipcRenderer.invoke("terminal:list"),
@@ -341,6 +347,7 @@ const bridge: AppBridge = {
   reviseImplementationPlan: (request: ReviseImplementationPlanRequest) =>
     ipcRenderer.invoke("conversations:revise-implementation-plan", request),
   cancelReview: (runId: string) => ipcRenderer.invoke("conversations:cancel-review", runId),
+  sendNowChatRun: (runId: string, waitingRunId?: string) => ipcRenderer.invoke("chat:send-now", runId, waitingRunId),
   listArtifacts: (request: ListArtifactsRequest) => ipcRenderer.invoke("artifacts:list", request),
   readArtifact: (request: ReadArtifactRequest) => ipcRenderer.invoke("artifacts:read", request),
   diffArtifactVersions: (request: DiffArtifactRequest) => ipcRenderer.invoke("artifacts:diff", request),

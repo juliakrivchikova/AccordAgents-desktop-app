@@ -5,7 +5,7 @@ import { spawnNativeProcess } from "../../nativeProcess";
 import { usesNativeProcessRegistry } from "../../nativeProcessRegistry";
 import { terminateCapturedPosixProcesses } from "../../processTermination";
 import { type ClaudePermissionMode, isClaudePermissionMode } from "../claude/permissionModes";
-import type { CliAgentOutputCallback, CliAgentRunOptions, WarmAgentEntry } from "../types";
+import type { ClaudeSendNowOutcome, CliAgentOutputCallback, CliAgentRunOptions, WarmAgentEntry } from "../types";
 import { warmAgentKey, warmAgentScopeKey, warmConversationId, warmKeyAgentEnvKey } from "./warmKeys";
 import type { CliModules } from "../modules";
 import type { CliDependencies } from "../dependencies";
@@ -246,6 +246,15 @@ export class WarmAgents {
       .filter((entry) => entry.scopeKey === scopeKey && !entry.closed && entry.process.exitCode === null && entry.control);
     const entry = live.find((item) => item.isReplyIdle?.() === false) ?? live[0];
     return entry?.control ? entry.control(request, timeoutMs, signal) : undefined;
+  }
+
+  /** Send now on the member's live Claude Code process that answers now
+   *  (WarmAgentEntry.sendNow); `unsupported` with none answering here. */
+  async memberClaudeSendNow(conversationId: string, participantId: string, waitingRunId?: string, runningRunId?: string): Promise<ClaudeSendNowOutcome> {
+    const scopeKey = warmAgentScopeKey({ conversationId, participantId, contextKey: "", idleTimeoutMs: 0 });
+    const entry = Array.from(this.entries.values()).find((item) => item.scopeKey === scopeKey && !item.closed &&
+      item.process.exitCode === null && item.isReplyIdle?.() === false && item.sendNow);
+    return entry?.sendNow ? entry.sendNow(waitingRunId, runningRunId) : "unsupported";
   }
 
   /** A changed agent environment waits for a busy member process (answering,

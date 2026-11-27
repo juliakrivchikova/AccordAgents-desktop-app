@@ -22,12 +22,14 @@ export type StableChatMessageActions = {
   onToggleReaction: (messageId: string, emoji: string) => void;
   onCompactParticipant: (participantId: string, context?: StableParticipantCompactContext) => void | Promise<boolean>;
   onStopRun: (runId: string) => void;
+  onSendNow: (runId: string, waitingRunId?: string) => void;
   onDismissTurnFinishedNote: (messageId: string) => void;
 };
 
-export type StableChatMessageActionHandlers = Omit<StableChatMessageActions, "onStopRun" | "onDismissTurnFinishedNote"> & {
+export type StableChatMessageActionHandlers = Omit<StableChatMessageActions, "onStopRun" | "onSendNow" | "onDismissTurnFinishedNote"> & {
   runChoiceWithSubmittingId: ChoiceSubmittingRunner;
   onStopRun?: (runId: string) => void;
+  onSendNow?: (runId: string, waitingRunId?: string) => void;
   onDismissTurnFinishedNote?: (messageId: string) => void;
 };
 
@@ -79,6 +81,13 @@ export function useStableChatMessageActions(
     []
   );
 
+  const onSendNow = useCallback<StableChatMessageActions["onSendNow"]>(
+    (runId, waitingRunId) => {
+      handlersRef.current.onSendNow?.(runId, waitingRunId);
+    },
+    []
+  );
+
   const onDismissTurnFinishedNote = useCallback<StableChatMessageActions["onDismissTurnFinishedNote"]>(
     (messageId) => {
       handlersRef.current.onDismissTurnFinishedNote?.(messageId);
@@ -93,6 +102,7 @@ export function useStableChatMessageActions(
     onToggleReaction,
     onCompactParticipant,
     onStopRun,
+    onSendNow,
     onDismissTurnFinishedNote
   }), [
     onApproveMentions,
@@ -100,6 +110,7 @@ export function useStableChatMessageActions(
     onDismissTurnFinishedNote,
     onRejectMentions,
     onRespondToChoice,
+    onSendNow,
     onStopRun,
     onToggleReaction
   ]);

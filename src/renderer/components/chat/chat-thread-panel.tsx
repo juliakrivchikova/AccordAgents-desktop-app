@@ -65,6 +65,7 @@ export function ChatThreadPanel(props: {
   onDismissTurnFinishedNote?: (messageId: string) => void;
   onCompactParticipant: ParticipantCompactHandler;
   onStopRun?: (runId: string) => void;
+  onSendNow?: (runId: string, waitingRunId?: string) => void;
   continuedMentionRequestIds: Set<string>;
   inferredParticipantRequestsByTrigger: Map<string, ChatParticipantRequestBatch[]>;
   approvalsByMessageId: ReadonlyMap<string, ChatAppToolApproval[]>;
@@ -120,6 +121,7 @@ export function ChatThreadPanel(props: {
           onDismissTurnFinishedNote={props.onDismissTurnFinishedNote}
           onCompactParticipant={props.onCompactParticipant}
           onStopRun={props.onStopRun}
+          onSendNow={props.onSendNow}
           onRespondToAppToolApproval={props.onRespondToAppToolApproval}
         />
         {props.replies.length > 0 && (
@@ -153,6 +155,7 @@ export function ChatThreadPanel(props: {
                 onDismissTurnFinishedNote={props.onDismissTurnFinishedNote}
                 onCompactParticipant={props.onCompactParticipant}
                 onStopRun={props.onStopRun}
+                onSendNow={props.onSendNow}
                 onRespondToAppToolApproval={props.onRespondToAppToolApproval}
                 key={message.id}
               />

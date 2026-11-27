@@ -57,6 +57,7 @@ import { useStableChatMessageActions } from "./use-stable-chat-message-actions";
 import { useChatPromptSuggestions } from "./use-chat-prompt-suggestions";
 import { sessionsComposerSuggestions } from "./use-chat-composer-suggestions";
 import { useChatRightPanel, useChatRightPanelWidth } from "./use-chat-right-panel";
+import { useSidePanelMotion } from "./use-side-panel-motion";
 import { useChatSessionsChrome, useChatSessionsView } from "./use-chat-sessions-view";
 import { useChatViewMode } from "./use-chat-view-mode";
 import { ChatViewHeaderContext } from "./chat-view-switch";
@@ -180,6 +181,7 @@ export function ChatConversationView(props: ChatConversationViewProps): JSX.Elem
     onToggleReaction: props.onToggleReaction,
     onCompactParticipant: props.onCompactParticipant,
     onStopRun: props.onStopRun,
+    onSendNow: props.onSendNow,
     onDismissTurnFinishedNote: props.onDismissTurnFinishedNote,
     runChoiceWithSubmittingId: choiceSubmission.runWithSubmittingId
   });
@@ -397,9 +399,56 @@ export function ChatConversationView(props: ChatConversationViewProps): JSX.Elem
     liveProgressById,
     ...chatMessageActions,
     onStopRun: props.onStopRun ? chatMessageActions.onStopRun : undefined,
+    onSendNow: props.onSendNow ? chatMessageActions.onSendNow : undefined,
     onDismissTurnFinishedNote: props.onDismissTurnFinishedNote ? chatMessageActions.onDismissTurnFinishedNote : undefined,
     onRespondToAppToolApproval: stableAppToolApproval
   };
+
+  // The right side's panels, kept on screen while they slide out (useSidePanelMotion).
+  const rightSide = useSidePanelMotion(hasThread || showArtifactsPanel ? (
+    <>
+      <ChatViewRightPanels
+        shown={hasThread}
+        onStartResize={panelWidth.startResize}
+        context={panelMessageContext}
+        conversation={props.conversation}
+        thread={selectedThreadRoot ? {
+          root: selectedThreadRoot,
+          summary: selectedThreadSummary,
+          draft: threadDrafts[selectedThreadRoot.id] ?? "",
+          approvalsByMessageId: approvalPlacement.byMessageId,
+          onDraftChange: (value) => setThreadDrafts((current) => ({ ...current, [selectedThreadRoot.id]: value })),
+          onSend: (repoFileMentions, imageAttachments, skillMentions, content) =>
+            sendThreadDraft(selectedThreadRoot, repoFileMentions, imageAttachments, skillMentions, content),
+          onClose: rightPanel.close
+        } : undefined}
+        sessions={sessions && sessionsPanelOpen ? {
+          view: sessions,
+          rightPanel,
+          runIdsByParticipantId: activeRunSummary.runIdsByParticipantId,
+          hasOlderMessages: props.hasOlderMessages,
+          olderMessagesLoading: props.olderMessagesLoading,
+          onLoadOlderMessages: props.onLoadOlderMessages,
+          onSendToMember: props.onSendToMember ?? (async () => false),
+          renderMemberSettings: props.renderMemberSettings,
+          renderMemberChip: props.renderMemberChip,
+          onStopRuns: props.onStopRun ? stopRuns : undefined,
+          latestAccord,
+          onOpenAccord: sessionsChrome.openAccord ?? rightPanel.openAccord,
+          accordNeedsAgent: props.accordNeedsAgent
+        } : undefined}
+      />
+      {showArtifactsPanel && (
+        <ChatSidePanel
+          conversation={props.conversation}
+          settings={props.settings}
+          artifacts={artifacts}
+          backToThread={sidePanel.backToThread}
+          openFileOutside={(ref, action) => void localFileOpen.openFileOutside(ref, action)}
+        />
+      )}
+    </>
+  ) : null);
 
   return (
     <ChatSessionsPresentationContext.Provider value={Boolean(sessions)}><ChatSessionsLinksContext.Provider value={sessionsChrome.links}><ChatSessionsNamesContext.Provider value={sessionsNames}>
@@ -415,6 +464,7 @@ export function ChatConversationView(props: ChatConversationViewProps): JSX.Elem
           data-testid="chat-view"
           data-chat-view={viewMode.view}
           data-right-panel={panel?.kind}
+          data-side-panel-motion={rightSide.motion}
           ref={viewport.viewRef}
           style={{ "--chat-thread-width": `${panelWidth.width}px` } as CSSProperties}
           onClick={(event) => {
@@ -450,6 +500,7 @@ export function ChatConversationView(props: ChatConversationViewProps): JSX.Elem
               onScroll={viewport.updateStickToBottom}
               onScrollIntent={viewport.markUserScrollIntent}
               onStopRun={props.onStopRun ? chatMessageActions.onStopRun : undefined}
+              onSendNow={props.onSendNow ? chatMessageActions.onSendNow : undefined}
               onToggleReaction={chatMessageActions.onToggleReaction}
               onDismissTurnFinishedNote={props.onDismissTurnFinishedNote ? chatMessageActions.onDismissTurnFinishedNote : undefined}
               participantStatusById={participantStatusById}
@@ -514,52 +565,13 @@ export function ChatConversationView(props: ChatConversationViewProps): JSX.Elem
                 lockedReason={props.isRunning ? FOLDER_BUSY_REASON : undefined} /> : undefined}
               testId="chat-main-composer"
               below={sessions ? <ChatBackgroundTasksLine participantId={sessions.mainSessionId} /> : undefined}
-              sendNow={sessions && composerSendNow(props.conversation.messages, sessions.mainSessionId, props.onStopRun)}
+              sendNow={sessions && composerSendNow(props.conversation.messages, sessions.mainSessionId, props.onSendNow)}
               takesFocusRequests
               renderParticipantAvatar={renderComposerMemberMark}
               participantRoleLabel={(participant) => chatRoleLabel(props.settings.chatRoleConfigs, participant)}
             />
           </div>
-          <ChatViewRightPanels
-            shown={hasThread}
-            onStartResize={panelWidth.startResize}
-            context={panelMessageContext}
-            conversation={props.conversation}
-            thread={selectedThreadRoot ? {
-              root: selectedThreadRoot,
-              summary: selectedThreadSummary,
-              draft: threadDrafts[selectedThreadRoot.id] ?? "",
-              approvalsByMessageId: approvalPlacement.byMessageId,
-              onDraftChange: (value) => setThreadDrafts((current) => ({ ...current, [selectedThreadRoot.id]: value })),
-              onSend: (repoFileMentions, imageAttachments, skillMentions, content) =>
-                sendThreadDraft(selectedThreadRoot, repoFileMentions, imageAttachments, skillMentions, content),
-              onClose: rightPanel.close
-            } : undefined}
-            sessions={sessions && sessionsPanelOpen ? {
-              view: sessions,
-              rightPanel,
-              runIdsByParticipantId: activeRunSummary.runIdsByParticipantId,
-              hasOlderMessages: props.hasOlderMessages,
-              olderMessagesLoading: props.olderMessagesLoading,
-              onLoadOlderMessages: props.onLoadOlderMessages,
-              onSendToMember: props.onSendToMember ?? (async () => false),
-              renderMemberSettings: props.renderMemberSettings,
-              renderMemberChip: props.renderMemberChip,
-              onStopRuns: props.onStopRun ? stopRuns : undefined,
-              latestAccord,
-              onOpenAccord: sessionsChrome.openAccord ?? rightPanel.openAccord,
-              accordNeedsAgent: props.accordNeedsAgent
-            } : undefined}
-          />
-          {showArtifactsPanel && (
-            <ChatSidePanel
-              conversation={props.conversation}
-              settings={props.settings}
-              artifacts={artifacts}
-              backToThread={sidePanel.backToThread}
-              openFileOutside={(ref, action) => void localFileOpen.openFileOutside(ref, action)}
-            />
-          )}
+          {rightSide.content}
           <LocalFileOpenChooser
             fileRef={localFileOpen.chooserFileRef}
             open={localFileOpen.chooserOpen}

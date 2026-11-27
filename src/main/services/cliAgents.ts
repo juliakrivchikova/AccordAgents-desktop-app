@@ -13,7 +13,7 @@ import type { ClaudePermissionMode } from "./cliAgents/claude/permissionModes";
 import {
   CLAUDE_MODEL_PROBE_DIR, type ClaudeModelProbeExpectSpawn, type ClaudeModelProbePtySpawn
 } from "./cliAgents/models/claudeModelProbe";
-import type { CliAgentCompactResult, CliAgentDebugLogger, CliAgentRunnerOptions, CliAgentRunOptions } from "./cliAgents/types";
+import type { ClaudeSendNowOutcome, CliAgentCompactResult, CliAgentDebugLogger, CliAgentRunnerOptions, CliAgentRunOptions } from "./cliAgents/types";
 import { createCliModules, type CliModules } from "./cliAgents/modules";
 
 export { CLAUDE_PERMISSION_MODE_TIMEOUT_MS } from "./cliAgents/claude/claudeRuns";
@@ -26,7 +26,7 @@ export { withCliStartModel, parseAgyModelList, agyModelsInvocation } from "./cli
 export { antigravityExpectProgram, antigravityInteractiveGoalAtPrompt, antigravityInteractivePermissionPrompt } from "./cliAgents/gemini/goalTerminal";
 export { resolveCodexCompactTimeoutMs } from "./cliAgents/codex/appServer/appServerTurns";
 export { isForkSourceMissingError, forkCopyNotMade } from "./cliAgents/runs/forkSource";
-export type { CliAgentImageInput, CliAgentTurnImages, CliAgentRunOptions, NativeGoalRun, CliAgentOutputKind, CliAgentOutputEvent, CliAgentOutputCallback, CliAgentSessionIdCallback, CliAgentCodexServerRequest, CliAgentCodexServerRequestCallback, CliAgentWarmOptions, CliAgentBackgroundTask, CliAgentReplyOrigin, CliAgentReplyStart, CliAgentSelfResumedTurn, CliAgentRoleOptions, CliAgentAppMcpOptions, CliAgentAppMcpClientStatus, CliAgentCompactResult } from "./cliAgents/types";
+export type { CliAgentImageInput, CliAgentTurnImages, CliAgentRunOptions, NativeGoalRun, CliAgentOutputKind, CliAgentOutputEvent, CliAgentOutputCallback, CliAgentSessionIdCallback, CliAgentCodexServerRequest, CliAgentCodexServerRequestCallback, CliAgentWarmOptions, CliAgentBackgroundTask, CliAgentReplyOrigin, CliAgentReplyStart, CliAgentSelfResumedTurn, CliAgentRoleOptions, CliAgentAppMcpOptions, CliAgentAppMcpClientStatus, CliAgentCompactResult, ClaudeSendNowOutcome } from "./cliAgents/types";
 export { type ClaudePermissionMode, ClaudeControlError, isClaudeAutoModeRefusal, isClaudePermissionMode, CLAUDE_PERMISSION_MODE_LABELS, claudePermissionModeRank, claudeCodePermissionMode } from "./cliAgents/claude/permissionModes";
 export { ClaudeFolderNotTrustedError, parseClaudeModelPickerOutput, claudeModelProbeEnv, resolveClaudeModelProbeCwd, probeClaudeModelsInFolder, runClaudeModelProbeWithExpect, runClaudeModelProbeInPty } from "./cliAgents/models/claudeModelProbe";
 export { parseClaudeInitializeModels, claudeAppliedSettings, ClaudeModelListTimeoutError, runClaudeModelListProbe } from "./cliAgents/models/claudeModelList";
@@ -225,6 +225,12 @@ export class CliAgentRunner {
     signal?: AbortSignal
   ): Promise<Record<string, unknown> | undefined> {
     return this.modules.warmAgents.memberClaudeControl(conversationId, participantId, request, timeoutMs, signal);
+  }
+
+  /** Send now on the member's live Claude Code process, as the CLI's own
+   *  send-now; `unsupported` when it cannot (the caller stops the reply). */
+  memberClaudeSendNow(conversationId: string, participantId: string, waitingRunId?: string, runningRunId?: string): Promise<ClaudeSendNowOutcome> {
+    return this.modules.warmAgents.memberClaudeSendNow(conversationId, participantId, waitingRunId, runningRunId);
   }
 
   /** Where this device's Claude Code keeps its members' sessions (the

@@ -77,6 +77,7 @@ export function ChatViewRightPanels(props: {
           onDismissTurnFinishedNote={context.onDismissTurnFinishedNote}
           onCompactParticipant={context.onCompactParticipant}
           onStopRun={context.onStopRun}
+          onSendNow={context.onSendNow}
           continuedMentionRequestIds={context.continuedMentionRequestIds}
           inferredParticipantRequestsByTrigger={context.inferredParticipantRequestsByTrigger}
           approvalsByMessageId={thread.approvalsByMessageId}

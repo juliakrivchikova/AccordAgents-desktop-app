@@ -86,7 +86,8 @@ function listRecentTimelineEntries(sinceIso, keepChars) {
 export function stopRunIdsOf(entries) {
   const ids = [];
   for (const entry of entries) {
-    if (!entry || entry.kind !== "turn.stop" || !entry.payload || entry.status === OUTBOX_REFUSED) continue;
+    // A Send now stops nothing.
+    if (!entry || entry.kind !== "turn.stop" || !entry.payload || entry.payload.sendNow || entry.status === OUTBOX_REFUSED) continue;
     if (entry.payload.runId) ids.push(entry.payload.runId);
     if (entry.payload.rowRunId) ids.push(entry.payload.rowRunId);
   }

@@ -46,7 +46,7 @@ export function sendFailureRecord(entry, failure, attempt) {
   } else if (entry.kind === "turn.stop") {
     const chat = loadChats().find(function (item) { return item.id === entry.conversationId; });
     const member = chat && Array.isArray(chat.members) ? chat.members.find(function (item) { return item.id === payload.participantId; }) : undefined;
-    text = "Stop" + (member ? " @" + member.handle : "");
+    text = (payload.sendNow ? "Send now" : "Stop") + (member ? " @" + member.handle : "");
   } else if (entry.kind === "card.answer") {
     text = String(payload.label || "Your answer");
   } else if (entry.kind === "conversation.create") {

@@ -40,7 +40,7 @@ type ChatMessageItemProps = ComponentProps<typeof ChatMessageItem>;
  *  come from. */
 export type ChatPanelMessageContext = Pick<ChatMessageItemProps,
   | "activityDisclosure" | "conversationId" | "participantStatusById" | "busy" | "onApproveMentions"
-  | "onRejectMentions" | "onRespondToChoice" | "onToggleReaction" | "onDismissTurnFinishedNote" | "onStopRun">
+  | "onRejectMentions" | "onRespondToChoice" | "onToggleReaction" | "onDismissTurnFinishedNote" | "onStopRun" | "onSendNow">
   & Required<Pick<ChatMessageItemProps,
     "participants" | "submittingChoiceIds" | "submittingApprovalIds" | "onCompactParticipant" | "onRespondToAppToolApproval">> & {
   settings: AppSettings;
@@ -235,7 +235,7 @@ export function ChatSessionsRightPanel(props: {
       onSend={props.onSendToMember}
       onStopRuns={props.onStopRuns}
       waiting={waiting}
-      sendNow={composerSendNow(conversation.messages, memberId, messageContext.onStopRun)}
+      sendNow={composerSendNow(conversation.messages, memberId, messageContext.onSendNow)}
       onBack={rightPanel.openMembers}
       onClose={rightPanel.close}
     />

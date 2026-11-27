@@ -1,7 +1,7 @@
 /**
  * Pinned and Recents on the phone (the User, 2026-11-15), in the real PWA
  * paired with a real hub (the User's own server):
- *  - the list leads with Pinned (in the order pinned) and Recents (the 20
+ *  - the list leads with Pinned (in the order pinned) and Recents (the 10
  *    newest chats of every project), then the projects; a chat may be listed
  *    in all three;
  *  - each row shows one mark: a member at work, else a choice waiting for
@@ -48,14 +48,14 @@ test("Pinned, Recents and projects on the phone; one mark per row; a long press 
 
     app = await attachApp({ port: 9525 });
     await pairPage(app, { hub, siteOrigin: site.origin, query: "qa=1" });
-    await app.waitFor(`document.querySelectorAll('#chat-list .mobile-chat-group[data-section="recents"] .mobile-chat-row').length === 20`, "Recents listed");
+    await app.waitFor(`document.querySelectorAll('#chat-list .mobile-chat-group[data-section="recents"] .mobile-chat-row').length === 10`, "Recents listed");
 
     const titles = await app.evaluate(sectionTitles);
     assert.deepEqual(titles.slice(0, 2), ["pinned:Pinned", "recents:Recents"], "Pinned, then Recents, above the projects");
     assert.deepEqual(titles.slice(2).sort(), ["project:alpha", "project:beta"]);
     assert.deepEqual(await app.evaluate(sectionRows("pinned")), ["chat-0"]);
     const recents = await app.evaluate(sectionRows("recents"));
-    assert.equal(recents.length, 20, "the 20 newest");
+    assert.equal(recents.length, 10, "the 10 newest");
     assert.equal(recents[0], "chat-20", "newest first");
     assert.equal(recents.includes("chat-0"), false, "the oldest pinned chat is not among the newest");
     assert.equal(recents.includes("chat-1"), false);

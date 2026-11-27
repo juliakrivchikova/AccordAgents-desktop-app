@@ -149,6 +149,7 @@ input.on("line", (line) => {
     const control = (await readFile(stdinLog, "utf8")).trim().split(/\r?\n/).map((line) => JSON.parse(line))
       .find((message) => message.type === "control_request");
     assert.equal(control?.request?.subtype, "interrupt", "Stop interrupts the step instead of closing the process");
+    assert.equal(control?.request?.spare_background_tasks, true, "Stop asks Claude Code to keep background work, as Esc does");
     assert.equal(testProcessExists(helperPid), true, "Stop keeps the background work");
 
     const third = await runner.run(participant, "Anything else?", fixtureDir, undefined, "chat", undefined, {
@@ -178,6 +179,108 @@ input.on("line", (line) => {
     if (helperPid && testProcessExists(helperPid)) {
       process.kill(helperPid, "SIGKILL");
     }
+    await rm(fixtureDir, { recursive: true, force: true });
+  }
+});
+
+test("Claude Send now: the CLI's own send-now names the waiting message, ends no background work, and the cut reply keeps its text as a turn that goes on", { timeout: 15_000 }, async () => {
+  if (process.platform === "win32") {
+    return;
+  }
+  const fixtureDir = await mkdtemp(path.join(tmpdir(), "accord-claude-send-now-"));
+  const claudePath = path.join(fixtureDir, "claude-fixture");
+  const stdinLog = path.join(fixtureDir, "stdin.jsonl");
+  // Mirrors Claude Code 2.1.329 on stream-json: system/init advertises
+  // interrupt_send_now_v1; a send_now interrupt with a message waiting cuts
+  // the running step (error_during_execution) and answers send_now "stopped",
+  // then the waiting message runs. A background task keeps running.
+  await writeFile(claudePath, `#!/usr/bin/env node
+const { appendFileSync } = require("node:fs");
+const readline = require("node:readline");
+const send = (value) => process.stdout.write(JSON.stringify(value) + "\\n");
+const init = () => send({ type: "system", subtype: "init", session_id: "fixture-session", capabilities: ["interrupt_send_now_v1"] });
+let running;
+const waiting = [];
+const input = readline.createInterface({ input: process.stdin });
+input.on("close", () => process.exit(0));
+const start = (uuid, text) => {
+  send({ type: "command_lifecycle", command_uuid: uuid, state: "started" });
+  init();
+  send({ type: "assistant", message: { role: "assistant", content: [{ type: "text", text }] } });
+  send({ type: "result", subtype: "success", result: text });
+  send({ type: "command_lifecycle", command_uuid: uuid, state: "completed" });
+};
+input.on("line", (line) => {
+  appendFileSync(${JSON.stringify(stdinLog)}, line + "\\n");
+  const message = JSON.parse(line);
+  if (message.type === "control_request") {
+    const request = message.request;
+    const named = waiting.find((item) => item === request.message_uuid);
+    const sendNow = request.subtype === "interrupt" && request.send_now === true;
+    send({ type: "control_response", response: { subtype: "success", request_id: message.request_id, response: sendNow ? { send_now: named ? "stopped" : "nothing_waiting" } : { still_queued: [] } } });
+    if (request.subtype === "interrupt" && running && (!sendNow || named)) {
+      send({ type: "result", subtype: "error_during_execution", is_error: true });
+      send({ type: "command_lifecycle", command_uuid: running, state: "completed" });
+      running = undefined;
+      if (sendNow) {
+        waiting.splice(waiting.indexOf(named), 1);
+        start(named, "Second.");
+      }
+    }
+    return;
+  }
+  const uuid = message.uuid;
+  send({ type: "command_lifecycle", command_uuid: uuid, state: "queued" });
+  if (running) {
+    waiting.push(uuid);
+    return;
+  }
+  running = uuid;
+  send({ type: "command_lifecycle", command_uuid: uuid, state: "started" });
+  init();
+  send({ type: "system", subtype: "task_started", task_id: "task-1", description: "fixture agent", is_backgrounded: true });
+  send({ type: "stream_event", event: { type: "content_block_delta", delta: { type: "text_delta", text: "Reading the logs." } } });
+  send({ type: "assistant", message: { role: "assistant", content: [{ type: "text", text: "Reading the logs." }] } });
+});
+`, "utf8");
+  await chmod(claudePath, 0o755);
+
+  const runner = makeRunner() as any;
+  cliDependencies(runner).nativeProcessDbPath = path.join(fixtureDir, "native-processes.sqlite3");
+  cliParts(runner).cliRuns.providerExecutableForRun = async () => claudePath;
+  const participant = { id: "claude-send-now", kind: "claude-code", label: "Claude" };
+  const warm = { conversationId: "conversation-send-now", participantId: participant.id, contextKey: "context-send-now", idleTimeoutMs: 60_000 };
+  try {
+    let markWorking!: () => void;
+    const working = new Promise<void>((resolve) => { markWorking = resolve; });
+    const firstRun = runner.run(participant, "Look into it.", fixtureDir, undefined, "chat", undefined, {
+      agentMode: "default",
+      warm: { ...warm, origin: { runId: "run-1", messageId: "reply-1" } },
+      onOutput: (event: { text: string }) => { if (/Reading the logs/.test(event.text)) markWorking(); }
+    });
+    await working;
+    const secondRun = runner.run(participant, "What is the thread id?", fixtureDir, undefined, "chat", undefined, {
+      agentMode: "default",
+      warm: { ...warm, origin: { runId: "run-2", messageId: "reply-2" } }
+    });
+    const stdin = async () => (await readFile(stdinLog, "utf8")).trim().split(/\r?\n/).map((line) => JSON.parse(line));
+    for (let tries = 0; tries < 100 && (await stdin()).filter((message) => message.type === "user").length < 2; tries += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    }
+    const outcome = await runner.memberClaudeSendNow(warm.conversationId, participant.id, "run-2");
+    assert.equal(outcome, "stopped");
+    const first = await firstRun;
+    assert.equal(first.ok, true, "the cut reply is not a failure or a Stop");
+    assert.equal(first.content, "Reading the logs.");
+    assert.equal(first.turnContinues, true, "the member's turn goes on in the waiting message's reply");
+    const second = await secondRun;
+    assert.equal(second.content, "Second.");
+    const messages = await stdin();
+    const waitingUuid = messages.filter((message) => message.type === "user")[1]?.uuid;
+    const control = messages.find((message) => message.type === "control_request");
+    assert.deepEqual(control?.request, { subtype: "interrupt", send_now: true, message_uuid: waitingUuid });
+  } finally {
+    await runner.shutdownWarmAgents();
     await rm(fixtureDir, { recursive: true, force: true });
   }
 });

@@ -53,6 +53,12 @@ export class Turns {
     }
 
     if (op.kind === "turn.stop") {
+      if (op.sendNow === true) {
+        // Send now is not a Stop: the turn stays as it is (a Stop after it is
+        // still heard), and its device hears it once, in the feed.
+        if (!current || current.state !== "claimed" || current.stopRequestedAt) return unchanged();
+        return place_({ ...current, sendNowRequestedAt: acceptedAt, ...(op.waitingRunId ? { sendNowWaitingRunId: op.waitingRunId } : {}) });
+      }
       if (!current) {
         return place_({ runId: op.runId, conversationId: op.conversationId, messageId: op.messageId, participantId: op.participantId,
           state: "stopped", finishedAt: acceptedAt, outcome: "stopped" });

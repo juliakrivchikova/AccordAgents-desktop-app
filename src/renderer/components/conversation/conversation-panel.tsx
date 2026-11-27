@@ -134,6 +134,7 @@ export function ConversationPanel({
           setRepoFileExternalOpenPreference={settingsActions.setRepoFileExternalOpenPreference}
           onCompactParticipant={(participantId) => chatActions.compactChatParticipant(participantId)}
           onStopRun={(runId) => void window.consensus.cancelReview(runId)}
+          onSendNow={(runId, waitingRunId) => void window.consensus.sendNowChatRun(runId, waitingRunId)}
           onJumpToParticipantLastMessage={conversationActions.jumpToParticipantLastMessage}
           onDismissMessageFocus={() => {
             // Dismissing the highlight by clicking outside it is the acknowledgment

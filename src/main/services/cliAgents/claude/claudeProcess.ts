@@ -18,14 +18,20 @@ import {
 } from "./replies";
 import type { ClaudeWarmProcessHooks, ClaudeWarmProcessState } from "./types";
 import { findModelId } from "../models/modelLists";
-import { reportSessionId } from "../runs/outputText";
+import { errorText, reportSessionId } from "../runs/outputText";
 import { asRecord, findSessionId, stringField } from "../runs/records";
 import { agentRunEnv, normalizedExtraReadableDirs } from "../runs/runEnvironment";
 import type {
-  ClaudeWarmRunContext, CliAgentCodexServerRequestCallback, CliAgentOutputCallback, CliAgentRunOptions, CliAgentSessionIdCallback,
+  ClaudeSendNowOutcome, ClaudeWarmRunContext, CliAgentCodexServerRequestCallback, CliAgentOutputCallback, CliAgentRunOptions, CliAgentSessionIdCallback,
   NativeGoalRun, WarmAgentEntry
 } from "../types";
 import type { CliModules } from "../modules";
+
+/** The CLI's own Send now (`interrupt` with `send_now`), on `system/init`. */
+const CLAUDE_SEND_NOW_CAPABILITY = "interrupt_send_now_v1";
+/** How long the CLI gets to answer a Send now before the reply is stopped for
+ *  the waiting message instead. */
+const CLAUDE_SEND_NOW_TIMEOUT_MS = 15_000;
 
 /** How long the CLI gets to answer `get_context_usage`. */
 const CLAUDE_CONTEXT_USAGE_TIMEOUT_MS = 15_000;
@@ -116,6 +122,7 @@ export class ClaudeProcess {
       lastTaskEventAt: 0,
       selfResumeExpectedUntil: 0,
       controlWaiters: new Map(),
+      capabilities: new Set(),
       toolContext: {},
       scopeKey,
       permissionMode: toolConfig.permissionMode,
@@ -443,6 +450,43 @@ export class ClaudeProcess {
           }
         }
       },
+      sendNow: async (waitingRunId?: string, runningRunId?: string): Promise<ClaudeSendNowOutcome> => {
+        const running = state.active;
+        if (closed || child.exitCode !== null || child.killed || !state.capabilities.has(CLAUDE_SEND_NOW_CAPABILITY) ||
+          !running || running.settled || running.stopRequested) {
+          return "unsupported";
+        }
+        // Pressed for a reply that has ended meanwhile: the one running now
+        // is another message's, and nothing is done to it. (A reply the CLI
+        // started itself carries an older run as its origin: not compared.)
+        if (runningRunId !== undefined && running.commandUuid && running.origin?.runId !== runningRunId) return "nothing_waiting";
+        // The CLI's send-now acts only on a message already in its queue: one
+        // the app still holds back is sent when its place comes.
+        const waiting = state.replies.find((reply) => reply !== running && reply.commandUuid && reply.written && !reply.started &&
+          !reply.settled && !reply.stopRequested && (waitingRunId === undefined || reply.origin?.runId === waitingRunId));
+        if (!waiting) return "not_at_cli";
+        running.sentNow = true;
+        try {
+          // Without a named message every message waiting at the CLI counts, as
+          // the CLI defines it (the composer's send-now).
+          const answer = await entry.control!({
+            subtype: "interrupt", send_now: true, ...(waitingRunId !== undefined ? { message_uuid: waiting.commandUuid } : {})
+          }, CLAUDE_SEND_NOW_TIMEOUT_MS);
+          const outcome = stringField(answer, "send_now");
+          void this.cli.cliRuns.writeDebugLog("cli-agent-claude-send-now", { participantId: participant.id, outcome: outcome ?? "interrupted" });
+          if (outcome === "nothing_waiting") {
+            running.sentNow = false;
+            return "nothing_waiting";
+          }
+          return outcome === "delivering" ? "delivering" : "stopped";
+        } catch (error) {
+          void this.cli.cliRuns.writeDebugLog("cli-agent-claude-send-now-failed", { participantId: participant.id, error: errorText(error) });
+          // Unanswered, the request may still act: no Stop follows it.
+          if (error instanceof ClaudeControlError && error.timedOut) return "stopped";
+          running.sentNow = false;
+          return "unsupported";
+        }
+      },
       permissionMode: () => state.permissionMode,
       autoModeSeen: () => state.autoModeSeen,
       lastCompactBoundary: () => state.lastCompactBoundary,
@@ -610,6 +654,9 @@ export class ClaudeProcess {
       }
       if (subtype === "init") {
         noteClaudeToolContext(record, state.toolContext);
+        if (Array.isArray(record.capabilities)) {
+          state.capabilities = new Set(record.capabilities.filter((item): item is string => typeof item === "string"));
+        }
         this.startClaudeWarmStep(state, participant, hooks);
       } else {
         this.cli.claudeReplyFlow.trackClaudeBackgroundTasks(record, subtype, state, participant);

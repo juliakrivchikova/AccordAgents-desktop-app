@@ -59,12 +59,19 @@ export async function messageOutboxEntries(input) {
 
 /** A Stop of one member's turn on the server, named by the turn's run id,
  *  the message it answers and the member (`rowRunId` is the run id the row on
- *  screen carries, which may be the device's own name for the run). */
+ *  screen carries, which may be the device's own name for the run). With
+ *  `sendNow` it is the User's Send now on a message waiting behind the turn,
+ *  not her Stop: the member's device lets it take that message now. */
 export function enqueueTurnStop(input) {
   return createOutboxEvent({
     conversationId: input.conversationId,
     kind: "turn.stop",
-    payload: { runId: input.runId, messageId: input.messageId, participantId: input.participantId, ...(input.rowRunId ? { rowRunId: input.rowRunId } : {}) }
+    payload: {
+      runId: input.runId, messageId: input.messageId, participantId: input.participantId,
+      ...(input.rowRunId ? { rowRunId: input.rowRunId } : {}),
+      ...(input.sendNow ? { sendNow: true } : {}),
+      ...(input.sendNow && input.waitingRunId ? { waitingRunId: input.waitingRunId } : {})
+    }
   }).then(persistOutboundEvent);
 }
 
@@ -85,6 +92,9 @@ export function serverOwesEntry(entry) {
  *  control back as if nothing had been asked -- which is both a lie and a
  *  second Stop the User can send by accident. */
 export const stopRequestedRunIds = new Set();
+/** Runs a Send now was pressed for (not stopping): their waiting buttons stay
+ *  pressed until the message moves on, or are released if it could not be sent. */
+export const sendNowPressedRunIds = new Set();
 
 /**
  * The turn on the server a row's run is: its run id there, the message it
@@ -132,20 +142,28 @@ export async function stopRunFromPhone(runId, forConversationId, known) {
     return;
   }
   const wanted = runId.trim();
-  stopRequestedRunIds.add(wanted);
+  // A Send now stops nothing: the run is not shown as stopping.
+  const sendNowOnly = Boolean(known && known.sendNow);
+  (sendNowOnly ? sendNowPressedRunIds : stopRequestedRunIds).add(wanted);
   await render();
   const turn = await turnOfRun(conversationId, wanted, known);
   if (!turn) {
     // Nothing to name it by: said in the send log, and the Stop comes back.
     stopRequestedRunIds.delete(wanted);
+    sendNowPressedRunIds.delete(wanted);
     await recordSendFailure({
-      conversationId: conversationId, kind: "turn.stop", text: "Stop", cause: "phone",
+      conversationId: conversationId, kind: "turn.stop", text: sendNowOnly ? "Send now" : "Stop", cause: "phone",
       reason: "This phone does not know which message this run answers, so it could not name it to your server."
     });
     await render();
     return;
   }
-  await enqueueTurnStop({ conversationId: conversationId, runId: turn.runId, rowRunId: turn.rowRunId, messageId: turn.messageId, participantId: turn.participantId });
+  await enqueueTurnStop({
+    conversationId: conversationId, runId: turn.runId, rowRunId: turn.rowRunId, messageId: turn.messageId, participantId: turn.participantId,
+    sendNow: sendNowOnly,
+    // The message it was pressed on, by its turn on the server.
+    waitingRunId: sendNowOnly && known.waitingRunId ? (known.waitingRunId.indexOf("turn-") === 0 ? known.waitingRunId : "turn-" + known.waitingRunId) : undefined
+  });
   // A Stop goes where every other write goes, at once; the member's own
   // device stops the run when it reads it, and the row keeps saying
   // "Stopping" until it has.

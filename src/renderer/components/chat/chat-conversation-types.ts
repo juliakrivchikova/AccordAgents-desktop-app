@@ -99,6 +99,9 @@ export interface ChatConversationViewProps {
   setRepoFileExternalOpenPreference: (action: RepoFileExternalOpenAction | null) => Promise<void>;
   onCompactParticipant: ParticipantCompactHandler;
   onStopRun?: (runId: string) => void;
+  /** Send now on a message waiting behind the running reply `runId` (the
+   *  CLI's send-now), the one waiting as `waitingRunId`, or every one. */
+  onSendNow?: (runId: string, waitingRunId?: string) => void;
   onJumpToParticipantLastMessage: (participantId: string) => void;
   /** Called after a click outside the focused (highlighted) message dismisses that highlight. */
   onDismissMessageFocus?: () => void;

@@ -74,6 +74,9 @@ import type { DisableSpeechToTextRequest, SpeechToTextState, TranscribeSpeechReq
 
 export interface AppBridge {
   getAppVersion(): Promise<string>;
+  /** Whether the window is in full screen, where macOS hides its traffic lights. */
+  isFullScreen(): Promise<boolean>;
+  onFullScreenChanged(callback: (fullScreen: boolean) => void): () => void;
   openExternal(url: string): Promise<void>;
   inspectLocalFile(request: InspectLocalFileRequest): Promise<InspectLocalFileResult>;
   openLocalFile(request: OpenLocalFileRequest): Promise<OpenLocalFileResult>;
@@ -292,6 +295,9 @@ export interface AppBridge {
   recoverImplementationPlan(request: RecoverImplementationPlanRequest): Promise<StartReviewResult>;
   reviseImplementationPlan(request: ReviseImplementationPlanRequest): Promise<StartReviewResult>;
   cancelReview(runId: string): Promise<void>;
+  /** Send now on a message waiting behind the member's running reply `runId`
+   *  (the CLI's send-now): the one waiting as `waitingRunId`, or every one. */
+  sendNowChatRun(runId: string, waitingRunId?: string): Promise<void>;
   listArtifacts(request: ListArtifactsRequest): Promise<ArtifactResult<ArtifactSummary[]>>;
   readArtifact(request: ReadArtifactRequest): Promise<ArtifactResult<ArtifactReadResult>>;
   diffArtifactVersions(request: DiffArtifactRequest): Promise<ArtifactResult<ArtifactDiffResult>>;

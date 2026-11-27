@@ -33,6 +33,10 @@ export class ActiveRuns {
   readonly chatRunControllers = new Map<string, Set<AbortController>>();
   readonly chatRunMeta = new Map<string, { conversationId: string; participantId: string; participantHandle: string; pendingMessageId?: string }>();
   readonly runProgressCallbacks = new Map<string, ProgressCallback>();
+  /** Runs stopped by Send now for the message waiting behind them (RunCancel.sendNow):
+   *  their reply ends with what it wrote and the turn goes on in that
+   *  message's reply, never as "stopped by user". Until the run unregisters. */
+  readonly sentNowRunIds = new Set<string>();
 
   constructor(
     private readonly chat: Pick<
@@ -158,6 +162,7 @@ export class ActiveRuns {
       return;
     }
     this.chatRunMeta.delete(runId);
+    this.sentNowRunIds.delete(runId);
     this.chat.chatPostTools.appSendMessageCountsByRun.delete(runId);
     this.chat.chatPostTools.appSendMessageImageBytesByRun.delete(runId);
     if (meta) {

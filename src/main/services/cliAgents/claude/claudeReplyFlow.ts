@@ -18,6 +18,27 @@ import type { CliModules } from "../modules";
 // removal before the reply is settled anyway and the process retired.
 const CLAUDE_WARM_STOP_ACK_TIMEOUT_MS = 15_000;
 
+// The User's Stop: it ends the running step and leaves background agents and
+// workflows running, as Esc does in the dedicated CLI. Since Claude Code
+// 2.1.329 an interrupt from a client that declared no stop of its own for each
+// task ends them too (`perTaskStopAffordance`); `spare_background_tasks`
+// keeps them, for this request only. Older CLIs ignore it and spare them.
+const CLAUDE_USER_STOP = { subtype: "interrupt", spare_background_tasks: true } as const;
+
+/** A step the CLI ended because it was interrupted, not because it failed:
+ *  Claude Code 2.1.329 says so in `terminal_reason` (`aborted_streaming`,
+ *  `aborted_tools`); a CLI that does not, by an error result that names no
+ *  error of its own. */
+function claudeStepCutByInterrupt(record: Record<string, unknown>): boolean {
+  if (stringField(record, "subtype") !== "error_during_execution") return false;
+  const reason = stringField(record, "terminal_reason");
+  if (reason) return reason.startsWith("aborted");
+  const errors = Array.isArray(record.errors)
+    ? record.errors.filter((item) => typeof item === "string" && item.trim() && !item.startsWith("[ede_diagnostic]"))
+    : [];
+  return !stringField(record, "result")?.trim() && !stringField(record, "error")?.trim() && errors.length === 0;
+}
+
 // After a background task finishes while the model is idle the CLI starts a
 // step of its own within milliseconds; until it does, the process is not idle.
 const CLAUDE_WARM_SELF_RESUME_EXPECTED_MS = 30_000;
@@ -192,7 +213,7 @@ export class ClaudeReplyFlow {
       if (reply.stopRequested) {
         // Its removal from the queue came too late: stop it now that it runs.
         state.interruptTarget = reply;
-        state.interruptRequestId = sendClaudeWarmControl(hooks, { subtype: "interrupt" });
+        state.interruptRequestId = sendClaudeWarmControl(hooks, CLAUDE_USER_STOP);
       }
       return;
     }
@@ -206,8 +227,9 @@ export class ClaudeReplyFlow {
   }
 
   /** Stop: a running reply is interrupted, which ends only the current step
-   *  (background tasks keep running, as with Esc in the dedicated CLI); a
-   *  message still waiting in the CLI's queue is removed from it. */
+   *  (background tasks keep running, as with Esc in the dedicated CLI:
+   *  CLAUDE_USER_STOP); a message still waiting in the CLI's queue is removed
+   *  from it. */
   stopClaudeWarmReply(
     state: ClaudeWarmProcessState,
     reply: ClaudeWarmReply,
@@ -226,7 +248,7 @@ export class ClaudeReplyFlow {
     }
     if (state.active === reply) {
       state.interruptTarget = reply;
-      state.interruptRequestId = sendClaudeWarmControl(hooks, { subtype: "interrupt" });
+      state.interruptRequestId = sendClaudeWarmControl(hooks, CLAUDE_USER_STOP);
     } else if (reply.commandUuid) {
       const requestId = sendClaudeWarmControl(hooks, { subtype: "cancel_async_message", message_uuid: reply.commandUuid });
       state.cancelRequests.set(requestId, reply);
@@ -289,6 +311,13 @@ export class ClaudeReplyFlow {
       // The interrupt ended the step (`error_during_execution`).
       removeClaudeWarmReply(state, reply);
       reply.reject(new Error(CLAUDE_WARM_CANCELLED_MESSAGE));
+    } else if (record.is_error === true && reply.sentNow && claudeStepCutByInterrupt(record)) {
+      // Send now cut the step for the message waiting behind it (the CLI's
+      // own send-now): the reply ends with what it wrote, and the member's
+      // turn goes on in that message's reply. It was not stopped. A result
+      // that says what failed (an API error) is a failure all the same.
+      void this.cli.cliRuns.writeDebugLog("cli-agent-claude-send-now-cut-step", { participantId: participant.id });
+      this.finishClaudeWarmReply(state, reply, claudeWarmSegmentText(reply, undefined), event, participant, { allowEmpty: true, turnContinues: true, cutBySendNow: true });
     } else if (record.is_error === true && interruptTarget && interruptTarget !== reply
       && stringField(record, "subtype") === "error_during_execution") {
       // A Stop meant for the previous reply reached the CLI after this message
@@ -346,7 +375,7 @@ export class ClaudeReplyFlow {
     segment: string,
     event: unknown,
     participant: ParticipantConfig,
-    options: { allowEmpty?: boolean; turnContinues?: boolean } = {}
+    options: { allowEmpty?: boolean; turnContinues?: boolean; cutBySendNow?: boolean } = {}
   ): void {
     removeClaudeWarmReply(state, reply);
     const content = segment.trim();
@@ -373,7 +402,8 @@ export class ClaudeReplyFlow {
       roleRuntime: reply.roleRuntime,
       contextUsage,
       ...(reply.lastAssistantUuid ? { sessionCut: reply.lastAssistantUuid } : {}),
-      ...(options.turnContinues ? { turnContinues: true } : {})
+      ...(options.turnContinues ? { turnContinues: true } : {}),
+      ...(options.cutBySendNow ? { cutBySendNow: true } : {})
     };
     for (const raw of reply.resultEvents) {
       result = this.cli.claudeSettings.withClaudePermissionDenialWarning(result, raw, participant, "warm");

@@ -140,6 +140,9 @@ export const ChatMessageItem = memo(function ChatMessageItem(props: {
   onDismissTurnFinishedNote?: (messageId: string) => void;
   onCompactParticipant?: ParticipantCompactHandler;
   onStopRun?: (runId: string) => void;
+  /** Send now on a message waiting behind the running reply `runId` (the
+   *  CLI's send-now), the one waiting as `waitingRunId`, or every one. */
+  onSendNow?: (runId: string, waitingRunId?: string) => void;
   onRespondToAppToolApproval?: (
     approvalId: string,
     approve: boolean,
@@ -432,7 +435,12 @@ export const ChatMessageItem = memo(function ChatMessageItem(props: {
             )}
             {reactAndReplyActions}
             {props.waitingRunId && props.onStopRun && (
-              <ChatWaitingMessageActions runId={props.waitingRunId} behindRunId={props.waitingBehindRunId} onStopRun={props.onStopRun} />
+              <ChatWaitingMessageActions
+                runId={props.waitingRunId}
+                behindRunId={props.waitingBehindRunId}
+                onTakeBack={props.onStopRun}
+                onSendNow={props.onSendNow}
+              />
             )}
           </div>}
           <ChatMessageMeta

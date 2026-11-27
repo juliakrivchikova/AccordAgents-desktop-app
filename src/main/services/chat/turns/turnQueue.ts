@@ -20,7 +20,7 @@ export class TurnQueue {
   constructor(
     private readonly chat: Pick<
       ChatModules,
-      | "delegation" | "host" | "participantBatch" | "participantTurn" | "promptSuggestions" | "remoteTurns"
+      | "activeRuns" | "delegation" | "host" | "participantBatch" | "participantTurn" | "promptSuggestions" | "remoteTurns"
       | "requesterResumes" | "serverLink" | "serverTurns"
     >
   ) {}
@@ -120,9 +120,9 @@ export class TurnQueue {
             turnSegmentId,
             queuedInCli: Boolean(reservation.behindMemberTurn)
           });
-          outcome = turnController.signal.aborted ? "stopped" : "done";
+          outcome = turnController.signal.aborted && !this.chat.activeRuns.sentNowRunIds.has(runId) ? "stopped" : "done";
         } catch (error) {
-          outcome = turnController.signal.aborted ? "stopped" : "error";
+          outcome = turnController.signal.aborted ? (this.chat.activeRuns.sentNowRunIds.has(runId) ? "done" : "stopped") : "error";
           throw error;
         } finally {
           // Its context use goes with the turn's end, for every other device.
