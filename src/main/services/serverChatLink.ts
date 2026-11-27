@@ -1,4 +1,4 @@
-import type { HubAlertRequest, HubAlertResult } from "../../shared/urgentAlerts";
+import { URGENT_ALERT_SERVER_TOO_OLD, type HubAlertRequest, type HubAlertResult } from "../../shared/urgentAlerts";
 import { accordClosedLaunchId } from "../../shared/accordProgress";
 import { HubClient, HubIdentityError, HubHttpError } from "./hubClient";
 import { HubOpsClient, HUB_FEED_CURSOR_KEY, type HubOpOutcome } from "./hubOpsClient";
@@ -150,7 +150,7 @@ export class ServerChatLink {
       const message = error instanceof Error ? error.message : String(error);
       this.options.log("server.alerts.failed", { action: request.action, status: error instanceof HubHttpError ? error.status : undefined, message: message.slice(0, 300) });
       if (error instanceof HubHttpError && error.status === 404) {
-        return { ok: false, error: { code: "server_unavailable", message: "Your server is older than this app and has no urgent alerts yet; it will once it updates." } };
+        return { ok: false, error: { code: "server_unavailable", message: URGENT_ALERT_SERVER_TOO_OLD } };
       }
       return { ok: false, error: { code: "server_unavailable", message: `Your server could not be reached (${message.slice(0, 200)}).` } };
     }

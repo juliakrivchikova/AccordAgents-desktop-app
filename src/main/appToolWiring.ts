@@ -7,6 +7,7 @@
  */
 
 import { UrgentAlertOutbox, type UrgentAlertCardHost, type UrgentAlertOutboxStore, type UrgentAlertServerAccess } from "./services/urgentAlertTools";
+import type { UrgentAlertView } from "../shared/urgentAlerts";
 import type {
   ArtifactDraftAudiencePolicyByAuthor,
   PublishArtifactSourceRequest
@@ -116,11 +117,17 @@ export function wireUrgentAlertToolHandler(
     access: () => UrgentAlertServerAccess | undefined;
     store: UrgentAlertOutboxStore;
     cards?: UrgentAlertCardHost;
+    /** Where the server's alert cards arrive on this device (its chats). */
+    serverCards: { observeServerCards(observer: (conversationId: string, messageId: string, alert: UrgentAlertView) => void): void };
     log: (event: string, payload: Record<string, unknown>) => void;
   }
 ): UrgentAlertOutbox {
-  const outbox = new UrgentAlertOutbox(options);
+  const { serverCards, ...outboxOptions } = options;
+  const outbox = new UrgentAlertOutbox(outboxOptions);
   appMcpService.setUrgentAlertToolHandler((actor, request) => outbox.raise(actor, request));
+  serverCards.observeServerCards((conversationId, messageId, alert) => {
+    void outbox.serverCardArrived(conversationId, messageId, alert).catch((error: unknown) => options.log("urgent-alert.outbox.server-card-failed", { message: error instanceof Error ? error.message : String(error) }));
+  });
   outbox.start();
   return outbox;
 }

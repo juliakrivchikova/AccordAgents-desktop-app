@@ -13,6 +13,7 @@ import { homeDeviceId } from "../hubOps";
 import { scopeCovers } from "../hubPhoneState";
 import { failure, messageOf, quote } from "./alertText";
 import { ACKNOWLEDGEABLE } from "./constants";
+import { AlertCardRefused } from "./alertRecords";
 import type { AlertRecord } from "./types";
 import type { HubAlertModules } from "./modules";
 import type { HubAlertDependencies } from "./dependencies";
@@ -149,11 +150,14 @@ export class AlertFlow {
       } catch (error) {
         // No card, no alert: the member's retry (same request id) raises it again.
         await this.alerts.alertRecords.storage().runSql(`delete from urgent_alerts where id = ${quote(id)};`).catch(() => undefined);
+        // Refused by the chat (not a failure of this server): said as such.
+        if (error instanceof AlertCardRefused) return { refused: error.message };
         throw error;
       }
       this.deps.log("hub.alert.raised", { alertId: id, conversationId: record.conversationId, participantId: record.participantId, telegram, phone });
       return { record, fresh: true };
     });
+    if ("refused" in raised) return failure("access_denied", `The chat did not take the alert's card: ${raised.refused}`);
     if (raised.fresh) {
       void this.alerts.telegramAlerts.deliverTelegram(raised.record.view.id).catch((error: unknown) => this.deps.log("hub.alert.telegram.error", { alertId: raised.record.view.id, message: messageOf(error) }));
       this.reschedule();

@@ -27,7 +27,7 @@ export class ServerChat {
     private readonly chat: Pick<
       ChatModules,
       | "autoWatch" | "deletion" | "host" | "list" | "memberMoves" | "members" | "queuedRosterChanges" | "replicatedChats"
-      | "serverCardMirrors" | "serverCards" | "serverLink" | "serverPlaceholders" | "serverTurns" | "store"
+      | "serverCardMirrors" | "serverCards" | "serverLink" | "serverPlaceholders" | "serverTurns" | "store" | "unsentAlertCards"
     >,
     private readonly deps: Pick<ChatDependencies, "cliRunner" | "debugLogs" | "storage">
   ) {}
@@ -59,6 +59,7 @@ export class ServerChat {
       for (const turn of read.turns) markServerTurn(server, turn);
       await this.chat.store.saveConversation(server, { emitChanges: false });
       for (const turn of read.turns) this.chat.serverTurns.noteServerTurn(turn);
+      this.noteServerAlertCards(conversationId, server.messages);
       return;
     }
     await this.chat.store.withChatMutation(existing, async () => {
@@ -94,6 +95,15 @@ export class ServerChat {
       await this.chat.store.saveConversation(existing, { emitChanges: false });
     });
     for (const turn of read.turns) this.chat.serverTurns.noteServerTurn(turn);
+    this.noteServerAlertCards(conversationId, server.messages);
+  }
+
+  /** The server's alert cards now stored here: what this device kept for
+   *  them (an alert it could not raise yet, one she answered here) settles. */
+  private noteServerAlertCards(conversationId: string, messages: ChatMessage[]): void {
+    for (const message of messages) {
+      if (message.metadata?.urgentAlert) this.chat.unsentAlertCards.serverMessageArrived(conversationId, message);
+    }
   }
 
   /** Applies what the server accepted (from any device, this one included),
@@ -110,6 +120,9 @@ export class ServerChat {
     }
     for (const entry of entries) {
       for (const turn of turnsOfEffect(entry.effect)) this.chat.serverTurns.noteServerTurn(turn);
+      if ((entry.effect.kind === "message.create" || entry.effect.kind === "message.update") && entry.effect.message.metadata?.urgentAlert) {
+        this.chat.unsentAlertCards.serverMessageArrived(entry.conversationId, entry.effect.message);
+      }
     }
     this.chat.serverCards.noteServerCardEntries(entries);
   }

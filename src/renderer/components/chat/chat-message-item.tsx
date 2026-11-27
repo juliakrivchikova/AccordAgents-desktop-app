@@ -169,7 +169,7 @@ export const ChatMessageItem = memo(function ChatMessageItem(props: {
   const liveProgress = shownLiveProgress(props.liveProgress, actionsShown);
   const urgentAlert = urgentAlertOfMessage(message);
   if (urgentAlert) {
-    return <ChatUrgentAlertCard message={message} alert={urgentAlert} participant={props.participants?.find((item) => item.id === message.participantId)} />;
+    return <ChatUrgentAlertCard conversationId={props.conversationId} message={message} alert={urgentAlert} participant={props.participants?.find((item) => item.id === message.participantId)} />;
   }
   if (accordClosedLaunchId(message)) {
     return <ChatAccordClosedLine message={message} />;

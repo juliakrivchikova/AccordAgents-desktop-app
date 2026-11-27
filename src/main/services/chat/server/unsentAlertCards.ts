@@ -1,4 +1,4 @@
-import type { UrgentAlertView } from "../../../../shared/urgentAlerts";
+import { URGENT_ALERT_SERVER_WRITER, type UrgentAlertView } from "../../../../shared/urgentAlerts";
 import type { ChatMessage } from "../../../../shared/types";
 import { chatParticipants } from "../members/identity";
 import type { ChatModules } from "../modules";
@@ -23,16 +23,37 @@ export interface UnsentAlertCard {
 export class UnsentAlertCards {
   constructor(private readonly chat: Pick<ChatModules, "store" | "serverPlaceholders">) {}
 
-  /** Puts the card up, or changes the one already there; false when the
-   *  chat or the member is gone, or the server's card already stands there. */
-  async show(card: UnsentAlertCard): Promise<boolean> {
+  /** Notified when the server's card of an alert arrives (the feed, or a
+   *  whole read of a chat): the outbox settles what it kept for it. */
+  private serverCardObserver?: (conversationId: string, messageId: string, alert: UrgentAlertView) => void;
+
+  observeServerCards(observer: ((conversationId: string, messageId: string, alert: UrgentAlertView) => void) | undefined): void {
+    this.serverCardObserver = observer;
+  }
+
+  /** A message the server wrote arrived here: an alert's card is told on. */
+  serverMessageArrived(conversationId: string, message: ChatMessage): void {
+    const alert = message.metadata?.urgentAlert;
+    if (!this.serverCardObserver || message.metadata?.serverWriter !== URGENT_ALERT_SERVER_WRITER || !alert || typeof alert.id !== "string") return;
+    try {
+      this.serverCardObserver(conversationId, message.id, alert);
+    } catch {
+      // An observer never breaks applying the server's messages.
+    }
+  }
+
+  /** Puts the card up, or changes the one already there. "answered": she
+   *  pressed Got it on it already (it stays as she left it); "server": the
+   *  server's card stands there; "gone": the chat or the member is gone. */
+  async show(card: UnsentAlertCard): Promise<"shown" | "answered" | "server" | "gone"> {
     return this.chat.store.withSavedConversation(card.conversationId, async (conversation) => {
-      if (!conversation || conversation.kind !== "chat") return false;
+      if (!conversation || conversation.kind !== "chat") return "gone";
       const participant = chatParticipants(conversation).find((item) => item.id === card.participantId);
-      if (!participant) return false;
+      if (!participant) return "gone";
       const index = conversation.messages.findIndex((message) => message.id === card.messageId);
       const current = index >= 0 ? conversation.messages[index] : undefined;
-      if (current && !isUnsentCard(current)) return false;
+      if (current && !isUnsentCard(current)) return current.metadata?.urgentAlert ? "server" : "gone";
+      if (current?.metadata?.urgentAlert?.state === "acknowledged") return "answered";
       const message: ChatMessage = {
         id: card.messageId,
         role: "participant",
@@ -47,8 +68,14 @@ export class UnsentAlertCards {
       if (current) conversation.messages = conversation.messages.map((item, at) => at === index ? message : item);
       else conversation.messages = [...conversation.messages, message];
       await this.chat.store.saveConversation(conversation);
-      return true;
+      return "shown";
     });
+  }
+
+  /** The alert the message carries now: the server's card or this computer's. */
+  async alertOf(conversationId: string, messageId: string): Promise<UrgentAlertView | undefined> {
+    return this.chat.store.withSavedConversation(conversationId, async (conversation) =>
+      conversation?.messages.find((message) => message.id === messageId)?.metadata?.urgentAlert);
   }
 
   /** Changes the card while it is still this computer's; undefined when it

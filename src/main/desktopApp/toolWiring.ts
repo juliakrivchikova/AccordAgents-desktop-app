@@ -49,6 +49,7 @@ export function wireAppTools(desktopApp: DesktopApp): void {
     access: () => desktopApp.serverChatLink,
     store: urgentAlertOutboxStore(desktopApp.storageService.hub()),
     cards: desktopApp.chatService.unsentAlertCards,
+    serverCards: desktopApp.chatService.unsentAlertCards,
     log: (event, payload) => { void desktopApp.debugLogService.write(event, payload); }
   });
   desktopApp.chatService.setConnectorSignedInObserver(() => desktopApp.usageMilestones?.reach("connector_signed_in"));

@@ -2,7 +2,7 @@ import { BellRingingIcon, CaretDownIcon, XIcon } from "@phosphor-icons/react";
 import { useContext, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { Button } from "@/components/ui/button";
 import {
-  urgentAlertAwaitsGotIt, urgentAlertFailureText, urgentAlertOutcome, urgentAlertStatus, type UrgentAlertView
+  URGENT_ALERT_UNSENT_ID_PREFIX, urgentAlertAwaitsGotIt, urgentAlertFailureText, urgentAlertOutcome, urgentAlertStatus, type UrgentAlertView
 } from "../../../shared/urgentAlerts";
 import type { ChatMessage, ChatParticipant } from "../../../shared/types";
 import { IconButton } from "../primitives";
@@ -23,6 +23,7 @@ import { useSessionsViewLabel, useSessionsViewText } from "./chat-sessions-links
  * or on the call it stays open with the outcome and a cross that folds it.
  */
 export function ChatUrgentAlertCard(props: {
+  conversationId: string;
   message: Pick<ChatMessage, "id" | "content" | "createdAt" | "participantId" | "participantLabel">;
   alert: UrgentAlertView;
   participant?: ChatParticipant;
@@ -88,7 +89,10 @@ export function ChatUrgentAlertCard(props: {
     setClosing(true);
     setError(undefined);
     try {
-      const result = await window.consensus.urgentAlertRequest({ action: "close", alertId: alert.id });
+      // A card this computer put up itself is answered here: it says where it stands.
+      const result = await window.consensus.urgentAlertRequest(alert.id.startsWith(URGENT_ALERT_UNSENT_ID_PREFIX)
+        ? { action: "close", alertId: alert.id, conversationId: props.conversationId, messageId: message.id }
+        : { action: "close", alertId: alert.id });
       if (!result.ok) {
         keepFocus.current = false;
         setError(result.error.message);

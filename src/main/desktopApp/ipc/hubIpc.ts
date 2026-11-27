@@ -16,7 +16,12 @@ export function registerHubIpc(desktopApp: DesktopApp): void {
     if (action === "close") {
       // A card this computer put up itself is answered here; one the server
       // took meanwhile is closed there.
-      const local = await desktopApp.urgentAlertOutbox?.close(String((request as { alertId?: unknown }).alertId ?? ""));
+      const close = request as { alertId?: unknown; conversationId?: unknown; messageId?: unknown };
+      const local = await desktopApp.urgentAlertOutbox?.close({
+        alertId: typeof close.alertId === "string" ? close.alertId : "",
+        ...(typeof close.conversationId === "string" ? { conversationId: close.conversationId } : {}),
+        ...(typeof close.messageId === "string" ? { messageId: close.messageId } : {})
+      });
       if (local && "handled" in local) return local.handled;
       if (local) return desktopApp.serverChatLink.alerts<unknown>({ action: "close", alertId: local.forwardTo });
     }
@@ -32,7 +37,10 @@ export function registerHubIpc(desktopApp: DesktopApp): void {
         alertsPublicUrlSaid = said.ok ? { key, at: Date.now() } : undefined;
       }
     }
-    const result = await desktopApp.serverChatLink.alerts<unknown>(request as UrgentAlertUserRequest);
+    // To the server only what it takes: the alert, never where a card stands here.
+    const result = await desktopApp.serverChatLink.alerts<unknown>(action === "close"
+      ? { action: "close", alertId: String((request as { alertId?: unknown }).alertId ?? "") }
+      : request as UrgentAlertUserRequest);
     desktopApp.usageMilestones?.observeUrgentAlertRequest(action, result);
     return result;
   });

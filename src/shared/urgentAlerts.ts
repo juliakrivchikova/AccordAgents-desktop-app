@@ -86,8 +86,12 @@ export interface UrgentAlertView {
   /** A card the computer put up itself because the User's server could not
    *  take the alert: why, and whether the computer still raises it there
    *  (until it gets through, or she presses Got it). Kept after Got it. */
-  unsent?: { reason: "unreachable" | "refused"; message?: string; retrying: boolean };
+  unsent?: { reason: "unreachable" | "outdated" | "refused"; message?: string; retrying: boolean };
 }
+
+/** What a device says when its server answers alerts with "no such route":
+ *  a server older than urgent alerts (it has them once it updates). */
+export const URGENT_ALERT_SERVER_TOO_OLD = "Your server is older than this app and has no urgent alerts yet; it will once it updates.";
 
 /** The id of a card the computer put up itself (state "unsent"); a server's
  *  alert ids are UUIDs. */
@@ -189,8 +193,10 @@ export interface UrgentAlertPhoneTry {
 export type HubAlertRequest =
   /** A member's tool call: the device it runs on asks. */
   | { action: "raise"; conversationId: string; participantId: string; text: string; requestId: string }
-  /** The User closes it in the app (her computer, a machine never, a phone). */
-  | { action: "close"; alertId: string }
+  /** The User closes it in the app (her computer, a machine never, a phone).
+   *  A card her computer put up itself (state "unsent") also says where it
+   *  stands; that one is answered on the computer, never sent to a server. */
+  | { action: "close"; alertId: string; conversationId?: string; messageId?: string }
   // The owner's settings (Settings → Alerts).
   | { action: "settings" }
   | { action: "telegram.connect"; token: string }
@@ -303,7 +309,9 @@ export function urgentAlertStatus(alert: UrgentAlertView, requester: string, now
     case "unsent": {
       const why = alert.unsent?.reason === "refused"
         ? `Your server didn't take it${alert.unsent.message ? ` (${alert.unsent.message.trim().replace(/[.\s]+$/, "")})` : ""}`
-        : "Your server couldn't be reached";
+        : alert.unsent?.reason === "outdated"
+          ? "Your server is older than this app and takes no alerts until it updates"
+          : "Your server couldn't be reached";
       return { tone: "off", icon: "off", lead: "Not sent outside the app",
         detail: `${why}, so ${requester} could reach you only here.${alert.unsent?.retrying
           ? " It goes out once your server takes it, unless you press Got it." : ""}`, action: "got-it" };

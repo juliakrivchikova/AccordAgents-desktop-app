@@ -88,6 +88,7 @@ async function setup(t: test.TestContext) {
       log: () => undefined
     });
     const outbox = new UrgentAlertOutbox({ access: () => link, store: urgentAlertOutboxStore(storage.hub()), cards: chat.unsentAlertCards, log: () => undefined, retryMs: 100, raiseTimeoutMs: 2_000 });
+    chat.unsentAlertCards.observeServerCards((conversationId, messageId, alert) => { void outbox.serverCardArrived(conversationId, messageId, alert); });
     links.push(link);
     outboxes.push(outbox);
     return { chat, link, outbox };
@@ -187,7 +188,7 @@ test("Got it on the card while the server cannot be reached: it never goes out, 
   await linked(h, "chat-b");
   h.front.block();
   const result = await h.outbox.raise({ conversationId: "chat-b", participantId: member.id }, { message: "Disk is full on the database host", requestId: "req-2" }) as { value: UrgentAlertRaised };
-  const closed = await h.outbox.close(result.value.alertId);
+  const closed = await h.outbox.close({ alertId: result.value.alertId });
   assert.ok(closed && "handled" in closed && closed.handled.ok);
   const card = cardsIn((await h.stored("chat-b")).messages)[0];
   const view = urgentAlertOfMessage(card) as UrgentAlertView;

@@ -19,6 +19,10 @@ create table if not exists urgent_alerts (
 create index if not exists urgent_alerts_state on urgent_alerts(state);
 `;
 
+/** The chat would not take an alert's card (deleted, or the message id is
+ *  taken): the alert is refused, which the raising device is told. */
+export class AlertCardRefused extends Error {}
+
 /** The alerts the server keeps. */
 export class AlertRecords {
   private ready?: Promise<void>;
@@ -97,7 +101,7 @@ export class AlertRecords {
     }
     if ("refused" in outcome) {
       this.deps.log("hub.alert.card.refused", { alertId: record.view.id, reason: outcome.refused });
-      if (options.strict) throw new Error(outcome.refused);
+      if (options.strict) throw new AlertCardRefused(outcome.refused);
     }
   }
 

@@ -335,7 +335,7 @@ export async function startMachine(args: MachineArgs): Promise<() => Promise<voi
   wireMemoryToolHandler(appMcpService, chatService, () => serverChatLink);
   // Urgent alerts: through the User's server, raised again until it takes
   // them (a machine shows her nothing of its own).
-  wireUrgentAlertToolHandler(appMcpService, { access: () => serverChatLink, store: urgentAlertOutboxStore(storageService.hub()), log });
+  wireUrgentAlertToolHandler(appMcpService, { access: () => serverChatLink, store: urgentAlertOutboxStore(storageService.hub()), serverCards: chatService.unsentAlertCards, log });
 
   await appMcpService.start();
   await storageService.init();
