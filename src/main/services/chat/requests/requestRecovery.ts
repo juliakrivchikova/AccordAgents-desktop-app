@@ -124,6 +124,10 @@ export class RequestRecovery {
     // Only work a restart cut short: a request whose approval card went
     // away was ended here before (no resume, as it never ran).
     if (nextBatch.delegation?.turnId || canInterruptRunning) this.weighRequestARestartEnded(conversation, message);
+    // A request of a member's own whose approval card went away: it is not
+    // asked, and its member is not resumed from it: a request waiting on its
+    // answer ends (its own device writes that).
+    else if (this.delegationRecoveryLookedChats.has(conversation.id)) this.endWaitsOnUnresumed(conversation, [message.id]);
     return true;
   }
 
@@ -169,7 +173,9 @@ export class RequestRecovery {
       // Only the device whose request it is writes it; another one ends it
       // when it reads the mark.
       const waiting = requester && this.chat.host.ownsParticipant(requester) ? endWaitOnUnresumedOwnRequest(conversation, id) : undefined;
-      if (markOwnRequestResumeEnded(conversation, id, "not-made")) changed = true;
+      // The mark is the member's own device's to write (its request).
+      const member = participants.find((participant) => participant.id === own.metadata?.participantRequest?.requesterParticipantId);
+      if (member && this.chat.host.ownsParticipant(member) && markOwnRequestResumeEnded(conversation, id, "not-made")) changed = true;
       if (!waiting) continue;
       changed = true;
       this.weighRequestARestartEnded(conversation, waiting);

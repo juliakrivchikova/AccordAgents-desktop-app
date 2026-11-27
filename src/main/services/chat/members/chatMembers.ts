@@ -27,6 +27,7 @@ import {
   appToolApprovalReferencesParticipant, cleanupRemovedParticipantMessageState, MAIN_SESSION_NOT_REMOVABLE_MESSAGE
 } from "./removalRules";
 import { isOpenParticipantRequestStatus } from "../requests/requestRecords";
+import { itemWaitsOnOwnRequests } from "../requests/ownRequests";
 import { createChatMessage } from "../store/messages";
 import type { ChatModules } from "../modules";
 import type { ChatDependencies } from "../dependencies";
@@ -334,8 +335,8 @@ export class ChatMembers {
     if (chatMemberIdsWithLiveWork(conversation).has(participantId)) {
       return true;
     }
-    for (const meta of this.chat.activeRuns.chatRunMeta.values()) {
-      if (meta.conversationId === conversation.id && meta.participantId === participantId) {
+    for (const [runId, meta] of this.chat.activeRuns.chatRunMeta) {
+      if (meta.conversationId === conversation.id && meta.participantId === participantId && !this.chat.activeRuns.waitOnlyRunIds.has(runId)) {
         return true;
       }
     }
@@ -388,17 +389,19 @@ export class ChatMembers {
    *  resumed for). A member that only waits for a request it asked is not
    *  answering: the reply resumes its session, which a restart keeps. */
   memberAnswersNow(conversation: Conversation, participantId: string): boolean {
-    if (activeRunSummaryForConversation(conversation).participantIds.includes(participantId)) return true;
+    // A run of its that only waits on what it asked others is not answering.
+    if ((activeRunSummaryForConversation(conversation).runIdsByParticipantId.get(participantId) ?? [])
+      .some((runId) => !this.chat.activeRuns.waitOnlyRunIds.has(runId))) return true;
     const compaction = readParticipantCompactions(conversation.metadata)[participantId];
     if (compaction && readActiveRunIds(conversation.metadata).includes(compaction.runId)) return true;
     for (const message of conversation.messages) {
       if (message.role === "participant" && message.status === "pending" && message.participantId === participantId) return true;
       const batch = message.metadata?.participantRequest;
-      if (batch?.items.some((item) => (item.status === "running" && item.targetParticipantId === participantId) ||
+      if (batch?.items.some((item) => (item.status === "running" && item.targetParticipantId === participantId && !itemWaitsOnOwnRequests(conversation, message, item)) ||
         (item.status === "resuming_requester" && batch.requesterParticipantId === participantId))) return true;
     }
-    for (const meta of this.chat.activeRuns.chatRunMeta.values()) {
-      if (meta.conversationId === conversation.id && meta.participantId === participantId) return true;
+    for (const [runId, meta] of this.chat.activeRuns.chatRunMeta) {
+      if (meta.conversationId === conversation.id && meta.participantId === participantId && !this.chat.activeRuns.waitOnlyRunIds.has(runId)) return true;
     }
     return false;
   }

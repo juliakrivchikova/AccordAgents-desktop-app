@@ -49,8 +49,15 @@ export class ActiveRuns {
     private readonly deps: Pick<ChatDependencies, "debugLogs" | "storage">
   ) {}
 
+  /** Runs that only wait for a member to come back from its own requests
+   *  (ownRequestWaits.ts), and the member requests whose runner only waits
+   *  so now: a restart loses nothing (the wait is armed again at the next
+   *  start), so they hold no update, idle stop or restart of the member. */
+  readonly waitOnlyRunIds = new Set<string>();
+  readonly waitOnlyRequests = new Set<string>();
+
   activeParticipantRuns(): ChatParticipantRun[] {
-    return [...this.chatRunMeta.entries()].map(([runId, meta]) => ({ runId, ...meta }));
+    return [...this.chatRunMeta.entries()].filter(([runId]) => !this.waitOnlyRunIds.has(runId)).map(([runId, meta]) => ({ runId, ...meta }));
   }
 
   /** Every run alive here: members' turns and the runs that carry no member
@@ -58,8 +65,9 @@ export class ActiveRuns {
   liveRunIds(): string[] {
     // A member request still collecting answers counts too: its requester
     // waits for them in the background, and a restart would lose that wait.
-    const requestRunners = [...this.chat.participantRequests.participantRequestRunners.keys()].map((id) => `participant-request:${id}`);
-    return [...new Set([...this.activeRunIds, ...this.chatRunMeta.keys(), ...requestRunners])];
+    const requestRunners = [...this.chat.participantRequests.participantRequestRunners.keys()]
+      .filter((id) => !this.waitOnlyRequests.has(id)).map((id) => `participant-request:${id}`);
+    return [...new Set([...this.activeRunIds, ...this.chatRunMeta.keys(), ...requestRunners])].filter((id) => !this.waitOnlyRunIds.has(id));
   }
 
   onParticipantRunSettled(listener: (run: ChatParticipantRun) => Promise<void> | void): () => void {

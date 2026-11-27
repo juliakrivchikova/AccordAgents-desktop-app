@@ -134,7 +134,9 @@ export class RequesterResumes {
           void this.logParticipantRequestAutoResumeSkipped(conversationId, requestMessageId, "all-items-interrupted-before-completion", batch);
           // Not resumed: a request its turn answered, waiting on these, ends
           // as the restart ended them, wherever it is waited on.
-          await this.chat.store.withChatMutation(conversation, async () => {
+          const asker = chatParticipants(conversation).find((participant) => participant.id === batch.requesterParticipantId);
+          // Only its own device writes it (it is its requester's request).
+          if (asker && this.chat.host.ownsParticipant(asker)) await this.chat.store.withChatMutation(conversation, async () => {
             const marked = group.map((entry) => markOwnRequestResumeEnded(conversation, entry.message.id, "not-made")).some(Boolean);
             if (!marked) return;
             conversation.updatedAt = new Date().toISOString();
@@ -290,6 +292,7 @@ export class RequesterResumes {
         chainRootId: batch.chainRootId,
         ...(extraPromptContextMessageIds?.length ? { extraPromptContextMessageIds } : {})
       });
+      const stoppedBeforeStart = this.chat.turnQueue.takeStoppedBeforeStart(resumeRunId);
       const participantRequestsToRun = await this.chat.store.withChatMutation(conversation, async () => {
         const toRun = await this.chat.pendingReplies.appendParticipantTurnMessages(conversation, requester, messages);
         const now = new Date().toISOString();
@@ -298,9 +301,10 @@ export class RequesterResumes {
             ...current,
             status: "completed",
             autoResumeMessageId: messages[0]?.id,
-            // Its turn was stopped before it began (no reply): a request
-            // waiting on this requester's answer ends with it (ownRequests.ts).
-            ...(messages[0] ? {} : { requesterResumeEnded: { reason: "stopped" as const, at: now } }),
+            // Its turn was stopped on the User's server before it began: a
+            // request waiting on this requester's answer ends with it
+            // (ownRequests.ts). One the server gave another device is not.
+            ...(!messages[0] && stoppedBeforeStart ? { requesterResumeEnded: { reason: "stopped" as const, at: now } } : {}),
             updatedAt: now
           }));
         }

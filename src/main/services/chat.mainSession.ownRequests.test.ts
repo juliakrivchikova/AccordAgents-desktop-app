@@ -808,3 +808,33 @@ test("an approved card holds the task while its resumed turn is asked and queued
   conversation.metadata.activeRunIds = [permissionApprovalResumeRunId("card")];
   assert.equal(permissionCardAnswering(conversation, "remote-id", "task", messagesById(conversation), at + 5 * 60_000), true);
 });
+
+test("a member that only waits on its own question holds no update or idle stop and can be restarted or moved; it still shows working with its Stop", async () => {
+  let releaseAnswer: (() => void) | undefined;
+  const answered = new Promise<void>((resolve) => { releaseAnswer = resolve; });
+  const { service, storage } = scenario({ worker: asksMainThenAnswers, answer: async () => { await answered; return { ok: true, content: "blue" }; } });
+  await service.requestParticipantsFromTool(mainActor(undefined, { turnSegmentId: "t", runId: "r" }), { requests: [{ target: "worker", prompt: "Pick." }] });
+  await waitFor(() => storage.current.messages.some((message: ChatMessage) => message.participantId === "worker-id" && message.status === "done"));
+  await settle();
+  const live = service.liveRunIds();
+  const workerRuns = Object.entries((storage.current.metadata.activeRunParticipantIdsByRunId ?? {}) as Record<string, string>)
+    .filter(([, participantId]) => participantId === "worker-id").map(([runId]) => runId);
+  assert.equal(workerRuns.length, 1, "shown working, with a Stop");
+  assert.equal(live.includes(workerRuns[0]!), false, "its wait is not live work: a restart arms it again");
+  assert.equal(live.some((id) => id === `participant-request:${requestBy(storage.current, "main-id")!.message.id}`), false);
+  assert.equal(chatParts(service).members.memberAnswersNow(storage.current, "worker-id"), false, "not answering: restart and move are allowed");
+  releaseAnswer!();
+  await waitFor(() => Boolean(requestBy(storage.current, "main-id")?.batch.autoResumeMessageId));
+});
+
+test("an own request nothing came of for a day ends the waiting task interrupted, never answered with the interim line", async () => {
+  const conversation = machineMemberChat({ items: "answered", status: "answered", ageMs: 26 * 60 * 60_000, local: true });
+  const { service, storage, runs } = testService({ conversation });
+  // A sweep after the first look: the requester's device waits again, and finds nothing will come.
+  await chatParts(service).store.requireChat("conversation-1");
+  await waitFor(() => itemOf(storage.current, "main-id")?.status !== "running");
+  const item = itemOf(storage.current, "main-id")!;
+  assert.equal(item.status, "interrupted");
+  assert.equal(item.error, PARTICIPANT_REQUEST_INTERRUPTED_BEFORE_COMPLETION);
+  assert.equal(runs.filter((run) => run.participant.id === "remote-id").length, 0);
+});

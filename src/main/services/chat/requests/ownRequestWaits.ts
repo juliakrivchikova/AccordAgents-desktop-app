@@ -79,8 +79,24 @@ async function nextReplyAfterOwnRequests(
   // As stored: from memory while this device saved it last, else read again
   // (another device's change came through the server).
   const read = async (): Promise<Conversation> => (await chat.store.readStoredChatStateForRefresh(conversationId)).stored ?? await chat.store.requireChat(conversationId);
-  let conversation = await read();
+  // A read that fails (storage busy for a moment) is made again later: it
+  // does not end a wait that may last hours. A chat deleted ends it.
+  const readAgain = async (previous: Conversation | undefined): Promise<Conversation | undefined> => {
+    try {
+      return await read();
+    } catch (error) {
+      if (error instanceof Error && /permanently deleted|was not found/.test(error.message)) throw error;
+      return previous;
+    }
+  };
+  let conversation = await readAgain(undefined);
   for (;;) {
+    if (!conversation) {
+      await chat.store.nextChatSave(conversationId, OWN_REQUEST_LOOK_AGAIN_MS, signal);
+      if (signal?.aborted) return { kind: "ended", answer: { kind: "ended", reason: chat.appQuit.quitting ? "interrupted" : "stopped" } };
+      conversation = await readAgain(undefined);
+      continue;
+    }
     if (signal?.aborted) return { kind: "ended", answer: { kind: "ended", reason: chat.appQuit.quitting ? "interrupted" : "stopped" } };
     const item = conversation.messages.find((message) => message.id === requestMessageId)?.metadata?.participantRequest?.items
       .find((candidate) => candidate.targetParticipantId === targetId);
@@ -105,6 +121,6 @@ async function nextReplyAfterOwnRequests(
       return { kind: "none" };
     }
     const saved = await chat.store.nextChatSave(conversationId, OWN_REQUEST_LOOK_AGAIN_MS, signal);
-    conversation = saved ?? await read();
+    conversation = saved ?? await readAgain(conversation);
   }
 }

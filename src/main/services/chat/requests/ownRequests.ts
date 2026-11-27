@@ -101,8 +101,13 @@ export function ownRequestsAnswering(
       state.ended.push({ message, reason: batch.requesterResumeEnded.reason, error: batch.requesterResumeEnded.error });
       continue;
     }
+    // Nothing came of it for a day (its device gone): it will not resume
+    // the member, as a restart's verdict would say.
     const lastChange = Date.parse(batch.updatedAt);
-    if (!batch.items.some((item) => isOpenParticipantRequestStatus(item.status)) && Number.isFinite(lastChange) && now - lastChange > OWN_REQUEST_STALE_MS) continue;
+    if (!batch.items.some((item) => isOpenParticipantRequestStatus(item.status)) && Number.isFinite(lastChange) && now - lastChange > OWN_REQUEST_STALE_MS) {
+      state.ended.push({ message, reason: "not-made" });
+      continue;
+    }
     state.open.push(message);
   }
   return state;
@@ -144,12 +149,17 @@ export function permissionCardAnswering(conversation: Conversation, memberId: st
   return chatAppToolApprovals(conversation).some((approval) => {
     if (approval.toolName !== APP_PERMISSIONS_REQUEST_CHANGE_TOOL || approval.requesterParticipantId !== memberId) return false;
     const resumeRunId = permissionApprovalResumeRunId(approval.id);
+    const trigger = approval.resumeContext?.triggerMessageId;
     // Approved: until its resumed turn's reply exists, while that turn is
-    // asked (its run is live, queued behind another turn too) or for a
-    // short grace before it is.
+    // asked (its run is live here, or its line "Auto-resumed … after
+    // permission approval." is written, on whichever device; at most a day,
+    // as any wait), or for a short grace before it is.
     const waitsForTurn = approval.status === "pending" || (approval.status === "approved" &&
       !conversation.messages.some((message) => message.participantId === memberId && message.metadata?.runId === resumeRunId) &&
-      (readActiveRunIds(conversation.metadata).includes(resumeRunId) || now - Date.parse(approval.updatedAt) < APPROVED_CARD_RESUME_GRACE_MS));
+      (readActiveRunIds(conversation.metadata).includes(resumeRunId) || now - Date.parse(approval.updatedAt) < APPROVED_CARD_RESUME_GRACE_MS ||
+        conversation.messages.some((message) => message.role === "system" && message.metadata?.sourceMessageId === trigger &&
+          message.content.includes("after permission approval.") && message.createdAt >= approval.updatedAt &&
+          now - Date.parse(message.createdAt) < OWN_REQUEST_STALE_MS)));
     return waitsForTurn && requestAnsweredByTurn(conversation, memberId, approval.resumeContext?.triggerMessageId, byId)?.id === requestMessageId;
   });
 }

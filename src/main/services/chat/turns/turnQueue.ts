@@ -123,6 +123,8 @@ export class TurnQueue {
   private readonly heldOf = new WeakMap<ParticipantTurnReservation, HeldTurn>();
   /** Runs whose request a request's turn before it answered (takeAnsweredTogether). */
   private readonly answeredTogether = new Set<string>();
+  /** Runs whose turn the User's server said was stopped before it began. */
+  private readonly stoppedBeforeStart = new Set<string>();
   /** Runs of requests taken into another request's turn, until they end:
    *  a Stop of one ends only its request (isJoinedRun). */
   private readonly joinedRuns = new Set<string>();
@@ -162,6 +164,12 @@ export class TurnQueue {
 
   /** Whether this run's request was answered by the turn of a request
    *  before it, which it went out with (asked once, after the run). */
+  /** Whether this run's turn was stopped on the User's server before it
+   *  began (it returned no reply); asked once, after the run. */
+  takeStoppedBeforeStart(runId: string): boolean {
+    return this.stoppedBeforeStart.delete(runId);
+  }
+
   takeAnsweredTogether(runId: string): boolean {
     return this.answeredTogether.delete(runId);
   }
@@ -253,6 +261,10 @@ export class TurnQueue {
       participant = chatParticipants(conversation).find((item) => item.id === participant.id) ?? participant;
       if (opened.kind !== "local") serverTurnEnded = true;
       if (opened.kind === "stopped" || opened.kind === "skip") {
+        if (opened.kind === "stopped") {
+          this.stoppedBeforeStart.add(runId);
+          while (this.stoppedBeforeStart.size > 1_000) this.stoppedBeforeStart.delete(this.stoppedBeforeStart.values().next().value as string);
+        }
         this.chat.serverTurns.serverTurnOpens.delete(runId);
         if (opened.kind === "stopped" && !options.existingPendingMessage && !turnShown(conversation, triggerMessage, participant, opened.serverRunId)) {
           await this.chat.serverTurns.noteTurnStoppedBeforeStart(conversation, triggerMessage, participant);
