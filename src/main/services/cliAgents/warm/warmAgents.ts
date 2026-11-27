@@ -86,7 +86,10 @@ export class WarmAgents {
    *  it holds no work. Called whenever that may have become true: a run on it
    *  settled, the process went idle, a turn routed into it is over. */
   retireIfEnvironmentOutdated(entry: WarmAgentEntry): void {
-    if (this.entries.get(entry.key) !== entry || !this.environmentOutdated(entry) || !this.freeForEnvironmentChange(entry)) return;
+    // Called on every line a Claude process prints: the cheap checks first
+    // (no change yet, or a run is on it), the key is parsed last.
+    if (this.environmentVersion === undefined || this.entries.get(entry.key) !== entry ||
+      !this.freeForEnvironmentChange(entry) || !this.environmentOutdated(entry)) return;
     this.entries.delete(entry.key);
     void this.closeForEnvironment(entry).catch(() => undefined);
   }

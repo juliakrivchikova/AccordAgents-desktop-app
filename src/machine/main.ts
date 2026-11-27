@@ -521,8 +521,14 @@ export async function startMachine(args: MachineArgs): Promise<() => Promise<voi
       cliAgentRunner.setRunTimeoutMs(await settingsService.getCliAgentRunTimeoutMs());
       // The variables Settings → Environment gives members came with them: a
       // member process holding other values is replaced as soon as it holds
-      // no work, as on the computer.
-      await cliAgentRunner.environmentChanged((await settingsService.getManualAgentEnvironment()).version);
+      // no work, as on the computer. Not awaited: closing them holds up
+      // neither the rest of the import nor a turn waiting for it (a member's
+      // next process waits for its old one by itself).
+      const environment = await settingsService.getManualAgentEnvironment().catch((error: unknown) => {
+        log("machine.settings.environment-read-error", { message: error instanceof Error ? error.message : String(error) });
+        return undefined;
+      });
+      if (environment) void cliAgentRunner.environmentChanged(environment.version);
       // The User's automatic-stop switch arrives with the settings. Switched
       // on again, idle counts from now; either way the desktop is told what
       // this machine now has, so the two cannot silently disagree.
