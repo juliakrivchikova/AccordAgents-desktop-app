@@ -12,6 +12,7 @@ import {
   MEMORY_LIST_MAX,
   MEMORY_LIVE_NOTES_MAX,
   MEMORY_PICK_MAX,
+  MEMORY_PROJECT_MAX_CHARS,
   MEMORY_QUERY_MAX_CHARS,
   MEMORY_SEARCH_DEFAULT_LIMIT,
   MEMORY_SEARCH_MAX_LIMIT,
@@ -24,6 +25,8 @@ import {
   MEMORY_TITLE_MAX_CHARS,
   isMemoryNoteKind,
   isMemoryScope,
+  memoryProjectName,
+  memoryProjectsNamed,
   memoryTitleKey,
   normalizeMemoryTags,
   type HubMemoryRequest,
@@ -45,6 +48,7 @@ import {
   type MemoryTagsValue
 } from "../shared/memory";
 import { homeDeviceId } from "./hubOps";
+import { nearFirst, pickedNearFirst, placedScore } from "./memoryRanking";
 import { candidateAnchors, rankCounted, searchTextOf, searchWords as wordsAsked, snippetOf, wordCounts, type SearchWord } from "./memoryWordSearch";
 import type { HubSemantic, PrintableNote } from "./semantic/hubSemantic";
 import { searchProjectChats } from "./semantic/projectChatSearch";
@@ -121,6 +125,9 @@ const SEARCH_MEANING_MIN = 0.15;
 const PICK_PRINT_TIMEOUT_MS = 3_000;
 const SEARCH_PRINT_TIMEOUT_MS = 4_000;
 const REQUEST_ID = /^[A-Za-z0-9._:-]{1,128}$/;
+/** At most this many of the User's projects are named when a member names
+ *  one she does not have. */
+const PROJECTS_LISTED = 40;
 const NOTE_ID = /^[A-Za-z0-9-]{8,64}$/;
 
 interface Row {
@@ -388,6 +395,7 @@ export class HubMemory {
     }
     // With the User's OpenAI key: the closest in meaning and the best by
     // words take turns, meaning first (a name or an id asked is not buried).
+    // Both with the chat's own notes first at similar relevance (memoryRanking).
     const [byWords, meaning] = await Promise.all([
       this.rankByWords(where, words),
       this.semantic?.enabled() ? this.rankByMeaning(request.query as string, where) : Promise.resolve(undefined)
@@ -424,9 +432,11 @@ export class HubMemory {
       if (index > 0 && index % COUNT_BATCH === 0) await new Promise<void>((resolve) => setImmediate(resolve));
       counted.push({ note: row, counts: wordCounts(row.searchText, words) });
     }
-    const ranked = rankCounted(counted, words, { total: Number(corpus[0]?.total ?? rows.length), averageLength: Number(corpus[0]?.averageLength ?? 0) });
-    // Equal scores: the most recently active first, as without words.
-    ranked.sort((left, right) => right.score - left.score || (left.note.activity < right.note.activity ? 1 : left.note.activity > right.note.activity ? -1 : 0));
+    const ranked = rankCounted(counted, words, { total: Number(corpus[0]?.total ?? rows.length), averageLength: Number(corpus[0]?.averageLength ?? 0) })
+      .map((item) => ({ note: item.note, placed: placedScore(item.score, isNear(item.note), "words") }));
+    // The chat's own notes first at similar scores; equal scores: the most
+    // recently active first, as without words.
+    ranked.sort((left, right) => right.placed - left.placed || (left.note.activity < right.note.activity ? 1 : left.note.activity > right.note.activity ? -1 : 0));
     return ranked.map((item) => item.note);
   }
 
@@ -437,10 +447,11 @@ export class HubMemory {
     if (!print || !this.semantic) return undefined;
     const rows = await this.query<Row>(`select ${SUMMARY_COLUMNS} from member_memory_notes where ${where};`);
     const scores = this.semantic.noteCloseness(print, rows.map((row) => row.id));
-    return rows.flatMap((row) => {
+    // Close enough by itself; the chat's own notes first at similar closeness.
+    return nearFirst(rows.flatMap((row) => {
       const score = scores.get(row.id);
-      return score && score.score >= SEARCH_MEANING_MIN ? [{ row, part: score.part, score: score.score }] : [];
-    }).sort((left, right) => right.score - left.score).map(({ row, part }) => ({ row, part }));
+      return score && score.score >= SEARCH_MEANING_MIN ? [{ item: { row, part: score.part }, score: score.score, near: isNear(row) }] : [];
+    }), "meaning");
   }
 
   /**
@@ -461,22 +472,22 @@ export class HubMemory {
     const print = await this.semantic.printQuery(request.text.slice(0, QUERY_MAX_CHARS), PICK_PRINT_TIMEOUT_MS);
     if (!print) return { ok: true, value: { enabled: false, notes: [] } };
     // Every turn asks: only ids and versions are read for all, summaries for the few picked.
-    const visible = await this.query<{ id: string; version: number }>(`select id, version from member_memory_notes where ${this.visibleSql(member)};`);
+    const visible = await this.query<{ id: string; version: number; scope: string }>(`select id, version, scope from member_memory_notes where ${this.visibleSql(member)};`);
     const scores = this.semantic.noteCloseness(print, visible.map((row) => row.id));
-    const ranked = visible.flatMap((row) => {
+    const scored = visible.flatMap((row) => {
       const score = scores.get(row.id)?.score;
-      return score === undefined ? [] : [{ row, score }];
-    }).sort((left, right) => right.score - left.score);
-    const closest = ranked[0]?.score ?? 0;
-    const picked = ranked
-      .filter((item) => item.score >= PICK_MIN && item.score >= closest - PICK_GAP && shown.get(item.row.id) !== Number(item.row.version))
-      .slice(0, MEMORY_PICK_MAX);
+      return score === undefined ? [] : [{ item: row, score, near: isNear(row) }];
+    });
+    const closest = scored.reduce((best, entry) => Math.max(best, entry.score), 0);
+    // The chat's own notes first at similar closeness (memoryRanking); each
+    // still close enough by itself.
+    const picked = pickedNearFirst(scored, { min: PICK_MIN, gap: PICK_GAP, max: MEMORY_PICK_MAX }, (row) => shown.get(row.id) === Number(row.version));
     const rows = picked.length
-      ? await this.query<Row>(`select ${SUMMARY_COLUMNS} from member_memory_notes where id in (${picked.map((item) => quote(item.row.id)).join(", ")}) and ${this.visibleSql(member)};`)
+      ? await this.query<Row>(`select ${SUMMARY_COLUMNS} from member_memory_notes where id in (${picked.map((entry) => quote(entry.item.id)).join(", ")}) and ${this.visibleSql(member)};`)
       : [];
     const byId = new Map(rows.map((row) => [row.id, row]));
-    const notes = picked.flatMap((item) => {
-      const row = byId.get(item.row.id);
+    const notes = picked.flatMap((entry) => {
+      const row = byId.get(entry.item.id);
       return row ? [summaryOf(row)] : [];
     });
     this.log("hub.memory.pick", { conversationId: member.conversationId, picked: notes.length, closest: Math.round(closest * 1000) / 1000 });
@@ -537,9 +548,12 @@ export class HubMemory {
     if (request.kind === undefined || request.scope === undefined || request.title === undefined || request.body === undefined) {
       return invalid("A new note has a kind, a scope, a title and a body.");
     }
+    const project = await this.projectAsked(request.project, request.scope);
+    if (typeof project === "object") return { ok: false, error: project };
     const fields = validFields({
       kind: request.kind, scope: request.scope, title: request.title, body: request.body, tags: request.tags ?? [],
-      source: request.source, awaitingRepository: request.awaitingRepository ?? false
+      source: request.source, awaitingRepository: request.awaitingRepository ?? false,
+      ...(project !== undefined ? { scopeKey: project } : {})
     }, member);
     if ("code" in fields) return { ok: false, error: fields };
     const duplicate = await this.duplicateOf(fields, undefined);
@@ -563,12 +577,15 @@ export class HubMemory {
 
   private async update(member: MemberContext, request: Extract<HubMemoryRequest, { action: "write" }>, device: HubDevice): Promise<MemoryResult<MemoryNote>> {
     if (typeof request.noteId !== "string" || !NOTE_ID.test(request.noteId)) return invalid("Name the note to change by its id.");
-    const rows = await this.query<Row>(`select ${SUMMARY_COLUMNS}, body, last_request as lastRequest from member_memory_notes
-      where id = ${quote(request.noteId)} and ${this.visibleSql(member)};`);
-    const row = rows[0];
-    if (!row) return { ok: false, error: { code: "not_found", message: "There is no such note, or it is not one this member sees." } };
     const key = requestKey(member, request.requestId);
     const done = `${key}:${requestHash(request)}`;
+    // A note this member sees; one it no longer sees only when this very
+    // change made it so (it moved the note to another project) and its
+    // answer was lost.
+    const rows = await this.query<Row>(`select ${SUMMARY_COLUMNS}, body, last_request as lastRequest from member_memory_notes
+      where id = ${quote(request.noteId)} and (${this.visibleSql(member)} or (archived_at is null and last_request = ${quote(done)}));`);
+    const row = rows[0];
+    if (!row) return { ok: false, error: { code: "not_found", message: "There is no such note, or it is not one this member sees." } };
     // The same change sent again (its answer was lost): it is done already.
     if (row.lastRequest === done) return { ok: true, value: noteOf(row) };
     if (row.lastRequest?.startsWith(`${key}:`)) return invalid("This requestId was already used for another change; send a new one or none.");
@@ -577,6 +594,9 @@ export class HubMemory {
       return { ok: false, error: { code: "conflict", message: `The note changed since version ${request.baseVersion}; it is at version ${row.version} now. Read it again and redo the change on top of it.`, current: summaryOf(row) } };
     }
     const current = noteOf(row);
+    const project = await this.projectAsked(request.project, request.scope ?? current.scope);
+    if (typeof project === "object") return { ok: false, error: project };
+    const scopeKey = project ?? (request.scope === undefined ? row.scopeKey : undefined);
     const fields = validFields({
       kind: request.kind ?? current.kind,
       scope: request.scope ?? current.scope,
@@ -585,7 +605,7 @@ export class HubMemory {
       tags: request.tags ?? current.tags,
       source: request.source !== undefined ? request.source : current.source,
       awaitingRepository: request.awaitingRepository ?? current.awaitingRepository,
-      ...(request.scope === undefined ? { scopeKey: row.scopeKey } : {})
+      ...(scopeKey !== undefined ? { scopeKey } : {})
     }, member);
     if ("code" in fields) return { ok: false, error: fields };
     const duplicate = await this.duplicateOf(fields, row.id);
@@ -625,6 +645,37 @@ export class HubMemory {
     this.log("hub.memory.archived", { noteId: row.id, deviceId: device.deviceId, conversationId: member.conversationId });
     const after = await this.query<Row>(`select ${SUMMARY_COLUMNS} from member_memory_notes where id = ${quote(row.id)};`);
     return { ok: true, value: summaryOf(after[0] ?? row) };
+  }
+
+  /**
+   * The project a note is filed under when the member names one (`project`):
+   * one of the User's projects, the folders of her chats on this server, so
+   * a note about another project's work is seen in that project's chats
+   * instead of every chat (the User, 2026-11-27). Undefined when none is
+   * named (the chat's own project, as before).
+   */
+  private async projectAsked(asked: unknown, scope: unknown): Promise<string | undefined | MemoryError> {
+    if (asked === undefined) return undefined;
+    if (typeof asked !== "string" || !asked.trim() || asked.length > MEMORY_PROJECT_MAX_CHARS || asked.includes("\u0000")) {
+      return { code: "invalid_request", message: "project is the folder name or path of one of the User's projects." };
+    }
+    if (scope !== "project") return { code: "invalid_request", message: "project goes with scope project: the note is then that project's." };
+    const rows = await this.query<{ path: string }>(`select distinct repo_path as path from conversations
+      where kind = 'chat' and repo_path is not null and trim(repo_path) <> '';`);
+    const projects = [...new Map(rows.filter((row) => typeof row.path === "string").map((row) => [row.path.trim().replace(/[\\/]+$/, ""), row.path])).values()]
+      .sort((left, right) => memoryProjectName(left).localeCompare(memoryProjectName(right)) || left.localeCompare(right));
+    const named = memoryProjectsNamed(asked, projects);
+    if (named.length === 1) return named[0];
+    const listed = (list: string[]) => `${list.slice(0, PROJECTS_LISTED).map((path) => `${memoryProjectName(path)} (${path})`).join(", ")}${list.length > PROJECTS_LISTED ? ` and ${list.length - PROJECTS_LISTED} more` : ""}`;
+    if (named.length > 1) {
+      return { code: "invalid_request", message: `Several of the User's projects are called "${memoryProjectName(asked)}": ${listed(named)}. Name the one the note concerns by its path.` };
+    }
+    return {
+      code: "invalid_request",
+      message: projects.length
+        ? `The User has no project "${asked.trim().slice(0, 200)}" (a folder of her chats). Her projects: ${listed(projects)}. Name the one the note concerns by its folder name or path.`
+        : "The User has no chats in a project folder yet, so there is no project to keep a note for."
+    };
   }
 
   private async duplicateOf(fields: ValidFields, exceptId: string | undefined): Promise<MemoryError | undefined> {
@@ -778,7 +829,7 @@ function validFields(
       if (!member.roleId) return { code: "invalid_request", message: "This member has no role to keep a role note for." };
       scopeKey = member.roleId;
     } else {
-      if (!member.projectPath) return { code: "invalid_request", message: "This chat has no project, so there is no project to keep a note for." };
+      if (!member.projectPath) return { code: "invalid_request", message: "This chat has no project: name the project the note concerns with project (its folder name)." };
       scopeKey = member.projectPath;
     }
   }
@@ -827,8 +878,11 @@ function requestKey(member: MemberContext, requestId: string): string {
 
 /** What a request asked, to tell a retry from a reuse of its requestId. */
 function requestHash(request: object): string {
+  const fields = request as Record<string, unknown>;
   const asked = ["noteId", "baseVersion", "kind", "title", "body", "tags", "scope", "source", "awaitingRepository", "verified"]
-    .map((field) => [field, (request as Record<string, unknown>)[field] ?? null]);
+    .map((field) => [field, fields[field] ?? null]);
+  // Only when named: a request without it keeps the hash it had before.
+  if (fields.project !== undefined) asked.push(["project", fields.project]);
   return createHash("sha256").update(JSON.stringify(asked)).digest("hex").slice(0, 32);
 }
 
@@ -872,6 +926,13 @@ function passageOf(body: string, part: number | undefined): string {
   if (part === undefined) return body;
   const range = passageRanges(body, NOTE_PASSAGE_CHARS)[part];
   return range ? body.slice(range.start, range.end) : body;
+}
+
+/** A note of the asking chat's own (its project, the member's role, the
+ *  chat): a member sees no other project's, role's or chat's notes, so any
+ *  note it sees that is not global is its own. */
+function isNear(row: { scope: string }): boolean {
+  return row.scope !== "global";
 }
 
 /** Lower case by the language's own rules (sqlite's lower() knows only ASCII). */

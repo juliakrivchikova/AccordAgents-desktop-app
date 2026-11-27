@@ -7,7 +7,7 @@ import path from "node:path";
 import test from "node:test";
 import { defaultChatAgentPermissions, normalizeChatAgentPermissions } from "../../shared/agentPermissions";
 import type { HubChatPage } from "../../shared/hubOps";
-import type { MemoryIndexValue, MemoryNote, MemoryNoteSummary, MemoryOwnerListValue, MemoryResult, MemorySearchValue } from "../../shared/memory";
+import type { MemoryIndexValue, MemoryNote, MemoryNoteSummary, MemoryOwnerListValue, MemoryPickValue, MemoryResult, MemorySearchValue } from "../../shared/memory";
 import type { ChatParticipant, Conversation } from "../../shared/types";
 import { HubMemory } from "../../hub/hubMemory";
 import { HubOps } from "../../hub/hubOps";
@@ -89,6 +89,29 @@ function refused(result: unknown, code: string): { message: string; current?: Me
   return (answer as { error: { message: string; current?: MemoryNoteSummary } }).error;
 }
 
+/**
+ * Search by meaning as HubMemory uses it, with closeness set by hand for each
+ * note title (a print stands for the text asked): what is ranked, not OpenAI.
+ */
+class SemanticStub {
+  readonly closeness = new Map<string, number>();
+  private readonly titles = new Map<string, string>();
+  setNoteSource(): void {}
+  enabled(): boolean { return true; }
+  ready(): boolean { return true; }
+  async printQuery(): Promise<number[]> { return [1]; }
+  noteChanged(note: { id: string; title: string }): void { this.titles.set(note.id, note.title); }
+  noteRemoved(id: string): void { this.titles.delete(id); }
+  noteCloseness(_print: number[], ids: Iterable<string>): Map<string, { score: number; part: number }> {
+    const scores = new Map<string, { score: number; part: number }>();
+    for (const id of ids) {
+      const score = this.closeness.get(this.titles.get(id) ?? "");
+      if (score !== undefined) scores.set(id, { score, part: 0 });
+    }
+    return scores;
+  }
+}
+
 /** Plays a server not updated yet while `old` is set: no memory route (404). */
 async function proxy(target: () => number) {
   const state = { old: true };
@@ -113,7 +136,7 @@ async function proxy(target: () => number) {
   return { state, port: (server.address() as AddressInfo).port, close: () => new Promise<void>((resolve) => server.close(() => resolve())) };
 }
 
-async function setup(t: test.TestContext, options: { oldServer?: boolean } = {}) {
+async function setup(t: test.TestContext, options: { oldServer?: boolean; semantic?: SemanticStub; extraChats?: Conversation[] } = {}) {
   const dir = await mkdtemp(path.join(tmpdir(), "accord-memory-"));
   const desktopStorage = new StorageService({ dbPath: path.join(dir, "desktop.sqlite3") });
   const desktopEvents = new DeviceIdentityService(desktopStorage);
@@ -128,7 +151,8 @@ async function setup(t: test.TestContext, options: { oldServer?: boolean } = {})
     machineId: "box", addedAt: "" }], new Date().toISOString());
   const clock = { now: new Date("2026-11-04T09:00:00.000Z") };
   const ops = new HubOps(hubStorage, (event, payload) => trace("hub", event, payload));
-  const memory = new HubMemory(hubStorage, (event, payload) => trace("hub", event, payload), () => clock.now);
+  const memory = new HubMemory(hubStorage, (event, payload) => trace("hub", event, payload), () => clock.now,
+    options.semantic ? { semantic: options.semantic as never } : {});
   const server = new HubServer({ hubId: "hub-test", version: "test", storage: hubStorage, search: new ChatSearchService(hubStorage), vapidPublicKey: "BPUB", ops, memory });
   const http = await server.listenHttp(0, "127.0.0.1");
   const hubPort = (http.address() as AddressInfo).port;
@@ -142,7 +166,8 @@ async function setup(t: test.TestContext, options: { oldServer?: boolean } = {})
     chat(CHAT_A, "/work/accord", [taylor, drew, sam], "Plans"),
     chat(CHAT_B, "/work/accord", [taylor], "Other chat, same project"),
     chat(CHAT_C, "/work/other", [taylor], "Another project"),
-    chat(CHAT_D, undefined, [taylor], "No project")
+    chat(CHAT_D, undefined, [taylor], "No project"),
+    ...(options.extraChats ?? [])
   ]) await save(desktopChat, conversation);
 
   const desktopLink = new ServerChatLink({
@@ -171,7 +196,9 @@ async function setup(t: test.TestContext, options: { oldServer?: boolean } = {})
     return await response.json() as HubChatPage;
   };
   await desktopLink.start();
-  for (const id of [CHAT_A, CHAT_B, CHAT_C, CHAT_D]) await until(() => page(id), (current) => Boolean(current.messages?.length));
+  for (const id of [CHAT_A, CHAT_B, CHAT_C, CHAT_D, ...(options.extraChats ?? []).map((extra) => extra.id)]) {
+    await until(() => page(id), (current) => Boolean(current.messages?.length));
+  }
   await machineLink.start();
   await until(async () => (await machineLink.status())?.ready, (ready) => ready === true);
 
@@ -628,4 +655,117 @@ test("an empty answer to several words from an older server tells the member to 
   assert.equal((await callMemoryTool(older({ notes: [] }), actor, APP_MEMORY_SEARCH_TOOL, { query: "deploy" }) as { note?: string }).note, undefined);
   assert.equal((await callMemoryTool(older({ notes: [], ranking: "any-word" }), actor, APP_MEMORY_SEARCH_TOOL, { query: "deploy release" }) as { note?: string }).note, undefined);
   assert.equal(asked.length, 3);
+});
+
+const CHAT_E = "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee";
+
+test("a note about another of the User's projects is filed under it, by name or path, and seen in that project's chats only", async (t) => {
+  const { tool, titles, desktopLink } = await setup(t, { extraChats: [chat(CHAT_E, "/elsewhere/twin", [taylor], "Twin project")] });
+  const write = (conversationId: string, args: Record<string, unknown>) =>
+    tool("desktop", conversationId, taylor, APP_MEMORY_WRITE_TOOL, { kind: "runbook", body: "Steps.", scope: "project", ...args });
+
+  // From a chat of another project, by the folder's name (any case).
+  const named = await write(CHAT_A, { title: "Release the other bot", project: "Other" }) as { ok: true; value: MemoryNote; note: string };
+  assert.equal(named.value.projectPath, "/work/other");
+  assert.match(named.note, /Kept for the project \/work\/other: members see it in that project's chats only/);
+  // From a chat with no project, by its path (a trailing slash aside).
+  assert.equal(ok<MemoryNote>(await write(CHAT_D, { title: "Accord release steps", project: "/work/accord/" })).projectPath, "/work/accord");
+  // This chat's own project named is the same as none.
+  assert.equal(ok<MemoryNote>(await write(CHAT_A, { title: "Accord QA stand", project: "accord" })).projectPath, "/work/accord");
+  // A member on a cloud machine files the same way.
+  assert.equal(ok<MemoryNote>(await tool("machine", CHAT_A, drew, APP_MEMORY_WRITE_TOOL,
+    { kind: "article", title: "Other bot's hosting", body: "Costs.", scope: "project", project: "other" })).projectPath, "/work/other");
+  assert.deepEqual(await titles("desktop", CHAT_C, taylor), ["Other bot's hosting", "Release the other bot"]);
+  assert.deepEqual(await titles("desktop", CHAT_A, taylor), ["Accord QA stand", "Accord release steps"]);
+  assert.deepEqual(await titles("desktop", CHAT_E, taylor), []);
+  // From a chat with no project, a project note without one named says how to name it.
+  assert.match(refused(await write(CHAT_D, { title: "Which project?" }), "invalid_request").message, /This chat has no project: name the project the note concerns with project/);
+  assert.deepEqual(await titles("desktop", CHAT_D, taylor), []);
+
+  // Only a project of the User's: a name she has not is refused with hers.
+  const unknown = refused(await write(CHAT_A, { title: "Somewhere", project: "mctb" }), "invalid_request");
+  assert.match(unknown.message, /no project "mctb".*accord \(\/work\/accord\), other \(\/work\/other\), twin \(\/elsewhere\/twin\)/);
+  refused(await write(CHAT_A, { title: "Global and named", scope: "global", kind: "article", project: "other" }), "invalid_request");
+  // An empty name from a tool call is none; the server refuses one sent as is.
+  assert.equal(ok<MemoryNote>(await write(CHAT_A, { title: "Empty name", project: "  " })).projectPath, "/work/accord");
+  refused(await desktopLink.memory({ action: "write", conversationId: CHAT_A, participantId: taylor.id, requestId: "blank-1", kind: "runbook",
+    title: "Blank", body: "x", scope: "project", project: "  " }), "invalid_request");
+  // The same title in that project is the note there to update.
+  assert.equal(refused(await write(CHAT_D, { title: "release the OTHER bot", project: "other" }), "duplicate").current?.id, named.value.id);
+});
+
+test("two projects of one name are told apart by path", async (t) => {
+  const { tool } = await setup(t, { extraChats: [chat(CHAT_E, "/elsewhere/other", [taylor], "Same name")] });
+  const write = (project: string) => tool("desktop", CHAT_A, taylor, APP_MEMORY_WRITE_TOOL, { kind: "runbook", title: `Note for ${project}`, body: "x", scope: "project", project });
+  assert.match(refused(await write("other"), "invalid_request").message, /Several of the User's projects are called "other": other \(\/elsewhere\/other\), other \(\/work\/other\)/);
+  assert.equal(ok<MemoryNote>(await write("/elsewhere/other")).projectPath, "/elsewhere/other");
+});
+
+test("a global note moves to the project it concerns; a retry of the move is done, not lost", async (t) => {
+  const { tool, titles } = await setup(t);
+  const global = ok<MemoryNote>(await tool("desktop", CHAT_A, taylor, APP_MEMORY_WRITE_TOOL,
+    { kind: "runbook", title: "Other bot: how to release", body: "Steps.", scope: "global", tags: ["release"] }));
+  const move = { noteId: global.id, baseVersion: 1, scope: "project", project: "other", requestId: "move-1" };
+  const moved = ok<MemoryNote>(await tool("desktop", CHAT_A, taylor, APP_MEMORY_WRITE_TOOL, move));
+  assert.deepEqual([moved.scope, moved.projectPath, moved.version, moved.body], ["project", "/work/other", 2, "Steps."]);
+  assert.deepEqual(await titles("desktop", CHAT_A, taylor), []);
+  assert.deepEqual(await titles("desktop", CHAT_C, taylor), ["Other bot: how to release"]);
+  // Its answer was lost: the same move again is done, though the member no longer sees the note.
+  assert.equal(ok<MemoryNote>(await tool("desktop", CHAT_A, taylor, APP_MEMORY_WRITE_TOOL, move)).version, 2);
+  // Another change from a chat that does not see it is refused.
+  refused(await tool("desktop", CHAT_A, taylor, APP_MEMORY_WRITE_TOOL, { ...move, baseVersion: 2, body: "Changed.", requestId: "move-2" }), "not_found");
+  // A project note moves on to another project without naming the scope again.
+  const there = ok<MemoryNote>(await tool("desktop", CHAT_C, taylor, APP_MEMORY_WRITE_TOOL, { noteId: global.id, baseVersion: 2, project: "/work/accord" }));
+  assert.equal(there.projectPath, "/work/accord");
+  assert.deepEqual(await titles("desktop", CHAT_B, taylor), ["Other bot: how to release"]);
+});
+
+test("an older server keeps a note named for another project under this chat's, or where it was: the member is told", async () => {
+  const actor = { conversationId: CHAT_A, participantId: taylor.id };
+  const older = (answer: unknown) => ({ memory: async <T>() => answer as MemoryResult<T> });
+  const write = async (answer: unknown) => (await callMemoryTool(older(answer), actor, APP_MEMORY_WRITE_TOOL,
+    { kind: "runbook", title: "x", body: "y", scope: "project", project: "other" }) as { note?: string }).note ?? "";
+  assert.match(await write({ ok: true, value: { id: "n1", scope: "project", projectPath: "/work/accord" } }),
+    /older than this app and kept the note under this chat's project \(\/work\/accord\), not under other/);
+  assert.match(await write({ ok: true, value: { id: "n1", scope: "global" } }), /older than this app and kept the note as a global note, not under other/);
+  assert.match(await write({ ok: false, error: { code: "invalid_request", message: "This chat has no project, so there is no project to keep a note for." } }),
+    /older than this app and cannot file a note under another project yet/);
+  // A current server's answer about another refusal is passed on as it is.
+  assert.equal(await write({ ok: false, error: { code: "invalid_request", message: "The User has no project \"other\"." } }), "");
+});
+
+test("search and picks put the chat's own notes before global ones of similar relevance; a clearly better global one still leads", async (t) => {
+  const semantic = new SemanticStub();
+  const { tool, desktopLink } = await setup(t, { semantic });
+  for (const [title, scope] of [["Other project's release", "global"], ["Our release", "project"], ["Our chat's release", "chat"], ["Reply in Russian", "global"]] as const) {
+    ok<MemoryNote>(await tool("desktop", CHAT_A, taylor, APP_MEMORY_WRITE_TOOL, { kind: "article", title, body: "release beta steps", scope }));
+  }
+  const search = async (query: string) => ok<MemorySearchValue>(await tool("desktop", CHAT_A, taylor, APP_MEMORY_SEARCH_TOOL, { query })).notes.map((note) => note.title);
+  const pick = async (text: string) => ok<MemoryPickValue>(await desktopLink.memory({ action: "pick", conversationId: CHAT_A, participantId: taylor.id, text })).notes.map((note) => note.title);
+
+  // By meaning: the global note a little closer comes after the chat's own.
+  semantic.closeness.set("Other project's release", 0.5).set("Our release", 0.46).set("Our chat's release", 0.47).set("Reply in Russian", 0.1);
+  assert.deepEqual((await search("выпуск")).slice(0, 3), ["Our chat's release", "Our release", "Other project's release"]);
+  assert.deepEqual(await pick("давай выпустим бету"), ["Our chat's release", "Our release", "Other project's release"]);
+  // A global preference that fits clearly better leads, by meaning and in picks.
+  semantic.closeness.set("Reply in Russian", 0.62);
+  assert.equal((await search("ответь по-русски"))[0], "Reply in Russian");
+  assert.deepEqual(await pick("ответь по-русски"), ["Reply in Russian"]);
+  // The chat's own are never picked below the bar a note must reach by itself.
+  semantic.closeness.set("Reply in Russian", 0.1).set("Other project's release", 0.41).set("Our release", 0.38).set("Our chat's release", 0.2);
+  assert.deepEqual(await pick("выпуск"), ["Other project's release"]);
+});
+
+test("by words, the chat's own notes come first at similar scores; a global note matching far better still leads", async (t) => {
+  const { tool } = await setup(t);
+  const write = async (title: string, body: string, scope: string) =>
+    ok<MemoryNote>(await tool("desktop", CHAT_A, taylor, APP_MEMORY_WRITE_TOOL, { kind: "runbook", title, body, scope }));
+  await write("Bot release", "How the bot is released and deployed.", "global");
+  // Alone by its words "release" fits the global note a little better (a shorter text).
+  await write("Beta release", "How the beta is released, checked and announced to everyone.", "project");
+  await write("Lunch", "Fridays.", "project");
+  const search = async (query: string) => ok<MemorySearchValue>(await tool("desktop", CHAT_A, taylor, APP_MEMORY_SEARCH_TOOL, { query })).notes.map((note) => note.title);
+  assert.deepEqual(await search("release"), ["Beta release", "Bot release"]);
+  // "deployed bot" is the global note's alone: it leads.
+  assert.deepEqual(await search("release deployed bot"), ["Bot release", "Beta release"]);
 });

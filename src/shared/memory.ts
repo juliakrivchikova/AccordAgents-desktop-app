@@ -104,6 +104,11 @@ export interface MemoryWriteRequest {
   body?: string;
   tags?: string[];
   scope?: MemoryScope;
+  /** With scope project: the project the note concerns when it is not the
+   *  chat's own (its folder's name or path); one of the User's projects,
+   *  those of her chats on the server. The note is then seen in that
+   *  project's chats only. */
+  project?: string;
   source?: string;
   awaitingRepository?: boolean;
   /** The member checked the note still holds. */
@@ -354,6 +359,35 @@ export function normalizeMemoryTags(tags: readonly unknown[] | undefined): strin
 export function memoryTitleKey(title: string): string {
   const lower = title.toLowerCase().normalize("NFKC");
   return lower.replace(/[\p{P}\p{S}]+/gu, " ").replace(/\s+/g, " ").trim() || lower.replace(/\s+/g, " ").trim();
+}
+
+/** At most this long a project named for a note (a folder's name or path). */
+export const MEMORY_PROJECT_MAX_CHARS = 1000;
+
+/** A folder path as projects are told by: without a trailing slash. */
+function projectPathKey(path: string): string {
+  return path.trim().replace(/[\\/]+$/, "");
+}
+
+/** A project folder's own name: its last part. */
+export function memoryProjectName(path: string): string {
+  const key = projectPathKey(path);
+  return key.slice(Math.max(key.lastIndexOf("/"), key.lastIndexOf("\\")) + 1);
+}
+
+/**
+ * The projects a name asked for a note means, among the User's (her chats'
+ * folders): the folder of that very path, else every folder of that name
+ * (case aside). One is the project; none or several is for the member to
+ * say again.
+ */
+export function memoryProjectsNamed(asked: string, projects: readonly string[]): string[] {
+  const key = projectPathKey(asked);
+  if (!key) return [];
+  const exact = projects.filter((path) => projectPathKey(path) === key);
+  if (exact.length) return exact.slice(0, 1);
+  const name = memoryProjectName(key).toLowerCase();
+  return projects.filter((path) => memoryProjectName(path).toLowerCase() === name);
 }
 
 /** The memory actions that change notes (sent as POST); the rest only read. */

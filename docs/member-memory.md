@@ -19,6 +19,20 @@ Decided by the User on 2026-11-04 (chat design "Память участнико�
 - **Scopes:** `global` (every member), `project` (chats of the same project
   folder), `role` (members of the same role), `chat` (one chat). A status is
   never global.
+- **Filed under another project** (the User, 2026-11-27): a project note is
+  the chat's project unless the member names another with `project` (its
+  folder's name, any case, or its path). Only the User's projects count: the
+  folders of her chats on the server; a name she has not is refused with the
+  list of hers, a name two of hers share asks for the path. Such a note is
+  seen in that project's chats only, not in the chat that wrote it, so a
+  member who worked on one project from another chat (or one with no
+  project) keeps what it learned there instead of making it global. A note
+  moves the same way (a change with scope `project` and `project`); a retry
+  of a move whose answer was lost is answered as done though the member no
+  longer sees the note. Members are told (tool description and
+  `MEMBER_MEMORY_INSTRUCTIONS`) that knowledge about one project is never
+  global. A server older than the app ignores `project` and keeps the note
+  under the chat's project; the tool says so.
 - Title, Markdown body (16 KB at most), up to 12 tags, optional source, author,
   last writer, version, created / updated / last confirmed, archived.
 
@@ -42,7 +56,8 @@ member on a cloud machine reach the same notes the same way (parity
 requirement 1). Every request names the chat and the member; the server checks
 against its own copy of that chat that the member is in it and runs on the
 device that asks, and takes the member's role and project from the chat, never
-from what the member says. The phone has no access; Settings uses owner-only
+from what the member says (a member may file a note under another of the
+User's projects, above, but sees only its chat's). The phone has no access; Settings uses owner-only
 actions (`list`, `owner-read`, `delete`).
 
 ### Moving to another server
@@ -231,7 +246,8 @@ Decided by the User on 2026-11-26 (same chat document): OpenAI
 ## Known limits of v1
 
 - A project is its folder path as the chat names it: a moved or renamed folder
-  is another project. A role note follows the role id.
+  is another project. A role note follows the role id. A project a member
+  files a note under must have a chat on the server.
 - The list is not shown again after a compaction the CLI starts on its own, nor
   in a fresh session the CLI starts when a resume fails; members are told to
   search memory when they start a task.

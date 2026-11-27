@@ -92,7 +92,7 @@ function currentSession(participant: ChatParticipant, sessionId: string, role: C
     participantBehaviorRules: [],
     roleLabel: role.label,
     roleInstructions: role.instructions,
-    runtimeConfigVersion: 26,
+    runtimeConfigVersion: 27,
     updatedAt: NOW,
     ...patch
   };
@@ -260,7 +260,7 @@ test("a session made before the instructions moved into the CLI is told them onc
 
   const first = await send(service, storage, runs, "Where were we?");
   const stored = (storage.current.metadata.participantSessions as ChatParticipantSession[]).find((session) => session.participantId === main.id)!;
-  assert.equal(stored.runtimeConfigVersion, 26, JSON.stringify(stored));
+  assert.equal(stored.runtimeConfigVersion, 27, JSON.stringify(stored));
   assert.match(first.prompt, /^<<<APP ([0-9a-f]{8})>>>\nAccordAgents session instructions \(from now on they apply instead of any given earlier\):\nYou are @main in AccordAgents Chat\.[\s\S]*\n<<<END APP \1>>>\n\n<<<MEMORY \1>>>\nLong-term memory [\s\S]*\n<<<END MEMORY \1>>>\n\nWhere were we\?$/, "the memory list is members' text, in a block of its own");
   assert.ok(first.prompt.endsWith("\n\nWhere were we?"));
   assert.equal((first.prompt.match(/How messages reach you:/g) ?? []).length, 1);
@@ -577,9 +577,9 @@ test("a Claude Code or Codex session that fell back to instructions in its messa
   for (const [kind, expected] of [["claude-code", "claude-agent"], ["codex-cli", "codex-developer-instructions"], ["gemini-cli", "prompt-fallback"]] as const) {
     const participant = member(`${kind}-id`, kind.split("-")[0]!, { kind });
     const stale = currentSession(participant, "s", GENERIC_ROLE, { roleRuntime: "prompt-fallback", runtimeConfigVersion: 23 });
-    assert.equal(refreshExistingSessionForParticipant(stale, participant, undefined, 26).roleRuntime, expected, kind);
-    const current = { ...stale, runtimeConfigVersion: 26 };
-    assert.equal(refreshExistingSessionForParticipant(current, participant, undefined, 26).roleRuntime, "prompt-fallback", `${kind} at the current version`);
+    assert.equal(refreshExistingSessionForParticipant(stale, participant, undefined, 27).roleRuntime, expected, kind);
+    const current = { ...stale, runtimeConfigVersion: 27 };
+    assert.equal(refreshExistingSessionForParticipant(current, participant, undefined, 27).roleRuntime, "prompt-fallback", `${kind} at the current version`);
   }
 });
 

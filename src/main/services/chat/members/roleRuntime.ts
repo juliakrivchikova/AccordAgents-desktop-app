@@ -22,8 +22,10 @@ import type { ResolvedChatParticipantRole } from "../types";
  *  memory as well as the CLI's own (MEMBER_MEMORY_INSTRUCTIONS). 26: a
  *  member starts an Accord with app_chat_start_accord when it has the tool
  *  (Settings → General → "Any agent can start an Accord"), else asks the main
- *  session (mainSessionMemberRules). */
-const CHAT_ROLE_RUNTIME_CONFIG_VERSION = 26;
+ *  session (mainSessionMemberRules). 27: a note about one project is
+ *  never global; another project's is filed under it with `project`
+ *  (MEMBER_MEMORY_INSTRUCTIONS). */
+const CHAT_ROLE_RUNTIME_CONFIG_VERSION = 27;
 
 export function memoryIndexKey(conversationId: string, participantId: string): string {
   return `${conversationId}\u0000${participantId}`;
