@@ -268,7 +268,7 @@ export function manageRolesParticipantsResolutionForRole(
 export function participantTurnMode(participant: ChatParticipant, triggerMessage: ChatMessage): "exclusive" | "shared" {
   // A request asked with `deliver: "now"` goes into a Claude Code member's
   // live CLI as a message typed there mid-turn does (TurnQueue `live`).
-  if (participant.kind === "claude-code" && deliversNow(triggerMessage)) {
+  if (participant.kind === "claude-code" && deliversNow(triggerMessage, participant.id)) {
     return "shared";
   }
   // Only the User's own messages: a request from another member, a resume
@@ -282,8 +282,8 @@ export function participantTurnMode(participant: ChatParticipant, triggerMessage
 
 /** A member request asked with `deliver: "now"` (app_chat_request_participants):
  *  the member takes it at once, even in the middle of a turn. */
-export function deliversNow(triggerMessage: ChatMessage): boolean {
-  return triggerMessage.metadata?.participantRequest?.deliver === "now";
+export function deliversNow(triggerMessage: ChatMessage, participantId: string): boolean {
+  return triggerMessage.metadata?.participantRequest?.items.some((item) => item.targetParticipantId === participantId && item.deliver === "now") === true;
 }
 
 /** How a busy member takes a message delivered now, as its dedicated CLI

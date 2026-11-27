@@ -3,6 +3,8 @@ import type { ChatProviderKind } from "./providers";
 export interface ChatParticipantRequestInput {
   target: string;
   prompt: string;
+  /** `now`: a busy target takes it at once (ChatParticipantRequestItem.deliver). */
+  deliver?: "now";
   /** Its short title, set by the app only: an inferred request's is the
    *  reply's sentence that mentions the member (sessionsMentionSentenceTitle). */
   title?: string;
@@ -43,6 +45,11 @@ export interface ChatParticipantRequestItem {
   title?: string;
   reason?: string;
   status: ChatParticipantRequestStatus;
+  /** Asked with `deliver: "now"`: the target takes it at once even when it
+   *  is busy, as a message typed into its CLI mid-turn (into its running
+   *  turn, or its running turn is cut and it goes on with it in the same
+   *  session). */
+  deliver?: "now";
   replyMessageId?: string;
   /** What it wrote before, when it compacted its context in between and went
    *  on (replyMessageId is the last of them). */
@@ -76,10 +83,6 @@ export interface ChatParticipantRequestBatch {
    *  `turnId`: the main-session turn that gave it; the tasks of one turn
    *  resume the main session once, when all of them have ended. */
   delegation?: { start: "clean" | "fork"; turnId?: string };
-  /** Asked with `deliver: "now"`: a busy target takes it at once, as a
-   *  message typed into its CLI mid-turn (into its running turn, or its
-   *  running turn is cut and it goes on with it in the same session). */
-  deliver?: "now";
   items: ChatParticipantRequestItem[];
   error?: string;
 }

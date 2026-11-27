@@ -82,15 +82,17 @@ export function normalizeParticipantRequest(raw: unknown): {
   requests: ChatParticipantRequestInput[];
   timeoutMs: number;
   resumeRequester: boolean;
-  deliver?: "now";
 } {
   if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
     throw new Error("Member request must be an object.");
   }
   const record = raw as { requests?: unknown; timeoutMs?: unknown; resumeRequester?: unknown; deliver?: unknown };
-  if (record.deliver !== undefined && record.deliver !== "queue" && record.deliver !== "now") {
-    throw new Error("deliver is \"queue\" or \"now\".");
-  }
+  // For every target (top level), or for one (its request), which wins.
+  const deliverOf = (value: unknown): "now" | "queue" | undefined => {
+    if (value !== undefined && value !== "queue" && value !== "now") throw new Error("deliver is \"queue\" or \"now\".");
+    return value;
+  };
+  const deliverAll = deliverOf(record.deliver);
   if (!Array.isArray(record.requests) || record.requests.length === 0) {
     throw new Error("Member request needs at least one target.");
   }
@@ -102,7 +104,8 @@ export function normalizeParticipantRequest(raw: unknown): {
     if (!item || typeof item !== "object" || Array.isArray(item)) {
       throw new Error("Each member request item must be an object.");
     }
-    const candidate = item as { target?: unknown; prompt?: unknown; reason?: unknown };
+    const candidate = item as { target?: unknown; prompt?: unknown; reason?: unknown; deliver?: unknown };
+    const deliver = deliverOf(candidate.deliver) ?? deliverAll;
     const target = typeof candidate.target === "string" ? candidate.target.trim().replace(/^@/, "") : "";
     const prompt = typeof candidate.prompt === "string" ? candidate.prompt.trim() : "";
     if (!HANDLE_PATTERN.test(target)) {
@@ -114,7 +117,8 @@ export function normalizeParticipantRequest(raw: unknown): {
     requests.push({
       target,
       prompt,
-      reason: typeof candidate.reason === "string" ? candidate.reason.trim().slice(0, 500) || undefined : undefined
+      reason: typeof candidate.reason === "string" ? candidate.reason.trim().slice(0, 500) || undefined : undefined,
+      ...(deliver === "now" ? { deliver } : {})
     });
   }
   return {
@@ -125,8 +129,7 @@ export function normalizeParticipantRequest(raw: unknown): {
       CHAT_PARTICIPANT_REQUEST_WAIT_DEFAULT_MS,
       CHAT_PARTICIPANT_REQUEST_WAIT_MAX_MS
     ),
-    resumeRequester: typeof record.resumeRequester === "boolean" ? record.resumeRequester : true,
-    ...(record.deliver === "now" ? { deliver: "now" as const } : {})
+    resumeRequester: typeof record.resumeRequester === "boolean" ? record.resumeRequester : true
   };
 }
 

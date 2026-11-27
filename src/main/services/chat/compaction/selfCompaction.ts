@@ -160,7 +160,10 @@ export class SelfCompaction {
           status: "pending_user_approval",
           approvalId: approval.id,
           summary,
-          ...(resume?.triggerMessageId ? { next: request.workDone ? SELF_COMPACTION_CARD_DONE : SELF_COMPACTION_CARD_NEXT } : {})
+          ...(resume?.triggerMessageId ? {
+            next: request.workDone ? SELF_COMPACTION_CARD_DONE : SELF_COMPACTION_CARD_NEXT,
+            afterCompaction: request.workDone ? "not-called-again" : "called-again-to-go-on"
+          } : {})
         };
       }
       recordSelfCompactionRequested(conversation, requesterNow.id, new Date().toISOString());
@@ -179,7 +182,11 @@ export class SelfCompaction {
       status: "queued",
       runId,
       summary,
-      ...(resume ? { next: request.workDone ? SELF_COMPACTION_QUEUED_DONE : SELF_COMPACTION_QUEUED_NEXT } : {})
+      ...(resume ? {
+        next: request.workDone ? SELF_COMPACTION_QUEUED_DONE : SELF_COMPACTION_QUEUED_NEXT,
+        // Which way it goes once compacted.
+        afterCompaction: request.workDone ? "not-called-again" : "called-again-to-go-on"
+      } : {})
     };
   }
 

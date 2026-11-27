@@ -3,7 +3,7 @@ import type {
   ChatMessage, ChatParticipant, ChatParticipantRequestBatch, ChatParticipantRequestItem, Conversation
 } from "../../../../shared/types";
 import { chatMessageMemberText } from "../../../../shared/interimPosts";
-import { PARTICIPANT_REQUEST_STOPPED_BY_USER } from "../constants";
+import { PARTICIPANT_REQUEST_CUT_BY_SEND_NOW, PARTICIPANT_REQUEST_STOPPED_BY_USER } from "../constants";
 
 /** What a resume of the main session's tasks of one turn reads of their
  *  replies: each at most this long, all of them together at most the next. */
@@ -52,7 +52,10 @@ export function delegationGroupResumeText(
       case "denied":
         return "denied";
       case "interrupted":
-        return item.error === PARTICIPANT_REQUEST_STOPPED_BY_USER ? `stopped by User${where}` : `interrupted${where}`;
+        // Why, when it was cut for a message to take now (its reply may hold
+        // no words at all).
+        return item.error === PARTICIPANT_REQUEST_STOPPED_BY_USER ? `stopped by User${where}`
+          : item.error === PARTICIPANT_REQUEST_CUT_BY_SEND_NOW ? `interrupted${where}: ${item.error}` : `interrupted${where}`;
       default:
         // A reply carries its own error; without one, the app's reason.
         return reply ? `failed${where}` : `failed: ${firstTextLine(item.error, 200) || "no reply"}`;

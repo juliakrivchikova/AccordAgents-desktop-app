@@ -5,6 +5,10 @@ import type { ClaudeSendNowOutcome, CliAgentRunner } from "../../cliAgents";
  *  Claude Code before it stops the reply for it instead (40 x 100 ms). */
 const SEND_NOW_WAIT_TRIES = 40;
 const SEND_NOW_WAIT_MS = 100;
+/** How long a request delivered now asks a Claude Code CLI that cannot tell
+ *  yet whether it takes it now (a process still starting): 60 x 500 ms. */
+const DELIVER_NOW_TRIES = 60;
+const DELIVER_NOW_RETRY_MS = 500;
 import type { ChatMessage, Conversation } from "../../../../shared/types";
 import { readActiveRunIds, withParticipantCompactionsForRunRemoved } from "../../../../shared/chatRunState";
 import { chatParticipants } from "../members/identity";
@@ -105,14 +109,21 @@ export class RunCancel {
    */
   async deliverNow(conversationId: string, participantId: string, waitingRunId: string, way: "into-running-turn" | "interrupt-and-restart"): Promise<void> {
     if (way === "into-running-turn") {
-      // Asked as the message is written: it is in the CLI's queue now, unless
-      // the CLI had nothing running and started it at once ("not_at_cli",
-      // "unsupported": nothing to do).
+      // Asked as the message is written: it is in the CLI's queue now.
+      // "not_at_cli": the CLI took it already. "unsupported": the CLI cannot
+      // tell yet (a process just started has not said what it can do, or no
+      // step runs yet): asked again for a while, as long as the message waits.
       const runner = this.deps.cliRunner as Partial<Pick<CliAgentRunner, "memberClaudeSendNow">>;
-      const outcome: ClaudeSendNowOutcome = runner.memberClaudeSendNow
-        ? await runner.memberClaudeSendNow.call(this.deps.cliRunner, conversationId, participantId, waitingRunId, undefined).catch(() => "unsupported" as const)
-        : "unsupported";
-      void this.deps.debugLogs.write("chat.deliver-now", { conversationId, participantId, runId: waitingRunId, way, outcome });
+      const ask = (): Promise<ClaudeSendNowOutcome> => runner.memberClaudeSendNow
+        ? runner.memberClaudeSendNow.call(this.deps.cliRunner, conversationId, participantId, waitingRunId, undefined).catch(() => "unsupported" as const)
+        : Promise.resolve("unsupported" as const);
+      let outcome = await ask();
+      let tries = 1;
+      for (; outcome === "unsupported" && tries < DELIVER_NOW_TRIES && this.chat.activeRuns.chatRunControllers.has(waitingRunId); tries += 1) {
+        await new Promise((resolve) => setTimeout(resolve, DELIVER_NOW_RETRY_MS));
+        outcome = await ask();
+      }
+      void this.deps.debugLogs.write("chat.deliver-now", { conversationId, participantId, runId: waitingRunId, way, outcome, tries });
       return;
     }
     const cut: string[] = [];

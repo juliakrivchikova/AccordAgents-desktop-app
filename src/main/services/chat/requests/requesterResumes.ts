@@ -145,7 +145,10 @@ export class RequesterResumes {
             ? delegationGroupResumeText(conversation, requester, group)
             : [
                 `Auto-resumed @${requester.handle} after member request.`,
-                "Target replies/errors are in the transcript above. Continue from your request using the available answers and errors."
+                "Target replies/errors are in the transcript above. Continue from your request using the available answers and errors.",
+                // A reply cut short (for a message delivered now, a Stop) may
+                // hold no words at all: why it ended is said here.
+                ...batch.items.filter((item) => item.status === "interrupted" && item.error).map((item) => `@${item.targetHandle}: ${item.error}`)
               ].join("\n"),
           undefined,
           {

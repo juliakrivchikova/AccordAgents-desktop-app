@@ -377,7 +377,7 @@ export class TurnQueue {
    *  its running turn (which is cut for it), or, for a member on another
    *  device, as that device orders it. */
   deliveryPriority(participant: ChatParticipant, triggerMessage: ChatMessage): TurnPriority | undefined {
-    if (!deliversNow(triggerMessage)) return undefined;
+    if (!deliversNow(triggerMessage, participant.id)) return undefined;
     if (!this.chat.host.runsHere(participant)) return "elsewhere";
     return memberDeliveryWay(participant) === "into-running-turn" ? "live" : "next";
   }

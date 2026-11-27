@@ -127,8 +127,8 @@ verbatim there). Modelled on T3 Code (`~/reference/t3code`,
   "@x /accord" in its reply. The classic view of the same chat keeps reading
   such a mention as a request, as before.
 - **A request can reach a busy member now** (the User, 2026-11-27):
-  `app_chat_request_participants` with `deliver: "now"` gives it to the
-  member at once, the way its CLI takes a message typed mid-turn, and the
+  `app_chat_request_participants` with `deliver: "now"` (for every target,
+  or on one request: members put it there) gives it to the member at once, the way its CLI takes a message typed mid-turn, and the
   reply still goes back to the requester. A Claude Code member gets it in its
   live CLI (TurnQueue `live`): once the message is in the CLI's queue the app
   sends the CLI's own send-now for it (`RunCancel.deliverNow`), so the running

@@ -69,13 +69,18 @@ export class ParticipantRequests {
     // added meanwhile is neither asked nor written back.
     let prepared!: PreparedParticipantRequest;
     let pendingTargets: ChatParticipantRequestItem[] = [];
+    let deliverRefused = false;
     const failure = await this.chat.store.withChatMutation(conversation, async () => {
       const requesterNow = chatParticipants(conversation).find((participant) => participant.id === actor.participantId);
       if (!requesterNow) {
         throw new Error("The requesting member is no longer in this chat.");
       }
       try {
-        prepared = await this.prepareParticipantRequest(conversation, requesterNow, normalizeParticipantRequest(rawRequest), actor, "mcp");
+        const normalized = normalizeParticipantRequest(rawRequest);
+        // Only the chat's main session delivers a request now (the User,
+        // 2026-11-27): a member's request never cuts another member's turn.
+        deliverRefused = normalized.requests.some((request) => request.deliver === "now") && requesterNow.id !== mainSessionParticipantId(conversation.metadata);
+        prepared = await this.prepareParticipantRequest(conversation, requesterNow, normalized, actor, "mcp");
       } catch (error) {
         return participantRequestFailedToolResult(error instanceof Error ? error.message : String(error));
       }
@@ -89,8 +94,12 @@ export class ParticipantRequests {
       return failure;
     }
     // Which way each busy target takes it, as things stand when it is asked.
-    const delivery = prepared.batch.deliver === "now" ? this.deliveryOf(conversation, prepared.batch) : undefined;
-    const withDelivery = (extra: Record<string, unknown>): Record<string, unknown> => delivery ? { ...extra, delivery } : extra;
+    const delivery = prepared.batch.items.some((item) => item.deliver === "now") ? this.deliveryOf(conversation, prepared.batch) : undefined;
+    const withDelivery = (extra: Record<string, unknown>): Record<string, unknown> => ({
+      ...extra,
+      ...(delivery ? { delivery } : {}),
+      ...(deliverRefused ? { deliverRefused: "Only the chat's main session delivers a request now: this one waits its turn, as without deliver." } : {})
+    });
 
     const hasRunningTargets = prepared.batch.items.some((item) => item.status === "running");
     if (!hasRunningTargets) {
@@ -163,7 +172,7 @@ export class ParticipantRequests {
    *  waits for the User's approval is delivered once she approves it. */
   private deliveryOf(conversation: Conversation, batch: ChatParticipantRequestBatch): Array<{ target: string; way: string; note: string }> {
     const participants = chatParticipants(conversation);
-    return batch.items.filter((item) => item.status === "running").flatMap((item) => {
+    return batch.items.filter((item) => item.status === "running" && item.deliver === "now").flatMap((item) => {
       const target = participants.find((participant) => participant.id === item.targetParticipantId);
       if (!target) return [];
       const activity = this.chat.turnQueue.memberActivity(conversation.id, target.id);
@@ -230,7 +239,7 @@ export class ParticipantRequests {
   async prepareParticipantRequest(
     conversation: Conversation,
     requester: ChatParticipant,
-    normalized: { requests: ChatParticipantRequestInput[]; timeoutMs: number; resumeRequester: boolean; deliver?: "now" },
+    normalized: { requests: ChatParticipantRequestInput[]; timeoutMs: number; resumeRequester: boolean },
     actor: ChatAppMcpActor,
     source: "mcp" | "inferred"
   ): Promise<PreparedParticipantRequest> {
@@ -293,6 +302,7 @@ export class ParticipantRequests {
         ...(request?.title ? { title: request.title } : {}),
         reason: request?.reason,
         status: requestStatus,
+        ...(source === "mcp" && request?.deliver === "now" && requester.id === mainId ? { deliver: "now" as const } : {}),
         createdAt: now,
         updatedAt: now
       };
@@ -311,7 +321,6 @@ export class ParticipantRequests {
       updatedAt: now,
       triggerMessageId: actor.triggerMessageId,
       ...(actor.turnSegmentId ? { requesterTurnSegmentId: actor.turnSegmentId } : {}),
-      ...(source === "mcp" && normalized.deliver === "now" ? { deliver: "now" as const } : {}),
       items
     };
     const requestMetadata: ChatMessageMetadata = {

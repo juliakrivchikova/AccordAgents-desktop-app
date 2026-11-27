@@ -298,15 +298,16 @@ export function compactionAccessLines(permissions: ChatAgentPermissions, isMainS
   switch (normalizeChatParticipantRequestPermission(normalizeChatAgentPermissions(permissions).requestCompaction)) {
     case "allow":
       return [
-        "Compaction: compact your own context yourself with `app_chat_request_compaction`; User is not asked. It runs right after your reply ends, and then the app calls you again to go on, so nobody has to call you.",
+        "Compaction: compact your own context yourself with `app_chat_request_compaction`; User is not asked. Your reply ends with that call: the compaction runs right after it, before anything waiting for you, and then the app calls you again to go on, so nobody has to call you.",
         "- Do it when most of what your context holds is not needed for what comes next and a short summary carries the rest: before you start a new task or the next stage of a big task, after an investigation or approach that led nowhere, once large outputs (logs, test runs, file dumps, screenshots) have served their purpose, when you switch to unrelated work.",
         "- Not because of context size alone, not while details in your context are still needed, and not when nothing is left to do or you only wait for someone.",
-        "- Say in the reply what is done and what comes next. Give `instructions` naming what the summary must keep: the goal and User's decisions (a task that has just arrived, in full), branch and changed files, what is done and checked, open findings, the next step. Then end the reply.",
+        "- Say in a line or two what is done and what comes next. Give `instructions` naming what the summary must keep: the goal and User's decisions (a task that has just arrived, in full), branch and changed files, what is done and checked, open findings, the next step. Then end the reply at once: no more tool calls.",
+        "- Pass `workDone: true` only when nothing is left of your task: the app then does not call you again after the compaction, and whatever waits for you runs next. Otherwise leave it out.",
         ...(isMainSession ? memberCompactionAccessLines() : [])
       ];
     case "ask":
       return [
-        "Compaction: `app_chat_request_compaction` asks User on a card to compact your own context after your reply; ask only when it would materially help the work that comes next, naming in `instructions` what the summary must keep, then end the reply. Once she answers the app calls you again to go on, with your context compacted, or as it is if she declines."
+        "Compaction: `app_chat_request_compaction` asks User on a card to compact your own context after your reply; ask only when it would materially help the work that comes next, naming in `instructions` what the summary must keep, then end the reply. Once she answers the app calls you again to go on, with your context compacted, or as it is if she declines; pass `workDone: true` only when nothing is left of your task, and it is not called again."
       ];
     default:
       return [];

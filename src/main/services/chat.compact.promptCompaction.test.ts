@@ -45,6 +45,7 @@ test("a member's own compaction asked mid-turn runs as soon as its reply ends, a
   await startWithRequestWaiting(chat, results, releaseFirst);
   await waitFor(() => chat.prompts.filter((item) => item.participantId === "codex-admin").length === 3, 8_000);
   assert.equal(results.compaction.status, "queued");
+  assert.equal(results.compaction.afterCompaction, "called-again-to-go-on");
   assert.match(results.compaction.next, /^End your reply now: .*make no more tool calls\. The compaction runs as soon as this reply ends, before anything waiting for you/);
   assert.deepEqual(chat.order.filter((entry) => entry.endsWith("codex-admin")), ["turn codex-admin", "compact codex-admin", "turn codex-admin", "turn codex-admin"]);
   const admin = chat.prompts.filter((item) => item.participantId === "codex-admin").map((item) => item.prompt);
@@ -60,6 +61,7 @@ test("a member that says its work is done is not called again after its compacti
   await startWithRequestWaiting(chat, results, releaseFirst);
   await waitFor(() => chat.prompts.filter((item) => item.participantId === "codex-admin").length === 2, 8_000);
   assert.match(results.compaction.next, /You said your work is done, so the app does not call you again to go on; requests waiting for you come next\./);
+  assert.equal(results.compaction.afterCompaction, "not-called-again");
   assert.deepEqual(chat.order.filter((entry) => entry.endsWith("codex-admin")), ["turn codex-admin", "compact codex-admin", "turn codex-admin"]);
   assert.match(chat.prompts.filter((item) => item.participantId === "codex-admin")[1].prompt, /Queued question/);
   assert.equal(chat.debugEvents.some(({ event }) => event === "chat.self-compaction.work-done"), true);

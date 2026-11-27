@@ -37,6 +37,11 @@ export const MEMBER_REQUEST_TOOLS: readonly AppMcpToolContract[] = [
                 "reason": {
                   "type": "string",
                   "description": "Optional brief reason this member input is needed."
+                },
+                "deliver": {
+                  "type": "string",
+                  "enum": ["queue", "now"],
+                  "description": "For this target; the same as the top-level deliver, which it overrides."
                 }
               },
               "required": [
@@ -58,7 +63,7 @@ export const MEMBER_REQUEST_TOOLS: readonly AppMcpToolContract[] = [
           "deliver": {
             "type": "string",
             "enum": ["queue", "now"],
-            "description": "Defaults to queue: a busy target takes the request after the work it already has. now: it takes it at once, the way its CLI takes a message typed mid-turn. Claude Code gets it in its running turn at the next tool result (its own send-now). A CLI that cannot take a message mid-turn has its running turn interrupted (what it wrote stays) and goes on with this request at once in the same session. Work already waiting runs after it. The reply still comes back to you; the result's delivery says which way it went."
+            "description": "For every target (each request may set its own). Only the chat's main session delivers now; another requester's request is queued. Defaults to queue: a busy target takes the request after the work it already has. now: it takes it at once, the way its CLI takes a message typed mid-turn. Claude Code gets it in its running turn at the next tool result (its own send-now). A CLI that cannot take a message mid-turn has its running turn interrupted (what it wrote stays) and goes on with this request at once in the same session. Work already waiting runs after it. The reply still comes back to you; the result's delivery says which way it went."
           }
         },
         "required": [
@@ -91,7 +96,7 @@ export const MEMBER_REQUEST_TOOLS: readonly AppMcpToolContract[] = [
           },
           "workDone": {
             "type": "boolean",
-            "description": "true when your work is done and nothing is left to go on with: you are not called again after the compaction; requests waiting for you run next."
+            "description": "true only when nothing is left of your task: you are not called again after the compaction, and requests waiting for you run next. Leave it out otherwise: the app calls you again to go on."
           }
         }
       },
