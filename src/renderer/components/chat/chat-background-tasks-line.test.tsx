@@ -55,6 +55,9 @@ test("new environment variables waiting: the Environment key after the backgroun
   assert.equal(dot[0]!.props.className, "chat-environment-pending", "the key in the pending colour (styles), no dot of its own");
   assert.equal(dot[0]!.props.tabIndex, 0, "reachable from the keyboard");
   assert.equal(dot[0]!.props["aria-label"], ENVIRONMENT_PENDING_TITLE);
+  const described = renderer!.root.findAll((node) => typeof node.type === "string" && node.props.id === dot[0]!.props["aria-describedby"]);
+  assert.equal(described.length, 1, "a screen reader gets the hover card's explanation too");
+  assert.equal(textOf(described[0]!), environmentPendingText(1));
   act(() => { renderer!.update(tree(new Set(["someone-else"]))); });
   assert.equal(renderer!.root.findAll((node) => node.props["data-testid"] === "chat-environment-pending").length, 0, "another member's waiting values are not this one's");
   act(() => renderer!.unmount());

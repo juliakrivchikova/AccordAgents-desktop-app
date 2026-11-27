@@ -169,14 +169,15 @@ export class WarmAgents {
     return run;
   }
 
-  createTrackedWarmAgent(key: string, construct: () => Promise<WarmAgentEntry>): Promise<WarmAgentEntry> {
+  createTrackedWarmAgent(key: string, construct: () => Promise<WarmAgentEntry>, agentEnvGeneration?: number): Promise<WarmAgentEntry> {
     if (this.cli.cliRuns.nativeAdmissionsFenced) return Promise.reject(new Error("The machine is stopping after idle; this native session did not start."));
     if (this.warmShutdown) return Promise.reject(new Error("The native sessions are shutting down; this command did not start."));
     if (this.conversationClosing(warmConversationId(key) ?? "")) return Promise.reject(new Error("This chat's native sessions are closing; this command did not start."));
     const existing = this.warmAgentCreations.get(key);
     if (existing) return existing;
-    // The environment it is started with was read before this point.
-    const environmentGeneration = this.environment.currentGeneration();
+    // The changes told before its environment was read (its turn says when
+    // that was); without that, before this point.
+    const environmentGeneration = agentEnvGeneration ?? this.environment.currentGeneration();
     const creating = (async () => {
       const refusal = await this.cli.cliRuns.hostRefusal("this native session");
       if (refusal || this.cli.cliRuns.nativeAdmissionsFenced || this.warmShutdown || this.conversationClosing(warmConversationId(key) ?? "")) {
@@ -294,7 +295,9 @@ export class WarmAgents {
       return unchanged;
     }
     void this.cli.cliRuns.writeDebugLog("cli.agent-environment-change-deferred", { participantId: options.warm.participantId });
-    return { options: { ...options, agentEnvKey: running }, release: this.environment.hold(busy) };
+    // A process started with these options (the busy one gone meanwhile) has
+    // its values, and is judged as it was.
+    return { options: { ...options, agentEnvKey: running, agentEnvGeneration: busy.environmentGeneration ?? 0 }, release: this.environment.hold(busy) };
   }
 
   /** Retire every warm process of one member, e.g. when the credential it was

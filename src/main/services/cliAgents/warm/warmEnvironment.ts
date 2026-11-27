@@ -70,7 +70,8 @@ export class WarmEnvironment {
     if (generation !== this.generation) return;
     this.version = version;
     for (const entry of Array.from(this.host.entries.values())) {
-      if (this.outdated(entry)) this.schedule(entry, true);
+      // One whose leftovers the app cannot see only when this finds it idle.
+      if (this.outdated(entry) && (entry.hasLiveBackgroundWork || this.free(entry))) this.schedule(entry, true);
       // Those kept by their background tasks say so with them; one whose
       // values were put back stops saying it.
       entry.refreshBackgroundReport?.();
@@ -88,8 +89,14 @@ export class WarmEnvironment {
    *  it has stayed so for a moment. Called on every line a Claude process
    *  prints: the cheap checks come first, the key is parsed last. */
   mayBeFree(entry: WarmAgentEntry): void {
-    if (this.version === undefined || !entry.hasLiveBackgroundWork) return;
+    if (this.version === undefined) return;
     const scheduled = this.timers.get(entry);
+    if (!entry.hasLiveBackgroundWork) {
+      // A turn ran on a process whose leftovers the app cannot see: it is
+      // not closed after it, the member's next turn replaces it.
+      if (scheduled) this.timers.delete(entry);
+      return;
+    }
     if (scheduled) {
       scheduled.due = Date.now() + this.settleMs;
       return;
@@ -138,6 +145,7 @@ export class WarmEnvironment {
     const record = { due: Date.now() + this.settleMs, anyProvider };
     this.timers.set(entry, record);
     const fire = (): void => {
+      if (this.timers.get(entry) !== record) return;
       const wait = record.due - Date.now();
       if (wait > 0) {
         setTimeout(fire, wait).unref();

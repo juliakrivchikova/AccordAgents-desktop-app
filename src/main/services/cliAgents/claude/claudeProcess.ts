@@ -61,7 +61,7 @@ export class ClaudeProcess {
     options: CliAgentRunOptions,
     claudeExecutable: string
   ): Promise<WarmAgentEntry> {
-    return this.cli.warmAgents.createTrackedWarmAgent(key, () => this.constructClaudeWarmAgent(key, scopeKey, participant, repoPath, kind, options, claudeExecutable));
+    return this.cli.warmAgents.createTrackedWarmAgent(key, () => this.constructClaudeWarmAgent(key, scopeKey, participant, repoPath, kind, options, claudeExecutable), options.agentEnvGeneration);
   }
 
   private async constructClaudeWarmAgent(
@@ -575,7 +575,10 @@ export class ClaudeProcess {
       }
     };
     state.environmentPending = () => this.cli.warmAgents.environment.pending(entry);
-    entry.refreshBackgroundReport = () => this.cli.claudeReplyFlow.reportClaudeBackgroundTasks(state, participant);
+    // A process that failed or is ending has said its last (its tasks ended).
+    entry.refreshBackgroundReport = () => {
+      if (!closed) this.cli.claudeReplyFlow.reportClaudeBackgroundTasks(state, participant);
+    };
     return entry;
   }
 

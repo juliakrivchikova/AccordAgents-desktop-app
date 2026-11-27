@@ -26,7 +26,7 @@ export class CodexAppServer {
     options: CliAgentRunOptions,
     codexExecutable: string
   ): Promise<WarmAgentEntry> {
-    return this.cli.warmAgents.createTrackedWarmAgent(key, () => this.constructCodexAppServerWarmAgent(key, scopeKey, participant, repoPath, diffMode, kind, options, codexExecutable));
+    return this.cli.warmAgents.createTrackedWarmAgent(key, () => this.constructCodexAppServerWarmAgent(key, scopeKey, participant, repoPath, diffMode, kind, options, codexExecutable), options.agentEnvGeneration);
   }
 
   private async constructCodexAppServerWarmAgent(

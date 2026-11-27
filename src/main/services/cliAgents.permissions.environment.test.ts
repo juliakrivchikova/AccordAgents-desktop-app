@@ -242,6 +242,58 @@ test("a turn routed into the busy process holds it until the turn is over", asyn
   assert.deepEqual(closed, ["p1:environment-changed"], "that turn is over: replaced");
   routed.release();
   assert.equal((entry as Entry).environmentHolds, 0, "a second release changes nothing");
+  assert.equal(routed.options.agentEnvGeneration, 0, "a process started for it (the busy one gone meanwhile) is judged as that one was");
+});
+
+test("a Codex process is not closed after a turn, even one that ends while the change settles", async () => {
+  const { runner, closed, env, add } = setup(60);
+  const running = add("running-codex", "v1");
+  const idle = add("idle-codex", "v1");
+  let finish!: () => void;
+  const turn = cliParts(runner).warmAgents.enqueueWarmRun(running, () => new Promise<void>((resolve) => { finish = resolve; }));
+  env.version = "v2";
+  await runner.environmentChanged();
+  // Its turn ends well within the settle time; a turn reaches the idle one too.
+  await tick(10);
+  finish();
+  await turn;
+  await cliParts(runner).warmAgents.trackWarmRun(idle, async () => "done");
+  await tick(120);
+  assert.deepEqual(closed, [], "what a Codex turn leaves running the app cannot see: its next turn replaces it");
+
+  const found = add("found-idle-codex", "v2");
+  env.version = "v3";
+  await runner.environmentChanged();
+  await tick(120);
+  assert.deepEqual(closed.sort(), ["found-idle-codex:environment-changed", "idle-codex:environment-changed", "running-codex:environment-changed"], "found idle by the change: replaced once it settled");
+  assert.ok(found.closed);
+});
+
+test("a process is judged by the changes told after its turn read the environment, not after it started", async () => {
+  const { runner, closed, env } = setup();
+  const readBefore = runner.environmentGeneration();
+  // Saved while the turn waited between reading the environment and
+  // starting its process: the process has the values read before.
+  env.version = "v2";
+  await runner.environmentChanged();
+  const key = JSON.stringify({ conversationId: "c1", participantId: "p1", agentEnvKey: "v1" });
+  const tasks = { tasks: 1 };
+  const entry = await cliParts(runner).warmAgents.createTrackedWarmAgent(key, async () => ({
+    name: "p1", key, scopeKey: "c1:p1", closed: false, queue: Promise.resolve(), ...claude(tasks)
+  }), readBefore);
+  assert.equal(entry.environmentGeneration, readBefore);
+  assert.equal(cliParts(runner).warmAgents.environment.pending(entry), true, "it says new values are waiting");
+  tasks.tasks = 0;
+  cliParts(runner).warmAgents.environment.mayBeFree(entry);
+  await tick();
+  assert.deepEqual(closed, ["p1:environment-changed"], "and is replaced once free");
+
+  // One that read the new values is left alone.
+  const fresh = JSON.stringify({ conversationId: "c1", participantId: "p2", agentEnvKey: "v2" });
+  const second = await cliParts(runner).warmAgents.createTrackedWarmAgent(fresh, async () => ({
+    name: "p2", key: fresh, scopeKey: "c1:p2", closed: false, queue: Promise.resolve(), ...claude()
+  }), readBefore);
+  assert.equal(cliParts(runner).warmAgents.environment.pending(second), false);
 });
 
 test("a new process of the member waits until its replaced one has gone", async () => {

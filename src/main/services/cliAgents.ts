@@ -149,6 +149,12 @@ export class CliAgentRunner {
     return this.modules.warmAgents.environmentChanged();
   }
 
+  /** The environment changes told so far: read before a turn reads the
+   *  environment, and given with it as `agentEnvGeneration`. */
+  environmentGeneration(): number {
+    return this.modules.warmAgents.environment.currentGeneration();
+  }
+
   /** Archive/delete closes resident processes, while leaving provider session
    * files intact for a later unarchive. Other chats continue running. */
   closeConversationSessions(conversationId: string): Promise<void> {

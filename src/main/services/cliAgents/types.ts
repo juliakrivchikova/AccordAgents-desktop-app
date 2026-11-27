@@ -70,6 +70,10 @@ export interface CliAgentRunOptions {
    *  the shell profile it reads again before each command. */
   settingsEnv?: NodeJS.ProcessEnv;
   agentEnvKey?: string;
+  /** The environment changes told before `agentEnv` was read
+   *  (CliAgentRunner.environmentGeneration): a process started with it is
+   *  judged by every change told after that read. */
+  agentEnvGeneration?: number;
   warm?: CliAgentWarmOptions;
   onOutput?: CliAgentOutputCallback;
   onSessionId?: CliAgentSessionIdCallback;
@@ -151,13 +155,13 @@ export interface CliAgentWarmOptions {
   onCliPermissionMode?: (mode: ClaudePermissionMode) => void;
 }
 
-/** A background task the CLI reports as live, with the reply that started it. */
 /** A member's live background tasks, the full current list. With
  *  `environmentPending` its process still runs with the environment variables
  *  it started with, while members get other values now: it is replaced (and
  *  resumes the same session) once these tasks have finished. */
 export type CliAgentBackgroundTasksCallback = (tasks: CliAgentBackgroundTask[], environmentPending?: boolean) => void;
 
+/** A background task the CLI reports as live, with the reply that started it. */
 export interface CliAgentBackgroundTask {
   id: string;
   label: string;
