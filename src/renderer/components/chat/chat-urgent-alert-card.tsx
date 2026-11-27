@@ -13,7 +13,7 @@ import { useSessionsViewLabel, useSessionsViewText } from "./chat-sessions-links
 /**
  * An urgent alert a member raised, as the User approved it on 2026-11-27
  * (docs/design/urgent-alert, variant 1): a plain kit card with a red border,
- * bell and status line until she answers it, whatever its state (it never
+ * bell and status line until she presses Got it, whatever its state (it never
  * left the app included: urgentAlertAlarming), a head line (Urgent alert, who, when), the
  * message, then one status line that says what happens now (when the phone
  * rings, or how it ended) as a small dot and colored words, with what

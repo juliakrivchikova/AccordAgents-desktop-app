@@ -53,7 +53,7 @@
   color: var(--warn);
 }
 
-/* Until she answers it, its status is red whatever its state, as the
+/* Until she presses Got it, its status is red whatever its state, as the
    desktop's (shared urgentAlertAlarming; the User, 2026-11-27). */
 .urgent-alert-status.is-alarming .urgent-alert-status-icon,
 .urgent-alert-status.is-alarming .urgent-alert-status-main {

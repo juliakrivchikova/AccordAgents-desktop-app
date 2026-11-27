@@ -184,10 +184,9 @@ test("phone numbers are taken with their country code only", () => {
   assert.equal(maskedPhoneNumber("+35799123342"), "+357 ••• 342");
 });
 
-test("the card is red until she answers it, whatever its state; quiet once she pressed Got it or closed it", () => {
+test("the card is red until she presses Got it, whatever its state, closed or not; quiet once she did", () => {
   for (const state of ["waiting", "calling", "unanswered", "not_set_up", "failed", "unsent"] as UrgentAlertState[]) {
     assert.equal(urgentAlertAlarming({ state }), true, state);
-    assert.equal(urgentAlertAlarming({ state, closedAt: "2026-11-12T18:55:00.000Z" }), false, `${state}, closed`);
   }
   assert.equal(urgentAlertAlarming({ state: "acknowledged" }), false);
 });

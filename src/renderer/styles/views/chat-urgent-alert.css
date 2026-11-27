@@ -13,8 +13,8 @@
 }
 
 .chat-urgent-alert-panel {
-  /* The status's tone: red until she answers it (is-alarming), green once
-     she reacted, amber for one that never left the app and was closed. */
+  /* The status's tone: red until she presses Got it (is-alarming), green
+     once she did. */
   --urgent-tone: var(--ui-danger);
   --urgent-tone-dot: var(--ui-danger-dot);
   max-width: 624px;
@@ -214,9 +214,10 @@ button.chat-card-row:hover {
   color: var(--ui-text-3);
 }
 
-/* One that never left the app: amber, as its open card's status. */
+/* One she has not answered with Got it (it never left the app): red, as
+   its open card's status and the phone's line. */
 .chat-urgent-alert-folded.is-unresolved .chat-urgent-alert-folded-bell {
-  color: var(--ui-warning);
+  color: var(--ui-danger);
 }
 
 .chat-urgent-alert-folded-preview,
@@ -244,7 +245,7 @@ button.chat-card-row:hover {
 }
 
 .chat-urgent-alert-folded.is-unresolved .chat-urgent-alert-folded-outcome {
-  color: var(--ui-warning);
+  color: var(--ui-danger);
 }
 
 .chat-urgent-alert-folded-chevron,
