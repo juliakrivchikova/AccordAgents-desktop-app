@@ -251,7 +251,8 @@ export function putTimelineEntryDeduped(entry, options) {
         // reconnect.
         if (current.status !== "pending") return 0;
         if (isScaffoldingEntry(entry) && !isPlaceholderTimelineContent(current.content)) {
-          entry = { ...entry, content: current.content };
+          // With what it is: the step in progress stays hidden with members' actions.
+          entry = { ...entry, content: current.content, ...(current.liveActivity ? { liveActivity: true } : {}) };
         }
         // Live progress does not repeat the snapshot's visual thread metadata.
         entry = { ...entry, createdAt: current.createdAt, threadRootId: entry.threadRootId || current.threadRootId };

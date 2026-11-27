@@ -4,7 +4,7 @@ import { serverPairing } from "../pairing/hubPairing.js";
 import { handleRelayChatListPayload } from "./chatListPayload.js";
 import { markHubNoticesSeen, SERVER_CHANGES_WAIT_MS, serverPhoneGet, serverReadsState } from "./serverReads.js";
 import { settleHeldTurnsBeyondPage } from "./settledTurns.js";
-import { noteServerDisplay } from "../chat/memberActions.js";
+import { memberActionsShown, noteServerDisplay } from "../chat/memberActions.js";
 import { handleRelayTimelinePayload } from "./timelinePayload.js";
 
 async function requestChatListFromServer() {
@@ -55,7 +55,9 @@ export function startServerChanges() {
           answer = await serverPhoneGet("/v1/phone/changes", {
             instance: serverChanges.instance || "none",
             after: serverChanges.seq,
-            waitMs: serverChanges.instance ? SERVER_CHANGES_WAIT_MS : 0
+            waitMs: serverChanges.instance ? SERVER_CHANGES_WAIT_MS : 0,
+            // What it draws by: a server that says otherwise answers at once.
+            shown: memberActionsShown() ? "1" : "0"
           }, { timeoutMs: SERVER_CHANGES_WAIT_MS + 15_000 });
           failures = 0;
         } catch (error) {

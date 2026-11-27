@@ -187,6 +187,8 @@ export class HubPhoneApi {
    *  a waiting changes request answers when they do. */
   private displayStamp?: string;
   private displayVersion = 0;
+  /** Counts catalog publications: a read older than the last one is not cached. */
+  private catalogGeneration = 0;
 
   constructor(private readonly options: HubPhoneOptions) {}
 
@@ -199,6 +201,7 @@ export class HubPhoneApi {
 
   /** The catalog was published again. */
   catalogChanged(): void {
+    this.catalogGeneration += 1;
     this.catalogCache = undefined;
     this.listCache.clear();
     this.rowCache.clear();
@@ -272,10 +275,13 @@ export class HubPhoneApi {
 
   private async catalog(): Promise<HubComposerCatalog | undefined> {
     if (this.catalogCache && Date.now() - this.catalogCache.at < 30_000) return this.catalogCache.catalog;
+    const generation = this.catalogGeneration;
     const stored = await this.options.store.hub().document("composer-catalog").catch(() => undefined);
     const value = stored?.value as HubComposerCatalog | undefined;
     const catalog = value && value.version === 1 ? value : undefined;
-    this.catalogCache = { at: Date.now(), catalog };
+    // A read begun before a new catalog was published does not stand for
+    // it: kept, every phone was told the old display settings for 30 s.
+    if (generation === this.catalogGeneration) this.catalogCache = { at: Date.now(), catalog };
     return catalog;
   }
 
@@ -696,17 +702,23 @@ export class HubPhoneApi {
     // Every answer says how the phone draws chats (HubPhoneDisplay), as
     // the catalog says when it is sent; a change ends the wait.
     const displayVersionAtStart = this.displayVersion;
+    const displayNow = await this.phoneDisplay().catch(() => undefined);
     const shown = async () => {
-      const display = await this.phoneDisplay().catch(() => undefined);
+      const display = (await this.phoneDisplay().catch(() => undefined)) ?? displayNow;
       return display ? { display } : {};
     };
     const reset = async () => ({ status: 200, body: { ok: true, instance: feed.instance, seq: feed.current(), reset: true, ...await shown() } });
+    // The phone says which display settings it draws by ("1"/"0"); one that
+    // differs from the catalog's (an answer read just before a publication)
+    // is answered at once rather than after a wait for news.
+    const phoneShows = query.get("shown");
+    const behind = (phoneShows === "1" || phoneShows === "0") && displayNow !== undefined && (displayNow.showMemberActions ? "1" : "0") !== phoneShows;
     if (instance !== feed.instance || !Number.isSafeInteger(after) || after < 0) return reset();
     const mine = (ids: string[]) => ids.filter((id) => scopeCovers(scope, id));
     let news = feed.since(after);
     if (news.reset) return reset();
     let conversationIds = mine(news.conversationIds);
-    if (conversationIds.length === 0 && waitMs > 0) {
+    if (conversationIds.length === 0 && waitMs > 0 && !behind) {
       const waiting = this.waitersByDevice.get(deviceId) ?? 0;
       // Too many waiting: answered at once, and told when to ask again.
       if (feed.waiting() >= WAITERS_MAX || waiting >= WAITERS_PER_DEVICE_MAX) {

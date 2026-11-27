@@ -321,6 +321,16 @@ test("the computer's Show members' actions reaches the phone with every changes 
   assert.equal((await h.call(h.owner, "PUT", "/v1/catalog", catalog({ showMemberActions: true }))).status, 200);
   await still;
   assert.ok(Date.now() - again >= 1_000, "an unchanged setting is no news");
+  // A phone still drawing by the other setting (it was told one read just
+  // before a publication) is answered at once, not after a wait for news.
+  const behindAt = Date.now();
+  const behind = await client.getJson<Changes>("/v1/phone/changes", { instance: woken.instance, after: woken.seq, waitMs: 20_000, shown: "0" }, { timeoutMs: 30_000 });
+  assert.ok(Date.now() - behindAt < 5_000, "a phone behind the setting is not kept waiting");
+  assert.deepEqual(behind.display, { showMemberActions: true });
+  const level = client.getJson<Changes>("/v1/phone/changes", { instance: woken.instance, after: woken.seq, waitMs: 1_500, shown: "1" }, { timeoutMs: 10_000 });
+  const levelAt = Date.now();
+  await level;
+  assert.ok(Date.now() - levelAt >= 1_000, "one drawing by the same setting waits for news as before");
   // A computer from before publishes none: the phone is told nothing.
   assert.equal((await h.call(h.owner, "PUT", "/v1/catalog", catalog())).status, 200);
   await h.settle();
