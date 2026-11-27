@@ -44,8 +44,11 @@ export async function answerThroughOwnWork(
   const earlier = [...firstEarlier];
   let reply = first;
   for (;;) {
-    // A reply the User stopped is where it ends.
-    if (reply.metadata?.terminalReason === "user-stopped") return { kind: "answer", answer: { kind: "went-on", reply }, reply, earlier };
+    // A reply the User stopped, or cut for a message delivered now, is where
+    // it ends (settleSelfCompactedItem ends the request as its first turn's).
+    if (reply.metadata?.terminalReason === "user-stopped" || reply.metadata?.turnContinues === true) {
+      return { kind: "answer", answer: { kind: "went-on", reply }, reply, earlier };
+    }
     if (reply.metadata?.selfCompaction && reply.metadata.runId) {
       const through = await chat.selfCompaction.answerThroughSelfCompactions(conversationId, targetId, reply, signal);
       earlier.push(...through.earlier);

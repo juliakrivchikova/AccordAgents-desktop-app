@@ -30,7 +30,7 @@ export class RequestRecovery {
   constructor(
     private readonly chat: Pick<
       ChatModules,
-      | "activeRuns" | "delegation" | "host" | "participantRequests" | "permissionRequests" | "requesterResumes" | "runOwners"
+      | "activeRuns" | "appQuit" | "delegation" | "host" | "participantRequests" | "permissionRequests" | "requesterResumes" | "runOwners"
     >,
     private readonly deps: Pick<ChatDependencies, "debugLogs" | "onReviewProgress">
   ) {}
@@ -57,6 +57,10 @@ export class RequestRecovery {
     if (!batch) {
       return false;
     }
+    // What a sweep keeps because its member waits on its own requests is
+    // waited on where its requester runs (that device may have learnt of it
+    // only now: the member answered a card on another device).
+    if (this.delegationRecoveryLookedChats.has(conversation.id)) this.armOwnRequestWait(conversation, message);
     const backedPendingTargetIds = pendingParticipantRequestApprovalTargetIds(conversation, batch);
     const hasOrphanedPendingApproval = batch.items.some((item) =>
       item.status === "pending_approval" && !backedPendingTargetIds.has(item.targetParticipantId)
@@ -143,7 +147,7 @@ export class RequestRecovery {
       return;
     }
     this.logDelegationGroupSettled(conversation.id, group.map((entry) => entry.message.id), verdict, false);
-    if (verdict !== "too-old") this.endWaitsOnUnresumed(conversation, group.map((entry) => entry.message.id));
+    this.endWaitsOnUnresumed(conversation, group.map((entry) => entry.message.id));
   }
 
   /** Requests of a member's own that will not resume it (a restart decided
@@ -152,11 +156,14 @@ export class RequestRecovery {
    *  a request a restart ended, with the requests that went out with it; each
    *  of them is marked so (markOwnRequestResumeEnded) for the device that
    *  waits on it. Returns whether one changed. */
-  private endWaitsOnUnresumed(conversation: Conversation, ownRequestMessageIds: readonly string[]): boolean {
+  private endWaitsOnUnresumed(conversation: Conversation, ownRequestMessageIds: readonly string[], awaited = awaitedMembersOf(conversation)): boolean {
     let changed = false;
     const participants = chatParticipants(conversation);
     for (const id of ownRequestMessageIds) {
       const own = conversation.messages.find((message) => message.id === id);
+      // Cheap first (a start weighs every old request of a long chat): only
+      // a member some open request waits on has a request waiting on it.
+      if (!own?.metadata?.participantRequest || !awaited.has(own.metadata.participantRequest.requesterParticipantId)) continue;
       const waitingOn = own ? requestWaitingOnOwnRequest(conversation, own) : undefined;
       const requester = participants.find((participant) => participant.id === waitingOn?.message.metadata?.participantRequest?.requesterParticipantId);
       // Only the device whose request it is writes it; another one ends it
@@ -214,6 +221,8 @@ export class RequestRecovery {
       groups.set(key, group);
     }
     let changed = false;
+    let awaited: Set<string> | undefined;
+    const awaitedMembers = (): Set<string> => (awaited ??= awaitedMembersOf(conversation));
     for (const [key, { turnId, messages }] of groups) {
       if (this.chat.delegation.liveTurnSegments.has(key) || this.chat.delegation.delegatingTurns.has(key) || this.chat.requesterResumes.delegationGroupResumes.has(key) ||
         this.delegationGroupsRecovered.has(key)) continue;
@@ -245,7 +254,7 @@ export class RequestRecovery {
           this.logDelegationGroupSettled(conversation.id, messages.map((message) => message.id), verdict, cutShort);
         }
         // Its requester is not resumed: a request that waited on it ends.
-        if (verdict !== "too-old" && this.endWaitsOnUnresumed(conversation, messages.map((message) => message.id))) changed = true;
+        if (this.endWaitsOnUnresumed(conversation, messages.map((message) => message.id), awaitedMembers())) changed = true;
         continue;
       }
       void this.deps.debugLogs.write("chat.participant-request.auto-resume.recovered", {
@@ -320,16 +329,26 @@ export class RequestRecovery {
    *  member waits on its own requests (a restart left it running) is waited
    *  on again where its requester runs. */
   private waitAgainOnOwnRequests(conversation: Conversation): void {
-    const participants = chatParticipants(conversation);
-    for (const message of conversation.messages) {
-      const batch = message.metadata?.participantRequest;
-      // One that went out with another waits as that one does (answeredWith).
-      if (!batch || !batch.items.some((item) => !item.answeredWith && itemWaitsOnOwnRequests(conversation, message, item))) continue;
-      const requester = participants.find((participant) => participant.id === batch.requesterParticipantId);
-      if (!requester || !this.chat.host.ownsParticipant(requester) || this.chat.participantRequests.participantRequestRunners.has(message.id)) continue;
-      const timer = setTimeout(() => this.chat.participantRequests.resumeOwnRequestWait(conversation.id, message.id), 0);
-      timer.unref?.();
-    }
+    for (const message of conversation.messages) this.armOwnRequestWait(conversation, message);
+  }
+
+  /** A request whose member waits on its own requests, with no wait for it
+   *  here, is waited on here when its requester runs here (not while the app
+   *  quits). */
+  private armOwnRequestWait(conversation: Conversation, message: ChatMessage): void {
+    const batch = message.metadata?.participantRequest;
+    // Not while one waits for it here already (its runner, or the resume
+    // after a permission card that holds it).
+    if (!batch || this.chat.appQuit.quitting || this.chat.participantRequests.participantRequestRunners.has(message.id) ||
+      this.chat.permissionRequests.heldParticipantRequests.has(message.id)) return;
+    // Cheap first: a sweep looks at every request of the chat.
+    if (!batch.items.some((item) => item.status === "running" && item.replyMessageId && !item.answeredWith)) return;
+    const requester = chatParticipants(conversation).find((participant) => participant.id === batch.requesterParticipantId);
+    if (!requester || !this.chat.host.ownsParticipant(requester)) return;
+    // One that went out with another waits as that one does (answeredWith).
+    if (!batch.items.some((item) => !item.answeredWith && itemWaitsOnOwnRequests(conversation, message, item))) return;
+    const timer = setTimeout(() => this.chat.participantRequests.resumeOwnRequestWait(conversation.id, message.id), 0);
+    timer.unref?.();
   }
 
   private logDelegationGroupSettled(conversationId: string, requestMessageIds: string[], reason: string, cutShort: boolean): void {
@@ -387,4 +406,16 @@ export class RequestRecovery {
       (item.status === "pending_approval" || item.status === "running" || item.status === "resuming_requester")
       && working.has(item.targetParticipantId));
   }
+}
+
+/** The members an open request waits on with a reply so far (a request
+ *  waiting on such a member's own requests is one of them). */
+function awaitedMembersOf(conversation: Conversation): Set<string> {
+  const members = new Set<string>();
+  for (const message of conversation.messages) {
+    for (const item of message.metadata?.participantRequest?.items ?? []) {
+      if (item.status === "running" && item.replyMessageId) members.add(item.targetParticipantId);
+    }
+  }
+  return members;
 }

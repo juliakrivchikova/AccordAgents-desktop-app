@@ -248,7 +248,11 @@ export class PermissionRequests {
       await this.chat.chatHistory.ensureHistoryFiles(conversation);
       emitProgress(resumeRunId, progress, "done", "Permission approval resume finished.");
       const first = messages[0];
-      if (participantRequestMessage && participantRequestBatch && first && goesOn) {
+      // The request is its requester's device's to settle: elsewhere that
+      // device waits for the member's answer itself (it arms its wait when it
+      // sees the request waiting, RequestRecovery.armOwnRequestWait).
+      const requestOwner = participantRequestBatch && chatParticipants(conversation).find((participant) => participant.id === participantRequestBatch.requesterParticipantId);
+      if (participantRequestMessage && participantRequestBatch && first && goesOn && requestOwner && this.chat.host.ownsParticipant(requestOwner)) {
         const through = await this.chat.participantRequests.answerWithLiveRun(conversation, participantRequestMessage.id, requester, first, []);
         if (through.kind === "answer") {
           await this.chat.selfCompaction.settleSelfCompactedItem(conversation, participantRequestMessage.id, participantRequestBatch.id, requester, through, true);

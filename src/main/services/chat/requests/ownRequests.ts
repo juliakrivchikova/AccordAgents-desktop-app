@@ -1,4 +1,5 @@
 import type { ChatMessage, ChatParticipantRequestBatch, ChatParticipantRequestItem, Conversation } from "../../../../shared/types";
+import { readActiveRunIds } from "../../../../shared/chatRunState";
 import { APP_PERMISSIONS_REQUEST_CHANGE_TOOL } from "../../appMcp";
 import { chatAppToolApprovals, permissionApprovalResumeRunId } from "../approvals/approvalRecords";
 import { PARTICIPANT_REQUEST_INTERRUPTED_BEFORE_COMPLETION } from "../constants";
@@ -132,8 +133,8 @@ export function repliesAnswering(
 }
 
 /** How long after the User approved a member's permission card its resumed
- *  turn is waited for before the card counts as done (its turn starts within
- *  seconds; one that never starts must not hold the request). */
+ *  turn is waited for before it is asked (its run is live from then on); one
+ *  that is never asked must not hold the request. */
 const APPROVED_CARD_RESUME_GRACE_MS = 60_000;
 
 /** A permission card the member raised in a turn that answers the request,
@@ -142,9 +143,13 @@ const APPROVED_CARD_RESUME_GRACE_MS = 60_000;
 export function permissionCardAnswering(conversation: Conversation, memberId: string, requestMessageId: string, byId: MessagesById, now = Date.now()): boolean {
   return chatAppToolApprovals(conversation).some((approval) => {
     if (approval.toolName !== APP_PERMISSIONS_REQUEST_CHANGE_TOOL || approval.requesterParticipantId !== memberId) return false;
+    const resumeRunId = permissionApprovalResumeRunId(approval.id);
+    // Approved: until its resumed turn's reply exists, while that turn is
+    // asked (its run is live, queued behind another turn too) or for a
+    // short grace before it is.
     const waitsForTurn = approval.status === "pending" || (approval.status === "approved" &&
-      now - Date.parse(approval.updatedAt) < APPROVED_CARD_RESUME_GRACE_MS &&
-      !conversation.messages.some((message) => message.participantId === memberId && message.metadata?.runId === permissionApprovalResumeRunId(approval.id)));
+      !conversation.messages.some((message) => message.participantId === memberId && message.metadata?.runId === resumeRunId) &&
+      (readActiveRunIds(conversation.metadata).includes(resumeRunId) || now - Date.parse(approval.updatedAt) < APPROVED_CARD_RESUME_GRACE_MS));
     return waitsForTurn && requestAnsweredByTurn(conversation, memberId, approval.resumeContext?.triggerMessageId, byId)?.id === requestMessageId;
   });
 }

@@ -19,7 +19,7 @@ import {
   runIdBase, type SelfCompactedAnswer, type SelfCompactionEnd, type SelfCompactionResume, selfCompactionResumeFrom,
   selfCompactionResumeRunId
 } from "./selfCompactionMarks";
-import { PARTICIPANT_REQUEST_INTERRUPTED_BEFORE_COMPLETION, PARTICIPANT_REQUEST_STOPPED_BY_USER } from "../constants";
+import { PARTICIPANT_REQUEST_CUT_BY_SEND_NOW, PARTICIPANT_REQUEST_INTERRUPTED_BEFORE_COMPLETION, PARTICIPANT_REQUEST_STOPPED_BY_USER } from "../constants";
 import { chatParticipants, participantForRun } from "../members/identity";
 import { rollupParticipantRequestStatus, updateParticipantRequestBatch } from "../requests/requestRecords";
 import { createChatMessage } from "../store/messages";
@@ -232,10 +232,12 @@ export class SelfCompaction {
         hasPendingPermissionApprovalForParticipantTurn(conversation, target, askedAs!, batchId);
       const stopped = answer.kind === "went-on" ? reply.metadata?.terminalReason === "user-stopped" : answer.reason === "stopped";
       const interrupted = answer.kind === "went-on" ? stopped && this.chat.appQuit.endsByQuit(reply.metadata?.runId) : answer.reason === "interrupted";
+      // Cut short for a message delivered now: not its answer, as in its first turn.
+      const cut = answer.kind === "went-on" && reply.metadata?.turnContinues === true;
       const failed = answer.kind === "ended" ? answer.reason === "failed" : reply.status === "error";
-      const status: ChatParticipantRequestStatus = onPermissionCard ? "running" : stopped || interrupted ? "interrupted" : failed ? "failed" : "answered";
+      const status: ChatParticipantRequestStatus = onPermissionCard ? "running" : stopped || interrupted || cut ? "interrupted" : failed ? "failed" : "answered";
       const error = status === "interrupted"
-        ? interrupted ? PARTICIPANT_REQUEST_INTERRUPTED_BEFORE_COMPLETION : PARTICIPANT_REQUEST_STOPPED_BY_USER
+        ? interrupted ? PARTICIPANT_REQUEST_INTERRUPTED_BEFORE_COMPLETION : cut && !stopped ? PARTICIPANT_REQUEST_CUT_BY_SEND_NOW : PARTICIPANT_REQUEST_STOPPED_BY_USER
         : status === "failed" ? (answer.kind === "ended" ? answer.error : reply.content) || "It could not go on after its compaction." : undefined;
       updateParticipantRequestBatch(conversation, requestMessageId, (current) => {
         if (current.id !== batchId) return current;

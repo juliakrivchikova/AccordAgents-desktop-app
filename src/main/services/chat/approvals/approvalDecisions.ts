@@ -29,6 +29,7 @@ import {
   applyParticipantRequestApprovalDecision, participantRequestApprovalTargetIds, participantRequestHasUnfinishedItems,
   resolveParticipantRequestApprovalItems, resolveParticipantRequestTargetItem, terminalParticipantRequestBatch
 } from "../requests/requestRecords";
+import { itemWaitsOnOwnRequests } from "../requests/ownRequests";
 import { createChatMessage } from "../store/messages";
 import { emitProgress } from "../turns/replyMessages";
 import type {
@@ -499,7 +500,10 @@ export class ApprovalDecisions {
         // the work carried on while the User was told it had been interrupted.
         // Only an interaction that can no longer make progress is closed here;
         // an explicit Stop still closes it through its own path.
-        && !this.chat.requestRecovery.participantRequestIsStillRunning(conversation, batch)) {
+        && !this.chat.requestRecovery.participantRequestIsStillRunning(conversation, batch)
+        // Nor one whose member waits on what it asked others itself: it goes
+        // on once resumed (its run may be live on another device).
+        && !batch.items.some((item) => itemWaitsOnOwnRequests(conversation, message, item))) {
         const nextBatch = terminalParticipantRequestBatch(batch, "interrupted", reason, now);
         if (nextBatch !== batch) {
           metadata = {

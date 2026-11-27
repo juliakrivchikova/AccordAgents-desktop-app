@@ -5,9 +5,9 @@ import { chatParticipant, selfCompactingChat, waitFor as waitLong } from "./chat
 import { defaultChatAgentPermissions, normalizeChatAgentPermissions } from "../../shared/agentPermissions";
 import { sessionsTaskReplyLine, sessionsTaskStatus } from "../../shared/mainSessionView";
 import type { ChatMessage, ChatParticipantRequestBatch, ChatParticipantRequestItem, Conversation, ParticipantConfig } from "../../shared/types";
-import { PARTICIPANT_REQUEST_INTERRUPTED_BEFORE_COMPLETION, PARTICIPANT_REQUEST_STOPPED_BY_USER } from "./chat/constants";
+import { PARTICIPANT_REQUEST_CUT_BY_SEND_NOW, PARTICIPANT_REQUEST_INTERRUPTED_BEFORE_COMPLETION, PARTICIPANT_REQUEST_STOPPED_BY_USER } from "./chat/constants";
 import {
-  GENERIC_ROLE, mainActor, mainSession, mainSessionChat, member, NOW, permissions, resumesOf, sessionRecord, testService, waitFor
+  clone, GENERIC_ROLE, mainActor, mainSession, mainSessionChat, member, NOW, permissions, resumesOf, sessionRecord, testService, waitFor
 } from "./chat/test/mainSessionFixtures";
 import { messagesById, ownRequestsAnswering, permissionCardAnswering, requestAnsweredByTurn } from "./chat/requests/ownRequests";
 import { permissionApprovalResumeRunId } from "./chat/approvals/approvalRecords";
@@ -18,7 +18,7 @@ import { markParticipantRequestAutoResumeFailed } from "./chat/requests/requestR
 // resumeRequester, and ends its turn to wait: its task is not over until the
 // turn it is resumed in with the answer ends (2026-11-27).
 
-type Reply = { ok: boolean; content?: string; error?: string };
+type Reply = { ok: boolean; content?: string; error?: string; turnContinues?: boolean };
 /** The member's own request: one target, or several in one request (a turn
  *  has one request out at a time). */
 type Ask = (target: string | string[], prompt: string) => Promise<Record<string, unknown>>;
@@ -417,11 +417,12 @@ test("a restart after which the member is not resumed (the User wrote meanwhile)
 /** A chat whose main session (here) asked a member on machine-1, which ended
  *  its turn after asking the main session itself: stored as the machine
  *  writes it. `own` is how the member's own request stands. */
-function machineMemberChat(own: { items: "answered" | "denied"; status: ChatParticipantRequestBatch["status"] }): Conversation {
-  const at = new Date(Date.now() - 60_000).toISOString();
-  const later = new Date(Date.now() - 30_000).toISOString();
+function machineMemberChat(own: { items: "answered" | "denied" | "pending_approval"; status: ChatParticipantRequestBatch["status"]; ageMs?: number; local?: boolean }): Conversation {
+  const age = own.ageMs ?? 60_000;
+  const at = new Date(Date.now() - age).toISOString();
+  const later = new Date(Date.now() - age + 30_000).toISOString();
   const main = mainSession("claude-code", { model: "sonnet" });
-  const remote = member("remote-id", "remote", { kind: "claude-code", homeMachineId: "machine-1", permissions: permissions({ requestParticipants: "allow" }) });
+  const remote = member("remote-id", "remote", { kind: "claude-code", ...(own.local ? {} : { homeMachineId: "machine-1" }), permissions: permissions({ requestParticipants: "allow" }) });
   const conversation = mainSessionChat([main, remote], { participantSessions: [sessionRecord(main, "main-thread")] });
   const item = (target: string, handle: string, status: ChatParticipantRequestItem["status"], replyMessageId?: string): ChatParticipantRequestItem =>
     ({ targetParticipantId: target, targetHandle: handle, prompt: "…", status, createdAt: at, updatedAt: later, ...(replyMessageId ? { replyMessageId } : {}) });
@@ -751,4 +752,59 @@ test("an approved permission card holds the task only until its resumed turn beg
   conversation.messages.push({ id: "resumed", role: "participant", participantId: "remote-id", content: "", createdAt: new Date(at).toISOString(), status: "pending",
     metadata: { sourceMessageId: "task", runId: permissionApprovalResumeRunId("card") } } as ChatMessage);
   assert.equal(permissionCardAnswering(conversation, "remote-id", "task", messagesById(conversation), at + 30_000), false, "its turn began: that reply holds it now");
+});
+
+// --- second review pass -------------------------------------------------------
+
+test("a restart more than a day after the member's resume was cut short ends the task interrupted and wakes nobody", async () => {
+  const conversation = machineMemberChat({ items: "answered", status: "resuming_requester", ageMs: 26 * 60 * 60_000, local: true });
+  const old = new Date(Date.now() - 25 * 60 * 60_000).toISOString();
+  conversation.messages.push(
+    { id: "resume-line", role: "system", content: "Auto-resumed @remote after member request.", createdAt: old, status: "done", metadata: { sourceMessageId: "own", parentMessageId: "own" } } as ChatMessage,
+    { id: "cut", role: "participant", participantId: "remote-id", content: "", createdAt: old, status: "pending", metadata: { sourceMessageId: "resume-line", runId: "remote-run-2" } } as ChatMessage
+  );
+  const { service, storage, runs } = testService({ conversation });
+  await chatParts(service).store.requireChat("conversation-1");
+  await settle();
+  const item = itemOf(storage.current, "main-id")!;
+  assert.equal(item.status, "interrupted");
+  assert.equal(item.error, PARTICIPANT_REQUEST_INTERRUPTED_BEFORE_COMPLETION);
+  assert.equal(runs.length, 0, "nobody is resumed a day late");
+  assert.equal(Object.values((storage.current.metadata.activeRunParticipantIdsByRunId ?? {}) as Record<string, string>).includes("remote-id"), false, "and the member is not shown working");
+});
+
+test("a turn the requester starts does not close its request whose member waits on its own question, even with no run of that member here", () => {
+  const conversation = machineMemberChat({ items: "pending_approval", status: "pending_approval" });
+  const { service } = testService({ conversation });
+  const working = clone(conversation);
+  chatParts(service).approvalDecisions.resolveSupersededParticipantInteractions(working, "main-id");
+  assert.equal(working.messages.find((message) => message.id === "task")!.metadata!.participantRequest!.items[0]!.status, "running");
+});
+
+test("a resumed reply cut for a message delivered now ends the task as its first turn would: interrupted, not answered", async () => {
+  const { service, storage } = scenario({
+    worker: async (turn, _prompt, ask) => {
+      if (turn === 1) {
+        await ask("main", "Which color?");
+        return { ok: true, content: "Asked." };
+      }
+      return { ok: true, content: "Half an answer", turnContinues: true } as Reply;
+    }
+  });
+  await service.requestParticipantsFromTool(mainActor(undefined, { turnSegmentId: "t", runId: "r" }), { requests: [{ target: "worker", prompt: "Pick." }] });
+  await waitFor(() => itemOf(storage.current, "main-id")?.status === "interrupted");
+  assert.equal(itemOf(storage.current, "main-id")!.error, PARTICIPANT_REQUEST_CUT_BY_SEND_NOW);
+});
+
+test("an approved card holds the task while its resumed turn is asked and queued, past the grace", () => {
+  const conversation = machineMemberChat({ items: "answered", status: "completed" });
+  const at = Date.now();
+  conversation.metadata.pendingAppToolApprovals = [{
+    id: "card", conversationId: "conversation-1", requesterParticipantId: "remote-id", requesterHandle: "remote", requesterRoleConfigId: GENERIC_ROLE.id,
+    toolName: "app_permissions_request_change", capability: "permissions.request", status: "approved", request: { kind: "portable", permissions: ["webAccess"] },
+    summary: "Grant @remote web access", createdAt: new Date(at).toISOString(), updatedAt: new Date(at).toISOString(),
+    resumeContext: { runId: "remote-run-1", triggerMessageId: "task", participantRequestBatchId: "task-batch" }
+  }] as any;
+  conversation.metadata.activeRunIds = [permissionApprovalResumeRunId("card")];
+  assert.equal(permissionCardAnswering(conversation, "remote-id", "task", messagesById(conversation), at + 5 * 60_000), true);
 });
