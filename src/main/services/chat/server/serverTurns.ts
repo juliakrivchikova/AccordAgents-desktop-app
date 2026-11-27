@@ -13,6 +13,7 @@ import { abortableWait } from "../runs/abortableWait";
 import { INTERRUPTED_REPLY_TEXT } from "../runs/interruptions";
 import { endAbortedServerTurn, turnShown } from "../runs/runOwnerRecords";
 import { createChatMessage } from "../store/messages";
+import { TurnClaimRefusedError } from "./remoteTurnErrors";
 import { deliveryTargetsOf } from "../turns/deliveryTargets";
 import type { ServerTurnOpen } from "../types";
 import type { ChatModules } from "../modules";
@@ -250,32 +251,39 @@ export class ServerTurns {
         const heldEarly = heldOwn
           ?? (request.kind === "compaction" && typeof request.requestedByParticipantId === "string"
             ? this.chat.turnQueue.reserveParticipantTurn(chat.id, participant.id, "exclusive", { operation: true }) : undefined);
-        // A member's own compaction not taken here this time (the server could
-        // not be reached, or it is not this device's yet) keeps its place for
-        // when it is offered again: the turn it goes on in waits behind it.
-        const giveBack = (): void => {
-          if (heldOwn) this.chat.selfCompaction.holdCompactionTurn(turn.runId, heldOwn);
+        // A member's own compaction not taken here this time only because
+        // the server could not be reached keeps its place for when it is
+        // offered again: the turn it goes on in waits behind it. Stopped
+        // meanwhile, refused by the server, or another device's, it is not
+        // offered here again: its place goes.
+        const giveBack = (reofferable: boolean): void => {
+          if (heldOwn && reofferable && !controller.signal.aborted) this.chat.selfCompaction.holdCompactionTurn(turn.runId, heldOwn);
           else heldEarly?.release();
         };
+        // A member's own compaction: it goes on from it here.
+        const resume = request.kind === "compaction" && request.triggeredBy === "agent" ? selfCompactionResumeFrom(request.resume) : undefined;
         // Taken on the server first, like any turn (Д5); a Stop from any
         // device reaches it by its run id.
         let claimed: Awaited<ReturnType<ServerTurns["claimServerTurnHere"]>>;
         try {
           claimed = await this.claimServerTurnHere(turn, controller.signal);
         } catch (error) {
-          giveBack();
+          const refused = error instanceof TurnClaimRefusedError;
+          giveBack(!refused);
+          // It cannot run here: the member goes on, told its compaction failed.
+          if (refused && resume) {
+            void this.chat.selfCompactionResumes.continueAfterSelfCompaction(chat.id, participant.id, resume, { kind: "failed", reason: error.message },
+              typeof request.instructions === "string" ? request.instructions : undefined);
+          }
           throw error;
         }
         if (claimed !== "claimed") {
-          if (claimed === "stopped") heldEarly?.release();
-          else giveBack();
+          giveBack(claimed === "unlinked");
           return true;
         }
         const run = this.chat.participantBatch.registerBackgroundRunController(runId, controller.signal);
         let outcome: "done" | "error" | "stopped" = "error";
         let usage: AgentContextUsage | undefined;
-        // A member's own compaction: it goes on from it here.
-        const resume = request.kind === "compaction" && request.triggeredBy === "agent" ? selfCompactionResumeFrom(request.resume) : undefined;
         let end: SelfCompactionEnd = { kind: "failed" };
         const text = (value: unknown) => typeof value === "string" && value.trim() ? value.trim() : undefined;
         try {
@@ -358,9 +366,9 @@ export class ServerTurns {
 
   /** Takes a turn the server asked of a member here, for a run that has no
    *  turn of its own to open it (a compaction). */
-  async claimServerTurnHere(turn: HubTurn, signal: AbortSignal): Promise<"claimed" | "stopped" | "skip"> {
+  async claimServerTurnHere(turn: HubTurn, signal: AbortSignal): Promise<"claimed" | "stopped" | "skip" | "unlinked"> {
     const link = this.chat.serverLink.current;
-    if (!link) return "skip";
+    if (!link) return "unlinked";
     this.inProcessServerTurns.add(turn.runId);
     this.serverRunOfLocal.set(turn.runId, { runId: turn.runId, conversationId: turn.conversationId, participantId: turn.participantId });
     this.localRunOfServer.set(turn.runId, turn.runId);
@@ -372,13 +380,15 @@ export class ServerTurns {
       const opId = newOpId();
       await link.enqueue([{ opId, kind: "turn.claim", conversationId: turn.conversationId, runId: turn.runId, messageId: turn.messageId, participantId: turn.participantId }]);
       const answer = await link.opAnswered(opId, signal);
-      if (answer.status === "rejected") throw new Error(`The server did not give this turn: ${answer.reason}`);
+      if (answer.status === "rejected") throw new TurnClaimRefusedError(`The server did not give this turn: ${answer.reason}`);
       void this.deps.debugLogs.write("chat.server-turn.claim", { conversationId: turn.conversationId, runId: turn.runId, participantId: turn.participantId, claim: answer.claim });
       if (answer.claim === "claimed" || answer.claim === "already-yours") return "claimed";
       forget();
       return answer.claim === "stopped" ? "stopped" : "skip";
     } catch (error) {
       forget();
+      // Not taken: offered again (a reconnect, the feed), it is claimed again.
+      this.inProcessServerTurns.delete(turn.runId);
       throw error;
     }
   }

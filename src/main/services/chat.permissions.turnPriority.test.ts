@@ -125,12 +125,12 @@ test("a reply the member's CLI began on its own counts as running: a compaction 
   const compaction = run("compaction", reserve(queue, "exclusive", { operation: true, priority: "next" }));
   await delay(10);
   assert.deepEqual(started, []);
-  assert.deepEqual(queue.memberActivity("chat", "member"), { running: "turn", waiting: 1, compacting: true });
+  assert.deepEqual(queue.memberActivity("chat", "member"), { running: "turn", waiting: 1, compacting: true, goingOn: false });
   own.release();
   await compaction.started;
-  assert.deepEqual(queue.memberActivity("chat", "member"), { running: "operation", waiting: 0, compacting: true });
+  assert.deepEqual(queue.memberActivity("chat", "member"), { running: "operation", waiting: 0, compacting: true, goingOn: false });
   compaction.release();
-  assert.deepEqual(queue.memberActivity("chat", "member"), { running: "none", waiting: 0, compacting: false });
+  assert.deepEqual(queue.memberActivity("chat", "member"), { running: "none", waiting: 0, compacting: false, goingOn: false });
 });
 
 test("a turn stopped while it waits behind a turn put next gives up its place", async () => {

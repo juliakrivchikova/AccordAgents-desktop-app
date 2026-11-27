@@ -402,15 +402,18 @@ export class TurnQueue {
   }
 
   /** What the member does now: an operation on its session, a turn, or nothing. */
-  memberActivity(conversationId: string, participantId: string): { running: "operation" | "turn" | "none"; waiting: number; compacting: boolean } {
+  memberActivity(conversationId: string, participantId: string): { running: "operation" | "turn" | "none"; waiting: number; compacting: boolean; goingOn: boolean } {
     const key = `${conversationId}:${participantId}`;
     const running = [...(this.runningTurns.get(key) ?? [])];
+    // Its own compaction and the turn it goes on in are put first: a request
+    // delivered now comes after them. Once only that turn is left and runs,
+    // the member works again (goingOn).
+    const ownCompaction = [...(this.priorityTurns.get(key) ?? [])].filter((turn) => turn.priority === "next" && (turn.operation || turn.userFirst));
     return {
       running: running.some((turn) => turn.operation) ? "operation" : running.length > 0 ? "turn" : "none",
       waiting: this.pendingTurns.get(key)?.size ?? 0,
-      // Its own compaction (or the turn it goes on in) is put first: a
-      // request delivered now comes after them.
-      compacting: [...(this.priorityTurns.get(key) ?? [])].some((turn) => turn.priority === "next" && (turn.operation || turn.userFirst))
+      compacting: ownCompaction.length > 0,
+      goingOn: ownCompaction.length > 0 && ownCompaction.every((turn) => turn.userFirst && turn.running)
     };
   }
 

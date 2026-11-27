@@ -179,6 +179,9 @@ export class ParticipantRequests {
       const busyElsewhere = !this.chat.host.runsHere(target) && [...this.chat.serverTurns.serverTurnStates.values()].some((turn) =>
         turn.conversationId === conversation.id && turn.participantId === target.id && turn.state === "claimed");
       const handle = `@${target.handle}`;
+      if (activity.goingOn) {
+        return [{ target: handle, way: "after-operation", note: `${handle} has just compacted its context and goes on with its work: it takes the request right after that turn, before anything else waiting for it.` }];
+      }
       if (activity.compacting) {
         return [{ target: handle, way: "after-operation", note: `${handle} is compacting its context: it takes the request right after that and the turn it goes on in, before anything else waiting for it.` }];
       }

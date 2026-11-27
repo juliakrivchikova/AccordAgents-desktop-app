@@ -182,3 +182,61 @@ test("on a machine, a member's own compaction whose claim failed keeps its place
   await Promise.race([after.wait(), new Promise((_, reject) => setTimeout(() => reject(new Error("the member's queue is stuck")), 5_000))]);
   after.release();
 });
+
+/** A machine member's own compaction asked here and offered to this machine:
+ *  the test plays the server's answer to its claim. */
+async function offeredOwnCompaction(claimAnswer: (opId: string, signal?: AbortSignal) => Promise<any> | undefined) {
+  const participant = chatParticipant({ homeMachineId: "box", ...ALLOWED });
+  const chat = selfCompactingChat({ participant, turn: async () => "unused" });
+  const parts = chatParts(chat.service);
+  chat.service.setHostMachineId("box");
+  parts.host.machineRuntime = true;
+  const link = fakeServerLink("machine-device");
+  const answered = link.opAnswered;
+  link.opAnswered = (async (opId: string, signal?: AbortSignal) => {
+    const op = link.ops.find((item) => item.opId === opId);
+    return (op?.kind === "turn.claim" ? claimAnswer(opId, signal) : undefined) ?? answered(opId);
+  }) as typeof link.opAnswered;
+  chat.service.setServerLink(link);
+  chat.storage.current.messages.push(acceptedMessage());
+  const conversation = await parts.store.requireChat(chat.conversation.id);
+  const resume = { runId: "run-asked-here", triggerMessageId: "anchor" };
+  parts.selfCompaction.startQueuedSelfCompaction(conversation, chat.participant, { type: "self_compaction" }, "run-asked-here", resume);
+  await waitFor(() => link.ops.some((op) => op.kind === "turn.request" && op.runId === "turn-run-asked-here"), 2_000);
+  const turn = { runId: "turn-run-asked-here", conversationId: conversation.id, messageId: "anchor", participantId: chat.participant.id, state: "requested" as const,
+    requestedBy: "machine-device", request: { kind: "compaction", triggeredBy: "agent", resume } };
+  const stuck = async () => {
+    const after = parts.turnQueue.reserveParticipantTurn(conversation.id, chat.participant.id);
+    const started = await Promise.race([after.wait().then(() => true), new Promise((resolve) => setTimeout(() => resolve(false), 2_000))]);
+    after.release();
+    return !started;
+  };
+  return { chat, parts, link, conversation, turn, stuck };
+}
+
+test("on a machine, a member's own compaction stopped while the machine claims it gives its place back: nothing waits forever", async () => {
+  const { parts, conversation, turn, stuck } = await offeredOwnCompaction((_opId, signal) =>
+    new Promise((_resolve, reject) => signal?.addEventListener("abort", () => reject(new Error("aborted")), { once: true })));
+  const started = parts.serverTurns.startServerTurn(turn).catch(() => undefined);
+  await new Promise((resolve) => setTimeout(resolve, 50));
+  assert.equal(parts.selfCompaction.heldCompactionTurns.size, 0, "taken by the claim");
+  // The User's Stop reaches the turn while the claim waits for its answer.
+  parts.serverTurns.noteServerTurn({ ...turn, state: "stopped" });
+  await started;
+  assert.equal(parts.selfCompaction.heldCompactionTurns.size, 0, "its place is not kept for a turn that is over");
+  assert.equal(parts.turnQueue.memberActivity(conversation.id, turn.participantId).compacting, false);
+  assert.equal(await stuck(), false);
+});
+
+test("on a machine, a member's own compaction whose claim the server refused gives its place back, and offered again it is claimed again", async () => {
+  let claims = 0;
+  const { chat, parts, link, turn, stuck } = await offeredOwnCompaction(() => (claims += 1) === 1 ? Promise.resolve({ status: "rejected", reason: "There is no such message." }) : undefined);
+  await parts.serverTurns.startServerTurn(turn).catch(() => undefined);
+  assert.equal(parts.selfCompaction.heldCompactionTurns.size, 0);
+  // It goes on, told its compaction failed, and nothing waits behind it.
+  await waitFor(() => chat.debugEvents.some(({ event }) => event === "chat.self-compaction.resumed"), 5_000);
+  assert.equal(await stuck(), false);
+  void parts.serverTurns.startServerTurn(turn);
+  await waitFor(() => chat.order.includes("compact codex-admin"), 5_000);
+  assert.equal(link.ops.filter((op) => op.kind === "turn.claim" && op.runId === turn.runId).length, 2);
+});

@@ -551,7 +551,7 @@ export class ParticipantTurn {
       }
       // `clean`: a fork whose copy could not be made starts a session of its
       // own from the saved chat context, in this same turn (below).
-      const runCli = (clean = false): Promise<ParticipantRunResult> => this.deps.cliRunner.run(cliParticipant, clean ? resumeFallbackPrompt ?? prompt : prompt, runPath, undefined, "chat", signal, {
+      const runCliOnce = (clean = false): Promise<ParticipantRunResult> => this.deps.cliRunner.run(cliParticipant, clean ? resumeFallbackPrompt ?? prompt : prompt, runPath, undefined, "chat", signal, {
         persistSession: true,
         ...(clean ? {} : {
           sessionId: session.sessionId,
@@ -623,8 +623,12 @@ export class ParticipantTurn {
             : undefined
         }
       });
+      // Its CLI has returned until a retry runs it again (cliReturnedRunIds).
+      const runCli = async (clean = false): Promise<ParticipantRunResult> => {
+        this.chat.activeRuns.cliReturnedRunIds.delete(runId);
+        try { return await runCliOnce(clean); } finally { this.chat.activeRuns.cliReturnedRunIds.add(runId); }
+      };
       let result = await runCli();
-      this.chat.activeRuns.cliReturnedRunIds.add(runId);
       if (!this.chat.host.machineRuntime) {
         this.chat.promptSuggestions.suggestions.replyEnded(conversation.id, participant.id, runId);
       }
