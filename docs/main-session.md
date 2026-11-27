@@ -132,7 +132,12 @@ verbatim there). Modelled on T3 Code (`~/reference/t3code`,
   reply still goes back to the requester. A Claude Code member gets it in its
   live CLI (TurnQueue `live`): once the message is in the CLI's queue the app
   sends the CLI's own send-now for it (`RunCancel.deliverNow`), so the running
-  step takes it at its next tool result or is cut for it. A member whose CLI
+  step takes it at its next tool result or is cut for it. A Codex member's
+  running turn is steered with it (`turn/steer`, Enter mid-turn in its CLI):
+  the reply so far ends as a turn that goes on and the rest of the turn is the
+  request's reply, split as Claude's is (`AppServerTurns.steer`, handed over
+  as Codex's answer is read); when Codex cannot take it (no turn yet, an
+  approval waits, it refuses) the turn is cut as below. A member whose CLI
   cannot take a message in the middle of a turn (Antigravity runs a process
   per turn) has its running turn cut as Send now cuts it (it keeps what it
   wrote, its run settles, a request it answered ends interrupted) and goes on

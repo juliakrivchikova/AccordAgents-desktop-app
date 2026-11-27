@@ -99,6 +99,9 @@ export class ParticipantTurn {
       /** Its message is in the member's Claude Code CLI (a request delivered
        *  now gets the CLI's send-now from here). */
       onCliMessageWritten?: () => void;
+      /** A request delivered now to a Codex member: steered into its running
+       *  turn (CliAgentRunOptions.steerIntoRunningTurn). */
+      steerIntoRunningTurn?: (outcome: "steered" | "not-steered") => void;
     }
   ): Promise<ChatMessage[]> {
     this.chat.host.assertOwnsParticipant(participant);
@@ -574,6 +577,7 @@ export class ParticipantTurn {
         agentMode,
         permissions: cliPermissions,
         nativeGoal,
+        ...(options.steerIntoRunningTurn ? { steerIntoRunningTurn: options.steerIntoRunningTurn } : {}),
         onOutput: progressSink.emit,
         onSessionId: persistSessionId,
         onCodexServerRequest: (request) => this.chat.codexApprovals.requestCodexApprovalFromCli(

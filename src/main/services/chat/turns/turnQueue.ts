@@ -173,7 +173,13 @@ export class TurnQueue {
             ...options,
             turnSegmentId,
             queuedInCli: Boolean(reservation.behindMemberTurn),
-            ...(delivery === "live" ? {
+            ...(delivery === "live" && participant.kind === "codex-cli" ? {
+              // Codex steers its running turn with it; when it cannot, the
+              // running turn is cut and this one runs next, in its session.
+              steerIntoRunningTurn: (outcome: "steered" | "not-steered") => {
+                void this.chat.runCancel.deliverNow(conversation.id, participant.id, runId, outcome === "steered" ? "steered" : "interrupt-and-restart").catch(() => undefined);
+              }
+            } : delivery === "live" ? {
               onCliMessageWritten: () => {
                 void this.chat.runCancel.deliverNow(conversation.id, participant.id, runId, "into-running-turn").catch(() => undefined);
               }

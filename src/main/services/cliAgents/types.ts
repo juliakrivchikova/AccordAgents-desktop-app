@@ -84,6 +84,9 @@ export interface CliAgentRunOptions {
   nativeGoal?: NativeGoalRun;
   onProviderActivity?: () => void;
   onCodexServerRequest?: CliAgentCodexServerRequestCallback;
+  /** Codex only: a request delivered now goes into the member's running turn
+   *  (WarmAgentEntry.steer); told whether it did, before the reply ends. */
+  steerIntoRunningTurn?: (outcome: "steered" | "not-steered") => void;
   /**
    * App-internal run that is not a participant turn: keep the user's MCP servers,
    * skills and subagents out of it. Used by the avatar studio.
@@ -290,6 +293,22 @@ export interface WarmAgentEntry {
    *  becomes idle after work it did on its own. */
   idleTimeoutMs?: number;
   compact?: (instructions?: string, signal?: AbortSignal, onSessionId?: CliAgentSessionIdCallback) => Promise<CliAgentCompactResult>;
+  /** Codex only: a message typed into the running turn, as Codex's own steer
+   *  (`turn/steer`, Enter mid-turn in its CLI). The running reply ends there
+   *  as a turn that goes on (`turnContinues`) and the rest of the turn is
+   *  this message's reply, as Claude Code's transcript splits a step a
+   *  message joined. Undefined when there is no turn to steer (none runs, it
+   *  waits on an approval, or Codex refused it): the caller runs the message
+   *  as a turn of its own. */
+  steer?: (
+    prompt: string,
+    signal?: AbortSignal,
+    onOutput?: CliAgentOutputCallback,
+    onSessionId?: CliAgentSessionIdCallback,
+    timeoutMs?: number,
+    onCodexServerRequest?: CliAgentCodexServerRequestCallback,
+    images?: CliAgentImageInput[]
+  ) => Promise<Promise<ParticipantRunResult> | undefined>;
   /** Claude only: the context the live session holds now, as the CLI's own
    *  `/context` counts it (`get_context_usage`); after a `/compact`, the
    *  compacted figure. Undefined when the CLI does not answer it. */

@@ -107,7 +107,12 @@ export class RunCancel {
    * as a turn that goes on, never "stopped by user"), and the request runs
    * next in the same session (TurnQueue `next`).
    */
-  async deliverNow(conversationId: string, participantId: string, waitingRunId: string, way: "into-running-turn" | "interrupt-and-restart"): Promise<void> {
+  async deliverNow(conversationId: string, participantId: string, waitingRunId: string, way: "into-running-turn" | "steered" | "interrupt-and-restart"): Promise<void> {
+    // Codex took it into its running turn itself (its steer): only said.
+    if (way === "steered") {
+      void this.deps.debugLogs.write("chat.deliver-now", { conversationId, participantId, runId: waitingRunId, way });
+      return;
+    }
     if (way === "into-running-turn") {
       // Asked as the message is written: it is in the CLI's queue now.
       // "not_at_cli": the CLI took it already. "unsupported": the CLI cannot

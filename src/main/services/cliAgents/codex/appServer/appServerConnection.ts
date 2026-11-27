@@ -22,7 +22,9 @@ export class AppServerConnection {
     private readonly launch: Pick<AppServerLaunch, "child" | "cli" | "options" | "participant">
   ) {}
 
-  sendRequest(method: string, params: unknown, timeoutMs?: number): Promise<unknown> {
+  /** `onAnswer`: told as Codex's answer is read, before the notifications
+   *  that follow it in the same output are (a steer hands its turn over there). */
+  sendRequest(method: string, params: unknown, timeoutMs?: number, onAnswer?: (answer: { ok: true; result: unknown } | { ok: false; error: Error }) => void): Promise<unknown> {
     if (this.closed || this.launch.child.exitCode !== null || this.launch.child.killed) {
       return Promise.reject(new Error("codex app-server process is not running"));
     }
@@ -42,8 +44,14 @@ export class AppServerConnection {
         this.pendingRequests.delete(id);
         callback();
       };
-      const resolveRequest = (result: unknown): void => settle(() => resolve(result));
-      const rejectRequest = (error: Error): void => settle(() => reject(error));
+      const resolveRequest = (result: unknown): void => settle(() => {
+        onAnswer?.({ ok: true, result });
+        resolve(result);
+      });
+      const rejectRequest = (error: Error): void => settle(() => {
+        onAnswer?.({ ok: false, error });
+        reject(error);
+      });
       this.pendingRequests.set(id, { method, resolve: resolveRequest, reject: rejectRequest });
       if (timeoutMs && timeoutMs > 0) {
         timer = setTimeout(() => {

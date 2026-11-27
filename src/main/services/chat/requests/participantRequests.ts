@@ -186,7 +186,13 @@ export class ParticipantRequests {
         return [{ target: handle, way: "started", note: `${handle} was not working: it starts on the request now.` }];
       }
       if (memberDeliveryWay(target) === "into-running-turn") {
-        return [{ target: handle, way: "into-running-turn", note: `${handle} is working: the request goes into its running turn now, as a message typed into Claude Code mid-turn (it takes it at its next tool result, or its step is cut for it).` }];
+        return [{
+          target: handle,
+          way: "into-running-turn",
+          note: target.kind === "codex-cli"
+            ? `${handle} is working: the request goes into its running turn now, as a message typed into Codex mid-turn (Codex steers the turn with it). If Codex cannot take it there, the running turn is interrupted (what it wrote stays) and it goes on at once in the same session with this request.`
+            : `${handle} is working: the request goes into its running turn now, as a message typed into Claude Code mid-turn (it takes it at its next tool result, or its step is cut for it).`
+        }];
       }
       const cli = target.kind === "gemini-cli" ? "Antigravity" : target.kind === "codex-cli" ? "Codex" : "its CLI";
       return [{

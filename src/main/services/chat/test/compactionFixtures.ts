@@ -68,7 +68,7 @@ export function fromServer(deviceId: string, effect: HubOpEffect): HubFeedEntry 
 export function selfCompactingChat(options: {
   participant?: Partial<ChatParticipant>;
   others?: ChatParticipant[];
-  turn: (context: { prompt: string; participantId: string; actor: any; service: ChatService; call: number; signal?: AbortSignal; options: Record<string, unknown> }) => Promise<string>;
+  turn: (context: { prompt: string; participantId: string; actor: any; service: ChatService; call: number; signal?: AbortSignal; options: Record<string, unknown> }) => Promise<string | { content: string; turnContinues?: boolean }>;
   compactSession?: (signal: AbortSignal | undefined) => Promise<Record<string, unknown>>;
 }) {
   const participant = chatParticipant(options.participant);
@@ -97,7 +97,8 @@ export function selfCompactingChat(options: {
         prompt, participantId: runParticipant.id, actor: { ...grants.get(runParticipant.id), capabilities: ["compaction.request", "participants.request"] },
         service: made.service, call: prompts.filter((item) => item.participantId === runParticipant.id).length, signal, options: runOptions
       });
-      return { participant: runParticipant, ok: true, content, durationMs: 1, sessionId: `session-${runParticipant.id}` };
+      const said = typeof content === "string" ? { content } : content;
+      return { participant: runParticipant, ok: true, ...said, durationMs: 1, sessionId: `session-${runParticipant.id}` };
     }
   });
   chatParts(made.service).chatHistory.ensureHistoryFiles = async () => tmpdir();

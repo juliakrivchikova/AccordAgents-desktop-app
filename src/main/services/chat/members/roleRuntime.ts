@@ -289,9 +289,11 @@ export function deliversNow(triggerMessage: ChatMessage, participantId: string):
 /** How a busy member takes a message delivered now, as its dedicated CLI
  *  takes one typed mid-turn: Claude Code into its running turn (its queue
  *  hands it to the running step at the next tool result, and its send-now
- *  makes that happen now); a CLI that cannot take a message in the middle of
- *  a turn (Antigravity runs a process per turn) has the turn cut as Stop cuts
- *  it, and goes on with the message at once in the same session. */
+ *  makes that happen now); Codex steers its running turn with it (Enter
+ *  mid-turn in its CLI, `turn/steer`); a CLI that cannot take a message in
+ *  the middle of a turn (Antigravity runs a process per turn) has the turn
+ *  cut as Stop cuts it, and goes on with the message at once in the same
+ *  session. */
 export function memberDeliveryWay(participant: Pick<ChatParticipant, "kind">): "into-running-turn" | "interrupt-and-restart" {
-  return participant.kind === "claude-code" ? "into-running-turn" : "interrupt-and-restart";
+  return participant.kind === "claude-code" || participant.kind === "codex-cli" ? "into-running-turn" : "interrupt-and-restart";
 }

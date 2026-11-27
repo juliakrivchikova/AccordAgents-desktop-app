@@ -8,18 +8,19 @@ import { chatParticipant, selfCompactingChat, waitFor } from "./chat/test/compac
 
 const ASKS = { permissions: normalizeChatAgentPermissions({ ...defaultChatAgentPermissions(), requestParticipants: "allow" }) };
 
-/** A worker (Codex here: a CLI the app does not steer mid-turn) busy with a
- *  long turn, a request that waits for it, and a correction delivered now. */
-function busyWorkerChat() {
+/** A worker busy with a long turn (Antigravity unless said: a CLI that cannot
+ *  take a message mid-turn), a request that waits for it, and a correction
+ *  delivered now. */
+function busyWorkerChat(kind: "gemini-cli" | "codex-cli" = "gemini-cli") {
   const queued = chatParticipant({ id: "asker-queued", handle: "queued", ...ASKS });
   const urgent = chatParticipant({ id: "asker-urgent", handle: "urgent", ...ASKS });
   const boss = chatParticipant({ id: "asker-boss", handle: "boss", ...ASKS });
   let releaseLong!: () => void;
   const results: Record<string, any> = {};
   const chat = selfCompactingChat({
-    participant: { id: "worker", handle: "worker" },
+    participant: { id: "worker", handle: "worker", kind },
     others: [queued, urgent, boss],
-    turn: async ({ participantId, prompt, actor, service, call, signal }) => {
+    turn: async ({ participantId, prompt, actor, service, call, signal, options }) => {
       if (participantId === "asker-boss") {
         if (call === 1) results.boss = await service.requestParticipantsFromTool(actor, { requests: [{ target: "worker", prompt: "Build the old variant" }] });
         return call === 1 ? "Asked." : "Noted.";
@@ -33,12 +34,20 @@ function busyWorkerChat() {
         return "Asked now.";
       }
       if (call === 1) {
-        // The long turn: it ends only when it is cut (or the test lets it).
-        await new Promise<void>((resolve) => {
-          releaseLong = resolve;
-          signal?.addEventListener("abort", () => resolve(), { once: true });
+        // The long turn: it ends only when it is cut, or steered (Codex
+        // ends the reply so far there), or the test lets it.
+        const steered = await new Promise<boolean>((resolve) => {
+          releaseLong = () => resolve(false);
+          results.steer = () => resolve(true);
+          signal?.addEventListener("abort", () => resolve(false), { once: true });
         });
-        return "Half of the old variant.";
+        return steered ? { content: "Half of the old variant.", turnContinues: true } : "Half of the old variant.";
+      }
+      // A Codex member is steered (or told it could not be) by its runner.
+      const steer = options.steerIntoRunningTurn as ((outcome: "steered" | "not-steered") => void) | undefined;
+      if (steer) {
+        steer(results.refuseSteer ? "not-steered" : "steered");
+        if (!results.refuseSteer) results.steer?.();
       }
       return /Urgent correction/.test(prompt) ? "Took the correction." : /Queued question/.test(prompt) ? "Answered the queued question." : "Other.";
     }
@@ -60,7 +69,7 @@ test("deliver now cuts a busy member's running turn and runs the request next, b
   assert.deepEqual(results.urgent.delivery, [{
     target: "@worker",
     way: "interrupted-and-restarted",
-    note: "@worker is working, and Codex cannot take a message in the middle of a turn: its running turn is interrupted (what it wrote stays, as after a Stop) and it goes on at once in the same session with this request. Work that was waiting for it runs after."
+    note: "@worker is working, and Antigravity cannot take a message in the middle of a turn: its running turn is interrupted (what it wrote stays, as after a Stop) and it goes on at once in the same session with this request. Work that was waiting for it runs after."
   }]);
   const workerPrompts = chat.prompts.filter((item) => item.participantId === "worker").map((item) => item.prompt);
   assert.match(workerPrompts[1], /Urgent correction/, "the request delivered now runs right after the cut turn");
@@ -81,6 +90,30 @@ test("deliver now cuts a busy member's running turn and runs the request next, b
   assert.match(resume.content, /\n@worker: Interrupted before it finished: the member was sent a message to take now/);
   assert.equal(chat.debugEvents.some(({ event, payload }) => event === "chat.deliver-now" && (payload.cutRunIds as string[] | undefined)?.length === 1), true);
 });
+
+for (const refuseSteer of [false, true]) {
+  test(refuseSteer
+    ? "a Codex member that cannot be steered has its running turn cut instead, and takes the request next"
+    : "deliver now steers a busy Codex member's running turn: the reply so far goes on in the request's reply, nothing is cut", async () => {
+    const { chat, results } = busyWorkerChat("codex-cli");
+    results.refuseSteer = refuseSteer;
+    await chat.service.sendMessage({ conversationId: chat.conversation.id, runId: "long-run", content: "@boss have worker build the old variant" });
+    await waitFor(() => chat.prompts.filter((item) => item.participantId === "worker").length === 1, 5_000);
+    await chat.service.sendMessage({ conversationId: chat.conversation.id, runId: "urgent-run", content: "@urgent tell worker now" });
+    await waitFor(() => results.urgent !== undefined, 5_000);
+    assert.equal(results.urgent.delivery?.[0]?.way, "into-running-turn");
+    assert.match(results.urgent.delivery?.[0]?.note, /as a message typed into Codex mid-turn \(Codex steers the turn with it\)/);
+    await waitFor(() => chat.storage.current.metadata.running === false, 8_000);
+    const cut = chat.storage.current.messages.find((message: any) => message.content === "Half of the old variant.");
+    assert.equal(cut.metadata.turnContinues, true);
+    assert.notEqual(cut.metadata.terminalReason, "user-stopped");
+    const items = chat.storage.current.messages.map((message: any) => message.metadata?.participantRequest).filter(Boolean).flatMap((batch: any) => batch.items);
+    assert.equal(items.find((item: any) => item.prompt === "Build the old variant").status, "interrupted");
+    assert.equal(items.find((item: any) => item.prompt === "Urgent correction").status, "answered");
+    const said = chat.debugEvents.filter(({ event }) => event === "chat.deliver-now").map(({ payload }) => payload.way);
+    assert.deepEqual(said, refuseSteer ? ["interrupt-and-restart"] : ["steered"]);
+  });
+}
 
 test("deliver now to a member that is not working just starts it, and says so", async () => {
   const urgent = chatParticipant({ id: "asker-urgent", handle: "urgent", ...ASKS });

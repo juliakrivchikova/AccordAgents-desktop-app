@@ -214,6 +214,17 @@ export class CodexRuns {
     const key = warmAgentKey(participant, repoPath, kind, options);
     const scopeKey = warmAgentScopeKey(warm);
     let entry: WarmAgentEntry | undefined;
+    // A request delivered now goes into the turn that runs (Codex's steer).
+    let steering = options.steerIntoRunningTurn;
+    const busyOther = steering && [...this.cli.warmAgents.entries.values()]
+      .find((item) => item.scopeKey === scopeKey && item.key !== key && !item.closed && (item.activeRuns ?? 0) > 0);
+    if (busyOther && steering) {
+      // The turn runs on a process started with other settings: it is not
+      // steered, it is cut (the caller does), and this one starts after it.
+      steering("not-steered");
+      steering = undefined;
+      await busyOther.queue.catch(() => undefined);
+    }
     const finishPreparation = this.cli.warmAgents.beginWarmPreparation(key);
     try {
       await this.cli.warmAgents.closeStaleWarmAgents(scopeKey, key);
@@ -246,21 +257,37 @@ export class CodexRuns {
       }
     } finally { finishPreparation(); }
 
-    return this.cli.warmAgents.enqueueWarmRun(entry, async () => {
+    const runNow = (target: WarmAgentEntry): Promise<ParticipantRunResult> => target.run(
+      prompt,
+      signal,
+      options.onOutput,
+      options.onSessionId,
+      options.timeoutMs,
+      options.nativeGoal,
+      options.onCodexServerRequest,
+      undefined,
+      options.images?.items
+    );
+    // Steered into the turn that runs, not behind it; with nothing to steer
+    // it runs as soon as that turn ends.
+    const earlier = entry.queue;
+    const admit = <T>(task: () => Promise<T>): Promise<T> => steering
+      ? this.cli.warmAgents.trackWarmRun(entry as WarmAgentEntry, task, Promise.resolve())
+      : this.cli.warmAgents.enqueueWarmRun(entry as WarmAgentEntry, task);
+    const reply = async (target: WarmAgentEntry): Promise<ParticipantRunResult> => {
+      if (!steering) return runNow(target);
+      const steered = await target.steer?.(prompt, signal, options.onOutput, options.onSessionId, options.timeoutMs, options.onCodexServerRequest, options.images?.items)
+        .catch(() => undefined);
+      steering(steered ? "steered" : "not-steered");
+      if (steered) return steered;
+      await earlier.catch(() => undefined);
+      return runNow(target);
+    };
+    return admit(async () => {
       this.cli.warmAgents.clearWarmIdleTimer(entry as WarmAgentEntry);
       try {
         const result = withAppMcpClientStatus(
-          await (entry as WarmAgentEntry).run(
-            prompt,
-            signal,
-            options.onOutput,
-            options.onSessionId,
-            options.timeoutMs,
-            options.nativeGoal,
-            options.onCodexServerRequest,
-            undefined,
-            options.images?.items
-          ),
+          await reply(entry as WarmAgentEntry),
           participant,
           options
         );

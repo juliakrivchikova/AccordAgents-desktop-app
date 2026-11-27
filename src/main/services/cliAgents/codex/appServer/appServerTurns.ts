@@ -3,6 +3,7 @@ import type { ParticipantRunResult } from "../../../providers";
 import { CodexAppServerRunError, isCodexCollaborationModeRefusal } from "../appServerErrors";
 import { handleCodexAppServerCompactNotification } from "../appServerEvents";
 import { codexAppServerThreadResumeParams, codexAppServerTurnInput, codexPrompt, codexReasoningEffort } from "../appServerParams";
+import { codexAppServerFinalContent, flushCodexAppServerAgentText } from "../appServerText";
 import type { CodexAppServerPendingCompact, CodexAppServerPendingTurn } from "../types";
 import { CLI_AGENT_COMPACT_TIMEOUT_MS } from "../../constants";
 import { errorText, reportSessionId } from "../../runs/outputText";
@@ -20,6 +21,9 @@ export function resolveCodexCompactTimeoutMs(requestedTimeoutMs: number | undefi
     ? requestedTimeoutMs
     : CLI_AGENT_COMPACT_TIMEOUT_MS;
 }
+
+/** How long Codex has to take a message steered into its running turn. */
+const CODEX_STEER_TIMEOUT_MS = 15_000;
 
 interface CodexAppServerTurnStartResult {
   turn?: {
@@ -165,8 +169,110 @@ export class AppServerTurns {
       queue: Promise.resolve(),
       closed: false,
       compact: (instructions, signal, onSessionId) => this.compact(instructions, signal, onSessionId),
-      run: (...args) => this.run(...args)
+      run: (...args) => this.run(...args),
+      steer: (...args) => this.steer(...args)
     };
+  }
+
+  /**
+   * A message typed into the running turn (WarmAgentEntry.steer): Codex's own
+   * `turn/steer`, as Enter mid-turn does in its CLI. Once Codex takes it, the
+   * reply so far ends as a turn that goes on (`turnContinues`), and what the
+   * turn does from here is this message's reply. Not while the turn waits on
+   * an approval (the CLI's prompt takes the input then) or runs a native goal.
+   */
+  private async steer(
+    turnPrompt: string,
+    signal?: AbortSignal,
+    onOutput?: CliAgentOutputCallback,
+    onSessionId?: CliAgentSessionIdCallback,
+    timeoutMsOverride?: number,
+    onCodexServerRequest?: CliAgentCodexServerRequestCallback,
+    images?: CliAgentImageInput[]
+  ): Promise<Promise<ParticipantRunResult> | undefined> {
+    const running = this.pendingTurn;
+    if (!running?.turnId || running.nativeGoal || running.outstandingServerRequestIds.size > 0 || signal?.aborted) return undefined;
+    const input = codexAppServerTurnInput(codexPrompt(turnPrompt, this.launch.repoPath, this.launch.diffMode, this.launch.kind, this.launch.options), images);
+    let reply: Promise<ParticipantRunResult> | undefined;
+    try {
+      // Handed over as Codex's answer is read: what the turn says after it
+      // (in the same output too) is this message's reply.
+      await this.server.connection.sendRequest("turn/steer", { threadId: running.threadId, expectedTurnId: running.turnId, input }, CODEX_STEER_TIMEOUT_MS, (answer) => {
+        if (answer.ok && this.pendingTurn === running) reply = this.handOverSteeredTurn(running, signal, onOutput, onSessionId, timeoutMsOverride, onCodexServerRequest);
+      });
+    } catch (error) {
+      void this.launch.debugLogs?.write("cli.codex-app-server.steer-refused", { threadId: running.threadId, turnId: running.turnId, message: errorText(error) });
+      return undefined;
+    }
+    return reply;
+  }
+
+  private handOverSteeredTurn(
+    running: CodexAppServerPendingTurn,
+    signal: AbortSignal | undefined,
+    onOutput: CliAgentOutputCallback | undefined,
+    onSessionId: CliAgentSessionIdCallback | undefined,
+    timeoutMsOverride: number | undefined,
+    onCodexServerRequest: CliAgentCodexServerRequestCallback | undefined
+  ): Promise<ParticipantRunResult> {
+    flushCodexAppServerAgentText(running);
+    const startedAt = Date.now();
+    const timeoutMs = timeoutMsOverride ?? this.launch.cli.cliRuns.runTimeoutMs;
+    reportSessionId(onSessionId, running.threadId);
+    const reply = new Promise<ParticipantRunResult>((resolve, reject) => {
+      this.pendingTurn = {
+        startedAt,
+        threadId: running.threadId,
+        cwd: running.cwd,
+        turnId: running.turnId,
+        acceptedByProvider: true,
+        messages: [],
+        streamedText: "",
+        visibleTranscript: "",
+        // A step that started before the message ends in this reply.
+        activityItems: new Map(running.activityItems),
+        completedAgentMessages: [],
+        nextAgentMessageStartsBlock: false,
+        model: running.model,
+        contextUsage: running.contextUsage,
+        timeoutRemainingMs: timeoutMs > 0 ? timeoutMs : undefined,
+        outstandingServerRequestIds: new Set(),
+        onOutput,
+        onCodexServerRequest,
+        resolve,
+        reject
+      };
+    });
+    const steered = this.pendingTurn!;
+    // The reply so far is over: its timer and Stop no longer reach the turn.
+    if (running.timer) clearTimeout(running.timer);
+    running.abort?.();
+    running.resolve({
+      participant: this.launch.participant,
+      ok: true,
+      content: codexAppServerFinalContent(running),
+      durationMs: Date.now() - running.startedAt,
+      sessionId: running.threadId,
+      roleRuntime: undefined,
+      contextUsage: running.contextUsage,
+      turnContinues: true
+    });
+    void this.launch.debugLogs?.write("cli.codex-app-server.steered", { threadId: running.threadId, turnId: running.turnId });
+    if (timeoutMs > 0) this.armPendingTurnTimer(steered, timeoutMs);
+    const abort = (): void => {
+      if (this.pendingTurn !== steered) return;
+      this.server.guardian.rejectPendingGuardianApprovals(new Error("Stopped by user."));
+      void this.server.approvals.cancelPendingInboundApprovals(steered, "Stopped by user.").catch(() => undefined);
+      if (steered.turnId && this.captureBeforeInterrupt()) {
+        void this.server.connection.sendRequest("turn/interrupt", { threadId: steered.threadId, turnId: steered.turnId }).catch(() => undefined);
+      }
+      this.rejectPendingTurn(new Error("codex app-server turn was cancelled"));
+    };
+    if (signal) {
+      steered.abort = () => signal.removeEventListener("abort", abort);
+      signal.addEventListener("abort", abort, { once: true });
+    }
+    return reply;
   }
 
   private async compact(
