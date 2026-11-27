@@ -334,8 +334,8 @@ async function taskRoundTrip(chatView?: "classic" | "sessions"): Promise<void> {
   await waitFor(() => runs.some((run) => run.participant.id === worker.id) && runs.some((run) => run.participant.id === reviewer.id));
   const workerRun = runs.find((run) => run.participant.id === worker.id)!;
   const reviewerRun = runs.find((run) => run.participant.id === reviewer.id)!;
-  assert.match(workerRun.prompt, /<<<REQUEST ([0-9a-f]{8}) from @main>>>\nRun the tests\.\n<<<END REQUEST \1>>>(\n\n<<<APP \1>>>\nCompaction: when a big stage of this work is finished, (ask to )?compact your context before the next one, as your Compaction instructions say\.\n<<<END APP \1>>>)?$/, workerRun.prompt);
-  assert.match(reviewerRun.prompt, /<<<REQUEST ([0-9a-f]{8}) from @main>>>\nReview the diff\.\n<<<END REQUEST \1>>>(\n\n<<<APP \1>>>\nCompaction: when a big stage of this work is finished, (ask to )?compact your context before the next one, as your Compaction instructions say\.\n<<<END APP \1>>>)?$/, reviewerRun.prompt);
+  assert.match(workerRun.prompt, /<<<REQUEST ([0-9a-f]{8}) from @main>>>\nRun the tests\.\n<<<END REQUEST \1>>>\n\n<<<APP \1>>>\nCompaction: when a big stage of this work is finished, (ask to )?compact your context before the next one, as your Compaction instructions say\.\n<<<END APP \1>>>$/, workerRun.prompt);
+  assert.match(reviewerRun.prompt, /<<<REQUEST ([0-9a-f]{8}) from @main>>>\nReview the diff\.\n<<<END REQUEST \1>>>\n\n<<<APP \1>>>\nCompaction: when a big stage of this work is finished, (ask to )?compact your context before the next one, as your Compaction instructions say\.\n<<<END APP \1>>>$/, reviewerRun.prompt);
   assert.doesNotMatch(workerRun.prompt, /Review the diff|Triggering message|Current request|Message ID/);
 
   // The main session is resumed with their replies, as data between markers.
