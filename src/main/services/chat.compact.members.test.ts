@@ -9,7 +9,7 @@ import { defaultChatAgentPermissions, normalizeChatAgentPermissions } from "../.
 import { readParticipantCompactions } from "../../shared/chatRunState";
 import { chatDependencies, chatParts } from "./chat/test/chatParts";
 import { memoryIndexKey } from "./chat/members/roleRuntime";
-import { compactionAccessLines } from "./chat/turns/promptSections";
+import { compactionAccessLines, stagedWorkCompactionNote } from "./chat/turns/promptSections";
 import {
   chatConversation, chatParticipant, chatSession, NOW, selfCompactingChat, testService, waitFor
 } from "./chat/test/compactionFixtures";
@@ -864,4 +864,15 @@ test("a member compacting while another member's compaction finishes stays compa
   } finally {
     await rm(tempRoot, { recursive: true, force: true });
   }
+});
+
+test("work another member gives carries one line on compacting between its stages; the User's own message stays as she typed it", () => {
+  const member = chatParticipant();
+  const rights = (right: "allow" | "ask" | "deny") => normalizeChatAgentPermissions({ ...defaultChatAgentPermissions(), requestCompaction: right });
+  const request = { id: "r", role: "participant", content: "", createdAt: "", metadata: { participantRequest: { items: [{ targetParticipantId: member.id }] } } } as never;
+  const typed = { id: "u", role: "user", content: "do both stages", createdAt: "" } as never;
+  assert.match(stagedWorkCompactionNote(request, member, rights("allow")), /when a big stage of this work is finished, compact your context before the next one/);
+  assert.match(stagedWorkCompactionNote(request, member, rights("ask")), /ask to compact your context before the next one/);
+  assert.equal(stagedWorkCompactionNote(request, member, rights("deny")), "");
+  assert.equal(stagedWorkCompactionNote(typed, member, rights("allow")), "");
 });

@@ -9,7 +9,7 @@ import {
   ANTIGRAVITY_READ_ONLY_NOTE, antigravityAccessLines, antigravityReadOnly, appNotesBlock, chatAssistantPermissionPolicy,
   compactionAccessLines, handleWritingLines, idleLargeMembersNote, initialAutoTitlePromptSection, newMessageNonce, notAsCliCommand,
   participantPermissionPolicy, participantRepositoryLine, repoFileMentionsPromptSection, scheduledTaskAccessLines,
-  skillMentionsPromptSection, triggerPromptText
+  skillMentionsPromptSection, stagedWorkCompactionNote, triggerPromptText
 } from "./promptSections";
 import type { ChatModules } from "../modules";
 import type { ChatDependencies } from "../dependencies";
@@ -139,6 +139,7 @@ export class TurnPrompt {
     // resumes only. In the sessions view a handle starts nobody
     // (handleWritingLines), so there is nothing to warn about.
     const continuationNote = continuation && chatViewFor(conversation.metadata) !== "sessions" ? CONTINUATION_HANDLE_NOTE : "";
+    const stagesNote = stagedWorkCompactionNote(triggerMessage, participant, options.permissions);
     // Antigravity has no read-only sandbox of its own (geminiExec): a
     // read-only member is reminded with every message.
     // (Not when its access is said in this message already.)
@@ -160,7 +161,7 @@ export class TurnPrompt {
       promptContextBlock,
       appNotesBlock(nonce, [closedChoicesNote, idleLargeNote, autoTitleBlock]),
       triggerBlock,
-      appNotesBlock(nonce, [skillsBlock, mentionsBlock, unavailableImagesBlock, readOnlyNote, continuationNote])
+      appNotesBlock(nonce, [skillsBlock, mentionsBlock, unavailableImagesBlock, readOnlyNote, continuationNote, stagesNote])
     ].filter(Boolean);
     const prompt = notAsCliCommand(orderedBlocks.join("\n\n"));
 

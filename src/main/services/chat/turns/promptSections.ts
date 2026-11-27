@@ -316,6 +316,24 @@ export function compactionAccessLines(permissions: ChatAgentPermissions, isMainS
   }
 }
 
+/** One line with the work a member is given by another member (a request, a
+ *  delegated task): a rule in its instructions alone is not applied as one
+ *  stage ends and the next begins (e2e, 2026-11-27: four Sonnet members never
+ *  compacted between two stages; with this line next to the task, one did).
+ *  The User's own messages stay as she typed them. */
+export function stagedWorkCompactionNote(triggerMessage: ChatMessage, participant: ChatParticipant, permissions: ChatAgentPermissions): string {
+  const asked = triggerMessage.metadata?.participantRequest?.items.some((item) => item.targetParticipantId === participant.id) === true;
+  if (!asked) return "";
+  switch (normalizeChatParticipantRequestPermission(normalizeChatAgentPermissions(permissions).requestCompaction)) {
+    case "allow":
+      return "Compaction: when a big stage of this work is finished, compact your context before the next one, as your Compaction instructions say.";
+    case "ask":
+      return "Compaction: when a big stage of this work is finished, ask to compact your context before the next one, as your Compaction instructions say.";
+    default:
+      return "";
+  }
+}
+
 /** Tokens above which an idle member's context is worth compacting before
  *  it works again: about three times what a CLI's own instructions and tools
  *  take, so the summary is a fraction of what its next turn would re-read. */
