@@ -39,6 +39,8 @@ test("Add to contacts says why when there is nothing to save or the system can't
     const none = await openAlertCallContact({ settings: async () => ({ ok: true, value: { waitMinutes: 5, callMode: "keypad" } as UrgentAlertSettingsView }), openPath, directory });
     assert.equal(none.ok, false);
     assert.deepEqual(opened, []);
+    const thrown = await openAlertCallContact({ settings: async () => { throw new Error("connect ECONNREFUSED"); }, openPath, directory });
+    assert.deepEqual(thrown, { ok: false, message: "connect ECONNREFUSED" });
     const refused = await openAlertCallContact({ settings: async () => withPhone("+14155550134"), openPath: async () => "No application knows how to open it.", directory });
     assert.deepEqual(refused, { ok: false, message: "Couldn't open the contact card: No application knows how to open it." });
   } finally {
@@ -60,6 +62,9 @@ test("Save logo writes the contact photo as a PNG where she chose, and nothing w
     const failed = await saveAlertCallLogo({ chooseFile: async () => path.join(directory, "missing", "x.png"), toPng, downloadsDirectory: directory });
     assert.equal(failed.ok, false);
     assert.match("message" in failed ? failed.message : "", /^Couldn't save the logo: /);
+    const empty = await saveAlertCallLogo({ chooseFile: async () => path.join(directory, "empty.png"), toPng: () => Buffer.alloc(0), downloadsDirectory: directory });
+    assert.equal(empty.ok, false);
+    await assert.rejects(readFile(path.join(directory, "empty.png")));
   } finally {
     await rm(directory, { recursive: true, force: true });
   }

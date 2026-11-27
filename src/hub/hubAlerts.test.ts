@@ -964,6 +964,7 @@ test("a paired phone reads only the number calls come from; a machine or a stran
   assert.deepEqual(await read(), { ok: true, value: {} });
   await connectPhone(h);
   assert.deepEqual(await read(), { ok: true, value: { from: "+14155550134" } });
+  assert.deepEqual(await h.alerts(h.owner, { action: "phone.call-from" }), { ok: true, value: { from: "+14155550134" } });
   // The rest of the settings stay the computer's.
   assert.equal((await phone.postJson<{ ok: boolean; error?: { code: string } }>("/v3/alerts", { action: "settings" })).error?.code, "access_denied");
   const machine = createDeviceIdentity(new Date().toISOString());

@@ -9,16 +9,17 @@ import { settingsViewState } from "./settingsView.js";
 // logo, and the logo alone for a contact she saved before (Mia's brief,
 // approved by the User, 2026-11-27). The number is read from her server;
 // a server older than this app refuses the read and the row stays away,
-// quietly, and is not asked again until the app starts again.
+// quietly; it is asked again an hour later (her server updates itself after
+// her computer does, and the installed app may stay open for days).
 
 export const alertCallContactState = {
   /** The number calls come from; undefined while not known or not set up. */
   from: undefined,
   /** When it was last asked for, so opening Settings asks at most once a minute. */
   askedAt: 0,
-  /** Her server refused the read (older than this app): not asked again
-   *  until the app starts again. */
-  refused: false,
+  /** When her server refused the read (older than this app): not asked
+   *  again for an hour. */
+  refusedAt: 0,
   /** What the last press could not do. */
   error: undefined,
   /** The logo as a PNG, made before any tap: iOS shows the share sheet only
@@ -27,10 +28,11 @@ export const alertCallContactState = {
 };
 
 const ASK_AGAIN_MS = 60_000;
+const ASK_REFUSED_AGAIN_MS = 60 * 60_000;
 
 /** Asks her server for the number once Settings opens (not in a loop). */
 export async function refreshAlertCallFrom() {
-  if (!isHubPairing(loadPairing()) || alertCallContactState.refused) return;
+  if (!isHubPairing(loadPairing()) || Date.now() - alertCallContactState.refusedAt < ASK_REFUSED_AGAIN_MS) return;
   if (Date.now() - alertCallContactState.askedAt < ASK_AGAIN_MS) return;
   const shared = mobileSharedRules();
   const client = hubClient();
@@ -39,13 +41,20 @@ export async function refreshAlertCallFrom() {
   const answer = await client.postJson(shared.HUB_ALERTS_PATH, { action: "phone.call-from" }).catch(function () { return undefined; });
   // No answer (offline, the server restarting): what was known stays.
   if (!answer) return;
-  // A server older than this app answers access_denied: no row, not asked
-  // again. Any other refusal is asked again next time Settings opens.
-  if (answer.ok === false) {
-    if (answer.error && answer.error.code === "access_denied") alertCallContactState.refused = true;
+  // A server older than this app answers access_denied: no row, asked again
+  // an hour later. Any other refusal, or an answer of no known shape, leaves
+  // what was known and is asked again next time Settings opens.
+  if (answer.ok !== true) {
+    if (answer.ok === false && answer.error && answer.error.code === "access_denied") {
+      alertCallContactState.refusedAt = Date.now();
+      if (alertCallContactState.from !== undefined) {
+        alertCallContactState.from = undefined;
+        redraw();
+      }
+    }
     return;
   }
-  const from = answer.ok === true && answer.value && typeof answer.value.from === "string" ? answer.value.from : undefined;
+  const from = answer.value && typeof answer.value.from === "string" ? answer.value.from : undefined;
   if (from) void prepareLogo();
   if (from === alertCallContactState.from) return;
   alertCallContactState.from = from;

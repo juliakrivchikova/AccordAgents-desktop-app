@@ -1,3 +1,4 @@
+import path from "node:path";
 import { URGENT_ALERT_USER_ACTIONS, type UrgentAlertSettingsView, type UrgentAlertUserRequest } from "../../../shared/urgentAlerts";
 import { app, dialog, ipcMain, nativeImage } from "electron";
 import { hostPlatform } from "../../platform";
@@ -34,7 +35,8 @@ export function registerHubIpc(desktopApp: DesktopApp): void {
 
   ipcMain.handle("alerts:open-call-contact", () => openAlertCallContact({
     settings: () => desktopApp.serverChatLink.alerts<UrgentAlertSettingsView>({ action: "settings" }),
-    openPath: (target) => hostPlatform().openPath(target)
+    openPath: (target) => hostPlatform().openPath(target),
+    directory: path.join(app.getPath("userData"), "contact-card")
   }));
   ipcMain.handle("alerts:save-call-logo", () => saveAlertCallLogo({
     chooseFile: async (defaultPath) => {

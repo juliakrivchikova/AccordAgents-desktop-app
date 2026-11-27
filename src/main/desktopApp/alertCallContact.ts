@@ -1,5 +1,4 @@
 import { mkdir, writeFile } from "node:fs/promises";
-import os from "node:os";
 import path from "node:path";
 import { ALERT_CALL_CONTACT_FILE_NAME, ALERT_CALL_LOGO_FILE_NAME, alertCallContactCard, type OpenAlertCallContactResult, type SaveAlertCallLogoResult } from "../../shared/alertCallContact";
 import { ALERT_CALL_CONTACT_PHOTO_JPEG_BASE64 } from "../../shared/alertCallContactPhoto";
@@ -12,22 +11,25 @@ export interface AlertCallContactDependencies {
   /** The system's handler for the file (Contacts on macOS); an error text, or
    *  "" when it opened. */
   openPath(target: string): Promise<string>;
-  /** Where the card is written; one file, written over on every press. */
-  directory?: string;
+  /** Where the card is written (a folder of this app's own); one file,
+   *  written over on every press. */
+  directory: string;
 }
 
 /** Settings → Alerts → Add to contacts: the card for the number alert calls
- *  come from, written to a temporary folder and handed to the system, which
+ *  come from, written to a folder of this app and handed to the system, which
  *  shows it before anything is saved (she can cancel there). */
 export async function openAlertCallContact(deps: AlertCallContactDependencies): Promise<OpenAlertCallContactResult> {
-  const settings = await deps.settings();
+  const settings = await deps.settings().catch((error: unknown) => ({
+    ok: false as const, error: { code: "server_unavailable" as const, message: error instanceof Error ? error.message : String(error) }
+  }));
   if (!settings.ok) return { ok: false, message: settings.error.message };
   const card = settings.value.phone ? alertCallContactCard(settings.value.phone.from) : undefined;
   if (!card) return { ok: false, message: "Phone calls aren't set up, so there is no number to save." };
-  const directory = deps.directory ?? path.join(os.tmpdir(), "AccordAgents contact");
+  const directory = deps.directory;
   const file = path.join(directory, ALERT_CALL_CONTACT_FILE_NAME);
   try {
-    await mkdir(directory, { recursive: true });
+    await mkdir(directory, { recursive: true, mode: 0o700 });
     await writeFile(file, card, "utf8");
   } catch (error) {
     return { ok: false, message: `Couldn't write the contact card: ${error instanceof Error ? error.message : String(error)}` };
@@ -51,7 +53,10 @@ export async function saveAlertCallLogo(deps: AlertCallLogoDependencies): Promis
   const target = await deps.chooseFile(path.join(deps.downloadsDirectory, ALERT_CALL_LOGO_FILE_NAME));
   if (!target) return { ok: false, canceled: true };
   try {
-    await writeFile(target, deps.toPng(Buffer.from(ALERT_CALL_CONTACT_PHOTO_JPEG_BASE64, "base64")));
+    const png = deps.toPng(Buffer.from(ALERT_CALL_CONTACT_PHOTO_JPEG_BASE64, "base64"));
+    // nativeImage gives an empty buffer for a picture it could not read.
+    if (png.length === 0) return { ok: false, message: "Couldn't save the logo: the picture could not be made." };
+    await writeFile(target, png);
   } catch (error) {
     return { ok: false, message: `Couldn't save the logo: ${error instanceof Error ? error.message : String(error)}` };
   }
