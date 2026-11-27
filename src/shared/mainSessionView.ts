@@ -10,7 +10,7 @@ import { sessionsViewLane, type SessionsViewIndex } from "./mainSession";
 import { isChatMessageHiddenFromTimeline } from "./chatTimelineVisibility";
 import { remoteRunStreamingStartedAt } from "./remoteRunStreaming";
 import { APP_CHAT_REQUEST_COMPACTION_TOOL, APP_CONNECTOR_SIGN_IN_TOOL, APP_PARTICIPANTS_REQUEST_CHANGE_TOOL, APP_TOOL_PERMISSION_TOOL } from "./appMcpToolContracts";
-import type { ChatAppToolApproval, ChatMessage, ChatParticipant, ChatParticipantRequestBatch, ChatParticipantRequestItem } from "./types";
+import type { ChatAppToolApproval, ChatMessage, ChatParticipant, ChatParticipantRequestBatch, ChatParticipantRequestItem, ChatProviderKind } from "./types";
 
 /** The ordinary member's role: the sessions view names no role for it. */
 const GENERIC_MEMBER_ROLE_ID = "generic-participant";
@@ -435,6 +435,64 @@ export function sessionsTaskEntries(
       ...(status === "stopped" ? { lineMuted: true as const } : {})
     };
   });
+}
+
+/** The main session's answer to a member's request as the main timeline
+ *  shows it (the User, 2026-11-27): a row like a task's under "Replied", the
+ *  member's logo with a dot for the answer's state, the member's title, one
+ *  line of the answer and its time; it opens the member's session at the
+ *  answer, whose whole text is there. */
+export interface SessionsReplyEntry {
+  messageId: string;
+  participantId: string;
+  title: string;
+  /** The member's provider (a member removed since: the one its tasks
+   *  named), for its logo. */
+  kind?: ChatProviderKind;
+  status: Extract<SessionsWorkStatus, "running" | "done" | "failed" | "stopped">;
+  /** While it is written: when its turn began. */
+  since?: string;
+  /** Once written: how long its turn worked. */
+  durationMs?: number;
+  /** Its first line; why it failed; "Stopped". */
+  line?: string;
+  lineMuted?: true;
+}
+
+/** The line over the answers ("Replied", her word: no count). */
+export const SESSIONS_REPLIED_SUMMARY = "Replied";
+
+/** `member`: the member it answered (sessionsAnsweredMemberOf), by its
+ *  title (sessionsMemberTitle) and provider. The answer's words
+ *  are read by the view's mention rule (`wordsText`), a failure's by the
+ *  app's (`appText`), as a task's row reads them. */
+export function sessionsReplyEntry(
+  message: Pick<ChatMessage, "id" | "role" | "status" | "content" | "createdAt" | "metadata">,
+  member: { id: string; title: string; kind?: ChatProviderKind },
+  appText: (text: string) => string = (text) => text,
+  wordsText: (text: string) => string = (text) => text
+): SessionsReplyEntry {
+  // A part a "send now" cut is stopped: its member was told the answer
+  // was interrupted (participantRequests.ts, PARTICIPANT_REQUEST_CUT_BY_SEND_NOW).
+  const status: SessionsReplyEntry["status"] = isPendingReply(message) ? "running"
+    : message.metadata?.terminalReason === "user-stopped" || message.metadata?.turnContinues === true ? "stopped"
+      : message.status === "error" ? "failed" : "done";
+  const first = firstTextLine(message.content);
+  const line = status === "stopped" ? SESSIONS_WORK_STATUS_LABELS.stopped
+    : status === "failed" ? appText(first)
+      : first ? wordsText(first) : "";
+  const workedMs = message.metadata?.workedMs;
+  return {
+    messageId: message.id,
+    participantId: member.id,
+    title: member.title,
+    ...(member.kind ? { kind: member.kind } : {}),
+    status,
+    ...(status === "running" ? { since: sessionsReplyStartedAt(message) } : {}),
+    ...(status !== "running" && typeof workedMs === "number" && Number.isFinite(workedMs) ? { durationMs: workedMs } : {}),
+    ...(line ? { line } : {}),
+    ...(status === "stopped" ? { lineMuted: true as const } : {})
+  };
 }
 
 /** From this many minutes on, hours are whole ("12h"), as T3 Code says them. */

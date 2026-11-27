@@ -32,6 +32,9 @@ export function useChatSessionsChrome(input: {
   header: ChatViewHeaderState;
   links?: ChatSessionsLinks;
   openOutsideTimeline?: (messageId: string) => boolean;
+  /** The main session's answer to a member: a "Replied" row on the main
+   *  timeline whose message lives in the member's session. */
+  livesOutsideTimeline?: (messageId: string) => boolean;
   /** The sessions view: an Accord opens in the right panel (again: closes). */
   openAccord?: (launchId: string) => void;
 } {
@@ -68,6 +71,7 @@ export function useChatSessionsChrome(input: {
     openMember(lane.participantId, messageId);
     return true;
   }, [isKnownMember, openMember]);
+  const livesOutsideTimeline = useCallback((messageId: string): boolean => latest.current.sessions?.repliedByMessageId.has(messageId) === true, []);
   const timeline = useMemo<ChatSessionsTimelineContext | undefined>(
     () => (sessions ? { sessions, onOpenMember: openMember, onOpenTask: openTask } : undefined),
     [sessions, openMember, openTask]
@@ -128,6 +132,7 @@ export function useChatSessionsChrome(input: {
     header,
     links,
     openOutsideTimeline: inSessions ? openOutsideTimeline : undefined,
+    livesOutsideTimeline: inSessions ? livesOutsideTimeline : undefined,
     openAccord: inSessions ? openAccord : undefined
   };
 }

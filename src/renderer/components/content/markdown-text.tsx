@@ -155,6 +155,13 @@ export function focusRenderedMessage(
   if (!el) {
     return false;
   }
+  markRenderedMessage(root, el, options);
+  return true;
+}
+
+/** Marks one drawn message as the one gone to (the mark leaves every other
+ *  message under `root`) and flashes it; scrolls to it unless told not to. */
+export function markRenderedMessage(root: ParentNode, el: HTMLElement, options: { scroll?: boolean } = {}): void {
   if (options.scroll !== false) {
     el.scrollIntoView({ behavior: "smooth", block: "start", inline: "nearest" });
   }
@@ -163,7 +170,6 @@ export function focusRenderedMessage(
   el.classList.add("message-focused");
   el.classList.add("message-flash");
   window.setTimeout(() => el.classList.remove("message-flash"), 1500);
-  return true;
 }
 
 /** How anything in the chat goes to a message: the chat scrolls to it and

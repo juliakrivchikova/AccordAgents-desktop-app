@@ -8,10 +8,12 @@ import {
   openTaskFolds, openWorkedFolds, sessionsCanStop, sessionsDelegationsOf, sessionsMemberDetailOf, sessionsMemberName,
   sessionsMemberSince, sessionsMemberTitleOf, sessionsRules, sessionsStateState, sessionsStopping
 } from "./sessionsState.js";
+import { sessionsRunningText } from "./sessionsStatus.js";
 
 /** The rows of the main timeline (shared/mainSession.ts mainTimelineMessages):
  *  the User's messages to the main session, the main session's replies
- *  with the tasks each turn gave inside its "Worked for …", what has no
+ *  with the tasks each turn gave inside its "Worked for …" (its answers to
+ *  members' requests as a "Replied" row in place of their text), what has no
  *  member (system lines) and the members' choices still waiting for the
  *  User. No avatars, threads or handles. */
 export function sessionsMainRows(state) {
@@ -42,6 +44,13 @@ export function sessionsMainRows(state) {
     if (row.author === "you") {
       base.content = shared.withoutLeadingMention(String(row.content || ""), state.mainHandle);
     }
+    // The main session's answer to a member's request: a "Replied" row in
+    // place of its text, as on the desktop (its text is in the member's
+    // session).
+    // While it is written, its line is what it has streamed so far, never
+    // the placeholder a running row carries until then.
+    const replied = row.author === "agent" ? sessionsRepliedOf(state, row.status === "Running" ? { ...message, content: sessionsRunningText(row) } : message) : undefined;
+    if (replied) base.replied = replied;
     const tasks = state.placement.tasksByReplyId.get(message.id);
     // A part of a turn her next message joined, with nothing in it, is not
     // drawn (as in the CLI's transcript).
@@ -66,6 +75,37 @@ export function sessionsMainRows(state) {
     rows.push(base);
   });
   return rows;
+}
+
+/** The main session's answer to a member as its "Replied" row (shared
+ *  sessionsReplyEntry): the member's title and logo (a member removed since
+ *  by the provider its tasks named), the answer's state, line and time, and
+ *  the answer its session opens at. A phone app on rules from before has
+ *  none, and its main timeline does not hold the answer either. */
+function sessionsRepliedOf(state, message) {
+  const shared = sessionsRules();
+  if (typeof shared.sessionsAnsweredMemberOf !== "function" || typeof shared.sessionsReplyEntry !== "function") return undefined;
+  const participantId = shared.sessionsAnsweredMemberOf(message, state.index);
+  if (!participantId) return undefined;
+  const member = state.members.find(function (candidate) { return candidate.id === participantId; }) ||
+    state.formerMembers.find(function (candidate) { return candidate.id === participantId; });
+  const names = state.viewNames;
+  const appText = function (text) { return names ? shared.sessionsViewText(text, names) : text; };
+  const wordsText = function (text) { return names && typeof shared.sessionsMentionText === "function" ? shared.sessionsMentionText(text, names) : text; };
+  const kind = member && member.kind ? member.kind : "";
+  const entry = shared.sessionsReplyEntry(message, { id: participantId, title: sessionsMemberTitleOf(state, participantId), ...(kind ? { kind: kind } : {}) }, appText, wordsText);
+  return {
+    summary: shared.SESSIONS_REPLIED_SUMMARY || "Replied",
+    participantId: participantId,
+    kind: kind,
+    title: entry.title,
+    status: entry.status,
+    line: entry.line || "",
+    ...(entry.lineMuted ? { lineMuted: true } : {}),
+    ...(entry.since ? { since: entry.since } : {}),
+    ...(typeof entry.durationMs === "number" ? { durationMs: entry.durationMs } : {}),
+    focus: message.id
+  };
 }
 
 /** One member's whole session: what it was asked (its task folded to one

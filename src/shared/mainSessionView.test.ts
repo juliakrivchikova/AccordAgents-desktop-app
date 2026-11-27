@@ -7,6 +7,7 @@ import {
   isSessionsHiddenTurnFinishedNote,
   mainTimelineMessages,
   memberSessionMessages,
+  sessionsAnsweredMemberOf,
   sessionsCompactionLineOf,
   sessionsCompactionLineText,
   sessionsCompactionLineWords,
@@ -40,7 +41,9 @@ import {
   sessionsMembersWaitingForUser,
   titleTaskByMember,
   sessionsMentionSentenceTitle,
-  SESSIONS_UNNAMED_TASK_TITLE
+  SESSIONS_UNNAMED_TASK_TITLE,
+  SESSIONS_REPLIED_SUMMARY,
+  sessionsReplyEntry
 } from "./mainSessionView";
 import type { ChatMessage, ChatParticipant, ChatParticipantRequestBatch, ChatParticipantRequestItem } from "./types";
 
@@ -76,10 +79,12 @@ function chat(): ChatMessage[] {
   ];
 }
 
-test("the main timeline holds the User's messages to the main session, its own messages and its task requests, not members' replies", () => {
+test("the main timeline holds the User's messages to the main session, its own messages (its answers to members as Replied rows) and its task requests, not members' replies", () => {
   const messages = chat();
   const index = buildSessionsViewIndex(messages, "p-main");
-  assert.deepEqual(mainTimelineMessages(messages, index).map((entry) => entry.id), ["intro", "ask", "main-1", "tasks"]);
+  assert.deepEqual(mainTimelineMessages(messages, index).map((entry) => entry.id), ["intro", "ask", "main-1", "tasks", "main-answer"]);
+  assert.equal(sessionsAnsweredMemberOf(messages[5]!, index), "p-drew", "its answer to drew's question, as a Replied row");
+  assert.equal(sessionsAnsweredMemberOf(messages[2]!, index), undefined, "its reply to the User answers no member");
   assert.equal(isMainSessionTaskMessage(messages[3]!, index), true, "the main session's request is a task card");
   assert.equal(isMainSessionTaskMessage(messages[4]!, index), false, "a member's question to the main session is not");
 });
@@ -264,7 +269,7 @@ test("a compaction line's words: the CLI it names, else the compacted member's o
   assert.equal(sessionsCompactionLineWords(line("codex-cli", "failed"), members), undefined, "a failed compaction leaves no line");
 });
 
-test("the main session's answer to a member's question is in that member's session from its first token", () => {
+test("the main session's answer to a member's question is in that member's session and a Replied row on the main timeline from its first token", () => {
   const question = message("drew-asks", "participant", 30, { participantId: "p-drew", metadata: { participantRequest: batch("b-ask", "p-drew", [item("p-main", "running", 30)]) } });
   const streaming = message("main-answering", "participant", 31, {
     participantId: "p-main", status: "pending", content: "Use the",
@@ -273,12 +278,86 @@ test("the main session's answer to a member's question is in that member's sessi
   const ownTurn = message("main-own", "participant", 32, { participantId: "p-main", metadata: { sourceMessageId: "ask", runId: "r2" } });
   const messages = [...chat(), question, streaming, ownTurn];
   const index = buildSessionsViewIndex(messages, "p-main");
-  assert.deepEqual(sessionsViewLane(streaming, index), { kind: "member", participantId: "p-drew" }, "no reply id yet: placed by the request it answers");
+  assert.deepEqual(sessionsViewLane(streaming, index), { kind: "member", participantId: "p-drew" }, "its home is drew's session");
+  assert.equal(sessionsAnsweredMemberOf(streaming, index), "p-drew", "no reply id yet: told by the request it answers");
   assert.deepEqual(sessionsViewLane(ownTurn, index), { kind: "main" });
+  assert.equal(sessionsAnsweredMemberOf(ownTurn, index), undefined);
   assert.ok(memberSessionMessages(messages, "p-drew", index).some((entry) => entry.id === "main-answering"));
-  assert.ok(!mainTimelineMessages(messages, index).some((entry) => entry.id === "main-answering"));
+  assert.ok(mainTimelineMessages(messages, index).some((entry) => entry.id === "main-answering"));
+  assert.ok(!memberSessionMessages(messages, "p-drew", index).some((entry) => entry.id === "main-own"), "its own turn is not drew's");
   const otherBatch = { ...streaming, id: "main-other", metadata: { ...streaming.metadata, participantRequestBatchId: "b-other" } };
-  assert.deepEqual(sessionsViewLane(otherBatch, index), { kind: "main" }, "a message of another request is not placed by this one");
+  assert.equal(sessionsAnsweredMemberOf(otherBatch, index), undefined, "a message of another request is not marked by this one");
+  assert.ok(!memberSessionMessages([...messages, otherBatch], "p-drew", buildSessionsViewIndex([...messages, otherBatch], "p-main")).some((entry) => entry.id === "main-other"));
+});
+
+test("the main session's continuation after its own request was answered answers no member and stays off members' sessions", () => {
+  const asks = message("main-asks", "participant", 50, { participantId: "p-main", metadata: { participantRequest: batch("b-main", "p-main", [item("p-drew", "answered", 50, "drew-says")], { autoResumeMessageId: "main-goes-on" }) } });
+  const drewSays = message("drew-says", "participant", 51, { participantId: "p-drew", content: "Done." });
+  const goesOn = message("main-goes-on", "participant", 52, { participantId: "p-main", content: "Drew is done.", metadata: { sourceMessageId: "main-asks" } });
+  const messages = [...chat(), asks, drewSays, goesOn];
+  const index = buildSessionsViewIndex(messages, "p-main");
+  assert.equal(sessionsAnsweredMemberOf(goesOn, index), undefined);
+  assert.ok(mainTimelineMessages(messages, index).some((entry) => entry.id === "main-goes-on"));
+  assert.ok(!memberSessionMessages(messages, "p-drew", index).some((entry) => entry.id === "main-goes-on"));
+  assert.equal(sessionsAnsweredMemberOf(drewSays, index), undefined, "a member's own reply is not the main session's answer");
+});
+
+test("a task the main session gives while it answers a member lands in that answer, not on its own", () => {
+  const question = message("gera-asks", "participant", 60, { participantId: "p-gera", metadata: { participantRequest: batch("b-gera", "p-gera", [item("p-main", "running", 60)]) } });
+  const answer = message("main-answers-gera", "participant", 61, { participantId: "p-main", status: "pending", content: "", metadata: { sourceMessageId: "gera-asks", participantRequestBatchId: "b-gera", runId: "r9" } });
+  const task = message("main-delegates", "participant", 62, { participantId: "p-main", metadata: { sourceMessageId: "gera-asks", participantRequest: batch("b-del", "p-main", [item("p-taylor", "running", 62)]) } });
+  const messages = [...chat(), question, answer, task];
+  const index = buildSessionsViewIndex(messages, "p-main");
+  const main = mainTimelineMessages(messages, index);
+  const placement = sessionsTaskPlacement(main, index);
+  assert.deepEqual(placement.tasksByReplyId.get("main-answers-gera")?.map((entry) => entry.id), ["main-delegates"]);
+  assert.ok(placement.placedTaskIds.has("main-delegates"));
+  assert.deepEqual(placement.tasksByReplyId.get("main-answer"), undefined, "an answer whose turn gave no task holds none");
+  assert.ok(!placement.tasksByReplyId.has("main-1") || !placement.tasksByReplyId.get("main-1")!.some((entry) => entry.id === "main-delegates"), "the task is not pulled into another turn's reply");
+});
+
+test("a Replied row reads like a task's: the member's title and logo, the answer's state, first line and time", () => {
+  const member = { id: "p-drew", title: "Restyle the login button", kind: "codex-cli" as const };
+  const base = { participantId: "p-main", metadata: { sourceMessageId: "q", turnStartedAt: at(30) } };
+  const running = sessionsReplyEntry(message("a", "participant", 31, { ...base, status: "pending", content: "Use the\nstaging config" }), member);
+  assert.deepEqual(running, { messageId: "a", participantId: "p-drew", title: "Restyle the login button", kind: "codex-cli", status: "running", since: at(30), line: "Use the" });
+  const done = sessionsReplyEntry(message("a", "participant", 31, { ...base, content: "## Use **staging**\n\nDetails", metadata: { ...base.metadata, workedMs: 6000 } }), member, (text) => text, (text) => text.replace("staging", "Staging"));
+  assert.deepEqual(done, { messageId: "a", participantId: "p-drew", title: "Restyle the login button", kind: "codex-cli", status: "done", durationMs: 6000, line: "Use Staging" },
+    "its first line without markdown, read by the view's mention rule; its time is how long its turn worked");
+  const failed = sessionsReplyEntry(message("a", "participant", 31, { ...base, status: "error", content: "@main failed: limit" }), member, (text) => text.replace("@main ", ""));
+  assert.equal(failed.status, "failed");
+  assert.equal(failed.line, "failed: limit", "a failure is worded by the app's rule");
+  const stopped = sessionsReplyEntry(message("a", "participant", 31, { ...base, status: "error", content: "partial", metadata: { ...base.metadata, terminalReason: "user-stopped" } }), member);
+  assert.deepEqual([stopped.status, stopped.line, stopped.lineMuted], ["stopped", "Stopped", true]);
+  const cut = sessionsReplyEntry(message("a", "participant", 31, { ...base, content: "Use the", metadata: { ...base.metadata, turnContinues: true } }), member);
+  assert.deepEqual([cut.status, cut.line], ["stopped", "Stopped"], "a part a send-now cut: its member was told it was interrupted");
+  const removed = sessionsReplyEntry(message("a", "participant", 31, { ...base, content: "" }), { id: "p-gone", title: "Agent" });
+  assert.equal(removed.kind, undefined, "no provider known: no logo");
+  assert.equal(removed.line, undefined, "nothing written: no line");
+  assert.equal(SESSIONS_REPLIED_SUMMARY, "Replied");
+});
+
+test("a chat far above the User's size (her largest main-session chat: 576 messages, 24 questions to the main session) with 3000 answers is laid out in linear time", () => {
+  const messages: ChatMessage[] = [];
+  for (let turn = 0; turn < 3000; turn += 1) {
+    const asker = turn % 2 ? "p-drew" : "p-gera";
+    messages.push(message(`q${turn}`, "participant", 0, { participantId: asker, metadata: { participantRequest: batch(`bq${turn}`, asker, [item("p-main", "answered", 0, `a${turn}`)]) } }));
+    messages.push(message(`a${turn}`, "participant", 0, { participantId: "p-main", content: "x".repeat(400), metadata: { sourceMessageId: `q${turn}`, participantRequestBatchId: `bq${turn}` } }));
+    messages.push(message(`u${turn}`, "user", 0, { metadata: { askedParticipantIds: ["p-main"] } }));
+  }
+  const started = performance.now();
+  const index = buildSessionsViewIndex(messages, "p-main");
+  const main = mainTimelineMessages(messages, index);
+  sessionsTaskPlacement(main, index);
+  const drew = memberSessionMessages(messages, "p-drew", index);
+  for (const entry of main) {
+    const answered = sessionsAnsweredMemberOf(entry, index);
+    if (answered) sessionsReplyEntry(entry, { id: answered, title: "A task" });
+  }
+  const elapsed = performance.now() - started;
+  assert.equal(main.length, 6000, "every answer and every message of the User");
+  assert.equal(drew.length, 3000, "drew's questions and the answers to them");
+  assert.ok(elapsed < 250, `laid out in ${elapsed.toFixed(1)} ms`);
 });
 
 test("the main session's tasks are shown inside the reply of the turn that gave them", () => {

@@ -512,7 +512,24 @@ switch is disabled.
   - the main timeline holds the User's messages to the main session, the
     main session's messages, system lines and the cards the User must
     answer; the member-added cards of its delegations are not shown
-    (`isMainSessionDelegationRosterCard`);
+    (`isMainSessionDelegationRosterCard`). The main session's answer to a
+    member's request is there too, not as its text but as a "Replied" row
+    (the User, 2026-11-27: an answer that also told her something reached
+    only the member's session and she never saw it; the full text on the
+    main timeline was noise, so it is a row like a turn's tasks). The
+    answer's turn has its "Worked for …" like any reply, and in place of
+    its text a muted line with a reply icon (Phosphor ArrowBendUpLeft) and
+    the word "Replied" (her word: no count), then one row in the task rows'
+    style: the member's logo with a dot for the answer's state, the
+    member's task title in bold (never a handle), the answer's first line
+    muted, how long its turn worked, a chevron. While the answer is being
+    written it is a running row from its first token ("Working for …" over
+    it, its line what has streamed so far). The row opens the member's
+    session at the answer, where its whole text stays; Search, Activity and
+    links reach the answer there too. A task its turn gave is inside its
+    "Worked for …" as in any reply (`sessionsAnsweredMemberOf`,
+    `isMainTimelineMessage`, `sessionsReplyEntry`, `ChatRepliedRows`; the
+    phone's `sessionsRepliedElement`). The classic view is unchanged;
   - a finished compaction leaves a muted line in the compacted session, as
     Claude Code leaves "Conversation compacted" in its transcript after
     `/compact` and after a compaction of its own: the main session's on the
@@ -651,7 +668,8 @@ switch is disabled.
     "Back", "Close";
   - no threads UI: every message has one place (`sessionsViewLane`); the
     main session's answer to a member's question is in that member's
-    session from its first token (placed by the request it answers);
+    session from its first token (told by the request it answers, before
+    its reply id is set), and its "Replied" row on the main timeline;
   - a finished message shows no member state; its time is with its controls
     on hover. A reply still being written has its "Working for …" (above);
   - a task's state is not taken from the member's earlier stopped or failed

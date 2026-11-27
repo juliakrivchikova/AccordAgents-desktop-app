@@ -303,7 +303,7 @@ test("the sessions view (T3 Code's way): tasks inside the turn's Worked fold, ch
   // The @ button is gone in the sessions view (its display rule must not beat [hidden]).
   assert.equal(await app.evaluate(`getComputedStyle(document.getElementById("mention-button")).display`), "none", "no @ button in the sessions view");
 
-  // --- the main session's answer to a member is in that member's session ---
+  // --- the main session's answer to a member is in that member's session, and a Replied row on the main timeline ---
   await hub.addMessages("conv-main", [
     { id: "drew-q", role: "participant", participantId: DREW.id, participantLabel: "@drew", content: "@main which shade?", status: "done", createdAt: at(1),
       metadata: { participantRequest: { id: "batch-q", requesterParticipantId: DREW.id, requesterHandle: "drew", source: "mcp", resumeRequester: true, status: "running",
@@ -323,7 +323,58 @@ test("the sessions view (T3 Code's way): tasks inside the turn's Worked fold, ch
   assert.equal(await app.evaluate(`document.querySelector('#message-list .message-row[data-thread-root="drew-q"] .message-content')?.textContent.trim()`), "which shade?");
   await app.evaluate(`document.getElementById("back-to-timeline").click()`);
   await app.waitFor(mainShown, "back");
-  assert.equal(await app.evaluate(`document.querySelector('#message-list .message-row[data-thread-root="main-answer"]') === null`), true, "not on the main timeline while it is written");
+  // On the main timeline it is a "Replied" row in place of its text, running
+  // while it is written: drew's logo, its task's title, the first line so
+  // far (no handle); the row opens drew's session at the answer.
+  const repliedRow = `document.querySelector('#message-list .message-row[data-thread-root="main-answer"] .message-content .sessions-replies')`;
+  await app.waitFor(`${repliedRow} !== null`, "the answer's Replied row on the main timeline");
+  assert.deepEqual(await app.evaluate(`(() => { const group = ${repliedRow}; const row = group.querySelector(".sessions-delegation");
+    return { summary: group.querySelector(".sessions-worked-summary").textContent, member: row.dataset.openMember, focus: row.dataset.focusMessage, status: row.dataset.taskStatus,
+      title: row.querySelector(".sessions-delegation-title").textContent, line: row.querySelector(".sessions-delegation-result")?.textContent ?? "",
+      logo: row.querySelector(".provider-logo")?.dataset.providerKind ?? "", rows: group.querySelectorAll(".sessions-delegation").length }; })()`),
+    { summary: "Replied", member: "p-drew", focus: "main-answer", status: "running", title: "Restyle the login button",
+      // While it runs the server sends its words so far or, before any,
+      // where the run stands (liveStatus): its first line, or none.
+      line: (await app.evaluate(`${repliedRow}.querySelector(".sessions-delegation-result")?.textContent ?? ""`)) === "" ? "" : "Use the", logo: "claude-code", rows: 1 });
+  assert.match(await app.evaluate(`${repliedRow}.querySelector(".sessions-delegation-result")?.textContent ?? ""`), /^(Use the)?$/, "its words so far or nothing, never a status");
+  assert.doesNotMatch(await app.evaluate(`${repliedRow}.textContent`), /@/, "no handle");
+  await app.evaluate(`${repliedRow}.querySelector(".sessions-delegation").click()`);
+  await app.waitFor(`${title} === "Restyle the login button" && document.querySelector('#message-list .message-row[data-thread-root="drew-q"]') !== null`, "drew's session from the row");
+  const answerInSession = `document.querySelector('#message-list .message-row[data-thread-root="main-answer"]')`;
+  await app.waitFor(`${answerInSession} !== null && ${answerInSession}.querySelector(".sessions-replies") === null`, "the answer as itself in drew's session");
+  assert.deepEqual(await app.evaluate(`(() => { const row = ${answerInSession};
+    return { replied: row.querySelector(".sessions-replies") !== null, logo: row.querySelector(".message-handle .provider-logo")?.dataset.providerKind ?? "" }; })()`),
+    { replied: false, logo: "claude-code" }, "in drew's session the answer reads as its text, under the main session's logo, no Replied row");
+  await app.evaluate(`document.getElementById("back-to-timeline").click()`);
+  await app.waitFor(mainShown, "back");
+  await app.waitFor(`${repliedRow} !== null`, "its Replied row again");
+  // Before its first words a running row carries a placeholder: the Replied
+  // row shows no line then, as on the desktop.
+  await hub.rewriteMessage("conv-main", { id: "main-answer", role: "participant", participantId: MAIN.id, participantLabel: "@main", content: "@main is running...", status: "pending", createdAt: at(0.5),
+    metadata: { runId: "run-answer", sourceMessageId: "drew-q" } });
+  await app.waitFor(`${repliedRow} !== null && ${repliedRow}.querySelector(".sessions-delegation-result") === null`, "no placeholder as the row's line");
+  assert.doesNotMatch(await app.evaluate(`${repliedRow}.textContent`), /running/, "the placeholder is not its line");
+  // An answer once written: done, its first line and its time on the main
+  // timeline, its whole text in drew's session. (A second question, so the
+  // running answer above stays running for the Stop below.)
+  await hub.addMessages("conv-main", [
+    { id: "drew-q2", role: "participant", participantId: DREW.id, participantLabel: "@drew", content: "@main which palette?", status: "done", createdAt: at(0.4),
+      metadata: { participantRequest: { id: "batch-q2", requesterParticipantId: DREW.id, requesterHandle: "drew", source: "mcp", resumeRequester: true, status: "completed",
+        depth: 1, createdAt: at(0.4), updatedAt: at(0.4), items: [item(MAIN.id, "main", "Which palette?", "answered", 0.4, { replyMessageId: "main-answer-2" })] } } },
+    { id: "main-answer-2", role: "participant", participantId: MAIN.id, participantLabel: "@main", content: "Use the darker shade.\nNote for the User: the palette changed.",
+      status: "done", createdAt: at(0.3), metadata: { sourceMessageId: "drew-q2", workedMs: 6000 } }
+  ]);
+  const doneRow = `document.querySelector('#message-list .message-row[data-thread-root="main-answer-2"] .message-content .sessions-replies')`;
+  await app.waitFor(`${doneRow}?.querySelector(".sessions-delegation")?.dataset.taskStatus === "done"`, "the written answer's row");
+  assert.deepEqual(await app.evaluate(`(() => { const row = ${doneRow}.querySelector(".sessions-delegation");
+    return { line: row.querySelector(".sessions-delegation-result")?.textContent, time: row.querySelector(".sessions-delegation-time")?.textContent, focus: row.dataset.focusMessage,
+      rest: ${doneRow}.closest(".message-row").textContent.includes("palette changed") }; })()`),
+    { line: "Use the darker shade.", time: "6s", focus: "main-answer-2", rest: false }, "its first line and its time; the rest of its text is not on the main timeline");
+  await app.evaluate(`${doneRow}.querySelector(".sessions-delegation").click()`);
+  await app.waitFor(`${title} === "Restyle the login button" && document.querySelector('#message-list .message-row[data-thread-root="main-answer-2"] .message-copy > .message-content')?.textContent.includes("palette changed") === true`,
+    "its whole text in drew's session");
+  await app.evaluate(`document.getElementById("back-to-timeline").click()`);
+  await app.waitFor(mainShown, "back");
   // The main session itself runs: with nothing typed, the main composer's
   // button is its Stop (as on the desktop, T3 Code and Claude); typing makes
   // it Send again.

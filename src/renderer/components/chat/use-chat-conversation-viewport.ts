@@ -2,7 +2,7 @@ import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react
 import { useVirtualizer, type VirtualItem, type Virtualizer } from "@tanstack/react-virtual";
 
 import type { ChatMessage, Conversation, ReviewProgress } from "../../../shared/types";
-import { focusRenderedMessage } from "../content/markdown-text";
+import { markRenderedMessage } from "../content/markdown-text";
 import type { ChatTimelineRow } from "./chat-conversation-data";
 import type { ChatMessageFocusRequest } from "./chat-conversation-types";
 import { measureRowAndRemember } from "./chat-timeline-row-clip";
@@ -39,6 +39,10 @@ export function useChatConversationViewport(props: {
   /** The sessions view: a loaded message that is not on the main timeline
    *  opens where it lives (its member's session); true when it did. */
   openOutsideTimeline?: (messageId: string) => boolean;
+  /** The sessions view: a message shown on the main timeline that lives in a
+   *  member's session (the main session's answer, a "Replied" row there): a
+   *  jump to it opens that session and marks it there. */
+  livesOutsideTimeline?: (messageId: string) => boolean;
   onLoadOlderMessages: () => void;
   onLoadMessagePageForMessage: (messageId: string) => Promise<boolean>;
 }): {
@@ -268,9 +272,18 @@ export function useChatConversationViewport(props: {
     });
   }
 
-  function renderedMessageElement(messageId: string): HTMLElement | undefined {
-    return Array.from(viewRef.current?.querySelectorAll<HTMLElement>("[data-message-id]") ?? [])
-      .find((candidate) => candidate.dataset.messageId === messageId);
+  /** Where a jump to a message marks it (chatRenderedMessageElement): on
+   *  the timeline when it is one of its rows, so a copy of it in the side
+   *  panel (a member's open card) is not marked instead, and the row is
+   *  waited for while it is not drawn yet; where it lives otherwise (a
+   *  thread, a member's session, the main session's answer to a member). */
+  function messageFocusPlace(messageId: string): ChatMessageFocusPlace {
+    if (props.livesOutsideTimeline?.(messageId)) return "outside";
+    return rowsRef.current.some((row) => row.type === "message" && row.message.id === messageId) ? "timeline" : "outside";
+  }
+
+  function renderedMessageElement(messageId: string, place: ChatMessageFocusPlace = messageFocusPlace(messageId)): HTMLElement | undefined {
+    return chatRenderedMessageElement(viewRef.current, timelineRef.current, messageId, place);
   }
 
   function renderedApprovalElement(approvalId: string): HTMLElement | undefined {
@@ -313,12 +326,15 @@ export function useChatConversationViewport(props: {
     });
   }
 
-  function alignRenderedMessageToTimelineStart(messageId: string): boolean {
-    if (!focusRenderedMessage(viewRef.current, messageId, { scroll: false })) {
+  function alignRenderedMessageToTimelineStart(messageId: string, place?: ChatMessageFocusPlace): boolean {
+    const view = viewRef.current;
+    const message = renderedMessageElement(messageId, place);
+    if (!view || !message) {
       return false;
     }
-    const message = renderedMessageElement(messageId);
-    return message ? alignRenderedMessageElementToTimelineStart(message) : true;
+    // One mark in the whole chat, timeline and side panel.
+    markRenderedMessage(view, message, { scroll: false });
+    return alignRenderedMessageElementToTimelineStart(message);
   }
 
   function alignRenderedMessageElementToTimelineStart(message: HTMLElement): boolean {
@@ -360,7 +376,7 @@ export function useChatConversationViewport(props: {
       if (rowIndex >= 0) {
         chatVirtualizer.scrollToIndex(rowIndex, { align: "start" });
       }
-      focused = alignRenderedMessageToTimelineStart(messageId);
+      focused = alignRenderedMessageToTimelineStart(messageId, "timeline");
       return focused;
     };
     if (attempt()) {
@@ -379,7 +395,11 @@ export function useChatConversationViewport(props: {
   }
 
   function focusLoadedChatMessage(messageId: string, threadRootId?: string): boolean {
-    if (props.chatTimelineRows.some((row) => row.type === "message" && row.message.id === messageId)) {
+    const onTimeline = props.chatTimelineRows.some((row) => row.type === "message" && row.message.id === messageId);
+    // The main session's answer to a member: shown on the main timeline as a
+    // row, read in its member's session, where a jump to it goes.
+    const livesOutside = props.livesOutsideTimeline?.(messageId) === true;
+    if (onTimeline && !livesOutside) {
       scheduleScrollToRowAndFocus(messageId);
       return true;
     }
@@ -406,6 +426,10 @@ export function useChatConversationViewport(props: {
     if (props.openOutsideTimeline?.(messageId)) {
       detachFromBottom();
       scheduleFocusRenderedMessage(messageId);
+      return true;
+    }
+    if (onTimeline) {
+      scheduleScrollToRowAndFocus(messageId);
       return true;
     }
     return false;
@@ -583,4 +607,21 @@ export function useChatConversationViewport(props: {
     updateStickToBottom,
     viewRef
   };
+}
+
+/** Where a jump marks a message: its row on the timeline, or a copy of it
+ *  outside the timeline (a thread, the side panel). */
+export type ChatMessageFocusPlace = "timeline" | "outside";
+
+/** The drawn copy of a message a jump marks in that place; none while that
+ *  copy is not drawn yet (the jump waits for it rather than mark another). */
+export function chatRenderedMessageElement(
+  view: ParentNode | null,
+  timeline: HTMLElement | null,
+  messageId: string,
+  place: ChatMessageFocusPlace
+): HTMLElement | undefined {
+  const copies = Array.from(view?.querySelectorAll<HTMLElement>("[data-message-id]") ?? []).filter((copy) => copy.dataset.messageId === messageId);
+  if (!timeline) return copies[0];
+  return copies.find((copy) => timeline.contains(copy) === (place === "timeline"));
 }

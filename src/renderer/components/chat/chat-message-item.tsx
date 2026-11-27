@@ -64,14 +64,14 @@ import { IconButton, StatusBadge } from "../primitives";
 import type { ChatParticipantRosterStatus } from "./chat-participant-menu";
 import { WorkedRow } from "./chat-worked-row";
 import { ChatWaitingMessageActions } from "./chat-waiting-message";
-import { ChatDelegationRows, ChatWorkedFold } from "./chat-delegation-fold";
+import { ChatDelegationRows, ChatRepliedRows, ChatWorkedFold } from "./chat-delegation-fold";
 import { ChatSessionsFinishedActivity, ChatSessionsRunningReply, sessionsReplyHasActivity } from "./chat-sessions-activity";
 import { shownLiveProgress, shownMemberActions, useChatMemberActionsShown } from "./chat-member-actions";
 import { mainSessionMemberOf, sessionsCompactionLineOf, withoutLeadingMention } from "../../../shared/mainSession";
-import type { SessionsTaskEntry } from "../../../shared/mainSessionView";
+import { firstTextLine, type SessionsReplyEntry, type SessionsTaskEntry } from "../../../shared/mainSessionView";
 import { ChatAppToolApprovalList } from "./chat-app-tool-approvals";
 import { useSessionsViewLabel, useSessionsViewNames, useSessionsViewText } from "./chat-sessions-links";
-import { sessionsViewReplyText } from "../../../shared/sessionsViewText";
+import { sessionsMentionText, sessionsViewReplyText } from "../../../shared/sessionsViewText";
 import type { ChatActivityDisclosureState } from "./use-chat-activity-disclosure";
 
 declare global {
@@ -116,6 +116,11 @@ export const ChatMessageItem = memo(function ChatMessageItem(props: {
   /** The sessions view: the main session's tasks of this turn, shown in its
    *  "Worked for …" fold (under the reply while it is being written). */
   sessionsWork?: readonly SessionsTaskEntry[];
+  /** The sessions view's main timeline: the main session's answer to a
+   *  member, shown as a "Replied" row in place of its text (the text is in
+   *  the member's session), live from its first token. */
+  sessionsReplied?: SessionsReplyEntry;
+  onOpenReply?: (entry: SessionsReplyEntry) => void;
   /** The sessions view: the User's message its member has not taken yet (the
    *  run it waits as), and the reply being written meanwhile. */
   waitingRunId?: string;
@@ -215,6 +220,14 @@ export const ChatMessageItem = memo(function ChatMessageItem(props: {
     livePartialContent: liveProgress?.partialContent,
     displayContent
   });
+  // An answer to a member while it is written: its row's line is the first
+  // line of what has streamed so far.
+  const replied = props.sessionsReplied && isStreaming
+    ? withLiveReplyLine(props.sessionsReplied, streamedContent ?? "", (text) => sessionsNames ? sessionsMentionText(text, sessionsNames) : text)
+    : props.sessionsReplied;
+  const repliedRows = replied && props.presentation === "sessions"
+    ? <ChatRepliedRows entries={[replied]} participants={props.participants} onOpen={props.onOpenReply} />
+    : undefined;
   // A reply that waited in the queue works from when its own turn began.
   const streamingStartedAt = remoteRunStreamingStartedAt(message.metadata?.turnStartedAt ?? message.createdAt, streamedRemoteRunStatus);
   const streamedActivity = liveProgress?.activity;
@@ -417,7 +430,7 @@ export const ChatMessageItem = memo(function ChatMessageItem(props: {
                 onClick={() => props.onStopRun?.(message.metadata!.runId!)}
               />
             )}
-            {hasProcessingTranscript && !sessionsFoldActivity && (
+            {hasProcessingTranscript && !sessionsFoldActivity && !repliedRows && (
               <IconButton
                 size="xs"
                 icon={processingTranscriptOpen ? CaretUpIcon : CaretDownIcon}
@@ -468,7 +481,7 @@ export const ChatMessageItem = memo(function ChatMessageItem(props: {
           : (props.sessionsWork?.length || (sessions && (showWorkedRow || sessionsFoldActivity))) && !isStreaming
             ? <ChatWorkedFold workedMs={workedMs ?? undefined} entries={props.sessionsWork ?? NO_SESSIONS_WORK} participants={props.participants} onOpenTask={props.onOpenTask}
                 activity={sessionsFoldActivity}
-                stream={hasProcessingTranscript || sessionsFoldActivity ? { open: processingTranscriptOpen, toggle: () => props.activityDisclosure.toggleProcessingTranscript(message.id) } : undefined} />
+                stream={(hasProcessingTranscript && !repliedRows) || sessionsFoldActivity ? { open: processingTranscriptOpen, toggle: () => props.activityDisclosure.toggleProcessingTranscript(message.id) } : undefined} />
             : showWorkedRow && <WorkedRow workedMs={workedMs} />}
           {/* Every rendering of the content (streaming, transcript, final) knows its author. */}
           <FileLinkAuthorContext.Provider value={participant?.cloudRun || participant?.homeMachineId ? CLOUD_AUTHOR : LOCAL_AUTHOR}>
@@ -476,14 +489,19 @@ export const ChatMessageItem = memo(function ChatMessageItem(props: {
             {isStreaming && sessions ? (
               <ChatSessionsRunningReply
                 since={queuedBehind ? undefined : streamingStartedAt}
-                content={streamedContent}
+                content={repliedRows ? "" : streamedContent}
                 activityEvents={liveProgress?.activityEvents ?? (streamedActivityEvents.length > 0 ? streamedActivityEvents : activityEvents)}
-                statusLabel={streamedRemoteRunStatus?.label}
+                statusLabel={repliedRows && streamedContent?.trim() ? undefined : streamedRemoteRunStatus?.label}
                 posts={interimPosts}
                 attachments={allImageAttachments}
                 conversationId={props.conversationId}
                 foldSteps={foldSteps}
-                tasks={props.sessionsWork?.length ? <ChatDelegationRows bare entries={props.sessionsWork} participants={props.participants} onOpenTask={props.onOpenTask} /> : undefined}
+                tasks={props.sessionsWork?.length || repliedRows ? (
+                  <>
+                    {repliedRows}
+                    {props.sessionsWork?.length ? <ChatDelegationRows bare entries={props.sessionsWork} participants={props.participants} onOpenTask={props.onOpenTask} /> : null}
+                  </>
+                ) : undefined}
               />
             ) : isStreaming ? (
               <StreamingContentWithInterimPosts
@@ -499,7 +517,7 @@ export const ChatMessageItem = memo(function ChatMessageItem(props: {
             ) : (
               <>
                 <ChatInterimPostList conversationId={props.conversationId} posts={interimPosts} attachments={allImageAttachments} />
-                {hasProcessingTranscript && processingTranscriptOpen && processingTranscriptView && !sessionsFoldActivity ? (
+                {hasProcessingTranscript && processingTranscriptOpen && processingTranscriptView && !sessionsFoldActivity && !repliedRows ? (
                   <ChatExpandedProcessingTranscript
                     activityDisclosure={props.activityDisclosure}
                     view={processingTranscriptView}
@@ -510,7 +528,7 @@ export const ChatMessageItem = memo(function ChatMessageItem(props: {
                 ) : continued && !sessions && activityEvents.length > 0 ? (
                   // The classic view's part its turn went on from: its steps and words, open.
                   <ChatInlineTranscript activityDisclosure={props.activityDisclosure} content={displayContent} activityEvents={activityEvents} />
-                ) : (
+                ) : repliedRows ?? (
                   <MarkdownText
                     content={displayContent}
                     recognizedCommand={message.role === "user" ? message.metadata?.nativeCommand?.name : undefined}
@@ -646,4 +664,13 @@ function participantRequestNoteClass(request: ChatParticipantRequestBatch): stri
 
 function isNegativeParticipantRequestStatus(status: ChatParticipantRequestBatch["status"]): boolean {
   return status === "denied" || status === "failed";
+}
+
+/** An answer's row while it is written: the first line streamed so far, read
+ *  by the view's mention rule as its finished line is; before anything has
+ *  streamed here, the line its saved copy has. */
+function withLiveReplyLine(entry: SessionsReplyEntry, content: string, words: (text: string) => string): SessionsReplyEntry {
+  const first = firstTextLine(content);
+  const line = first ? words(first) : undefined;
+  return line && line !== entry.line ? { ...entry, line } : entry;
 }

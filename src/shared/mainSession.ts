@@ -13,8 +13,9 @@
 // createImplicitParticipantRequestApproval; the User, 2026-11-22):
 //   - "classic": today's timeline, every member's reply on it, with avatars;
 //   - "sessions": the main timeline holds the User and the main session only
-//     (plus the cards the User must answer and a card for every task the main
-//     session gave); each other member's whole session is in the right panel.
+//     (plus the cards the User must answer, a row for every task the main
+//     session gave and a "Replied" row for each of its answers to a member);
+//     each other member's whole session is in the right panel.
 //
 // These rules are shared so the desktop and the phone (mobileSharedRules.ts)
 // put every message in the same place.
@@ -175,7 +176,8 @@ export type SessionsViewLane =
  *   then in the first such member's session.
  * - The main session's message: on the main timeline (its request messages
  *   become task cards there), except its answer to a member's request, which
- *   is part of that member's session.
+ *   is part of that member's session; the main timeline shows that answer as
+ *   a "Replied" row (mainTimelineMessages, sessionsAnsweredMemberOf).
  * - Another member's message: in its own session.
  * - The line a compaction of a member left: in that member's session (the
  *   main session's own on the main timeline).
@@ -195,12 +197,8 @@ export function sessionsViewLane(message: ChatMessage, index: SessionsViewIndex)
   }
   if (message.role === "participant" && message.participantId) {
     if (message.participantId === mainId) {
-      if (index.autoResumeMessageIds.has(message.id)) return { kind: "main" };
-      const requester = index.requestReplyRequesterById.get(message.id) ?? answeredRequesterOf(message, index);
-      if (requester && requester !== mainId) {
-        return { kind: "member", participantId: requester };
-      }
-      return { kind: "main" };
+      const answered = sessionsAnsweredMemberOf(message, index);
+      return answered ? { kind: "member", participantId: answered } : { kind: "main" };
     }
     return { kind: "member", participantId: message.participantId };
   }
@@ -247,10 +245,25 @@ export function sessionsCompactionLineWords(
   return sessionsCompactionLineText(line.cli ?? COMPACTING_CLIS.find((kind) => kind === memberKind));
 }
 
+/** The member whose request the main session answers with this message:
+ *  the request's reply, or the turn answering it while it is written. The
+ *  answer is part of that member's session, and the main timeline shows it as
+ *  a "Replied" row (the User, 2026-11-27: what the main session tells a
+ *  member, she sees it was told, without its text in her way). Its
+ *  continuation after its own request was answered (autoResumeMessageId)
+ *  answers nobody. */
+export function sessionsAnsweredMemberOf(message: ChatMessage, index: SessionsViewIndex): string | undefined {
+  const mainId = index.mainSessionParticipantId;
+  if (message.role !== "participant" || message.participantId !== mainId || index.autoResumeMessageIds.has(message.id)) return undefined;
+  const requester = index.requestReplyRequesterById.get(message.id) ?? answeredRequesterOf(message, index);
+  return requester && requester !== mainId ? requester : undefined;
+}
+
 /** The member whose request the main session answers with this message,
  *  told by the request it answers (its source) rather than by the request's
  *  reply id, which is set only when the turn ends: so the answer is in that
- *  member's session from its first token, not on the main timeline first. */
+ *  member's session, and its "Replied" row on the main timeline, from its
+ *  first token. */
 function answeredRequesterOf(message: ChatMessage, index: SessionsViewIndex): string | undefined {
   const metadata = message.metadata as { sourceMessageId?: unknown; participantRequestBatchId?: unknown; participantRequest?: unknown } | undefined;
   if (metadata?.participantRequest || typeof metadata?.sourceMessageId !== "string") return undefined;
@@ -300,9 +313,17 @@ export function isSessionsHiddenTurnFinishedNote(message: Pick<ChatMessage, "rol
   return turnFinishedNoteOf(message) !== undefined;
 }
 
+/** Whether a message is on the main timeline of the sessions view: its own
+ *  (sessionsViewLane), or the main session's answer to a member, shown there
+ *  as a "Replied" row. */
+export function isMainTimelineMessage(message: ChatMessage, index: SessionsViewIndex): boolean {
+  if (isSessionsHiddenTurnFinishedNote(message)) return false;
+  return sessionsViewLane(message, index).kind === "main" || sessionsAnsweredMemberOf(message, index) !== undefined;
+}
+
 /** The messages on the main timeline of the sessions view, in order. */
 export function mainTimelineMessages(messages: readonly ChatMessage[], index: SessionsViewIndex): ChatMessage[] {
-  return messages.filter((message) => sessionsViewLane(message, index).kind === "main" && !isSessionsHiddenTurnFinishedNote(message));
+  return messages.filter((message) => isMainTimelineMessage(message, index));
 }
 
 /** Where each of the main session's tasks is shown on the main timeline of

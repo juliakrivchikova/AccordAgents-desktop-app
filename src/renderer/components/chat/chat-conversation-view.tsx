@@ -280,6 +280,7 @@ export function ChatConversationView(props: ChatConversationViewProps): JSX.Elem
     thinkingSignature,
     messageFocusRequest: props.messageFocusRequest,
     openOutsideTimeline: sessionsChrome.openOutsideTimeline,
+    livesOutsideTimeline: sessionsChrome.livesOutsideTimeline,
     onLoadOlderMessages: props.onLoadOlderMessages,
     onLoadMessagePageForMessage: props.onLoadMessagePageForMessage
   });

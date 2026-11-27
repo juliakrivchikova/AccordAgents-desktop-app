@@ -1,10 +1,10 @@
-import type { ComponentProps } from "react";
+import { useCallback, type ComponentProps } from "react";
 import { CaretRightIcon } from "@phosphor-icons/react";
 
 import { isWaitingChoice } from "../../../shared/chatActiveRuns";
 import { isMainSessionTaskMessage } from "../../../shared/mainSession";
 import { machineAnswerPendingText } from "../../../shared/machineWaitingText";
-import type { SessionsTaskEntry } from "../../../shared/mainSessionView";
+import type { SessionsReplyEntry, SessionsTaskEntry } from "../../../shared/mainSessionView";
 import type { ChatMessage, ChatParticipant } from "../../../shared/types";
 import { ChatChoiceCard } from "./chat-choice-card";
 import { ChatDelegationRows } from "./chat-delegation-fold";
@@ -25,8 +25,9 @@ const NO_WORK: readonly SessionsTaskEntry[] = [];
 
 /** One message row of the sessions view's main timeline: the message without
  *  avatar, author or thread controls (the main session's reply with the tasks
- *  of its turn in its "Worked for …" fold), a member's card still waiting for
- *  the User, or a task whose reply is not loaded, on its own. */
+ *  of its turn in its "Worked for …" fold; its answer to a member's request
+ *  as a "Replied" row in place of its text), a member's card still waiting
+ *  for the User, or a task whose reply is not loaded, on its own. */
 export function ChatSessionsTimelineRow(props: {
   itemProps: ChatMessageItemProps;
   context: ChatSessionsTimelineContext;
@@ -34,6 +35,9 @@ export function ChatSessionsTimelineRow(props: {
   const { itemProps, context } = props;
   const { message } = itemProps;
   const { sessions } = context;
+  const { onOpenMember } = context;
+  // A "Replied" row opens the member's session at the answer.
+  const openReply = useCallback((entry: SessionsReplyEntry) => onOpenMember(entry.participantId, entry.messageId), [onOpenMember]);
   if (message.metadata?.participantRequest && isMainSessionTaskMessage(message, sessions.index)) {
     return (
       <div className="chat-sessions-task" data-message-id={message.id} data-testid="chat-sessions-task">
@@ -67,7 +71,9 @@ export function ChatSessionsTimelineRow(props: {
       waitingRunId={waiting?.runId}
       waitingBehindRunId={waiting?.behind?.runId}
       sessionsWork={sessions.workByReplyId.get(message.id)}
+      sessionsReplied={sessions.repliedByMessageId.get(message.id)}
       onOpenTask={context.onOpenTask}
+      onOpenReply={openReply}
     />
   );
 }

@@ -234,14 +234,17 @@ function sessionsMessageOf(row) {
     ...(row.participantId ? { participantId: row.participantId } : {}),
     ...(role === "participant" && row.participantLabel ? { participantLabel: row.participantLabel } : {}),
     metadata: {
-      // As the computer holds it: a reply a Stop or a quit ended.
+      // As the computer holds it: a reply a Stop or a quit ended, a part of
+      // a turn a "send now" cut.
       ...(row.status === "Stopped" ? { terminalReason: "user-stopped" } : {}),
+      ...(row.turnContinues ? { turnContinues: true } : {}),
       ...(Array.isArray(row.addressees) && row.addressees.length ? { deliveryTargets: row.addressees } : {}),
       ...(row.participantRequest ? { participantRequest: row.participantRequest } : {}),
       ...(waitingChoice ? { pendingChoice: { status: "pending" } } : {}),
       // What a member's turn answers: the main session's answer to a
-      // member's question belongs in that member's session from its first
-      // token (shared/mainSession.ts sessionsViewLane).
+      // member's question belongs in that member's session, and its
+      // "Replied" row on the main timeline, from its first token
+      // (shared/mainSession.ts sessionsAnsweredMemberOf).
       ...(role !== "user" && row.sourceMessageId ? { sourceMessageId: row.sourceMessageId } : {}),
       ...(role === "system" && row.finishedNote ? { appMessageSource: "app_turn_finished_note", turnFinishedNote: row.finishedNote } : {}),
       // A finished compaction's line: in the compacted member's session

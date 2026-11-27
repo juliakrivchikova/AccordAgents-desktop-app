@@ -1,8 +1,10 @@
 import { memo, useState, type ReactNode } from "react";
-import { CaretDownIcon, CaretRightIcon, HammerIcon } from "@phosphor-icons/react";
+import { ArrowBendUpLeftIcon, CaretDownIcon, CaretRightIcon, HammerIcon } from "@phosphor-icons/react";
 
-import { SESSIONS_WORK_STATUS_LABELS, sessionsDelegationSummary, type SessionsTaskEntry } from "../../../shared/mainSessionView";
-import type { ChatParticipant } from "../../../shared/types";
+import {
+  SESSIONS_REPLIED_SUMMARY, SESSIONS_WORK_STATUS_LABELS, sessionsDelegationSummary, type SessionsReplyEntry, type SessionsTaskEntry, type SessionsWorkStatus
+} from "../../../shared/mainSessionView";
+import type { ChatParticipant, ChatProviderKind } from "../../../shared/types";
 import { ChatProviderMark, ChatProviderMarkSlot } from "./chat-member-mark";
 import { ChatElapsed } from "./chat-task-card";
 import { formatWorkedDuration } from "./chat-worked-row";
@@ -84,31 +86,83 @@ function ChatDelegationRow(props: {
   participant?: ChatParticipant;
   onOpen?: (entry: SessionsTaskEntry) => void;
 }): JSX.Element {
-  const { entry, participant } = props;
+  const { entry } = props;
+  return (
+    <ChatWorkRow
+      testId="chat-delegation-row"
+      participantId={entry.item.targetParticipantId}
+      participant={props.participant}
+      kind={entry.item.targetKind}
+      row={entry}
+      onClick={() => props.onOpen?.(entry)}
+    />
+  );
+}
+
+/** The main session's answers to members on the main timeline (the User,
+ *  2026-11-27): "Replied" and a row per answer, as a turn's tasks are shown;
+ *  a row opens the member's session at the answer. */
+export const ChatRepliedRows = memo(function ChatRepliedRows(props: {
+  entries: readonly SessionsReplyEntry[];
+  participants?: readonly ChatParticipant[];
+  onOpen?: (entry: SessionsReplyEntry) => void;
+}): JSX.Element {
+  return (
+    <div className="chat-delegations chat-replies" data-testid="chat-replies">
+      <div className="chat-delegations-summary">
+        <ArrowBendUpLeftIcon size={13} aria-hidden />
+        <span>{SESSIONS_REPLIED_SUMMARY}</span>
+      </div>
+      {props.entries.map((entry) => (
+        <ChatWorkRow
+          key={entry.messageId}
+          testId="chat-reply-row"
+          participantId={entry.participantId}
+          participant={props.participants?.find((candidate) => candidate.id === entry.participantId)}
+          kind={entry.kind}
+          row={entry}
+          onClick={() => props.onOpen?.(entry)}
+        />
+      ))}
+    </div>
+  );
+});
+
+/** One slim row of a turn's work: the member's provider logo with a dot for
+ *  the state, the title, one line, the time, a chevron. */
+function ChatWorkRow(props: {
+  testId: string;
+  participantId: string;
+  participant?: ChatParticipant;
+  kind?: ChatProviderKind;
+  row: { title: string; status: Exclude<SessionsWorkStatus, "idle">; line?: string; lineMuted?: true; since?: string; durationMs?: number };
+  onClick: () => void;
+}): JSX.Element {
+  const { row, participant } = props;
   return (
     <button
       type="button"
       className="chat-delegation-row"
-      data-testid="chat-delegation-row"
-      data-participant-id={entry.item.targetParticipantId}
-      data-task-status={entry.status}
-      aria-label={`${entry.title}: ${SESSIONS_WORK_STATUS_LABELS[entry.status]}`}
-      onClick={() => props.onOpen?.(entry)}
+      data-testid={props.testId}
+      data-participant-id={props.participantId}
+      data-task-status={row.status}
+      aria-label={`${row.title}: ${SESSIONS_WORK_STATUS_LABELS[row.status]}`}
+      onClick={props.onClick}
     >
       <span className="chat-delegation-mark">
         {participant
           ? <ChatProviderMark member={participant} />
-          : entry.item.targetKind ? <ChatProviderMark member={{ kind: entry.item.targetKind }} /> : <ChatProviderMarkSlot />}
-        <span className={`chat-delegation-dot is-${entry.status}`} aria-hidden="true" />
+          : props.kind ? <ChatProviderMark member={{ kind: props.kind }} /> : <ChatProviderMarkSlot />}
+        <span className={`chat-delegation-dot is-${row.status}`} aria-hidden="true" />
       </span>
       <span className="chat-delegation-text">
-        <strong className="chat-delegation-title">{entry.title}</strong>
-        {entry.line && <span className={entry.lineMuted ? "chat-delegation-line is-muted" : "chat-delegation-line"}>{entry.line}</span>}
+        <strong className="chat-delegation-title">{row.title}</strong>
+        {row.line && <span className={row.lineMuted ? "chat-delegation-line is-muted" : "chat-delegation-line"}>{row.line}</span>}
       </span>
       <span className="chat-delegation-time">
-        {entry.since
-          ? <ChatElapsed className="chat-delegation-elapsed" since={entry.since} />
-          : entry.durationMs !== undefined ? formatWorkedDuration(entry.durationMs) : null}
+        {row.since
+          ? <ChatElapsed className="chat-delegation-elapsed" since={row.since} />
+          : row.durationMs !== undefined ? formatWorkedDuration(row.durationMs) : null}
       </span>
       <CaretRightIcon className="chat-delegation-chevron" size={15} aria-hidden />
     </button>

@@ -62,14 +62,15 @@ export {
 // task cards and the members list, by the desktop's own rules.
 export {
   MAIN_SESSION_ROLE_ID, buildSessionsViewIndex, canSwitchChatView, chatViewFor, isChatViewMode, isMainSessionTaskMessage, isSessionsHiddenTurnFinishedNote,
-  mainSessionMemberOf, mainSessionParticipantId, mainTimelineMessages, memberSessionMessages, sessionsCompactionLineWords, sessionsFormerMembers,
+  mainSessionMemberOf, mainSessionParticipantId, mainTimelineMessages, memberSessionMessages, sessionsAnsweredMemberOf, sessionsCompactionLineWords, sessionsFormerMembers,
   sessionsTaskPlacement, sessionsViewLane, withoutLeadingMention
 } from "./mainSession";
 export {
   SESSIONS_REMOVED_MEMBER_DETAIL, SESSIONS_WORK_STATUS_LABELS, firstTextLine, isMainSessionDelegationRosterCard, isMemberWorking, latestTaskByMember, memberRunningSince,
   openMemberCardMessages, sessionsDelegationSummary, sessionsFormerMemberStatus, sessionsMemberActivity, sessionsMemberDetail, sessionsMemberRows,
   sessionsMemberStatus, sessionsMemberTitle, sessionsMembersWaitingForUser, sessionsMembersWaitingSince, sessionsRunningCount, sessionsTaskEntries, titleTaskByMember,
-  sessionsCompactDuration, sessionsTaskDurationMs, sessionsTaskGroupLabel, sessionsTaskReplyLine, sessionsTaskRunningSince, sessionsTaskStatus
+  sessionsCompactDuration, sessionsTaskDurationMs, sessionsTaskGroupLabel, sessionsTaskReplyLine, sessionsTaskRunningSince, sessionsTaskStatus,
+  SESSIONS_REPLIED_SUMMARY, sessionsReplyEntry
 } from "./mainSessionView";
 // The User's messages a member has not taken yet, by the desktop's rule.
 export { isWaitingReply, waitingMessages } from "./waitingMessages";

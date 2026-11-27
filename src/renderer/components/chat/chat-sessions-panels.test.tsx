@@ -345,6 +345,8 @@ test("a member's session shows its task folded to one line, its messages without
   const answerMeta = articles[1]!.find((node) => typeof node.props.className === "string" && node.props.className.split(" ").includes("message-meta"));
   assert.ok(answerMeta.findAll((node) => node.props?.["data-provider-kind"] === MAIN.kind).length > 0, "the main session's answer is told apart by its provider's logo");
   assert.doesNotMatch(textOf(articles[1]!), /main session/i, "named by nothing");
+  assert.equal(root.findAll((node) => typeof node.type === "string" && node.props["data-testid"] === "chat-replies").length, 0,
+    "in drew's own session the answer reads in full, not as a Replied row");
 
   const composer = root.find((node) => node.props?.testId === "chat-member-composer");
   assert.equal(composer.props.placeholder, "Message Task for drew: fix the drew part...");

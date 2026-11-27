@@ -10,6 +10,8 @@ import { renderMessageContentIfChanged } from "../text/messageText.js";
 
 // The compaction icon (the desktop draws Phosphor's ArrowsInSimple).
 const COMPACTION_ICON_PATHS = ["M4 14h6v6", "M20 10h-6V4", "m14 10 7-7", "m3 21 7-7"];
+// The reply icon (the desktop draws Phosphor's ArrowBendUpLeft; lucide's corner-up-left).
+const REPLIED_ICON_PATHS = ["M20 20v-7a4 4 0 0 0-4-4H4", "m9 14-5-5 5-5"];
 const HAMMER_ICON_PATHS = ["m15 12-8.373 8.373a1 1 0 1 1-3-3L12 9", "m18 15 4-4", "m21.5 11.5-1.914-1.914A2 2 0 0 1 19 8.172V7l-2.26-2.26a6 6 0 0 0-4.202-1.756L9 2.96l.92.82A6.18 6.18 0 0 1 12 8.4V10l2 2h1.172a2 2 0 0 1 1.414.586L18.5 14.5"];
 
 /** The tasks a main-session turn gave, as T3 Code shows them: in the
@@ -69,6 +71,21 @@ function sessionsChoiceElement(entry) {
   from.append(providerLogoElement(entry.memberChoice.kind, "is-small"), name, document.createTextNode(" asks"), lineIcon(["m9 18 6-6-6-6"], 14));
   wrap.append(from);
   syncPendingCards(wrap, entry);
+  return wrap;
+}
+
+/** The main session's answer to a member on the main timeline, in place of
+ *  its text: "Replied" and the member's row, as a turn's tasks are shown
+ *  (the User, 2026-11-27); the row opens the member's session at it. */
+export function sessionsRepliedElement(replied) {
+  const wrap = document.createElement("div");
+  wrap.className = "sessions-delegations sessions-replies";
+  const summary = document.createElement("div");
+  summary.className = "sessions-worked-summary";
+  const text = document.createElement("span");
+  text.textContent = replied.summary;
+  summary.append(lineIcon(REPLIED_ICON_PATHS, 14), text);
+  wrap.append(summary, sessionsDelegationRowElement(replied));
   return wrap;
 }
 

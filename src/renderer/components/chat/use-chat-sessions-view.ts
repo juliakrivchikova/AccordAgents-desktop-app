@@ -2,8 +2,9 @@ import { useMemo, useRef } from "react";
 
 import {
   buildSessionsViewIndex,
-  isSessionsHiddenTurnFinishedNote,
+  isMainTimelineMessage,
   mainSessionParticipantId,
+  sessionsAnsweredMemberOf,
   sessionsFormerMembers,
   sessionsTaskPlacement,
   sessionsViewLane,
@@ -21,11 +22,13 @@ import {
   sessionsMembersWaitingSince,
   sessionsMemberTitle,
   sessionsRunningCount,
+  sessionsReplyEntry,
   sessionsTaskEntries,
   titleTaskByMember,
   type SessionsMemberActivity,
   type SessionsMemberRow,
   type SessionsMemberTask,
+  type SessionsReplyEntry,
   type SessionsTaskEntry,
   type SessionsWorkStatus
 } from "../../../shared/mainSessionView";
@@ -57,6 +60,9 @@ export interface ChatSessionsView {
   mainMessages: ChatMessage[];
   /** Members' messages on the main timeline only for their open card. */
   openCardMessageIds: ReadonlySet<string>;
+  /** The main session's answers to members' requests, each shown on the main
+   *  timeline as a "Replied" row in place of its text, by the answer's id. */
+  repliedByMessageId: ReadonlyMap<string, SessionsReplyEntry>;
   messagesById: ReadonlyMap<string, ChatMessage>;
   tasksByMember: ReadonlyMap<string, SessionsMemberTask>;
   /** Members a card waits on the User for: "Waiting for you" while they run. */
@@ -98,6 +104,10 @@ function useSignatureCache<T>(): (key: string, signature: string, value: () => T
   };
 }
 
+function replySignature(entry: SessionsReplyEntry): string {
+  return [entry.participantId, entry.title, entry.kind, entry.status, entry.since, entry.durationMs, entry.line, entry.lineMuted].join("\u0001");
+}
+
 function entriesSignature(entries: readonly SessionsTaskEntry[]): string {
   return entries.map((entry) =>
     [entry.messageId, entry.item.targetParticipantId, entry.item.replyMessageId, entry.title, entry.status, entry.since, entry.durationMs, entry.line].join("\u0001")
@@ -120,6 +130,7 @@ export function useChatSessionsView(input: {
   const actionsShown = input.actionsShown !== false;
   const mainId = view === "sessions" ? mainSessionParticipantId(conversation.metadata) : undefined;
   const cached = useSignatureCache<readonly SessionsTaskEntry[]>();
+  const cachedReply = useSignatureCache<SessionsReplyEntry>();
 
   const placement = useMemo(() => {
     if (!mainId) return undefined;
@@ -129,14 +140,20 @@ export function useChatSessionsView(input: {
     const shown = (message: ChatMessage): boolean => !isChatMessageHiddenInSessions(conversation, message, actionsShown) && !isWaitingReply(message);
     const openCards = openMemberCardMessages(messages, index).filter(shown);
     const openCardMessageIds = new Set(openCards.map((message) => message.id));
-    const lane = messages.filter((message) => openCardMessageIds.has(message.id) ||
-      (sessionsViewLane(message, index).kind === "main" && shown(message) && !isSessionsHiddenTurnFinishedNote(message)));
+    const lane = messages.filter((message) => openCardMessageIds.has(message.id) || (isMainTimelineMessage(message, index) && shown(message)));
     const tasks = sessionsTaskPlacement(lane, index);
+    const mainMessages = lane.filter((message) => !tasks.placedTaskIds.has(message.id));
+    const answeredMemberById = new Map<string, string>();
+    for (const message of mainMessages) {
+      const answered = sessionsAnsweredMemberOf(message, index);
+      if (answered) answeredMemberById.set(message.id, answered);
+    }
     return {
       index,
-      mainMessages: lane.filter((message) => !tasks.placedTaskIds.has(message.id)),
+      mainMessages,
       tasks,
       openCardMessageIds,
+      answeredMemberById,
       waiting: waitingMessages(messages, mainId),
       messagesById: new Map(messages.map((message) => [message.id, message])),
       tasksByMember: latestTaskByMember(messages),
@@ -190,6 +207,14 @@ export function useChatSessionsView(input: {
       const entries = sessionsTaskEntries(message, batch, participantStatusById, activity, placement.messagesById, appText, wordsText, waitingForUser);
       taskEntriesByMessageId.set(message.id, cached(message.id, entriesSignature(entries), () => entries));
     }
+    const repliedByMessageId = new Map<string, SessionsReplyEntry>();
+    for (const [messageId, participantId] of placement.answeredMemberById) {
+      const message = placement.messagesById.get(messageId);
+      if (!message) continue;
+      const kind = byId.get(participantId)?.kind ?? formerById.get(participantId)?.kind;
+      const entry = sessionsReplyEntry(message, { id: participantId, title: memberTitle(participantId), ...(kind ? { kind } : {}) }, appText, wordsText);
+      repliedByMessageId.set(messageId, cachedReply(messageId, replySignature(entry), () => entry));
+    }
     const workByReplyId = new Map<string, readonly SessionsTaskEntry[]>();
     for (const [replyId, tasks] of placement.tasks.tasksByReplyId) {
       const entries = tasks.flatMap((task) => taskEntriesByMessageId.get(task.id) ?? NO_ENTRIES);
@@ -202,6 +227,7 @@ export function useChatSessionsView(input: {
       index,
       mainMessages: placement.mainMessages,
       openCardMessageIds: placement.openCardMessageIds,
+      repliedByMessageId,
       waiting: placement.waiting,
       messagesById: placement.messagesById,
       tasksByMember: placement.tasksByMember,

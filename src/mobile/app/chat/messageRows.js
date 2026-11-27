@@ -17,7 +17,7 @@ import { avatarForLabel, avatarSignature, clearAvatarKindClasses, paintAvatar } 
 import { conversationMembers } from "../members/mentions.js";
 import { OUTBOX_REFUSED, OUTBOX_SUPERSEDED } from "../outbox/hubOutbox.js";
 import { serverOwesEntry, stopRequestedRunIds, stopRunFromPhone } from "../outbox/sending.js";
-import { appendSessionsSpecial, sessionsDelegationsElement, sessionsSpecialSignature } from "../sessions/sessionsCards.js";
+import { appendSessionsSpecial, sessionsDelegationsElement, sessionsRepliedElement, sessionsSpecialSignature } from "../sessions/sessionsCards.js";
 import { openWorkedFolds, sessionsRules, sessionsStateState } from "../sessions/sessionsState.js";
 import {
   compactElapsed, formatWorked, isSessionsRunningEntry, providerLogoElement, sessionsRunningText, sessionsWorkedElement,
@@ -42,6 +42,7 @@ export function messageRowSignature(entry) {
     presentation: entry.presentation,
     authorLabel: entry.authorLabel,
     authorKind: entry.authorKind,
+    replied: sessionsView && entry.replied ? JSON.stringify(entry.replied) : undefined,
     worked: sessionsView ? entry.workedMs : undefined,
     continued: sessionsView && entry.turnContinues ? true : undefined,
     // Its steps (a running reply's rows; what its Worked for opens to, and
@@ -456,7 +457,9 @@ function createMessageRow(entry) {
     status.textContent = messageStatusLabel(entry);
     const content = document.createElement("div");
     content.className = "message-content";
-    if (isSessionsRunningEntry(entry)) {
+    if (syncRepliedContent(content, entry)) {
+      // The main session's answer to a member: its "Replied" row.
+    } else if (isSessionsRunningEntry(entry)) {
       // No "Thinking" word: its "Working for …" and its steps say it.
       renderMessageContentIfChanged(content, sessionsRunningText(entry), entry.author);
     } else if (isThinkingEntry(entry)) {
@@ -630,7 +633,9 @@ export function updateMessageRow(item, entry) {
     syncMessageStopButton(meta, entry);
     // A running row drawn again in place (its posts came) keeps "Thinking"
     // as a new row draws it, not the placeholder sentence.
-    if (isThinkingEntry(entry) && !isSessionsRunningEntry(entry)) {
+    if (syncRepliedContent(content, entry)) {
+      // The main session's answer to a member: its "Replied" row.
+    } else if (isThinkingEntry(entry) && !isSessionsRunningEntry(entry)) {
       delete content.dataset.markdownRaw;
       delete content.dataset.markdownSource;
       renderThinkingInto(content, entry);
@@ -663,6 +668,29 @@ export function updateMessageRow(item, entry) {
   syncWaitingActions(item, entry);
   syncThreadChip(item, entry);
   return true;
+}
+
+/** The main session's answer to a member on the main timeline: its
+ *  "Replied" row in place of its text, drawn again only when it changes;
+ *  true when the row is one. A row that stops being one (opened in the
+ *  member's session) is cleared so its text is drawn again. */
+function syncRepliedContent(content, entry) {
+  if (entry.presentation === "sessions" && entry.replied) {
+    const key = JSON.stringify(entry.replied);
+    if (content.dataset.replied !== key) {
+      content.dataset.replied = key;
+      delete content.dataset.markdownRaw;
+      delete content.dataset.markdownSource;
+      delete content.dataset.thinking;
+      content.replaceChildren(sessionsRepliedElement(entry.replied));
+    }
+    return true;
+  }
+  if (content.dataset.replied !== undefined) {
+    delete content.dataset.replied;
+    content.replaceChildren();
+  }
+  return false;
 }
 
 /** A row's text as the open chat's view shows it: a failed or stopped

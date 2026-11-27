@@ -11,6 +11,7 @@ import type { ChatParticipantRosterStatus } from "./chat-roster-status";
 import { ChatSessionsTimelineRow } from "./chat-sessions-timeline-row";
 import { ChatSessionsLinksContext, type ChatSessionsLinks } from "./chat-sessions-links";
 import { useChatSessionsView, type ChatSessionsView } from "./use-chat-sessions-view";
+import { chatRenderedMessageElement } from "./use-chat-conversation-viewport";
 import { isChatMessageHiddenInChat, isChatMessageHiddenInSessions } from "./chat-thread-data";
 import { memberSessionMessages, sessionsCompactionLineText } from "../../../shared/mainSession";
 import {
@@ -85,12 +86,102 @@ function renderRow(message: ChatMessage, sessions: ChatSessionsView, opened: str
 test("the main timeline holds the User and the main session and an open member card; tasks are inside their turn's reply; members' replies are in their sessions", () => {
   const sessions = sessionsOf(sessionsConversation());
   assert.ok(sessions);
-  assert.deepEqual(sessions.mainMessages.map((message) => message.id), ["ask", "main-1", "taylor-choice"],
-    "the intro system line stays hidden; the task message is not a card; drew's question, the main session's answer to it, gera's reply and the User's message to drew are not here");
+  assert.deepEqual(sessions.mainMessages.map((message) => message.id), ["ask", "main-1", "main-answer", "taylor-choice"],
+    "the intro system line stays hidden; the task message is not a card; the main session's answer to drew is here (a Replied row); drew's question, gera's reply and the User's message to drew are not");
+  assert.deepEqual([...sessions.repliedByMessageId].map(([id, entry]) => [id, entry.participantId, entry.title, entry.status, entry.line]),
+    [["main-answer", DREW.id, sessions.memberTitle(DREW.id), "done", "Use the staging config."]], "the answer is drew's Replied row");
   assert.deepEqual(sessions.workByReplyId.get("main-1")?.map((entry) => [entry.item.targetParticipantId, entry.status]), [[DREW.id, "running"], [GERA.id, "done"]]);
   assert.equal(sessions.runningMemberCount, 1);
   assert.deepEqual(sessions.memberRows.current.map((row) => row.participant.handle), ["drew", "taylor"]);
   assert.deepEqual(sessions.memberRows.previous.map((row) => row.participant.handle), ["gera"]);
+});
+
+test("the main session's answer to a member is a Replied row on the main timeline in place of its text; the row opens that member's session at it", () => {
+  const conversation = sessionsConversation();
+  const messages = conversation.messages.map((message) => message.id === "main-answer"
+    ? { ...message, content: "Use the staging config.\n\nAlso restart the worker.", metadata: { ...message.metadata, workedMs: 6000 } }
+    : message);
+  const sessions = sessionsOf({ ...conversation, messages });
+  assert.ok(sessions);
+  const opened: string[] = [];
+  const answer = renderRow(messages.find((message) => message.id === "main-answer")!, sessions, opened);
+  const replies = answer.find((node) => typeof node.type === "string" && node.props["data-testid"] === "chat-replies");
+  assert.equal(textOf(replies.find(hasClass("chat-delegations-summary"))), "Replied", "her word, no count");
+  const rows = replies.findAll((node) => typeof node.type === "string" && node.props["data-testid"] === "chat-reply-row");
+  assert.equal(rows.length, 1);
+  const row = rows[0]!;
+  assert.equal(row.props["data-participant-id"], DREW.id);
+  assert.equal(textOf(row.find(hasClass("chat-delegation-title"))), sessions.memberTitle(DREW.id), "drew by its task's title");
+  assert.equal(textOf(row.find(hasClass("chat-delegation-line"))), "Use the staging config.", "the answer's first line");
+  assert.equal(textOf(row.find(hasClass("chat-delegation-time"))), "6s", "how long its turn worked");
+  assert.ok(row.findAll((node) => node.props?.["data-provider-kind"] === DREW.kind).length > 0, "drew's provider logo");
+  assert.ok(row.findAll(hasClass("is-done")).length === 1, "with the answer's state");
+  assert.doesNotMatch(textOf(answer), /restart the worker/, "the text itself is not on the main timeline");
+  assert.doesNotMatch(textOf(answer), /@/, "no handle");
+  assert.ok(answer.findAll((node) => typeof node.type === "string" && node.props["data-testid"] === "chat-worked-fold").length === 1, "under its turn's Worked for");
+  act(() => { row.props.onClick(); });
+  assert.deepEqual(opened, [`${DREW.id}@main-answer`], "it opens drew's session at the answer");
+  const reply = renderRow(messages.find((message) => message.id === "main-1")!, sessions);
+  assert.equal(reply.findAll((node) => typeof node.type === "string" && node.props["data-testid"] === "chat-replies").length, 0, "its reply to the User is its text");
+  assert.ok(memberSessionMessages(messages, DREW.id, sessions.index).some((message) => message.id === "main-answer"), "the whole answer stays in drew's session");
+});
+
+test("an answer being written is a running Replied row from its first token, and a task its turn gives lands inside it", () => {
+  const question = chatMessage("gera-asks", "participant", 20, {
+    participantId: GERA.id, participantLabel: "gera", content: "@main Which branch?",
+    metadata: { participantRequest: { id: "b-gera", requesterParticipantId: GERA.id, requesterHandle: "gera", source: "mcp", resumeRequester: true, status: "running", depth: 1,
+      createdAt: "2026-11-20T10:20:00.000Z", updatedAt: "2026-11-20T10:20:00.000Z",
+      items: [{ targetParticipantId: MAIN.id, targetHandle: "main", prompt: "Which branch?", status: "running", createdAt: "2026-11-20T10:20:00.000Z", updatedAt: "2026-11-20T10:20:00.000Z" }] } }
+  });
+  const answering = chatMessage("main-answering", "participant", 21, {
+    participantId: MAIN.id, participantLabel: "main", status: "pending", content: "Use",
+    metadata: { sourceMessageId: "gera-asks", participantRequestBatchId: "b-gera", runId: "run-answering" }
+  });
+  const task = chatMessage("main-delegates", "participant", 22, {
+    participantId: MAIN.id, participantLabel: "main", content: "@taylor check it",
+    metadata: { sourceMessageId: "gera-asks", participantRequest: { id: "b-del", requesterParticipantId: MAIN.id, requesterHandle: "main", source: "mcp", resumeRequester: true, status: "running", depth: 1,
+      createdAt: "2026-11-20T10:22:00.000Z", updatedAt: "2026-11-20T10:22:00.000Z",
+      items: [{ targetParticipantId: TAYLOR.id, targetHandle: "taylor", prompt: "Check the branch.", status: "running", createdAt: "2026-11-20T10:22:00.000Z", updatedAt: "2026-11-20T10:22:00.000Z" }] } }
+  });
+  const conversation = sessionsConversation();
+  const sessions = sessionsOf({ ...conversation, messages: [...conversation.messages, question, answering, task] });
+  assert.ok(sessions);
+  assert.ok(sessions.mainMessages.some((message) => message.id === "main-answering"), "on the main timeline while it is written");
+  assert.ok(!sessions.mainMessages.some((message) => message.id === "main-delegates"), "its task is not on its own");
+  assert.equal(sessions.repliedByMessageId.get("main-answering")?.participantId, GERA.id, "gera's Replied row from its first token");
+  assert.deepEqual(sessions.workByReplyId.get("main-answering")?.map((entry) => entry.item.targetParticipantId), [TAYLOR.id], "the task is inside the answer its turn was writing");
+  const row = renderRow(answering, sessions);
+  assert.ok(row.findAll((node) => typeof node.type === "string" && node.props["data-testid"] === "chat-sessions-running").length === 1, "its turn's Working for");
+  const replyRow = row.find((node) => typeof node.type === "string" && node.props["data-testid"] === "chat-reply-row");
+  assert.equal(replyRow.props["data-task-status"], "running");
+  assert.equal(textOf(replyRow.find(hasClass("chat-delegation-line"))), "Use", "what has streamed so far, as its line");
+  assert.equal(row.findAll(hasClass("chat-sessions-activity-words")).length, 0, "its words are not on the main timeline");
+  assert.equal(row.findAll((node) => typeof node.type === "string" && node.props["data-testid"] === "chat-delegation-row").length, 1, "the task its turn gave, beside it");
+});
+
+test("a jump marks the copy of a message where it lives: a timeline row on the timeline, an answer to a member in the side panel", () => {
+  const view = document.createElement("div");
+  const timeline = document.createElement("div");
+  const panel = document.createElement("div");
+  view.append(timeline, panel);
+  const copy = (parent: HTMLElement, id: string): HTMLElement => {
+    const article = document.createElement("article");
+    article.dataset.messageId = id;
+    parent.append(article);
+    return article;
+  };
+  // A member's open card: on the timeline and in its open session.
+  const cardRow = copy(timeline, "taylor-choice");
+  const cardInPanel = copy(panel, "taylor-choice");
+  assert.equal(chatRenderedMessageElement(view, timeline, "taylor-choice", "timeline"), cardRow);
+  assert.equal(chatRenderedMessageElement(view, timeline, "taylor-choice", "outside"), cardInPanel);
+  // The main session's answer: its Replied row is not drawn yet, its text is in the panel.
+  const answerInPanel = copy(panel, "main-answer");
+  assert.equal(chatRenderedMessageElement(view, timeline, "main-answer", "timeline"), undefined, "a row not drawn yet is waited for, not swapped for the panel's copy");
+  assert.equal(chatRenderedMessageElement(view, timeline, "main-answer", "outside"), answerInPanel);
+  copy(timeline, "main-answer");
+  assert.equal(chatRenderedMessageElement(view, timeline, "main-answer", "outside"), answerInPanel, "a jump to the answer marks its text in the member's session, not its Replied row");
+  assert.equal(chatRenderedMessageElement(view, null, "taylor-choice", "timeline"), cardRow, "no timeline drawn: the first copy");
 });
 
 test("a compaction leaves its CLI's line in the compacted member's session in the sessions view; the classic view stays as it was", () => {
@@ -255,7 +346,7 @@ test("a member's open mention approval stays on the main timeline as its message
   });
   const messages = [...sessionsMessages(), mention];
   const sessions = sessionsOf(sessionsConversation({}, messages))!;
-  assert.deepEqual(sessions.mainMessages.map((message) => message.id), ["ask", "main-1", "taylor-choice", "gera-mention"]);
+  assert.deepEqual(sessions.mainMessages.map((message) => message.id), ["ask", "main-1", "main-answer", "taylor-choice", "gera-mention"]);
   const row = renderRow(mention, sessions);
   const article = row.find((node) => node.type === "article");
   assert.equal(article.props["data-presentation"], "sessions");
@@ -382,7 +473,7 @@ test("turn-finished notes: none on the main timeline of the sessions view, the m
   } as Partial<ChatMessage>);
   const messages = [...sessionsMessages(), note("note-gera", GERA.id, "gera", 11), note("note-main", MAIN.id, "main", 12)];
   const sessions = sessionsOf(sessionsConversation({}, messages))!;
-  assert.deepEqual(sessions.mainMessages.map((message) => message.id), ["ask", "main-1", "taylor-choice"],
+  assert.deepEqual(sessions.mainMessages.map((message) => message.id), ["ask", "main-1", "main-answer", "taylor-choice"],
     "a member's task row says it is done; the main session's reply is the newest thing there");
   assert.equal(sessionsOf(sessionsConversation({ chatView: "classic" }, messages), "classic"), undefined, "the classic view places nothing: its notes stay");
 });
