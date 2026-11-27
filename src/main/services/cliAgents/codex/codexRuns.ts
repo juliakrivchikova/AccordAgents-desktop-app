@@ -276,10 +276,11 @@ export class CodexRuns {
       : this.cli.warmAgents.enqueueWarmRun(entry as WarmAgentEntry, task);
     const reply = async (target: WarmAgentEntry): Promise<ParticipantRunResult> => {
       if (!steering) return runNow(target);
-      const steered = await target.steer?.(prompt, signal, options.onOutput, options.onSessionId, options.timeoutMs, options.onCodexServerRequest, options.images?.items)
+      const taken = await target.steer?.(prompt, signal, options.onOutput, options.onSessionId, options.timeoutMs, options.onCodexServerRequest, options.images?.items)
         .catch(() => undefined);
+      const steered = taken === "after-turn" ? undefined : taken;
       // Stopped meanwhile: nothing is cut for it.
-      if (!signal?.aborted || steered) steering(steered ? "steered" : "not-steered");
+      if (!signal?.aborted || steered) steering(steered ? "steered" : taken === "after-turn" ? "after-turn" : "not-steered");
       if (steered) return steered;
       await earlier.catch(() => undefined);
       return runNow(target);

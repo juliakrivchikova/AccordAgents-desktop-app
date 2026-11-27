@@ -19,6 +19,8 @@ export interface AppMcpActor {
   participantRequestDepth?: number;
   participantRequestBatchId?: string;
   chainRootId?: string;
+  /** The chains of requests that went out with this turn's own in one turn. */
+  combinedChainRootIds?: string[];
   historyMarkdownPath?: string;
   historyJsonPath?: string;
   agentMode?: ChatAgentMode;

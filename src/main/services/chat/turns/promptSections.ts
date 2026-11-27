@@ -93,6 +93,28 @@ export function combinedRequestsNote(count: number): string {
   return `These ${count} requests waited for you while you were busy and reach you together, each in its own REQUEST block, in the order they were made. Answer every one of them in this reply: it goes back to each member who asked as its answer.`;
 }
 
+/** Antigravity gets its prompt as a command-line argument (macOS takes 1 MB
+ *  for the arguments and environment together): requests that would go out
+ *  together in a prompt larger than this stay out of it and run on their own. */
+export const COMBINED_ARGUMENT_PROMPT_MAX_BYTES = 512 * 1024;
+
+/** The request depth a turn answering requests that went out together asks
+ *  other members from: the deepest of them (the limit on how deep requests
+ *  go holds for each). */
+export function combinedRequestDepth(depth: number | undefined, combined: readonly ChatMessage[] | undefined): number {
+  return Math.max(depth ?? 0, ...(combined ?? []).map((message) => message.metadata?.participantRequest?.depth ?? 0));
+}
+
+/** The request chains of requests that went out together with a turn's own
+ *  (each keeps its own: the chain limit holds for every one of them). */
+export function combinedChainRootIds(combined: readonly ChatMessage[] | undefined): string[] | undefined {
+  const roots = (combined ?? []).flatMap((message) => {
+    const batch = message.metadata?.participantRequest;
+    return batch ? [batch.chainRootId ?? batch.id] : [];
+  });
+  return roots.length > 0 ? [...new Set(roots)] : undefined;
+}
+
 /** The app's own notes in one message, between markers with the message's
  *  nonce (buildPromptParts); nothing when there are none. */
 export function appNotesBlock(nonce: string, notes: readonly string[]): string {

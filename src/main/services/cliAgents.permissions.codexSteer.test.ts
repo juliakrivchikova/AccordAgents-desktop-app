@@ -217,3 +217,62 @@ test("two requests delivered now to one Codex turn: each takes the turn over in 
     assert.equal((await calls()).filter((call) => call === "turn/start").length, 1, "nothing sent again as a turn of its own");
   });
 });
+
+test("a request delivered now while Codex's turn waits on the User's approval is not steered or cut: it runs right after that turn, her card kept", async () => {
+  const fixtureDir = await mkdtemp(path.join(tmpdir(), "accord-codex-steer-approval-"));
+  const codexPath = await writeCodexAppServerFixture(fixtureDir, `#!/usr/bin/env node
+const readline = require("node:readline");
+const send = (value) => process.stdout.write(JSON.stringify(value) + "\\n");
+let turns = 0;
+readline.createInterface({ input: process.stdin }).on("line", (line) => {
+  const message = JSON.parse(line);
+  if (message.method === "initialize") { send({ id: message.id, result: { userAgent: "fake-codex", platformFamily: "unix", platformOsName: "macos", platformArch: "arm64" } }); return; }
+  if (message.method === "thread/start" || message.method === "thread/resume") { send({ id: message.id, result: { thread: { id: "thread-a" }, model: "gpt-5" } }); return; }
+  if (message.method === "turn/steer") process.exit(32);
+  if (message.method === "turn/interrupt") process.exit(33);
+  if (message.method === "turn/start") {
+    turns += 1;
+    const turn = "turn-" + turns;
+    send({ id: message.id, result: { turn: { id: turn } } });
+    send({ method: "turn/started", params: { threadId: "thread-a", turn: { id: turn } } });
+    if (turns === 1) {
+      send({ id: 900, method: "item/commandExecution/requestApproval", params: { threadId: "thread-a", turnId: turn, itemId: "i1", startedAtMs: 1, environmentId: null, command: "ls", cwd: "/tmp", availableDecisions: ["accept", "decline"] } });
+      return;
+    }
+    send({ method: "item/completed", params: { threadId: "thread-a", turnId: turn, item: { id: "b2", type: "agentMessage", text: "Ran the correction after the approval." } } });
+    send({ method: "turn/completed", params: { threadId: "thread-a", turn: { id: turn, status: "completed" } } });
+    return;
+  }
+  if (message.id === 900 && !message.method) {
+    send({ method: "item/completed", params: { threadId: "thread-a", turnId: "turn-1", item: { id: "a1", type: "agentMessage", text: "Approved and ran." } } });
+    send({ method: "turn/completed", params: { threadId: "thread-a", turn: { id: "turn-1", status: "completed" } } });
+  }
+});
+`);
+  const runner = new CliAgentRunner(undefined, undefined, codexPath) as any;
+  const participant = { id: "codex-member", kind: "codex-cli", label: "Codex" };
+  const warm = { conversationId: "chat-steer", participantId: "codex-member", contextKey: "context-approval", idleTimeoutMs: 60_000 };
+  const run = (prompt: string, extra: Record<string, unknown> = {}): Promise<ParticipantRunResult> =>
+    cliParts(runner).codexRuns.runCodexAppServerWarmOrOneShot(participant, prompt, fixtureDir, undefined, "chat", undefined, { agentMode: "auto", warm, ...extra });
+  try {
+    let asked!: () => void;
+    const approvalAsked = new Promise<void>((resolve) => { asked = resolve; });
+    let approve!: () => void;
+    const approved = new Promise<void>((resolve) => { approve = resolve; });
+    const first = run("Run ls.", { onCodexServerRequest: async () => { asked(); await approved; return { decision: "accept" }; } });
+    await approvalAsked;
+    const outcomes: string[] = [];
+    const second = run("Correction: build the new one.", { steerIntoRunningTurn: (outcome: string) => outcomes.push(outcome) });
+    for (let tries = 0; outcomes.length === 0 && tries < 200; tries += 1) await new Promise((resolve) => setTimeout(resolve, 10));
+    assert.deepEqual(outcomes, ["after-turn"]);
+    approve();
+    const [firstResult, secondResult] = await Promise.all([first, second]);
+    assert.equal(firstResult.ok, true, firstResult.error);
+    assert.match(firstResult.content ?? "", /Approved and ran\./);
+    assert.equal(secondResult.ok, true, secondResult.error);
+    assert.match(secondResult.content ?? "", /Ran the correction after the approval\./);
+  } finally {
+    await runner.shutdownWarmAgents();
+    await rm(fixtureDir, { recursive: true, force: true });
+  }
+});

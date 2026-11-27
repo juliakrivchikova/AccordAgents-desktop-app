@@ -150,11 +150,15 @@ export function participantRequestLimitError(
   // members, 2026-11-20); the depth limit above and the rate limit below
   // still stop a loop.
   const mainId = mainSessionParticipantId(conversation.metadata);
-  const chainBatches = asksMainSessionOnly ? [] : participantRequestBatches(conversation).filter((batch) =>
-    participantRequestBatchChainRootId(batch) === chainRootId && !isMainSessionTaskOrQuestion(batch, mainId)
-  );
-  if (chainBatches.length >= CHAT_PARTICIPANT_REQUEST_MAX_CHAIN_BATCHES) {
-    return `member request chain limit (${CHAT_PARTICIPANT_REQUEST_MAX_CHAIN_BATCHES}) reached`;
+  // A turn answering requests that went out together asks for each of them:
+  // every one's chain stays within the limit.
+  for (const root of asksMainSessionOnly ? [] : [chainRootId, ...(actor.combinedChainRootIds ?? [])]) {
+    const chainBatches = participantRequestBatches(conversation).filter((batch) =>
+      participantRequestBatchChainRootId(batch) === root && !isMainSessionTaskOrQuestion(batch, mainId)
+    );
+    if (chainBatches.length >= CHAT_PARTICIPANT_REQUEST_MAX_CHAIN_BATCHES) {
+      return `member request chain limit (${CHAT_PARTICIPANT_REQUEST_MAX_CHAIN_BATCHES}) reached`;
+    }
   }
   // The main session's tasks to members it made (app_chat_delegate_task)
   // are not member requests in this sense: it may give any number of them
@@ -355,6 +359,9 @@ export function updateParticipantRequestBatch(
 export function settleRequestsAnsweredWith(conversation: Conversation, requestMessageId: string, batch: ChatParticipantRequestBatch): void {
   const ended = batch.items.filter((item) => !isOpenParticipantRequestStatus(item.status));
   if (ended.length === 0) return;
+  // Nothing went out with it (nearly always): the chat is left as it is.
+  const linked = (message: ChatMessage) => message.metadata?.participantRequest?.items.some((item) => item.answeredWith?.requestMessageId === requestMessageId) === true;
+  if (!conversation.messages.some(linked)) return;
   const now = new Date().toISOString();
   conversation.messages = conversation.messages.map((message) => {
     const other = message.metadata?.participantRequest;

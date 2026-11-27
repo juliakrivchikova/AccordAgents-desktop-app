@@ -136,8 +136,11 @@ verbatim there). Modelled on T3 Code (`~/reference/t3code`,
   running turn is steered with it (`turn/steer`, Enter mid-turn in its CLI):
   the reply so far ends as a turn that goes on and the rest of the turn is the
   request's reply, split as Claude's is (`AppServerTurns.steer`, handed over
-  as Codex's answer is read); when Codex cannot take it (no turn yet, an
-  approval waits, it refuses) the turn is cut as below. A member whose CLI
+  as Codex's answer is read); while the turn waits on the User's approval
+  it is neither steered nor cut (the CLI's prompt holds what is typed then):
+  it runs right after that turn, her card kept; when Codex cannot take it
+  (no turn yet, it refuses) the turn is cut as below. Only a request the
+  main session wrote delivers now (the server vouches for who wrote it). A member whose CLI
   cannot take a message in the middle of a turn (Antigravity runs a process
   per turn) has its running turn cut as Send now cuts it (it keeps what it
   wrote, its run settles, a request it answered ends interrupted) and goes on
@@ -167,15 +170,25 @@ verbatim there). Modelled on T3 Code (`~/reference/t3code`,
   member's CLI takes her messages itself), a request delivered now, an
   inline request (its requester's Stop stops it), a resume or an operation;
   at most 8 requests, and only while their text stays within one request's
-  limit (Antigravity gets its prompt as an argument). A member on a machine
+  limit. Antigravity gets its prompt as a command-line argument (1 MB for
+  arguments and environment together): a prompt that would pass 512 KB with
+  them (a long unseen thread, say) goes out without them, and they run on
+  their own. What the turn asks of other members counts from the deepest of
+  the requests it answers, and within every one's chain limit
+  (`combinedChainRootIds` on its grant); each request keeps its own depth and
+  chain. A request stopped before its member started ends interrupted, here
+  and on a machine alike, never answered without a reply; a turn that failed
+  before its reply existed leaves the requests that went out with it to run
+  on their own, so none waits forever. A member on a machine
   gets them in one turn too: the asking device names them in the turn's
   request (`combined`), the server lets through only requests to that member
   the asking device may ask (from a machine: its own members' requests that
   need no approval of hers), and the machine's reply lists the ones it
   answered (`combinedRequestMessageIds`); one it did not answer (left out,
   an older machine program) runs on its own after it, so nothing is lost. A
-  Stop of one request that went out with others ends only that request; a
-  Stop of the reply ends all of them, before the member started too.
+  Stop of one request that went out with others ends only that request (not
+  the member going on after a compaction it asked for in that turn); a Stop
+  of the reply ends all of them, before the member started too.
 - **A member that asks someone itself and ends its turn to wait has not
   answered yet** (the User, 2026-11-27). A task (or any member request) whose
   member asked the main session or another member with

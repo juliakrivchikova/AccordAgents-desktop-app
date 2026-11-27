@@ -34,7 +34,7 @@ interface HeldTurn {
   priority?: TurnPriority;
   /** A request from another member that may go out with the ones waiting
    *  next to it (takeCombinableTurns). */
-  combinable?: { trigger: ChatMessage; chars: number };
+  combinable?: { trigger: ChatMessage; chars: number; runId: string };
   /** Taken into the turn of the request before it: its reply answers it
    *  (`stopped`: that reply was stopped before the member started). */
   combinedInto?: Promise<CombinedReply>;
@@ -123,6 +123,9 @@ export class TurnQueue {
   private readonly heldOf = new WeakMap<ParticipantTurnReservation, HeldTurn>();
   /** Runs whose request a request's turn before it answered (takeAnsweredTogether). */
   private readonly answeredTogether = new Set<string>();
+  /** Runs of requests taken into another request's turn, until they end:
+   *  a Stop of one ends only its request (isJoinedRun). */
+  private readonly joinedRuns = new Set<string>();
 
   constructor(
     private readonly chat: Pick<
@@ -147,9 +150,13 @@ export class TurnQueue {
       if (!(error instanceof NotAnsweredTogether)) throw error;
       // Taken into another request's turn that did not answer it (that turn
       // ended before it ran, or the member's device did not take it in): it
-      // runs on its own, as it would have.
+      // runs on its own, as it would have, in the place it had (right after
+      // that turn, before what was asked of the member since).
       const { combine: _combine, turnReservation: _reservation, ...own } = options;
-      return this.runTurnSerialized(conversation, participant, triggerMessage, runId, signal, progress, own);
+      return this.runTurnSerialized(conversation, participant, triggerMessage, runId, signal, progress, {
+        ...own,
+        turnReservation: this.reserveParticipantTurn(conversation.id, participant.id, "exclusive", { priority: "next" })
+      });
     }
   }
 
@@ -172,7 +179,7 @@ export class TurnQueue {
     const liveTurnKey = turnSegmentKey(conversation.id, turnSegmentId);
     this.chat.delegation.liveTurnSegments.add(liveTurnKey);
     const reservation = options.turnReservation ?? this.reserveTurnFor(conversation, participant, triggerMessage);
-    if (options.combine) this.markCombinable(reservation, triggerMessage, options.combine.chars);
+    if (options.combine) this.markCombinable(reservation, triggerMessage, options.combine.chars, runId);
     // The requests that go out with this one, and the end of this turn for
     // them (its reply, or none when it did not run).
     let combinedTriggers = options.combinedTriggers ?? [];
@@ -207,7 +214,11 @@ export class TurnQueue {
         reservation.release();
         const messages = await abortableReply(combinedInto, turnController.signal);
         if (messages === "stopped") throw new CombinedTurnStopped();
-        if (!messages[0]?.metadata?.combinedRequestMessageIds?.includes(triggerMessage.id)) throw new NotAnsweredTogether();
+        if (!messages[0]?.metadata?.combinedRequestMessageIds?.includes(triggerMessage.id)) {
+          // It runs on its own: a run of the member like any other.
+          this.joinedRuns.delete(runId);
+          throw new NotAnsweredTogether();
+        }
         this.answeredTogether.add(runId);
         return messages;
       }
@@ -270,17 +281,14 @@ export class TurnQueue {
         try {
           messages = await this.chat.participantTurn.runParticipantTurn(conversation, participant, triggerMessage, runId, turnController.signal, progress, {
             ...options,
-            // What its reply asks of other members counts from the deepest
-            // request it answers (the limit on how deep requests go).
-            participantRequestDepth: Math.max(options.participantRequestDepth ?? 0, ...combinedTriggers.map((message) => message.metadata?.participantRequest?.depth ?? 0)),
             turnSegmentId,
             combinedTriggers,
             queuedInCli: Boolean(reservation.behindMemberTurn),
             ...(delivery === "live" && participant.kind === "codex-cli" ? {
               // Codex steers its running turn with it; when it cannot, the
               // running turn is cut and this one runs next, in its session.
-              steerIntoRunningTurn: (outcome: "steered" | "not-steered") => {
-                void this.chat.runCancel.deliverNow(conversation.id, participant.id, runId, outcome === "steered" ? "steered" : "interrupt-and-restart").catch(() => undefined);
+              steerIntoRunningTurn: (outcome: "steered" | "not-steered" | "after-turn") => {
+                void this.chat.runCancel.deliverNow(conversation.id, participant.id, runId, outcome === "not-steered" ? "interrupt-and-restart" : outcome).catch(() => undefined);
               }
             } : delivery === "live" ? {
               onCliMessageWritten: () => {
@@ -476,9 +484,21 @@ export class TurnQueue {
   /** A request from another member that waits for its turn and may go out
    *  together with the requests waiting next to it, as the member's
    *  dedicated CLI sends what was queued while it worked in one message. */
-  markCombinable(reservation: ParticipantTurnReservation, trigger: ChatMessage, chars: number): void {
+  markCombinable(reservation: ParticipantTurnReservation, trigger: ChatMessage, chars: number, runId: string): void {
     const held = this.heldOf.get(reservation);
-    if (held && !held.running && !held.priority && held.mode === "exclusive") held.combinable = { trigger, chars };
+    if (held && !held.running && !held.priority && held.mode === "exclusive") held.combinable = { trigger, chars, runId };
+  }
+
+  /** A run of a request taken into another request's turn: it does not run
+   *  the member, and its Stop ends only its own request (not, say, the
+   *  member going on after a compaction it asked for in that turn). */
+  isJoinedRun(runId: string): boolean {
+    return this.joinedRuns.has(runId);
+  }
+
+  /** The run of a request taken into another's turn has ended. */
+  endJoinedRun(runId: string): void {
+    this.joinedRuns.delete(runId);
   }
 
   /** The requests waiting right behind a request whose turn begins, taken
@@ -502,6 +522,7 @@ export class TurnQueue {
     }
     for (const turn of taken) {
       turn.combinedInto = result;
+      this.joinedRuns.add(turn.combinable!.runId);
       for (const map of [this.pendingTurns, this.readyTurns]) map.get(key)?.delete(turn);
       turn.wake?.();
     }

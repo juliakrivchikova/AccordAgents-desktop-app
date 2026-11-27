@@ -186,7 +186,7 @@ export class SelfCompactionResumes {
       if (ended) await this.endSelfCompaction(conversationId, participantId, resume.runId, ended);
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
-      await this.deps.debugLogs.write("chat.self-compaction.resume-error", { conversationId, participantId, askingRunId: resume.runId, message });
+      void this.deps.debugLogs.write("chat.self-compaction.resume-error", { conversationId, participantId, askingRunId: resume.runId, message });
       // Stopped while it waited to be taken: no reply says so.
       await this.endSelfCompaction(conversationId, participantId, resume.runId, message === "Chat run cancelled." ? (this.chat.appQuit.quitting ? "interrupted" : "stopped") : "failed", message);
     }
