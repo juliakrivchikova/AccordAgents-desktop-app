@@ -101,52 +101,17 @@ Conversations are append-mostly. Chat conversations store timeline messages plus
 - Strict TS everywhere; keep types explicit at IPC, service, and shared boundaries. Add new shapes to the subject's file in `src/shared/types/` rather than redefining them on either side of the bridge.
 - Do not commit provider API keys, local repo paths, generated logs, `node_modules`, or `dist`. Treat saved conversations and `debug-logs/` as sensitive — they contain prompts, diffs, and raw model responses.
 
-## MANDATORY: a change is done only after end-to-end QA and review
+## Verifying changes
 
-**When the User asks for a change, it is not done until it has been verified
-end to end through the real surface the User touches, and reviewed with the gstack
-`/review` skill.** Both, every time. Not only before a merge, and not only for
-a pull request — a commit straight to a branch, a deploy, or a report that it
-builds and the tests pass is an unfinished change without them. This holds for
-a one-line fix, for a change whose author reported passing tests, for a change
-you wrote yourself, and for every participant, local or in the cloud.
+Use the project’s `implement-change` skill to choose checks for the affected behavior.
+For a small, isolated change, run a focused test or reproduction and the cheap
+checks that directly apply. Start a server, browser or benchmark for such a
+change only when the User asks.
 
-Route every such request through the `implement-change` skill. There is no
-threshold below which it is skipped: a CSS tweak, a copy change, a config
-value and a rename all go through it, and so does the second and third attempt
-at the same defect. "It is one line", "it is only CSS", "I can see it is right
-by reading it" and "the User is waiting" are not reasons — the first three have
-each shipped broken work here, and the fourth is a trade the User gets to make,
-not one to make silently by skipping the step.
-
-End to end means the real thing: the running Electron app for desktop
-behavior, the installed PWA on the phone for phone behavior, against the real
-services involved. A unit test, a headless-browser measurement or a mocked
-event is supporting evidence, never the proof. When the real check is
-genuinely impossible, say so plainly and name what is missing — never
-substitute a weaker check and call it verified.
-
-That is not hypothetical. On 2026-08-31 a phone-app fix went through tests, a
-Chromium measurement and a deploy with neither step run; it shipped a second
-defect straight to the User's phone, and the User found it.
-
-Reading the author's summary and grepping the diff for the parts you decided
-were risky is not a review. That is exactly what was done to PR #17 on
-2026-08-21: the security surface was checked and passed, while the change
-quietly attached a full conversation snapshot to a payload that goes to SQLite
-as a command-line argument. On the User's real chat that argument is megabytes
-and the write fails; it failed 1696 times in one morning, on every message she
-sent, and nobody noticed until she said the app felt slow. The author's
-end-to-end verification was real but ran on a small conversation, so the size
-never showed.
-
-Two questions the review must answer out loud, because that defect would have
-been caught by either:
-
-- **How large does this get on the User's actual data?** This chat, thousands of
-  messages, is the case that matters — not a fixture.
-- **Where does this data end up?** A payload that grows is fine until something
-  downstream has a limit: an argument list, a request body, a column, a screen.
+For changes that span processes, devices or services, verify the affected
+workflow in the running Electron app or installed PWA with the relevant services.
+Report which checks ran and any verification gaps. When a change grows a payload,
+check its size on representative data and the limits at its destination.
 
 ## The phone app is deployed separately
 
@@ -166,18 +131,7 @@ busts the phone's cache.
 When the user's request matches an available skill, invoke it via the Skill tool. When in doubt, invoke the skill.
 
 Key routing rules:
-- Product ideas/brainstorming → invoke /office-hours
-- Strategy/scope → invoke /plan-ceo-review
-- Architecture → invoke /plan-eng-review
-- Design system/plan review → invoke /design-consultation or /plan-design-review
-- Full review pipeline → invoke /autoplan
+
 - Fix a reported defect → invoke /fix-with-e2e-repro (reproduce end-to-end first, prove the fix with the same reproduction)
 - Make a main-process change go live → invoke /restart-the-app (build, restart through launchd, verify the process actually came back)
-- Bugs/errors → invoke /investigate
-- QA/testing site behavior → invoke /qa or /qa-only
-- Code review/diff check → invoke /review
 - Writing, changing or reviewing renderer UI or React code → invoke /renderer-ui-code (and read `src/components/ui/AGENTS.md`)
-- Visual polish → invoke /design-review
-- Ship/deploy/PR → invoke /ship or /land-and-deploy
-- Save progress → invoke /context-save
-- Resume context → invoke /context-restore

@@ -21,7 +21,6 @@ debug-logs/
 .vscode/
 .codex
 .history
-.gstack/
 .playwright-mcp/
 .wrangler/
 design-diff-report.json
