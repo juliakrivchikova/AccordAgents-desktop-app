@@ -18,12 +18,16 @@ const PROGRESS_TEXT_FLUSH_MS = 1_000;
 const PHONES_RECHECK_MS = 30_000;
 /** Runs whose progress is published at once, at most (the oldest stop). */
 const PROGRESS_RUNS_MAX = 32;
+/** How long a catalog the server did not take waits before it is sent again. */
+const CATALOG_RETRY_MIN_MS = 30_000;
+const CATALOG_RETRY_MAX_MS = 5 * 60_000;
 
 export class HubPhonePublisher {
   /** Members by chat that live on a machine: their progress is not ours. */
   private readonly machineMembers = new Map<string, Set<string>>();
   private readonly progress = new Map<string, MachineProgressSender<void>>();
   private catalogTimer?: ReturnType<typeof setTimeout>;
+  private catalogRetryMs = CATALOG_RETRY_MIN_MS;
   private catalogQueue: Promise<void> = Promise.resolve();
   /** Custom avatars already on the server, by id and content. */
   private readonly uploadedAvatars = new Map<string, { stamp: string; entry: HubComposerCatalog["avatars"][string] }>();
@@ -149,8 +153,15 @@ export class HubPhonePublisher {
     if (this.catalogTimer) clearTimeout(this.catalogTimer);
     this.catalogTimer = setTimeout(() => {
       this.catalogTimer = undefined;
-      this.catalogQueue = this.catalogQueue.then(() => this.publishCatalog()).catch((error) => {
-        this.options.log("hub.phone.catalog-error", { message: error instanceof Error ? error.message : String(error) });
+      this.catalogQueue = this.catalogQueue.then(() => this.publishCatalog()).then(() => {
+        this.catalogRetryMs = CATALOG_RETRY_MIN_MS;
+      }, (error) => {
+        // Not put up (the server restarting, the network gone a moment):
+        // tried again later, or the phone keeps what the catalog said
+        // before (its New chat, the display settings) until the next change.
+        this.options.log("hub.phone.catalog-error", { message: error instanceof Error ? error.message : String(error), retryMs: this.catalogRetryMs });
+        if (!this.catalogTimer) this.scheduleCatalog(this.catalogRetryMs);
+        this.catalogRetryMs = Math.min(CATALOG_RETRY_MAX_MS, this.catalogRetryMs * 2);
       });
     }, delayMs);
     this.catalogTimer.unref?.();

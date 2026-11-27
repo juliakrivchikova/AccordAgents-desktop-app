@@ -7,7 +7,14 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { rm } from "node:fs/promises";
+import { createRequire } from "node:module";
 import { attachApp, launchChrome, member, openChat, pairPage, serveMobileShell, sleep, startMobileHub, tempProfile } from "./mobile-hub-fixture.mjs";
+
+const require = createRequire(import.meta.url);
+const chatChanges = require("../dist/main/main/services/chatChanges.js");
+for (const key of ["mainSessionParticipantId", "chatView"]) {
+  if (!chatChanges.SHARED_CONVERSATION_METADATA_KEYS.includes(key)) chatChanges.SHARED_CONVERSATION_METADATA_KEYS.push(key);
+}
 
 const SITE_PORT = 8403;
 const CDP_PORT = 9553;
@@ -53,6 +60,51 @@ test("the computer's switch hides the step in progress on the phone, both ways, 
     await hub.progress(CONVERSATION, RUN_ID, "", { participantLabel: "@drew", agentProgress: { participantId: DREW.id, messageId: running.id } });
     await sleep(4000);
     assert.doesNotMatch(await app.evaluate(lastRow), /npm test/, "the kept step text stays hidden");
+  } finally {
+    app?.close();
+    chrome.kill("SIGKILL");
+    await site.close();
+    await hub.close();
+    await rm(profile, { recursive: true, force: true }).catch(() => undefined);
+  }
+});
+
+test("with actions hidden the phone's sessions view keeps a reply's notices about the run and drops its steps", { timeout: 180_000 }, async () => {
+  const MAIN = member("main", { id: "p-main", roleConfigId: "main-session", kind: "codex-cli" });
+  const at = (minutesAgo) => new Date(Date.now() - minutesAgo * 60_000).toISOString();
+  const event = (n, kind, label, extra = {}) => ({ id: `a${n}`, sequence: n, kind, label, createdAt: at(5), ...extra });
+  const hub = await startMobileHub();
+  const site = await serveMobileShell({ port: SITE_PORT + 1, hubOrigins: [hub.base] });
+  const profile = await tempProfile("aa-mobile-member-notices-");
+  const chrome = launchChrome({ port: CDP_PORT + 1, profile, url: `${site.origin}/` });
+  let app;
+  try {
+    await hub.createChat("conv-notices", {
+      title: "Notices", participants: [MAIN], createdAt: at(10),
+      metadata: { mainSessionParticipantId: MAIN.id, chatView: "sessions" },
+      messages: [
+        { id: "u0", role: "user", content: "Fix it", status: "done", createdAt: at(9), metadata: { deliveryTargets: [MAIN.id] } },
+        { id: "r0", role: "participant", participantId: MAIN.id, participantLabel: "@main", content: "Stopped: sign in again.", status: "done", createdAt: at(8),
+          metadata: { sourceMessageId: "u0", workedMs: 4_000, activityEvents: [
+            event(1, "command", "Running npm test", { detail: "npm test" }),
+            event(2, "status", "@main has produced no provider output for 5 minutes."),
+            event(3, "approval", "Codex needs you to sign in again", { status: "failed" })
+          ] } }
+      ]
+    });
+    await hub.publishCatalog({ display: { showMemberActions: false } });
+    app = await attachApp({ port: CDP_PORT + 1 });
+    await pairPage(app, { hub, siteOrigin: site.origin });
+    await openChat(app, "conv-notices");
+    await app.waitFor(`localStorage.getItem("accordagents.display.showMemberActions") === "0"`, "the phone learned the setting", 20_000);
+    const row = `document.querySelector('#message-list .message-row[data-thread-root="r0"]')`;
+    await app.waitFor(`Boolean(${row}?.querySelector("button.sessions-worked-toggle"))`, "its Worked for opens to its notices", 20_000);
+    await app.evaluate(`${row}.querySelector("button.sessions-worked-toggle").click()`);
+    await app.waitFor(`${row}.querySelectorAll(".sessions-activity-row").length === 2`, "two rows: the notices", 10_000);
+    const text = await app.evaluate(`${row}.innerText`);
+    assert.match(text, /no provider output for 5 minutes/);
+    assert.match(text, /sign in again/);
+    assert.doesNotMatch(text, /npm test/, "the step is gone");
   } finally {
     app?.close();
     chrome.kill("SIGKILL");

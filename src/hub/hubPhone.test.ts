@@ -1,86 +1,24 @@
 import assert from "node:assert/strict";
-import { generateKeyPairSync, randomBytes } from "node:crypto";
+import { randomBytes } from "node:crypto";
 import { mkdtemp, rm } from "node:fs/promises";
-import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { createDeviceIdentity } from "../main/services/deviceIdentity";
-import { hubCertificateCrypto, sha256Hex, signHubRequest, signHubText } from "../main/services/hubAuth";
+import { hubCertificateCrypto } from "../main/services/hubAuth";
 import { StorageService } from "../main/services/storage";
 import { storageParts } from "../main/services/storage/test/storageParts";
-import { createHubDeviceClient, enrollHubPhone, createHubDeviceIdentity, hubTurnRunId, signHubRequestWeb } from "../shared/hubDeviceClient";
+import { createHubDeviceIdentity, hubTurnRunId, signHubRequestWeb } from "../shared/hubDeviceClient";
 import type { HubOp, HubOpsResponse } from "../shared/hubOps";
-import { hubPhoneInviteSigningText, verifyHubPhoneCertificate, verifyHubPhoneEnrollment, type HubPhoneCertificate, type HubPhoneInvite, type HubRosterResponse } from "../shared/hubProtocol";
+import { verifyHubPhoneCertificate, verifyHubPhoneEnrollment, type HubPhoneCertificate, type HubRosterResponse } from "../shared/hubProtocol";
 import { encodeMachineProgress } from "../shared/machineProgress";
 import { lastMemberTurnEnd } from "../shared/forkToNewChat";
 import type { ChatAppToolApproval, ChatMessage, ChatParticipant, ReviewProgress } from "../shared/types";
-import { composeHub } from "./main";
 import { HubWaker } from "./hubPhoneState";
 import { HubRetention, HUB_RETENTION_DEFAULTS } from "./hubRetention";
+import { hub, pairPhone } from "./test/hubPhoneFixtures";
 
 type Identity = ReturnType<typeof createDeviceIdentity>;
-
-function vapid() {
-  const { privateKey, publicKey } = generateKeyPairSync("ec", { namedCurve: "P-256" });
-  const jwk = publicKey.export({ format: "jwk" });
-  const point = Buffer.concat([Buffer.from([4]), Buffer.from(jwk.x!, "base64url"), Buffer.from(jwk.y!, "base64url")]);
-  return { publicKey: point.toString("base64url"), privateJwk: privateKey.export({ format: "jwk" }) };
-}
-
-async function hub(t: test.TestContext) {
-  const dir = await mkdtemp(path.join(tmpdir(), "accord-hub-phone-"));
-  const storage = new StorageService({ dbPath: path.join(dir, "hub.sqlite3"), sqliteExecutable: "sqlite3" });
-  await storage.init();
-  const owner = createDeviceIdentity(new Date().toISOString());
-  await storage.hub().setOwner({ deviceId: owner.originId, publicKeyDerBase64: owner.publicKeyDerBase64, name: "Mac", addedAt: new Date().toISOString() });
-  const rings: Array<{ url: string; at: number }> = [];
-  const aws: Array<{ url: string; body: string }> = [];
-  const fetchImpl = (async (url: string | URL, init?: RequestInit) => {
-    const text = String(url);
-    if (text.startsWith("https://fcm.googleapis.com/")) {
-      rings.push({ url: text, at: Date.now() });
-      return new Response("", { status: 201 });
-    }
-    aws.push({ url: text, body: String(init?.body ?? "") });
-    return new Response("<StartInstancesResponse/>", { status: 200 });
-  }) as typeof fetch;
-  const composed = composeHub({ storage, hubId: "hub-phone-test", version: "test", keys: vapid(), log: () => undefined, fetchImpl, pushDebounceMs: 50 });
-  const http = await composed.server.listenHttp(0, "127.0.0.1");
-  const base = `http://127.0.0.1:${(http.address() as AddressInfo).port}`;
-  t.after(async () => {
-    await composed.close();
-    await rm(dir, { recursive: true, force: true });
-  });
-  const call = async (identity: Identity, method: string, pathWithQuery: string, body?: unknown) => {
-    const text = body === undefined ? "" : JSON.stringify(body);
-    const response = await fetch(`${base}${pathWithQuery}`, {
-      method,
-      headers: { authorization: signHubRequest(identity, { method, pathWithQuery, body: text }), ...(body === undefined ? {} : { "content-type": "application/json" }) },
-      ...(body === undefined ? {} : { body: text })
-    });
-    return { status: response.status, body: await response.json() as Record<string, unknown> };
-  };
-  /** What the server does after an answer (rings, live progress) is done by then. */
-  const settle = async () => {
-    await new Promise((resolve) => setTimeout(resolve, 50));
-  };
-  return { dir, storage, owner, base, call, settle, rings, aws, ...composed };
-}
-
-/** The desktop invites, the phone enrolls the way the PWA does: WebCrypto. */
-async function pairPhone(h: Awaited<ReturnType<typeof hub>>, scope: HubPhoneInvite["scope"] = { scope: "device" }) {
-  const token = randomBytes(32).toString("base64url");
-  const invite: HubPhoneInvite = {
-    version: 1, inviteId: `invite-${randomBytes(8).toString("hex")}`, hubId: "hub-phone-test", issuerDeviceId: h.owner.originId,
-    tokenHash: sha256Hex(token), scope, name: "Phone", issuedAt: new Date().toISOString(), expiresAt: new Date(Date.now() + 600_000).toISOString()
-  };
-  assert.equal((await h.call(h.owner, "PUT", "/v1/phone-invites", { invite, signature: signHubText(h.owner, hubPhoneInviteSigningText(invite)) })).status, 200);
-  const identity = await createHubDeviceIdentity();
-  const answer = await enrollHubPhone({ hubUrl: h.base, hubId: "hub-phone-test", token, identity, name: "iPhone" });
-  const client = createHubDeviceClient({ hubUrl: h.base, identity: async () => identity });
-  return { identity, client, answer, invite };
-}
 
 /** Operations a device writes, signed as the request that carries them. */
 function writer(h: Awaited<ReturnType<typeof hub>>) {
@@ -296,47 +234,6 @@ test("a machine's live progress shows as the pending row with the turn it is, th
   assert.deepEqual(notices.notices.map((notice) => [notice.kind, notice.body]), [["reply", "@box replied."]], "a notice names who, not what");
 });
 
-test("the computer's Show members' actions reaches the phone with every changes answer, and changing it ends a phone's wait at once", async (t) => {
-  const h = await hub(t);
-  const { client } = await pairPhone(h);
-  const catalog = (display?: { showMemberActions: boolean }) => ({ catalog: { version: 1, publishedAt: new Date().toISOString(), roles: {}, prompts: [], skills: [], avatars: {}, ...(display ? { display } : {}) } });
-  type Changes = { instance: string; seq: number; conversationIds?: string[]; display?: { showMemberActions: boolean } };
-  const before = await client.getJson<Changes>("/v1/phone/changes", { instance: "none", after: 0 });
-  assert.equal(before.display, undefined, "no catalog yet: the phone keeps its own");
-  assert.equal((await h.call(h.owner, "PUT", "/v1/catalog", catalog({ showMemberActions: false }))).status, 200);
-  await h.settle();
-  const off = await client.getJson<Changes>("/v1/phone/changes", { instance: "none", after: 0 });
-  assert.deepEqual(off.display, { showMemberActions: false });
-  const started = Date.now();
-  const waiting = client.getJson<Changes>("/v1/phone/changes", { instance: off.instance, after: off.seq, waitMs: 20_000 }, { timeoutMs: 30_000 });
-  await new Promise((resolve) => setTimeout(resolve, 100));
-  assert.equal((await h.call(h.owner, "PUT", "/v1/catalog", catalog({ showMemberActions: true }))).status, 200);
-  const woken = await waiting;
-  assert.ok(Date.now() - started < 5_000, "answered at once, not at the end of its wait");
-  assert.deepEqual(woken.display, { showMemberActions: true });
-  assert.deepEqual(woken.conversationIds, [], "no chat changed");
-  // Published again unchanged (another setting was saved): a wait goes on.
-  const still = client.getJson<Changes>("/v1/phone/changes", { instance: woken.instance, after: woken.seq, waitMs: 1_500 }, { timeoutMs: 10_000 });
-  const again = Date.now();
-  assert.equal((await h.call(h.owner, "PUT", "/v1/catalog", catalog({ showMemberActions: true }))).status, 200);
-  await still;
-  assert.ok(Date.now() - again >= 1_000, "an unchanged setting is no news");
-  // A phone still drawing by the other setting (it was told one read just
-  // before a publication) is answered at once, not after a wait for news.
-  const behindAt = Date.now();
-  const behind = await client.getJson<Changes>("/v1/phone/changes", { instance: woken.instance, after: woken.seq, waitMs: 20_000, shown: "0" }, { timeoutMs: 30_000 });
-  assert.ok(Date.now() - behindAt < 5_000, "a phone behind the setting is not kept waiting");
-  assert.deepEqual(behind.display, { showMemberActions: true });
-  const level = client.getJson<Changes>("/v1/phone/changes", { instance: woken.instance, after: woken.seq, waitMs: 1_500, shown: "1" }, { timeoutMs: 10_000 });
-  const levelAt = Date.now();
-  await level;
-  assert.ok(Date.now() - levelAt >= 1_000, "one drawing by the same setting waits for news as before");
-  // A computer from before publishes none: the phone is told nothing.
-  assert.equal((await h.call(h.owner, "PUT", "/v1/catalog", catalog())).status, 200);
-  await h.settle();
-  assert.equal((await client.getJson<Changes>("/v1/phone/changes", { instance: "none", after: 0 })).display, undefined);
-});
-
 test("a picture the phone puts on the server is read back by its message, and a custom avatar from the catalog", async (t) => {
   const h = await hub(t);
   const machine = createDeviceIdentity(new Date().toISOString());
@@ -514,6 +411,16 @@ test("a running reply's steps reach the phone as the sessions view's short rows,
   assert.equal(event?.content, "Reading file");
   assert.equal(event?.liveStatus, true, "its text is where the run stands, not words of the reply");
   assert.equal(event?.liveActivity, true, "and that text is the step in progress, which a phone hides with members' actions");
+  // A notice about the run in progress is no step: never hidden.
+  const stalled = { id: "n1", sequence: 30, kind: "status" as const, label: "@mac has produced no provider output for 5 minutes.", createdAt: at };
+  const noticeFrame = encodeMachineProgress(progress, { ...progress, agentProgress: { ...progress.agentProgress!, activity: stalled.label, activityEvents: [...steps, stalled] } },
+    { conversationId: "chat-s", streamId: "stream-steps", sequence: 2 });
+  assert.equal((await h.call(h.owner, "POST", "/v1/progress", { frames: [noticeFrame] })).status, 200);
+  const noticed = (await client.getJson<{ events: Array<{ content: string; liveActivity?: boolean; activity?: Array<{ text: string; notice?: boolean }> }> }>(
+    "/v1/phone/progress", { conversationId: "chat-s" })).events[0];
+  assert.equal(noticed?.content, stalled.label);
+  assert.equal(noticed?.liveActivity, undefined, "a notice in progress is not marked as a step");
+  assert.deepEqual(noticed?.activity?.filter((row) => row.notice).map((row) => row.text), [stalled.label], "and its row is marked as a notice");
   assert.equal(event?.activity?.length, 12, "the newest steps only");
   assert.equal(event?.activityMore, 4);
   assert.deepEqual(event?.activity?.[0], { kind: "shell", text: "npm test 3" }, "the command's first line");

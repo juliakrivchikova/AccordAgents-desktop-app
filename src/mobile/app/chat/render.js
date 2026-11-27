@@ -10,7 +10,7 @@ import {
   scrollToLatestWhenSettled, setJumpToLatestVisible, setOpenStreamRunId, setOpenThreadRootId, threadSurface
 } from "./chatScroll.js";
 import { renderLoadEarlier } from "./loadEarlier.js";
-import { memberActionsShown, shownLiveContent } from "./memberActions.js";
+import { memberActionsShown, shownActivity, shownLiveContent } from "./memberActions.js";
 import { messageRowSignature, reconcileMessageRows, routedRows } from "./messageRows.js";
 import { renderStreamView } from "./streamView.js";
 import { renderChatList } from "../chats/chatListView.js";
@@ -325,9 +325,9 @@ export async function render(connectionStatus) {
       ...(entry.accordLaunchByMainSession ? { accordLaunchByMainSession: true } : {}),
       ...(typeof entry.workedMs === "number" ? { workedMs: entry.workedMs } : {}),
       ...(entry.turnContinues ? { turnContinues: true } : {}),
-      // Its steps, unless the computer's Settings hide members' actions.
-      ...(actionsShown && Array.isArray(entry.activity) && entry.activity.length ? { activity: entry.activity } : {}),
-      ...(actionsShown && entry.activityMore ? { activityMore: entry.activityMore } : {}),
+      // Its steps; only its notices about the run while the computer's
+      // Settings hide members' actions.
+      ...shownActivity(entry, actionsShown),
       ...(entry.liveStatus && entry.status === "pending" ? { liveStatus: true } : {}),
       // Waiting behind the member's turn before it: "Queued", and its
       // "Working for …" starts once its own turn does (startedAt), as on

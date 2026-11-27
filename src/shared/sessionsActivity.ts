@@ -5,6 +5,7 @@
 // gets them already made (mobileTimeline.ts, hubPhoneState.ts), short.
 
 import { claudeStepBlocks, claudeStepSummary } from "./claudeStepFold";
+import { chatActivityStandsAlone } from "./processingTranscript";
 import type { ChatAgentActivityEvent } from "./types";
 
 /** What a row is about: its icon. */
@@ -19,7 +20,7 @@ export interface SessionsActivityRow {
 /** A phone's row: a step, or steps folded into one line as Claude Code folds
  *  them (claudeStepFold.ts), drawn without an icon. A phone app from before
  *  folding draws such a line as the status row its kind says. */
-export type PhoneActivityRow = SessionsActivityRow & { folded?: true };
+export type PhoneActivityRow = SessionsActivityRow & { folded?: true; notice?: true };
 
 /** The rows a phone gets of one reply at most (the newest), and each row's
  *  length: a reply that ran hundreds of tools stays a few lines on the wire. */
@@ -83,14 +84,21 @@ export function sessionsActivityRow(event: Pick<ChatAgentActivityEvent, "kind" |
   }
 }
 
-type PhoneActivityEvent = Pick<ChatAgentActivityEvent, "kind" | "label" | "detail">;
+type PhoneActivityEvent = Pick<ChatAgentActivityEvent, "kind" | "label" | "detail" | "status">;
+
+/** A step's row; a notice about the run itself is marked, as the phone still
+ *  shows it while members' actions are hidden. */
+function phoneActivityRow(event: PhoneActivityEvent): PhoneActivityRow {
+  const row = sessionsActivityRow(event);
+  return chatActivityStandsAlone(event) ? { ...row, notice: true } : row;
+}
 
 /** A Claude Code member's steps, folded; the newest fold says the step it is
  *  at while the reply is being written. */
 function foldedPhoneRows(events: readonly PhoneActivityEvent[], live: boolean): PhoneActivityRow[] {
   const blocks = claudeStepBlocks(events);
   return blocks.map((block, index): PhoneActivityRow => {
-    if (!block.fold) return sessionsActivityRow(block.event);
+    if (!block.fold) return phoneActivityRow(block.event);
     const newest = block.events[block.events.length - 1]!;
     return { kind: "status", folded: true, text: live && index === blocks.length - 1 ? sessionsActivityRow(newest).text : claudeStepSummary(block.events) };
   });
@@ -104,7 +112,7 @@ export function phoneSessionsActivity(
   options: { claude?: boolean; live?: boolean } = {}
 ): { activity: PhoneActivityRow[]; activityMore?: number } | undefined {
   if (!Array.isArray(events) || events.length === 0) return undefined;
-  const all: PhoneActivityRow[] = options.claude ? foldedPhoneRows(events, options.live === true) : events.map(sessionsActivityRow);
+  const all: PhoneActivityRow[] = options.claude ? foldedPhoneRows(events, options.live === true) : events.map(phoneActivityRow);
   const rows = all.filter((row) => row.text);
   if (rows.length === 0) return undefined;
   const kept = rows.slice(-PHONE_ACTIVITY_ROWS_MAX).map((row) => ({

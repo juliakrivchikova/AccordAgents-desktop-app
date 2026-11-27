@@ -465,6 +465,12 @@ export function deletePendingTimelineEntriesForRun(conversationId, runId, mobile
 // which is what the reverted age guard got wrong.
 const PLACEHOLDER_CORPSE_AGE_MS = 30 * 60 * 1000;
 
+/** The placeholder text of a running reply that has written nothing yet, as
+ *  the server writes it (hubPhoneState.ts liveTimelineEvents). */
+export function placeholderTimelineContent(participantLabel) {
+  return participantLabel ? participantLabel + " is running..." : "Running...";
+}
+
 export function isPlaceholderTimelineContent(content) {
   const text = (content || "").trim();
   return text === "Running..." || /\bis running\.\.\.$/.test(text);

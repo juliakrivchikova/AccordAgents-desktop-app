@@ -1,9 +1,11 @@
 // Settings → General → Show members’ actions on the computer (the User,
-// 2026-11-27): while it is off, the phone draws no steps in a reply, and a
-// running reply whose live line names the step in progress says it is
-// working instead. Her server hands the setting over with every answer to
+// 2026-11-27): while it is off, the phone draws no steps in a reply but its
+// notices about the run, and a running reply whose live line names the step
+// in progress says it is working instead. Her server hands the setting over with every answer to
 // /v1/phone/changes (HubPhoneDisplay); it is kept here so the phone draws
 // the same before its first answer.
+import { placeholderTimelineContent } from "../store/timelineRows.js";
+
 const MEMBER_ACTIONS_KEY = "accordagents.display.showMemberActions";
 
 let shown = readShown();
@@ -37,5 +39,15 @@ export function noteServerDisplay(display) {
  *  progress (liveActivity) becomes the placeholder that says it is working. */
 export function shownLiveContent(entry, actionsShown) {
   if (actionsShown || !entry.liveActivity) return entry.content;
-  return entry.participantLabel ? entry.participantLabel + " is running..." : "Running...";
+  return placeholderTimelineContent(entry.participantLabel);
+}
+
+/** A reply's steps as a row carries them: every one, or only its notices
+ *  about the run itself (a stalled provider, a failed background task) while
+ *  actions are hidden. */
+export function shownActivity(entry, actionsShown) {
+  if (!Array.isArray(entry.activity) || entry.activity.length === 0) return {};
+  if (actionsShown) return entry.activityMore ? { activity: entry.activity, activityMore: entry.activityMore } : { activity: entry.activity };
+  const notices = entry.activity.filter(function (row) { return row && row.notice === true; });
+  return notices.length ? { activity: notices } : {};
 }

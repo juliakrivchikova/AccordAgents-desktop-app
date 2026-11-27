@@ -183,9 +183,12 @@ export class HubPhoneApi {
   private readonly openedCache = new Map<string, { stamp: number; limit: number; opened: ConversationOpenResult }>();
   private readonly farMessageCache = new Map<string, { stamp: number; messages: Map<string, ChatMessage | undefined> }>();
   private catalogCache?: { at: number; catalog: HubComposerCatalog | undefined };
-  /** The display settings last published, and how many times they changed:
-   *  a waiting changes request answers when they do. */
-  private displayStamp?: string;
+  /** The display settings last published (kept in memory: a changes
+   *  request reads no storage), whether they are known yet, and how many times
+   *  they changed: a waiting changes request answers when they do. */
+  private display?: HubPhoneDisplay;
+  private displayKnown = false;
+  private displayLoad?: Promise<void>;
   private displayVersion = 0;
   /** Counts catalog publications: a read older than the last one is not cached. */
   private catalogGeneration = 0;
@@ -199,28 +202,39 @@ export class HubPhoneApi {
     return ended !== undefined && now - ended < PHONE_ACTIVE_GRACE_MS;
   }
 
-  /** The catalog was published again. */
-  catalogChanged(): void {
+  /** The catalog was published again (`catalog`: what was published). */
+  catalogChanged(catalog?: unknown): void {
     this.catalogGeneration += 1;
     this.catalogCache = undefined;
     this.listCache.clear();
     this.rowCache.clear();
+    const next = displayOfCatalog(catalog);
+    const changed = !this.displayKnown || JSON.stringify(next ?? null) !== JSON.stringify(this.display ?? null);
+    this.display = next;
+    this.displayKnown = true;
     // A phone waiting for news learns a changed display setting at once,
     // not with its next chat change.
-    void this.phoneDisplay().then((display) => {
-      const stamp = JSON.stringify(display ?? null);
-      if (stamp === this.displayStamp) return;
-      this.displayStamp = stamp;
+    if (changed) {
       this.displayVersion += 1;
       this.options.feed.wakeWaiters();
-    }, () => undefined);
+    }
   }
 
-  /** How the phone draws chats, from the catalog the owner desktop published
-   *  (HubComposerCatalog.display); none from a desktop from before. */
+  /** How the phone draws chats, as the catalog the owner desktop published
+   *  says (HubComposerCatalog.display); read from storage once, after a
+   *  restart, and kept from each publication after that. */
   private async phoneDisplay(): Promise<HubPhoneDisplay | undefined> {
-    const display = (await this.catalog())?.display;
-    return display && typeof display.showMemberActions === "boolean" ? { showMemberActions: display.showMemberActions } : undefined;
+    if (!this.displayKnown) {
+      this.displayLoad ??= this.catalog().then((catalog) => {
+        // A publication while this was read is newer than what it read.
+        if (!this.displayKnown) {
+          this.display = displayOfCatalog(catalog);
+          this.displayKnown = true;
+        }
+      }).finally(() => { this.displayLoad = undefined; });
+      await this.displayLoad;
+    }
+    return this.display;
   }
 
   /** Answers one phone request; the status is returned for the server's log. */
@@ -814,4 +828,13 @@ function send(request: IncomingMessage, response: ServerResponse, answer: Answer
   }
   response.writeHead(answer.status, { ...headers, "content-length": Buffer.byteLength(text) });
   response.end(text);
+}
+
+/** The display settings a catalog carries: a catalog from a computer from
+ *  before has none, and the phone then shows members' actions, as the CLIs
+ *  do; with no catalog at all the phone keeps what it has. */
+function displayOfCatalog(catalog: unknown): HubPhoneDisplay | undefined {
+  if (!catalog || typeof catalog !== "object" || (catalog as { version?: unknown }).version !== 1) return undefined;
+  const display = (catalog as HubComposerCatalog).display;
+  return { showMemberActions: display && typeof display.showMemberActions === "boolean" ? display.showMemberActions : true };
 }

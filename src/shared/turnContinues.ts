@@ -1,4 +1,5 @@
 import { chatInterimPostsOf } from "./interimPosts";
+import { chatActivityStandsAlone } from "./processingTranscript";
 import type { ChatMessage } from "./types";
 
 /** The note the app itself adds under a reply that left work running
@@ -10,11 +11,13 @@ const LEFT_RUNNING_NOTE = /^Running in the background: /;
  *  (ChatMessageMetadata.turnContinues), or a step Claude Code started and
  *  ended by itself with nothing to do (replies kept from before the app left
  *  those out). As in the CLI's transcript, no row is drawn for it. */
-export function isEmptyFinishedReply(message: ChatMessage): boolean {
+export function isEmptyFinishedReply(message: ChatMessage, actionsShown = true): boolean {
   if (message.role !== "participant" || message.status !== "done" || message.content.trim()) return false;
   const metadata = message.metadata;
   if (!metadata) return false;
-  const steps = (metadata.activityEvents ?? []).filter((event) => !(event.kind === "status" && LEFT_RUNNING_NOTE.test(event.label)));
+  // While members' actions are hidden only its notices are drawn of its steps.
+  const steps = (metadata.activityEvents ?? []).filter((event) => !(event.kind === "status" && LEFT_RUNNING_NOTE.test(event.label)) &&
+    (actionsShown || chatActivityStandsAlone(event)));
   return steps.length === 0 && !metadata.processingTranscript?.content?.trim() &&
     chatInterimPostsOf(message).length === 0 && !(Array.isArray(metadata.imageAttachments) && metadata.imageAttachments.length > 0) &&
     !metadata.pendingChoice && !metadata.participantRequest && !metadata.pendingMentions?.length && !metadata.urgentAlert &&
