@@ -223,6 +223,22 @@ button.aa-icon-button > svg.chat-agent-stop-icon {
   overflow-wrap: anywhere;
 }
 
+/* New environment variables waiting for its background tasks: under what
+   it does, set off by a little room. */
+.chat-agent-card-env {
+  display: grid;
+  gap: 2px;
+  margin-top: 6px;
+}
+
+.chat-agent-card-env-title {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--app-text);
+  font-weight: 500;
+}
+
 .chat-agent-card-status.is-running {
   color: var(--ui-link);
   font-weight: 500;

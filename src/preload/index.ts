@@ -463,6 +463,7 @@ const bridge: AppBridge = {
     return () => ipcRenderer.removeListener("chat:prompt-suggestions", listener);
   },
   getChatBackgroundTasks: (conversationId: string) => ipcRenderer.invoke("chat:get-background-tasks", conversationId),
+  getChatEnvironmentPending: (conversationId: string) => ipcRenderer.invoke("chat:get-environment-pending", conversationId),
   onChatBackgroundTasks: (callback: (event: ChatBackgroundTasksEvent) => void) => {
     const listener = (_event: Electron.IpcRendererEvent, update: ChatBackgroundTasksEvent) => callback(update);
     ipcRenderer.on("chat:background-tasks", listener);

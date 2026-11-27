@@ -19,6 +19,7 @@ import { ParticipantRuntimeControls } from "./chat-participant-runtime-controls"
 import { chatCliProviderLabel, type ChatParticipantRuntimeOverride } from "./chat-participant-drafts";
 import { cliProviderHostForParticipant } from "../../../shared/cliProviderHosts";
 import { backgroundTasksStatusLabel, ChatBackgroundTasksContext, RosterStatusIndicator, type ChatParticipantRosterStatus } from "./chat-roster-status";
+import { ChatEnvironmentPendingKey } from "./chat-environment-pending";
 import { Spinner } from "@/components/ui/spinner";
 
 type ParticipantRuntimePatch = Pick<ChatParticipant, "model" | "reasoningEffort" | "agentMode" | "permissions" | "remoteExecution" | "cloudRun" | "homeMachineId" | "skipToolchainPreflight" | "autoWatch">;
@@ -123,6 +124,7 @@ export function ChatParticipantRosterRow(props: {
                   runningRemotely={props.participant.remoteExecution === "remote"}
                   participantId={props.participant.id}
                 />
+                <ChatEnvironmentPendingKey participantId={props.participant.id} taskCount={backgroundTasks.length} focusable={false} />
               </span>
             </span>
             <span className="chat-participant-role-line">

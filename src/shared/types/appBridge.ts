@@ -371,6 +371,9 @@ export interface AppBridge {
   onChatPromptSuggestions(callback: (update: ChatPromptSuggestionsUpdate) => void): () => void;
   /** Live background work of the chat's members, by member id. */
   getChatBackgroundTasks(conversationId: string): Promise<Record<string, ChatBackgroundTask[]>>;
+  /** Members of the chat whose background tasks keep them on the environment
+   *  variables their process started with (ChatBackgroundTasksEvent). */
+  getChatEnvironmentPending(conversationId: string): Promise<string[]>;
   onChatBackgroundTasks(callback: (event: ChatBackgroundTasksEvent) => void): () => void;
   /** The plan usage of the members' CLI accounts: this computer's, and each
    *  machine's as it put them on the User's server. */

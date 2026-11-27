@@ -474,6 +474,8 @@ export class ParticipantTurn {
         messageId: pendingMessage.id
       }
     });
+    // Before the read: a change told while it is read still judges its process.
+    const agentEnvGeneration = this.deps.cliRunner.environmentGeneration?.();
     const agentEnvironment = await this.chat.agentEnvironment.agentEnvironmentForParticipant(participant, cliParticipant.model);
     cliParticipant = cliParticipantWithHost(cliParticipant, agentEnvironment);
     // The last session id this turn's CLI reported (a fork's copy, or one
@@ -565,6 +567,7 @@ export class ParticipantTurn {
         agentEnv: agentEnvironment.env,
         settingsEnv: agentEnvironment.settingsEnv,
         agentEnvKey: agentEnvironment.version,
+        agentEnvGeneration,
         agentMode,
         permissions: cliPermissions,
         nativeGoal,
@@ -590,7 +593,7 @@ export class ParticipantTurn {
             chatThreadRootId: pendingMessage.metadata?.chatThreadRootId
           },
           onSelfResumedTurn: (turn) => this.chat.selfResumedTurns.handleSelfResumedTurn(conversation.id, participant.id, turn),
-          onBackgroundTasksChanged: (tasks) => this.chat.backgroundTasks.handleBackgroundTasksChanged(conversation.id, participant.id, tasks),
+          onBackgroundTasksChanged: (tasks, environmentPending) => this.chat.backgroundTasks.handleBackgroundTasksChanged(conversation.id, participant.id, tasks, environmentPending),
           onReplyStarted: grantAtReplyStart || sharedClaudeTurn ? onReplyStarted : undefined,
           onMessageWritten: options.writeGate?.markWritten,
           onPromptSuggestion: (text) => this.chat.promptSuggestions.receiveMemberPromptSuggestion({

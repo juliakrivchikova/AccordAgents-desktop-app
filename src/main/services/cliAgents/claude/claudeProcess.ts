@@ -61,7 +61,7 @@ export class ClaudeProcess {
     options: CliAgentRunOptions,
     claudeExecutable: string
   ): Promise<WarmAgentEntry> {
-    return this.cli.warmAgents.createTrackedWarmAgent(key, () => this.constructClaudeWarmAgent(key, scopeKey, participant, repoPath, kind, options, claudeExecutable));
+    return this.cli.warmAgents.createTrackedWarmAgent(key, () => this.constructClaudeWarmAgent(key, scopeKey, participant, repoPath, kind, options, claudeExecutable), options.agentEnvGeneration);
   }
 
   private async constructClaudeWarmAgent(
@@ -119,7 +119,7 @@ export class ClaudeProcess {
       sessionId: options.sessionId ?? newSessionId,
       model: participant.model,
       cancelRequests: new Map(),
-      reportedBackgroundTasks: "[]",
+      reportedBackgroundTasks: "[[],false]",
       lastTaskEventAt: 0,
       selfResumeExpectedUntil: 0,
       controlWaiters: new Map(),
@@ -171,6 +171,10 @@ export class ClaudeProcess {
       for (const [waiter, holds] of Array.from(idleWaiters)) {
         if (holds()) waiter();
       }
+      // Work it did on its own (a reply to a finished background task) or its
+      // background tasks are over: a process started with outdated
+      // environment values is replaced now.
+      this.cli.warmAgents.environment.mayBeFree(entry);
       if (!isIdle()) {
         return;
       }
@@ -569,6 +573,11 @@ export class ClaudeProcess {
           flushUnwritten();
         });
       }
+    };
+    state.environmentPending = () => this.cli.warmAgents.environment.pending(entry);
+    // A process that failed or is ending has said its last (its tasks ended).
+    entry.refreshBackgroundReport = () => {
+      if (!closed) this.cli.claudeReplyFlow.reportClaudeBackgroundTasks(state, participant);
     };
     return entry;
   }

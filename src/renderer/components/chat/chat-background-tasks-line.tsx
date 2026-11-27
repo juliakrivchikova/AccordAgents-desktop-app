@@ -4,6 +4,7 @@ import { Spinner } from "@/components/ui/spinner";
 import { sessionsCompactDuration } from "../../../shared/mainSessionView";
 import type { ChatBackgroundTask } from "../../../shared/types";
 import { backgroundTasksStatusLabel, ChatBackgroundTasksContext } from "./chat-roster-status";
+import { ChatEnvironmentPendingContext, ChatEnvironmentPendingKey } from "./chat-environment-pending";
 import { useStreamingElapsedSeconds } from "./chat-streaming";
 
 interface ChatBackgroundTasksLineProps {
@@ -17,6 +18,7 @@ interface ChatBackgroundTasksLineProps {
  *  line itself (the User, 2026-11-26). Nothing while none runs. */
 export const ChatBackgroundTasksLine = ({ participantId }: ChatBackgroundTasksLineProps): JSX.Element | null => {
   const tasks = useContext(ChatBackgroundTasksContext).get(participantId) ?? [];
+  const environmentPending = useContext(ChatEnvironmentPendingContext).has(participantId);
   if (tasks.length === 0) {
     return null;
   }
@@ -46,6 +48,12 @@ export const ChatBackgroundTasksLine = ({ participantId }: ChatBackgroundTasksLi
           </HoverCard.Content>
         </HoverCard.Portal>
       </HoverCard.Root>
+      {environmentPending && (
+        <>
+          <span className="chat-background-tasks-sep" aria-hidden>·</span>
+          <ChatEnvironmentPendingKey participantId={participantId} taskCount={tasks.length} />
+        </>
+      )}
     </div>
   );
 };

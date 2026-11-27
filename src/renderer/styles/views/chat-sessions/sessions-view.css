@@ -179,6 +179,8 @@
    shows them under its prompt (the User chose it, 2026-11-26). */
 .chat-background-tasks {
   display: flex;
+  align-items: center;
+  gap: 6px;
   min-width: 0;
   margin-top: calc(-1 * var(--space-2) + 6px);
   padding-inline: 10px;
@@ -199,6 +201,12 @@
 
 .chat-background-tasks-line:focus-visible {
   box-shadow: 0 0 0 2px var(--ui-focus-ring);
+}
+
+.chat-background-tasks-sep {
+  color: var(--ui-text-3);
+  font-size: 12px;
+  line-height: 18px;
 }
 
 /* The side panel's hover card (.chat-agent-card), wider for task names; a

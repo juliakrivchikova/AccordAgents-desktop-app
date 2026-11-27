@@ -215,6 +215,9 @@ export interface MachineMemberBackgroundBody {
   /** When each task in `labels` started (ISO, same order; "" when not
    *  known). Missing from a machine on an older runtime. */
   startedAt?: string[];
+  /** These tasks keep the member's process on the environment variables it
+   *  started with (ChatBackgroundTasksEvent). Missing from an older runtime. */
+  environmentPending?: boolean;
 }
 
 /** Every member hosted on this machine with background work running now, as
@@ -223,7 +226,7 @@ export interface MachineMemberBackgroundBody {
  *  died meanwhile stays shown. */
 export interface MachineMemberBackgroundSnapshotBody {
   type: "machine.member.background.snapshot";
-  members: Array<{ conversationId: string; participantId: string; labels: string[]; startedAt?: string[] }>;
+  members: Array<{ conversationId: string; participantId: string; labels: string[]; startedAt?: string[]; environmentPending?: boolean }>;
 }
 
 /** A member's background tasks as the link carries them: names in

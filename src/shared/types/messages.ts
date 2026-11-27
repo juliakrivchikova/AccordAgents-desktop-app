@@ -34,6 +34,10 @@ export interface ChatBackgroundTasksEvent {
   conversationId: string;
   participantId: string;
   tasks: ChatBackgroundTask[];
+  /** The member's process still runs with the environment variables it
+   *  started with: Settings → Environment changed, and it restarts with the
+   *  new ones (resuming the same conversation) once these tasks finish. */
+  environmentPending?: boolean;
 }
 
 /** What a member wrote during its turn with app_chat_send_message, kept in

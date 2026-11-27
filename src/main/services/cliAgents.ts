@@ -38,7 +38,7 @@ export class CliAgentRunner {
 
   constructor(
     debugLogs?: CliAgentDebugLogger,
-    manualReadinessEnvironment?: () => Promise<{ env: NodeJS.ProcessEnv }>,
+    manualReadinessEnvironment?: () => Promise<{ env: NodeJS.ProcessEnv; version?: string }>,
     codexExecutableOrOptions: string | CliAgentRunnerOptions = "codex",
     claudeModelProbePtySpawn?: ClaudeModelProbePtySpawn,
     claudeModelProbeExpectSpawn: ClaudeModelProbeExpectSpawn = spawnCommand
@@ -139,15 +139,20 @@ export class CliAgentRunner {
     return this.modules.warmAgents.shutdownWarmAgents();
   }
 
-  /** A changed agent environment: resident processes holding no work close
-   * now. A process still answering, queued for, or carrying background work
-   * keeps running with the values it started with, as a running dedicated CLI
-   * does, and keeps taking its member's messages meanwhile
-   * (withBusyMemberEnvironment); its key carries the environment version, so
-   * the member's first turn once it is idle replaces it, and otherwise its idle
-   * timer retires it. Nothing is fenced: turns keep starting meanwhile. */
-  retireIdleWarmAgents(reason: string): Promise<void> {
-    return this.modules.warmAgents.retireIdleWarmAgents(reason);
+  /** The environment members get changed (Settings → Environment saved, or
+   * a machine's settings imported). A member process started with other
+   * values closes once it holds no work, so the member's next message resumes
+   * its session in a new process with the new values (WarmEnvironment). A
+   * turn in progress finishes on the process it started on. Nothing is
+   * fenced: turns keep starting meanwhile. */
+  environmentChanged(): Promise<void> {
+    return this.modules.warmAgents.environmentChanged();
+  }
+
+  /** The environment changes told so far: read before a turn reads the
+   *  environment, and given with it as `agentEnvGeneration`. */
+  environmentGeneration(): number {
+    return this.modules.warmAgents.environment.currentGeneration();
   }
 
   /** Archive/delete closes resident processes, while leaving provider session

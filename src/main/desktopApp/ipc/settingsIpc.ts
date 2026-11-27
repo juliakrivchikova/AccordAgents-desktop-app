@@ -58,8 +58,8 @@ export function registerSettingsIpc(desktopApp: DesktopApp): void {
   ipcMain.handle("settings:save-agent-environment-variable", async (_event, request: SaveAgentEnvironmentVariableRequest) => {
     const snapshot = await desktopApp.agentEnvironmentService.save(request);
     // Work in progress keeps running with the values it started with; each
-    // member gets the new ones once its process is idle (retireIdleWarmAgents).
-    await desktopApp.cliAgentRunner.retireIdleWarmAgents("environment-changed");
+    // member's process is replaced as soon as it holds no work.
+    await desktopApp.cliAgentRunner.environmentChanged();
     desktopApp.cliAgentRunner.invalidateAgentReadiness();
     return snapshot;
   });
@@ -83,7 +83,7 @@ export function registerSettingsIpc(desktopApp: DesktopApp): void {
 
   ipcMain.handle("settings:delete-agent-environment-variable", async (_event, request: DeleteAgentEnvironmentVariableRequest) => {
     const snapshot = await desktopApp.agentEnvironmentService.delete(request);
-    await desktopApp.cliAgentRunner.retireIdleWarmAgents("environment-changed");
+    await desktopApp.cliAgentRunner.environmentChanged();
     desktopApp.cliAgentRunner.invalidateAgentReadiness();
     return snapshot;
   });

@@ -54,6 +54,7 @@ import { DictationHoldKey } from "./components/chat/dictation-hold-key";
 import { pluginNewChatDraft, pluginNewChatMentions } from "./app/plugin-new-chat";
 import { CHAT_SPLIT_WORKSPACE_MIN_WIDTH } from "./lib/chat-split-sizing";
 import { ChatBackgroundTasksContext } from "./components/chat/chat-roster-status";
+import { ChatEnvironmentPendingContext } from "./components/chat/chat-environment-pending";
 import { UrgentAlertActionsContext } from "./components/chat/urgent-alert-context";
 import { SubagentProvidersContext, type SubagentProvidersActions } from "./components/chat/subagent-providers-context";
 import { subagentReadiness } from "./components/chat/subagent-panel";
@@ -525,11 +526,13 @@ function App(): JSX.Element {
   );
   return (
     <ChatBackgroundTasksContext.Provider value={view.participantBackgroundTasksById}>
-      <UrgentAlertActionsContext.Provider value={urgentAlertActions}>
-        <SubagentProvidersContext.Provider value={subagentActions}>
-          {shell}
-        </SubagentProvidersContext.Provider>
-      </UrgentAlertActionsContext.Provider>
+      <ChatEnvironmentPendingContext.Provider value={view.participantEnvironmentPending}>
+        <UrgentAlertActionsContext.Provider value={urgentAlertActions}>
+          <SubagentProvidersContext.Provider value={subagentActions}>
+            {shell}
+          </SubagentProvidersContext.Provider>
+        </UrgentAlertActionsContext.Provider>
+      </ChatEnvironmentPendingContext.Provider>
     </ChatBackgroundTasksContext.Provider>
   );
 }

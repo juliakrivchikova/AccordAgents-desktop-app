@@ -70,6 +70,10 @@ export interface CliAgentRunOptions {
    *  the shell profile it reads again before each command. */
   settingsEnv?: NodeJS.ProcessEnv;
   agentEnvKey?: string;
+  /** The environment changes told before `agentEnv` was read
+   *  (CliAgentRunner.environmentGeneration): a process started with it is
+   *  judged by every change told after that read. */
+  agentEnvGeneration?: number;
   warm?: CliAgentWarmOptions;
   onOutput?: CliAgentOutputCallback;
   onSessionId?: CliAgentSessionIdCallback;
@@ -126,7 +130,7 @@ export interface CliAgentWarmOptions {
   onSelfResumedTurn?: (turn: CliAgentSelfResumedTurn) => void;
   /** Claude: the member's live background tasks changed (one started or
    *  finished, or the process ended with them). Always the full current list. */
-  onBackgroundTasksChanged?: (tasks: CliAgentBackgroundTask[]) => void;
+  onBackgroundTasksChanged?: CliAgentBackgroundTasksCallback;
   /** Claude: the CLI handed this run's message to a step (it starts now, or
    *  joins the step that is running). Until then the process may still be
    *  working on an earlier message. */
@@ -150,6 +154,12 @@ export interface CliAgentWarmOptions {
    *  the process at its start. */
   onCliPermissionMode?: (mode: ClaudePermissionMode) => void;
 }
+
+/** A member's live background tasks, the full current list. With
+ *  `environmentPending` its process still runs with the environment variables
+ *  it started with, while members get other values now: it is replaced (and
+ *  resumes the same session) once these tasks have finished. */
+export type CliAgentBackgroundTasksCallback = (tasks: CliAgentBackgroundTask[], environmentPending?: boolean) => void;
 
 /** A background task the CLI reports as live, with the reply that started it. */
 export interface CliAgentBackgroundTask {
@@ -311,6 +321,16 @@ export interface WarmAgentEntry {
   queue: Promise<void>;
   /** Runs admitted on this process and not yet settled (queued ones too). */
   activeRuns?: number;
+  /** Claude only: tells its background tasks again, whether its environment
+   *  is now outdated (WarmAgents.environmentChanged) included. */
+  refreshBackgroundReport?: () => void;
+  /** Turns routed into this process with the environment it started with
+   *  (WarmAgents.withBusyMemberEnvironment) and not yet over: it is not
+   *  replaced for a changed environment under them. */
+  environmentHolds?: number;
+  /** The environment change (WarmEnvironment.currentGeneration) its process
+   *  started after: only a later change can find it outdated. */
+  environmentGeneration?: number;
   idleTimer?: NodeJS.Timeout;
   closed: boolean;
   /** Set when the process can no longer carry another turn cleanly (an error
@@ -335,7 +355,7 @@ export interface WarmAgentEntry {
 export interface ClaudeWarmRunContext {
   origin?: CliAgentReplyOrigin;
   onSelfResumedTurn?: (turn: CliAgentSelfResumedTurn) => void;
-  onBackgroundTasksChanged?: (tasks: CliAgentBackgroundTask[]) => void;
+  onBackgroundTasksChanged?: CliAgentBackgroundTasksCallback;
   onReplyStarted?: (start?: CliAgentReplyStart) => void;
   onMessageWritten?: () => void;
   onPromptSuggestion?: (suggestion: string) => void;

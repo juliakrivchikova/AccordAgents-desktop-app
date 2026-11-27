@@ -182,6 +182,7 @@ export class Compaction {
       const accordFromAnySession = await this.chat.accord.accordFromAnySession();
       const runPath = runPathForParticipant(conversation, participant, workspacePath, agentMode, permissions);
       const baseCliParticipant = cliParticipantForSession(participant, session);
+      const agentEnvGeneration = this.deps.cliRunner.environmentGeneration?.();
       const agentEnvironment = await this.chat.agentEnvironment.agentEnvironmentForParticipant(participant, baseCliParticipant.model);
       const cliParticipant = cliParticipantWithHost(baseCliParticipant, agentEnvironment);
       if (agentEnvironment.problem) {
@@ -194,6 +195,7 @@ export class Compaction {
             agentEnv: agentEnvironment.env,
             settingsEnv: agentEnvironment.settingsEnv,
             agentEnvKey: agentEnvironment.version,
+            agentEnvGeneration,
             ...(compactInstructions ? { compactInstructions } : {}),
             onSessionId: (sessionId) => {
               this.chat.memberSessions.persistParticipantSessionId(conversation, session, sessionId);
@@ -373,7 +375,7 @@ export class Compaction {
         // Called only before a process is started for the compaction.
         onReplyStarted: grantBeforeStart,
         onSelfResumedTurn: (turn) => this.chat.selfResumedTurns.handleSelfResumedTurn(conversation.id, participant.id, turn),
-        onBackgroundTasksChanged: (tasks) => this.chat.backgroundTasks.handleBackgroundTasksChanged(conversation.id, participant.id, tasks),
+        onBackgroundTasksChanged: (tasks, environmentPending) => this.chat.backgroundTasks.handleBackgroundTasksChanged(conversation.id, participant.id, tasks, environmentPending),
         // Started with suggestions on, as a turn starts it; the compaction
         // itself is not a reply a suggestion follows.
         onPromptSuggestion: (text) => this.chat.promptSuggestions.receiveMemberPromptSuggestion({

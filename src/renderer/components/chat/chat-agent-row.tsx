@@ -1,12 +1,13 @@
 import { useContext, type ReactNode } from "react";
 import { HoverCard } from "radix-ui";
-import { SquareIcon } from "@phosphor-icons/react";
+import { KeyIcon, SquareIcon } from "@phosphor-icons/react";
 
 import { SESSIONS_WORK_STATUS_LABELS, sessionsCompactDuration, type SessionsWorkStatus } from "../../../shared/mainSessionView";
 import type { MachineListResult } from "../../../shared/machineLink";
 import type { ChatParticipant } from "../../../shared/types";
 import { IconButton } from "../primitives";
 import { ChatBackgroundTasksContext } from "./chat-roster-status";
+import { ChatEnvironmentPendingContext, ENVIRONMENT_PENDING_TITLE, environmentPendingText } from "./chat-environment-pending";
 import { useStreamingElapsedSeconds } from "./chat-streaming";
 import { formatWorkedDuration } from "./chat-worked-row";
 import { useMemberModelSummary, type MemberModelSummary } from "./use-member-model-summary";
@@ -56,13 +57,20 @@ export type ChatAgentDetail = (model: MemberModelSummary) => string;
  *  runs or worked, muted. Never its state (the dot on its glyph says that;
  *  its hover card and accessible name say it in words), nor its model and
  *  effort (its hover card says them). */
-function RowMeta(props: { row: ChatAgentRowData }): JSX.Element {
+function RowMeta(props: { row: ChatAgentRowData; environmentPending: boolean }): JSX.Element {
   const { row } = props;
   const time = row.status === "running" && row.since
     ? <LiveElapsed since={row.since} compact />
     : row.durationMs !== undefined ? formatCompactDuration(row.durationMs) : undefined;
   return (
     <span className="chat-agent-meta">
+      {/* New environment variables wait for its background tasks: the
+          Environment key in the pending colour, explained in the row's card. */}
+      {props.environmentPending && (
+        <span className="chat-environment-pending" data-testid="chat-environment-pending" aria-hidden="true">
+          <KeyIcon size={12} />
+        </span>
+      )}
       {time !== undefined && <span className="chat-agent-time" data-testid="chat-agent-time">{time}</span>}
       {/* Stop's place on hover. */}
       {time === undefined && row.stop && <span className="chat-agent-time" aria-hidden="true" />}
@@ -73,7 +81,7 @@ function RowMeta(props: { row: ChatAgentRowData }): JSX.Element {
 /** The hover card's words: the title, the CLI · model · effort line, the
  *  state, time and background work, then what it does now (while it runs)
  *  or how its task ended. */
-export function ChatAgentCard(props: { row: ChatAgentRowData; detail: string; backgroundTasks: number }): JSX.Element {
+export function ChatAgentCard(props: { row: ChatAgentRowData; detail: string; backgroundTasks: number; environmentPending?: boolean }): JSX.Element {
   const { row } = props;
   const time = row.status === "running" && row.since
     ? <LiveElapsed since={row.since} />
@@ -92,6 +100,15 @@ export function ChatAgentCard(props: { row: ChatAgentRowData; detail: string; ba
         {background && <>{(row.status !== "idle" || time !== undefined) && " · "}{background}</>}
       </span>
       {line && <span className="chat-agent-card-now">{line}</span>}
+      {props.environmentPending && (
+        <span className="chat-agent-card-env" data-testid="chat-environment-pending-card">
+          <span className="chat-agent-card-env-title">
+            <span className="chat-environment-pending" aria-hidden="true"><KeyIcon size={12} /></span>
+            {ENVIRONMENT_PENDING_TITLE}
+          </span>
+          <span className="chat-agent-card-line">{environmentPendingText(props.backgroundTasks)}</span>
+        </span>
+      )}
     </>
   );
 }
@@ -125,6 +142,8 @@ function MemberAgentRow(props: { row: ChatAgentRowData; participant: ChatPartici
 function AgentRowView(props: { row: ChatAgentRowData; detail: string }): JSX.Element {
   const { row } = props;
   const backgroundTasks = useContext(ChatBackgroundTasksContext).get(row.id)?.length ?? 0;
+  const environmentPending = useContext(ChatEnvironmentPendingContext).has(row.id) && backgroundTasks > 0;
+  const status = row.status === "idle" ? row.title : `${row.title}, ${SESSIONS_WORK_STATUS_LABELS[row.status]}`;
   return (
     <li
       className={row.stop ? "chat-agent-row has-stop" : "chat-agent-row"}
@@ -137,7 +156,7 @@ function AgentRowView(props: { row: ChatAgentRowData; detail: string }): JSX.Ele
           <button
             type="button"
             className="chat-agent-row-main"
-            aria-label={row.status === "idle" ? row.title : `${row.title}, ${SESSIONS_WORK_STATUS_LABELS[row.status]}`}
+            aria-label={environmentPending ? `${status}, ${ENVIRONMENT_PENDING_TITLE.toLowerCase()}` : status}
             onClick={row.onOpen}
           >
             <span className="chat-agent-glyph">
@@ -145,12 +164,12 @@ function AgentRowView(props: { row: ChatAgentRowData; detail: string }): JSX.Ele
               {stateMatters(row.status) && <span className={`chat-agent-dot is-${row.status}`} aria-hidden="true" />}
             </span>
             <span className="chat-agent-title">{row.title}</span>
-            <RowMeta row={row} />
+            <RowMeta row={row} environmentPending={environmentPending} />
           </button>
         </HoverCard.Trigger>
         <HoverCard.Portal>
           <HoverCard.Content side="left" align="start" sideOffset={12} collisionPadding={8} className="chat-agent-card" data-testid="chat-agent-card">
-            <ChatAgentCard row={row} detail={props.detail} backgroundTasks={backgroundTasks} />
+            <ChatAgentCard row={row} detail={props.detail} backgroundTasks={backgroundTasks} environmentPending={environmentPending} />
           </HoverCard.Content>
         </HoverCard.Portal>
       </HoverCard.Root>

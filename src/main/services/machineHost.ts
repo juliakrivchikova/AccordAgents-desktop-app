@@ -666,7 +666,8 @@ export class MachineHostService {
       members: this.chat.localBackgroundTasks().map((event) => ({
         conversationId: event.conversationId,
         participantId: event.participantId,
-        ...backgroundTasksToWire(event.tasks)
+        ...backgroundTasksToWire(event.tasks),
+        ...(event.environmentPending ? { environmentPending: true } : {})
       }))
     }, to).catch((error) => {
       void this.debugLogs.write("machine-host.background.snapshot-not-sent", { message: errorMessage(error) });
@@ -679,7 +680,8 @@ export class MachineHostService {
       type: "machine.member.background",
       conversationId: event.conversationId,
       participantId: event.participantId,
-      ...backgroundTasksToWire(event.tasks)
+      ...backgroundTasksToWire(event.tasks),
+      ...(event.environmentPending ? { environmentPending: true } : {})
     }, to).catch((error) => {
       void this.debugLogs.write("machine-host.background.not-sent", { participantId: event.participantId, message: errorMessage(error) });
     });

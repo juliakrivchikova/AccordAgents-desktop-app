@@ -519,6 +519,10 @@ export async function startMachine(args: MachineArgs): Promise<() => Promise<voi
     },
     onImported: async () => {
       cliAgentRunner.setRunTimeoutMs(await settingsService.getCliAgentRunTimeoutMs());
+      // The variables Settings → Environment gives members came with them: a
+      // member process holding other values is replaced as soon as it holds
+      // no work, as on the computer.
+      await cliAgentRunner.environmentChanged();
       // The User's automatic-stop switch arrives with the settings. Switched
       // on again, idle counts from now; either way the desktop is told what
       // this machine now has, so the two cannot silently disagree.

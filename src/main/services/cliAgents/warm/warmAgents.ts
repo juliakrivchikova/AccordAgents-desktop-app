@@ -7,6 +7,7 @@ import { terminateCapturedPosixProcesses } from "../../processTermination";
 import { type ClaudePermissionMode, isClaudePermissionMode } from "../claude/permissionModes";
 import type { ClaudeSendNowOutcome, CliAgentOutputCallback, CliAgentRunOptions, WarmAgentEntry } from "../types";
 import { warmAgentKey, warmAgentScopeKey, warmConversationId, warmKeyAgentEnvKey } from "./warmKeys";
+import { WarmEnvironment } from "./warmEnvironment";
 import type { CliModules } from "../modules";
 import type { CliDependencies } from "../dependencies";
 
@@ -25,11 +26,23 @@ export class WarmAgents {
   warmShutdown?: Promise<void>;
   warmOperations = 0;
   readonly warmPreparations = new Set<{ key: string; done: Promise<void> }>();
+  /** Member processes started with environment values members no longer
+   *  get, replaced once they hold no work. */
+  readonly environment: WarmEnvironment;
 
   constructor(
     private readonly cli: Pick<CliModules, "cliRuns" | "warmAgentClose">,
-    private readonly deps: Pick<CliDependencies, "nativeProcessDbPath">
-  ) {}
+    private readonly deps: Pick<CliDependencies, "nativeProcessDbPath" | "manualReadinessEnvironment">
+  ) {
+    this.environment = new WarmEnvironment({
+      entries: this.entries,
+      warmPreparations: this.warmPreparations,
+      closingWarmAgents: () => this.cli.warmAgentClose.closingWarmAgents,
+      readVersion: async () => (await this.deps.manualReadinessEnvironment?.())?.version,
+      close: (entry, reason) => this.cli.warmAgentClose.closeWarmAgent(entry, reason),
+      log: (event, payload) => { void this.cli.cliRuns.writeDebugLog(event, payload); }
+    });
+  }
 
   shutdownWarmAgents(): Promise<void> {
     if (this.warmShutdown) return this.warmShutdown;
@@ -49,20 +62,10 @@ export class WarmAgents {
     return this.warmShutdown;
   }
 
-  /** A changed agent environment: resident processes holding no work close
-   * now. A process still answering, queued for, or carrying background work
-   * keeps running with the values it started with, as a running dedicated CLI
-   * does, and keeps taking its member's messages meanwhile
-   * (withBusyMemberEnvironment); its key carries the environment version, so
-   * the member's first turn once it is idle replaces it, and otherwise its idle
-   * timer retires it. Nothing is fenced: turns keep starting meanwhile. */
-  async retireIdleWarmAgents(reason: string): Promise<void> {
-    // Taken out of the map in one step, before any await, so no turn can pick
-    // one of them up between this check and its close.
-    const idle = [...this.entries.values()].filter((entry) =>
-      !entry.closed && !entry.activeRuns && entry.isIdle?.() !== false && !entry.hasLiveBackgroundWork?.());
-    for (const entry of idle) this.entries.delete(entry.key);
-    await Promise.all(idle.map((entry) => this.cli.warmAgentClose.closeWarmAgent(entry, reason)));
+  /** The environment members get changed (a save on the computer, the
+   *  imported settings on a machine): see WarmEnvironment. */
+  environmentChanged(): Promise<void> {
+    return this.environment.changed();
   }
 
   /** Archive/delete closes resident processes, while leaving provider session
@@ -153,19 +156,28 @@ export class WarmAgents {
       const refusal = await this.cli.cliRuns.hostRefusal("this native command");
       if (refusal || this.cli.cliRuns.nativeAdmissionsFenced || this.warmShutdown || entry.closed) throw new Error(refusal ?? "Native admission is fenced.");
       return task();
-    }).finally(() => { this.warmOperations--; entry.activeRuns = (entry.activeRuns ?? 1) - 1; });
+    }).finally(() => {
+      this.warmOperations--;
+      entry.activeRuns = (entry.activeRuns ?? 1) - 1;
+      // Its turn is over: a process holding outdated environment values is
+      // replaced soon rather than on the member's next message.
+      this.environment.mayBeFree(entry);
+    });
     if (after) {
       entry.queue = run.then(() => undefined, () => undefined);
     }
     return run;
   }
 
-  createTrackedWarmAgent(key: string, construct: () => Promise<WarmAgentEntry>): Promise<WarmAgentEntry> {
+  createTrackedWarmAgent(key: string, construct: () => Promise<WarmAgentEntry>, agentEnvGeneration?: number): Promise<WarmAgentEntry> {
     if (this.cli.cliRuns.nativeAdmissionsFenced) return Promise.reject(new Error("The machine is stopping after idle; this native session did not start."));
     if (this.warmShutdown) return Promise.reject(new Error("The native sessions are shutting down; this command did not start."));
     if (this.conversationClosing(warmConversationId(key) ?? "")) return Promise.reject(new Error("This chat's native sessions are closing; this command did not start."));
     const existing = this.warmAgentCreations.get(key);
     if (existing) return existing;
+    // The changes told before its environment was read (its turn says when
+    // that was); without that, before this point.
+    const environmentGeneration = agentEnvGeneration ?? this.environment.currentGeneration();
     const creating = (async () => {
       const refusal = await this.cli.cliRuns.hostRefusal("this native session");
       if (refusal || this.cli.cliRuns.nativeAdmissionsFenced || this.warmShutdown || this.conversationClosing(warmConversationId(key) ?? "")) {
@@ -177,6 +189,7 @@ export class WarmAgents {
         await this.cli.warmAgentClose.closeWarmAgent(entry, "shutdown-during-start");
         throw new Error("The native session shut down before this command started.");
       }
+      entry.environmentGeneration = environmentGeneration;
       this.entries.set(key, entry);
       return entry;
     }).finally(() => this.warmAgentCreations.delete(key));
@@ -263,23 +276,28 @@ export class WarmAgents {
    *  values it started with, as in the dedicated CLI, and nothing waits. Its
    *  first turn once that process is idle starts with the new values. A run
    *  that would not use that process anyway (a goal, or other settings changed
-   *  too) gets the environment as it is now. */
+   *  too) gets the environment as it is now. The turn holds that process
+   *  until `release` (called once the turn is over), so it is not replaced
+   *  under the turn before the turn reaches it. */
   withBusyMemberEnvironment(
     participant: ParticipantConfig,
     repoPath: string | undefined,
     kind: ConversationKind,
     options: CliAgentRunOptions
-  ): CliAgentRunOptions {
-    if (!options.warm || options.nativeGoal || kind !== "chat") return options;
+  ): { options: CliAgentRunOptions; release: () => void } {
+    const unchanged = { options, release: (): void => undefined };
+    if (!options.warm || options.nativeGoal || kind !== "chat") return unchanged;
     const scopeKey = warmAgentScopeKey(options.warm);
     const busy = Array.from(this.entries.values()).find((entry) => entry.scopeKey === scopeKey && !entry.closed && entry.isIdle?.() === false);
     const running = busy ? warmKeyAgentEnvKey(busy.key) : undefined;
-    if (running === undefined || running === (options.agentEnvKey ?? "") ||
-      busy!.key !== warmAgentKey(participant, repoPath, kind, { ...options, agentEnvKey: running })) {
-      return options;
+    if (!busy || running === undefined || running === (options.agentEnvKey ?? "") ||
+      busy.key !== warmAgentKey(participant, repoPath, kind, { ...options, agentEnvKey: running })) {
+      return unchanged;
     }
     void this.cli.cliRuns.writeDebugLog("cli.agent-environment-change-deferred", { participantId: options.warm.participantId });
-    return { ...options, agentEnvKey: running };
+    // A process started with these options (the busy one gone meanwhile) has
+    // its values, and is judged as it was.
+    return { options: { ...options, agentEnvKey: running, agentEnvGeneration: busy.environmentGeneration ?? 0 }, release: this.environment.hold(busy) };
   }
 
   /** Retire every warm process of one member, e.g. when the credential it was
@@ -299,6 +317,10 @@ export class WarmAgents {
       this.entries.delete(entry.key);
       await this.cli.warmAgentClose.closeWarmAgent(entry, reason);
     }
+    // A process of this member still closing (replaced for a changed
+    // environment, or by its idle timer): the next one starts once it has
+    // gone, so two processes never hold the member's session at once.
+    await this.environment.waitForClosing(scopeKey);
   }
 
   scheduleWarmIdleTimer(entry: WarmAgentEntry, idleTimeoutMs: number): void {
