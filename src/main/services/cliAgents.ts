@@ -139,15 +139,15 @@ export class CliAgentRunner {
     return this.modules.warmAgents.shutdownWarmAgents();
   }
 
-  /** A changed agent environment: resident processes holding no work close
-   * now. A process still answering, queued for, or carrying background work
-   * keeps running with the values it started with, as a running dedicated CLI
-   * does, and keeps taking its member's messages meanwhile
-   * (withBusyMemberEnvironment); its key carries the environment version, so
-   * the member's first turn once it is idle replaces it, and otherwise its idle
-   * timer retires it. Nothing is fenced: turns keep starting meanwhile. */
-  retireIdleWarmAgents(reason: string): Promise<void> {
-    return this.modules.warmAgents.retireIdleWarmAgents(reason);
+  /** The environment members get changed (`version`: the new one, from
+   * SettingsService.getManualAgentEnvironment). A member process started with
+   * other values closes once it holds no work: at once when idle, otherwise
+   * as soon as its turn ends, so the member's next message resumes its session
+   * in a new process with the new values. A turn in progress finishes on the
+   * process it started on, and messages sent meanwhile join it. Nothing is
+   * fenced: turns keep starting meanwhile. */
+  environmentChanged(version: string): Promise<void> {
+    return this.modules.warmAgents.environmentChanged(version);
   }
 
   /** Archive/delete closes resident processes, while leaving provider session

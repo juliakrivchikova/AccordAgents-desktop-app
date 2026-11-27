@@ -171,6 +171,10 @@ export class ClaudeProcess {
       for (const [waiter, holds] of Array.from(idleWaiters)) {
         if (holds()) waiter();
       }
+      // Work it did on its own (a reply to a finished background task) or its
+      // background tasks are over: a process started with outdated
+      // environment values is replaced now.
+      this.cli.warmAgents.retireIfEnvironmentOutdated(entry);
       if (!isIdle()) {
         return;
       }

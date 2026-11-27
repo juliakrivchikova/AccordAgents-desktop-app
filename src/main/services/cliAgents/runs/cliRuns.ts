@@ -84,14 +84,19 @@ export class CliRuns {
     this.nativeOperations++;
     this.cli.warmAgents.trackConversationOperation(options.warm?.conversationId, 1);
     const shutdownGeneration = this.nativeShutdownGeneration;
+    // A turn routed into the member's busy process holds it until the turn is over.
+    let releaseEnvironmentHold = (): void => undefined;
     try {
       // Every Claude turn (a goal, a warm or a one-shot one) starts its CLI
       // with the same Claude in Chrome. Read before the checks below, so a
       // shutdown during the read stops the turn too.
-      const runOptions = participant.kind === "claude-code"
-        ? this.cli.warmAgents.withBusyMemberEnvironment(participant, effectiveRepoPath, kind,
-          await this.cli.claudeSettings.withClaudeChrome(participant, effectiveRepoPath, kind, effectiveOptions))
-        : effectiveOptions;
+      let runOptions = effectiveOptions;
+      if (participant.kind === "claude-code") {
+        const routed = this.cli.warmAgents.withBusyMemberEnvironment(participant, effectiveRepoPath, kind,
+          await this.cli.claudeSettings.withClaudeChrome(participant, effectiveRepoPath, kind, effectiveOptions));
+        runOptions = routed.options;
+        releaseEnvironmentHold = routed.release;
+      }
       const refusal = await this.hostRefusal("this native command");
       if (shutdownGeneration !== this.nativeShutdownGeneration) return this.failed(participant, new Error("Native sessions shut down while this command waited; it did not start."));
       if (signal?.aborted) return this.failed(participant, new Error("The command was cancelled before native execution started."));
@@ -108,6 +113,7 @@ export class CliRuns {
       }
       return { participant, ok: false, content: "", error: `${participant.label} is not a CLI agent.` };
     } finally {
+      releaseEnvironmentHold();
       this.nativeOperations--;
       this.cli.warmAgents.trackConversationOperation(options.warm?.conversationId, -1);
       idleMonitor?.close();
@@ -136,13 +142,17 @@ export class CliRuns {
     this.nativeOperations++;
     this.cli.warmAgents.trackConversationOperation(options.warm?.conversationId, 1);
     const shutdownGeneration = this.nativeShutdownGeneration;
+    let releaseEnvironmentHold = (): void => undefined;
     try {
       // The same key as its turns: a compaction must not replace the process
       // the member's turns run in only because Chrome was not looked up here.
-      const compactOptions = participant.kind === "claude-code"
-        ? this.cli.warmAgents.withBusyMemberEnvironment(participant, effectiveRepoPath, kind,
-          await this.cli.claudeSettings.withClaudeChrome(participant, effectiveRepoPath, kind, options))
-        : options;
+      let compactOptions = options;
+      if (participant.kind === "claude-code") {
+        const routed = this.cli.warmAgents.withBusyMemberEnvironment(participant, effectiveRepoPath, kind,
+          await this.cli.claudeSettings.withClaudeChrome(participant, effectiveRepoPath, kind, options));
+        compactOptions = routed.options;
+        releaseEnvironmentHold = routed.release;
+      }
       const compactionRefusal = await this.hostRefusal("compaction");
       if (shutdownGeneration !== this.nativeShutdownGeneration) return failedCompact(participant, new Error("Native sessions shut down while compaction waited; it did not start."));
       if (signal?.aborted) return failedCompact(participant, new Error(COMPACTION_CANCELLED_BEFORE_START));
@@ -158,7 +168,7 @@ export class CliRuns {
         return await this.cli.geminiRuns.compactGeminiSession(participant, effectiveRepoPath, kind, signal, options);
       }
       return { participant, ok: false, error: `${participant.label} is not a CLI agent.` };
-    } finally { this.nativeOperations--; this.cli.warmAgents.trackConversationOperation(options.warm?.conversationId, -1); }
+    } finally { releaseEnvironmentHold(); this.nativeOperations--; this.cli.warmAgents.trackConversationOperation(options.warm?.conversationId, -1); }
   }
 
   hasActiveNativeWork(): boolean {

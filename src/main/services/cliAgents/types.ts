@@ -311,6 +311,10 @@ export interface WarmAgentEntry {
   queue: Promise<void>;
   /** Runs admitted on this process and not yet settled (queued ones too). */
   activeRuns?: number;
+  /** Turns routed into this process with the environment it started with
+   *  (WarmAgents.withBusyMemberEnvironment) and not yet over: it is not
+   *  replaced for a changed environment under them. */
+  environmentHolds?: number;
   idleTimer?: NodeJS.Timeout;
   closed: boolean;
   /** Set when the process can no longer carry another turn cleanly (an error
