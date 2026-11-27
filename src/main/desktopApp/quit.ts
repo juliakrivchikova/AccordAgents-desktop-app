@@ -93,6 +93,8 @@ export function listenToQuit(desktopApp: DesktopApp): void {
     // on its own once the app is gone).
     void desktopApp.speechToTextService.shutdown();
     desktopApp.localCliSignInService.shutdown();
+    // Its live link to the server and its timers end with the app.
+    desktopApp.planUsageLink.stop();
   });
 
   app.on("quit", (_event, exitCode) => {

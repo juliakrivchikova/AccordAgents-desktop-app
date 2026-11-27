@@ -2,9 +2,11 @@ import { HUB_ALERTS_PATH, type HubAlertRequest, type HubAlertResult } from "../.
 import { BLOB_FRAGMENT_MAX_BYTES, isDeviceEventBlobReference, type DeviceEventBlobReference } from "../../shared/deviceEventBlobs";
 import { HUB_MEMORY_PATH, isMemoryPostAction, type HubMemoryRequest, type MemoryResult } from "../../shared/memory";
 import {
-  HUB_MEMBER_RULES_PATH, HUB_PROGRESS_PATH, hubBlobFragmentPath, hubWebSocketUrl,
-  type HubComposerCatalog, type HubDevice, type HubHealth, type HubMachineWakeRequest, type HubMemberRules, type HubPhoneInvite, type HubProgressPost, type HubRosterResponse
+  HUB_MEMBER_RULES_PATH, HUB_PLAN_USAGE_PATH, HUB_PLAN_USAGE_REFRESH_PATH, HUB_PROGRESS_PATH, hubBlobFragmentPath, hubWebSocketUrl,
+  type HubComposerCatalog, type HubDevice, type HubHealth, type HubMachineWakeRequest, type HubMemberRules, type HubPhoneInvite,
+  type HubPlanUsagePut, type HubPlanUsageRefresh, type HubPlanUsageResponse, type HubProgressPost, type HubRosterResponse
 } from "../../shared/hubProtocol";
+import type { PlanUsageSnapshot } from "../../shared/types";
 import type { MachineProgressFrame } from "../../shared/machineProgress";
 import {
   HUB_ARTIFACT_PATH,
@@ -333,6 +335,21 @@ export class HubClient {
    *  they run (held in the hub's memory only). */
   postProgress(frames: MachineProgressFrame[]): Promise<{ ok: boolean }> {
     return this.request("POST", HUB_PROGRESS_PATH, JSON.stringify({ frames } satisfies HubProgressPost), "application/json");
+  }
+
+  /** This device's plan usage of its CLI accounts (its last value only). */
+  putPlanUsage(snapshots: PlanUsageSnapshot[]): Promise<{ ok: boolean }> {
+    return this.request("PUT", HUB_PLAN_USAGE_PATH, JSON.stringify({ snapshots } satisfies HubPlanUsagePut), "application/json");
+  }
+
+  /** Every device's plan usage as the server keeps it (not for a machine). */
+  planUsage(): Promise<HubPlanUsageResponse> {
+    return this.request<HubPlanUsageResponse>("GET", HUB_PLAN_USAGE_PATH);
+  }
+
+  /** Asks a machine, through the server, to read one CLI's usage again. */
+  requestPlanUsageRefresh(request: HubPlanUsageRefresh): Promise<{ ok: boolean; delivered?: boolean }> {
+    return this.request("POST", HUB_PLAN_USAGE_REFRESH_PATH, JSON.stringify(request), "application/json");
   }
 
   /** The start-only keys the hub may wake the machines with (owner only). */

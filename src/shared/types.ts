@@ -28,6 +28,7 @@ export * from "./types/phoneInvites";
 export * from "./types/speechToText";
 export * from "./types/subagentProviders";
 export * from "./types/cliImport";
+export * from "./types/planUsage";
 export type {
   MachineInstallRecord,
   MachineInstallRequest,

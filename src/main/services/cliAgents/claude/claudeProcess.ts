@@ -26,6 +26,7 @@ import type {
   NativeGoalRun, WarmAgentEntry
 } from "../types";
 import type { CliModules } from "../modules";
+import { CLAUDE_GET_USAGE_CAPABILITY, runsOnOwnSignIn } from "../../cliPlanUsage";
 
 /** The CLI's own Send now (`interrupt` with `send_now`), on `system/init`. */
 const CLAUDE_SEND_NOW_CAPABILITY = "interrupt_send_now_v1";
@@ -49,7 +50,7 @@ const MAX_KEPT_STDERR_CHARS = 2_000;
 
 /** A member's live Claude Code process. */
 export class ClaudeProcess {
-  constructor(private readonly cli: Pick<CliModules, "claudeReplyFlow" | "claudeSettings" | "cliRuns" | "warmAgentClose" | "warmAgents">) {}
+  constructor(private readonly cli: Pick<CliModules, "claudeReplyFlow" | "claudeSettings" | "cliRuns" | "planUsage" | "warmAgentClose" | "warmAgents">) {}
 
   async createClaudeWarmAgent(
     key: string,
@@ -130,6 +131,7 @@ export class ClaudeProcess {
       autoModeSeen: false,
       onCliPermissionMode: options.warm?.onCliPermissionMode
     };
+    const ownSignIn = runsOnOwnSignIn(participant, options.agentEnv);
     const capturedBackgroundProcesses = new Map<string, CapturedPosixProcess>();
     /** Each waiter settles once its condition holds (or the process is gone). */
     const idleWaiters = new Map<() => void, () => boolean>();
@@ -332,7 +334,7 @@ export class ClaudeProcess {
         const line = stdoutBuffer.slice(0, newline).trim();
         stdoutBuffer = stdoutBuffer.slice(newline + 1);
         if (line) {
-          this.handleClaudeWarmLine(line, participant, newSessionId, state, hooks);
+          this.handleClaudeWarmLine(line, participant, newSessionId, state, hooks, ownSignIn);
           refreshCapturedBackgroundProcesses();
           this.cli.claudeReplyFlow.reportClaudeBackgroundTasks(state, participant);
           notifyIfIdle();
@@ -487,6 +489,8 @@ export class ClaudeProcess {
           return "unsupported";
         }
       },
+      cliCapabilities: () => state.capabilities,
+      ownSignIn,
       permissionMode: () => state.permissionMode,
       autoModeSeen: () => state.autoModeSeen,
       lastCompactBoundary: () => state.lastCompactBoundary,
@@ -582,7 +586,8 @@ export class ClaudeProcess {
     participant: ParticipantConfig,
     fallbackSessionId: string | undefined,
     state: ClaudeWarmProcessState,
-    hooks: ClaudeWarmProcessHooks
+    hooks: ClaudeWarmProcessHooks,
+    ownSignIn = true
   ): void {
     let event: unknown;
     try {
@@ -626,6 +631,11 @@ export class ClaudeProcess {
         }
       }
     }
+    // The account's plan usage after a response (on the CLI's own sign-in
+    // only: an added provider has no plan).
+    if (type === "rate_limit_event" && ownSignIn) {
+      this.cli.planUsage.noteClaudeRateLimitEvent(record);
+    }
     if (type === "command_lifecycle") {
       this.cli.claudeReplyFlow.handleClaudeCommandLifecycle(record, state, participant, hooks);
       return;
@@ -656,6 +666,9 @@ export class ClaudeProcess {
         noteClaudeToolContext(record, state.toolContext);
         if (Array.isArray(record.capabilities)) {
           state.capabilities = new Set(record.capabilities.filter((item): item is string => typeof item === "string"));
+        }
+        if (ownSignIn && Array.isArray(record.capabilities) && record.capabilities.includes(CLAUDE_GET_USAGE_CAPABILITY)) {
+          this.cli.planUsage.claudeProcessStarted();
         }
         this.startClaudeWarmStep(state, participant, hooks);
       } else {

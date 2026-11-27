@@ -1,7 +1,7 @@
 import path from "node:path";
 import type {
   AgentContextUsage, AgentDetectionRequest, AgentHealth, ChatProviderKind, CliProviderHost, ClaudeChromeSetting, ConversationKind,
-  GitDiffMode, ParticipantConfig, ProviderModelCatalog
+  GitDiffMode, ParticipantConfig, PlanUsageProvider, PlanUsageSnapshot, ProviderModelCatalog
 } from "../../shared/types";
 import type { CliStartDefaultsByKind } from "../../shared/cliStartDefaults";
 import { spawnCommand } from "./command";
@@ -248,6 +248,24 @@ export class CliAgentRunner {
    *  pick it up with their next turn once their process is idle. */
   setClaudeChromeEnabledByDefault(enabled: boolean): Promise<ClaudeChromeSetting> {
     return this.modules.claudeSettings.setClaudeChromeEnabledByDefault(enabled);
+  }
+
+  /** The plan usage of this device's CLI accounts, as their CLIs last
+   *  reported it (cliAgents/usage/planUsage.ts). */
+  planUsage(): PlanUsageSnapshot[] {
+    return this.modules.planUsage.list();
+  }
+
+  /** Told every change of planUsage(). Reads happen only while someone listens. */
+  onPlanUsageChanged(listener: (snapshots: PlanUsageSnapshot[]) => void): () => void {
+    return this.modules.planUsage.onChanged(listener);
+  }
+
+  /** Reads one CLI's account again (a card opened, Refresh): not twice at
+   *  once, and not again within a minute (ten seconds for Refresh). */
+  async refreshPlanUsage(provider: PlanUsageProvider, force = false): Promise<PlanUsageSnapshot[]> {
+    await this.modules.planUsage.refresh(provider, force);
+    return this.modules.planUsage.list();
   }
 
   /** Retire every warm process of one member, e.g. when the credential it was

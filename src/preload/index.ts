@@ -394,6 +394,13 @@ const bridge: AppBridge = {
     ipcRenderer.on("machines:install-progress", listener);
     return () => ipcRenderer.off("machines:install-progress", listener);
   },
+  getPlanUsage: () => ipcRenderer.invoke("plan-usage:get"),
+  refreshPlanUsage: (request) => ipcRenderer.invoke("plan-usage:refresh", request),
+  onPlanUsageChanged: (callback) => {
+    const listener = (_event: Electron.IpcRendererEvent, view: Parameters<typeof callback>[0]) => callback(view);
+    ipcRenderer.on("plan-usage:changed", listener);
+    return () => ipcRenderer.removeListener("plan-usage:changed", listener);
+  },
   onMachinesUpdated: (callback: (result: MachineListResult) => void) => {
     const listener = (_event: unknown, result: MachineListResult): void => callback(result);
     ipcRenderer.on("machines:updated", listener);

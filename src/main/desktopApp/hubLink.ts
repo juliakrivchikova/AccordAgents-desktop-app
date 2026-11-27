@@ -2,6 +2,8 @@ import path from "node:path";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { app } from "electron";
 import { HubClient } from "../services/hubClient";
+import { PlanUsageLink } from "../services/planUsageLink";
+import { sendToMainWindow } from "./windowState";
 import { compareVersions } from "../../shared/machineInstall";
 import { publishHubRoster, scheduleEnrolledPhones } from "./hubRoster";
 import type { DesktopApp } from "./desktopApp";
@@ -16,6 +18,18 @@ export function createHubLink(desktopApp: DesktopApp): void {
 
   /** The update made before the app's window opens is running. */
   desktopApp.hubProgramUpdatingBeforeOpening = false;
+
+  // The members' plan usage: this computer's CLIs read here, the machines'
+  // from the User's server once the link to it starts.
+  desktopApp.planUsageLink = new PlanUsageLink({
+    runner: desktopApp.cliAgentRunner,
+    client: () => desktopApp.hubClient,
+    readsMachines: true,
+    ownDeviceId: async () => (await desktopApp.deviceIdentityService.getOrCreateDeviceIdentity()).originId,
+    log: (event, payload) => void desktopApp.debugLogService.write(event, payload)
+  });
+  desktopApp.planUsageLink.onChanged((view) => sendToMainWindow(desktopApp, "plan-usage:changed", view));
+  desktopApp.planUsageLink.start();
 }
 
 export async function startHubLink(desktopApp: DesktopApp): Promise<void> {
@@ -42,6 +56,7 @@ export async function startHubLink(desktopApp: DesktopApp): Promise<void> {
   desktopApp.chatService.setHubBlobWriter((bytes) => blobClient.uploadBytes(bytes));
   desktopApp.hubPhonePublisher.reset();
   desktopApp.hubMemberRulesPublisher.reset();
+  desktopApp.planUsageLink.serverChanged();
   publishHubRoster(desktopApp);
   // Phones that paired while this desktop was away are on the server's
   // roster: learned now, and the roster is read again from then on.

@@ -47,9 +47,16 @@ export function ComposerMenu(props: {
   triggerClassName?: string;
   /** No chevron after the label (icon triggers). */
   bare?: boolean;
+  /** Told when the menu opens or closes (a hover card on the same control
+   *  stays shut while it is open). */
+  onOpenChange?: (open: boolean) => void;
   children: (close: () => void) => ReactNode;
 }): JSX.Element {
-  const [open, setOpen] = useState(false);
+  const [open, setOpenState] = useState(false);
+  const setOpen = (next: boolean): void => {
+    setOpenState(next);
+    props.onOpenChange?.(next);
+  };
   const triggerRef = useRef<HTMLButtonElement>(null);
   const menuRef = useRef<HTMLDivElement>(null);
   const [place, setPlace] = useState<MenuPlace>();
@@ -189,7 +196,7 @@ export function ComposerMenu(props: {
         aria-expanded={open}
         aria-label={props.title}
         disabled={props.disabled}
-        onClick={() => setOpen((current) => !current)}
+        onClick={() => setOpen(!open)}
         onKeyDown={(event) => {
           if (event.key === "Escape" && open) {
             event.stopPropagation();

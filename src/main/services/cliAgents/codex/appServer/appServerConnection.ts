@@ -6,6 +6,7 @@ import { asRecord, stringField } from "../../runs/records";
 import type { CodexAppServerPendingRequest } from "../../types";
 import type { AppServerModules } from "./modules";
 import type { AppServerLaunch } from "./launch";
+import { runsOnOwnSignIn } from "../../../cliPlanUsage";
 
 /** The app-server process's own lines: requests sent to it, its answers, and its end. */
 export class AppServerConnection {
@@ -18,7 +19,7 @@ export class AppServerConnection {
 
   constructor(
     private readonly server: Pick<AppServerModules, "approvals" | "guardian" | "turns">,
-    private readonly launch: Pick<AppServerLaunch, "child" | "cli" | "participant">
+    private readonly launch: Pick<AppServerLaunch, "child" | "cli" | "options" | "participant">
   ) {}
 
   sendRequest(method: string, params: unknown, timeoutMs?: number): Promise<unknown> {
@@ -107,6 +108,11 @@ export class AppServerConnection {
     }
     if (this.server.approvals.handleServerRequestResolved(record)) {
       return;
+    }
+    // Pushed with every model response: the account's plan usage (on the
+    // CLI's own sign-in only; an added provider has no plan).
+    if (record.method === "account/rateLimits/updated" && runsOnOwnSignIn(this.launch.participant, this.launch.options.agentEnv)) {
+      this.launch.cli.planUsage.noteCodexRateLimitsUpdated(record.params);
     }
     this.server.approvals.handleFileChangePatchUpdated(record);
     this.server.approvals.handleItemCompletedApprovalRetirement(record);

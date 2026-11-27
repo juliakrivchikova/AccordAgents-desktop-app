@@ -79,5 +79,6 @@
 @import "./views/chat-sessions/title-menu.css" layer(components);
 @import "./views/chat-sessions/delegations.css" layer(components);
 @import "./views/chat-sessions/model-chip.css" layer(components);
+@import "./views/chat-sessions/plan-usage.css" layer(components);
 @import "./views/chat-model-access.css" layer(components);
 @import "./views/chat-sessions-activity.css" layer(components);

@@ -1,5 +1,8 @@
 import type { IncomingMessage, ServerResponse } from "node:http";
-import { HUB_MAX_BODY_BYTES, type HubDevice } from "../../shared/hubProtocol";
+import {
+  HUB_MAX_BODY_BYTES, HUB_PLAN_USAGE_REFRESH_PATH, type HubDevice, type HubPlanUsageDevice, type HubPlanUsageRefresh, type HubPlanUsageResponse
+} from "../../shared/hubProtocol";
+import { isPlanUsageProvider, normalizePlanUsageSnapshot } from "../../shared/planUsage";
 import type { HubOps } from "../hubOps";
 import type { HubMemory } from "../hubMemory";
 import { isMemoryPostAction } from "../../shared/memory";
@@ -9,7 +12,7 @@ import {
   type HubMachineSettingsPut, type HubTurnsResponse
 } from "../../shared/hubOps";
 import { HubRequestError, json, parseJson } from "./httpAnswers";
-import { MACHINE_ID, machineSettingsKey } from "./requestChecks";
+import { MACHINE_ID, machineSettingsKey, planUsageKey, validPlanUsage } from "./requestChecks";
 import type { HubServerModules } from "./modules";
 import type { HubServerDependencies } from "./dependencies";
 
@@ -114,7 +117,7 @@ export class DeviceRequests {
       }
       const updatedAt = new Date(this.deps.now()).toISOString();
       await hub.setDocument(machineSettingsKey(parsed.machineId), { sealed: parsed.sealed, updatedAt }, updatedAt);
-      this.server.liveSockets.tellMachine(parsed.machineId, { type: "settings" } satisfies HubLiveSettings);
+      void this.server.liveSockets.tellMachine(parsed.machineId, { type: "settings" } satisfies HubLiveSettings);
       this.deps.options.debugLog?.("hub.machine-settings.published", { machineId: parsed.machineId, bytes: parsed.sealed.length });
       json(response, 200, { ok: true, updatedAt });
       return 200;
@@ -130,6 +133,66 @@ export class DeviceRequests {
         return 200;
       }
       json(response, 200, (sealed && updatedAt ? { sealed, updatedAt } : {}) satisfies HubMachineSettings);
+      return 200;
+    }
+    throw new HubRequestError(404, "Not found.");
+  }
+
+  /** Puts of plan usage, one at a time (each merges into what is stored). */
+  private planUsageWrites: Promise<unknown> = Promise.resolve();
+
+  /**
+   * Plan usage (HUB_PLAN_USAGE_PATH): a device that runs members puts its
+   * own, the computer (and a phone that reads every chat) reads every
+   * device's and asks a machine to read its own again, told on its live
+   * socket; the answer says whether the machine was there to take it. The
+   * last value of each CLI only.
+   */
+  async handlePlanUsage(request: IncomingMessage, response: ServerResponse, url: URL, device: HubDevice, body: Buffer): Promise<number> {
+    const hub = this.deps.options.storage.hub();
+    // A phone reads only with the device-wide scope it reads every chat with.
+    const reads = device.role !== "machine" && (device.role !== "phone" || device.scope?.scope === "device");
+    if (url.pathname === HUB_PLAN_USAGE_REFRESH_PATH) {
+      if (request.method !== "POST") throw new HubRequestError(404, "Not found.");
+      if (!reads) throw new HubRequestError(403, "This device does not ask machines for their usage.");
+      const parsed = parseJson(body) as Partial<HubPlanUsageRefresh> | undefined;
+      if (typeof parsed?.machineId !== "string" || !MACHINE_ID.test(parsed.machineId) || !isPlanUsageProvider(parsed.provider)) {
+        throw new HubRequestError(400, "Invalid plan usage refresh.");
+      }
+      const sent = await this.server.liveSockets.tellMachine(parsed.machineId,
+        { type: "plan-usage-refresh", provider: parsed.provider, ...(parsed.force === true ? { force: true } : {}) });
+      json(response, 200, { ok: true, delivered: sent > 0 });
+      return 200;
+    }
+    if (request.method === "PUT") {
+      if (device.role === "phone") throw new HubRequestError(403, "Only a device that runs members puts their usage.");
+      const snapshots = validPlanUsage(parseJson(body));
+      const updatedAt = new Date(this.deps.now()).toISOString();
+      // The CLIs it put replace their own last value; the others it read
+      // before (a CLI not read since it restarted) stay.
+      const write = this.planUsageWrites.then(async () => {
+        const stored = (await hub.document(planUsageKey(device.deviceId)))?.value as { snapshots?: unknown } | undefined;
+        const kept = (Array.isArray(stored?.snapshots) ? stored.snapshots : []).map(normalizePlanUsageSnapshot)
+          .filter((snapshot) => snapshot !== undefined && !snapshots.some((item) => item.provider === snapshot.provider));
+        await hub.setDocument(planUsageKey(device.deviceId), { snapshots: [...kept, ...snapshots], updatedAt }, updatedAt);
+      });
+      this.planUsageWrites = write.catch(() => undefined);
+      await write;
+      this.server.liveSockets.broadcast({ type: "plan-usage", deviceId: device.deviceId });
+      json(response, 200, { ok: true });
+      return 200;
+    }
+    if (request.method === "GET") {
+      if (!reads) throw new HubRequestError(403, "This device does not read other devices' usage.");
+      const devices: HubPlanUsageDevice[] = [];
+      for (const item of await hub.devices()) {
+        if (item.role === "phone") continue;
+        const stored = (await hub.document(planUsageKey(item.deviceId)))?.value as { snapshots?: unknown; updatedAt?: unknown } | undefined;
+        if (!stored || typeof stored.updatedAt !== "string" || !Array.isArray(stored.snapshots)) continue;
+        const snapshots = stored.snapshots.map(normalizePlanUsageSnapshot).filter((snapshot) => snapshot !== undefined);
+        devices.push({ deviceId: item.deviceId, ...(item.machineId ? { machineId: item.machineId } : {}), snapshots, updatedAt: stored.updatedAt });
+      }
+      json(response, 200, { devices } satisfies HubPlanUsageResponse);
       return 200;
     }
     throw new HubRequestError(404, "Not found.");

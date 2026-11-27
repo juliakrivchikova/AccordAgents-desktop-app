@@ -294,6 +294,11 @@ export interface WarmAgentEntry {
    *  take the message into the running step instead of ending it. With no
    *  waiting run named, every message waiting at the CLI counts. */
   sendNow?: (waitingRunId?: string, runningRunId?: string) => Promise<ClaudeSendNowOutcome>;
+  /** Claude only: the capabilities the CLI announced on `system/init`. */
+  cliCapabilities?: () => ReadonlySet<string>;
+  /** Claude only: the member runs on the CLI's own sign-in (not an added
+   *  provider), so the account's plan usage can be read through it. */
+  ownSignIn?: boolean;
   /** Claude only: the permission mode the process is in, as far as the app
    *  knows: `--permission-mode` at its start, then each `set_permission_mode`
    *  it accepted and each mode the CLI reported itself (its `system` events). */

@@ -11,7 +11,7 @@ export class CodexAppServer {
   constructor(
     private readonly cli: Pick<
       CliModules,
-      | "cliRuns" | "codexAppServerNotifications" | "codexRuns" | "sessionLogs" | "warmAgentClose" | "warmAgents"
+      | "cliRuns" | "codexAppServerNotifications" | "codexRuns" | "planUsage" | "sessionLogs" | "warmAgentClose" | "warmAgents"
     >,
     private readonly deps: Pick<CliDependencies, "debugLogs">
   ) {}

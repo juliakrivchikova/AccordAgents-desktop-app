@@ -372,4 +372,9 @@ export interface AppBridge {
   /** Live background work of the chat's members, by member id. */
   getChatBackgroundTasks(conversationId: string): Promise<Record<string, ChatBackgroundTask[]>>;
   onChatBackgroundTasks(callback: (event: ChatBackgroundTasksEvent) => void): () => void;
+  /** The plan usage of the members' CLI accounts: this computer's, and each
+   *  machine's as it put them on the User's server. */
+  getPlanUsage(): Promise<import("./planUsage").PlanUsageView>;
+  refreshPlanUsage(request: import("./planUsage").PlanUsageRefreshRequest): Promise<import("./planUsage").PlanUsageRefreshResult>;
+  onPlanUsageChanged(callback: (view: import("./planUsage").PlanUsageView) => void): () => void;
 }

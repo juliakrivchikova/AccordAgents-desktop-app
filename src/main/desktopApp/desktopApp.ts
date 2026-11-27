@@ -8,6 +8,7 @@ import type { ArtifactStore } from "../services/artifactStore";
 import type { ScriptService } from "../services/scripts";
 import type { ScriptHub } from "../services/scriptHub";
 import type { HubClient } from "../services/hubClient";
+import type { PlanUsageLink } from "../services/planUsageLink";
 import type { ServerChatLink } from "../services/serverChatLink";
 import type { MemoryMirror } from "../services/memoryMirror";
 import type { HubPhonePublisher } from "../services/hubPhonePublisher";
@@ -98,6 +99,8 @@ export interface DesktopApp {
   cloudRunDoctorService: CloudRunDoctorService;
   cloudRunSetupSession: CloudRunSetupSession;
   hubClient: HubClient | undefined;
+  /** The plan usage rings: this computer's CLI accounts and the machines' through the server. */
+  planUsageLink: PlanUsageLink;
   hubRosterPublish: Promise<void> | undefined;
   hubRosterAgain: boolean;
   hubRosterRetry: ReturnType<typeof setTimeout> | undefined;

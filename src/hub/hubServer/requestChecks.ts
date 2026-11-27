@@ -1,7 +1,10 @@
 import { isDeviceEventBlobReference, type DeviceEventBlobReference } from "../../shared/deviceEventBlobs";
 import {
-  HUB_ROSTER_ROLES, isHubPhoneInviteId, isHubPhoneScope, type HubDevice, type HubMemberRules, type HubRosterRequest
+  HUB_PLAN_USAGE_MAX_SNAPSHOT_BYTES, HUB_PLAN_USAGE_MAX_SNAPSHOTS, HUB_ROSTER_ROLES, isHubPhoneInviteId, isHubPhoneScope, type HubDevice,
+  type HubMemberRules, type HubPlanUsagePut, type HubRosterRequest
 } from "../../shared/hubProtocol";
+import { normalizePlanUsageSnapshot } from "../../shared/planUsage";
+import type { PlanUsageSnapshot } from "../../shared/types";
 import { deviceIdForPublicKey } from "../../main/services/hubAuth";
 import { CONTROL_CHARACTER } from "./constants";
 import { HubRequestError } from "./httpAnswers";
@@ -15,6 +18,22 @@ export const MACHINE_ID = /^[A-Za-z0-9._:-]{1,128}$/;
 
 export function machineSettingsKey(machineId: string): string {
   return `machine-settings:${machineId}`;
+}
+
+export function planUsageKey(deviceId: string): string {
+  return `plan-usage:${deviceId}`;
+}
+
+/** A device's plan usage: a few small snapshots, one per CLI, in the shape
+ *  the app writes, or nothing is kept. */
+export function validPlanUsage(value: unknown): PlanUsageSnapshot[] {
+  const snapshots = (value as Partial<HubPlanUsagePut> | undefined)?.snapshots;
+  if (!Array.isArray(snapshots) || snapshots.length > HUB_PLAN_USAGE_MAX_SNAPSHOTS) throw new HubRequestError(400, "Invalid plan usage.");
+  return snapshots.map((item) => {
+    const snapshot = normalizePlanUsageSnapshot(item);
+    if (!snapshot || Buffer.byteLength(JSON.stringify(snapshot)) > HUB_PLAN_USAGE_MAX_SNAPSHOT_BYTES) throw new HubRequestError(400, "Invalid plan usage.");
+    return snapshot;
+  });
 }
 
 export function validRoster(value: unknown): HubDevice[] {

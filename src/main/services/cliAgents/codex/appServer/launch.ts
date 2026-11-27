@@ -5,7 +5,7 @@ import type { CliDependencies } from "../../dependencies";
 
 /** What one app-server process is started with. */
 export interface AppServerLaunch {
-  readonly cli: Pick<CliModules, "cliRuns" | "codexAppServerNotifications" | "codexRuns" | "sessionLogs" | "warmAgentClose">;
+  readonly cli: Pick<CliModules, "cliRuns" | "codexAppServerNotifications" | "codexRuns" | "planUsage" | "sessionLogs" | "warmAgentClose">;
   readonly debugLogs: CliDependencies["debugLogs"];
   readonly child: Awaited<ReturnType<CliModules["warmAgents"]["spawnResidentProcess"]>>;
   readonly key: string;

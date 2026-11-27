@@ -1,0 +1,241 @@
+/* The plan usage ring in the composer's context row, left of the model
+   (the User's design, 2026-11-27, docs/design/usage-ring/mockup.html): a
+   28px quiet control whose 14px icon is the ring. It never changes size or
+   place between states; only the arc's length and tone change. */
+.plan-usage-anchor {
+  display: inline-flex;
+  flex: none;
+}
+
+.plan-usage-ring-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: none;
+  width: 28px;
+  height: 28px;
+  border: 0;
+  border-radius: var(--ui-radius-8);
+  background: transparent;
+  color: var(--ui-text-3);
+  cursor: pointer;
+  transition: background-color 120ms var(--ui-ease-out);
+}
+
+.plan-usage-ring-button:hover,
+.plan-usage-ring-button[aria-expanded="true"] {
+  background: var(--ui-row-hover);
+}
+
+.plan-usage-ring-button:focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring);
+}
+
+/* The hover card: the side panel's card (.chat-agent-card), a little wider. */
+.chat-agent-card.plan-usage-card {
+  gap: 0;
+  width: 272px;
+  max-width: calc(100vw - 16px);
+  padding: 9px 11px 10px;
+  color: var(--ui-text);
+  line-height: 17px;
+}
+
+.plan-usage-card-lead {
+  color: var(--ui-text);
+  font-size: 13px;
+  font-weight: 500;
+  line-height: 18px;
+}
+
+.plan-usage-card-sub {
+  color: var(--ui-text-3);
+}
+
+.plan-usage-card-rows,
+.plan-usage-card-foot {
+  margin-top: 7px;
+  padding-top: 7px;
+  border-top: 1px solid var(--ui-border-subtle);
+}
+
+.plan-usage-card-rows {
+  display: grid;
+  gap: 2px;
+}
+
+.plan-usage-card-line {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  color: var(--ui-text-2);
+}
+
+.plan-usage-card-name {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.plan-usage-card-value {
+  flex: none;
+  color: var(--ui-text);
+  font-variant-numeric: tabular-nums;
+}
+
+.plan-usage-card-foot {
+  color: var(--ui-text-3);
+}
+
+/* Quiet status: a small dot and colored text, never a filled pill. */
+.plan-usage-status {
+  display: inline-flex;
+  align-items: flex-start;
+  gap: 6px;
+}
+
+/* Centered on the first line when the text wraps. */
+.plan-usage-status::before {
+  content: "";
+  flex: none;
+  width: 6px;
+  height: 6px;
+  margin-top: calc(0.5lh - 3px);
+  border-radius: 50%;
+  background: currentColor;
+}
+
+.plan-usage-status.is-warning {
+  color: var(--ui-warning);
+}
+
+.plan-usage-status.is-reached {
+  color: var(--ui-danger);
+}
+
+/* The click: the member's account as its CLI's /usage shows it, in the
+   composer's menu (320px, radius 12). */
+.plan-usage-detail {
+  display: grid;
+  width: 310px;
+  max-width: 100%;
+  color: var(--ui-text);
+  font-size: 13px;
+  line-height: 20px;
+}
+
+.plan-usage-detail-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 8px 8px;
+  border-bottom: 1px solid var(--ui-border-subtle);
+}
+
+.plan-usage-detail-title {
+  flex: 1 1 auto;
+  min-width: 0;
+  font-weight: 600;
+}
+
+.plan-usage-detail-plan,
+.plan-usage-detail-note {
+  color: var(--ui-text-3);
+  font-size: 12px;
+}
+
+.plan-usage-detail-note {
+  margin: 0;
+  padding: 8px;
+}
+
+.plan-usage-detail-window {
+  display: grid;
+  gap: 4px;
+  padding: 6px 8px;
+}
+
+.plan-usage-detail-window-top {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+}
+
+.plan-usage-detail-window-name {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.plan-usage-detail-window-value {
+  flex: none;
+  font-variant-numeric: tabular-nums;
+}
+
+.plan-usage-detail-reset {
+  color: var(--ui-text-3);
+  font-size: 12px;
+  line-height: 16px;
+}
+
+.plan-usage-detail-group-label {
+  padding: 8px 8px 0;
+  color: var(--ui-text-3);
+  font-size: 11px;
+  font-weight: 500;
+  line-height: 16px;
+}
+
+.plan-usage-detail-mine {
+  color: var(--ui-text-2);
+}
+
+.plan-usage-detail-facts {
+  display: grid;
+  gap: 2px;
+  padding: 6px 8px;
+  border-top: 1px solid var(--ui-border-subtle);
+}
+
+.plan-usage-detail-fact {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  min-height: 22px;
+  color: var(--ui-text-2);
+}
+
+.plan-usage-detail-fact.is-idle {
+  padding: 0 8px;
+  color: var(--ui-text);
+}
+
+.plan-usage-detail-fact-name {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.plan-usage-detail-fact-value {
+  flex: none;
+  color: var(--ui-text);
+  font-variant-numeric: tabular-nums;
+}
+
+.plan-usage-detail-fact.is-idle .plan-usage-detail-fact-value {
+  color: var(--ui-text-3);
+}
+
+.plan-usage-detail-foot {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 4px 2px 8px;
+  border-top: 1px solid var(--ui-border-subtle);
+  color: var(--ui-text-3);
+  font-size: 12px;
+  line-height: 16px;
+}
+
+.plan-usage-detail-where {
+  flex: 1 1 auto;
+  min-width: 0;
+}
