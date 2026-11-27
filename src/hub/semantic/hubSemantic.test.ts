@@ -197,6 +197,9 @@ test("with the User's key the server finds notes and messages by meaning and pic
   assert.equal(index.picks, true);
   assert.equal(index.more, 3);
   assert.equal((await h.ok<MemoryIndexValue>({ action: "index", ...h.member })).notes.length, 3);
+  // An app that asks for every note (`full`) gets the list with picks on too.
+  const full = await h.ok<MemoryIndexValue>({ action: "index", ...h.member, picks: true, full: true });
+  assert.deepEqual([full.notes.length, full.more, full.picks], [3, 0, true]);
 
   // Chats by meaning: Russian finds the English messages, only in this project.
   const chats = await h.ok<ChatSearchValue>({ action: "chat-search", ...h.member, query: "выкатка" });

@@ -36,17 +36,29 @@ Decided by the User on 2026-11-04 (chat design "Память участнико�
 - Title, Markdown body (16 KB at most), up to 12 tags, optional source, author,
   last writer, version, created / updated / last confirmed, archived.
 
-## Repository first
+## Where knowledge goes, in order
 
-Project knowledge that everyone working with the repository may see goes into
-the repository's files, as part of the member's current task (its branch and
-changes), so it reaches people and agents working without AccordAgents too.
-Memory is for what must not or need not be there: User-specific details,
-anything not for a public repository (a member treats a repository as public
-unless it checked it is private), know-how beyond one project. With no task to
-carry the change, the member keeps it as a project note marked
-`awaitingRepository` and moves it into the repository with the next task in
-that project, then archives the note.
+Decided by the User on 2026-11-27; members are told it in this order
+(`MEMBER_MEMORY_INSTRUCTIONS`):
+
+1. **The repository.** Everything about the code, its architecture and how
+   the project is worked on (the parity rules included) goes into the
+   repository's docs, CLAUDE.md or AGENTS.md, as part of the member's current
+   task (its branch and changes), so other developers and agents working
+   without AccordAgents see it. With no task to carry the change, the member
+   keeps it as a project note marked `awaitingRepository` and moves it into
+   the repository with the next task in that project, then archives the note.
+2. **AccordAgents memory, for everything else:** the User's preferences and
+   corrections (articles tagged `preference`), User-specific or private
+   details and anything not for a public repository (a member treats a
+   repository as public unless it checked it is private), task statuses,
+   outside systems. It is the primary memory and the only one members share.
+3. **Never a CLI's own memory** (Claude Code's memory files, Codex memories):
+   only that CLI on that computer reads it, so members on other providers and
+   on cloud machines never see it (on 2026-11-26 the main session had kept
+   the User's preferences only in Claude Code's memory files). A separate
+   sync of those memories into this one will file each under the project its
+   CLI folder belongs to, with `project` (below).
 
 ## Where it lives and who sees what
 
@@ -92,33 +104,42 @@ not there yet.
   spelling of it (members are told to reuse tags).
 - The way to keep memory is part of every member's static instructions
   (`MEMBER_MEMORY_INSTRUCTIONS` in `chat/`).
-- A CLI's own memory (Claude Code's memory files, for example) is read only by
-  sessions of that CLI on that computer, so members are told to write a
-  preference or correction of the User here too, as an article tagged
-  `preference`, besides what their CLI keeps (the User, 2026-11-26: the main
-  session had kept her preferences only in Claude Code's memory files, where
-  members on other providers and on cloud machines never saw them).
 - A session's first turn, a turn that sends the instructions again, and the
-  first turn after a compaction carry a short list of relevant notes (titles
-  and tags, at most 25): the member's own open statuses first, then project
-  notes waiting for the repository, then the most recently used; and a line
-  with the most used tags (up to 12). Bodies are
-  read with `app_memory_read`, which says who wrote the note and that it is
-  reference, not the User's instructions.
+  first turn after a compaction carry the list of every note the member sees,
+  one short line each: kind, title, scope and id (the User, 2026-11-27,
+  instead of the 25 most relevant). The chat's own notes come first (the
+  member's open statuses, then project notes waiting for the repository, then
+  the rest of its project's, role's and chat's notes by activity), the global
+  ones after; then a line with the most used tags (up to 12). Past 150 notes
+  the list keeps all of the chat's own (up to 300) and the global ones most
+  relevant to the chat: closest in meaning to the chat's title and the
+  message the session starts with, when the server searches by meaning (else
+  the most recently active), and says how many are left out and that
+  `app_memory_search` finds them. The list is at most 32,000 characters (a
+  Gemini member gets its message as one command-line argument); what does
+  not fit is counted as left out. The list carrying a message goes as a POST
+  (any server takes any memory action as POST). The app asks for it with
+  `full`; an app older than the server (a machine runtime not upgraded yet)
+  asks without it and gets the list it knows: the 25 most relevant, or none
+  while notes are picked for each message. Bodies are read with
+  `app_memory_read`, which says who wrote the note and that it is reference,
+  not the User's instructions.
 - A list or tool call the server could not answer says so and never reads as
   "no memory". The list waits at most 4 s before the turn starts without it.
-- With search by meaning on (below), that list gives way to the notes that fit
-  each message: a line says so (with how many notes the member can see and
-  the tags in use), and each turn carries the few notes picked for its
-  message. An app that does not add picks (an older desktop or machine
-  runtime) asks without `picks` and still gets the list. The server answers
-  with picks only while it can pick (the key works, every note is printed,
-  OpenAI answers); a pick it cannot make says `enabled: false`, and the app
-  then stops asking for a minute and gives a session told that notes come
-  with each message the list in that same turn (or, when the server did not
-  answer at all, with its next one). What a session was told is kept with it
-  (`ChatParticipantSession.memoryNotesPicked`), so an app restart does not
-  forget it.
+- With search by meaning on (below), each turn also carries the few notes
+  picked for its message (the first turn too, after the list); later turns
+  carry only those. A note in the list is not counted as given: a pick can
+  still bring it when a message needs it. An older server leaves the list
+  out while it picks and says so (`picks` with no notes): the session is then
+  told that notes come with each message, and the rest of this item holds
+  for it. The server answers with picks only while it can pick (the key
+  works, every note is printed, OpenAI answers); a pick it cannot make says
+  `enabled: false`, and the app then stops asking for a minute and gives a
+  session told that notes come with each message the list in that same turn
+  (or, when the server did not answer at all, with its next one). What a
+  session was told is kept with it (`ChatParticipantSession.memoryNotesPicked`),
+  so an app restart does not forget it; a session given the list is not
+  marked.
 - `app_chat_search` finds messages in the other chats of the member's project
   (a chat with no project searches the other chats with no project; the
   User, 2026-11-26: "в других чатах этого проекта"; the member's own chat is
@@ -244,8 +265,6 @@ Decided by the User on 2026-11-26 (same chat document): OpenAI
   `release-beta` skill makes it a step of every release.
 - A status nobody updated for 30 days is archived by the server (swept at most
   every 10 minutes).
-- A note nobody wrote, read or confirmed for 60 days leaves the session-start
-  list but is still found by search.
 - A server keeps at most 2000 unarchived notes; past that a write is refused
   with a request to archive or merge.
 

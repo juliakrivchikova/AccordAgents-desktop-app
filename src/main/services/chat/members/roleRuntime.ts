@@ -24,8 +24,10 @@ import type { ResolvedChatParticipantRole } from "../types";
  *  (Settings → General → "Any agent can start an Accord"), else asks the main
  *  session (mainSessionMemberRules). 27: a note about one project is
  *  never global; another project's is filed under it with `project`; who
- *  merges or releases work updates the status notes of all it ships
- *  (MEMBER_MEMORY_INSTRUCTIONS). */
+ *  merges or releases work updates the status notes of all it ships;
+ *  knowledge goes to the repository, then this memory, never a CLI's own;
+ *  a session starts with every note its member sees
+ *  (MEMBER_MEMORY_INSTRUCTIONS, memoryIndex). */
 const CHAT_ROLE_RUNTIME_CONFIG_VERSION = 27;
 
 export function memoryIndexKey(conversationId: string, participantId: string): string {

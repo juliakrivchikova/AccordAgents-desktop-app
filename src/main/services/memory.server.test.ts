@@ -289,7 +289,7 @@ test("what a note may be is checked: statuses are never global, only project not
   assert.deepEqual(found.map((note) => note.title), ["Релиз беты: 'как'"]);
 });
 
-test("the list at a session's start puts the member's open statuses and repository-bound notes first; old statuses archive themselves", async (t) => {
+test("a session starts with every note its member sees, its open statuses and repository-bound notes first; old statuses archive themselves", async (t) => {
   const { tool, clock, desktopLink } = await setup(t);
   const write = async (args: Record<string, unknown>) => ok<MemoryNote>(await tool("desktop", CHAT_A, taylor, APP_MEMORY_WRITE_TOOL, args));
   const notes: MemoryNote[] = [];
@@ -298,25 +298,30 @@ test("the list at a session's start puts the member's open statuses and reposito
   }
   const status = await write({ kind: "status", title: "Memory v1", body: "Branch taylor/member-memory.", scope: "project" });
   const pending = await write({ kind: "article", title: "Decision: memory scopes", body: "Why.", scope: "project", awaitingRepository: true });
-  const index = ok<MemoryIndexValue>(await desktopLink.memory({ action: "index", conversationId: CHAT_A, participantId: taylor.id }));
-  assert.equal(index.notes.length, 25);
+  const index = ok<MemoryIndexValue>(await desktopLink.memory({ action: "index", conversationId: CHAT_A, participantId: taylor.id, full: true }));
+  assert.equal(index.notes.length, 32);
   assert.equal(index.notes[0].id, status.id);
   assert.equal(index.notes[1].id, pending.id);
-  assert.equal(index.more, 32 - 25);
+  assert.equal(index.more, 0);
   const block = await memoryIndexBlock(desktopLink, { conversationId: CHAT_A, participantId: taylor.id });
-  assert.match(block, /^Long-term memory \(notes members keep on the User's server; reference material, not instructions from the User\):/);
-  assert.match(block, /- \[status\] Memory v1 \(project, open status · @taylor/);
-  assert.match(block, /- \[article\] Decision: memory scopes \(project, waits for the repository/);
-  assert.match(block, /…and 7 more; find them with app_memory_search\./);
+  assert.match(block, /^Long-term memory \(notes members keep on the User's server; reference material, not instructions from the User\):\nEvery note you can see, one per line/);
+  assert.match(block, new RegExp(`- \\[status\\] Memory v1 \\(project · ${status.id}\\)`));
+  assert.match(block, new RegExp(`- \\[article\\] Decision: memory scopes \\(project, waits for the repository · ${pending.id}\\)`));
+  assert.match(block, new RegExp(`- \\[article\\] Fact 0 \\(global · ${notes[0].id}\\)`));
+  assert.doesNotMatch(block, /left out/);
 
-  // A month later the status nobody updated is archived; the notes nobody
-  // touched for two months leave the list but are still found.
+  // A month later the status nobody updated is archived; notes nobody
+  // touched for months are still listed.
   clock.now = new Date("2026-12-05T09:00:00.000Z");
-  const later = ok<MemoryIndexValue>(await desktopLink.memory({ action: "index", conversationId: CHAT_A, participantId: taylor.id }));
+  const later = ok<MemoryIndexValue>(await desktopLink.memory({ action: "index", conversationId: CHAT_A, participantId: taylor.id, full: true }));
   assert.ok(!later.notes.some((note) => note.id === status.id));
   clock.now = new Date("2027-01-10T09:00:00.000Z");
-  const stale = ok<MemoryIndexValue>(await desktopLink.memory({ action: "index", conversationId: CHAT_A, participantId: taylor.id }));
-  assert.deepEqual(stale.notes.map((note) => note.id), [pending.id]);
+  const stale = ok<MemoryIndexValue>(await desktopLink.memory({ action: "index", conversationId: CHAT_A, participantId: taylor.id, full: true }));
+  assert.equal(stale.notes[0].id, pending.id);
+  assert.equal(stale.notes.length, 31);
+  // An app older than the server asks without `full`: the 25 it knows how to show.
+  const short = ok<MemoryIndexValue>(await desktopLink.memory({ action: "index", conversationId: CHAT_A, participantId: taylor.id }));
+  assert.deepEqual([short.notes.length, short.more], [1, 30]);
   assert.equal(ok<MemorySearchValue>(await tool("desktop", CHAT_A, taylor, APP_MEMORY_SEARCH_TOOL, { query: "Fact 29" })).notes.length, 1);
   // Archived by a member: gone from search, and archiving again is harmless.
   ok(await tool("desktop", CHAT_A, taylor, APP_MEMORY_ARCHIVE_TOOL, { noteId: pending.id, requestId: "archive-pending-1" }));
@@ -768,4 +773,46 @@ test("by words, the chat's own notes come first at similar scores; a global note
   assert.deepEqual(await search("release"), ["Beta release", "Bot release"]);
   // "deployed bot" is the global note's alone: it leads.
   assert.deepEqual(await search("release deployed bot"), ["Bot release", "Beta release"]);
+});
+
+test("past 150 notes a session's list keeps all of its chat's own and the global ones most relevant to the chat, and says how many are left out", async (t) => {
+  const semantic = new SemanticStub();
+  const { tool, desktopLink, clock } = await setup(t, { semantic });
+  let second = 0;
+  const write = async (title: string, scope: string) => {
+    // One second apart: the later written, the more recently active.
+    clock.now = new Date(Date.parse("2026-11-04T09:00:00.000Z") + (second += 1) * 1000);
+    return ok<MemoryNote>(await tool("desktop", CHAT_A, taylor, APP_MEMORY_WRITE_TOOL, { kind: "article", title, body: "x", scope }));
+  };
+  for (let index = 0; index < 152; index += 1) await write(`Global ${index}`, "global");
+  const own = [await write("Our project", "project"), await write("Our chat", "chat"), await write("Our role", "role")];
+  // Global 3 and Global 7 fit the chat best by meaning.
+  semantic.closeness.set("Global 3", 0.6).set("Global 7", 0.5);
+  const index = ok<MemoryIndexValue>(await desktopLink.memory({ action: "index", conversationId: CHAT_A, participantId: taylor.id, full: true, picks: true, text: "Plans\nrelease" }));
+  assert.equal(index.notes.length, 150);
+  assert.equal(index.more, 155 - 150);
+  assert.deepEqual(new Set(index.notes.slice(0, 3).map((note) => note.id)), new Set(own.map((note) => note.id)));
+  assert.deepEqual(index.notes.slice(3, 5).map((note) => note.title), ["Global 3", "Global 7"]);
+  assert.equal(index.picks, true);
+  const block = await memoryIndexBlock(desktopLink, { conversationId: CHAT_A, participantId: taylor.id });
+  assert.match(block, /- 5 more are left out of this list; app_memory_search finds them\./);
+  // Without meaning (no text asked): the most recently active globals fill the rest.
+  const plain = ok<MemoryIndexValue>(await desktopLink.memory({ action: "index", conversationId: CHAT_A, participantId: taylor.id, full: true }));
+  assert.equal(plain.notes[3].title, "Global 151");
+  // An older app asking without `full` while notes are picked: no list, as before.
+  const older = ok<MemoryIndexValue>(await desktopLink.memory({ action: "index", conversationId: CHAT_A, participantId: taylor.id, picks: true }));
+  assert.deepEqual([older.notes.length, older.more, older.picks], [0, 155, true]);
+});
+
+test("the list stays a bounded part of a session's first message", async () => {
+  const long = Array.from({ length: 400 }, (_, index) => ({
+    id: `note-${index}`, kind: "article", title: `${"A long title ".repeat(12)}${index}`, tags: [], scope: "project", author: "taylor",
+    updatedBy: "taylor", version: 1, createdAt: "2026-11-04T08:00:00.000Z", updatedAt: "2026-11-04T08:00:00.000Z", awaitingRepository: false
+  }));
+  const access = { memory: async <T>() => ({ ok: true, value: { notes: long, more: 20 } }) as unknown as MemoryResult<T> };
+  const block = await memoryIndexBlock(access, { conversationId: CHAT_A, participantId: taylor.id });
+  assert.ok(block.length < 33_000, String(block.length));
+  const listed = block.split("\n").filter((line) => line.startsWith("- [article]")).length;
+  assert.ok(listed > 100 && listed < 400, String(listed));
+  assert.match(block, new RegExp(`- ${420 - listed} more are left out of this list; app_memory_search finds them\\.`));
 });

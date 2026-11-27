@@ -8,7 +8,7 @@ import {
   MEMORY_EXPORT_PAGE,
   MEMORY_INDEX_MAX_NOTES,
   MEMORY_INDEX_MAX_TAGS,
-  MEMORY_INDEX_STALE_DAYS,
+  MEMORY_INDEX_NEAR_MAX,
   MEMORY_LIST_MAX,
   MEMORY_LIVE_NOTES_MAX,
   MEMORY_PICK_MAX,
@@ -125,6 +125,9 @@ const SEARCH_MEANING_MIN = 0.15;
 const PICK_PRINT_TIMEOUT_MS = 3_000;
 const SEARCH_PRINT_TIMEOUT_MS = 4_000;
 const REQUEST_ID = /^[A-Za-z0-9._:-]{1,128}$/;
+/** The list apps before 2026-11-27 ask for (shortIndex). */
+const SHORT_INDEX_MAX_NOTES = 25;
+const SHORT_INDEX_STALE_DAYS = 60;
 /** At most this many of the User's projects are named when a member names
  *  one she does not have. */
 const PROJECTS_LISTED = 40;
@@ -268,7 +271,7 @@ export class HubMemory {
         // In the same order as changes: a version read for a change is never
         // moved on by an archive in between.
         await this.serialize(() => this.sweepIfDue());
-        if (request.action === "index") return this.index(member, request.picks === true);
+        if (request.action === "index") return this.index(member, request);
         if (request.action === "pick") return this.pick(member, request);
         if (request.action === "chat-search") {
           return searchProjectChats({ storage: this.storage, semantic: this.semantic, chatSearch: this.chatSearch, log: this.log }, member, request);
@@ -345,27 +348,64 @@ export class HubMemory {
       change_seq = ${SEQ_SQL} where ${stale};`);
   }
 
-  private async index(member: MemberContext, picks: boolean): Promise<MemoryResult<MemoryIndexValue>> {
-    // Notes that fit come with each message instead (the User, 2026-11-26:
-    // 3–5 that fit rather than the same 25 every time).
-    // Only while picks can be made (the key works, every note is printed,
-    // OpenAI answers): otherwise the list, as without the key.
-    if (picks && this.semantic?.ready()) {
-      const counted = await this.query<{ total: number }>(`select count(*) as total from member_memory_notes where ${this.visibleSql(member)};`);
-      const tags = await this.tagsInUse(member, MEMORY_INDEX_MAX_TAGS);
-      return { ok: true, value: { notes: [], more: Number(counted[0]?.total ?? 0), ...(tags.length ? { tags } : {}), picks: true } };
-    }
-    const cutoff = new Date(this.now().getTime() - MEMORY_INDEX_STALE_DAYS * DAY_MS).toISOString();
+  /**
+   * The list a session starts with (the User, 2026-11-27): every note the
+   * member sees, its chat's own first (its open statuses, then project notes
+   * waiting for the repository, then the rest by activity), the global ones
+   * after. Past MEMORY_INDEX_MAX_NOTES: all of the chat's own and the global
+   * ones most relevant to the chat (by meaning to the message the session
+   * starts with, when the server can tell; else the most recently active),
+   * with how many are left out. Only summaries are read, never bodies.
+   */
+  private async index(member: MemberContext, request: { picks?: unknown; text?: unknown; full?: unknown }): Promise<MemoryResult<MemoryIndexValue>> {
+    // An app older than the server (a machine runtime not upgraded yet) asks
+    // without `full` and gets the list it knows how to show.
+    if (request.full !== true) return this.shortIndex(member, request.picks === true);
+    const picks = request.picks === true && Boolean(this.semantic?.ready());
     const activity = "max(updated_at, coalesce(verified_at, ''), coalesce(last_read_at, ''))";
-    const rank = `case when kind = 'status' and author = ${quote(member.handle)} then 0
-      when awaiting_repository = 1 and scope = 'project' and ${member.projectPath ? `scope_key = ${quote(member.projectPath)}` : "0"} then 1 else 2 end`;
-    const where = `${this.visibleSql(member)} and (${rank} < 2 or ${activity} >= ${quote(cutoff)})`;
-    const rows = await this.query<Row>(`select ${SUMMARY_COLUMNS} from member_memory_notes where ${where}
-      order by ${rank}, ${activity} desc limit ${MEMORY_INDEX_MAX_NOTES};`);
+    const rank = `case when kind = 'status' and author = ${quote(member.handle)} and scope <> 'global' then 0
+      when awaiting_repository = 1 and scope = 'project' then 1 when scope <> 'global' then 2 else 3 end`;
+    const rows = await this.query<Row>(`select ${SUMMARY_COLUMNS} from member_memory_notes where ${this.visibleSql(member)}
+      order by ${rank}, ${activity} desc, id;`);
+    let notes = rows;
+    if (rows.length > MEMORY_INDEX_MAX_NOTES) {
+      const near = rows.filter(isNear).slice(0, MEMORY_INDEX_NEAR_MAX);
+      const room = Math.max(0, MEMORY_INDEX_MAX_NOTES - near.length);
+      const global = rows.filter((row) => !isNear(row));
+      notes = [...near, ...(room ? (await this.mostRelevant(global, request.text, picks)).slice(0, room) : [])];
+    }
+    const tags = await this.tagsInUse(member, MEMORY_INDEX_MAX_TAGS);
+    return { ok: true, value: { notes: notes.map(summaryOf), more: rows.length - notes.length, ...(tags.length ? { tags } : {}), ...(picks ? { picks: true } : {}) } };
+  }
+
+  /** The list as apps before 2026-11-27 ask for it: the 25 most relevant
+   *  (statuses of the member, notes waiting for the repository, then those
+   *  used in the last 60 days), or none while notes are picked for each
+   *  message. */
+  private async shortIndex(member: MemberContext, picks: boolean): Promise<MemoryResult<MemoryIndexValue>> {
     const counted = await this.query<{ total: number }>(`select count(*) as total from member_memory_notes where ${this.visibleSql(member)};`);
     const total = Number(counted[0]?.total ?? 0);
     const tags = await this.tagsInUse(member, MEMORY_INDEX_MAX_TAGS);
+    if (picks && this.semantic?.ready()) return { ok: true, value: { notes: [], more: total, ...(tags.length ? { tags } : {}), picks: true } };
+    const cutoff = new Date(this.now().getTime() - SHORT_INDEX_STALE_DAYS * DAY_MS).toISOString();
+    const activity = "max(updated_at, coalesce(verified_at, ''), coalesce(last_read_at, ''))";
+    const rank = `case when kind = 'status' and author = ${quote(member.handle)} then 0
+      when awaiting_repository = 1 and scope = 'project' then 1 else 2 end`;
+    const rows = await this.query<Row>(`select ${SUMMARY_COLUMNS} from member_memory_notes where ${this.visibleSql(member)}
+      and (${rank} < 2 or ${activity} >= ${quote(cutoff)}) order by ${rank}, ${activity} desc limit ${SHORT_INDEX_MAX_NOTES};`);
     return { ok: true, value: { notes: rows.map(summaryOf), more: Math.max(0, total - rows.length), ...(tags.length ? { tags } : {}) } };
+  }
+
+  /** Global notes by meaning to a session's first message when the server
+   *  can tell (OpenAI answers in time), else as they came (most active first). */
+  private async mostRelevant(rows: Row[], text: unknown, canPick: boolean): Promise<Row[]> {
+    if (!canPick || typeof text !== "string" || !text.trim() || text.includes("\u0000") || !this.semantic) return rows;
+    const print = await this.semantic.printQuery(text.slice(0, QUERY_MAX_CHARS), PICK_PRINT_TIMEOUT_MS);
+    if (!print) return rows;
+    const scores = this.semantic.noteCloseness(print, rows.map((row) => row.id));
+    return rows.map((row, index) => ({ row, index, score: scores.get(row.id)?.score ?? -1 }))
+      .sort((left, right) => right.score - left.score || left.index - right.index)
+      .map((entry) => entry.row);
   }
 
   /** The tags on the notes a member sees (not archived), most used first:

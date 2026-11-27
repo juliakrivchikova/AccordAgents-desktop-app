@@ -26,11 +26,17 @@ export const MEMORY_SEARCH_DEFAULT_LIMIT = 20;
 export const MEMORY_SEARCH_MAX_LIMIT = 100;
 /** A task status nobody updated for this long is archived by the server. */
 export const MEMORY_STATUS_STALE_DAYS = 30;
-/** A note nobody wrote, read or confirmed for this long leaves the list a
- *  member is shown at the start of a session (it is still found by search). */
-export const MEMORY_INDEX_STALE_DAYS = 60;
-/** At most this many notes are listed at the start of a session. */
-export const MEMORY_INDEX_MAX_NOTES = 25;
+/** A session starts with every note its member sees, one line each (the
+ *  User, 2026-11-27). Past this many, it gets all of its chat's own notes
+ *  (project, role, chat) and the global ones most relevant to the chat, and
+ *  is told how many are left out. */
+export const MEMORY_INDEX_MAX_NOTES = 150;
+/** At most this many of the chat's own notes are listed all the same (a
+ *  bound on a session's first message; a project far past it is unlikely). */
+export const MEMORY_INDEX_NEAR_MAX = 300;
+/** At most this much text of the list goes into a session's first message
+ *  (a Gemini member gets its message as one command-line argument). */
+export const MEMORY_INDEX_MAX_CHARS = 32_000;
 /** At most this many tags are named at the start of a session. */
 export const MEMORY_INDEX_MAX_TAGS = 12;
 /** At most this many tags are given when a member asks for them. */
@@ -142,8 +148,12 @@ export type MemoryResult<T> = { ok: true; value: T } | { ok: false; error: Memor
 /** One signed request to the server's memory. */
 export type HubMemoryRequest =
   // `picks`: the asking app adds notes picked by meaning to each message
-  // (memoryPicks); with search by meaning on, the list is then left out.
-  | ({ action: "index"; picks?: boolean } & MemoryMemberRef)
+  // (memoryPicks). `full`: every note the member sees (an app asking
+  // without it gets the 25 most relevant, or none while notes are picked).
+  // `text`: the message the session starts with (and the chat's title), to
+  // tell the global notes most relevant to the chat when not all fit. An
+  // older server ignores `full` and `text`.
+  | ({ action: "index"; picks?: boolean; full?: boolean; text?: string } & MemoryMemberRef)
   | ({ action: "tags" } & MemoryMemberRef)
   | ({ action: "search" } & MemoryMemberRef & MemorySearchQuery)
   | ({ action: "read"; noteId: string } & MemoryMemberRef)
@@ -208,7 +218,9 @@ export interface MemoryOwnerListQuery {
 }
 
 export interface MemoryIndexValue {
-  /** Empty when notes are picked for each message instead (`picks`). */
+  /** Every note the member sees, its chat's own first (see
+   *  MEMORY_INDEX_MAX_NOTES); empty from an older server that picks notes
+   *  for each message instead (`picks`). */
   notes: MemoryNoteSummary[];
   /** How many visible notes there are beyond the ones listed. */
   more: number;
@@ -409,4 +421,11 @@ export function isUnknownMemoryAction(result: MemoryResult<unknown>): boolean {
 
 export function isMemoryPostAction(action: string): boolean {
   return isMemoryChangeAction(action) || (MEMORY_POST_ONLY_ACTIONS as readonly string[]).includes(action);
+}
+
+/** Whether a request goes as POST: a change, a post-only action, or the
+ *  list carrying a message's text (every server takes any action as POST;
+ *  a GET of a list without text still works on every server). */
+export function memoryRequestIsPost(request: { action: string; text?: unknown }): boolean {
+  return isMemoryPostAction(request.action) || (request.action === "index" && typeof request.text === "string");
 }
