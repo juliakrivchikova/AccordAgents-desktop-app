@@ -45,6 +45,8 @@ import {
   type MemoryTagsValue
 } from "../shared/memory";
 import { homeDeviceId } from "./hubOps";
+import { HubCliMemory } from "./hubCliMemory";
+import { BUMP_SQL, SEQ_SQL, SUMMARY_COLUMNS, noteOf, parseTags, quote, searchText, summaryOf, type Row } from "./memoryRows";
 import { candidateAnchors, rankCounted, searchTextOf, searchWords as wordsAsked, snippetOf, wordCounts, type SearchWord } from "./memoryWordSearch";
 import type { HubSemantic, PrintableNote } from "./semantic/hubSemantic";
 import { searchProjectChats } from "./semantic/projectChatSearch";
@@ -98,10 +100,6 @@ const ORDER_SQL = `
   insert or ignore into member_memory_counter(key, value) values ('change_seq',
     max((select coalesce(max(change_seq), 0) from member_memory_notes), (select coalesce(max(change_seq), 0) from member_memory_deleted)));
 `;
-/** Takes the next place in the order (changes are made one at a time); sent
- *  in the same batch as the change that uses SEQ_SQL. */
-const BUMP_SQL = "update member_memory_counter set value = value + 1 where key = 'change_seq';";
-const SEQ_SQL = "(select value from member_memory_counter where key = 'change_seq')";
 
 const DAY_MS = 24 * 60 * 60_000;
 /** Notes counted for a search before the server answers other requests. */
@@ -123,27 +121,6 @@ const SEARCH_PRINT_TIMEOUT_MS = 4_000;
 const REQUEST_ID = /^[A-Za-z0-9._:-]{1,128}$/;
 const NOTE_ID = /^[A-Za-z0-9-]{8,64}$/;
 
-interface Row {
-  id: string;
-  kind: string;
-  title: string;
-  body?: string;
-  tagsJson: string;
-  scope: string;
-  scopeKey: string;
-  source: string | null;
-  author: string;
-  updatedBy: string;
-  version: number;
-  createdAt: string;
-  updatedAt: string;
-  verifiedAt: string | null;
-  awaitingRepository: number;
-  archivedAt: string | null;
-  lastRequest?: string | null;
-  createRequestHash?: string | null;
-}
-
 /** The member a request is for, as the server's copy of the chat has it. */
 export interface MemberContext {
   conversationId: string;
@@ -154,9 +131,6 @@ export interface MemberContext {
   /** The chat's project folder, when the chat has one. */
   projectPath?: string;
 }
-
-const SUMMARY_COLUMNS = `id, kind, title, tags_json as tagsJson, scope, scope_key as scopeKey, source, author, updated_by as updatedBy, version,
-  created_at as createdAt, updated_at as updatedAt, verified_at as verifiedAt, awaiting_repository as awaitingRepository, archived_at as archivedAt`;
 
 /**
  * Members' long-term memory on the User's server (shared/memory.ts). The
@@ -174,6 +148,8 @@ export class HubMemory {
 
   private readonly semantic?: HubSemantic;
   private readonly chatSearch?: ChatSearchService;
+  /** What members' CLIs remember on their own (shared/cliMemory.ts). */
+  private readonly cliMemory: HubCliMemory;
 
   constructor(
     private readonly storage: StorageService,
@@ -185,6 +161,30 @@ export class HubMemory {
     this.semantic = search.semantic;
     this.chatSearch = search.chatSearch;
     this.semantic?.setNoteSource({ notesPage: (afterId, limit) => this.notesPage(afterId, limit) });
+    this.cliMemory = new HubCliMemory({
+      query: (sql) => this.query(sql),
+      run: (sql) => this.run(sql),
+      now: () => this.now(),
+      log: (event, payload) => this.log(event, payload),
+      noteChanged: (note) => this.semantic?.noteChanged(note),
+      machineHostsProject: (device, projectPath) => this.machineHostsProject(device, projectPath)
+    });
+  }
+
+  /** Whether a cloud machine hosts a member in a chat of this project (the
+   *  chats' members only: a chat's body can be large). */
+  private async machineHostsProject(device: HubDevice, projectPath: string): Promise<boolean> {
+    if (device.role !== "machine" || !device.machineId) return false;
+    const rows = await this.query<{ participantsJson: string | null }>(`select json_extract(coalesce(nullif(body_json, ''), payload_json), '$.metadata.participants') as participantsJson
+      from conversations where kind = 'chat' and repo_path = ${quote(projectPath)};`);
+    return rows.some((row) => {
+      try {
+        const participants = JSON.parse(row.participantsJson ?? "[]") as unknown;
+        return Array.isArray(participants) && participants.some((participant) => (participant as { homeMachineId?: unknown } | null)?.homeMachineId === device.machineId);
+      } catch {
+        return false;
+      }
+    });
   }
 
   /** Notes not archived, by id, as they are printed (HubSemantic). */
@@ -248,6 +248,10 @@ export class HubMemory {
         if (request.action === "export") return this.exportNotes(request.after);
         if (request.action === "import") return this.serialize(() => this.importNotes(request.notes, device));
         return this.serialize(() => this.deleteNote(request.noteId, device));
+      case "cli-sync":
+        // In the same order as members' changes: a version read is never
+        // moved on by a change in between.
+        return this.serialize(() => this.cliMemory.sync(device, request.entries));
       case "index":
       case "tags":
       case "search":
@@ -832,51 +836,13 @@ function requestHash(request: object): string {
   return createHash("sha256").update(JSON.stringify(asked)).digest("hex").slice(0, 32);
 }
 
-function summaryOf(row: Row): MemoryNoteSummary {
-  const scope = row.scope as MemoryScope;
-  return {
-    id: row.id,
-    kind: row.kind as MemoryNoteKind,
-    title: row.title,
-    tags: parseTags(row.tagsJson),
-    scope,
-    ...(scope === "project" ? { projectPath: row.scopeKey } : {}),
-    ...(scope === "role" ? { roleId: row.scopeKey } : {}),
-    ...(scope === "chat" ? { conversationId: row.scopeKey } : {}),
-    author: row.author,
-    updatedBy: row.updatedBy,
-    version: Number(row.version),
-    createdAt: row.createdAt,
-    updatedAt: row.updatedAt,
-    ...(row.verifiedAt ? { verifiedAt: row.verifiedAt } : {}),
-    awaitingRepository: Number(row.awaitingRepository) === 1,
-    ...(row.archivedAt ? { archivedAt: row.archivedAt } : {})
-  };
-}
 
-function noteOf(row: Row): MemoryNote {
-  return { ...summaryOf(row), body: row.body ?? "", ...(row.source ? { source: row.source } : {}) };
-}
-
-function parseTags(json: string): string[] {
-  try {
-    const parsed = JSON.parse(json) as unknown;
-    return Array.isArray(parsed) ? parsed.filter((tag): tag is string => typeof tag === "string") : [];
-  } catch {
-    return [];
-  }
-}
 
 /** The passage of a body a print was made from (the whole body when none). */
 function passageOf(body: string, part: number | undefined): string {
   if (part === undefined) return body;
   const range = passageRanges(body, NOTE_PASSAGE_CHARS)[part];
   return range ? body.slice(range.start, range.end) : body;
-}
-
-/** Lower case by the language's own rules (sqlite's lower() knows only ASCII). */
-function searchText(fields: { title: string; body: string; tags: string[] }): string {
-  return searchTextOf(fields);
 }
 
 const QUERY_RULE = `Search by words under ${MEMORY_QUERY_MAX_CHARS} characters.`;
@@ -907,8 +873,3 @@ function denied(message: string): { ok: false; error: MemoryError } {
   return { ok: false, error: { code: "access_denied", message } };
 }
 
-function quote(value: string): string {
-  // The sqlite3 shell reads statements line by line and a NUL ends a line.
-  if (value.includes("\u0000")) throw new Error("A value with a NUL character cannot be stored.");
-  return `'${value.replace(/'/g, "''")}'`;
-}

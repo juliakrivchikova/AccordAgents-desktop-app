@@ -17,6 +17,7 @@ import {
   isUsageProviderFamily,
   isUsageReadyAttribute
 } from "./usageSignals";
+import { SECRET_KEY_WORDS, SECRET_TOKEN_PATTERNS } from "./secretPatterns";
 
 /** Longest piece of free text kept in a report; error messages can quote a
  *  prompt, a command line or a file, and the start is enough to group them. */
@@ -50,7 +51,7 @@ const IP_PATTERN = /\b(?:\d{1,3}\.){3}\d{1,3}(?::\d+)?\b/g;
 // "github.com/…"): only real top-level domains, so "error.message" stays.
 const HOST_PATTERN = /(?<![\w@.-])(?:[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\.)+(?:com|net|org|io|dev|ai|app|cloud|co|sh|me|so|xyz|info|biz|tech|site|online|us|uk|eu|de|fr|nl|ru|ua|cy|cn|jp|in|ca|au|ch|se|no|fi|pl|es|it|il|br|kz)(?::\d+)?\b/gi;
 const EMAIL_PATTERN = /(?<![\w.+-])[\w.+-]+@[\w-]+(?:\.[\w-]+)+/g;
-const SECRET_KEYS = "authorization|bearer|token|api[_-]?key|apikey|secret|password|passwd|pwd|access[_-]?key|client[_-]?secret|cookie";
+const SECRET_KEYS = SECRET_KEY_WORDS;
 // "PASSWORD=hunter2", "Authorization: Bearer …": whatever is assigned goes.
 const SECRET_ASSIGNMENT_PATTERN = new RegExp(`\\b(${SECRET_KEYS})(\\s*[:=]\\s*)(?:bearer\\s+)?["']?[^\\s"',;]+`, "gi");
 // "relay token 0123…": a long word after the key goes; "Unexpected token <" stays.
@@ -61,15 +62,7 @@ const HOME_PATH_PATTERN = new RegExp(`~[\\/\\\\]${PATH_BODY}`, "g");
 const ABSOLUTE_PATH_PATTERN = new RegExp(`(?<![\\w.~/-])(?:\\.{1,2})?/[^\\s'"\`<>()[\\]{}|,;:/]+/${PATH_BODY}`, "g");
 // A relative path: three or more segments, or two ending in a file name.
 const RELATIVE_PATH_PATTERN = /(?<![\w.~\/:@-])[\w.-]+(?:\/[\w.-]+){2,}|(?<![\w.~\/:@-])[\w.-]+\/[\w-]+\.[a-z0-9]{1,6}\b/gi;
-const TOKEN_PATTERNS = [
-  /\b(?:sk|pk|rk|hf|xai|glpat)[-_][A-Za-z0-9_-]{12,}/g,
-  /\b(?:ghp|gho|ghs|ghu|ghr|github_pat)_[A-Za-z0-9_]{12,}/g,
-  /\bxox[abpr]-[A-Za-z0-9-]{10,}/g,
-  /\b(?:AKIA|ASIA)[A-Z0-9]{16}\b/g,
-  /\bAIza[0-9A-Za-z_-]{35}/g,
-  /\beyJ[A-Za-z0-9_-]{8,}(?:\.[A-Za-z0-9_-]+){0,2}/g,
-  /\b[0-9a-f]{32,}(?:\.[A-Za-z0-9_-]+)?/gi
-];
+const TOKEN_PATTERNS = SECRET_TOKEN_PATTERNS;
 const UUID_PATTERN = /\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b/gi;
 const LONG_OPAQUE_PATTERN = /[A-Za-z0-9+/_=-]{40,}/g;
 

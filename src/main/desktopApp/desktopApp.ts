@@ -11,6 +11,7 @@ import type { HubClient } from "../services/hubClient";
 import type { PlanUsageLink } from "../services/planUsageLink";
 import type { ServerChatLink } from "../services/serverChatLink";
 import type { MemoryMirror } from "../services/memoryMirror";
+import type { CliMemorySync } from "../services/cliMemorySync";
 import type { HubPhonePublisher } from "../services/hubPhonePublisher";
 import type { HubMemberRulesPublisher } from "../services/hubMemberRules";
 import type { DeviceIdentityService } from "../services/deviceIdentity";
@@ -109,6 +110,7 @@ export interface DesktopApp {
   artifactStore: ArtifactStore;
   artifactService: ArtifactClient;
   memoryMirror: MemoryMirror;
+  cliMemorySync: CliMemorySync;
   serverChatLink: ServerChatLink;
   serverChatLinkStarted: boolean;
   lastNewChatOptions: import("../../shared/hubProtocol").HubNewChatOptions | undefined;

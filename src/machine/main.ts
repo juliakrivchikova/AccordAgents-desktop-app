@@ -31,7 +31,9 @@ import { ArtifactStore } from "../main/services/artifactStore";
 import { DeviceIdentityService } from "../main/services/deviceIdentity";
 import { ChatService } from "../main/services/chat";
 import { CliAgentRunner } from "../main/services/cliAgents";
-import { setCommandDebugLogger } from "../main/services/command";
+import { commandEnvironment, setCommandDebugLogger } from "../main/services/command";
+import { CliMemorySync } from "../main/services/cliMemorySync";
+import { projectsOfMachine } from "../main/services/cliMemorySync/projects";
 import { DebugLogService } from "../main/services/debugLogs";
 import { MachineHostService } from "../main/services/machineHost";
 import { MachineServerSettings } from "../main/services/machineServerSettings";
@@ -504,6 +506,19 @@ export async function startMachine(args: MachineArgs): Promise<() => Promise<voi
   chatService.setHubBlobReader((reference) => hubClient.downloadBytes(reference));
   // A member's session leaving this machine goes up from here.
   chatService.setHubBlobWriter((bytes) => hubClient.uploadBytes(bytes));
+  // Where the computer's projects are on this machine (its settings for it).
+  let publishedProjects: Record<string, string> = {};
+  // What its members' CLIs remember on their own, kept in members' memory
+  // on the User's server too, as the computer does (shared/cliMemory.ts).
+  const cliMemorySync = new CliMemorySync({
+    access: () => serverChatLink,
+    serverId: () => serverChatLink.serverId(),
+    database: () => storageService.sqlExecutor(),
+    env: async () => ({ ...commandEnvironment(), ...(await settingsService.getManualAgentEnvironment()).env }),
+    projects: async () => projectsOfMachine(publishedProjects, await storageService.listConversations()),
+    homeOverride: process.env.ACCORDAGENTS_CLI_MEMORY_HOME,
+    log
+  });
   // The settings the computer published for this machine on the User's
   // server, sealed for it alone.
   const machineSettings = new MachineServerSettings({
@@ -516,6 +531,7 @@ export async function startMachine(args: MachineArgs): Promise<() => Promise<voi
     apply: async (document) => {
       await settingsService.importMachineSettingsSnapshot(document.settings);
       chatService.setMachineProjects(document.projects);
+      publishedProjects = { ...document.projects };
     },
     onImported: async () => {
       cliAgentRunner.setRunTimeoutMs(await settingsService.getCliAgentRunTimeoutMs());
@@ -622,6 +638,7 @@ export async function startMachine(args: MachineArgs): Promise<() => Promise<voi
     machineSettings.start();
     if (stopping) return;
     await serverChatLink.start();
+    if (!stopping) cliMemorySync.start();
     // Its members' decided removals a restart left waiting (Д2: made here).
     void chatService.resumeQueuedMemberRemovals().catch((error) => log("machine.member-removal.resume-error", { message: error instanceof Error ? error.message : String(error) }));
   })().catch((error) => log("machine.server.link-error", { message: error instanceof Error ? error.message : String(error) }));
@@ -664,6 +681,7 @@ export async function startMachine(args: MachineArgs): Promise<() => Promise<voi
     // the server while the link still stands.
     await host.shutdown(() => cliAgentRunner.shutdownWarmAgents());
     await linking;
+    await cliMemorySync.stop();
     await serverChatLink.waitUntilSent(5_000);
     // An unreachable server gets what is left at the next start.
     await serverChatLink.stop();

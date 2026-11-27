@@ -10,6 +10,8 @@
  * notes, notes of its chat's project, of its own role and of its chat.
  */
 
+import type { CliMemoryEntry } from "./cliMemory";
+
 export const MEMORY_NOTE_KINDS = ["runbook", "article", "status"] as const;
 export type MemoryNoteKind = typeof MEMORY_NOTE_KINDS[number];
 
@@ -158,7 +160,10 @@ export type HubMemoryRequest =
   // The owner's copy of every note (so they move with the chats to another
   // server): what changed after a place, and putting a copy on a new server.
   | { action: "export"; after?: MemoryExportPlace }
-  | { action: "import"; notes: MemoryNote[] };
+  | { action: "import"; notes: MemoryNote[] }
+  // A device where members' CLIs run (the computer, a cloud machine): what
+  // its CLIs remember on their own, new or changed (shared/cliMemory.ts).
+  | { action: "cli-sync"; entries: CliMemoryEntry[] };
 
 /** A place in the order of changes on one server. */
 export interface MemoryExportPlace {
@@ -357,7 +362,7 @@ export function memoryTitleKey(title: string): string {
 }
 
 /** The memory actions that change notes (sent as POST); the rest only read. */
-export const MEMORY_CHANGE_ACTIONS = ["write", "archive", "delete", "import"] as const;
+export const MEMORY_CHANGE_ACTIONS = ["write", "archive", "delete", "import", "cli-sync"] as const;
 
 export function isMemoryChangeAction(action: string): boolean {
   return (MEMORY_CHANGE_ACTIONS as readonly string[]).includes(action);

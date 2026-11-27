@@ -82,7 +82,9 @@ not there yet.
   preference or correction of the User here too, as an article tagged
   `preference`, besides what their CLI keeps (the User, 2026-11-26: the main
   session had kept her preferences only in Claude Code's memory files, where
-  members on other providers and on cloud machines never saw them).
+  members on other providers and on cloud machines never saw them). Since
+  2026-11-27 what the CLIs remember on their own is also brought here by the
+  app (below), so nothing a CLI kept stays out of reach.
 - A session's first turn, a turn that sends the instructions again, and the
   first turn after a compaction carry a short list of relevant notes (titles
   and tags, at most 25): the member's own open statuses first, then project
@@ -210,6 +212,85 @@ Decided by the User on 2026-11-26 (same chat document): OpenAI
 - Measured on her notes (2026-11-26): full prints of passages put the right
   note in the first three for all 37 queries; 512 numbers for 95%. Cost: about
   $0.08 once for all her chats, then under a cent a month.
+
+## What the CLIs remember on their own
+
+Decided by the User on 2026-11-27: "Постоянный: новые и изменённые записи
+Claude Code и Codex подтягиваются сами, всё время". Every device where
+members' CLIs run — the computer and every cloud machine — keeps what its
+CLIs remember in members' memory too, one note per entry
+(`src/main/services/cliMemorySync.ts`, the server's part
+`src/hub/hubCliMemory.ts`, the protocol `src/shared/cliMemory.ts`).
+
+- **What is read** (checked against Claude Code 2.1.332 and Codex 0.171.0):
+  Claude Code's auto memory, `<CLAUDE_CONFIG_DIR or ~/.claude>/projects/<folder>/memory/*.md`
+  (one topic file per memory; `MEMORY.md` is its index and gives the titles);
+  Codex's memories, `<CODEX_HOME or ~/.codex>/memories/`: each `# Task Group:`
+  block of `MEMORY.md`, and `memory_summary.md` without its list of what is
+  in the handbook. Codex's raw memories, rollout summaries and notes waiting
+  to be merged are what Codex itself merges into those two, so they are not
+  read. The folders are the ones members' CLIs use: the members' environment
+  (Settings → Environment included) decides `CLAUDE_CONFIG_DIR` and
+  `CODEX_HOME`. The files are only read, never written.
+- **Kind and scope:** a Claude Code `feedback` or `user` memory is an article
+  tagged `preference`; `project` is a status when it says where work stands
+  (a branch, merged, released, in progress), otherwise an article;
+  `reference` (and anything else) is an article. A Codex task group is a
+  runbook; Codex's summary an article tagged `preference`. Every such note is
+  tagged `cli-memory` and `claude-code` or `codex`, written by
+  `@claude-code-memory` or `@codex-memory`, and its source says the file and
+  the device ("Claude Code memory: ~/.claude/projects/…/memory/x.md on
+  <device>").
+  The scope is `project` when the memory belongs to one of the User's
+  projects as this device has them, otherwise `global` (a status of no
+  project becomes an article, as a status is never global). Claude Code names
+  the folder after the git repository (worktrees share their repository's),
+  with every character that is not a letter or a digit written as "-": a
+  folder is the project whose folder, or whose repository's folder, gives
+  that name. A Codex task group belongs to the project holding the folder its
+  `applies_to: cwd=` names. On a cloud machine the projects are the copies
+  the computer published for it; the server takes a machine's project note
+  only for a project in which that machine hosts a member (its members could
+  write there themselves), and refuses the entry otherwise.
+- **When:** every 30 s the device looks at the stores (a stat per file; a
+  folder whose files did not change is not read again; the User's projects
+  are read again every 5 minutes) and sends what is new or changed since it
+  last sent it to this server, at most 100 entries and 180 KB a request. What
+  was sent is kept per server in the device's database
+  (`cli_memory_sync_state`), so a restart sends nothing that did not change
+  and a new server gets everything once. Measured on the User's Mac
+  (2026-11-27): 138 entries (344 KB), the first look 1.5 s, a look with
+  nothing changed 9 ms and no request.
+- **The server** keeps which file of which device fills which note
+  (`member_memory_cli_sources`, keyed by provider, device and file) and the
+  version the sync last wrote each note at (`member_memory_cli_notes`). The
+  same entry from another device (the same provider, place and entry name)
+  fills the same note. A changed entry changes its note unless a member or
+  the User changed that note since (then it is kept as it is and the server
+  logs `hub.memory.cli-entry-not-applied`; notes keep no revisions); the
+  server archiving a stale status is no one's change, so a later change of
+  the entry brings it back. A note with the same title a member wrote is
+  kept, and the entry follows it without changing it; a note the User
+  deleted in Settings is not made again; a file that went away deletes
+  nothing. A note moved to another server is taken up again by its title (a
+  note only the sync ever wrote). Everything goes through the User's server;
+  an older server refuses the request, and the device asks again an hour
+  later.
+- **Secrets:** a line that looks like it holds a key, a token or a password
+  (the patterns crash reports use, `src/shared/secretPatterns.ts`), and a
+  private key block, is left out of the note; the device logs how many lines
+  were left out of which file (`cli-memory.secret-lines-left-out`). A body
+  over 16 KB is cut at a line and says where the rest is.
+- **QA:** `ACCORDAGENTS_CLI_MEMORY_HOME=<folder>` makes the desktop or machine
+  read `<folder>/.claude` and `<folder>/.codex` instead, so a test instance
+  reads a copy and not the User's own memory.
+- **Known limits:** a Claude Code folder name over 200 characters (the CLI
+  shortens it with a hash of its own) and an `autoMemoryDirectory` the User
+  set in Claude Code's settings are not followed; their memories are not
+  read. A project the app knows under two folder names that both have
+  memory files with the same file name fills one note from both. A note
+  imported once stays in the session-start list of members without search by
+  meaning like any recently written note.
 
 ## Keeping it tidy without the User
 

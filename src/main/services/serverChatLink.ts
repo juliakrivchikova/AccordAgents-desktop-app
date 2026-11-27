@@ -32,6 +32,10 @@ const MEMORY_COPY_INTERVAL_MS = 60_000;
 const LAST_MEMORY_READ_MS = 5_000;
 /** What members ask of memory (the rest is the owner's, for the copy and Settings). */
 const MEMBER_MEMORY_ACTIONS = new Set<string>(["index", "tags", "search", "read", "write", "archive"]);
+/** What waits while the computer's copy of the notes is put on a server:
+ *  members' requests, and what the CLIs remember (which would stand beside a
+ *  note about to arrive). */
+const WAITS_FOR_MEMORY_MOVE = new Set<string>([...MEMBER_MEMORY_ACTIONS, "cli-sync"]);
 
 /**
  * The computer's (or a machine's) link to the User's server, which owns every
@@ -100,6 +104,8 @@ export class ServerChatLink {
   private memoryHubId?: string;
   /** The copy is still to be put on this server: members' memory waits. */
   private memoryMoving = false;
+  /** The server's id, as the link it was asked through had it. */
+  private serverIdOf?: { client: HubClient; id: string };
 
   /** The link as documents use it. */
   private artifactLink(): ArtifactServerLink {
@@ -129,10 +135,21 @@ export class ServerChatLink {
     // While the computer's copy is still being put on a server it links to
     // for the first time, members wait: a note they wrote meanwhile would
     // stand beside the one about to arrive.
-    if (this.options.memoryMirror && this.options.movesChats && MEMBER_MEMORY_ACTIONS.has(request.action) && (!this.ready || this.memoryMoving)) {
+    if (this.options.memoryMirror && this.options.movesChats && WAITS_FOR_MEMORY_MOVE.has(request.action) && (!this.ready || this.memoryMoving)) {
       return { ok: false, error: { code: "server_unavailable", message: "Memory is moving to your server (or this link is still starting); try again in a minute. It does not mean there is no memory." } };
     }
     return this.memoryVia<T>(client, request, cancel);
+  }
+
+  /** The id of the server this device is linked to, once the link is up
+   *  (asked of the server once per link). */
+  async serverId(): Promise<string | undefined> {
+    const client = this.client;
+    if (!client || !this.ready) return undefined;
+    if (this.serverIdOf?.client === client) return this.serverIdOf.id;
+    const id = (await client.health()).hubId;
+    if (this.client === client && id) this.serverIdOf = { client, id };
+    return id || undefined;
   }
 
   /**

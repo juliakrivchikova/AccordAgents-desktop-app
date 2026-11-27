@@ -2,6 +2,9 @@ import path from "node:path";
 import { app } from "electron";
 import { ServerChatLink } from "../services/serverChatLink";
 import { MemoryMirror } from "../services/memoryMirror";
+import { CliMemorySync } from "../services/cliMemorySync";
+import { projectsOfChats } from "../services/cliMemorySync/projects";
+import { commandEnvironment } from "../services/command";
 import { HubPhonePublisher } from "../services/hubPhonePublisher";
 import { HubMemberRulesPublisher, memberRulesFrom } from "../services/hubMemberRules";
 import { hubPhones } from "./chatServices";
@@ -38,6 +41,18 @@ export function createServerChat(desktopApp: DesktopApp): void {
     machineNames: async () => (await desktopApp.settingsService.listMachines().catch(() => [])).map((machine) => ({ id: machine.id, name: machine.name })),
     movesChats: true,
     artifacts: desktopApp.artifactService,
+    log: (event, payload) => { void desktopApp.debugLogService.write(event, payload); }
+  });
+
+  /** What members' CLIs remember on their own, kept in members' memory on
+   *  the server too (shared/cliMemory.ts): started with the link. */
+  desktopApp.cliMemorySync = new CliMemorySync({
+    access: () => desktopApp.serverChatLink,
+    serverId: () => desktopApp.serverChatLink.serverId(),
+    database: () => desktopApp.storageService.sqlExecutor(),
+    env: async () => ({ ...commandEnvironment(), ...(await desktopApp.settingsService.getManualAgentEnvironment()).env }),
+    projects: async () => projectsOfChats(await desktopApp.storageService.listConversations()),
+    homeOverride: process.env.ACCORDAGENTS_CLI_MEMORY_HOME,
     log: (event, payload) => { void desktopApp.debugLogService.write(event, payload); }
   });
 
@@ -115,6 +130,7 @@ export async function restartServerChatLink(desktopApp: DesktopApp): Promise<voi
 export async function startServerChatLinkOnce(desktopApp: DesktopApp): Promise<void> {
   if (desktopApp.serverChatLinkStarted) return;
   desktopApp.serverChatLinkStarted = true;
+  desktopApp.cliMemorySync.start();
   await desktopApp.serverChatLink.start().catch((error: unknown) => {
     void desktopApp.debugLogService.write("chat.server.start-error", { message: error instanceof Error ? error.message : String(error) });
   });

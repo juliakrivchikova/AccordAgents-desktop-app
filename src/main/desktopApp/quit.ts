@@ -95,6 +95,7 @@ export function listenToQuit(desktopApp: DesktopApp): void {
     desktopApp.localCliSignInService.shutdown();
     // Its live link to the server and its timers end with the app.
     desktopApp.planUsageLink.stop();
+    void desktopApp.cliMemorySync?.stop();
   });
 
   app.on("quit", (_event, exitCode) => {
