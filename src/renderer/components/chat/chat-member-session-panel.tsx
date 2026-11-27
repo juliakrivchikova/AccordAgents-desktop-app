@@ -1,7 +1,8 @@
 import { memo, useLayoutEffect, useMemo, useRef, useState, type ComponentProps, type ReactNode } from "react";
 import { ArrowLeftIcon, CaretDownIcon, CaretRightIcon, XIcon } from "@phosphor-icons/react";
+import { HoverCard } from "radix-ui";
 
-import { SESSIONS_REMOVED_MEMBER_DETAIL, firstTextLine, type SessionsWorkStatus } from "../../../shared/mainSessionView";
+import { SESSIONS_REMOVED_MEMBER_DETAIL, SESSIONS_WORK_STATUS_LABELS, firstTextLine, type SessionsWorkStatus } from "../../../shared/mainSessionView";
 import type { AppSettings, ChatImageInput, ChatMessage, ChatParticipant, ChatSkillMention, RepoFileMention } from "../../../shared/types";
 import { MarkdownText } from "../content/markdown-text";
 import { TimelineLoadMoreRow } from "../conversation/timeline-primitives";
@@ -14,7 +15,6 @@ import { useSessionsViewNames } from "./chat-sessions-links";
 import { sessionsMentionText } from "../../../shared/sessionsViewText";
 import { ChatMessageItem } from "./chat-message-item";
 import { followsLatestAfterScroll, isScrollKey, SUBPIXEL_PX } from "./chat-timeline-follow";
-import { ChatWorkStatusLabel } from "./chat-task-card";
 
 type ChatMessageItemProps = ComponentProps<typeof ChatMessageItem>;
 
@@ -34,6 +34,30 @@ export interface ChatSessionMember {
   hostLabel?: string;
 }
 
+/** Its task's title on one line; its CLI, model and effort and a state other
+ *  than running, in words, are in the card hovering the title shows, as a
+ *  members panel row's card (the User, 2026-11-27). */
+const SessionHeadTitle = (props: { title: string; detail: string; status: SessionsWorkStatus }): JSX.Element => (
+  <HoverCard.Root openDelay={500} closeDelay={60}>
+    <HoverCard.Trigger asChild>
+      {/* Focusable, so the keyboard opens its card too. */}
+      <h2 className="chat-member-session-title" data-testid="chat-member-session-title" tabIndex={0}>
+        {props.title}
+        {props.detail && <span className="sr-only">, {props.detail}</span>}
+      </h2>
+    </HoverCard.Trigger>
+    <HoverCard.Portal>
+      <HoverCard.Content side="bottom" align="start" sideOffset={8} collisionPadding={8} className="chat-agent-card" data-testid="chat-member-session-card">
+        <span className="chat-agent-card-title">{props.title}</span>
+        {props.detail && <span className="chat-agent-card-line">{props.detail}</span>}
+        {props.status !== "idle" && props.status !== "running" && (
+          <span className="chat-agent-card-line"><span className={`chat-agent-card-status is-${props.status}`}>{SESSIONS_WORK_STATUS_LABELS[props.status]}</span></span>
+        )}
+      </HoverCard.Content>
+    </HoverCard.Portal>
+  </HoverCard.Root>
+);
+
 const NO_MENTIONS: ChatParticipant[] = [];
 const FOCUS_HIGHLIGHT_MS = 1600;
 // How long after a wheel turn, touch, key or press on the scrollbar a move counts as the User's.
@@ -48,9 +72,10 @@ const USER_SCROLL_INTENT_MS = 900;
  */
 export function ChatMemberSessionPanel(props: {
   member: ChatSessionMember;
-  /** Its task's title and the line under it (provider, model, role). */
+  /** Its task's title, and its provider, model and role, which hovering the
+   *  title shows. */
   title: string;
-  detail: ReactNode;
+  detail: string;
   readOnly: boolean;
   focus?: { messageId: string; nonce: number };
   mainSessionId: string;
@@ -163,12 +188,16 @@ export function ChatMemberSessionPanel(props: {
         <div>
           <IconButton icon={ArrowLeftIcon} label="Back" tooltip="Back" data-testid="chat-member-session-back" onClick={props.onBack} />
           {member.kind && <ChatProviderMark member={{ kind: member.kind, hostLabel: member.hostLabel }} />}
-          <span className="chat-member-session-title">
-            <h2>{props.title}</h2>
-            {props.detail && <span className="chat-member-session-provider">{props.detail}</span>}
-          </span>
-          {/* No "Running" or its time here (the User, 2026-11-26): that it works shows in the composer's Stop. */}
-          {props.status !== "idle" && props.status !== "running" && <ChatWorkStatusLabel status={props.status} />}
+          <SessionHeadTitle title={props.title} detail={props.detail} status={props.status} />
+          {/* No "Running" or its time here (the User, 2026-11-26): that it works
+              shows in the composer's Stop. Any other state by its dot alone, as
+              its members panel row shows it; its card and accessible name say
+              it in words. */}
+          {props.status !== "idle" && props.status !== "running" && (
+            <span className={`chat-work-status is-${props.status}`} data-work-status={props.status} role="img" aria-label={SESSIONS_WORK_STATUS_LABELS[props.status]}>
+              <span className="chat-work-status-dot" aria-hidden="true" />
+            </span>
+          )}
         </div>
         <div className="thread-panel-actions">
           {props.settings}

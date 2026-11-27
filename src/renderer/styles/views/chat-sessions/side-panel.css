@@ -313,28 +313,19 @@ button.aa-icon-button > svg.chat-agent-stop-icon {
   gap: 8px;
 }
 
-/* The task over its CLI, model and effort: two tight lines (30px) that fit
-   the workspace's 34px title row. */
-.chat-member-session-title {
-  display: grid;
+/* The task on one line; its CLI, model and effort are in its hover card.
+   The title row drags the window on macOS: the title takes the pointer, or
+   its card would never open. */
+.thread-panel-head.chat-member-session-head .chat-member-session-title {
   min-width: 0;
+  cursor: default;
+  -webkit-app-region: no-drag;
+  border-radius: var(--radius-ui-4);
+  outline: none;
 }
 
-.thread-panel-head.chat-member-session-head .chat-member-session-title h2 {
-  overflow: hidden;
-  font-size: 13px;
-  line-height: 16px;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.chat-member-session-provider {
-  overflow: hidden;
-  color: var(--ui-text-3);
-  font-size: 11px;
-  line-height: 14px;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+.thread-panel-head.chat-member-session-head .chat-member-session-title:focus-visible {
+  box-shadow: var(--focus-ring);
 }
 
 .chat-member-task {

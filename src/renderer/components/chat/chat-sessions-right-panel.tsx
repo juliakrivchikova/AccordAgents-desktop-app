@@ -203,14 +203,14 @@ export function ChatSessionsRightPanel(props: {
   const status = former
     ? former.status
     : sessionsMemberStatus(props.participantStatusById.get(memberId), task, sessions.activity.finishedAt.get(memberId), sessions.waitingForUser.has(memberId));
-  return (
+  const sessionPanel = (detail: string): JSX.Element => (
     <ChatMemberSessionPanel
       key={memberId}
       member={participant
         ? { id: participant.id, kind: participant.kind, hostLabel: participant.hostLabel }
         : { id: memberId, ...(former?.member.kind ? { kind: former.member.kind } : {}) }}
       title={sessions.memberTitle(memberId)}
-      detail={participant ? <MemberSessionDetail member={participant} detail={memberDetail(participant)} /> : SESSIONS_REMOVED_MEMBER_DETAIL}
+      detail={detail}
       readOnly={!participant}
       settings={participant ? props.renderMemberSettings?.(participant.id) : undefined}
       chip={participant ? props.renderMemberChip?.(participant.id) : undefined}
@@ -237,12 +237,26 @@ export function ChatSessionsRightPanel(props: {
       onClose={rightPanel.close}
     />
   );
+  // One element for a member and for one just removed: its open session
+  // stays mounted (where she reads, its unfolded tasks) as it leaves.
+  return (
+    <MemberSessionDetail key={memberId} member={participant} kind={participant?.kind ?? former?.member.kind ?? "claude-code"} detail={memberDetail}>
+      {sessionPanel}
+    </MemberSessionDetail>
+  );
 }
 
-/** The line under a member's title in its session's header: its CLI, the
- *  model by its name in the CLI's list and its effort, as its row's card. */
-function MemberSessionDetail(props: { member: ChatParticipant; detail: ChatAgentDetail }): JSX.Element {
+/** A member's CLI, the model by its name in the CLI's list and its effort,
+ *  as its row's card says them, worked out once for its session's header
+ *  (its title's hover card and the heading's hidden text). */
+function MemberSessionDetail(props: {
+  member: ChatParticipant | undefined;
+  /** Its CLI, read for a removed member too, as hooks are always called. */
+  kind: ChatParticipant["kind"];
+  detail: (member: ChatParticipant) => ChatAgentDetail;
+  children: (detail: string) => JSX.Element;
+}): JSX.Element {
   const machines = useMachineList();
-  const model = useMemberModelSummary(props.member, machines);
-  return <>{props.detail(model)}</>;
+  const model = useMemberModelSummary(props.member ?? { kind: props.kind }, machines);
+  return props.children(props.member ? props.detail(props.member)(model) : SESSIONS_REMOVED_MEMBER_DETAIL);
 }

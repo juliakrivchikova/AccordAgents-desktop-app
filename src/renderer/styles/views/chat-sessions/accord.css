@@ -8,9 +8,11 @@
   gap: 4px;
 }
 
+/* Clipped, not visible: the head's background would cover the frame's top
+   corners. */
 .chat-accord-panel-body .chat-accord-dock {
   max-height: none;
-  overflow: visible;
+  overflow: hidden;
 }
 
 .chat-accord-panel-body .chat-accord-dock-head {

@@ -171,7 +171,6 @@ function renderSidebar(overrides: Partial<SidebarProps>): ReactTestRenderer {
           key: "repo",
           label: "shop-web",
           repoPath: "/tmp/shop-web",
-          updatedAt: "2026-09-24T00:00:00.000Z",
           sessions: [summary("chat-1", "Checkout retry flow")]
         }]}
         macShortcuts

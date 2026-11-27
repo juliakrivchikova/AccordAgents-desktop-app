@@ -20,7 +20,6 @@ export interface ProjectSessionGroup {
   key: string;
   label: string;
   repoPath?: string;
-  updatedAt: string;
   sessions: ConversationSummary[];
   isNoProject?: boolean;
 }

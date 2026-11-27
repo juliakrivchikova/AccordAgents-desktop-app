@@ -52,9 +52,9 @@
   line-height: 1.6;
 }
 
-/* The dot between two facts stays at the end of a line. */
-.chat-accord-launch-meta > :first-child,
-.chat-accord-launch-meta > :last-child {
+/* The dot between two facts stays at the end of a line; the member list,
+   the last fact, wraps between members. */
+.chat-accord-launch-meta > :first-child {
   white-space: nowrap;
 }
 

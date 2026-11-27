@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import type { ChatMessage, Conversation, ConversationSummary, ConversationUpdate } from "../../shared/types";
-import { RECENT_CHAT_LIMIT, pinnedChatSummaries, recentChatSummaries, upsertConversationSummary, withPinnedState } from "./conversation-summaries";
+import { RECENT_CHAT_LIMIT, buildProjectSessionGroups, pinnedChatSummaries, recentChatSummaries, upsertConversationSummary, withPinnedState } from "./conversation-summaries";
 import { MAIN_SESSION_ROLE_ID } from "../../shared/mainSession";
 
 // The chat list row shows work while a run of this device is in the chat, and
@@ -61,6 +61,20 @@ test("Pinned lists pinned chats in the order they were pinned, never an archived
     listed("plain", "2026-11-15T12:00:00.000Z")
   ];
   assert.deepEqual(pinnedChatSummaries(summaries).map((summary) => summary.id), ["early-pin", "late-pin"]);
+});
+
+test("Projects keep their places while their chats work: a project where it first appeared, its chats newest-created first", () => {
+  const at = (day: number): string => `2026-11-${String(day).padStart(2, "0")}T10:00:00.000Z`;
+  const summaries = [
+    listed("a-old", at(20), { repoPath: "/a", createdAt: at(1) }),
+    listed("a-new", at(5), { repoPath: "/a", createdAt: at(4) }),
+    listed("b-first", at(25), { repoPath: "/b", createdAt: at(2), archived: true }),
+    listed("b-working", at(26), { repoPath: "/b", createdAt: at(10) }),
+    listed("c-new-project", at(3), { repoPath: "/c", createdAt: at(3) })
+  ];
+  const groups = buildProjectSessionGroups(summaries);
+  assert.deepEqual(groups.map((group) => group.repoPath), ["/a", "/b", "/c"], "by first appearance, the archived chat still holding /b's place");
+  assert.deepEqual(groups[0]!.sessions.map((summary) => summary.id), ["a-new", "a-old"], "the chat at work stays below a newer one");
 });
 
 test("Recents lists the newest chats of every project, pinned ones included, at most ten", () => {

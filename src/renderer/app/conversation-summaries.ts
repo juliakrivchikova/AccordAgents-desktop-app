@@ -7,28 +7,32 @@ import { normalizeProjectPath, projectLabelForPath } from "../../shared/newChat"
 
 export { normalizeProjectPath };
 
+/** The Projects list keeps its places; only Recents ranks chats by activity
+ *  (the User, 2026-11-27). A project stays where it first appeared, a new one
+ *  below the others (as a newly pinned chat), and an archived chat still holds
+ *  its project's place. A project's chats are listed newest-created first, so
+ *  a chat at work does not move. */
 export function buildProjectSessionGroups(summaries: ConversationSummary[]): ProjectSessionGroup[] {
   const groups = new Map<string, ProjectSessionGroup>();
+  const firstCreated = new Map<string, number>();
 
   for (const summary of summaries) {
+    const projectPath = normalizeProjectPath(summary.repoPath);
+    const key = projectPath ?? NO_PROJECT_GROUP_KEY;
+    const created = conversationTimeValue(summary.createdAt);
+    firstCreated.set(key, Math.min(firstCreated.get(key) ?? created, created));
     if (summary.archived) {
       continue;
     }
-    const projectPath = normalizeProjectPath(summary.repoPath);
-    const key = projectPath ?? NO_PROJECT_GROUP_KEY;
     const existing = groups.get(key);
     if (existing) {
       existing.sessions.push(summary);
-      if (conversationTimeValue(summary.updatedAt) > conversationTimeValue(existing.updatedAt)) {
-        existing.updatedAt = summary.updatedAt;
-      }
       continue;
     }
     groups.set(key, {
       key,
       label: projectPath ? projectLabelForPath(projectPath) : "No project",
       repoPath: projectPath,
-      updatedAt: summary.updatedAt,
       sessions: [summary],
       isNoProject: !projectPath
     });
@@ -37,15 +41,20 @@ export function buildProjectSessionGroups(summaries: ConversationSummary[]): Pro
   return [...groups.values()]
     .map((group) => ({
       ...group,
-      sessions: [...group.sessions].sort(compareConversationSummaries)
+      sessions: [...group.sessions].sort(compareByCreation)
     }))
     .sort((left, right) => {
       if (left.isNoProject !== right.isNoProject) {
         return left.isNoProject ? 1 : -1;
       }
-      const timeDelta = conversationTimeValue(right.updatedAt) - conversationTimeValue(left.updatedAt);
-      return timeDelta || left.label.localeCompare(right.label);
+      const timeDelta = (firstCreated.get(left.key) ?? 0) - (firstCreated.get(right.key) ?? 0);
+      return timeDelta || left.label.localeCompare(right.label) || left.key.localeCompare(right.key);
     });
+}
+
+function compareByCreation(left: ConversationSummary, right: ConversationSummary): number {
+  const timeDelta = conversationTimeValue(right.createdAt) - conversationTimeValue(left.createdAt);
+  return timeDelta || left.title.localeCompare(right.title) || left.id.localeCompare(right.id);
 }
 
 /** How many chats Recents lists, as Claude's does. */
@@ -89,8 +98,7 @@ export function upsertConversationSummary(summaries: ConversationSummary[], conv
   ].sort(compareConversationSummaries);
 }
 
-/** A folder's chats, newest first, as its sidebar group lists them: what New
- *  chat offers to continue. */
+/** A folder's most recently active chats: what New chat offers to continue. */
 export function projectChatSummaries(summaries: ConversationSummary[], repoPath: string | undefined, limit: number): ConversationSummary[] {
   const projectPath = normalizeProjectPath(repoPath);
   if (!projectPath) return [];
