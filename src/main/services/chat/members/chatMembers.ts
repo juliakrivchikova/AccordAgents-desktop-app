@@ -13,7 +13,7 @@ import { CODEX_APPROVAL_TOOL_NAME } from "../../codexApprovals";
 import { normalizeChatAgentPermissions, chatAgentModeForKind } from "../../../../shared/agentPermissions";
 import { preservedRemoteExecution } from "../../../../shared/chatParticipantHome";
 import { APP_CONNECTOR_SIGN_IN_TOOL } from "../../appMcp";
-import { readActiveRunIds, readParticipantCompactions } from "../../../../shared/chatRunState";
+import { readActiveRunIds, readParticipantCompactions, readWaitOnlyRunIds } from "../../../../shared/chatRunState";
 import { activeRunSummaryForConversation, chatMemberIdsWithLiveWork } from "../../../../shared/chatRosterStatus";
 import { chatAppToolApprovalPolicies, chatAppToolApprovals, isCodexApprovalRequest } from "../approvals/approvalRecords";
 import { metadataWithAutoWatchDisabled, metadataWithAutoWatchEnabled } from "../autoWatch/watchers";
@@ -389,9 +389,11 @@ export class ChatMembers {
    *  resumed for). A member that only waits for a request it asked is not
    *  answering: the reply resumes its session, which a restart keeps. */
   memberAnswersNow(conversation: Conversation, participantId: string): boolean {
-    // A run of its that only waits on what it asked others is not answering.
+    // A run of its that only waits on what it asked others is not answering,
+    // whichever device waits (the chat marks it).
+    const waitOnly = readWaitOnlyRunIds(conversation.metadata);
     if ((activeRunSummaryForConversation(conversation).runIdsByParticipantId.get(participantId) ?? [])
-      .some((runId) => !this.chat.activeRuns.waitOnlyRunIds.has(runId))) return true;
+      .some((runId) => !this.chat.activeRuns.waitOnlyRunIds.has(runId) && !waitOnly.has(runId))) return true;
     const compaction = readParticipantCompactions(conversation.metadata)[participantId];
     if (compaction && readActiveRunIds(conversation.metadata).includes(compaction.runId)) return true;
     for (const message of conversation.messages) {

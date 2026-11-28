@@ -3,6 +3,10 @@ import type { ChatParticipantCompactionState } from "./types";
 export const PARTICIPANT_COMPACTIONS_KEY = "participantCompactionsByParticipantId";
 const ACTIVE_RUN_OWNERS_KEY = "activeRunOwnersByRunId";
 const ACTIVE_RUN_PARTICIPANTS_KEY = "activeRunParticipantIdsByRunId";
+/** Runs that only wait for a member to come back from its own questions
+ *  (requests/ownRequestWaits): its member shows working, but no turn of its
+ *  runs, on every device (ChatMembers.memberAnswersNow). */
+export const WAIT_ONLY_RUNS_KEY = "waitOnlyRunIds";
 
 export function clearChatRunMetadata(metadata: Record<string, unknown>): Record<string, unknown> {
   const next: Record<string, unknown> = { ...metadata, running: false };
@@ -10,6 +14,7 @@ export function clearChatRunMetadata(metadata: Record<string, unknown>): Record<
   delete next.activeRunIds;
   delete next[ACTIVE_RUN_OWNERS_KEY];
   delete next[ACTIVE_RUN_PARTICIPANTS_KEY];
+  delete next[WAIT_ONLY_RUNS_KEY];
   return next;
 }
 
@@ -42,6 +47,9 @@ export function withActiveRunIdRemoved(metadata: Record<string, unknown>, runId:
   const next: Record<string, unknown> = { ...metadata, activeRunIds: list };
   const participants = readActiveRunParticipants(metadata);
   participants.delete(runId);
+  const waitOnly = [...readWaitOnlyRunIds(metadata)].filter((id) => id !== runId && list.includes(id));
+  if (waitOnly.length > 0) next[WAIT_ONLY_RUNS_KEY] = waitOnly;
+  else delete next[WAIT_ONLY_RUNS_KEY];
   next.running = list.length > 0;
   if (list.length === 0) {
     delete next.activeRunIds;
@@ -73,6 +81,11 @@ export function readActiveRunOwnerIds(metadata: Record<string, unknown>): Set<st
     }
   }
   return ids;
+}
+
+export function readWaitOnlyRunIds(metadata: Record<string, unknown>): Set<string> {
+  const raw = metadata[WAIT_ONLY_RUNS_KEY];
+  return new Set(Array.isArray(raw) ? raw.filter((id): id is string => typeof id === "string" && id.trim().length > 0) : []);
 }
 
 export function readActiveRunParticipants(metadata: Record<string, unknown>): Map<string, string> {

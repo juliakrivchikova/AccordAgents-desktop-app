@@ -8,10 +8,10 @@ import { CHAT_PARTICIPANT_REQUEST_MAX_CHAIN_BATCHES } from "../../../../shared/c
 import { APP_CHAT_REQUEST_PARTICIPANTS_TOOL, APP_PERMISSIONS_REQUEST_CHANGE_TOOL } from "../../appMcp";
 import {
   chatAppToolApprovals, confirmationRequestWasAsked, isParticipantRequestApprovalRequest, newAppToolApproval,
-  upsertAppToolApproval
+  permissionApprovalResumeRunId, upsertAppToolApproval
 } from "../approvals/approvalRecords";
 import { participantForMentionHandle } from "../choices/mentions";
-import { HANDLE_PATTERN } from "../constants";
+import { HANDLE_PATTERN, PARTICIPANT_REQUEST_STOPPED_BY_USER } from "../constants";
 import { chatParticipants, formatHandleList } from "../members/identity";
 import {
   CHAT_PARTICIPANT_REQUEST_MAX_ITEMS, CHAT_PARTICIPANT_REQUEST_WAIT_DEFAULT_MS, PARTICIPANT_REQUEST_SCRUTINY_APPENDIX
@@ -645,6 +645,33 @@ export function participantRequestWaitsOnPermissionCard(conversation: Conversati
     batch.items.some((item) => item.targetParticipantId === approval.requesterParticipantId));
 }
 
+/** How long after a member's permission card was approved a sweep leaves
+ *  the request it answers to that card's resume: a day, as long as a restart
+ *  still resumes a member (its machine may be stopped when the User
+ *  approves); one that never begins does not hold the request longer.
+ *  Coarse, so the approving device's clock does not matter. */
+const APPROVED_CARD_RESUME_HOLD_MS = 24 * 60 * 60_000;
+
+/** Whether a request's item waits on its member's permission card: still
+ *  open, or approved and its resume not begun yet (no reply of its run). A
+ *  sweep leaves such an item to the card's resume, which answers it. */
+export function participantRequestItemWaitsOnPermissionCard(
+  conversation: Conversation,
+  requestMessage: ChatMessage,
+  batch: ChatParticipantRequestBatch,
+  item: ChatParticipantRequestItem,
+  now = Date.now()
+): boolean {
+  return chatAppToolApprovals(conversation).some((approval) => {
+    if (approval.toolName !== APP_PERMISSIONS_REQUEST_CHANGE_TOOL || approval.requesterParticipantId !== item.targetParticipantId ||
+      approval.resumeContext?.participantRequestBatchId !== batch.id ||
+      (approval.resumeContext.triggerMessageId !== requestMessage.id && !item.earlierReplyMessageIds?.length)) return false;
+    if (approval.status === "pending") return true;
+    return approval.status === "approved" && now - Date.parse(approval.updatedAt) < APPROVED_CARD_RESUME_HOLD_MS &&
+      !conversation.messages.some((message) => message.metadata?.runId === permissionApprovalResumeRunId(approval.id));
+  });
+}
+
 export function pendingParticipantRequestApprovalTargetIds(
   conversation: Conversation,
   batch: ChatParticipantRequestBatch
@@ -671,13 +698,15 @@ export function pendingParticipantRequestApprovalTargetIds(
 
 export function markParticipantRequestAutoResumeFailed(conversation: Conversation, requestMessageId: string, error: unknown, stopped = false): void {
   const message = error instanceof Error ? error.message : String(error);
+  const failure = message || "Requester auto-resume failed before completion.";
   const now = new Date().toISOString();
+  // Stopped while it waited its turn: it says so, as its mark does.
   updateParticipantRequestBatch(conversation, requestMessageId, (batch) => ({
     ...batch,
-    status: "failed",
+    status: stopped ? "interrupted" : "failed",
     updatedAt: now,
-    error: message || "Requester auto-resume failed before completion.",
-    requesterResumeEnded: stopped ? { reason: "stopped", at: now } : { reason: "failed", error: message || "Requester auto-resume failed before completion.", at: now }
+    error: stopped ? PARTICIPANT_REQUEST_STOPPED_BY_USER : failure,
+    requesterResumeEnded: stopped ? { reason: "stopped", at: now } : { reason: "failed", error: failure, at: now }
   }));
   conversation.updatedAt = new Date().toISOString();
 }

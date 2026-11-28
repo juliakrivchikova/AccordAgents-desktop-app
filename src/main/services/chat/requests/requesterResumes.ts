@@ -140,7 +140,7 @@ export class RequesterResumes {
             const marked = group.map((entry) => markOwnRequestResumeEnded(conversation, entry.message.id, "not-made")).some(Boolean);
             if (!marked) return;
             conversation.updatedAt = new Date().toISOString();
-            await this.chat.store.saveConversation(conversation);
+            this.chat.store.queueSnapshot(conversation);
           });
           return;
         }
@@ -283,6 +283,8 @@ export class RequesterResumes {
     progress?: ProgressCallback,
     extraPromptContextMessageIds?: readonly string[]
   ): Promise<void> {
+    // Its turn ran and was recorded: what fails after it is not its resume's.
+    let resumeRecorded = false;
     try {
       const messages = await this.chat.turnQueue.runParticipantTurnSerialized(conversation, requester, trigger, resumeRunId, undefined, progress, {
         continuation: true,
@@ -312,14 +314,28 @@ export class RequesterResumes {
         this.chat.store.queueSnapshot(conversation);
         return toRun;
       });
+      resumeRecorded = true;
       this.chat.participantRequests.startDeferredParticipantRequestRunners(conversation.id, participantRequestsToRun);
       await this.chat.chatHistory.ensureHistoryFiles(conversation);
     } catch (error) {
+      // Cut by the app's quit: the next start weighs it (a resume a quit
+      // cut short), as for a member's own compaction (selfCompactionResumes).
       // Stopped while it waited its turn (TurnQueue: "Chat run cancelled."):
       // a request waiting on this requester's answer ends stopped.
-      const stopped = error instanceof Error && error.message === "Chat run cancelled.";
-      for (const requestMessageId of requestMessageIds) {
-        markParticipantRequestAutoResumeFailed(conversation, requestMessageId, error, stopped);
+      if (!this.chat.appQuit.quitting && !resumeRecorded) {
+        const stopped = error instanceof Error && (error.message === "Chat run cancelled." || error.name === "AbortError");
+        await this.chat.store.withChatMutation(conversation, async () => {
+          for (const requestMessageId of requestMessageIds) {
+            markParticipantRequestAutoResumeFailed(conversation, requestMessageId, error, stopped);
+          }
+          this.chat.store.queueSnapshot(conversation);
+        }).catch((markError: unknown) => {
+          void this.deps.debugLogs.write("chat.participant-request.auto-resume.mark-failed", {
+            conversationId: conversation.id,
+            requestMessageIds: [...requestMessageIds],
+            message: markError instanceof Error ? markError.message : String(markError)
+          });
+        });
       }
       emitChatRunFailure(resumeRunId, progress, error);
       throw error;

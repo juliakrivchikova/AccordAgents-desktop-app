@@ -195,17 +195,21 @@ verbatim there). Modelled on T3 Code (`~/reference/t3code`,
   `app_chat_request_participants` (a resume of its own) and ended its turn
   stays running: the reply it writes once resumed with the answers settles
   it, and that reply is what the main session is woken with (once); asking
-  again, or a permission card in that turn, keeps it waiting
-  (`requests/ownRequests.ts`, `ownRequestWaits.ts`). Its earlier lines are
+  again keeps it waiting (`requests/ownRequests.ts`, `ownRequestWaits.ts`).
+  A permission card it raises in a turn after its own question is not waited
+  on: that turn's reply answers, as before. Its earlier lines are
   kept (`earlierReplyMessageIds`) and read too. The member shows working
   meanwhile and its Stop ends the task (its own question still comes back to
   it, as finished background work does in its CLI). Its own question failing,
   interrupted or declined still resumes it. A resume that ends with no reply
   (it could not run, was stopped before it began, a restart will not make
   it: `requesterResumeEnded` on the member's own request, written by the
-  member's device) ends the task failed or interrupted, never with the
-  interim line. A quit or restart leaves it running and it is waited on
-  again at the chat's first look; the same on a cloud machine. A request
+  member's device) ends the task failed, stopped or interrupted, never with
+  the interim line. While all it waits on is the User's answer on a card for
+  its own question, a cloud machine may still stop when idle; once it is
+  approved, or the member is in a turn, it stays awake. A quit or restart
+  leaves it running and it is waited on again at the chat's first look; the
+  same on a cloud machine. A request
   inferred from a mention is not waited on.
 - **The Chat Assistant and the Workflow Manager role are not in new chats.**
   Chats made before stay exactly as they are (with their Assistant).

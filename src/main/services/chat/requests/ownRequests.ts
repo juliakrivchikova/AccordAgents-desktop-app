@@ -1,6 +1,4 @@
 import type { ChatMessage, ChatParticipantRequestBatch, ChatParticipantRequestItem, Conversation } from "../../../../shared/types";
-import { APP_PERMISSIONS_REQUEST_CHANGE_TOOL } from "../../appMcp";
-import { chatAppToolApprovals } from "../approvals/approvalRecords";
 import { PARTICIPANT_REQUEST_INTERRUPTED_BEFORE_COMPLETION } from "../constants";
 import { chatParticipants } from "../members/identity";
 import { isOpenParticipantRequestStatus, rollupParticipantRequestStatus, updateParticipantRequestBatch } from "./requestRecords";
@@ -9,8 +7,7 @@ import { isOpenParticipantRequestStatus, rollupParticipantRequestStatus, updateP
  * A member that asks another member something while it answers a request
  * (app_chat_request_participants with resumeRequester) and ends its turn to
  * wait has not answered yet: the turn it is resumed in with the answers does,
- * and so on while it asks again (or waits on the User's permission card in
- * that turn). These read, from the chat as stored, which of its own requests a
+ * and so on while it asks again. These read, from the chat as stored, which of its own requests a
  * request waits on, where each of them stands and which of its replies answer
  * the request, on every device alike (the member may run on a machine).
  */
@@ -25,6 +22,19 @@ export type MessagesById = ReadonlyMap<string, ChatMessage>;
 
 export function messagesById(conversation: Conversation): Map<string, ChatMessage> {
   return new Map(conversation.messages.map((message) => [message.id, message]));
+}
+
+/** Whether `message` comes after `than` in the chat. By its place in the
+ *  chat, not its time: a request a turn asks can carry the same millisecond
+ *  as that turn's reply, written as the turn began. */
+export function comesAfter(conversation: Conversation, message: ChatMessage, than: ChatMessage): boolean {
+  if (message.id === than.id) return false;
+  let seen = false;
+  for (const candidate of conversation.messages) {
+    if (candidate.id === than.id) seen = true;
+    else if (candidate.id === message.id) return seen || !conversation.messages.some((other) => other.id === than.id) && message.createdAt > than.createdAt;
+  }
+  return false;
 }
 
 /** The request a member was answering in the turn that the message
@@ -109,18 +119,53 @@ export function ownRequestsAnswering(
     }
     state.open.push(message);
   }
+  // Its resume recorded as done with no reply here: another device ran it.
+  const handedOver = state.open.filter((message) => message.metadata?.participantRequest?.status === "completed");
+  if (handedOver.length > 0) {
+    const resumed = resumedElsewhere(conversation, memberId, handedOver, index ?? messagesById(conversation));
+    if (resumed.size > 0) state.open = state.open.filter((message) => !resumed.has(message.id));
+  }
   return state;
+}
+
+/** Of these requests of the member's own whose resume was recorded as done
+ *  with no reply (the User's server gave that turn another device), those
+ *  whose reply is there: it goes on from the line its resume wrote from it,
+ *  or from the first request it went out with in one turn. A resume a quit
+ *  cut short is not recorded as done: a restart weighs it. */
+function resumedElsewhere(conversation: Conversation, memberId: string, candidates: readonly ChatMessage[], byId: MessagesById): Set<string> {
+  const resumedBy = new Map<string, string[]>();
+  for (const message of candidates) {
+    const turnId = message.metadata?.participantRequest?.delegation?.turnId;
+    const sources = turnId
+      ? conversation.messages.filter((other) => other.metadata?.participantRequest?.requesterParticipantId === memberId &&
+        other.metadata.participantRequest.delegation?.turnId === turnId).map((other) => other.id)
+      : [message.id];
+    for (const source of sources) resumedBy.set(source, [...(resumedBy.get(source) ?? []), message.id]);
+  }
+  const resumed = new Set<string>();
+  for (const reply of conversation.messages) {
+    if (reply.role !== "participant" || reply.participantId !== memberId || !reply.metadata?.runId ||
+      reply.metadata.participantRequest || reply.metadata.serverPlaceholder || !reply.metadata.sourceMessageId) continue;
+    const line = byId.get(reply.metadata.sourceMessageId);
+    const source = line?.role === "system" ? line.metadata?.sourceMessageId : undefined;
+    for (const id of (source ? resumedBy.get(source) : undefined) ?? []) resumed.add(id);
+  }
+  return resumed;
 }
 
 /** The member's replies in the turns that answer `requestMessageId` (its
  *  first turn, the turns it was resumed in after its own requests, after a
- *  permission card, after its own compaction), oldest first, and whether one
- *  of those turns is still running. */
+ *  permission card, after its own compaction), in the chat's order (one
+ *  device writes them, and the server keeps its order), and whether one of
+ *  those turns is still running. */
 export function repliesAnswering(
   conversation: Conversation,
   memberId: string,
   requestMessageId: string,
-  byId: MessagesById = messagesById(conversation)
+  byId: MessagesById = messagesById(conversation),
+  /** Leave out the replies of the turn resumed after this request of its own. */
+  besidesResumeOf?: string
 ): { finished: ChatMessage[]; running: boolean } {
   const finished: ChatMessage[] = [];
   let running = false;
@@ -128,72 +173,37 @@ export function repliesAnswering(
     // A reply of a turn of its (not its own requests, nor a placeholder).
     if (message.role !== "participant" || message.participantId !== memberId || !message.metadata?.runId ||
       message.metadata.participantRequest || message.metadata.serverPlaceholder) continue;
+    if (besidesResumeOf && message.metadata.sourceMessageId) {
+      const line = byId.get(message.metadata.sourceMessageId);
+      if (line?.role === "system" && line.metadata?.sourceMessageId === besidesResumeOf) continue;
+    }
     if (requestAnsweredByTurn(conversation, memberId, message.metadata?.sourceMessageId, byId)?.id !== requestMessageId) continue;
     if (message.status === "pending") running = true;
     else finished.push(message);
   }
-  finished.sort((left, right) => left.createdAt.localeCompare(right.createdAt));
+  // In the chat's order, as they were written.
   return { finished, running };
-}
-
-/** Permission cards the member raised in a turn that answers the request:
- *  `waiting` while one still waits for the User, or was approved and no reply
- *  of the member's to the request came after (its resumed turn, or another
- *  card's on the same turn) since it was raised, for at most a day after
- *  she approved it (its device may be asleep or stopped then); `leftUnanswered` once an approved one went a
- *  day with none (its resume never came: the request ends interrupted). */
-export function permissionCardsAnswering(
-  conversation: Conversation,
-  memberId: string,
-  requestMessageId: string,
-  byId: MessagesById,
-  now = Date.now()
-): { waiting: boolean; leftUnanswered: boolean } {
-  let waiting = false;
-  let leftUnanswered = false;
-  let replyTimes: string[] | undefined;
-  const repliedAfter = (at: string): boolean => {
-    replyTimes ??= conversation.messages.filter((message) => message.role === "participant" && message.participantId === memberId &&
-      message.metadata?.runId && !message.metadata.participantRequest &&
-      requestAnsweredByTurn(conversation, memberId, message.metadata.sourceMessageId, byId)?.id === requestMessageId).map((message) => message.createdAt);
-    return replyTimes.some((createdAt) => createdAt > at);
-  };
-  for (const approval of chatAppToolApprovals(conversation)) {
-    if (approval.toolName !== APP_PERMISSIONS_REQUEST_CHANGE_TOOL || approval.requesterParticipantId !== memberId) continue;
-    if (approval.status !== "pending" && approval.status !== "approved") continue;
-    if (requestAnsweredByTurn(conversation, memberId, approval.resumeContext?.triggerMessageId, byId)?.id !== requestMessageId) continue;
-    if (approval.status === "pending") {
-      waiting = true;
-      continue;
-    }
-    // A reply to the request written after the card was raised (its
-    // resumed turn's, or another card's on the same turn) answers it.
-    if (repliedAfter(approval.createdAt)) continue;
-    if (now - Date.parse(approval.updatedAt) < OWN_REQUEST_STALE_MS) waiting = true;
-    else leftUnanswered = true;
-  }
-  return { waiting, leftUnanswered };
-}
-
-/** Whether a permission card in a turn answering the request still holds it
- *  (permissionCardsAnswering). */
-export function permissionCardAnswering(conversation: Conversation, memberId: string, requestMessageId: string, byId: MessagesById, now = Date.now()): boolean {
-  return permissionCardsAnswering(conversation, memberId, requestMessageId, byId, now).waiting;
 }
 
 /** Whether `reply` is not yet the member's answer to the request because it
  *  asked others itself in the turns that answer it, and it is still out on
- *  one of them, still in a turn (or on a permission card) after one, or has
- *  written a later reply. False when it asked nobody: other waits (a card in
- *  its first turn, its own compaction) are not this one's. */
+ *  one of them, still in a turn after one, or has written a later reply.
+ *  False when it asked nobody: other waits (a card in its first turn, its own
+ *  compaction) are not this one's. A permission card it raises in a turn
+ *  after one is not waited on: that turn's reply answers, as before. */
 export function memberWorksOnAfter(conversation: Conversation, memberId: string, requestMessageId: string, reply: ChatMessage): boolean {
+  return worksOnAfter(conversation, memberId, requestMessageId, reply);
+}
+
+/** The same, leaving out one of its own requests (one that will not resume
+ *  it) and what its resume a quit cut short wrote. */
+function worksOnAfter(conversation: Conversation, memberId: string, requestMessageId: string, reply: ChatMessage, besidesOwnId?: string): boolean {
   const byId = messagesById(conversation);
   const own = ownRequestsAnswering(conversation, memberId, requestMessageId, byId);
   if (own.all.length === 0) return false;
-  if (own.open.length > 0) return true;
-  const replies = repliesAnswering(conversation, memberId, requestMessageId, byId);
-  return replies.running || replies.finished.some((message) => message.id !== reply.id && message.createdAt > reply.createdAt) ||
-    permissionCardAnswering(conversation, memberId, requestMessageId, byId);
+  if (own.open.some((message) => message.id !== besidesOwnId)) return true;
+  const replies = repliesAnswering(conversation, memberId, requestMessageId, byId, besidesOwnId);
+  return replies.running || replies.finished.some((message) => comesAfter(conversation, message, reply));
 }
 
 /** Whether a request's item still waits on its member's own requests (it
@@ -255,11 +265,15 @@ export function markOwnRequestResumeEnded(
 
 /** The same, where the request that waits is this device's to end too: it
  *  ends as a restart ends a task (interrupted before completion), so it never
- *  waits for nothing. Returns that request when one changed. */
+ *  waits for nothing, unless the member still works on it besides (another
+ *  question of its still out, a turn of its running or a later reply).
+ *  Returns that request when one changed. */
 export function endWaitOnUnresumedOwnRequest(conversation: Conversation, ownRequestMessageId: string, byId?: MessagesById): ChatMessage | undefined {
   const own = conversation.messages.find((message) => message.id === ownRequestMessageId);
   const waiting = own ? requestWaitingOnOwnRequest(conversation, own, byId) : undefined;
   if (!waiting || !itemWaitsOnOwnRequests(conversation, waiting.message, waiting.item)) return undefined;
+  const reply = conversation.messages.find((message) => message.id === waiting.item.replyMessageId);
+  if (reply && worksOnAfter(conversation, waiting.item.targetParticipantId, waiting.message.id, reply, ownRequestMessageId)) return undefined;
   const now = new Date().toISOString();
   updateParticipantRequestBatch(conversation, waiting.message.id, (current) => {
     const items = current.items.map((item) => item.targetParticipantId === waiting.item.targetParticipantId

@@ -4,7 +4,7 @@ import { chatParticipants } from "../members/identity";
 import { delegationTurnGroup, requesterResumeRecoveryKey, turnSegmentKey } from "./delegationGroups";
 import { endWaitOnUnresumedOwnRequest, itemWaitsOnOwnRequests, markOwnRequestResumeEnded, requestWaitingOnOwnRequest } from "./ownRequests";
 import {
-  isOpenParticipantRequestStatus, participantRequestHasUnfinishedItems, participantRequestWaitsOnPermissionCard,
+  isOpenParticipantRequestStatus, participantRequestHasUnfinishedItems, participantRequestItemWaitsOnPermissionCard, participantRequestWaitsOnPermissionCard,
   pendingParticipantRequestApprovalTargetIds, rollupParticipantRequestStatus, settleRequestsAnsweredWith, terminalParticipantRequestBatch,
   updateParticipantRequestBatch
 } from "./requestRecords";
@@ -103,7 +103,11 @@ export class RequestRecovery {
         // A member that ended its turn waiting on its own requests goes on
         // once resumed with their answers, after a restart too: its answer is
         // still to come (resumeOwnRequestWait waits for it again).
-        (((item.status === "running" && !itemWaitsOnOwnRequests(conversation, message, item)) || item.status === "resuming_requester") && !leadOpen(item)) ||
+        // Nor one whose member waits on the User's permission card: her
+        // answer resumes it (applyPermissionResumeToParticipantRequest).
+        (((item.status === "running" && !itemWaitsOnOwnRequests(conversation, message, item) &&
+          !participantRequestItemWaitsOnPermissionCard(conversation, message, batch, item)) ||
+          item.status === "resuming_requester") && !leadOpen(item)) ||
         (item.status === "pending_approval" && !backedPendingTargetIds.has(item.targetParticipantId))
     );
     if (nextBatch === batch) {

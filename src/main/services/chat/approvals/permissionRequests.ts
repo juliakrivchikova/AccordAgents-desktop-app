@@ -219,6 +219,9 @@ export class PermissionRequests {
     progress?: ProgressCallback
   ): Promise<void> {
     if (participantRequestMessage) this.heldParticipantRequests.add(participantRequestMessage.id);
+    // It asked others itself and ends its turn to wait (ownRequests.ts): the
+    // request is waited on once this resume is over, where it is settled.
+    let waitAfter = false;
     try {
       const messages = await this.chat.turnQueue.runParticipantTurnSerialized(conversation, requester, trigger, resumeRunId, undefined, progress, {
         warnings: [],
@@ -229,15 +232,16 @@ export class PermissionRequests {
         participantRequestBatchId: participantRequestBatch?.id,
         chainRootId: participantRequestBatch?.chainRootId
       });
-      let goesOn = false;
+      let waitsOnOwn = false;
       const { participantRequestsToRun, participantRequestResumeMessageId } = await this.chat.store.withChatMutation(conversation, async () => {
         const toRun = await this.chat.pendingReplies.appendParticipantTurnMessages(conversation, requester, messages);
-        // It compacts its own context next, or it asked others itself and
-        // waits for them (ownRequests.ts): its answer is a turn after this one.
+        // It compacts its own context next (its answer is the turn after
+        // that), or it asked others itself and waits for them.
         const reply = messages[0];
-        goesOn = Boolean(participantRequestMessage && reply && (reply.metadata?.selfCompaction ||
-          memberWorksOnAfter(conversation, requester.id, participantRequestMessage.id, reply)));
-        const resumeMessageId = participantRequestMessage && participantRequestBatch && !goesOn
+        waitsOnOwn = Boolean(participantRequestMessage && reply && !reply.metadata?.selfCompaction &&
+          memberWorksOnAfter(conversation, requester.id, participantRequestMessage.id, reply));
+
+        const resumeMessageId = participantRequestMessage && participantRequestBatch && !reply?.metadata?.selfCompaction && !waitsOnOwn
           ? applyPermissionResumeToParticipantRequest(conversation, participantRequestMessage.id, participantRequestBatch.id, requester, messages)
           : undefined;
         conversation.updatedAt = new Date().toISOString();
@@ -247,19 +251,27 @@ export class PermissionRequests {
       this.chat.participantRequests.startDeferredParticipantRequestRunners(conversation.id, participantRequestsToRun);
       await this.chat.chatHistory.ensureHistoryFiles(conversation);
       emitProgress(resumeRunId, progress, "done", "Permission approval resume finished.");
-      const first = messages[0];
-      // The request is its requester's device's to settle: elsewhere that
-      // device waits for the member's answer itself (it arms its wait when it
-      // sees the request waiting, RequestRecovery.armOwnRequestWait).
+      // The request is its requester's device's to wait on and settle; on
+      // another device that one arms its wait when it sees the request
+      // waiting (RequestRecovery.armOwnRequestWait).
       const requestOwner = participantRequestBatch && chatParticipants(conversation).find((participant) => participant.id === participantRequestBatch.requesterParticipantId);
-      if (participantRequestMessage && participantRequestBatch && first && goesOn && requestOwner && this.chat.host.ownsParticipant(requestOwner)) {
-        const through = await this.chat.participantRequests.answerWithLiveRun(conversation, participantRequestMessage.id, requester, first, []);
-        if (through.kind === "answer") {
-          await this.chat.selfCompaction.settleSelfCompactedItem(conversation, participantRequestMessage.id, participantRequestBatch.id, requester, through, true);
-        }
+      const ownsRequest = Boolean(requestOwner && this.chat.host.ownsParticipant(requestOwner));
+      waitAfter = waitsOnOwn && ownsRequest;
+      const compacting = messages[0];
+      if (participantRequestMessage && participantRequestBatch && compacting?.metadata?.selfCompaction) {
+        const through = await this.chat.selfCompaction.answerThroughSelfCompactions(conversation.id, requester.id, compacting, undefined);
+        // The turn it went on in asked others itself: waited on as above.
         await this.chat.store.waitForQueuedSave(conversation.id);
-        this.heldParticipantRequests.delete(participantRequestMessage.id);
-        await this.chat.requesterResumes.autoResumeParticipantRequest(conversation.id, participantRequestMessage.id, progress);
+        const latest = (await this.chat.store.readStoredChatStateForRefresh(conversation.id)).stored ?? conversation;
+        const askedAfter = through.answer.kind === "went-on" && memberWorksOnAfter(latest, requester.id, participantRequestMessage.id, through.reply);
+        if (askedAfter) {
+          waitAfter = ownsRequest;
+        } else {
+          await this.chat.selfCompaction.settleSelfCompactedItem(conversation, participantRequestMessage.id, participantRequestBatch.id, requester, through, true);
+          await this.chat.store.waitForQueuedSave(conversation.id);
+          this.heldParticipantRequests.delete(participantRequestMessage.id);
+          await this.chat.requesterResumes.autoResumeParticipantRequest(conversation.id, participantRequestMessage.id, progress);
+        }
       }
       if (participantRequestResumeMessageId) {
         void this.chat.requesterResumes.autoResumeParticipantRequest(conversation.id, participantRequestResumeMessageId, progress).catch((error) => {
@@ -278,6 +290,9 @@ export class PermissionRequests {
       if (participantRequestMessage) this.heldParticipantRequests.delete(participantRequestMessage.id);
       await this.chat.activeRuns.endChatRun(conversation, resumeRunId);
     }
+    // Waited on in a run of its own that only waits, as after a restart:
+    // this resume's run and its card's keys are free from here on.
+    if (waitAfter && participantRequestMessage) this.chat.participantRequests.resumeOwnRequestWait(conversation.id, participantRequestMessage.id);
   }
 
   oneTimeApprovalClaimedByOtherRun(approvalId: string, runId: string): boolean {
@@ -320,3 +335,4 @@ export class PermissionRequests {
     return permissions;
   }
 }
+

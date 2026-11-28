@@ -602,10 +602,18 @@ export class ParticipantRequests {
           targetRunBegun = false;
           if (targetRunId && targetController) this.chat.activeRuns.unregisterTargetRun(targetRunId, targetController);
         };
-        const through = !continues || !reply ? undefined
-          : reply.metadata?.selfCompaction
-            ? await answerThroughOwnWork(this.chat, conversation.id, requestMessageId, target.id, reply, [], targetController.signal)
-            : await this.answerWithLiveRun(conversation, requestMessageId, target, reply, [], { parentSignal: targetController.signal, onLive: endTurnRun });
+        let through: OwnWorkAnswer | undefined;
+        if (continues && reply?.metadata?.selfCompaction) {
+          const compacted = await this.chat.selfCompaction.answerThroughSelfCompactions(conversation.id, target.id, reply, targetController.signal);
+          // The turn it went on in asked others itself: from here it only waits.
+          await this.chat.store.waitForQueuedSave(conversation.id);
+          const latest = (await this.chat.store.readStoredChatStateForRefresh(conversation.id)).stored ?? conversation;
+          through = compacted.answer.kind === "went-on" && memberWorksOnAfter(latest, target.id, requestMessageId, compacted.reply)
+            ? await this.answerWithLiveRun(conversation, requestMessageId, target, compacted.reply, compacted.earlier, { parentSignal: targetController.signal, onLive: endTurnRun })
+            : { kind: "answer", ...compacted, earlier: [...compacted.earlier] };
+        } else if (continues && reply) {
+          through = await this.answerWithLiveRun(conversation, requestMessageId, target, reply, [], { parentSignal: targetController.signal, onLive: endTurnRun });
+        }
         if (through?.kind === "answer") {
           reply = through.reply;
           earlier.push(...through.earlier);
@@ -712,7 +720,8 @@ export class ParticipantRequests {
     if (waiting.length === 0) return { waited: false, result: { batch, replies } };
     const byId = messagesById(conversation);
     let settled = 0;
-    await Promise.all(waiting.map(async (item) => {
+    // Every target waits to its end; one that fails fails the runner after.
+    const outcomes = await Promise.allSettled(waiting.map(async (item) => {
       const target = chatParticipants(conversation).find((participant) => participant.id === item.targetParticipantId);
       const first = item.replyMessageId ? byId.get(item.replyMessageId) : undefined;
       if (!target || !first) return;
@@ -724,6 +733,8 @@ export class ParticipantRequests {
       await this.chat.selfCompaction.settleSelfCompactedItem(conversation, requestMessageId, batch.id, target, through);
       replies.push({ targetHandle: target.handle, messageId: through.reply.id, content: [...through.earlier, through.reply].map((message) => chatMessageMemberText(message)).filter(Boolean).join("\n\n") });
     }));
+    const failure = outcomes.find((outcome): outcome is PromiseRejectedResult => outcome.status === "rejected");
+    if (failure) throw failure.reason;
     const updatedBatch = await this.chat.store.saveChatChange(conversation, () => updateParticipantRequestBatch(conversation, requestMessageId, (current) => ({
       ...current,
       status: rollupParticipantRequestStatus(current.items),
@@ -756,7 +767,7 @@ export class ParticipantRequests {
     const abort = (): void => controller.abort();
     if (options.parentSignal?.aborted) controller.abort();
     else options.parentSignal?.addEventListener("abort", abort, { once: true });
-    this.chat.activeRuns.waitOnlyRunIds.add(runId);
+    this.chat.activeRuns.beginWaitOnlyRun(runId, requestMessageId);
     this.chat.activeRuns.beginWaitOnly(requestMessageId);
     this.chat.activeRuns.registerTargetRun(runId, controller, { conversationId: conversation.id, participantId: target.id, participantHandle: target.handle });
     let begun = false;
@@ -764,12 +775,13 @@ export class ParticipantRequests {
       await this.chat.activeRuns.beginChatRun(conversation, runId);
       begun = true;
       await options.onLive?.();
-      return await answerThroughOwnWork(this.chat, conversation.id, requestMessageId, target.id, first, earlier, controller.signal);
+      return await answerThroughOwnWork(this.chat, conversation.id, requestMessageId, target.id, first, earlier, controller.signal,
+        (onlyOnUser) => this.chat.activeRuns.noteWaitOnlyOnUser(runId, onlyOnUser));
     } finally {
       options.parentSignal?.removeEventListener("abort", abort);
       if (begun) await this.chat.activeRuns.endChatRun(conversation, runId);
       this.chat.activeRuns.unregisterTargetRun(runId, controller);
-      this.chat.activeRuns.waitOnlyRunIds.delete(runId);
+      this.chat.activeRuns.endWaitOnlyRun(runId);
       this.chat.activeRuns.endWaitOnly(requestMessageId);
     }
   }

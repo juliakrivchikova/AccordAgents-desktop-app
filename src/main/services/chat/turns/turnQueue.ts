@@ -162,14 +162,14 @@ export class TurnQueue {
     }
   }
 
-  /** Whether this run's request was answered by the turn of a request
-   *  before it, which it went out with (asked once, after the run). */
   /** Whether this run's turn was stopped on the User's server before it
    *  began (it returned no reply); asked once, after the run. */
   takeStoppedBeforeStart(runId: string): boolean {
     return this.stoppedBeforeStart.delete(runId);
   }
 
+  /** Whether this run's request was answered by the turn of a request
+   *  before it, which it went out with (asked once, after the run). */
   takeAnsweredTogether(runId: string): boolean {
     return this.answeredTogether.delete(runId);
   }

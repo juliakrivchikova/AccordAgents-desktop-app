@@ -2,7 +2,7 @@ import type { ChatMessage, ChatParticipantRequestItem, Conversation } from "../.
 import type { SelfCompactedAnswer } from "../compaction/selfCompactionMarks";
 import { chatParticipants } from "../members/identity";
 import type { ChatModules } from "../modules";
-import { messagesById, ownRequestsAnswering, permissionCardsAnswering, repliesAnswering } from "./ownRequests";
+import { comesAfter, messagesById, ownRequestsAnswering, repliesAnswering } from "./ownRequests";
 import { isOpenParticipantRequestStatus } from "./requestRecords";
 
 /** How often a wait for a member to come back from its own requests looks
@@ -27,8 +27,8 @@ type NextReply =
  * A request's target that ended its turn in the middle of its work, as its
  * CLI would go on with it: it compacted its own context (the turn it goes on
  * in answers), or it asked others with a resume of its own (the turn it is
- * resumed in with their answers answers; it may ask again, or wait on a
- * permission card there). Waits for its last reply, wherever the member runs.
+ * resumed in with their answers answers; it may ask again). Waits for its
+ * last reply, wherever the member runs.
  */
 export async function answerThroughOwnWork(
   chat: Pick<ChatModules, "appQuit" | "selfCompaction" | "store">,
@@ -37,9 +37,11 @@ export async function answerThroughOwnWork(
   targetId: string,
   first: ChatMessage,
   firstEarlier: readonly ChatMessage[],
-  /** Aborted: the request was stopped. None: nothing stops this wait but
-   *  the member's own replies (a resume after a permission card). */
-  signal: AbortSignal | undefined
+  /** Aborted: the request was stopped. */
+  signal: AbortSignal | undefined,
+  /** Told, as it looks, whether all it waits on is the User's answer on a
+   *  card (the member's own questions not approved yet). */
+  onWaitState?: (onlyOnUser: boolean) => void
 ): Promise<OwnWorkAnswer> {
   const earlier = [...firstEarlier];
   let reply = first;
@@ -56,7 +58,7 @@ export async function answerThroughOwnWork(
       reply = through.reply;
       continue;
     }
-    const next = await nextReplyAfterOwnRequests(chat, conversationId, requestMessageId, targetId, reply, signal);
+    const next = await nextReplyAfterOwnRequests(chat, conversationId, requestMessageId, targetId, reply, signal, onWaitState);
     if (next.kind === "closed") return next;
     if (next.kind === "none") return { kind: "answer", answer: { kind: "went-on", reply }, reply, earlier };
     if (next.kind === "ended") return { kind: "answer", answer: next.answer, reply, earlier };
@@ -66,15 +68,16 @@ export async function answerThroughOwnWork(
 }
 
 /** The member's next reply to the request after `after` once it is back
- *  from every request of its own it is still out on (and from a permission
- *  card in a turn after one); none when it is out on none. */
+ *  from every request of its own it is still out on; none when it is out on
+ *  none. */
 async function nextReplyAfterOwnRequests(
   chat: Pick<ChatModules, "appQuit" | "store">,
   conversationId: string,
   requestMessageId: string,
   targetId: string,
   after: ChatMessage,
-  signal: AbortSignal | undefined
+  signal: AbortSignal | undefined,
+  onWaitState: ((onlyOnUser: boolean) => void) | undefined
 ): Promise<NextReply> {
   // As stored: from memory while this device saved it last, else read again
   // (another device's change came through the server).
@@ -108,19 +111,22 @@ async function nextReplyAfterOwnRequests(
     const own = ownRequestsAnswering(conversation, targetId, requestMessageId, byId);
     if (own.all.length === 0) return { kind: "none" };
     const replies = repliesAnswering(conversation, targetId, requestMessageId, byId);
-    const cards = permissionCardsAnswering(conversation, targetId, requestMessageId, byId);
-    const stillOut = own.open.length > 0 || replies.running || cards.waiting;
+    const stillOut = own.open.length > 0 || replies.running;
+    // Only on the User: every question it is out on still awaits her answer
+    // on its card (one already answered is about to resume it).
+    onWaitState?.(!replies.running && own.open.length > 0 && own.open.every((message) => {
+      const open = (message.metadata?.participantRequest?.items ?? []).filter((item) => isOpenParticipantRequestStatus(item.status));
+      return open.length > 0 && open.every((item) => item.status === "pending_approval");
+    }));
     if (!stillOut) {
-      const newer = replies.finished.filter((message) => message.id !== after.id && message.createdAt > after.createdAt);
+      const newer = replies.finished.filter((message) => comesAfter(conversation!, message, after));
       if (newer.length > 0) return { kind: "reply", reply: newer.at(-1)!, skipped: newer.slice(0, -1) };
       // Asked in this turn, and the resume after it ended with no reply.
-      const ended = own.ended.find((entry) => entry.message.createdAt > after.createdAt);
+      const ended = own.ended.find((entry) => comesAfter(conversation!, entry.message, after));
       if (ended) {
         return { kind: "ended", answer: ended.reason === "failed" ? { kind: "ended", reason: "failed", error: ended.error ?? "It could not be resumed with the answers." }
           : { kind: "ended", reason: ended.reason === "stopped" ? "stopped" : "interrupted" } };
       }
-      // A card she approved whose resume never came.
-      if (cards.leftUnanswered) return { kind: "ended", answer: { kind: "ended", reason: "interrupted" } };
       return { kind: "none" };
     }
     const saved = await chat.store.nextChatSave(conversationId, OWN_REQUEST_LOOK_AGAIN_MS, signal);

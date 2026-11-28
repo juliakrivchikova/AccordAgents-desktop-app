@@ -1,6 +1,6 @@
 import type { AgentContextUsage, ChatMessage, Conversation } from "../../../../shared/types";
 import {
-  readActiveRunIds, readActiveRunParticipants, withParticipantCompactionStarted, withParticipantCompactionsForRunRemoved
+  readActiveRunIds, readActiveRunParticipants, readWaitOnlyRunIds, WAIT_ONLY_RUNS_KEY, withParticipantCompactionStarted, withParticipantCompactionsForRunRemoved
 } from "../../../../shared/chatRunState";
 import { agentContextUsageByParticipant } from "../compaction/contextUsage";
 import { ACTIVE_RUN_OWNERS_KEY } from "./constants";
@@ -52,10 +52,29 @@ export class ActiveRuns {
   /** Runs that only wait for a member to come back from its own requests
    *  (ownRequestWaits.ts), and the member requests whose runner only waits
    *  so now: a restart loses nothing (the wait is armed again at the next
-   *  start), so they hold no update, idle stop or restart of the member. */
+   *  start), so they hold no update or restart of the member. */
   readonly waitOnlyRunIds = new Set<string>();
+  /** The request each of those runs waits for, and whether all it waits on
+   *  now is the User's answer on a card (hasWaitOnlyWork). */
+  private readonly waitOnlyRuns = new Map<string, { requestMessageId: string; onlyOnUser: boolean }>();
   /** How many waits of each request (one per target that waits). */
   private readonly waitOnlyRequestCounts = new Map<string, number>();
+
+  beginWaitOnlyRun(runId: string, requestMessageId: string): void {
+    this.waitOnlyRunIds.add(runId);
+    this.waitOnlyRuns.set(runId, { requestMessageId, onlyOnUser: false });
+  }
+
+  /** What the wait of this run looks for now (ownRequestWaits). */
+  noteWaitOnlyOnUser(runId: string, onlyOnUser: boolean): void {
+    const run = this.waitOnlyRuns.get(runId);
+    if (run) run.onlyOnUser = onlyOnUser;
+  }
+
+  endWaitOnlyRun(runId: string): void {
+    this.waitOnlyRunIds.delete(runId);
+    this.waitOnlyRuns.delete(runId);
+  }
 
   beginWaitOnly(requestMessageId: string): void {
     this.waitOnlyRequestCounts.set(requestMessageId, (this.waitOnlyRequestCounts.get(requestMessageId) ?? 0) + 1);
@@ -67,11 +86,17 @@ export class ActiveRuns {
     else this.waitOnlyRequestCounts.delete(requestMessageId);
   }
 
-  /** Whether a member's wait on its own requests runs here: a machine
-   *  that hosts one stays on (its requester is resumed only from here, and
-   *  nothing else wakes the machine for the member's answer). */
+  /** Whether a member's wait on its own requests here keeps a machine
+   *  hosting it on: its requester is resumed only from here, and nothing else
+   *  wakes the machine for the member's answer. While someone works on what
+   *  the member asked, as any turn does; not while all it waits on is the
+   *  User's answer on a card (that can take a weekend: the next start arms
+   *  the wait again). A wait about to begin or just ended (armed again after
+   *  a restart, settling) counts. */
   hasWaitOnlyWork(): boolean {
-    return this.waitOnlyRunIds.size > 0 || this.waitOnlyRequestCounts.size > 0;
+    for (const run of this.waitOnlyRuns.values()) if (!run.onlyOnUser) return true;
+    const live = new Set([...this.waitOnlyRuns.values()].map((run) => run.requestMessageId));
+    return [...this.waitOnlyRequestCounts.keys()].some((requestMessageId) => !live.has(requestMessageId));
   }
 
   activeParticipantRuns(): ChatParticipantRun[] {
@@ -366,11 +391,14 @@ export class ActiveRuns {
       };
       const existingOwners = chatRunOwners(metadata);
       const existingRunParticipants = readActiveRunParticipants(metadata);
+      const existingWaitOnly = readWaitOnlyRunIds(metadata);
       const currentActiveRunIdSet = new Set(currentActiveRunIds);
       const owners: Record<string, ChatRunOwner> = {};
       const runParticipants: Record<string, string> = {};
+      const waitOnly: string[] = [];
       for (const activeRunId of activeRunIds) {
         if (currentActiveRunIdSet.has(activeRunId)) {
+          if (this.waitOnlyRunIds.has(activeRunId)) waitOnly.push(activeRunId);
           owners[activeRunId] = this.chat.runOwners.currentRunOwner(existingOwners[activeRunId], new Date().toISOString());
           const participantId = this.chatRunMeta.get(activeRunId)?.participantId ?? existingRunParticipants.get(activeRunId);
           if (participantId) {
@@ -380,6 +408,7 @@ export class ActiveRuns {
         }
         if (this.chat.runOwners.localRunOwnerState(metadata, activeRunId) === "external-live" && existingOwners[activeRunId]) {
           owners[activeRunId] = existingOwners[activeRunId];
+          if (existingWaitOnly.has(activeRunId)) waitOnly.push(activeRunId);
           const participantId = existingRunParticipants.get(activeRunId);
           if (participantId) {
             runParticipants[activeRunId] = participantId;
@@ -392,6 +421,7 @@ export class ActiveRuns {
       if (Object.keys(runParticipants).length > 0) {
         next[ACTIVE_RUN_PARTICIPANTS_KEY] = runParticipants;
       }
+      if (waitOnly.length > 0) next[WAIT_ONLY_RUNS_KEY] = waitOnly;
       return next;
     }
     if ((this.backgroundRunnerCounts.get(conversationId) ?? 0) > 0) {
