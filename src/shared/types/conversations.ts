@@ -100,6 +100,9 @@ export type ConversationMetadata = Record<string, unknown> & {
   machineRepository?: { sourcePath: string; paths: Record<string, string> };
   activationProviderKind?: ChatProviderKind;
   activeRunParticipantIdsByRunId?: Record<string, string>;
+  /** Runs that only wait for a member to come back from its own questions
+   *  (chatRunState WAIT_ONLY_RUNS_KEY): no turn of its runs in them. */
+  waitOnlyRunIds?: string[];
   lastMessageByParticipant?: ChatLastMessageByParticipant;
   participantCompactionsByParticipantId?: Record<string, ChatParticipantCompactionState>;
   participantSelfCompactionRequestedAtByParticipantId?: Record<string, string>;

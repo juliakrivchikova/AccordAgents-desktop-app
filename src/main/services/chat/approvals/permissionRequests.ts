@@ -222,6 +222,8 @@ export class PermissionRequests {
     // It asked others itself and ends its turn to wait (ownRequests.ts): the
     // request is waited on once this resume is over, where it is settled.
     let waitAfter = false;
+    // This resume's run ended once a run that waits for the member is live.
+    let resumeRunEnded = false;
     try {
       const messages = await this.chat.turnQueue.runParticipantTurnSerialized(conversation, requester, trigger, resumeRunId, undefined, progress, {
         warnings: [],
@@ -259,18 +261,30 @@ export class PermissionRequests {
       waitAfter = waitsOnOwn && ownsRequest;
       const compacting = messages[0];
       if (participantRequestMessage && participantRequestBatch && compacting?.metadata?.selfCompaction) {
-        const through = await this.chat.selfCompaction.answerThroughSelfCompactions(conversation.id, requester.id, compacting, undefined);
-        // The turn it went on in asked others itself: waited on as above.
-        await this.chat.store.waitForQueuedSave(conversation.id);
-        const latest = (await this.chat.store.readStoredChatStateForRefresh(conversation.id)).stored ?? conversation;
-        const askedAfter = through.answer.kind === "went-on" && memberWorksOnAfter(latest, requester.id, participantRequestMessage.id, through.reply);
-        if (askedAfter) {
-          waitAfter = ownsRequest;
-        } else {
-          await this.chat.selfCompaction.settleSelfCompactedItem(conversation, participantRequestMessage.id, participantRequestBatch.id, requester, through, true);
+        // Through its compaction in a run of the member's, as after its first
+        // turn (its Stop ends it). A member that asked someone in the turn
+        // it went on in is waited on as above, by the request's own device
+        // (another one sees it waiting, RequestRecovery.armOwnRequestWait),
+        // in a run that only waits, once this resume is over and its card's
+        // keys are free: one device settles the request.
+        const through = await this.chat.participantRequests.answerWithLiveRun(conversation, participantRequestMessage.id, requester, compacting, [], {
+          throughOwnRequests: false,
+          onLive: async () => {
+            await this.chat.activeRuns.endChatRun(conversation, resumeRunId);
+            resumeRunEnded = true;
+          }
+        });
+        if (through.kind === "answer") {
           await this.chat.store.waitForQueuedSave(conversation.id);
-          this.heldParticipantRequests.delete(participantRequestMessage.id);
-          await this.chat.requesterResumes.autoResumeParticipantRequest(conversation.id, participantRequestMessage.id, progress);
+          const latest = (await this.chat.store.readStoredChatStateForRefresh(conversation.id)).stored ?? conversation;
+          const askedAfter = through.answer.kind === "went-on" && memberWorksOnAfter(latest, requester.id, participantRequestMessage.id, through.reply);
+          if (askedAfter) waitAfter = ownsRequest;
+          else {
+            await this.chat.selfCompaction.settleSelfCompactedItem(conversation, participantRequestMessage.id, participantRequestBatch.id, requester, through, true);
+            await this.chat.store.waitForQueuedSave(conversation.id);
+            this.heldParticipantRequests.delete(participantRequestMessage.id);
+            await this.chat.requesterResumes.autoResumeParticipantRequest(conversation.id, participantRequestMessage.id, progress);
+          }
         }
       }
       if (participantRequestResumeMessageId) {
@@ -284,11 +298,12 @@ export class PermissionRequests {
         });
       }
     } catch (error) {
-      emitChatRunFailure(resumeRunId, progress, error);
+      // Not on this resume's run once it ended (a wait's run took over).
+      if (!resumeRunEnded) emitChatRunFailure(resumeRunId, progress, error);
       throw error;
     } finally {
       if (participantRequestMessage) this.heldParticipantRequests.delete(participantRequestMessage.id);
-      await this.chat.activeRuns.endChatRun(conversation, resumeRunId);
+      if (!resumeRunEnded) await this.chat.activeRuns.endChatRun(conversation, resumeRunId);
     }
     // Waited on in a run of its own that only waits, as after a restart:
     // this resume's run and its card's keys are free from here on.

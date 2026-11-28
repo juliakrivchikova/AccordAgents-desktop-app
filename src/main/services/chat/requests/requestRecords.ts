@@ -11,7 +11,7 @@ import {
   permissionApprovalResumeRunId, upsertAppToolApproval
 } from "../approvals/approvalRecords";
 import { participantForMentionHandle } from "../choices/mentions";
-import { HANDLE_PATTERN, PARTICIPANT_REQUEST_STOPPED_BY_USER } from "../constants";
+import { HANDLE_PATTERN, PARTICIPANT_REQUEST_INTERRUPTED_BEFORE_COMPLETION, PARTICIPANT_REQUEST_STOPPED_BY_USER } from "../constants";
 import { chatParticipants, formatHandleList } from "../members/identity";
 import {
   CHAT_PARTICIPANT_REQUEST_MAX_ITEMS, CHAT_PARTICIPANT_REQUEST_WAIT_DEFAULT_MS, PARTICIPANT_REQUEST_SCRUTINY_APPENDIX
@@ -696,17 +696,25 @@ export function pendingParticipantRequestApprovalTargetIds(
   return targetIds;
 }
 
-export function markParticipantRequestAutoResumeFailed(conversation: Conversation, requestMessageId: string, error: unknown, stopped = false): void {
+/** How a requester's resume ended before it ran: it failed, the User
+ *  stopped it, or the app ended it (a member removed or restarted, a chat
+ *  deleted, a mode change, a shutdown). */
+export type RequesterResumeCut = "failed" | "stopped" | "interrupted";
+
+export function markParticipantRequestAutoResumeFailed(conversation: Conversation, requestMessageId: string, error: unknown, how: RequesterResumeCut = "failed"): void {
   const message = error instanceof Error ? error.message : String(error);
   const failure = message || "Requester auto-resume failed before completion.";
   const now = new Date().toISOString();
-  // Stopped while it waited its turn: it says so, as its mark does.
+  // Stopped or ended by the app while it waited its turn: it says so, as its
+  // mark does (a request waiting on its answer ends the same way).
   updateParticipantRequestBatch(conversation, requestMessageId, (batch) => ({
     ...batch,
-    status: stopped ? "interrupted" : "failed",
+    status: how === "failed" ? "failed" : "interrupted",
     updatedAt: now,
-    error: stopped ? PARTICIPANT_REQUEST_STOPPED_BY_USER : failure,
-    requesterResumeEnded: stopped ? { reason: "stopped", at: now } : { reason: "failed", error: failure, at: now }
+    error: how === "stopped" ? PARTICIPANT_REQUEST_STOPPED_BY_USER : how === "interrupted" ? PARTICIPANT_REQUEST_INTERRUPTED_BEFORE_COMPLETION : failure,
+    requesterResumeEnded: how === "stopped" ? { reason: "stopped", at: now }
+      : how === "interrupted" ? { reason: "not-made", at: now }
+        : { reason: "failed", error: failure, at: now }
   }));
   conversation.updatedAt = new Date().toISOString();
 }

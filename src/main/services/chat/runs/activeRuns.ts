@@ -37,6 +37,20 @@ export class ActiveRuns {
    *  their reply ends with what it wrote and the turn goes on in that
    *  message's reply, never as "stopped by user". Until the run unregisters. */
   readonly sentNowRunIds = new Set<string>();
+  /** Runs the User stopped (her Stop here, or on another device through her
+   *  server), not ones the app ended itself (a member removed or restarted,
+   *  a chat deleted, a mode change, a shutdown). Taken by what must tell them
+   *  apart (a requester's resume stopped before it ran). */
+  private readonly userStoppedRunIds = new Set<string>();
+
+  noteUserStop(runId: string): void {
+    this.userStoppedRunIds.add(runId);
+    while (this.userStoppedRunIds.size > 1_000) this.userStoppedRunIds.delete(this.userStoppedRunIds.values().next().value as string);
+  }
+
+  takeUserStop(runId: string): boolean {
+    return this.userStoppedRunIds.delete(runId);
+  }
   /** Runs whose CLI has answered (its reply is in, the turn only settles):
    *  a request delivered now cuts none of them (RunCancel.deliverNow). */
   readonly cliReturnedRunIds = new Set<string>();
@@ -54,6 +68,9 @@ export class ActiveRuns {
    *  so now: a restart loses nothing (the wait is armed again at the next
    *  start), so they hold no update or restart of the member. */
   readonly waitOnlyRunIds = new Set<string>();
+  /** Runs that wait for a member's answer through its own work (its
+   *  compaction, its questions) and run no CLI: a mode change leaves them. */
+  readonly memberWaitRunIds = new Set<string>();
   /** The request each of those runs waits for, and whether all it waits on
    *  now is the User's answer on a card (hasWaitOnlyWork). */
   private readonly waitOnlyRuns = new Map<string, { requestMessageId: string; onlyOnUser: boolean }>();
@@ -313,6 +330,16 @@ export class ActiveRuns {
       this.forgetActiveChatRun(conversation.id, runId);
       throw error;
     }
+  }
+
+  /** The chat's record of the runs live here written again (a run that
+   *  began as a turn's and now only waits, say). */
+  async rewriteLiveRunState(conversation: Conversation): Promise<void> {
+    await this.chat.store.withChatMutation(conversation, async () => {
+      if (readActiveRunIds(conversation.metadata).length === 0) return;
+      conversation.metadata = this.metadataWithLiveRunState(conversation.id, conversation.metadata);
+      this.chat.store.queueSnapshot(conversation);
+    });
   }
 
   async endChatRun(conversation: Conversation, runId: string): Promise<void> {

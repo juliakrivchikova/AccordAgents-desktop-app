@@ -802,7 +802,9 @@ export class ChatService {
     return this.modules.attachments.putServerPictures(ops, put, alreadyPut);
   }
 
+  /** The User's Stop (noted where the run is: here, or ServerTurns). */
   cancelRun(runId: string): boolean {
+    if (this.modules.activeRuns.chatRunControllers.has(runId.trim())) this.modules.activeRuns.noteUserStop(runId.trim());
     return this.modules.runCancel.cancelRun(runId);
   }
 

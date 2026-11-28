@@ -335,8 +335,8 @@ export class ChatMembers {
     if (chatMemberIdsWithLiveWork(conversation).has(participantId)) {
       return true;
     }
-    for (const [runId, meta] of this.chat.activeRuns.chatRunMeta) {
-      if (meta.conversationId === conversation.id && meta.participantId === participantId && !this.chat.activeRuns.waitOnlyRunIds.has(runId)) {
+    for (const meta of this.chat.activeRuns.chatRunMeta.values()) {
+      if (meta.conversationId === conversation.id && meta.participantId === participantId) {
         return true;
       }
     }

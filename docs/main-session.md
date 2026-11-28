@@ -204,12 +204,15 @@ verbatim there). Modelled on T3 Code (`~/reference/t3code`,
   interrupted or declined still resumes it. A resume that ends with no reply
   (it could not run, was stopped before it began, a restart will not make
   it: `requesterResumeEnded` on the member's own request, written by the
-  member's device) ends the task failed, stopped or interrupted, never with
-  the interim line. While all it waits on is the User's answer on a card for
-  its own question, a cloud machine may still stop when idle; once it is
-  approved, or the member is in a turn, it stays awake. A quit or restart
-  leaves it running and it is waited on again at the chat's first look; the
-  same on a cloud machine. A request
+  member's device) ends the task failed, stopped (the User's Stop) or
+  interrupted (the app ended it), never with the interim line. While all it
+  waits on is the User's answer on a card for its own question, a cloud
+  machine holding the wait may stop when idle if the member runs on it (her
+  answer is work her server wakes it for); a member on another device keeps
+  it on. A quit or restart leaves it running and it is waited on again at
+  the chat's first look; the same on a cloud machine. A requester waiting in
+  its tool call (no resume of its own) that the member asks back gets the
+  member's reply at once, as before. A request
   inferred from a mention is not waited on.
 - **The Chat Assistant and the Workflow Manager role are not in new chats.**
   Chats made before stay exactly as they are (with their Assistant).

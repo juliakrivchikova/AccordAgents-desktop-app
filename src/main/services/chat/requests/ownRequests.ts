@@ -26,7 +26,8 @@ export function messagesById(conversation: Conversation): Map<string, ChatMessag
 
 /** Whether `message` comes after `than` in the chat. By its place in the
  *  chat, not its time: a request a turn asks can carry the same millisecond
- *  as that turn's reply, written as the turn began. */
+ *  as that turn's reply, written as the turn began, and devices' clocks
+ *  differ. */
 export function comesAfter(conversation: Conversation, message: ChatMessage, than: ChatMessage): boolean {
   if (message.id === than.id) return false;
   let seen = false;
@@ -35,6 +36,17 @@ export function comesAfter(conversation: Conversation, message: ChatMessage, tha
     else if (candidate.id === message.id) return seen || !conversation.messages.some((other) => other.id === than.id) && message.createdAt > than.createdAt;
   }
   return false;
+}
+
+/** Whether a request of the member's own was asked in the turn that wrote
+ *  `reply` or after it: by that turn's segment, whatever their places, since
+ *  a reply that reached this device from another one can be placed after the
+ *  requests its turn asked (a resume after a permission card has the same
+ *  starting message as the turn before it, not the same segment). */
+export function askedInOrAfter(conversation: Conversation, ownRequest: ChatMessage, reply: ChatMessage): boolean {
+  const segment = reply.metadata?.turnSegmentId;
+  if (segment && ownRequest.metadata?.participantRequest?.requesterTurnSegmentId === segment) return true;
+  return comesAfter(conversation, ownRequest, reply);
 }
 
 /** The request a member was answering in the turn that the message
@@ -204,6 +216,13 @@ function worksOnAfter(conversation: Conversation, memberId: string, requestMessa
   if (own.open.some((message) => message.id !== besidesOwnId)) return true;
   const replies = repliesAnswering(conversation, memberId, requestMessageId, byId, besidesOwnId);
   return replies.running || replies.finished.some((message) => comesAfter(conversation, message, reply));
+}
+
+/** Whether the member is out on a request of its own to `requesterId`
+ *  itself, in the turns that answer `requestMessageId`. */
+export function asksBack(conversation: Conversation, memberId: string, requestMessageId: string, requesterId: string): boolean {
+  return ownRequestsAnswering(conversation, memberId, requestMessageId).open
+    .some((message) => message.metadata?.participantRequest?.items.some((item) => item.targetParticipantId === requesterId));
 }
 
 /** Whether a request's item still waits on its member's own requests (it

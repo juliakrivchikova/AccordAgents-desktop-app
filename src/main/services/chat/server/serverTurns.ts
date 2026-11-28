@@ -123,6 +123,8 @@ export class ServerTurns {
       return;
     }
     if (turn.state === "claimed" && turn.stopRequestedAt && turn.executorDeviceId === me) {
+      // The User's Stop on another device, through her server.
+      this.chat.activeRuns.noteUserStop(this.localRunOfServer.get(turn.runId) ?? turn.runId);
       this.chat.runCancel.cancelRun(this.localRunOfServer.get(turn.runId) ?? turn.runId);
       return;
     }

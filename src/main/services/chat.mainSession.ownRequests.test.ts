@@ -425,8 +425,11 @@ test("requests answered together in one turn wait with it when their member asks
 
 /** The machine chat of above, its member's own request now answered and its
  *  resume ended on its machine with no reply of the member's. */
-async function machineResumeEnds(reason: "failed" | "stopped" | "not-made"): Promise<ChatParticipantRequestItem> {
-  const { service, storage, runs } = testService({ conversation: machineMemberChat({ items: "answered", status: "resuming_requester" }) });
+async function machineResumeEnds(reason: "failed" | "stopped" | "not-made", replyPlacedLast = false): Promise<ChatParticipantRequestItem> {
+  const conversation = machineMemberChat({ items: "answered", status: "resuming_requester" });
+  // As another device's reply can reach this one: after the request its turn asked.
+  if (replyPlacedLast) conversation.messages = [...conversation.messages.filter((message) => message.id !== "interim"), conversation.messages.find((message) => message.id === "interim")!];
+  const { service, storage, runs } = testService({ conversation });
   await chatParts(service).store.requireChat("conversation-1");
   await waitFor(() => Object.values((storage.current.metadata.activeRunParticipantIdsByRunId ?? {}) as Record<string, string>).includes("remote-id"));
   const written = structuredClone(storage.current) as Conversation;
@@ -452,6 +455,8 @@ test("a member's resume that ends with no reply ends the task as that resume did
   const notMade = await machineResumeEnds("not-made");
   assert.equal(notMade.status, "interrupted");
   assert.equal(notMade.error, PARTICIPANT_REQUEST_INTERRUPTED_BEFORE_COMPLETION);
+  const placedLast = await machineResumeEnds("failed", true);
+  assert.equal(placedLast.status, "failed", "its reply placed after its request: still ended as its resume did");
 });
 
 test("a failed resume stays known after a merge rewrites its request's status, and a request nobody resumes for a day stops being waited on", () => {
@@ -730,6 +735,20 @@ test("a member's resume stopped while it waited its turn ends the task stopped, 
   const own = requestBy(chat.storage.current, "worker-id")!.batch;
   assert.equal(own.requesterResumeEnded?.reason, "stopped");
   assert.equal(own.error, PARTICIPANT_REQUEST_STOPPED_BY_USER);
+  chat.releaseUserTurn();
+  await settle();
+});
+
+test("a member's resume the app ends while it waited its turn (a member removed, a mode change) ends the task interrupted, not stopped by the User", async () => {
+  const chat = resumeQueuedBehindUserTurn();
+  const resumeRunId = await resumeRunQueued(chat);
+  // Not the User's Stop: the app's own cancel of the run.
+  assert.equal(chatParts(chat.service).runCancel.cancelRun(resumeRunId), true, resumeRunId);
+  await waitFor(() => itemOf(chat.storage.current, "main-id")?.status === "interrupted", 5000);
+  assert.equal(itemOf(chat.storage.current, "main-id")!.error, PARTICIPANT_REQUEST_INTERRUPTED_BEFORE_COMPLETION);
+  const own = requestBy(chat.storage.current, "worker-id")!.batch;
+  assert.equal(own.requesterResumeEnded?.reason, "not-made");
+  assert.equal(own.error, PARTICIPANT_REQUEST_INTERRUPTED_BEFORE_COMPLETION);
   chat.releaseUserTurn();
   await settle();
 });

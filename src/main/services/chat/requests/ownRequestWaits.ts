@@ -2,7 +2,7 @@ import type { ChatMessage, ChatParticipantRequestItem, Conversation } from "../.
 import type { SelfCompactedAnswer } from "../compaction/selfCompactionMarks";
 import { chatParticipants } from "../members/identity";
 import type { ChatModules } from "../modules";
-import { comesAfter, messagesById, ownRequestsAnswering, repliesAnswering } from "./ownRequests";
+import { askedInOrAfter, comesAfter, messagesById, ownRequestsAnswering, repliesAnswering } from "./ownRequests";
 import { isOpenParticipantRequestStatus } from "./requestRecords";
 
 /** How often a wait for a member to come back from its own requests looks
@@ -41,7 +41,10 @@ export async function answerThroughOwnWork(
   signal: AbortSignal | undefined,
   /** Told, as it looks, whether all it waits on is the User's answer on a
    *  card (the member's own questions not approved yet). */
-  onWaitState?: (onlyOnUser: boolean) => void
+  onWaitState?: (onlyOnUser: boolean) => void,
+  /** throughOwnRequests false: only through its own compactions.
+   *  onOwnRequests: called before it waits on the member's own questions. */
+  options: { throughOwnRequests?: boolean; onOwnRequests?: () => Promise<void> } = {}
 ): Promise<OwnWorkAnswer> {
   const earlier = [...firstEarlier];
   let reply = first;
@@ -58,6 +61,8 @@ export async function answerThroughOwnWork(
       reply = through.reply;
       continue;
     }
+    if (options.throughOwnRequests === false) return { kind: "answer", answer: { kind: "went-on", reply }, reply, earlier };
+    await options.onOwnRequests?.();
     const next = await nextReplyAfterOwnRequests(chat, conversationId, requestMessageId, targetId, reply, signal, onWaitState);
     if (next.kind === "closed") return next;
     if (next.kind === "none") return { kind: "answer", answer: { kind: "went-on", reply }, reply, earlier };
@@ -122,7 +127,9 @@ async function nextReplyAfterOwnRequests(
       const newer = replies.finished.filter((message) => comesAfter(conversation!, message, after));
       if (newer.length > 0) return { kind: "reply", reply: newer.at(-1)!, skipped: newer.slice(0, -1) };
       // Asked in this turn, and the resume after it ended with no reply.
-      const ended = own.ended.find((entry) => comesAfter(conversation!, entry.message, after));
+      // Several: stopped, then failed (with its error), then not made.
+      const rank = { stopped: 0, failed: 1, "not-made": 2 } as const;
+      const ended = own.ended.filter((entry) => askedInOrAfter(conversation!, entry.message, after)).sort((a, b) => rank[a.reason] - rank[b.reason])[0];
       if (ended) {
         return { kind: "ended", answer: ended.reason === "failed" ? { kind: "ended", reason: "failed", error: ended.error ?? "It could not be resumed with the answers." }
           : { kind: "ended", reason: ended.reason === "stopped" ? "stopped" : "interrupted" } };

@@ -194,6 +194,8 @@ export class RunOwners {
     const requested = await this.deps.storage.takeRunCancelRequests(cancellable);
     for (const runId of requested) {
       void this.deps.debugLogs.write("chat.cancel.cross-instance-honored", { runId });
+      // The User's Stop in another window of the app.
+      this.chat.activeRuns.noteUserStop(runId);
       this.chat.runCancel.cancelRun(runId);
     }
   }

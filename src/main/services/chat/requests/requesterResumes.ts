@@ -320,13 +320,16 @@ export class RequesterResumes {
     } catch (error) {
       // Cut by the app's quit: the next start weighs it (a resume a quit
       // cut short), as for a member's own compaction (selfCompactionResumes).
-      // Stopped while it waited its turn (TurnQueue: "Chat run cancelled."):
-      // a request waiting on this requester's answer ends stopped.
+      // Cut while it waited its turn (TurnQueue: "Chat run cancelled."): by
+      // the User's Stop, a request waiting on this requester's answer ends
+      // stopped; by the app (a member removed or restarted, a shutdown),
+      // interrupted.
       if (!this.chat.appQuit.quitting && !resumeRecorded) {
-        const stopped = error instanceof Error && (error.message === "Chat run cancelled." || error.name === "AbortError");
+        const cut = error instanceof Error && (error.message === "Chat run cancelled." || error.name === "AbortError");
+        const how = !cut ? "failed" as const : this.chat.activeRuns.takeUserStop(resumeRunId) ? "stopped" as const : "interrupted" as const;
         await this.chat.store.withChatMutation(conversation, async () => {
           for (const requestMessageId of requestMessageIds) {
-            markParticipantRequestAutoResumeFailed(conversation, requestMessageId, error, stopped);
+            markParticipantRequestAutoResumeFailed(conversation, requestMessageId, error, how);
           }
           this.chat.store.queueSnapshot(conversation);
         }).catch((markError: unknown) => {

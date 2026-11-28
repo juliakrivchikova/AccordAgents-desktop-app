@@ -23,7 +23,7 @@ import {
   participantRequestToolResult, recordPreparedParticipantRequest, rollupParticipantRequestStatus, settleRequestsAnsweredWith,
   updateParticipantRequestBatch
 } from "./requestRecords";
-import { itemWaitsOnOwnRequests, memberWorksOnAfter, messagesById } from "./ownRequests";
+import { asksBack, itemWaitsOnOwnRequests, memberWorksOnAfter, messagesById } from "./ownRequests";
 import { answerThroughOwnWork, type OwnWorkAnswer } from "./ownRequestWaits";
 import type { ParticipantRequestRunResult, PreparedParticipantRequest } from "./types";
 import { createChatMessage } from "../store/messages";
@@ -553,8 +553,12 @@ export class ParticipantRequests {
           const notRun = !reply;
           const stoppedByUser = reply?.metadata?.terminalReason === "user-stopped" || reply?.metadata?.turnContinues === true ||
             (notRun && targetController!.signal.aborted);
+          // A requester waiting in its tool call (no resume of its own) that
+          // the member asked back cannot answer before this reply returns to
+          // it: it gets this one.
           continues = !waitingOnPermissionApproval && !stoppedByUser && Boolean(reply && (
-            (reply.metadata?.selfCompaction && reply.metadata.runId) || memberWorksOnAfter(conversation, target.id, requestMessageId, reply)
+            (reply.metadata?.selfCompaction && reply.metadata.runId) || (memberWorksOnAfter(conversation, target.id, requestMessageId, reply) &&
+              !(!batch.resumeRequester && asksBack(conversation, target.id, requestMessageId, batch.requesterParticipantId)))
           ));
           updateParticipantRequestBatch(conversation, requestMessageId, (current) => ({
             ...current,
@@ -688,7 +692,8 @@ export class ParticipantRequests {
    *  on again here, on its requester's device, as its runner did, and the
    *  requester is resumed once it ends. One wait per request at a time. */
   resumeOwnRequestWait(conversationId: string, requestMessageId: string): void {
-    if (this.participantRequestRunners.has(requestMessageId)) return;
+    // Quitting: the next start waits again (RequestRecovery).
+    if (this.chat.appQuit.quitting || this.participantRequestRunners.has(requestMessageId)) return;
     this.chat.activeRuns.incrementBackgroundRunner(conversationId);
     this.chat.activeRuns.beginWaitOnly(requestMessageId);
     const waited = this.waitOnOwnRequestsAgain(conversationId, requestMessageId).finally(() => {
@@ -760,6 +765,9 @@ export class ParticipantRequests {
       parentSignal?: AbortSignal;
       /** Called once this run is live (the turn before ends its run then). */
       onLive?: () => Promise<void>;
+      /** False: only through the member's own compactions, not the questions
+       *  it asks after them (another device's to wait on). */
+      throughOwnRequests?: boolean;
     } = {}
   ): Promise<OwnWorkAnswer> {
     const runId = randomUUID();
@@ -767,22 +775,48 @@ export class ParticipantRequests {
     const abort = (): void => controller.abort();
     if (options.parentSignal?.aborted) controller.abort();
     else options.parentSignal?.addEventListener("abort", abort, { once: true });
-    this.chat.activeRuns.beginWaitOnlyRun(runId, requestMessageId);
-    this.chat.activeRuns.beginWaitOnly(requestMessageId);
-    this.chat.activeRuns.registerTargetRun(runId, controller, { conversationId: conversation.id, participantId: target.id, participantHandle: target.handle });
+    // Through a compaction of the member's it is a run of the member's like
+    // its turn's (live work: an update waits for it); on its own questions
+    // it only waits (RequestRecovery waits again after a restart).
+    let waitOnly = false;
+    const onlyWaits = async (): Promise<void> => {
+      if (waitOnly) return;
+      waitOnly = true;
+      this.chat.activeRuns.beginWaitOnlyRun(runId, requestMessageId);
+      this.chat.activeRuns.beginWaitOnly(requestMessageId);
+      // Other devices read it from the chat; a write that fails is written
+      // with the next change (this device knows already).
+      if (begun) await this.chat.activeRuns.rewriteLiveRunState(conversation).catch((error: unknown) => {
+        void this.deps.debugLogs.write("chat.participant-request.own-requests.mark-failed", {
+          conversationId: conversation.id, requestMessageId, message: error instanceof Error ? error.message : String(error)
+        });
+      });
+    };
     let begun = false;
+    if (!first.metadata?.selfCompaction) await onlyWaits();
+    this.chat.activeRuns.memberWaitRunIds.add(runId);
+    this.chat.activeRuns.registerTargetRun(runId, controller, { conversationId: conversation.id, participantId: target.id, participantHandle: target.handle });
     try {
       await this.chat.activeRuns.beginChatRun(conversation, runId);
       begun = true;
       await options.onLive?.();
+      // All it waits on is the User's answer on a card: a machine holding
+      // this wait may stop when idle if the member runs here (her answer is
+      // work for this machine, which her server wakes it for), not when the
+      // member runs on another device (nothing would wake this one to settle
+      // the request).
+      const memberHere = this.chat.host.runsHere(target);
       return await answerThroughOwnWork(this.chat, conversation.id, requestMessageId, target.id, first, earlier, controller.signal,
-        (onlyOnUser) => this.chat.activeRuns.noteWaitOnlyOnUser(runId, onlyOnUser));
+        (onlyOnUser) => this.chat.activeRuns.noteWaitOnlyOnUser(runId, onlyOnUser && memberHere), { throughOwnRequests: options.throughOwnRequests, onOwnRequests: onlyWaits });
     } finally {
       options.parentSignal?.removeEventListener("abort", abort);
       if (begun) await this.chat.activeRuns.endChatRun(conversation, runId);
       this.chat.activeRuns.unregisterTargetRun(runId, controller);
-      this.chat.activeRuns.endWaitOnlyRun(runId);
-      this.chat.activeRuns.endWaitOnly(requestMessageId);
+      this.chat.activeRuns.memberWaitRunIds.delete(runId);
+      if (waitOnly) {
+        this.chat.activeRuns.endWaitOnlyRun(runId);
+        this.chat.activeRuns.endWaitOnly(requestMessageId);
+      }
     }
   }
 
